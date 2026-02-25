@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build artifacts
+.turbo/
+dist/
+*.tsbuildinfo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# SQLite databases (feedback store creates these at runtime)
+*.db
+
+# Large intermediate files at repo root (generated during benchmark runs)
+/queries.json
+/queries_1k.json
+/results/

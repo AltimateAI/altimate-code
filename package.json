@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "altimate-code",
+  "description": "AI-powered CLI agent for dbt and data engineering",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.9",
+  "scripts": {
+    "dev": "bun run --cwd packages/altimate-code --conditions=browser src/index.ts",
+    "typecheck": "bun turbo typecheck",
+    "test": "echo 'do not run tests from root' && exit 1"
+  },
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "packages/sdk/js"
+    ],
+    "catalog": {
+      "@types/bun": "1.3.9",
+      "@types/node": "22.13.9",
+      "@tsconfig/bun": "1.0.9",
+      "@tsconfig/node22": "22.0.2",
+      "@typescript/native-preview": "7.0.0-dev.20251207.1",
+      "@hono/zod-validator": "0.4.2",
+      "@octokit/rest": "22.0.0",
+      "@openauthjs/openauth": "0.0.0-20250322224806",
+      "@pierre/diffs": "1.1.0-beta.13",
+      "diff": "8.0.2",
+      "hono": "4.10.7",
+      "hono-openapi": "1.1.2",
+      "solid-js": "1.9.10",
+      "ulid": "3.0.1",
+      "typescript": "5.8.2",
+      "zod": "4.1.8",
+      "ai": "5.0.124",
+      "remeda": "2.26.0"
+    }
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "catalog:",
+    "turbo": "2.5.6"
+  },
+  "dependencies": {
+    "@altimate/cli-plugin": "workspace:*",
+    "@altimate/cli-script": "workspace:*",
+    "@altimate/cli-sdk": "workspace:*",
+    "typescript": "catalog:"
+  },
+  "license": "MIT",
+  "prettier": {
+    "semi": false,
+    "printWidth": 120
+  },
+  "trustedDependencies": [
+    "esbuild",
+    "protobufjs",
+    "tree-sitter",
+    "tree-sitter-bash",
+    "web-tree-sitter"
+  ],
+  "overrides": {
+    "@types/bun": "catalog:",
+    "@types/node": "catalog:"
+  },
+  "patchedDependencies": {
+    "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch",
+    "@openrouter/ai-sdk-provider@1.5.4": "patches/@openrouter%2Fai-sdk-provider@1.5.4.patch"
+  }
+}
