@@ -59,6 +59,31 @@ from altimate_engine.models import (
     WarehouseListResult,
     WarehouseTestParams,
     WarehouseTestResult,
+    QueryHistoryParams,
+    QueryHistoryResult,
+    CreditAnalysisParams,
+    CreditAnalysisResult,
+    ExpensiveQueriesParams,
+    ExpensiveQueriesResult,
+    WarehouseAdvisorParams,
+    WarehouseAdvisorResult,
+    UnusedResourcesParams,
+    UnusedResourcesResult,
+    RoleGrantsParams,
+    RoleGrantsResult,
+    RoleHierarchyParams,
+    RoleHierarchyResult,
+    UserRolesParams,
+    UserRolesResult,
+    PiiDetectParams,
+    PiiDetectResult,
+    PiiFinding,
+    TagsGetParams,
+    TagsGetResult,
+    TagsListParams,
+    TagsListResult,
+    SqlDiffParams,
+    SqlDiffResult,
 )
 from altimate_engine.sql.guard import check_sql, validate_sql
 from altimate_engine.sql.executor import execute_sql
@@ -69,13 +94,21 @@ from altimate_engine.sql.formatter import format_sql
 from altimate_engine.sql.explainer import explain_sql
 from altimate_engine.sql.fixer import fix_sql
 from altimate_engine.sql.autocomplete import autocomplete_sql
+from altimate_engine.sql.diff import diff_sql
 from altimate_engine.schema.inspector import inspect_schema
+from altimate_engine.schema.pii_detector import detect_pii
+from altimate_engine.schema.tags import get_tags, list_tags
 from altimate_engine.dbt.runner import run_dbt
 from altimate_engine.dbt.manifest import parse_manifest
 from altimate_engine.connections import ConnectionRegistry
 from altimate_engine.lineage.check import check_lineage
 from altimate_engine.sql.feedback_store import FeedbackStore
 from altimate_engine.schema.cache import SchemaCache
+from altimate_engine.finops.query_history import get_query_history
+from altimate_engine.finops.credit_analyzer import analyze_credits, get_expensive_queries
+from altimate_engine.finops.warehouse_advisor import advise_warehouse_sizing
+from altimate_engine.finops.unused_resources import find_unused_resources
+from altimate_engine.finops.role_access import query_grants, query_role_hierarchy, query_user_roles
 
 
 # JSON-RPC error codes
@@ -275,6 +308,65 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                 total_columns=raw["total_columns"],
                 cache_path=raw["cache_path"],
             )
+        # --- FinOps methods ---
+        elif method == "finops.query_history":
+            p = QueryHistoryParams(**params)
+            raw = get_query_history(p.warehouse, p.days, p.limit, p.user, p.warehouse_filter)
+            result = QueryHistoryResult(**raw)
+        elif method == "finops.analyze_credits":
+            p = CreditAnalysisParams(**params)
+            raw = analyze_credits(p.warehouse, p.days, p.limit, p.warehouse_filter)
+            result = CreditAnalysisResult(**raw)
+        elif method == "finops.expensive_queries":
+            p = ExpensiveQueriesParams(**params)
+            raw = get_expensive_queries(p.warehouse, p.days, p.limit)
+            result = ExpensiveQueriesResult(**raw)
+        elif method == "finops.warehouse_advice":
+            p = WarehouseAdvisorParams(**params)
+            raw = advise_warehouse_sizing(p.warehouse, p.days)
+            result = WarehouseAdvisorResult(**raw)
+        elif method == "finops.unused_resources":
+            p = UnusedResourcesParams(**params)
+            raw = find_unused_resources(p.warehouse, p.days, p.limit)
+            result = UnusedResourcesResult(**raw)
+        elif method == "finops.role_grants":
+            p = RoleGrantsParams(**params)
+            raw = query_grants(p.warehouse, p.role, p.object_name, p.limit)
+            result = RoleGrantsResult(**raw)
+        elif method == "finops.role_hierarchy":
+            p = RoleHierarchyParams(**params)
+            raw = query_role_hierarchy(p.warehouse)
+            result = RoleHierarchyResult(**raw)
+        elif method == "finops.user_roles":
+            p = UserRolesParams(**params)
+            raw = query_user_roles(p.warehouse, p.user, p.limit)
+            result = UserRolesResult(**raw)
+        # --- Schema discovery methods ---
+        elif method == "schema.detect_pii":
+            p = PiiDetectParams(**params)
+            cache = _get_schema_cache()
+            raw = detect_pii(p.warehouse, p.schema_name, p.table, cache)
+            result = PiiDetectResult(
+                success=raw["success"],
+                findings=[PiiFinding(**f) for f in raw["findings"]],
+                finding_count=raw["finding_count"],
+                columns_scanned=raw["columns_scanned"],
+                by_category=raw["by_category"],
+                tables_with_pii=raw["tables_with_pii"],
+            )
+        elif method == "schema.tags":
+            p = TagsGetParams(**params)
+            raw = get_tags(p.warehouse, p.object_name, p.tag_name, p.limit)
+            result = TagsGetResult(**raw)
+        elif method == "schema.tags_list":
+            p = TagsListParams(**params)
+            raw = list_tags(p.warehouse, p.limit)
+            result = TagsListResult(**raw)
+        # --- SQL diff ---
+        elif method == "sql.diff":
+            p = SqlDiffParams(**params)
+            raw = diff_sql(p.original, p.modified, p.context_lines)
+            result = SqlDiffResult(**raw)
         elif method == "ping":
             return JsonRpcResponse(result={"status": "ok"}, id=request.id)
         else:

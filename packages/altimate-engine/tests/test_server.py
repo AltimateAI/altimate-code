@@ -152,6 +152,192 @@ class TestDispatch:
         assert "suggestion_count" in response.result
 
 
+class TestDispatchSqlDiff:
+    """Dispatch tests for sql.diff — pure computation, no external deps."""
+
+    def test_sql_diff_identical(self):
+        request = JsonRpcRequest(
+            method="sql.diff",
+            params={"original": "SELECT 1", "modified": "SELECT 1"},
+            id=100,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["has_changes"] is False
+        assert response.result["similarity"] == 1.0
+        assert response.result["additions"] == 0
+        assert response.result["deletions"] == 0
+
+    def test_sql_diff_with_changes(self):
+        request = JsonRpcRequest(
+            method="sql.diff",
+            params={"original": "SELECT id FROM users", "modified": "SELECT id FROM customers"},
+            id=101,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["has_changes"] is True
+        assert response.result["change_count"] >= 1
+        assert response.result["similarity"] < 1.0
+
+    def test_sql_diff_custom_context(self):
+        request = JsonRpcRequest(
+            method="sql.diff",
+            params={
+                "original": "SELECT 1\nSELECT 2\nSELECT 3",
+                "modified": "SELECT 1\nSELECT 99\nSELECT 3",
+                "context_lines": 0,
+            },
+            id=102,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["has_changes"] is True
+
+
+class TestDispatchSchemaPii:
+    """Dispatch tests for schema.detect_pii — uses SchemaCache singleton."""
+
+    def test_schema_detect_pii_dispatches(self):
+        request = JsonRpcRequest(
+            method="schema.detect_pii",
+            params={},
+            id=110,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is True
+        assert "finding_count" in response.result
+        assert "columns_scanned" in response.result
+        assert "by_category" in response.result
+        assert "tables_with_pii" in response.result
+        assert isinstance(response.result["findings"], list)
+
+
+class TestDispatchFinops:
+    """Dispatch tests for finops methods.
+
+    These methods call ConnectionRegistry internally. With no connections
+    configured, they return success=False with a 'not found' error. This
+    verifies the dispatch routes correctly and the Pydantic response model
+    is valid.
+    """
+
+    def test_finops_query_history(self):
+        request = JsonRpcRequest(
+            method="finops.query_history",
+            params={"warehouse": "nonexistent"},
+            id=200,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_finops_analyze_credits(self):
+        request = JsonRpcRequest(
+            method="finops.analyze_credits",
+            params={"warehouse": "nonexistent"},
+            id=201,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_finops_expensive_queries(self):
+        request = JsonRpcRequest(
+            method="finops.expensive_queries",
+            params={"warehouse": "nonexistent"},
+            id=202,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_finops_warehouse_advice(self):
+        request = JsonRpcRequest(
+            method="finops.warehouse_advice",
+            params={"warehouse": "nonexistent"},
+            id=203,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_finops_unused_resources(self):
+        request = JsonRpcRequest(
+            method="finops.unused_resources",
+            params={"warehouse": "nonexistent"},
+            id=204,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_finops_role_grants(self):
+        request = JsonRpcRequest(
+            method="finops.role_grants",
+            params={"warehouse": "nonexistent"},
+            id=205,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_finops_role_hierarchy(self):
+        request = JsonRpcRequest(
+            method="finops.role_hierarchy",
+            params={"warehouse": "nonexistent"},
+            id=206,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_finops_user_roles(self):
+        request = JsonRpcRequest(
+            method="finops.user_roles",
+            params={"warehouse": "nonexistent"},
+            id=207,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+
+class TestDispatchSchemaTags:
+    """Dispatch tests for schema.tags and schema.tags_list."""
+
+    def test_schema_tags(self):
+        request = JsonRpcRequest(
+            method="schema.tags",
+            params={"warehouse": "nonexistent"},
+            id=210,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+    def test_schema_tags_list(self):
+        request = JsonRpcRequest(
+            method="schema.tags_list",
+            params={"warehouse": "nonexistent"},
+            id=211,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "not found" in response.result["error"]
+
+
 class TestHandleLine:
     def test_valid_request(self):
         line = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1})

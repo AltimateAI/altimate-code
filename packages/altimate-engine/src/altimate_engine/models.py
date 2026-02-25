@@ -455,6 +455,217 @@ class WarehouseTestResult(BaseModel):
     error: str | None = None
 
 
+# --- FinOps: Query History ---
+
+
+class QueryHistoryParams(BaseModel):
+    warehouse: str
+    days: int = 7
+    limit: int = 100
+    user: str | None = None
+    warehouse_filter: str | None = None
+
+
+class QueryHistoryResult(BaseModel):
+    success: bool
+    queries: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    warehouse_type: str | None = None
+    error: str | None = None
+
+
+# --- FinOps: Credit Analysis ---
+
+
+class CreditAnalysisParams(BaseModel):
+    warehouse: str
+    days: int = 30
+    limit: int = 50
+    warehouse_filter: str | None = None
+
+
+class CreditAnalysisResult(BaseModel):
+    success: bool
+    daily_usage: list[dict[str, Any]] = Field(default_factory=list)
+    warehouse_summary: list[dict[str, Any]] = Field(default_factory=list)
+    total_credits: float = 0
+    days_analyzed: int = 0
+    recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
+# --- FinOps: Expensive Queries ---
+
+
+class ExpensiveQueriesParams(BaseModel):
+    warehouse: str
+    days: int = 7
+    limit: int = 20
+
+
+class ExpensiveQueriesResult(BaseModel):
+    success: bool
+    queries: list[dict[str, Any]] = Field(default_factory=list)
+    query_count: int = 0
+    days_analyzed: int = 0
+    error: str | None = None
+
+
+# --- FinOps: Warehouse Advisor ---
+
+
+class WarehouseAdvisorParams(BaseModel):
+    warehouse: str
+    days: int = 14
+
+
+class WarehouseAdvisorResult(BaseModel):
+    success: bool
+    warehouse_load: list[dict[str, Any]] = Field(default_factory=list)
+    warehouse_performance: list[dict[str, Any]] = Field(default_factory=list)
+    recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    days_analyzed: int = 0
+    error: str | None = None
+
+
+# --- FinOps: Unused Resources ---
+
+
+class UnusedResourcesParams(BaseModel):
+    warehouse: str
+    days: int = 30
+    limit: int = 50
+
+
+class UnusedResourcesResult(BaseModel):
+    success: bool
+    unused_tables: list[dict[str, Any]] = Field(default_factory=list)
+    idle_warehouses: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    days_analyzed: int = 0
+    errors: list[str] | None = None
+    error: str | None = None
+
+
+# --- FinOps: Role & Access ---
+
+
+class RoleGrantsParams(BaseModel):
+    warehouse: str
+    role: str | None = None
+    object_name: str | None = None
+    limit: int = 100
+
+
+class RoleGrantsResult(BaseModel):
+    success: bool
+    grants: list[dict[str, Any]] = Field(default_factory=list)
+    grant_count: int = 0
+    privilege_summary: dict[str, int] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class RoleHierarchyParams(BaseModel):
+    warehouse: str
+
+
+class RoleHierarchyResult(BaseModel):
+    success: bool
+    hierarchy: list[dict[str, Any]] = Field(default_factory=list)
+    role_count: int = 0
+    error: str | None = None
+
+
+class UserRolesParams(BaseModel):
+    warehouse: str
+    user: str | None = None
+    limit: int = 100
+
+
+class UserRolesResult(BaseModel):
+    success: bool
+    assignments: list[dict[str, Any]] = Field(default_factory=list)
+    assignment_count: int = 0
+    error: str | None = None
+
+
+# --- Schema: PII Detection ---
+
+
+class PiiDetectParams(BaseModel):
+    warehouse: str | None = None
+    schema_name: str | None = None
+    table: str | None = None
+
+
+class PiiFinding(BaseModel):
+    warehouse: str
+    schema_name: str = Field(alias="schema")
+    table: str
+    column: str
+    data_type: str | None = None
+    pii_category: str
+    confidence: str
+
+
+class PiiDetectResult(BaseModel):
+    success: bool
+    findings: list[PiiFinding] = Field(default_factory=list)
+    finding_count: int = 0
+    columns_scanned: int = 0
+    by_category: dict[str, int] = Field(default_factory=dict)
+    tables_with_pii: int = 0
+
+
+# --- Schema: Metadata Tags ---
+
+
+class TagsGetParams(BaseModel):
+    warehouse: str
+    object_name: str | None = None
+    tag_name: str | None = None
+    limit: int = 100
+
+
+class TagsGetResult(BaseModel):
+    success: bool
+    tags: list[dict[str, Any]] = Field(default_factory=list)
+    tag_count: int = 0
+    tag_summary: dict[str, int] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class TagsListParams(BaseModel):
+    warehouse: str
+    limit: int = 50
+
+
+class TagsListResult(BaseModel):
+    success: bool
+    tags: list[dict[str, Any]] = Field(default_factory=list)
+    tag_count: int = 0
+    error: str | None = None
+
+
+# --- SQL Diff ---
+
+
+class SqlDiffParams(BaseModel):
+    original: str
+    modified: str
+    context_lines: int = 3
+
+
+class SqlDiffResult(BaseModel):
+    has_changes: bool
+    unified_diff: str = ""
+    additions: int = 0
+    deletions: int = 0
+    change_count: int = 0
+    similarity: float = 1.0
+    changes: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # --- JSON-RPC ---
 
 

@@ -1,8 +1,8 @@
 # altimate-code Implementation Progress
-Last updated: 2026-02-25 21:00
+Last updated: 2026-02-25 23:30
 
 ## Current Phase: COMPLETE (all unblocked phases done)
-## Status: Phase 0-4 complete + Schema Cache + Phase 6 DX tools (except 3B blocked, 3E blocked)
+## Status: Phase 0-6 complete + Phase 7 CoCo parity (except 3B blocked, 3E blocked)
 
 ### Completed
 - [x] Phase 1A: Bridge contract parity + warehouse tools (18 rules, 10 bridge methods)
@@ -30,6 +30,11 @@ Last updated: 2026-02-25 21:00
 - [x] Phase 5: Schema cache — SQLite-backed warehouse metadata indexing + search + agent permissions
 - [x] TypeScript type fixes — all 16 tool files now pass `tsgo --noEmit` (metadata shape consistency)
 - [x] Phase 6: DX tools — sql.explain, sql.format, sql.fix, sql.autocomplete (4 bridge methods, 4 TS tools, 55 new tests)
+- [x] Phase 7: CoCo parity — Close all Cortex Code feature gaps (13 bridge methods, 13 TS tools, 5 skills, 131 new tests)
+  - FinOps: query history, credit analysis, expensive queries, warehouse advice, unused resources, role grants/hierarchy/user roles
+  - Schema: PII detection, metadata tags (get + list)
+  - SQL: diff view
+  - Skills: model-scaffold, yaml-config, dbt-docs, medallion-patterns, incremental-logic
 
 ### Blocked
 - [ ] Phase 3B: dbt runner completion (needs real dbt project for testing)
@@ -42,7 +47,7 @@ Last updated: 2026-02-25 21:00
 | 0 | Rules with known accuracy | **19/19** | 19/19 |
 | 0 | Analyzer overall accuracy | **100.00%** | measured |
 | 0 | Lineage edge match rate | **100.0%** | measured |
-| 1 | Working bridge methods | **15/15** | 15/15 |
+| 1-7 | Working bridge methods | **34/34** | 34/34 |
 | 1 | ConfidenceTracker rules | **7/7** | 7/7 |
 | 2 | Snowflake connector | **imports OK** | live test |
 | 2 | Feedback store observations | **working** | >0 |
@@ -52,7 +57,10 @@ Last updated: 2026-02-25 21:00
 | 5 | TypeScript typecheck | **PASS** | PASS |
 | 6 | DX bridge methods | **4/4** | 4/4 |
 | 6 | DX tools tests | **55/55** | 55/55 |
-| All | Total Python tests | **152/152** | PASS |
+| 7 | CoCo parity bridge methods | **13/13** | 13/13 |
+| 7 | CoCo parity skills | **5/5** | 5/5 |
+| 7 | CoCo parity tests | **131/131** | 131/131 |
+| All | Total Python tests | **283/283** | PASS |
 
 ### Accuracy Reports
 
@@ -97,7 +105,7 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 - `packages/altimate-engine/src/altimate_engine/sql/analyzer.py` — 19 rules + ConfidenceTracker
 - `packages/altimate-engine/src/altimate_engine/sql/confidence.py` — 7 AST detection rules
 - `packages/altimate-engine/src/altimate_engine/lineage/check.py` — lineage + 4 confidence signals + Func/Window/Case edges
-- `packages/altimate-engine/src/altimate_engine/server.py` — JSON-RPC dispatch (22 methods)
+- `packages/altimate-engine/src/altimate_engine/server.py` — JSON-RPC dispatch (34 methods)
 - `packages/altimate-engine/src/altimate_engine/models.py` — All Pydantic models
 
 **Phase 2 (connectors + parsers + feedback):**
@@ -139,11 +147,40 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 - `packages/altimate-engine/tests/test_autocomplete.py` — 14 tests
 - `packages/altimate-engine/tests/test_explainer.py` — 12 tests
 
+**Phase 7 (CoCo parity — FinOps, PII, Tags, Diff, Skills):**
+- `packages/altimate-engine/src/altimate_engine/finops/query_history.py` — QUERY_HISTORY + pg_stat_statements
+- `packages/altimate-engine/src/altimate_engine/finops/credit_analyzer.py` — Credit analysis + expensive queries
+- `packages/altimate-engine/src/altimate_engine/finops/warehouse_advisor.py` — Warehouse sizing recommendations
+- `packages/altimate-engine/src/altimate_engine/finops/unused_resources.py` — Stale tables + idle warehouses
+- `packages/altimate-engine/src/altimate_engine/finops/role_access.py` — RBAC grants, role hierarchy, user roles
+- `packages/altimate-engine/src/altimate_engine/schema/pii_detector.py` — 30+ regex PII patterns, 15 categories
+- `packages/altimate-engine/src/altimate_engine/schema/tags.py` — Snowflake TAG_REFERENCES queries
+- `packages/altimate-engine/src/altimate_engine/sql/diff.py` — SQL diff via difflib (unified diff, similarity)
+- `packages/altimate-code/src/tool/finops-query-history.ts` — TS tool
+- `packages/altimate-code/src/tool/finops-analyze-credits.ts` — TS tool
+- `packages/altimate-code/src/tool/finops-expensive-queries.ts` — TS tool
+- `packages/altimate-code/src/tool/finops-warehouse-advice.ts` — TS tool
+- `packages/altimate-code/src/tool/finops-unused-resources.ts` — TS tool
+- `packages/altimate-code/src/tool/finops-role-access.ts` — 3 TS tools (grants, hierarchy, user roles)
+- `packages/altimate-code/src/tool/schema-detect-pii.ts` — TS tool
+- `packages/altimate-code/src/tool/schema-tags.ts` — 2 TS tools (tags, tags_list)
+- `packages/altimate-code/src/tool/sql-diff.ts` — TS tool
+- `.altimate-code/skills/model-scaffold/SKILL.md` — dbt model scaffolding skill
+- `.altimate-code/skills/yaml-config/SKILL.md` — YAML config generation skill
+- `.altimate-code/skills/dbt-docs/SKILL.md` — dbt documentation generation skill
+- `.altimate-code/skills/medallion-patterns/SKILL.md` — Medallion architecture patterns skill
+- `.altimate-code/skills/incremental-logic/SKILL.md` — Incremental logic assistance skill
+- `packages/altimate-engine/tests/test_diff.py` — 24 tests
+- `packages/altimate-engine/tests/test_pii_detector.py` — 33 tests
+- `packages/altimate-engine/tests/test_finops.py` — 39 tests
+- `packages/altimate-engine/tests/test_tags.py` — 14 tests
+- `packages/altimate-engine/tests/test_server.py` — +14 dispatch tests for new methods
+
 **Phase 4 (benchmarks):**
 - `experiments/BENCHMARKS.md` — Published benchmark report
 - `experiments/benchmark_report.json` — Machine-readable benchmark data
 
-### Bridge Methods (22 total)
+### Bridge Methods (34 total)
 1. `ping` — Health check
 2. `sql.validate` — SQL syntax validation
 3. `sql.check` — Read-only/mutation safety check
@@ -166,11 +203,28 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 20. `sql.format` — Format/beautify SQL via sqlglot pretty-print
 21. `sql.fix` — Diagnose SQL errors and suggest fixes (syntax, patterns, resolution)
 22. `sql.autocomplete` — Schema-aware auto-complete suggestions from cache
+23. `sql.diff` — Compare two SQL queries (unified diff, similarity score)
+24. `finops.query_history` — Query execution history (Snowflake QUERY_HISTORY, PG pg_stat_statements)
+25. `finops.analyze_credits` — Credit consumption analysis with recommendations
+26. `finops.expensive_queries` — Identify most expensive queries by bytes scanned
+27. `finops.warehouse_advice` — Warehouse sizing recommendations (scale up/down/burst)
+28. `finops.unused_resources` — Find stale tables and idle warehouses
+29. `finops.role_grants` — Query RBAC grants on objects/roles
+30. `finops.role_hierarchy` — Map role inheritance hierarchy
+31. `finops.user_roles` — List user-to-role assignments
+32. `schema.detect_pii` — Scan columns for PII patterns (30+ regex, 15 categories)
+33. `schema.tags` — Query metadata/governance tags on objects (Snowflake TAG_REFERENCES)
+34. `schema.tags_list` — List all available tags with usage counts
 
-### Skills (6 total)
+### Skills (11 total)
 1. `generate-tests` — Generate dbt test definitions
 2. `lineage-diff` — Compare lineage between SQL versions
 3. `cost-report` — Snowflake cost analysis + optimization suggestions
 4. `sql-translate` — Cross-dialect SQL translation
 5. `query-optimize` — Query optimization with impact-ranked suggestions
 6. `impact-analysis` — Downstream impact analysis using lineage + dbt manifest
+7. `model-scaffold` — Staging/intermediate/mart dbt model scaffolding
+8. `yaml-config` — Generate sources.yml, schema.yml, properties.yml
+9. `dbt-docs` — Generate model/column descriptions and doc blocks
+10. `medallion-patterns` — Bronze/silver/gold architecture patterns
+11. `incremental-logic` — Append-only, merge/upsert, insert overwrite strategies

@@ -423,6 +423,207 @@ export interface SqlAutocompleteResult {
   suggestion_count: number
 }
 
+// --- FinOps: Query History ---
+
+export interface QueryHistoryParams {
+  warehouse: string
+  days?: number
+  limit?: number
+  user?: string
+  warehouse_filter?: string
+}
+
+export interface QueryHistoryResult {
+  success: boolean
+  queries: Record<string, unknown>[]
+  summary: Record<string, unknown>
+  warehouse_type?: string
+  error?: string
+}
+
+// --- FinOps: Credit Analysis ---
+
+export interface CreditAnalysisParams {
+  warehouse: string
+  days?: number
+  limit?: number
+  warehouse_filter?: string
+}
+
+export interface CreditAnalysisResult {
+  success: boolean
+  daily_usage: Record<string, unknown>[]
+  warehouse_summary: Record<string, unknown>[]
+  total_credits: number
+  days_analyzed: number
+  recommendations: Record<string, unknown>[]
+  error?: string
+}
+
+// --- FinOps: Expensive Queries ---
+
+export interface ExpensiveQueriesParams {
+  warehouse: string
+  days?: number
+  limit?: number
+}
+
+export interface ExpensiveQueriesResult {
+  success: boolean
+  queries: Record<string, unknown>[]
+  query_count: number
+  days_analyzed: number
+  error?: string
+}
+
+// --- FinOps: Warehouse Advisor ---
+
+export interface WarehouseAdvisorParams {
+  warehouse: string
+  days?: number
+}
+
+export interface WarehouseAdvisorResult {
+  success: boolean
+  warehouse_load: Record<string, unknown>[]
+  warehouse_performance: Record<string, unknown>[]
+  recommendations: Record<string, unknown>[]
+  days_analyzed: number
+  error?: string
+}
+
+// --- FinOps: Unused Resources ---
+
+export interface UnusedResourcesParams {
+  warehouse: string
+  days?: number
+  limit?: number
+}
+
+export interface UnusedResourcesResult {
+  success: boolean
+  unused_tables: Record<string, unknown>[]
+  idle_warehouses: Record<string, unknown>[]
+  summary: Record<string, unknown>
+  days_analyzed: number
+  error?: string
+}
+
+// --- FinOps: Role & Access ---
+
+export interface RoleGrantsParams {
+  warehouse: string
+  role?: string
+  object_name?: string
+  limit?: number
+}
+
+export interface RoleGrantsResult {
+  success: boolean
+  grants: Record<string, unknown>[]
+  grant_count: number
+  privilege_summary: Record<string, number>
+  error?: string
+}
+
+export interface RoleHierarchyParams {
+  warehouse: string
+}
+
+export interface RoleHierarchyResult {
+  success: boolean
+  hierarchy: Record<string, unknown>[]
+  role_count: number
+  error?: string
+}
+
+export interface UserRolesParams {
+  warehouse: string
+  user?: string
+  limit?: number
+}
+
+export interface UserRolesResult {
+  success: boolean
+  assignments: Record<string, unknown>[]
+  assignment_count: number
+  error?: string
+}
+
+// --- Schema: PII Detection ---
+
+export interface PiiDetectParams {
+  warehouse?: string
+  schema_name?: string
+  table?: string
+}
+
+export interface PiiFinding {
+  warehouse: string
+  schema: string
+  table: string
+  column: string
+  data_type?: string
+  pii_category: string
+  confidence: string
+}
+
+export interface PiiDetectResult {
+  success: boolean
+  findings: PiiFinding[]
+  finding_count: number
+  columns_scanned: number
+  by_category: Record<string, number>
+  tables_with_pii: number
+}
+
+// --- Schema: Metadata Tags ---
+
+export interface TagsGetParams {
+  warehouse: string
+  object_name?: string
+  tag_name?: string
+  limit?: number
+}
+
+export interface TagsGetResult {
+  success: boolean
+  tags: Record<string, unknown>[]
+  tag_count: number
+  tag_summary: Record<string, number>
+  error?: string
+}
+
+export interface TagsListParams {
+  warehouse: string
+  limit?: number
+}
+
+export interface TagsListResult {
+  success: boolean
+  tags: Record<string, unknown>[]
+  tag_count: number
+  error?: string
+}
+
+// --- SQL Diff ---
+
+export interface SqlDiffParams {
+  original: string
+  modified: string
+  context_lines?: number
+}
+
+export interface SqlDiffResult {
+  has_changes: boolean
+  unified_diff: string
+  additions: number
+  deletions: number
+  change_count: number
+  similarity: number
+  changes: Record<string, unknown>[]
+}
+
 // --- Method registry ---
 
 export const BridgeMethods = {
@@ -447,6 +648,18 @@ export const BridgeMethods = {
   "dbt.manifest": {} as { params: DbtManifestParams; result: DbtManifestResult },
   "warehouse.list": {} as { params: WarehouseListParams; result: WarehouseListResult },
   "warehouse.test": {} as { params: WarehouseTestParams; result: WarehouseTestResult },
+  "finops.query_history": {} as { params: QueryHistoryParams; result: QueryHistoryResult },
+  "finops.analyze_credits": {} as { params: CreditAnalysisParams; result: CreditAnalysisResult },
+  "finops.expensive_queries": {} as { params: ExpensiveQueriesParams; result: ExpensiveQueriesResult },
+  "finops.warehouse_advice": {} as { params: WarehouseAdvisorParams; result: WarehouseAdvisorResult },
+  "finops.unused_resources": {} as { params: UnusedResourcesParams; result: UnusedResourcesResult },
+  "finops.role_grants": {} as { params: RoleGrantsParams; result: RoleGrantsResult },
+  "finops.role_hierarchy": {} as { params: RoleHierarchyParams; result: RoleHierarchyResult },
+  "finops.user_roles": {} as { params: UserRolesParams; result: UserRolesResult },
+  "schema.detect_pii": {} as { params: PiiDetectParams; result: PiiDetectResult },
+  "schema.tags": {} as { params: TagsGetParams; result: TagsGetResult },
+  "schema.tags_list": {} as { params: TagsListParams; result: TagsListResult },
+  "sql.diff": {} as { params: SqlDiffParams; result: SqlDiffResult },
   ping: {} as { params: Record<string, never>; result: { status: string } },
 } as const
 

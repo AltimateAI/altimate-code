@@ -44,6 +44,15 @@ import { SqlExplainTool } from "./sql-explain"
 import { SqlFormatTool } from "./sql-format"
 import { SqlFixTool } from "./sql-fix"
 import { SqlAutocompleteTool } from "./sql-autocomplete"
+import { SqlDiffTool } from "./sql-diff"
+import { FinopsQueryHistoryTool } from "./finops-query-history"
+import { FinopsAnalyzeCreditsTool } from "./finops-analyze-credits"
+import { FinopsExpensiveQueriesTool } from "./finops-expensive-queries"
+import { FinopsWarehouseAdviceTool } from "./finops-warehouse-advice"
+import { FinopsUnusedResourcesTool } from "./finops-unused-resources"
+import { FinopsRoleGrantsTool, FinopsRoleHierarchyTool, FinopsUserRolesTool } from "./finops-role-access"
+import { SchemaDetectPiiTool } from "./schema-detect-pii"
+import { SchemaTagsTool, SchemaTagsListTool } from "./schema-tags"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -151,6 +160,18 @@ export namespace ToolRegistry {
       SqlFormatTool,
       SqlFixTool,
       SqlAutocompleteTool,
+      SqlDiffTool,
+      FinopsQueryHistoryTool,
+      FinopsAnalyzeCreditsTool,
+      FinopsExpensiveQueriesTool,
+      FinopsWarehouseAdviceTool,
+      FinopsUnusedResourcesTool,
+      FinopsRoleGrantsTool,
+      FinopsRoleHierarchyTool,
+      FinopsUserRolesTool,
+      SchemaDetectPiiTool,
+      SchemaTagsTool,
+      SchemaTagsListTool,
       ...custom,
     ]
   }
