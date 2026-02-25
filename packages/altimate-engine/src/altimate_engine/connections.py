@@ -106,6 +106,3 @@ class ConnectionRegistry:
         except Exception as e:
             return {"connected": False, "error": str(e)}
 
-    @classmethod
-    def register(cls, name: str, config: dict[str, Any]) -> None:
-        cls._connections[name] = config

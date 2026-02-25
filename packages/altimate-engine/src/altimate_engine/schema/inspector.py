@@ -2,28 +2,68 @@
 
 from __future__ import annotations
 
+from altimate_engine.connections import ConnectionRegistry
 from altimate_engine.models import SchemaColumn, SchemaInspectParams, SchemaInspectResult
 
 
 def inspect_schema(params: SchemaInspectParams) -> SchemaInspectResult:
     """Inspect schema of a table in a warehouse.
 
-    Currently a stub — will be extended with real warehouse introspection
-    in a future phase.
+    Uses ConnectionRegistry to resolve named connections.
+    Falls back to treating warehouse as a raw postgres connection string
+    for backwards compatibility.
     """
-    if params.warehouse and params.warehouse.startswith("postgres"):
-        return _inspect_postgres(params)
+    if not params.warehouse:
+        return SchemaInspectResult(
+            table=params.table,
+            schema_name=params.schema_name,
+            columns=[],
+        )
 
-    return SchemaInspectResult(
-        table=params.table,
-        schema_name=params.schema_name,
-        columns=[],
-        row_count=None,
-    )
+    # Try ConnectionRegistry first
+    try:
+        connector = ConnectionRegistry.get(params.warehouse)
+    except ValueError:
+        # Fallback: treat as raw postgres connection string for backwards compat
+        if params.warehouse.startswith("postgres"):
+            return _inspect_postgres_raw(params)
+        return SchemaInspectResult(
+            table=params.table,
+            schema_name=params.schema_name,
+            columns=[],
+        )
+
+    try:
+        connector.connect()
+        schema = params.schema_name or "public"
+        rows = connector.describe_table(schema, params.table)
+        connector.close()
+
+        columns = [
+            SchemaColumn(
+                name=row.get("name", ""),
+                data_type=row.get("data_type", ""),
+                nullable=bool(row.get("nullable", True)),
+                primary_key=bool(row.get("primary_key", False)),
+            )
+            for row in rows
+        ]
+
+        return SchemaInspectResult(
+            table=params.table,
+            schema_name=schema,
+            columns=columns,
+        )
+    except Exception:
+        return SchemaInspectResult(
+            table=params.table,
+            schema_name=params.schema_name,
+            columns=[],
+        )
 
 
-def _inspect_postgres(params: SchemaInspectParams) -> SchemaInspectResult:
-    """Inspect schema from a PostgreSQL database."""
+def _inspect_postgres_raw(params: SchemaInspectParams) -> SchemaInspectResult:
+    """Legacy fallback: inspect schema from a raw PostgreSQL connection string."""
     try:
         import psycopg2
     except ImportError:

@@ -7,6 +7,8 @@
  */
 
 import { spawn, type ChildProcess } from "child_process"
+import { existsSync } from "fs"
+import path from "path"
 import type { BridgeMethod, BridgeMethods } from "./protocol"
 
 export namespace Bridge {
@@ -41,8 +43,25 @@ export namespace Bridge {
     })
   }
 
+  function resolvePython(): string {
+    // 1. Explicit env var
+    if (process.env.ALTIMATE_CLI_PYTHON) return process.env.ALTIMATE_CLI_PYTHON
+
+    // 2. Check for .venv relative to altimate-engine package
+    const engineDir = path.resolve(__dirname, "..", "..", "..", "altimate-engine")
+    const venvPython = path.join(engineDir, ".venv", "bin", "python")
+    if (existsSync(venvPython)) return venvPython
+
+    // 3. Check for .venv in cwd
+    const cwdVenv = path.join(process.cwd(), ".venv", "bin", "python")
+    if (existsSync(cwdVenv)) return cwdVenv
+
+    // 4. Fallback
+    return "python3"
+  }
+
   async function start() {
-    const pythonCmd = process.env.ALTIMATE_CLI_PYTHON ?? "python3"
+    const pythonCmd = resolvePython()
     child = spawn(pythonCmd, ["-m", "altimate_engine.server"], {
       stdio: ["pipe", "pipe", "pipe"],
     })

@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 
@@ -20,7 +21,16 @@ from altimate_engine.models import (
     JsonRpcRequest,
     JsonRpcResponse,
     LineageCheckParams,
+    SchemaCacheStatusParams,
+    SchemaCacheStatusResult,
+    SchemaCacheWarehouseStatus,
+    SchemaIndexParams,
+    SchemaIndexResult,
     SchemaInspectParams,
+    SchemaSearchColumnResult,
+    SchemaSearchParams,
+    SchemaSearchResult,
+    SchemaSearchTableResult,
     SqlAnalyzeIssue,
     SqlAnalyzeParams,
     SqlAnalyzeResult,
@@ -51,6 +61,7 @@ from altimate_engine.dbt.manifest import parse_manifest
 from altimate_engine.connections import ConnectionRegistry
 from altimate_engine.lineage.check import check_lineage
 from altimate_engine.sql.feedback_store import FeedbackStore
+from altimate_engine.schema.cache import SchemaCache
 
 
 # JSON-RPC error codes
@@ -60,8 +71,9 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
-# Lazily-initialized singleton feedback store
+# Lazily-initialized singletons
 _feedback_store: FeedbackStore | None = None
+_schema_cache: SchemaCache | None = None
 
 
 def _get_feedback_store() -> FeedbackStore:
@@ -70,6 +82,14 @@ def _get_feedback_store() -> FeedbackStore:
     if _feedback_store is None:
         _feedback_store = FeedbackStore()
     return _feedback_store
+
+
+def _get_schema_cache() -> SchemaCache:
+    """Return the singleton SchemaCache, creating it on first use."""
+    global _schema_cache
+    if _schema_cache is None:
+        _schema_cache = SchemaCache()
+    return _schema_cache
 
 
 def _compute_overall_confidence(issues: list) -> str:
@@ -167,6 +187,46 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             store = _get_feedback_store()
             prediction = store.predict(sql=pc_params.sql, dialect=pc_params.dialect)
             result = SqlPredictCostResult(**prediction)
+        elif method == "schema.index":
+            idx_params = SchemaIndexParams(**params)
+            connector = ConnectionRegistry.get(idx_params.warehouse)
+            connector.connect()
+            try:
+                # Look up warehouse type from registry
+                wh_list = ConnectionRegistry.list()
+                wh_type = "unknown"
+                for wh in wh_list:
+                    if wh["name"] == idx_params.warehouse:
+                        wh_type = wh.get("type", "unknown")
+                        break
+                cache = _get_schema_cache()
+                idx_result = cache.index_warehouse(idx_params.warehouse, wh_type, connector)
+                result = SchemaIndexResult(**idx_result)
+            finally:
+                connector.close()
+        elif method == "schema.search":
+            search_params = SchemaSearchParams(**params)
+            cache = _get_schema_cache()
+            raw = cache.search(
+                query=search_params.query,
+                warehouse=search_params.warehouse,
+                limit=search_params.limit,
+            )
+            result = SchemaSearchResult(
+                tables=[SchemaSearchTableResult(**t) for t in raw["tables"]],
+                columns=[SchemaSearchColumnResult(**c) for c in raw["columns"]],
+                query=raw["query"],
+                match_count=raw["match_count"],
+            )
+        elif method == "schema.cache_status":
+            cache = _get_schema_cache()
+            raw = cache.cache_status()
+            result = SchemaCacheStatusResult(
+                warehouses=[SchemaCacheWarehouseStatus(**w) for w in raw["warehouses"]],
+                total_tables=raw["total_tables"],
+                total_columns=raw["total_columns"],
+                cache_path=raw["cache_path"],
+            )
         elif method == "ping":
             return JsonRpcResponse(result={"status": "ok"}, id=request.id)
         else:
@@ -191,11 +251,12 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             id=request.id,
         )
     except Exception as e:
+        trace_data = traceback.format_exc() if os.environ.get("ALTIMATE_ENGINE_DEBUG") else None
         return JsonRpcResponse(
             error=JsonRpcError(
                 code=INTERNAL_ERROR,
                 message=str(e),
-                data=traceback.format_exc(),
+                data=trace_data,
             ),
             id=request.id,
         )

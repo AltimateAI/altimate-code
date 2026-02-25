@@ -13,10 +13,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sqlguard = ["sqlguard"]
 warehouses = [
     "psycopg2-binary>=2.9",
     "snowflake-connector-python>=3.0",
+    "duckdb>=0.9",
+    "cryptography>=41.0",
 ]
 
 [tool.hatch.build.targets.wheel]

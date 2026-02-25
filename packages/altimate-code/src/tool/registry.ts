@@ -33,6 +33,13 @@ import { SqlTranslateTool } from "./sql-translate"
 import { LineageCheckTool } from "./lineage-check"
 import { WarehouseListTool } from "./warehouse-list"
 import { WarehouseTestTool } from "./warehouse-test"
+import { SqlRecordFeedbackTool } from "./sql-record-feedback"
+import { SqlPredictCostTool } from "./sql-predict-cost"
+import { DbtRunTool } from "./dbt-run"
+import { DbtManifestTool } from "./dbt-manifest"
+import { SchemaIndexTool } from "./schema-index"
+import { SchemaSearchTool } from "./schema-search"
+import { SchemaCacheStatusTool } from "./schema-cache-status"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -129,6 +136,13 @@ export namespace ToolRegistry {
       LineageCheckTool,
       WarehouseListTool,
       WarehouseTestTool,
+      SqlRecordFeedbackTool,
+      SqlPredictCostTool,
+      DbtRunTool,
+      DbtManifestTool,
+      SchemaIndexTool,
+      SchemaSearchTool,
+      SchemaCacheStatusTool,
       ...custom,
     ]
   }

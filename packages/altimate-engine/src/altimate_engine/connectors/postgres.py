@@ -51,10 +51,10 @@ class PostgresConnector(Connector):
             self.connect()
         return self._conn
 
-    def execute(self, sql: str, limit: int = 1000) -> list[dict[str, Any]]:
+    def execute(self, sql: str, params: tuple | list | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         conn = self._ensure_conn()
         cur = conn.cursor()
-        cur.execute(sql)
+        cur.execute(sql, params)
 
         if cur.description is None:
             conn.commit()
@@ -72,13 +72,15 @@ class PostgresConnector(Connector):
 
     def list_tables(self, schema: str) -> list[dict[str, Any]]:
         rows = self.execute(
-            f"SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = '{schema}'"
+            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = %s",
+            (schema,),
         )
         return [{"name": row["table_name"], "type": row["table_type"]} for row in rows]
 
     def describe_table(self, schema: str, table: str) -> list[dict[str, Any]]:
         rows = self.execute(
-            f"SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = '{schema}' AND table_name = '{table}'"
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = %s AND table_name = %s",
+            (schema, table),
         )
         return [
             {

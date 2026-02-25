@@ -96,10 +96,13 @@ class SnowflakeConnector(Connector):
             self.connect()
         return self._conn
 
-    def execute(self, sql: str, limit: int = 1000) -> list[dict[str, Any]]:
+    def execute(self, sql: str, params: tuple | list | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         conn = self._ensure_conn()
         cur = conn.cursor()
-        cur.execute(sql)
+        if params:
+            cur.execute(sql, params)
+        else:
+            cur.execute(sql)
 
         if cur.description is None:
             return []

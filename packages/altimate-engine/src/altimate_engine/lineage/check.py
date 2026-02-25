@@ -68,7 +68,6 @@ def check_lineage(params: LineageCheckParams) -> LineageCheckResult:
 
             if table_name:
                 tables.add(table_name)
-            tables.add(column_name)
             columns.add(column_name)
 
             if table_name not in source_columns:
@@ -197,9 +196,23 @@ def _get_target_table(select: exp.Select) -> str:
 
     Uses find(exp.From) for sqlglot v29 compatibility (key is 'from_' not 'from').
     Only considers the FROM clause that belongs directly to this SELECT.
+    Handles subqueries in FROM by using the subquery alias.
     """
     from_clause = select.find(exp.From)
     if from_clause and from_clause.parent is select:
-        for table in from_clause.find_all(exp.Table):
-            return table.alias_or_name
+        # Check for subquery in FROM first — use its alias
+        for child in from_clause.args.get("expressions", [from_clause.this] if from_clause.this else []):
+            if isinstance(child, exp.Subquery):
+                alias = child.alias
+                if alias:
+                    return alias
+            elif isinstance(child, exp.Table):
+                return child.alias_or_name
+        # Fallback: find the first direct table (not recursing into subqueries)
+        first_expr = from_clause.this
+        if first_expr is not None:
+            if isinstance(first_expr, exp.Subquery):
+                return first_expr.alias or "unknown"
+            if isinstance(first_expr, exp.Table):
+                return first_expr.alias_or_name
     return "unknown"

@@ -34,10 +34,13 @@ class DuckDBConnector(Connector):
             self.connect()
         return self._conn
 
-    def execute(self, sql: str, limit: int = 1000) -> list[dict[str, Any]]:
+    def execute(self, sql: str, params: tuple | list | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         """Execute SQL and return results as list of dicts."""
         conn = self._ensure_connected()
-        result = conn.execute(sql)
+        if params:
+            result = conn.execute(sql, params)
+        else:
+            result = conn.execute(sql)
 
         if result.description is None:
             return []
@@ -63,6 +66,7 @@ class DuckDBConnector(Connector):
             "FROM information_schema.tables "
             "WHERE table_schema = ? "
             "ORDER BY table_name",
+            (schema,),
             limit=10000,
         )
         return rows
@@ -75,6 +79,7 @@ class DuckDBConnector(Connector):
             "FROM information_schema.columns "
             "WHERE table_schema = ? AND table_name = ? "
             "ORDER BY ordinal_position",
+            (schema, table),
             limit=1000,
         )
         return rows

@@ -218,6 +218,81 @@ class SchemaInspectResult(BaseModel):
     row_count: int | None = None
 
 
+# --- Schema Cache (Indexing & Search) ---
+
+
+class SchemaIndexParams(BaseModel):
+    warehouse: str
+
+
+class SchemaIndexResult(BaseModel):
+    warehouse: str
+    type: str
+    schemas_indexed: int
+    tables_indexed: int
+    columns_indexed: int
+    timestamp: str
+
+
+class SchemaSearchTableResult(BaseModel):
+    warehouse: str
+    database: str | None = None
+    schema_name: str = Field(alias="schema")
+    name: str
+    type: str = "TABLE"
+    row_count: int | None = None
+    fqn: str
+
+    model_config = {"populate_by_name": True}
+
+
+class SchemaSearchColumnResult(BaseModel):
+    warehouse: str
+    database: str | None = None
+    schema_name: str = Field(alias="schema")
+    table: str
+    name: str
+    data_type: str | None = None
+    nullable: bool = True
+    fqn: str
+
+    model_config = {"populate_by_name": True}
+
+
+class SchemaSearchParams(BaseModel):
+    query: str
+    warehouse: str | None = None
+    limit: int = 20
+
+
+class SchemaSearchResult(BaseModel):
+    tables: list[SchemaSearchTableResult] = Field(default_factory=list)
+    columns: list[SchemaSearchColumnResult] = Field(default_factory=list)
+    query: str
+    match_count: int = 0
+
+
+class SchemaCacheWarehouseStatus(BaseModel):
+    name: str
+    type: str
+    last_indexed: str | None = None
+    databases_count: int = 0
+    schemas_count: int = 0
+    tables_count: int = 0
+    columns_count: int = 0
+
+
+class SchemaCacheStatusParams(BaseModel):
+    pass
+
+
+class SchemaCacheStatusResult(BaseModel):
+    warehouses: list[SchemaCacheWarehouseStatus] = Field(default_factory=list)
+    total_tables: int = 0
+    total_columns: int = 0
+    cache_path: str
+
+
 # --- dbt ---
 
 

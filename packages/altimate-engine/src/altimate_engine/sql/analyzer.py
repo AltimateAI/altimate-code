@@ -168,29 +168,40 @@ class StaticQueryAnalyzer:
         return issues
 
     def _check_missing_limit(self) -> list[dict]:
-        """Check for SELECT queries without LIMIT clause."""
+        """Check for SELECT queries without LIMIT clause.
+
+        Skips DML/DDL statements (CREATE TABLE AS SELECT, INSERT INTO SELECT, MERGE).
+        """
         issues = []
 
-        if isinstance(self.ast, exp.Select):
-            has_limit = self.ast.args.get("limit") is not None
-            has_aggregation = any(
-                isinstance(expr, exp.AggFunc)
-                for expr in self.ast.find_all(exp.Expression)
-            )
-            has_group_by = self.ast.args.get("group") is not None
+        # Skip non-SELECT top-level statements (DML/DDL)
+        if not isinstance(self.ast, exp.Select):
+            return issues
 
-            if not has_limit and not has_aggregation and not has_group_by:
-                issues.append(
-                    {
-                        "type": "MISSING_LIMIT",
-                        "severity": "info",
-                        "message": "SELECT query without LIMIT clause may return large result sets",
-                        "recommendation": "Consider adding a LIMIT clause to prevent "
-                        "unexpectedly large result sets, especially for ad-hoc queries.",
-                        "location": None,
-                        "confidence": "high",
-                    }
-                )
+        # Skip if this SELECT is wrapped in a DML context (e.g. CREATE TABLE AS, INSERT INTO)
+        parent = self.ast.parent
+        if parent and isinstance(parent, (exp.Create, exp.Insert, exp.Merge)):
+            return issues
+
+        has_limit = self.ast.args.get("limit") is not None
+        has_aggregation = any(
+            isinstance(expr, exp.AggFunc)
+            for expr in self.ast.find_all(exp.Expression)
+        )
+        has_group_by = self.ast.args.get("group") is not None
+
+        if not has_limit and not has_aggregation and not has_group_by:
+            issues.append(
+                {
+                    "type": "MISSING_LIMIT",
+                    "severity": "info",
+                    "message": "SELECT query without LIMIT clause may return large result sets",
+                    "recommendation": "Consider adding a LIMIT clause to prevent "
+                    "unexpectedly large result sets, especially for ad-hoc queries.",
+                    "location": None,
+                    "confidence": "high",
+                }
+            )
 
         return issues
 
@@ -282,7 +293,7 @@ class StaticQueryAnalyzer:
         issues = []
 
         for union in self.ast.find_all(exp.Union):
-            if not union.args.get("distinct") is False:
+            if union.args.get("distinct") is not False:
                 issues.append(
                     {
                         "type": "UNION_INSTEAD_OF_UNION_ALL",

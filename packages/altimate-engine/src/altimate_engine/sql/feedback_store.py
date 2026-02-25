@@ -193,12 +193,6 @@ class FeedbackStore:
             normalized = _regex_strip_literals(sql)
             return hashlib.sha256(normalized.encode()).hexdigest()
 
-    def get_observations(self, sql: str, dialect: str = "snowflake") -> list[dict]:
-        """Get all observations for this query's fingerprint."""
-        fingerprint = self._fingerprint(sql, dialect)
-        rows = self._fetch_observations_by_fingerprint(fingerprint)
-        return [dict(row) for row in rows]
-
     # --- Internal helpers ---
 
     @staticmethod

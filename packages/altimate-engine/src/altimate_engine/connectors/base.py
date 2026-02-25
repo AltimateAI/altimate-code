@@ -10,7 +10,7 @@ class Connector(ABC):
         pass
 
     @abstractmethod
-    def execute(self, sql: str, limit: int = 1000) -> list[dict[str, Any]]:
+    def execute(self, sql: str, params: tuple | list | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         pass
 
     @abstractmethod
