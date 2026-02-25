@@ -15,29 +15,47 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
   }),
   async execute(args, ctx) {
-    const result = await Bridge.call("lineage.check", {
-      sql: args.sql,
-      dialect: args.dialect,
-    })
+    try {
+      const result = await Bridge.call("lineage.check", {
+        sql: args.sql,
+        dialect: args.dialect,
+      })
 
-    return {
-      title: `Lineage: ${result.edges.length} edge${result.edges.length !== 1 ? "s" : ""}, ${result.tables.length} table${result.tables.length !== 1 ? "s" : ""}`,
-      metadata: {
-        edgeCount: result.edges.length,
-        tableCount: result.tables.length,
-        columnCount: result.columns.length,
-      },
-      output: formatLineage(result),
+      return {
+        title: `Lineage: ${result.edges.length} edge${result.edges.length !== 1 ? "s" : ""}, ${result.tables.length} table${result.tables.length !== 1 ? "s" : ""} [${result.confidence}]`,
+        metadata: {
+          edgeCount: result.edges.length,
+          tableCount: result.tables.length,
+          columnCount: result.columns.length,
+          confidence: result.confidence,
+        },
+        output: formatLineage(result),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: "Lineage: ERROR",
+        metadata: { edgeCount: 0, tableCount: 0, columnCount: 0, confidence: "unknown" },
+        output: `Failed to check lineage: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+      }
     }
   },
 })
 
 function formatLineage(result: LineageCheckResult): string {
-  if (result.edges.length === 0) {
-    return "No column-level lineage edges detected.\nThis may indicate the query uses SELECT * or has complex expressions that couldn't be traced."
+  const lines: string[] = []
+
+  if (result.confidence_factors.length > 0) {
+    lines.push(`Confidence: ${result.confidence}`)
+    lines.push(`  Note: ${result.confidence_factors.join("; ")}`)
+    lines.push("")
   }
 
-  const lines: string[] = []
+  if (result.edges.length === 0) {
+    lines.push("No column-level lineage edges detected.")
+    lines.push("This may indicate the query uses SELECT * or has complex expressions that couldn't be traced.")
+    return lines.join("\n")
+  }
 
   lines.push("Column Lineage Edges:")
   lines.push("Source Table.Column → Target Table.Column | Transform")

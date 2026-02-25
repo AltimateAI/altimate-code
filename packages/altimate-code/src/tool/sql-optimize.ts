@@ -14,32 +14,41 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
       .default("snowflake")
       .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
     schema_context: z
-      .record(z.any())
+      .record(z.string(), z.any())
       .optional()
       .describe(
         'Optional schema mapping for full optimization. Format: {"table_name": {"col_name": "TYPE", ...}}',
       ),
   }),
   async execute(args, ctx) {
-    const result = await Bridge.call("sql.optimize", {
-      sql: args.sql,
-      dialect: args.dialect,
-      ...(args.schema_context ? { schema_context: args.schema_context } : {}),
-    })
+    try {
+      const result = await Bridge.call("sql.optimize", {
+        sql: args.sql,
+        dialect: args.dialect,
+        ...(args.schema_context ? { schema_context: args.schema_context } : {}),
+      })
 
-    const suggestionCount = result.suggestions.length
-    const antiPatternCount = result.anti_patterns.length
+      const suggestionCount = result.suggestions.length
+      const antiPatternCount = result.anti_patterns.length
 
-    return {
-      title: `Optimize: ${result.success ? `${suggestionCount} suggestion${suggestionCount !== 1 ? "s" : ""}, ${antiPatternCount} anti-pattern${antiPatternCount !== 1 ? "s" : ""}` : "PARSE ERROR"} [${result.confidence}]`,
-      metadata: {
-        success: result.success,
-        suggestionCount,
-        antiPatternCount,
-        hasOptimizedSql: !!result.optimized_sql,
-        confidence: result.confidence,
-      },
-      output: formatOptimization(result),
+      return {
+        title: `Optimize: ${result.success ? `${suggestionCount} suggestion${suggestionCount !== 1 ? "s" : ""}, ${antiPatternCount} anti-pattern${antiPatternCount !== 1 ? "s" : ""}` : "PARSE ERROR"} [${result.confidence}]`,
+        metadata: {
+          success: result.success,
+          suggestionCount,
+          antiPatternCount,
+          hasOptimizedSql: !!result.optimized_sql,
+          confidence: result.confidence,
+        },
+        output: formatOptimization(result),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: "Optimize: ERROR",
+        metadata: { success: false, suggestionCount: 0, antiPatternCount: 0, hasOptimizedSql: false, confidence: "unknown" },
+        output: `Failed to optimize SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+      }
     }
   },
 })

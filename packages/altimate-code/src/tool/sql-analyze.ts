@@ -15,19 +15,28 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
   }),
   async execute(args, ctx) {
-    const result = await Bridge.call("sql.analyze", {
-      sql: args.sql,
-      dialect: args.dialect,
-    })
+    try {
+      const result = await Bridge.call("sql.analyze", {
+        sql: args.sql,
+        dialect: args.dialect,
+      })
 
-    return {
-      title: `Analyze: ${result.success ? `${result.issue_count} issue${result.issue_count !== 1 ? "s" : ""}` : "PARSE ERROR"} [${result.confidence}]`,
-      metadata: {
-        success: result.success,
-        issueCount: result.issue_count,
-        confidence: result.confidence,
-      },
-      output: formatAnalysis(result),
+      return {
+        title: `Analyze: ${result.success ? `${result.issue_count} issue${result.issue_count !== 1 ? "s" : ""}` : "PARSE ERROR"} [${result.confidence}]`,
+        metadata: {
+          success: result.success,
+          issueCount: result.issue_count,
+          confidence: result.confidence,
+        },
+        output: formatAnalysis(result),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: "Analyze: ERROR",
+        metadata: { success: false, issueCount: 0, confidence: "unknown" },
+        output: `Failed to analyze SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+      }
     }
   },
 })

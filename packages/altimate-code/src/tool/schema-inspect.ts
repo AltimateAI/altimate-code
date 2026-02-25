@@ -11,16 +11,25 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     warehouse: z.string().optional().describe("Warehouse connection name"),
   }),
   async execute(args, ctx) {
-    const result = await Bridge.call("schema.inspect", {
-      table: args.table,
-      schema_name: args.schema_name,
-      warehouse: args.warehouse,
-    })
+    try {
+      const result = await Bridge.call("schema.inspect", {
+        table: args.table,
+        schema_name: args.schema_name,
+        warehouse: args.warehouse,
+      })
 
-    return {
-      title: `Schema: ${result.table}`,
-      metadata: { columnCount: result.columns.length, rowCount: result.row_count },
-      output: formatSchema(result),
+      return {
+        title: `Schema: ${result.table}`,
+        metadata: { columnCount: result.columns.length, rowCount: result.row_count },
+        output: formatSchema(result),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: "Schema: ERROR",
+        metadata: { columnCount: 0, rowCount: undefined },
+        output: `Failed to inspect schema: ${msg}\n\nEnsure the Python bridge is running and a warehouse connection is configured.`,
+      }
     }
   },
 })

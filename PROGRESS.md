@@ -1,8 +1,8 @@
 # altimate-code Implementation Progress
-Last updated: 2026-02-25 04:00
+Last updated: 2026-02-25 17:00
 
 ## Current Phase: COMPLETE (all unblocked phases done)
-## Status: Phase 0-4 complete (except 3B blocked, 3E blocked)
+## Status: Phase 0-4 complete + Schema Cache (except 3B blocked, 3E blocked)
 
 ### Completed
 - [x] Phase 1A: Bridge contract parity + warehouse tools (18 rules, 10 bridge methods)
@@ -27,6 +27,8 @@ Last updated: 2026-02-25 04:00
 - [x] Phase 3D: Query optimization skill — sqlglot optimizer passes + anti-pattern suggestions, TS tool + skill
 - [x] Lineage engine hardening — fixed `_get_target_table` (v29 compat), added Func/Window/Case edge extraction
 - [x] Phase 4: Benchmark & documentation — published benchmarks with methodology
+- [x] Phase 5: Schema cache — SQLite-backed warehouse metadata indexing + search + agent permissions
+- [x] TypeScript type fixes — all 16 tool files now pass `tsgo --noEmit` (metadata shape consistency)
 
 ### Blocked
 - [ ] Phase 3B: dbt runner completion (needs real dbt project for testing)
@@ -45,6 +47,8 @@ Last updated: 2026-02-25 04:00
 | 2 | Feedback store observations | **working** | >0 |
 | 3 | Skills functional end-to-end | **6** | 5+ |
 | 4 | Rules with published benchmarks | **19/19** | 19/19 |
+| 5 | Schema cache tests | **20/20** | 20/20 |
+| 5 | TypeScript typecheck | **PASS** | PASS |
 
 ### Accuracy Reports
 
@@ -110,11 +114,18 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 - `.altimate-code/skills/query-optimize/SKILL.md` — Query optimization skill
 - `.altimate-code/skills/impact-analysis/SKILL.md` — Impact analysis skill
 
+**Phase 5 (schema cache):**
+- `packages/altimate-engine/src/altimate_engine/schema/cache.py` — SQLite-backed SchemaCache (index, search, status)
+- `packages/altimate-code/src/tool/schema-index.ts` — Index warehouse tool
+- `packages/altimate-code/src/tool/schema-search.ts` — Search warehouse tool
+- `packages/altimate-code/src/tool/schema-cache-status.ts` — Cache status tool
+- `packages/altimate-engine/tests/test_schema_cache.py` — 20 tests
+
 **Phase 4 (benchmarks):**
 - `experiments/BENCHMARKS.md` — Published benchmark report
 - `experiments/benchmark_report.json` — Machine-readable benchmark data
 
-### Bridge Methods (15 total)
+### Bridge Methods (18 total)
 1. `ping` — Health check
 2. `sql.validate` — SQL syntax validation
 3. `sql.check` — Read-only/mutation safety check
@@ -130,6 +141,9 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 13. `dbt.manifest` — Manifest parsing
 14. `warehouse.list` — List configured warehouses
 15. `warehouse.test` — Test warehouse connection
+16. `schema.index` — Index warehouse metadata into SQLite cache
+17. `schema.search` — Search indexed metadata (tables/columns) with natural language
+18. `schema.cache_status` — Show cache status (warehouses indexed, counts, timestamps)
 
 ### Skills (6 total)
 1. `generate-tests` — Generate dbt test definitions

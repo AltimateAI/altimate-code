@@ -16,21 +16,30 @@ export const SqlTranslateTool = Tool.define("sql_translate", {
       .describe("Target SQL dialect (e.g., snowflake, bigquery, postgres, mysql, tsql, redshift, duckdb)"),
   }),
   async execute(args, ctx) {
-    const result = await Bridge.call("sql.translate", {
-      sql: args.sql,
-      source_dialect: args.source_dialect,
-      target_dialect: args.target_dialect,
-    })
+    try {
+      const result = await Bridge.call("sql.translate", {
+        sql: args.sql,
+        source_dialect: args.source_dialect,
+        target_dialect: args.target_dialect,
+      })
 
-    return {
-      title: `Translate: ${args.source_dialect} → ${args.target_dialect} [${result.success ? "OK" : "FAIL"}]`,
-      metadata: {
-        success: result.success,
-        source_dialect: result.source_dialect,
-        target_dialect: result.target_dialect,
-        warningCount: result.warnings.length,
-      },
-      output: formatTranslation(result, args.sql),
+      return {
+        title: `Translate: ${args.source_dialect} → ${args.target_dialect} [${result.success ? "OK" : "FAIL"}]`,
+        metadata: {
+          success: result.success,
+          source_dialect: result.source_dialect,
+          target_dialect: result.target_dialect,
+          warningCount: result.warnings.length,
+        },
+        output: formatTranslation(result, args.sql),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return {
+        title: `Translate: ERROR`,
+        metadata: { success: false, source_dialect: args.source_dialect, target_dialect: args.target_dialect, warningCount: 0 },
+        output: `Failed to translate SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+      }
     }
   },
 })
