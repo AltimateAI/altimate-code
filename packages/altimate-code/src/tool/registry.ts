@@ -40,6 +40,10 @@ import { DbtManifestTool } from "./dbt-manifest"
 import { SchemaIndexTool } from "./schema-index"
 import { SchemaSearchTool } from "./schema-search"
 import { SchemaCacheStatusTool } from "./schema-cache-status"
+import { SqlExplainTool } from "./sql-explain"
+import { SqlFormatTool } from "./sql-format"
+import { SqlFixTool } from "./sql-fix"
+import { SqlAutocompleteTool } from "./sql-autocomplete"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -143,6 +147,10 @@ export namespace ToolRegistry {
       SchemaIndexTool,
       SchemaSearchTool,
       SchemaCacheStatusTool,
+      SqlExplainTool,
+      SqlFormatTool,
+      SqlFixTool,
+      SqlAutocompleteTool,
       ...custom,
     ]
   }

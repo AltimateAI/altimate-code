@@ -34,8 +34,18 @@ from altimate_engine.models import (
     SqlAnalyzeIssue,
     SqlAnalyzeParams,
     SqlAnalyzeResult,
+    SqlAutocompleteParams,
+    SqlAutocompleteResult,
+    SqlAutocompleteSuggestion,
     SqlCheckParams,
     SqlExecuteParams,
+    SqlExplainParams,
+    SqlExplainResult,
+    SqlFixParams,
+    SqlFixResult,
+    SqlFixSuggestion,
+    SqlFormatParams,
+    SqlFormatResult,
     SqlOptimizeParams,
     SqlOptimizeResult,
     SqlPredictCostParams,
@@ -55,6 +65,10 @@ from altimate_engine.sql.executor import execute_sql
 from altimate_engine.sql.analyzer import analyze_sql
 from altimate_engine.sql.optimizer import optimize_sql
 from altimate_engine.sql.translator import translate_sql
+from altimate_engine.sql.formatter import format_sql
+from altimate_engine.sql.explainer import explain_sql
+from altimate_engine.sql.fixer import fix_sql
+from altimate_engine.sql.autocomplete import autocomplete_sql
 from altimate_engine.schema.inspector import inspect_schema
 from altimate_engine.dbt.runner import run_dbt
 from altimate_engine.dbt.manifest import parse_manifest
@@ -187,6 +201,40 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             store = _get_feedback_store()
             prediction = store.predict(sql=pc_params.sql, dialect=pc_params.dialect)
             result = SqlPredictCostResult(**prediction)
+        elif method == "sql.format":
+            fmt_params = SqlFormatParams(**params)
+            fmt_result = format_sql(fmt_params.sql, fmt_params.dialect, fmt_params.indent)
+            result = SqlFormatResult(**fmt_result)
+        elif method == "sql.explain":
+            result = explain_sql(SqlExplainParams(**params))
+        elif method == "sql.fix":
+            fix_params = SqlFixParams(**params)
+            fix_result = fix_sql(fix_params.sql, fix_params.error_message, fix_params.dialect)
+            result = SqlFixResult(
+                success=fix_result["success"],
+                original_sql=fix_result["original_sql"],
+                fixed_sql=fix_result.get("fixed_sql"),
+                error_message=fix_result["error_message"],
+                suggestions=[SqlFixSuggestion(**s) for s in fix_result["suggestions"]],
+                suggestion_count=fix_result["suggestion_count"],
+            )
+        elif method == "sql.autocomplete":
+            ac_params = SqlAutocompleteParams(**params)
+            cache = _get_schema_cache()
+            ac_result = autocomplete_sql(
+                prefix=ac_params.prefix,
+                position=ac_params.position,
+                warehouse=ac_params.warehouse,
+                table_context=ac_params.table_context,
+                limit=ac_params.limit,
+                cache=cache,
+            )
+            result = SqlAutocompleteResult(
+                suggestions=[SqlAutocompleteSuggestion(**s) for s in ac_result["suggestions"]],
+                prefix=ac_result["prefix"],
+                position=ac_result["position"],
+                suggestion_count=ac_result["suggestion_count"],
+            )
         elif method == "schema.index":
             idx_params = SchemaIndexParams(**params)
             connector = ConnectionRegistry.get(idx_params.warehouse)

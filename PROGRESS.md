@@ -1,8 +1,8 @@
 # altimate-code Implementation Progress
-Last updated: 2026-02-25 17:00
+Last updated: 2026-02-25 21:00
 
 ## Current Phase: COMPLETE (all unblocked phases done)
-## Status: Phase 0-4 complete + Schema Cache (except 3B blocked, 3E blocked)
+## Status: Phase 0-4 complete + Schema Cache + Phase 6 DX tools (except 3B blocked, 3E blocked)
 
 ### Completed
 - [x] Phase 1A: Bridge contract parity + warehouse tools (18 rules, 10 bridge methods)
@@ -29,6 +29,7 @@ Last updated: 2026-02-25 17:00
 - [x] Phase 4: Benchmark & documentation — published benchmarks with methodology
 - [x] Phase 5: Schema cache — SQLite-backed warehouse metadata indexing + search + agent permissions
 - [x] TypeScript type fixes — all 16 tool files now pass `tsgo --noEmit` (metadata shape consistency)
+- [x] Phase 6: DX tools — sql.explain, sql.format, sql.fix, sql.autocomplete (4 bridge methods, 4 TS tools, 55 new tests)
 
 ### Blocked
 - [ ] Phase 3B: dbt runner completion (needs real dbt project for testing)
@@ -49,6 +50,9 @@ Last updated: 2026-02-25 17:00
 | 4 | Rules with published benchmarks | **19/19** | 19/19 |
 | 5 | Schema cache tests | **20/20** | 20/20 |
 | 5 | TypeScript typecheck | **PASS** | PASS |
+| 6 | DX bridge methods | **4/4** | 4/4 |
+| 6 | DX tools tests | **55/55** | 55/55 |
+| All | Total Python tests | **152/152** | PASS |
 
 ### Accuracy Reports
 
@@ -93,7 +97,7 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 - `packages/altimate-engine/src/altimate_engine/sql/analyzer.py` — 19 rules + ConfidenceTracker
 - `packages/altimate-engine/src/altimate_engine/sql/confidence.py` — 7 AST detection rules
 - `packages/altimate-engine/src/altimate_engine/lineage/check.py` — lineage + 4 confidence signals + Func/Window/Case edges
-- `packages/altimate-engine/src/altimate_engine/server.py` — JSON-RPC dispatch (15 methods)
+- `packages/altimate-engine/src/altimate_engine/server.py` — JSON-RPC dispatch (22 methods)
 - `packages/altimate-engine/src/altimate_engine/models.py` — All Pydantic models
 
 **Phase 2 (connectors + parsers + feedback):**
@@ -121,11 +125,25 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 - `packages/altimate-code/src/tool/schema-cache-status.ts` — Cache status tool
 - `packages/altimate-engine/tests/test_schema_cache.py` — 20 tests
 
+**Phase 6 (DX tools):**
+- `packages/altimate-engine/src/altimate_engine/sql/formatter.py` — SQL formatting via sqlglot pretty-print
+- `packages/altimate-engine/src/altimate_engine/sql/explainer.py` — EXPLAIN query builder (Snowflake/PG/DuckDB)
+- `packages/altimate-engine/src/altimate_engine/sql/fixer.py` — SQL error diagnosis + auto-fix suggestions
+- `packages/altimate-engine/src/altimate_engine/sql/autocomplete.py` — Schema-aware autocomplete from cache
+- `packages/altimate-code/src/tool/sql-explain.ts` — TS tool for sql.explain
+- `packages/altimate-code/src/tool/sql-format.ts` — TS tool for sql.format
+- `packages/altimate-code/src/tool/sql-fix.ts` — TS tool for sql.fix
+- `packages/altimate-code/src/tool/sql-autocomplete.ts` — TS tool for sql.autocomplete
+- `packages/altimate-engine/tests/test_formatter.py` — 9 tests
+- `packages/altimate-engine/tests/test_fixer.py` — 14 tests
+- `packages/altimate-engine/tests/test_autocomplete.py` — 14 tests
+- `packages/altimate-engine/tests/test_explainer.py` — 12 tests
+
 **Phase 4 (benchmarks):**
 - `experiments/BENCHMARKS.md` — Published benchmark report
 - `experiments/benchmark_report.json` — Machine-readable benchmark data
 
-### Bridge Methods (18 total)
+### Bridge Methods (22 total)
 1. `ping` — Health check
 2. `sql.validate` — SQL syntax validation
 3. `sql.check` — Read-only/mutation safety check
@@ -144,6 +162,10 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 16. `schema.index` — Index warehouse metadata into SQLite cache
 17. `schema.search` — Search indexed metadata (tables/columns) with natural language
 18. `schema.cache_status` — Show cache status (warehouses indexed, counts, timestamps)
+19. `sql.explain` — Run EXPLAIN on a query (Snowflake/PG/DuckDB dialect-specific syntax)
+20. `sql.format` — Format/beautify SQL via sqlglot pretty-print
+21. `sql.fix` — Diagnose SQL errors and suggest fixes (syntax, patterns, resolution)
+22. `sql.autocomplete` — Schema-aware auto-complete suggestions from cache
 
 ### Skills (6 total)
 1. `generate-tests` — Generate dbt test definitions

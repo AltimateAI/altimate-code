@@ -103,6 +103,54 @@ class TestDispatch:
         assert response.error is None
         assert "warehouses" in response.result
 
+    def test_sql_format(self):
+        request = JsonRpcRequest(
+            method="sql.format",
+            params={"sql": "select a,b from t", "dialect": "snowflake"},
+            id=11,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is True
+        assert response.result["statement_count"] == 1
+
+    def test_sql_fix(self):
+        request = JsonRpcRequest(
+            method="sql.fix",
+            params={
+                "sql": "SELECT * FROM t",
+                "error_message": "Object 't' does not exist",
+                "dialect": "snowflake",
+            },
+            id=12,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is True
+        assert response.result["suggestion_count"] >= 1
+
+    def test_sql_explain_no_warehouse(self):
+        request = JsonRpcRequest(
+            method="sql.explain",
+            params={"sql": "SELECT 1"},
+            id=13,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert response.result["success"] is False
+        assert "No warehouse" in response.result["error"]
+
+    def test_sql_autocomplete(self):
+        request = JsonRpcRequest(
+            method="sql.autocomplete",
+            params={"prefix": "cust", "position": "any"},
+            id=14,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert "suggestions" in response.result
+        assert "suggestion_count" in response.result
+
 
 class TestHandleLine:
     def test_valid_request(self):

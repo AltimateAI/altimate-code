@@ -169,6 +169,93 @@ class SqlPredictCostResult(BaseModel):
     observation_count: int
 
 
+# --- SQL Explain ---
+
+
+class SqlExplainParams(BaseModel):
+    sql: str
+    warehouse: str | None = None
+    analyze: bool = False
+
+
+class SqlExplainResult(BaseModel):
+    success: bool
+    plan_text: str | None = None
+    plan_rows: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+    warehouse_type: str | None = None
+    analyzed: bool = False
+
+
+# --- SQL Format ---
+
+
+class SqlFormatParams(BaseModel):
+    sql: str
+    dialect: str = "snowflake"
+    indent: int = 2
+
+
+class SqlFormatResult(BaseModel):
+    success: bool
+    formatted_sql: str | None = None
+    statement_count: int = 0
+    error: str | None = None
+
+
+# --- SQL Fix ---
+
+
+class SqlFixParams(BaseModel):
+    sql: str
+    error_message: str
+    dialect: str = "snowflake"
+
+
+class SqlFixSuggestion(BaseModel):
+    type: str
+    message: str
+    confidence: str = "medium"
+    fixed_sql: str | None = None
+
+
+class SqlFixResult(BaseModel):
+    success: bool
+    original_sql: str
+    fixed_sql: str | None = None
+    error_message: str
+    suggestions: list[SqlFixSuggestion] = Field(default_factory=list)
+    suggestion_count: int = 0
+
+
+# --- SQL Autocomplete ---
+
+
+class SqlAutocompleteParams(BaseModel):
+    prefix: str
+    position: str = "any"
+    warehouse: str | None = None
+    table_context: list[str] | None = None
+    limit: int = 20
+
+
+class SqlAutocompleteSuggestion(BaseModel):
+    name: str
+    type: str  # table, column, schema
+    detail: str | None = None
+    fqn: str | None = None
+    table: str | None = None
+    warehouse: str | None = None
+    in_context: bool = False
+
+
+class SqlAutocompleteResult(BaseModel):
+    suggestions: list[SqlAutocompleteSuggestion] = Field(default_factory=list)
+    prefix: str
+    position: str
+    suggestion_count: int = 0
+
+
 # --- Lineage ---
 
 

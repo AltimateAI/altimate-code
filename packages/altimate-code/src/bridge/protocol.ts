@@ -340,6 +340,89 @@ export interface SqlPredictCostResult {
   observation_count: number
 }
 
+// --- SQL Explain ---
+
+export interface SqlExplainParams {
+  sql: string
+  warehouse?: string
+  analyze?: boolean
+}
+
+export interface SqlExplainResult {
+  success: boolean
+  plan_text?: string
+  plan_rows: Record<string, unknown>[]
+  error?: string
+  warehouse_type?: string
+  analyzed: boolean
+}
+
+// --- SQL Format ---
+
+export interface SqlFormatParams {
+  sql: string
+  dialect?: string
+  indent?: number
+}
+
+export interface SqlFormatResult {
+  success: boolean
+  formatted_sql?: string
+  statement_count: number
+  error?: string
+}
+
+// --- SQL Fix ---
+
+export interface SqlFixParams {
+  sql: string
+  error_message: string
+  dialect?: string
+}
+
+export interface SqlFixSuggestion {
+  type: string
+  message: string
+  confidence: string
+  fixed_sql?: string
+}
+
+export interface SqlFixResult {
+  success: boolean
+  original_sql: string
+  fixed_sql?: string
+  error_message: string
+  suggestions: SqlFixSuggestion[]
+  suggestion_count: number
+}
+
+// --- SQL Autocomplete ---
+
+export interface SqlAutocompleteParams {
+  prefix: string
+  position?: string
+  warehouse?: string
+  table_context?: string[]
+  limit?: number
+}
+
+export interface SqlAutocompleteSuggestion {
+  name: string
+  type: string
+  detail?: string
+  fqn?: string
+  table?: string
+  warehouse?: string
+  in_context: boolean
+}
+
+export interface SqlAutocompleteResult {
+  suggestions: SqlAutocompleteSuggestion[]
+  prefix: string
+  position: string
+  suggestion_count: number
+}
+
 // --- Method registry ---
 
 export const BridgeMethods = {
@@ -351,6 +434,10 @@ export const BridgeMethods = {
   "sql.translate": {} as { params: SqlTranslateParams; result: SqlTranslateResult },
   "sql.record_feedback": {} as { params: SqlRecordFeedbackParams; result: SqlRecordFeedbackResult },
   "sql.predict_cost": {} as { params: SqlPredictCostParams; result: SqlPredictCostResult },
+  "sql.explain": {} as { params: SqlExplainParams; result: SqlExplainResult },
+  "sql.format": {} as { params: SqlFormatParams; result: SqlFormatResult },
+  "sql.fix": {} as { params: SqlFixParams; result: SqlFixResult },
+  "sql.autocomplete": {} as { params: SqlAutocompleteParams; result: SqlAutocompleteResult },
   "schema.inspect": {} as { params: SchemaInspectParams; result: SchemaInspectResult },
   "schema.index": {} as { params: SchemaIndexParams; result: SchemaIndexResult },
   "schema.search": {} as { params: SchemaSearchParams; result: SchemaSearchResult },
