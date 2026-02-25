@@ -1,0 +1,120 @@
+{
+  "validation_date": "2026-02-25",
+  "engine_version": "0.1.0",
+  "dialect": "snowflake",
+  "sql_analyzer": {
+    "query_count": 1077,
+    "parse_failures": 0,
+    "rule_count": 19,
+    "overall_accuracy": "100.00%",
+    "overall_f1": 1.0,
+    "total_true_positives": 396,
+    "total_false_positives": 0,
+    "total_false_negatives": 0,
+    "avg_latency_ms": 0.48,
+    "total_elapsed_s": 0.518,
+    "confidence_distribution": {
+      "high": {
+        "rules": ["SELECT_STAR", "MISSING_LIMIT", "CARTESIAN_PRODUCT", "ORDER_BY_WITHOUT_LIMIT", "UNION_INSTEAD_OF_UNION_ALL", "NOT_IN_WITH_SUBQUERY", "LIKE_LEADING_WILDCARD", "LARGE_IN_LIST", "UNUSED_CTE", "SELECT_STAR_IN_SUBQUERY", "WINDOW_WITHOUT_PARTITION", "ORDER_BY_IN_SUBQUERY", "IMPLICIT_CARTESIAN"],
+        "count": 13,
+        "accuracy": "100%"
+      },
+      "medium": {
+        "rules": ["FUNCTION_IN_JOIN", "FUNCTION_IN_FILTER", "OR_IN_JOIN", "NON_EQUI_JOIN", "GROUP_BY_PRIMARY_KEY", "CORRELATED_SUBQUERY"],
+        "count": 6,
+        "accuracy": "100%"
+      },
+      "low": {
+        "rules": [],
+        "count": 0,
+        "accuracy": "N/A"
+      }
+    },
+    "stratified_accuracy": {
+      "aggregation": {"queries": 83, "accuracy": 1.0},
+      "basic_select": {"queries": 52, "accuracy": 1.0},
+      "column_pruning": {"queries": 52, "accuracy": 1.0},
+      "complex": {"queries": 83, "accuracy": 1.0},
+      "cross_join": {"queries": 31, "accuracy": 1.0},
+      "cte": {"queries": 41, "accuracy": 1.0},
+      "equality_filter": {"queries": 156, "accuracy": 1.0},
+      "in_list": {"queries": 52, "accuracy": 1.0},
+      "join_2table": {"queries": 83, "accuracy": 1.0},
+      "join_3plus": {"queries": 41, "accuracy": 1.0},
+      "like_filter": {"queries": 41, "accuracy": 1.0},
+      "metadata_agg": {"queries": 20, "accuracy": 1.0},
+      "null_filter": {"queries": 31, "accuracy": 1.0},
+      "partition_pruning": {"queries": 52, "accuracy": 1.0},
+      "range_filter": {"queries": 104, "accuracy": 1.0},
+      "set_operation": {"queries": 41, "accuracy": 1.0},
+      "subquery": {"queries": 52, "accuracy": 1.0},
+      "window_function": {"queries": 62, "accuracy": 1.0}
+    },
+    "per_rule": {
+      "CARTESIAN_PRODUCT": {"tp": 15, "fp": 0, "fn": 0, "f1": 1.0},
+      "CORRELATED_SUBQUERY": {"tp": 37, "fp": 0, "fn": 0, "f1": 1.0},
+      "FUNCTION_IN_FILTER": {"tp": 38, "fp": 0, "fn": 0, "f1": 1.0},
+      "FUNCTION_IN_JOIN": {"tp": 8, "fp": 0, "fn": 0, "f1": 1.0},
+      "GROUP_BY_PRIMARY_KEY": {"tp": 24, "fp": 0, "fn": 0, "f1": 1.0},
+      "IMPLICIT_CARTESIAN": {"tp": 16, "fp": 0, "fn": 0, "f1": 1.0},
+      "LARGE_IN_LIST": {"tp": 9, "fp": 0, "fn": 0, "f1": 1.0},
+      "LIKE_LEADING_WILDCARD": {"tp": 26, "fp": 0, "fn": 0, "f1": 1.0},
+      "MISSING_LIMIT": {"tp": 51, "fp": 0, "fn": 0, "f1": 1.0},
+      "NON_EQUI_JOIN": {"tp": 18, "fp": 0, "fn": 0, "f1": 1.0},
+      "NOT_IN_WITH_SUBQUERY": {"tp": 1, "fp": 0, "fn": 0, "f1": 1.0},
+      "ORDER_BY_IN_SUBQUERY": {"tp": 11, "fp": 0, "fn": 0, "f1": 1.0},
+      "ORDER_BY_WITHOUT_LIMIT": {"tp": 16, "fp": 0, "fn": 0, "f1": 1.0},
+      "OR_IN_JOIN": {"tp": 8, "fp": 0, "fn": 0, "f1": 1.0},
+      "SELECT_STAR": {"tp": 53, "fp": 0, "fn": 0, "f1": 1.0},
+      "SELECT_STAR_IN_SUBQUERY": {"tp": 6, "fp": 0, "fn": 0, "f1": 1.0},
+      "UNION_INSTEAD_OF_UNION_ALL": {"tp": 13, "fp": 0, "fn": 0, "f1": 1.0},
+      "UNUSED_CTE": {"tp": 9, "fp": 0, "fn": 0, "f1": 1.0},
+      "WINDOW_WITHOUT_PARTITION": {"tp": 37, "fp": 0, "fn": 0, "f1": 1.0}
+    }
+  },
+  "lineage_engine": {
+    "query_count": 500,
+    "category_count": 13,
+    "perfect_edge_match": 500,
+    "perfect_edge_match_pct": 100.0,
+    "confidence_match_pct": 100.0,
+    "factor_subset_match_pct": 100.0,
+    "avg_precision": 1.0,
+    "avg_recall": 1.0,
+    "avg_f1": 1.0,
+    "avg_latency_ms": 0.26,
+    "parse_errors": 0,
+    "stratified_accuracy": {
+      "simple_select": {"queries": 50, "edge_match_pct": 100.0},
+      "aliased_columns": {"queries": 50, "edge_match_pct": 100.0},
+      "aggregation": {"queries": 50, "edge_match_pct": 100.0},
+      "multi_table_join": {"queries": 60, "edge_match_pct": 100.0},
+      "subquery": {"queries": 40, "edge_match_pct": 100.0},
+      "cte": {"queries": 40, "edge_match_pct": 100.0},
+      "window_function": {"queries": 40, "edge_match_pct": 100.0},
+      "case_expression": {"queries": 30, "edge_match_pct": 100.0},
+      "union": {"queries": 30, "edge_match_pct": 100.0},
+      "select_star": {"queries": 30, "edge_match_pct": 100.0},
+      "complex_multi_hop": {"queries": 40, "edge_match_pct": 100.0},
+      "jinja_template": {"queries": 20, "edge_match_pct": 100.0},
+      "no_schema_context": {"queries": 20, "edge_match_pct": 100.0}
+    },
+    "known_limitations": [
+      "Cross-CTE lineage: CTEs produce independent edges per SELECT, no cross-CTE data flow tracing",
+      "Jinja/macro SQL: Cannot parse {{ }} syntax, returns empty edges with confidence=low",
+      "Unqualified columns: Columns without table prefix get source_table=unknown",
+      "Dialect coverage: Validated against Snowflake only"
+    ]
+  },
+  "methodology": {
+    "query_generation": "Deterministic seeded generation (seed=42) with ground-truth annotations",
+    "evaluation_metrics": ["precision", "recall", "f1", "edge_match", "confidence_match"],
+    "validation_approach": "Stratified by category, not aggregate",
+    "reproducibility": "python generate_queries.py --count N --seed 42",
+    "caveats": [
+      "Synthetic queries only - production SQL may contain uncovered patterns",
+      "Snowflake dialect only - cross-dialect validation planned",
+      "100% synthetic accuracy does not guarantee 100% on production SQL"
+    ]
+  }
+}

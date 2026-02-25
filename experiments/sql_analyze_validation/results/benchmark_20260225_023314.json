@@ -1,0 +1,544 @@
+{
+  "timestamp": "20260225_023314",
+  "dialect": "snowflake",
+  "total_queries": 18,
+  "parse_failures": 0,
+  "total_elapsed_s": 0.017,
+  "avg_query_ms": 0.967,
+  "rule_metrics": {
+    "FUNCTION_IN_FILTER": {
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    },
+    "IMPLICIT_CARTESIAN": {
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 1,
+      "precision": 1.0,
+      "recall": 0.0,
+      "f1_score": 0.0
+    },
+    "LIKE_LEADING_WILDCARD": {
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    },
+    "MISSING_LIMIT": {
+      "true_positives": 2,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    },
+    "ORDER_BY_WITHOUT_LIMIT": {
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    },
+    "SELECT_STAR": {
+      "true_positives": 2,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    },
+    "UNUSED_CTE": {
+      "true_positives": 1,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    }
+  },
+  "category_metrics": {
+    "aggregation": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "basic_select": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "column_pruning": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 1,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {
+        "SELECT_STAR": 1
+      }
+    },
+    "complex": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 3,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {
+        "MISSING_LIMIT": 1,
+        "ORDER_BY_WITHOUT_LIMIT": 1,
+        "SELECT_STAR": 1
+      }
+    },
+    "cross_join": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 0.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 1,
+      "rules_fired": {}
+    },
+    "cte": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 1,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {
+        "UNUSED_CTE": 1
+      }
+    },
+    "equality_filter": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "in_list": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "join_2table": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "join_3plus": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "like_filter": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 1,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {
+        "LIKE_LEADING_WILDCARD": 1
+      }
+    },
+    "metadata_agg": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 1,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {
+        "MISSING_LIMIT": 1
+      }
+    },
+    "null_filter": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "partition_pruning": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 1,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {
+        "FUNCTION_IN_FILTER": 1
+      }
+    },
+    "range_filter": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "set_operation": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "subquery": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    },
+    "window_function": {
+      "query_count": 1,
+      "parse_failures": 0,
+      "accuracy": 1.0,
+      "total_true_positives": 0,
+      "total_false_positives": 0,
+      "total_false_negatives": 0,
+      "rules_fired": {}
+    }
+  },
+  "query_results": [
+    {
+      "id": 0,
+      "sql": "SELECT discount FROM orders LIMIT 291",
+      "category": "basic_select",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 9.921
+    },
+    {
+      "id": 1,
+      "sql": "SELECT user_id, id FROM events WHERE session_id = 'us' LIMIT 54",
+      "category": "equality_filter",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.402
+    },
+    {
+      "id": 2,
+      "sql": "SELECT id, price, quantity FROM items WHERE quantity > 518 LIMIT 318",
+      "category": "range_filter",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.324
+    },
+    {
+      "id": 3,
+      "sql": "SELECT country, name FROM users WHERE tier IS NOT NULL LIMIT 424",
+      "category": "null_filter",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.303
+    },
+    {
+      "id": 4,
+      "sql": "SELECT age, email, name FROM users WHERE name LIKE '%error%' LIMIT 36",
+      "category": "like_filter",
+      "expected_positive": [
+        "LIKE_LEADING_WILDCARD"
+      ],
+      "expected_negative_count": 18,
+      "detected_rules": [
+        "LIKE_LEADING_WILDCARD"
+      ],
+      "true_positives": [
+        "LIKE_LEADING_WILDCARD"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.41
+    },
+    {
+      "id": 5,
+      "sql": "SELECT id, total, discount FROM orders WHERE status IN (7528, 8786) LIMIT 73",
+      "category": "in_list",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.345
+    },
+    {
+      "id": 6,
+      "sql": "SELECT products.created_at, items.price, items.product_id FROM products JOIN items ON products.id = items.product_id LIMIT 305",
+      "category": "join_2table",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.494
+    },
+    {
+      "id": 7,
+      "sql": "SELECT users.id, users.country, orders.user_id, payments.order_id FROM users JOIN orders ON users.id = orders.user_id JOIN payments ON orders.id = payments.order_id LIMIT 348",
+      "category": "join_3plus",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.712
+    },
+    {
+      "id": 8,
+      "sql": "SELECT created_at, COUNT(user_id) AS agg_val FROM events GROUP BY created_at",
+      "category": "aggregation",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.316
+    },
+    {
+      "id": 9,
+      "sql": "SELECT total, created_at, shipping_cost, RANK() OVER (PARTITION BY shipping_cost ORDER BY total) AS win_val FROM orders LIMIT 146",
+      "category": "window_function",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.441
+    },
+    {
+      "id": 10,
+      "sql": "SELECT status, discount FROM orders WHERE user_id IN (SELECT id FROM users WHERE status = 'active') LIMIT 100",
+      "category": "subquery",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.516
+    },
+    {
+      "id": 11,
+      "sql": "WITH active_users AS (SELECT id, name FROM users WHERE status = 'active'), recent_orders AS (SELECT id, user_id, total FROM orders WHERE created_at > '2024-01-01') SELECT id, name FROM active_users LIMIT 100",
+      "category": "cte",
+      "expected_positive": [
+        "UNUSED_CTE"
+      ],
+      "expected_negative_count": 18,
+      "detected_rules": [
+        "UNUSED_CTE"
+      ],
+      "true_positives": [
+        "UNUSED_CTE"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 1.26
+    },
+    {
+      "id": 12,
+      "sql": "SELECT id, name, email FROM users WHERE status = 'active' UNION ALL SELECT id, name, email FROM users WHERE status = 'pending'",
+      "category": "set_operation",
+      "expected_positive": [],
+      "expected_negative_count": 19,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.524
+    },
+    {
+      "id": 13,
+      "sql": "SELECT * FROM categories ORDER BY description",
+      "category": "complex",
+      "expected_positive": [
+        "MISSING_LIMIT",
+        "ORDER_BY_WITHOUT_LIMIT",
+        "SELECT_STAR"
+      ],
+      "expected_negative_count": 16,
+      "detected_rules": [
+        "MISSING_LIMIT",
+        "ORDER_BY_WITHOUT_LIMIT",
+        "SELECT_STAR"
+      ],
+      "true_positives": [
+        "MISSING_LIMIT",
+        "ORDER_BY_WITHOUT_LIMIT",
+        "SELECT_STAR"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.241
+    },
+    {
+      "id": 14,
+      "sql": "SELECT user_id, id FROM events WHERE MONTH(created_at) = 1 LIMIT 422",
+      "category": "partition_pruning",
+      "expected_positive": [
+        "FUNCTION_IN_FILTER"
+      ],
+      "expected_negative_count": 18,
+      "detected_rules": [
+        "FUNCTION_IN_FILTER"
+      ],
+      "true_positives": [
+        "FUNCTION_IN_FILTER"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.409
+    },
+    {
+      "id": 15,
+      "sql": "SELECT * FROM items LIMIT 118",
+      "category": "column_pruning",
+      "expected_positive": [
+        "SELECT_STAR"
+      ],
+      "expected_negative_count": 18,
+      "detected_rules": [
+        "SELECT_STAR"
+      ],
+      "true_positives": [
+        "SELECT_STAR"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.202
+    },
+    {
+      "id": 16,
+      "sql": "SELECT schema_name FROM information_schema.schemata",
+      "category": "metadata_agg",
+      "expected_positive": [
+        "MISSING_LIMIT"
+      ],
+      "expected_negative_count": 18,
+      "detected_rules": [
+        "MISSING_LIMIT"
+      ],
+      "true_positives": [
+        "MISSING_LIMIT"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.161
+    },
+    {
+      "id": 17,
+      "sql": "SELECT users.id, products.id FROM users, products LIMIT 100",
+      "category": "cross_join",
+      "expected_positive": [
+        "IMPLICIT_CARTESIAN"
+      ],
+      "expected_negative_count": 18,
+      "detected_rules": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [
+        "IMPLICIT_CARTESIAN"
+      ],
+      "parse_success": true,
+      "parse_error": null,
+      "elapsed_ms": 0.303
+    }
+  ]
+}
