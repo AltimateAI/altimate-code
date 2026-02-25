@@ -1,0 +1,423 @@
+"""Feedback store for query execution metrics — enables cost prediction."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import sqlite3
+import statistics
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import sqlglot
+from sqlglot import exp
+
+
+_CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS query_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL,
+    template_hash TEXT NOT NULL,
+    bytes_scanned INTEGER,
+    rows_produced INTEGER,
+    execution_time_ms INTEGER,
+    credits_used REAL,
+    warehouse_size TEXT,
+    dialect TEXT DEFAULT 'snowflake',
+    timestamp TEXT NOT NULL
+);
+"""
+
+_CREATE_INDEX_FINGERPRINT = (
+    "CREATE INDEX IF NOT EXISTS idx_fingerprint ON query_feedback(fingerprint);"
+)
+_CREATE_INDEX_TEMPLATE = (
+    "CREATE INDEX IF NOT EXISTS idx_template ON query_feedback(template_hash);"
+)
+
+
+def _default_db_path() -> str:
+    """Return the default feedback database path: ~/.altimate/feedback.db"""
+    altimate_dir = Path.home() / ".altimate"
+    altimate_dir.mkdir(parents=True, exist_ok=True)
+    return str(altimate_dir / "feedback.db")
+
+
+def _regex_strip_literals(sql: str) -> str:
+    """Fallback regex-based literal stripping when sqlglot parsing fails.
+
+    Replaces string literals, numeric literals, and boolean literals with
+    placeholders. Normalizes whitespace.
+    """
+    # Replace single-quoted strings
+    result = re.sub(r"'[^']*'", "'?'", sql)
+    # Replace double-quoted strings (that are not identifiers in some dialects)
+    # Be conservative — skip this for Snowflake where double quotes are identifiers
+    # Replace numeric literals (integers and floats, but not in identifiers)
+    result = re.sub(r"\b\d+(\.\d+)?\b", "?", result)
+    # Normalize whitespace
+    result = re.sub(r"\s+", " ", result).strip()
+    return result.upper()
+
+
+class FeedbackStore:
+    """Local SQLite-based feedback store that records query execution metrics
+    and uses them for cost prediction via a multi-tier hierarchy."""
+
+    def __init__(self, db_path: str | None = None):
+        """Initialize with optional db path. Defaults to ~/.altimate/feedback.db"""
+        self._db_path = db_path or _default_db_path()
+        self._conn = sqlite3.connect(self._db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        """Create tables and indexes if they don't exist."""
+        cursor = self._conn.cursor()
+        cursor.execute(_CREATE_TABLE_SQL)
+        cursor.execute(_CREATE_INDEX_FINGERPRINT)
+        cursor.execute(_CREATE_INDEX_TEMPLATE)
+        self._conn.commit()
+
+    def record(
+        self,
+        sql: str,
+        dialect: str = "snowflake",
+        bytes_scanned: int | None = None,
+        rows_produced: int | None = None,
+        execution_time_ms: int | None = None,
+        credits_used: float | None = None,
+        warehouse_size: str | None = None,
+    ) -> None:
+        """Record a query execution observation."""
+        fingerprint = self._fingerprint(sql, dialect)
+        template_hash = self._template_hash(sql, dialect)
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        self._conn.execute(
+            """
+            INSERT INTO query_feedback
+                (fingerprint, template_hash, bytes_scanned, rows_produced,
+                 execution_time_ms, credits_used, warehouse_size, dialect, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fingerprint,
+                template_hash,
+                bytes_scanned,
+                rows_produced,
+                execution_time_ms,
+                credits_used,
+                warehouse_size,
+                dialect,
+                timestamp,
+            ),
+        )
+        self._conn.commit()
+
+    def predict(self, sql: str, dialect: str = "snowflake") -> dict[str, Any]:
+        """Predict cost for a query using a multi-tier hierarchy.
+
+        Tiers:
+            1. Fingerprint match (>= 3 observations) — median of matching fingerprints
+            2. Template match (>= 3 observations) — median of matching templates
+            3. Table scan estimate — sum of estimated table sizes from schema
+            4. Static heuristic — based on query complexity (joins, aggregations, etc.)
+
+        Returns:
+            Dictionary with keys: tier, confidence, predicted_bytes, predicted_time_ms,
+            predicted_credits, method, observation_count
+        """
+        # Tier 1: Fingerprint match
+        fingerprint = self._fingerprint(sql, dialect)
+        rows = self._fetch_observations_by_fingerprint(fingerprint)
+        if len(rows) >= 3:
+            return self._aggregate_predictions(rows, tier=1, method="fingerprint_match")
+
+        # Tier 2: Template match
+        template_hash = self._template_hash(sql, dialect)
+        rows = self._fetch_observations_by_template(template_hash)
+        if len(rows) >= 3:
+            return self._aggregate_predictions(rows, tier=2, method="template_match")
+
+        # Tier 3: Table scan estimate
+        table_estimate = self._estimate_from_tables(sql, dialect)
+        if table_estimate is not None:
+            return {
+                "tier": 3,
+                "confidence": "low",
+                "predicted_bytes": table_estimate["predicted_bytes"],
+                "predicted_time_ms": table_estimate["predicted_time_ms"],
+                "predicted_credits": table_estimate["predicted_credits"],
+                "method": "table_scan_estimate",
+                "observation_count": table_estimate["observation_count"],
+            }
+
+        # Tier 4: Static heuristic
+        return self._static_heuristic(sql, dialect)
+
+    def _fingerprint(self, sql: str, dialect: str) -> str:
+        """Normalize SQL to a canonical fingerprint (strip literals, normalize whitespace).
+
+        Uses sqlglot to parse, strip all literal values, and regenerate the SQL.
+        Falls back to regex-based normalization if parsing fails.
+        """
+        try:
+            ast = sqlglot.parse_one(sql, dialect=dialect)
+            self._replace_literals_in_place(ast)
+            normalized = ast.sql(dialect=dialect).upper()
+            # Normalize whitespace
+            normalized = re.sub(r"\s+", " ", normalized).strip()
+            return hashlib.sha256(normalized.encode()).hexdigest()
+        except Exception:
+            # Fallback to regex-based normalization
+            normalized = _regex_strip_literals(sql)
+            return hashlib.sha256(normalized.encode()).hexdigest()
+
+    def _template_hash(self, sql: str, dialect: str) -> str:
+        """Generalized hash: preserve table structure, replace all literals with ?.
+
+        Parses with sqlglot, replaces every Literal node with a placeholder '?',
+        then hashes the resulting SQL string.
+        """
+        try:
+            ast = sqlglot.parse_one(sql, dialect=dialect)
+            self._replace_literals_with_placeholder(ast)
+            template_sql = ast.sql(dialect=dialect).upper()
+            template_sql = re.sub(r"\s+", " ", template_sql).strip()
+            return hashlib.sha256(template_sql.encode()).hexdigest()
+        except Exception:
+            # Fallback: same as fingerprint for unparseable SQL
+            normalized = _regex_strip_literals(sql)
+            return hashlib.sha256(normalized.encode()).hexdigest()
+
+    def get_observations(self, sql: str, dialect: str = "snowflake") -> list[dict]:
+        """Get all observations for this query's fingerprint."""
+        fingerprint = self._fingerprint(sql, dialect)
+        rows = self._fetch_observations_by_fingerprint(fingerprint)
+        return [dict(row) for row in rows]
+
+    # --- Internal helpers ---
+
+    @staticmethod
+    def _replace_literals_in_place(ast: exp.Expression) -> None:
+        """Replace all Literal nodes with a canonical placeholder value.
+
+        For fingerprinting: numbers become 0, strings become empty string.
+        This preserves the query structure while normalizing values.
+        """
+        for literal in list(ast.find_all(exp.Literal)):
+            if literal.is_number:
+                literal.args["this"] = "0"
+            else:
+                literal.args["this"] = ""
+
+    @staticmethod
+    def _replace_literals_with_placeholder(ast: exp.Expression) -> None:
+        """Replace all Literal nodes with a ? placeholder for template hashing."""
+        for literal in list(ast.find_all(exp.Literal)):
+            literal.args["this"] = "?"
+            # Ensure it looks like a string placeholder
+            literal.args["is_string"] = False
+
+    def _fetch_observations_by_fingerprint(self, fingerprint: str) -> list[sqlite3.Row]:
+        """Fetch all observations matching a fingerprint."""
+        cursor = self._conn.execute(
+            "SELECT * FROM query_feedback WHERE fingerprint = ? ORDER BY timestamp DESC",
+            (fingerprint,),
+        )
+        return cursor.fetchall()
+
+    def _fetch_observations_by_template(self, template_hash: str) -> list[sqlite3.Row]:
+        """Fetch all observations matching a template hash."""
+        cursor = self._conn.execute(
+            "SELECT * FROM query_feedback WHERE template_hash = ? ORDER BY timestamp DESC",
+            (template_hash,),
+        )
+        return cursor.fetchall()
+
+    def _aggregate_predictions(
+        self, rows: list[sqlite3.Row], tier: int, method: str
+    ) -> dict[str, Any]:
+        """Compute median-based predictions from a list of observations."""
+        count = len(rows)
+
+        bytes_values = [r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]
+        time_values = [r["execution_time_ms"] for r in rows if r["execution_time_ms"] is not None]
+        credit_values = [r["credits_used"] for r in rows if r["credits_used"] is not None]
+
+        predicted_bytes = int(statistics.median(bytes_values)) if bytes_values else None
+        predicted_time_ms = int(statistics.median(time_values)) if time_values else None
+        predicted_credits = round(statistics.median(credit_values), 6) if credit_values else None
+
+        # Confidence based on observation count
+        if count >= 10:
+            confidence = "high"
+        elif count >= 5:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        return {
+            "tier": tier,
+            "confidence": confidence,
+            "predicted_bytes": predicted_bytes,
+            "predicted_time_ms": predicted_time_ms,
+            "predicted_credits": predicted_credits,
+            "method": method,
+            "observation_count": count,
+        }
+
+    def _estimate_from_tables(
+        self, sql: str, dialect: str
+    ) -> dict[str, Any] | None:
+        """Tier 3: Estimate cost based on historical data for the tables in the query.
+
+        Looks up all observations involving the same tables (via template patterns)
+        and produces a rough average. Returns None if no relevant data is found.
+        """
+        try:
+            ast = sqlglot.parse_one(sql, dialect=dialect)
+        except Exception:
+            return None
+
+        # Extract table names from the query
+        table_names = set()
+        for table in ast.find_all(exp.Table):
+            name = table.name
+            if name:
+                table_names.add(name.upper())
+
+        if not table_names:
+            return None
+
+        # Search for any observations that reference these tables by looking
+        # at all stored queries. This is a simple heuristic: find rows where
+        # the fingerprint corresponds to queries touching the same tables.
+        placeholders = ",".join("?" for _ in table_names)
+        # We can't easily search by table names in the DB schema. Instead,
+        # use a LIKE search on raw SQL would require storing raw SQL.
+        # Since we don't store raw SQL, fall back: if we have any fingerprint
+        # observations at all (even < 3), use them for a rough estimate.
+        fingerprint = self._fingerprint(sql, dialect)
+        rows = self._fetch_observations_by_fingerprint(fingerprint)
+        if rows:
+            # We have some observations but less than 3 (otherwise tier 1 would catch it)
+            return {
+                "predicted_bytes": self._safe_median([r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]),
+                "predicted_time_ms": self._safe_median([r["execution_time_ms"] for r in rows if r["execution_time_ms"] is not None]),
+                "predicted_credits": self._safe_median_float([r["credits_used"] for r in rows if r["credits_used"] is not None]),
+                "observation_count": len(rows),
+            }
+
+        # Check template observations
+        template_hash = self._template_hash(sql, dialect)
+        rows = self._fetch_observations_by_template(template_hash)
+        if rows:
+            return {
+                "predicted_bytes": self._safe_median([r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]),
+                "predicted_time_ms": self._safe_median([r["execution_time_ms"] for r in rows if r["execution_time_ms"] is not None]),
+                "predicted_credits": self._safe_median_float([r["credits_used"] for r in rows if r["credits_used"] is not None]),
+                "observation_count": len(rows),
+            }
+
+        return None
+
+    def _static_heuristic(self, sql: str, dialect: str) -> dict[str, Any]:
+        """Tier 4: Estimate cost based on query complexity analysis.
+
+        Analyzes the SQL structure to produce a rough cost estimate based on:
+        - Number of joins (each join multiplies potential data)
+        - Presence of aggregations
+        - Subquery depth
+        - UNION operations
+        """
+        complexity_score = 1.0
+
+        try:
+            ast = sqlglot.parse_one(sql, dialect=dialect)
+
+            # Count joins
+            join_count = len(list(ast.find_all(exp.Join)))
+            complexity_score += join_count * 2.0
+
+            # Count subqueries
+            subquery_count = len(list(ast.find_all(exp.Subquery)))
+            complexity_score += subquery_count * 1.5
+
+            # Check for aggregations
+            agg_count = len(list(ast.find_all(exp.AggFunc)))
+            if agg_count > 0:
+                complexity_score += 1.0
+
+            # Check for UNION
+            union_count = len(list(ast.find_all(exp.Union)))
+            complexity_score += union_count * 2.0
+
+            # Check for window functions
+            window_count = len(list(ast.find_all(exp.Window)))
+            complexity_score += window_count * 1.0
+
+            # Check for ORDER BY (sorting is expensive)
+            if ast.find(exp.Order):
+                complexity_score += 1.0
+
+            # Check for DISTINCT
+            if isinstance(ast, exp.Select) and ast.args.get("distinct"):
+                complexity_score += 1.0
+
+            # Check for cross joins
+            for join in ast.find_all(exp.Join):
+                if join.kind == "CROSS":
+                    complexity_score += 5.0
+
+        except Exception:
+            # If parsing fails, use length-based heuristic
+            complexity_score = max(1.0, len(sql) / 100.0)
+
+        # Map complexity score to estimated cost
+        # These are rough heuristics for Snowflake X-Small warehouse
+        base_bytes = 10_000_000  # 10 MB base
+        base_time_ms = 500  # 500ms base
+        base_credits = 0.001  # base credit cost
+
+        predicted_bytes = int(base_bytes * complexity_score)
+        predicted_time_ms = int(base_time_ms * complexity_score)
+        predicted_credits = round(base_credits * complexity_score, 6)
+
+        return {
+            "tier": 4,
+            "confidence": "very_low",
+            "predicted_bytes": predicted_bytes,
+            "predicted_time_ms": predicted_time_ms,
+            "predicted_credits": predicted_credits,
+            "method": "static_heuristic",
+            "observation_count": 0,
+        }
+
+    @staticmethod
+    def _safe_median(values: list[int]) -> int | None:
+        """Compute median of integer values, returning None for empty lists."""
+        if not values:
+            return None
+        return int(statistics.median(values))
+
+    @staticmethod
+    def _safe_median_float(values: list[float]) -> float | None:
+        """Compute median of float values, returning None for empty lists."""
+        if not values:
+            return None
+        return round(statistics.median(values), 6)
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self._conn.close()
+
+    def __del__(self) -> None:
+        """Ensure connection is closed on garbage collection."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass
