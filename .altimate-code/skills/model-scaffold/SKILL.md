@@ -5,6 +5,10 @@ description: Scaffold a new dbt model following staging/intermediate/mart patter
 
 # Scaffold dbt Model
 
+## Requirements
+**Agent:** builder or migrator (requires file write access)
+**Tools used:** glob, read, dbt_manifest, schema_inspect, schema_search, write
+
 Generate a new dbt model file following established data modeling patterns. Supports staging, intermediate, and mart layer scaffolding.
 
 ## Workflow

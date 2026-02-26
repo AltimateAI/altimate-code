@@ -104,27 +104,29 @@ def find_unused_resources(
 
     try:
         connector.connect()
-
-        # Try ACCESS_HISTORY first, fall back to simple query
         try:
-            rows = connector.execute(_UNUSED_TABLES_SQL.format(days=days, limit=limit))
-            unused_tables = [dict(r) if not isinstance(r, dict) else r for r in rows]
-        except Exception:
+            connector.set_statement_timeout(60_000)
+
+            # Try ACCESS_HISTORY first, fall back to simple query
             try:
-                rows = connector.execute(_UNUSED_TABLES_SIMPLE_SQL.format(days=days, limit=limit))
+                rows = connector.execute(_UNUSED_TABLES_SQL.format(days=days, limit=limit))
                 unused_tables = [dict(r) if not isinstance(r, dict) else r for r in rows]
+            except Exception:
+                try:
+                    rows = connector.execute(_UNUSED_TABLES_SIMPLE_SQL.format(days=days, limit=limit))
+                    unused_tables = [dict(r) if not isinstance(r, dict) else r for r in rows]
+                except Exception as e:
+                    errors.append(f"Could not query unused tables: {e}")
+
+            # Find idle warehouses
+            try:
+                rows = connector.execute(_IDLE_WAREHOUSES_SQL.format(days=days))
+                idle_warehouses = [dict(r) if not isinstance(r, dict) else r for r in rows]
+                idle_warehouses = [w for w in idle_warehouses if w.get("is_idle")]
             except Exception as e:
-                errors.append(f"Could not query unused tables: {e}")
-
-        # Find idle warehouses
-        try:
-            rows = connector.execute(_IDLE_WAREHOUSES_SQL.format(days=days))
-            idle_warehouses = [dict(r) if not isinstance(r, dict) else r for r in rows]
-            idle_warehouses = [w for w in idle_warehouses if w.get("is_idle")]
-        except Exception as e:
-            errors.append(f"Could not query idle warehouses: {e}")
-
-        connector.close()
+                errors.append(f"Could not query idle warehouses: {e}")
+        finally:
+            connector.close()
 
         # Calculate potential savings
         total_stale_bytes = sum(t.get("size_bytes") or 0 for t in unused_tables)

@@ -132,6 +132,18 @@ class SnowflakeConnector(Connector):
             for row in rows
         ]
 
+    def set_statement_timeout(self, timeout_ms: int) -> None:
+        """Set Snowflake session statement timeout.
+
+        Args:
+            timeout_ms: Maximum query execution time in milliseconds.
+        """
+        timeout_sec = max(1, timeout_ms // 1000)
+        conn = self._ensure_conn()
+        cur = conn.cursor()
+        cur.execute(f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {timeout_sec}")
+        cur.close()
+
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()

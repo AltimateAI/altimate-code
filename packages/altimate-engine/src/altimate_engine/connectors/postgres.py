@@ -91,6 +91,18 @@ class PostgresConnector(Connector):
             for row in rows
         ]
 
+    def set_statement_timeout(self, timeout_ms: int) -> None:
+        """Set PostgreSQL session statement timeout.
+
+        Args:
+            timeout_ms: Maximum query execution time in milliseconds.
+        """
+        conn = self._ensure_conn()
+        cur = conn.cursor()
+        cur.execute(f"SET statement_timeout = {int(timeout_ms)}")
+        conn.commit()
+        cur.close()
+
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()

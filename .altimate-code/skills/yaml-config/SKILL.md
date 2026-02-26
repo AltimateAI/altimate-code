@@ -5,6 +5,12 @@ description: Generate dbt YAML configuration files — sources.yml, schema.yml, 
 
 # Generate dbt YAML Config
 
+## Requirements
+**Agent:** builder or migrator (requires file write access)
+**Tools used:** glob, read, schema_inspect, schema_search, dbt_manifest, write, edit
+
+> **When to use this vs other skills:** Use /yaml-config to generate sources.yml or schema.yml from warehouse metadata. Use /generate-tests to add test definitions. Use /dbt-docs to enrich existing YAML with descriptions.
+
 Generate or update dbt YAML configuration files by inspecting warehouse schemas and existing models.
 
 ## Workflow

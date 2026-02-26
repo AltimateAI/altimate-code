@@ -106,8 +106,11 @@ def get_query_history(
 
     try:
         connector.connect()
-        rows = connector.execute(sql)
-        connector.close()
+        try:
+            connector.set_statement_timeout(60_000)
+            rows = connector.execute(sql)
+        finally:
+            connector.close()
 
         queries = []
         total_bytes = 0

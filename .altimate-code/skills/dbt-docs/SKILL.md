@@ -5,6 +5,12 @@ description: Generate or improve dbt model documentation — column descriptions
 
 # Generate dbt Documentation
 
+## Requirements
+**Agent:** builder or migrator (requires file write access)
+**Tools used:** glob, read, schema_inspect, dbt_manifest, edit, write
+
+> **When to use this vs other skills:** Use /dbt-docs to add or improve descriptions in existing schema.yml. Use /yaml-config to create schema.yml from scratch. Use /generate-tests to add test scaffolding.
+
 Generate comprehensive documentation for dbt models by analyzing SQL logic, schema metadata, and existing docs.
 
 ## Workflow

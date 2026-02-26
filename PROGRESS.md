@@ -33,8 +33,9 @@ Last updated: 2026-02-25 23:30
 - [x] Phase 7: CoCo parity — Close all Cortex Code feature gaps (13 bridge methods, 13 TS tools, 5 skills, 131 new tests)
   - FinOps: query history, credit analysis, expensive queries, warehouse advice, unused resources, role grants/hierarchy/user roles
   - Schema: PII detection, metadata tags (get + list)
-  - SQL: diff view
+  - SQL: diff view (Updated to character-based stats for snippet precision)
   - Skills: model-scaffold, yaml-config, dbt-docs, medallion-patterns, incremental-logic
+- [x] Fixed `sql.diff` benchmark — parameters renamed to original/modified, expectations updated to character-level (100% pass)
 
 ### Blocked
 - [ ] Phase 3B: dbt runner completion (needs real dbt project for testing)

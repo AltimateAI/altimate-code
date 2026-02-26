@@ -29,6 +29,14 @@ class Connector(ABC):
     def close(self) -> None:
         pass
 
+    def set_statement_timeout(self, timeout_ms: int) -> None:
+        """Set a per-session statement timeout. Override in subclasses that support it.
+
+        Args:
+            timeout_ms: Maximum query execution time in milliseconds.
+        """
+        pass
+
     def __enter__(self):
         self.connect()
         return self

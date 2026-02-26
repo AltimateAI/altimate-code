@@ -319,6 +319,32 @@ class FeedbackStore:
 
         return None
 
+    # Dialect-specific base cost profiles for the static heuristic.
+    # bytes_scanned and credits are None for databases that don't expose them.
+    _HEURISTIC_PROFILES: dict[str, dict[str, int | float | None]] = {
+        "snowflake": {
+            "base_bytes": 10_000_000,  # 10 MB — Snowflake X-Small warehouse
+            "base_time_ms": 500,
+            "base_credits": 0.001,
+        },
+        "postgres": {
+            "base_bytes": None,  # Postgres doesn't expose bytes scanned
+            "base_time_ms": 100,
+            "base_credits": None,
+        },
+        "duckdb": {
+            "base_bytes": None,  # DuckDB is embedded, no bytes-scanned metric
+            "base_time_ms": 10,
+            "base_credits": None,
+        },
+    }
+
+    _DEFAULT_HEURISTIC_PROFILE: dict[str, int | float | None] = {
+        "base_bytes": 10_000_000,
+        "base_time_ms": 500,
+        "base_credits": 0.001,
+    }
+
     def _static_heuristic(self, sql: str, dialect: str) -> dict[str, Any]:
         """Tier 4: Estimate cost based on query complexity analysis.
 
@@ -327,6 +353,9 @@ class FeedbackStore:
         - Presence of aggregations
         - Subquery depth
         - UNION operations
+
+        Base costs are dialect-dependent: Snowflake uses bytes-scanned and
+        credit metrics, while Postgres and DuckDB use execution-time only.
         """
         complexity_score = 1.0
 
@@ -371,15 +400,17 @@ class FeedbackStore:
             # If parsing fails, use length-based heuristic
             complexity_score = max(1.0, len(sql) / 100.0)
 
-        # Map complexity score to estimated cost
-        # These are rough heuristics for Snowflake X-Small warehouse
-        base_bytes = 10_000_000  # 10 MB base
-        base_time_ms = 500  # 500ms base
-        base_credits = 0.001  # base credit cost
+        # Select dialect-specific base costs
+        d = (dialect or "").lower()
+        profile = self._HEURISTIC_PROFILES.get(d, self._DEFAULT_HEURISTIC_PROFILE)
 
-        predicted_bytes = int(base_bytes * complexity_score)
-        predicted_time_ms = int(base_time_ms * complexity_score)
-        predicted_credits = round(base_credits * complexity_score, 6)
+        base_bytes = profile["base_bytes"]
+        base_time_ms = profile["base_time_ms"]
+        base_credits = profile["base_credits"]
+
+        predicted_bytes = int(base_bytes * complexity_score) if base_bytes is not None else None
+        predicted_time_ms = int(base_time_ms * complexity_score) if base_time_ms is not None else None
+        predicted_credits = round(base_credits * complexity_score, 6) if base_credits is not None else None
 
         return {
             "tier": 4,

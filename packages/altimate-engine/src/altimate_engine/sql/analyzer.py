@@ -8,6 +8,206 @@ import sqlglot
 from sqlglot import exp
 
 
+# ---------------------------------------------------------------------------
+# Dialect-aware recommendation text
+# ---------------------------------------------------------------------------
+
+_RECOMMENDATIONS: dict[str, dict[str, str]] = {
+    "select_star": {
+        "snowflake": (
+            "List columns explicitly — Snowflake's columnar storage only reads "
+            "needed columns, reducing bytes scanned and cost."
+        ),
+        "postgres": (
+            "List columns explicitly to avoid pulling unnecessary data over the "
+            "network and to let the planner use index-only scans."
+        ),
+        "duckdb": (
+            "List columns explicitly for clarity and to leverage DuckDB's "
+            "columnar scan optimization."
+        ),
+        "_default": (
+            "Consider selecting only the columns you need. In columnar databases, "
+            "selecting specific columns significantly improves performance."
+        ),
+    },
+    "function_in_join": {
+        "snowflake": (
+            "Functions on columns in JOIN conditions can prevent optimal join "
+            "pruning in Snowflake. Review if this function is necessary for "
+            "the join logic."
+        ),
+        "postgres": (
+            "Functions on columns in JOIN conditions prevent PostgreSQL from "
+            "using indexes. Consider creating an expression index, or apply "
+            "the function to the comparison value instead."
+        ),
+        "duckdb": (
+            "Functions on columns in JOIN conditions may prevent join "
+            "optimization. Review if this function is necessary."
+        ),
+        "_default": (
+            "Functions on columns in JOIN conditions may prevent index or "
+            "partition pruning. Review if this function is necessary for "
+            "the join logic."
+        ),
+    },
+    "function_in_filter": {
+        "snowflake": (
+            "Functions on columns in WHERE clauses can prevent partition "
+            "pruning in Snowflake. If possible, restructure the filter to "
+            "apply the function to the comparison value instead of the column."
+        ),
+        "postgres": (
+            "Functions on columns in WHERE clauses prevent PostgreSQL from "
+            "using indexes. Create an expression index or restructure the "
+            "filter to apply the function to the comparison value."
+        ),
+        "duckdb": (
+            "Functions on columns in WHERE clauses may prevent filter "
+            "push-down. If possible, restructure the filter to apply the "
+            "function to the comparison value."
+        ),
+        "_default": (
+            "Functions on columns in WHERE clauses may prevent index or "
+            "partition pruning. If possible, restructure the filter to "
+            "apply the function to the comparison value instead of the column."
+        ),
+    },
+    "missing_limit": {
+        "snowflake": (
+            "Add a LIMIT clause to prevent scanning entire tables — "
+            "Snowflake charges per byte scanned."
+        ),
+        "postgres": (
+            "Add a LIMIT clause to prevent returning unbounded result sets "
+            "that consume memory and network bandwidth."
+        ),
+        "duckdb": (
+            "Add a LIMIT clause to cap result size, especially for ad-hoc queries."
+        ),
+        "_default": (
+            "Consider adding a LIMIT clause to prevent unexpectedly large "
+            "result sets, especially for ad-hoc queries."
+        ),
+    },
+    "cartesian_product": {
+        "snowflake": (
+            "Verify this is intentional. CROSS JOINs multiply row counts "
+            "and in Snowflake the resulting bytes scanned can be enormous."
+        ),
+        "postgres": (
+            "Verify this is intentional. CROSS JOINs multiply row counts "
+            "and can exhaust PostgreSQL's work_mem."
+        ),
+        "duckdb": (
+            "Verify this is intentional. CROSS JOINs multiply row counts "
+            "and can consume large amounts of memory."
+        ),
+        "_default": (
+            "Verify this is intentional. CROSS JOINs multiply row counts "
+            "and can cause performance issues with large tables."
+        ),
+    },
+    "implicit_cartesian": {
+        "_default": (
+            "Add explicit JOIN conditions to relate the tables, "
+            "or add a WHERE clause with join predicates."
+        ),
+    },
+    "implicit_cartesian_multi": {
+        "_default": "Add explicit JOIN conditions to relate the tables.",
+    },
+    "order_by_without_limit": {
+        "snowflake": (
+            "Sorting large result sets in Snowflake is expensive and consumes "
+            "warehouse credits. Add a LIMIT clause if you only need top/bottom "
+            "N rows, or remove ORDER BY if sorting is not required."
+        ),
+        "postgres": (
+            "Sorting large result sets in PostgreSQL may spill to disk. "
+            "Add a LIMIT clause if you only need top/bottom N rows, or "
+            "remove ORDER BY if sorting is not required."
+        ),
+        "duckdb": (
+            "Add a LIMIT clause if you only need top/bottom N rows, or "
+            "remove ORDER BY if sorting is not required."
+        ),
+        "_default": (
+            "Sorting the entire result set is expensive. Add a LIMIT clause "
+            "if you only need top/bottom N rows, or remove ORDER BY if "
+            "sorting is not required."
+        ),
+    },
+    "like_leading_wildcard": {
+        "snowflake": (
+            "Leading wildcards (% or _) prevent the use of clustering keys "
+            "for filtering. Consider Snowflake's SEARCH optimization or "
+            "restructure the query."
+        ),
+        "postgres": (
+            "Leading wildcards (% or _) prevent B-tree index usage. Consider "
+            "a trigram (pg_trgm) index or full-text search for this pattern."
+        ),
+        "duckdb": (
+            "Leading wildcards (% or _) force a full table scan. Consider "
+            "restructuring the query if this is a performance bottleneck."
+        ),
+        "_default": (
+            "Leading wildcards (% or _) prevent index or clustering key "
+            "usage for filtering. Consider restructuring the query or "
+            "using full-text search features."
+        ),
+    },
+    "large_in_list": {
+        "snowflake": (
+            "Large IN lists cause query compilation overhead in Snowflake. "
+            "Consider using a CTE with VALUES clause or a temporary table."
+        ),
+        "postgres": (
+            "Large IN lists can slow down PostgreSQL's query planner. "
+            "Consider using a CTE with VALUES clause, or a temporary table "
+            "with an = ANY(array) pattern."
+        ),
+        "duckdb": (
+            "Large IN lists may slow query compilation. Consider using a "
+            "CTE with VALUES clause instead."
+        ),
+        "_default": (
+            "Large IN lists can cause query compilation overhead. Consider "
+            "using a CTE with VALUES clause or a temporary table instead."
+        ),
+    },
+    "or_in_join": {
+        "snowflake": (
+            "OR conditions in JOIN ON clauses prevent Snowflake's join "
+            "optimization and increase bytes scanned. Consider splitting "
+            "into separate JOINs with UNION ALL."
+        ),
+        "postgres": (
+            "OR conditions in JOIN ON clauses prevent the PostgreSQL planner "
+            "from using hash or merge joins. Consider splitting into separate "
+            "JOINs with UNION ALL."
+        ),
+        "duckdb": (
+            "OR conditions in JOIN ON clauses may prevent join optimization. "
+            "Consider splitting into separate JOINs with UNION ALL."
+        ),
+        "_default": (
+            "Consider splitting into separate JOINs with UNION ALL, or "
+            "restructuring the join condition for better optimization."
+        ),
+    },
+}
+
+
+def _recommend(concept: str, dialect: str | None) -> str:
+    """Return dialect-appropriate recommendation text."""
+    d = (dialect or "").lower()
+    rec = _RECOMMENDATIONS.get(concept, {})
+    return rec.get(d, rec.get("_default", concept))
+
+
 class StaticQueryAnalyzer:
     """Analyzes SQL queries statically using sqlglot to identify potential issues."""
 
@@ -102,8 +302,7 @@ class StaticQueryAnalyzer:
                         "type": "SELECT_STAR",
                         "severity": "warning",
                         "message": "Query uses SELECT * which can lead to unnecessary data transfer",
-                        "recommendation": "Consider selecting only the columns you need. "
-                        "In columnar databases, selecting specific columns significantly improves performance.",
+                        "recommendation": _recommend("select_star", self.dialect),
                         "location": self._get_location(star),
                         "confidence": "high",
                     }
@@ -131,8 +330,7 @@ class StaticQueryAnalyzer:
                                     "type": "FUNCTION_IN_JOIN",
                                     "severity": "warning",
                                     "message": f"Function '{func.sql()}' used in JOIN condition may prevent index usage",
-                                    "recommendation": "In Snowflake, functions on columns in JOIN conditions can prevent optimal join pruning. "
-                                    "Review if this function is necessary for the join logic.",
+                                    "recommendation": _recommend("function_in_join", self.dialect),
                                     "location": self._get_location(func),
                                     "confidence": "medium",
                                 }
@@ -157,9 +355,8 @@ class StaticQueryAnalyzer:
                             {
                                 "type": "FUNCTION_IN_FILTER",
                                 "severity": "warning",
-                                "message": f"Function '{func.sql()}' on column in WHERE clause may prevent partition pruning",
-                                "recommendation": "In Snowflake, functions on columns in WHERE clauses can prevent partition pruning. "
-                                "If possible, restructure the filter to apply the function to the comparison value instead of the column.",
+                                "message": f"Function '{func.sql()}' on column in WHERE clause may prevent optimal filtering",
+                                "recommendation": _recommend("function_in_filter", self.dialect),
                                 "location": self._get_location(func),
                                 "confidence": "medium",
                             }
@@ -184,6 +381,7 @@ class StaticQueryAnalyzer:
             return issues
 
         has_limit = self.ast.args.get("limit") is not None
+        has_offset = self.ast.args.get("offset") is not None
         has_aggregation = any(
             isinstance(expr, exp.AggFunc)
             for expr in self.ast.find_all(exp.Expression)
@@ -196,8 +394,19 @@ class StaticQueryAnalyzer:
                     "type": "MISSING_LIMIT",
                     "severity": "info",
                     "message": "SELECT query without LIMIT clause may return large result sets",
-                    "recommendation": "Consider adding a LIMIT clause to prevent "
-                    "unexpectedly large result sets, especially for ad-hoc queries.",
+                    "recommendation": _recommend("missing_limit", self.dialect),
+                    "location": None,
+                    "confidence": "high",
+                }
+            )
+
+        if has_offset and not has_limit:
+            issues.append(
+                {
+                    "type": "OFFSET_WITHOUT_LIMIT",
+                    "severity": "warning",
+                    "message": "OFFSET without LIMIT will skip rows but still return all remaining rows",
+                    "recommendation": "Add a LIMIT clause when using OFFSET to bound the result set",
                     "location": None,
                     "confidence": "high",
                 }
@@ -216,8 +425,7 @@ class StaticQueryAnalyzer:
                         "type": "CARTESIAN_PRODUCT",
                         "severity": "error",
                         "message": "CROSS JOIN detected which creates a Cartesian product",
-                        "recommendation": "Verify this is intentional. CROSS JOINs multiply "
-                        "row counts and can cause performance issues with large tables.",
+                        "recommendation": _recommend("cartesian_product", self.dialect),
                         "location": self._get_location(join),
                         "confidence": "high",
                     }
@@ -231,8 +439,7 @@ class StaticQueryAnalyzer:
                             "type": "IMPLICIT_CARTESIAN",
                             "severity": "error",
                             "message": "Implicit comma join without WHERE condition creates a Cartesian product",
-                            "recommendation": "Add explicit JOIN conditions to relate the tables, "
-                            "or add a WHERE clause with join predicates.",
+                            "recommendation": _recommend("implicit_cartesian", self.dialect),
                             "location": self._get_location(join),
                             "confidence": "high",
                         }
@@ -252,7 +459,7 @@ class StaticQueryAnalyzer:
                                 "type": "IMPLICIT_CARTESIAN",
                                 "severity": "error",
                                 "message": "Multiple tables without JOIN or WHERE condition may create Cartesian product",
-                                "recommendation": "Add explicit JOIN conditions to relate the tables.",
+                                "recommendation": _recommend("implicit_cartesian_multi", self.dialect),
                                 "location": None,
                                 "confidence": "high",
                             }
@@ -278,9 +485,7 @@ class StaticQueryAnalyzer:
                         "type": "ORDER_BY_WITHOUT_LIMIT",
                         "severity": "warning",
                         "message": "ORDER BY without LIMIT sorts the entire result set",
-                        "recommendation": "In Snowflake, sorting large result sets is expensive. "
-                        "Add a LIMIT clause if you only need top/bottom N rows, "
-                        "or remove ORDER BY if sorting is not required.",
+                        "recommendation": _recommend("order_by_without_limit", self.dialect),
                         "location": None,
                         "confidence": "high",
                     }
@@ -362,9 +567,7 @@ class StaticQueryAnalyzer:
                             "type": "LIKE_LEADING_WILDCARD",
                             "severity": "info",
                             "message": f"LIKE pattern '{pattern_str}' starts with wildcard",
-                            "recommendation": "Leading wildcards (% or _) prevent the use of clustering keys for filtering. "
-                            "If possible, restructure the query or consider using SEARCH optimization features "
-                            "for full-text search scenarios.",
+                            "recommendation": _recommend("like_leading_wildcard", self.dialect),
                             "location": self._get_location(like),
                             "confidence": "high",
                         }
@@ -385,8 +588,7 @@ class StaticQueryAnalyzer:
                         "type": "LARGE_IN_LIST",
                         "severity": "warning",
                         "message": f"IN clause contains {len(expressions)} values",
-                        "recommendation": f"Large IN lists (>{LARGE_IN_THRESHOLD} values) can cause query compilation overhead. "
-                        "Consider using a CTE with VALUES clause or a temporary table instead.",
+                        "recommendation": _recommend("large_in_list", self.dialect),
                         "location": None,
                         "confidence": "high",
                     }
@@ -498,7 +700,7 @@ class StaticQueryAnalyzer:
                         "type": "OR_IN_JOIN",
                         "severity": "warning",
                         "message": "OR condition in JOIN ON clause may prevent join optimization",
-                        "recommendation": "Consider splitting into separate JOINs with UNION ALL, or restructuring the join condition for better optimization.",
+                        "recommendation": _recommend("or_in_join", self.dialect),
                         "location": self._get_location(or_node),
                         "confidence": "medium",
                     })

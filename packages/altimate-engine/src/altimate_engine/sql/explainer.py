@@ -44,8 +44,11 @@ def explain_sql(params: SqlExplainParams) -> SqlExplainResult:
 
     try:
         connector.connect()
-        rows = connector.execute(explain_sql_str)
-        connector.close()
+        try:
+            connector.set_statement_timeout(60_000)
+            rows = connector.execute(explain_sql_str)
+        finally:
+            connector.close()
 
         if not rows:
             return SqlExplainResult(

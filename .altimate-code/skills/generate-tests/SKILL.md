@@ -5,6 +5,12 @@ description: Generate dbt tests for a model by inspecting its schema and SQL, pr
 
 # Generate dbt Tests
 
+## Requirements
+**Agent:** builder or migrator (requires file write access)
+**Tools used:** glob, read, schema_inspect, write, edit
+
+> **When to use this vs other skills:** Use /generate-tests for automated test scaffolding based on column patterns. Use /yaml-config for generating full schema.yml from scratch. Use /dbt-docs for adding descriptions to existing YAML.
+
 Generate comprehensive dbt test definitions for a model. This skill inspects the model's schema, reads its SQL, and produces appropriate tests.
 
 ## Workflow

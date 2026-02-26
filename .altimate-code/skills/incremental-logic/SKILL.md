@@ -5,6 +5,10 @@ description: Add or fix incremental materialization logic in dbt models — is_i
 
 # Incremental Logic Assistant
 
+## Requirements
+**Agent:** builder or migrator (requires file write access)
+**Tools used:** glob, read, sql_analyze, lineage_check, schema_inspect, edit, write
+
 Help convert batch models to incremental or fix existing incremental logic. Covers `is_incremental()` patterns, merge strategies, and common pitfalls.
 
 ## Workflow

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from altimate_engine.schema.cache import SchemaCache
 
-# PII patterns: (regex for column name, PII category, confidence)
+# PII patterns: (regex for column name, PII category, base confidence)
 _PII_PATTERNS = [
     # Direct identifiers
     (r"\b(ssn|social_security|sin_number)\b", "SSN", "high"),
@@ -26,7 +26,7 @@ _PII_PATTERNS = [
     # Names
     (r"\b(first_name|firstname|given_name|fname)\b", "PERSON_NAME", "high"),
     (r"\b(last_name|lastname|surname|family_name|lname)\b", "PERSON_NAME", "high"),
-    (r"\b(full_name|name|display_name|legal_name)\b", "PERSON_NAME", "medium"),
+    (r"\b(full_name|display_name|legal_name)\b", "PERSON_NAME", "medium"),
     (r"\b(middle_name|maiden_name)\b", "PERSON_NAME", "high"),
 
     # Financial
@@ -56,13 +56,45 @@ _PII_PATTERNS = [
     (r"\b(lat|latitude|lon|longitude|geo|coordinates)\b", "GEOLOCATION", "medium"),
 ]
 
-# Data type patterns that increase PII likelihood
-_TYPE_INDICATORS = {
-    "VARCHAR": 0.1,
-    "STRING": 0.1,
-    "TEXT": 0.1,
-    "CHAR": 0.1,
-}
+# Suffixes that indicate the column is metadata ABOUT the PII field, not PII itself.
+# e.g. "email_sent_count", "phone_validated_at", "address_type"
+_FALSE_POSITIVE_SUFFIXES = re.compile(
+    r"_(count|cnt|flag|status|type|format|length|len|hash|hashed|"
+    r"encrypted|masked|valid|validated|validation|verified|verification|"
+    r"enabled|disabled|sent|received|updated|created|deleted|"
+    r"at|date|timestamp|ts|time|source|method|provider|"
+    r"preference|setting|config|mode|template|label|category|"
+    r"index|idx|seq|order|rank|score|rating|level)$",
+    re.IGNORECASE,
+)
+
+# Prefixes that indicate metadata rather than PII
+_FALSE_POSITIVE_PREFIXES = re.compile(
+    r"^(is_|has_|num_|total_|max_|min_|avg_|count_|n_|default_)",
+    re.IGNORECASE,
+)
+
+# Data types that are NOT plausible for text-based PII (names, emails, etc.)
+_NON_TEXT_TYPES = frozenset({
+    "BOOLEAN", "BOOL",
+    "INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT",
+    "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "NUMBER", "REAL",
+    "DATE", "DATETIME", "TIMESTAMP", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+    "TIME",
+    "BINARY", "VARBINARY", "BYTEA",
+    "ARRAY", "OBJECT", "VARIANT", "MAP",
+})
+
+# PII categories that inherently store text values — these should have text-compatible types
+_TEXT_PII_CATEGORIES = frozenset({
+    "SSN", "PASSPORT", "DRIVERS_LICENSE", "NATIONAL_ID", "TAX_ID",
+    "EMAIL", "PHONE", "ADDRESS", "POSTAL_CODE",
+    "PERSON_NAME", "CREDIT_CARD", "BANK_ACCOUNT",
+    "CREDENTIAL", "IP_ADDRESS", "MAC_ADDRESS",
+})
+
+# Confidence downgrade mapping: if data type doesn't match, reduce confidence
+_CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
 
 
 def detect_pii(
@@ -71,7 +103,11 @@ def detect_pii(
     table: str | None = None,
     cache: SchemaCache | None = None,
 ) -> dict:
-    """Scan columns for potential PII based on name patterns.
+    """Scan columns for potential PII based on name patterns and data type validation.
+
+    Uses a two-pass approach:
+    1. Match column names against 30+ PII regex patterns
+    2. Filter false positives using suffix/prefix heuristics and data type checks
 
     Args:
         warehouse: Limit scan to a specific warehouse
@@ -144,9 +180,55 @@ def detect_pii(
 
 
 def _check_column_pii(col_name: str, data_type: str | None) -> list[dict]:
-    """Check a column name against PII patterns."""
+    """Check a column name against PII patterns with false-positive filtering.
+
+    Three-step process:
+    1. Match against PII regex patterns
+    2. Filter out false positives (metadata suffixes/prefixes)
+    3. Adjust confidence based on data type compatibility
+    """
+    # Step 1: Check for false-positive indicators before pattern matching.
+    # If the column looks like metadata about a PII field, skip it entirely
+    # for high-confidence patterns, but still flag with reduced confidence.
+    is_metadata = bool(
+        _FALSE_POSITIVE_SUFFIXES.search(col_name)
+        or _FALSE_POSITIVE_PREFIXES.match(col_name)
+    )
+
+    # Determine base data type (strip precision/length: "VARCHAR(100)" → "VARCHAR")
+    base_type = _normalize_type(data_type) if data_type else None
+
     matches = []
-    for pattern, category, confidence in _PII_PATTERNS:
-        if re.search(pattern, col_name, re.IGNORECASE):
-            matches.append({"category": category, "confidence": confidence})
+    for pattern, category, base_confidence in _PII_PATTERNS:
+        if not re.search(pattern, col_name, re.IGNORECASE):
+            continue
+
+        confidence = base_confidence
+
+        # Step 2: Downgrade metadata-looking columns
+        if is_metadata:
+            confidence = _CONFIDENCE_DOWNGRADE.get(confidence, "low")
+
+        # Step 3: Check data type compatibility for text-based PII categories
+        if base_type and category in _TEXT_PII_CATEGORIES:
+            if base_type in _NON_TEXT_TYPES:
+                # A column named "email" with type INTEGER is unlikely to be PII
+                confidence = _CONFIDENCE_DOWNGRADE.get(confidence, "low")
+
+        # Only include if confidence isn't completely degraded for metadata columns
+        # (skip "low" confidence metadata hits to reduce noise)
+        if is_metadata and confidence == "low":
+            continue
+
+        matches.append({"category": category, "confidence": confidence})
     return matches
+
+
+def _normalize_type(data_type: str) -> str:
+    """Normalize a data type string: strip precision, parentheses, uppercase."""
+    t = data_type.upper().strip()
+    # Remove parenthesized precision: VARCHAR(100) → VARCHAR
+    paren = t.find("(")
+    if paren != -1:
+        t = t[:paren].strip()
+    return t

@@ -52,6 +52,9 @@ def parse_manifest(params: DbtManifestParams) -> DbtManifestResult:
     except (json.JSONDecodeError, OSError):
         return DbtManifestResult()
 
+    if not isinstance(manifest, dict):
+        return DbtManifestResult()
+
     nodes = manifest.get("nodes", {})
     sources_dict = manifest.get("sources", {})
 

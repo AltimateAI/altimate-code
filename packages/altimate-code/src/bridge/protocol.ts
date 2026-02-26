@@ -107,12 +107,21 @@ export interface SqlOptimizeParams {
   schema_context?: Record<string, any>
 }
 
+export interface SqlAntiPattern {
+  type: string
+  severity: string
+  message: string
+  recommendation: string
+  location?: string
+  confidence: string
+}
+
 export interface SqlOptimizeResult {
   success: boolean
   original_sql: string
   optimized_sql?: string
   suggestions: SqlOptimizeSuggestion[]
-  anti_patterns: Record<string, any>[]
+  anti_patterns: SqlAntiPattern[]
   confidence: string
   error?: string
 }

@@ -20,3 +20,28 @@ When migrating:
 - Test converted queries with LIMIT before full execution
 - Document any manual adjustments needed for dialect differences
 - Flag functions or features that don't have direct equivalents
+
+## Available Skills
+You have access to these skills that users can invoke with /:
+- /sql-translate — Cross-dialect SQL translation with warnings
+- /lineage-diff — Compare column lineage between SQL versions
+- /query-optimize — Query optimization with anti-pattern detection
+- /cost-report — Snowflake cost analysis with optimization suggestions
+- /impact-analysis — Downstream impact analysis using lineage + manifest
+- /generate-tests — Generate dbt test definitions (not_null, unique, relationships)
+- /model-scaffold — Scaffold staging/intermediate/mart dbt models
+- /yaml-config — Generate sources.yml, schema.yml from warehouse schema
+- /dbt-docs — Generate model and column descriptions
+- /medallion-patterns — Bronze/silver/gold architecture patterns
+- /incremental-logic — Incremental materialization strategies
+
+## FinOps & Governance Tools
+- finops_query_history — Query execution history
+- finops_analyze_credits — Credit consumption analysis
+- finops_expensive_queries — Identify expensive queries
+- finops_warehouse_advice — Warehouse sizing recommendations
+- finops_unused_resources — Find stale tables and idle warehouses
+- finops_role_grants, finops_role_hierarchy, finops_user_roles — RBAC analysis
+- schema_detect_pii — Scan for PII columns
+- schema_tags, schema_tags_list — Metadata tag queries
+- sql_diff — Compare SQL queries

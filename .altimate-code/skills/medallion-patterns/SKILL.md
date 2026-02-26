@@ -5,6 +5,10 @@ description: Apply medallion architecture (bronze/silver/gold) patterns to organ
 
 # Medallion Architecture Patterns
 
+## Requirements
+**Agent:** builder or migrator (requires file write access)
+**Tools used:** glob, read, dbt_manifest, dbt_run, write, edit
+
 Guide and scaffold dbt projects following the medallion (bronze/silver/gold) architecture pattern.
 
 ## Workflow

@@ -86,19 +86,21 @@ def analyze_credits(
 
     try:
         connector.connect()
+        try:
+            connector.set_statement_timeout(60_000)
 
-        # Get daily breakdown
-        wh_f = f"AND warehouse_name = '{warehouse_filter}'" if warehouse_filter else ""
-        daily_sql = _CREDIT_USAGE_SQL.format(days=days, limit=limit, warehouse_filter=wh_f)
-        daily_rows = connector.execute(daily_sql)
-        daily = [dict(r) if not isinstance(r, dict) else r for r in daily_rows]
+            # Get daily breakdown
+            wh_f = f"AND warehouse_name = '{warehouse_filter}'" if warehouse_filter else ""
+            daily_sql = _CREDIT_USAGE_SQL.format(days=days, limit=limit, warehouse_filter=wh_f)
+            daily_rows = connector.execute(daily_sql)
+            daily = [dict(r) if not isinstance(r, dict) else r for r in daily_rows]
 
-        # Get warehouse summary
-        summary_sql = _CREDIT_SUMMARY_SQL.format(days=days)
-        summary_rows = connector.execute(summary_sql)
-        summary = [dict(r) if not isinstance(r, dict) else r for r in summary_rows]
-
-        connector.close()
+            # Get warehouse summary
+            summary_sql = _CREDIT_SUMMARY_SQL.format(days=days)
+            summary_rows = connector.execute(summary_sql)
+            summary = [dict(r) if not isinstance(r, dict) else r for r in summary_rows]
+        finally:
+            connector.close()
 
         # Generate recommendations
         recommendations = _generate_recommendations(summary, daily, days)
@@ -143,9 +145,12 @@ def get_expensive_queries(
 
     try:
         connector.connect()
-        sql = _TOP_EXPENSIVE_SQL.format(days=days, limit=limit)
-        rows = connector.execute(sql)
-        connector.close()
+        try:
+            connector.set_statement_timeout(60_000)
+            sql = _TOP_EXPENSIVE_SQL.format(days=days, limit=limit)
+            rows = connector.execute(sql)
+        finally:
+            connector.close()
 
         queries = [dict(r) if not isinstance(r, dict) else r for r in rows]
 

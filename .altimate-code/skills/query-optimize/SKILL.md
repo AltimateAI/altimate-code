@@ -5,6 +5,10 @@ description: Analyze and optimize SQL queries for better performance
 
 # Query Optimize
 
+## Requirements
+**Agent:** any (read-only analysis)
+**Tools used:** sql_optimize, sql_analyze, read, glob, schema_inspect, warehouse_list
+
 Analyze SQL queries for performance issues and suggest concrete optimizations including rewritten SQL.
 
 ## Workflow

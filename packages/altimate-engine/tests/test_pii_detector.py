@@ -214,6 +214,98 @@ class TestCheckColumnPii:
         city_matches = _check_column_pii("city", "VARCHAR")
         assert any(m["confidence"] == "low" for m in city_matches)
 
+    # --- False-positive filtering tests ---
+
+    def test_metadata_suffix_email_sent_count(self):
+        """email_sent_count is about email delivery, not PII."""
+        matches = _check_column_pii("email_sent_count", "INTEGER")
+        # Should either be empty or have reduced confidence (not high)
+        for m in matches:
+            assert m["confidence"] != "high", f"email_sent_count should not be high confidence: {m}"
+
+    def test_metadata_suffix_phone_validated_at(self):
+        """phone_validated_at is a timestamp, not a phone number."""
+        matches = _check_column_pii("phone_validated_at", "TIMESTAMP")
+        # With both metadata suffix + non-text type, should be filtered
+        for m in matches:
+            assert m["confidence"] != "high"
+
+    def test_metadata_suffix_address_type(self):
+        """address_type is a category field, not an address."""
+        matches = _check_column_pii("address_type", "VARCHAR")
+        for m in matches:
+            assert m["confidence"] != "high"
+
+    def test_metadata_prefix_is_email(self):
+        """is_email_verified is a boolean flag, not PII."""
+        matches = _check_column_pii("is_email_verified", "BOOLEAN")
+        # Should be filtered out completely (metadata prefix + non-text type)
+        assert len(matches) == 0
+
+    def test_metadata_prefix_num_phone(self):
+        """num_phone_calls is a count, not PII."""
+        matches = _check_column_pii("num_phone_calls", "INTEGER")
+        assert len(matches) == 0
+
+    def test_metadata_suffix_hash(self):
+        """email_hash is a hashed value, not raw PII."""
+        matches = _check_column_pii("email_hash", "VARCHAR")
+        for m in matches:
+            assert m["confidence"] != "high"
+
+    def test_real_email_still_detected(self):
+        """email (without metadata suffix) should still be high confidence."""
+        matches = _check_column_pii("email", "VARCHAR")
+        assert any(m["confidence"] == "high" and m["category"] == "EMAIL" for m in matches)
+
+    def test_real_ssn_still_detected(self):
+        """ssn should still be high confidence."""
+        matches = _check_column_pii("ssn", "VARCHAR")
+        assert any(m["confidence"] == "high" and m["category"] == "SSN" for m in matches)
+
+    # --- Data type compatibility tests ---
+
+    def test_email_integer_downgraded(self):
+        """email column with INTEGER type is suspicious — downgrade confidence."""
+        matches = _check_column_pii("email", "INTEGER")
+        for m in matches:
+            if m["category"] == "EMAIL":
+                assert m["confidence"] != "high", "INTEGER email should not be high confidence"
+
+    def test_ssn_boolean_downgraded(self):
+        """ssn column with BOOLEAN type doesn't make sense."""
+        matches = _check_column_pii("ssn", "BOOLEAN")
+        for m in matches:
+            if m["category"] == "SSN":
+                assert m["confidence"] != "high"
+
+    def test_phone_float_downgraded(self):
+        """phone with FLOAT type — unusual, should downgrade."""
+        matches = _check_column_pii("phone", "FLOAT")
+        for m in matches:
+            if m["category"] == "PHONE":
+                assert m["confidence"] != "high"
+
+    def test_salary_decimal_not_downgraded(self):
+        """salary with DECIMAL is expected — FINANCIAL is not a text PII category."""
+        matches = _check_column_pii("salary", "DECIMAL")
+        assert any(m["category"] == "FINANCIAL" for m in matches)
+
+    def test_latitude_float_not_downgraded(self):
+        """latitude with FLOAT is expected — GEOLOCATION is not a text PII category."""
+        matches = _check_column_pii("latitude", "FLOAT")
+        assert any(m["category"] == "GEOLOCATION" for m in matches)
+
+    def test_varchar_precision_stripped(self):
+        """VARCHAR(255) should be treated as VARCHAR (text type, no downgrade)."""
+        matches = _check_column_pii("email", "VARCHAR(255)")
+        assert any(m["confidence"] == "high" and m["category"] == "EMAIL" for m in matches)
+
+    def test_none_data_type_no_crash(self):
+        """None data_type should not crash, just skip type check."""
+        matches = _check_column_pii("email", None)
+        assert any(m["category"] == "EMAIL" for m in matches)
+
 
 class TestDetectPii:
     """Integration tests for detect_pii with a real SchemaCache."""

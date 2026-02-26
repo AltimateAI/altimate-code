@@ -75,26 +75,28 @@ def get_tags(
 
     try:
         connector.connect()
+        try:
+            connector.set_statement_timeout(60_000)
 
-        obj_filter = ""
-        if object_name:
-            parts = object_name.split(".")
-            if len(parts) == 3:
-                obj_filter = f"AND object_database = '{parts[0]}' AND object_schema = '{parts[1]}' AND object_name = '{parts[2]}'"
-            elif len(parts) == 2:
-                obj_filter = f"AND object_schema = '{parts[0]}' AND object_name = '{parts[1]}'"
-            else:
-                obj_filter = f"AND object_name = '{parts[0]}'"
+            obj_filter = ""
+            if object_name:
+                parts = object_name.split(".")
+                if len(parts) == 3:
+                    obj_filter = f"AND object_database = '{parts[0]}' AND object_schema = '{parts[1]}' AND object_name = '{parts[2]}'"
+                elif len(parts) == 2:
+                    obj_filter = f"AND object_schema = '{parts[0]}' AND object_name = '{parts[1]}'"
+                else:
+                    obj_filter = f"AND object_name = '{parts[0]}'"
 
-        tag_filter = f"AND tag_name = '{tag_name}'" if tag_name else ""
+            tag_filter = f"AND tag_name = '{tag_name}'" if tag_name else ""
 
-        sql = _SNOWFLAKE_TAGS_SQL.format(
-            object_filter=obj_filter, tag_filter=tag_filter, limit=limit
-        )
-        rows = connector.execute(sql)
-        tags = [dict(r) if not isinstance(r, dict) else r for r in rows]
-
-        connector.close()
+            sql = _SNOWFLAKE_TAGS_SQL.format(
+                object_filter=obj_filter, tag_filter=tag_filter, limit=limit
+            )
+            rows = connector.execute(sql)
+            tags = [dict(r) if not isinstance(r, dict) else r for r in rows]
+        finally:
+            connector.close()
 
         # Summarize by tag
         tag_summary: dict[str, int] = {}
@@ -137,9 +139,12 @@ def list_tags(
 
     try:
         connector.connect()
-        rows = connector.execute(_SNOWFLAKE_LIST_TAGS_SQL.format(limit=limit))
-        tags = [dict(r) if not isinstance(r, dict) else r for r in rows]
-        connector.close()
+        try:
+            connector.set_statement_timeout(60_000)
+            rows = connector.execute(_SNOWFLAKE_LIST_TAGS_SQL.format(limit=limit))
+            tags = [dict(r) if not isinstance(r, dict) else r for r in rows]
+        finally:
+            connector.close()
 
         return {"success": True, "tags": tags, "tag_count": len(tags)}
     except Exception as e:

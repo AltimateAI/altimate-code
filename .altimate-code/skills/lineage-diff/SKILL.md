@@ -5,6 +5,10 @@ description: Compare column-level lineage between two versions of a SQL query to
 
 # Lineage Diff
 
+## Requirements
+**Agent:** any (read-only analysis)
+**Tools used:** lineage_check, read, bash (for git operations), glob
+
 Compare column-level lineage between two versions of a SQL model to identify changes in data flow.
 
 ## Workflow

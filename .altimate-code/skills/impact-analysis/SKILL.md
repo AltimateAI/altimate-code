@@ -5,6 +5,10 @@ description: Analyze the downstream impact of changes to a dbt model by combinin
 
 # Impact Analysis
 
+## Requirements
+**Agent:** any (read-only analysis)
+**Tools used:** dbt_manifest, lineage_check, sql_analyze, glob, bash, read
+
 Determine which downstream models, tests, and dashboards are affected when a dbt model changes.
 
 ## Workflow

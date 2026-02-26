@@ -19,10 +19,17 @@ from altimate_engine.sql.analyzer import analyze_sql
 
 
 # Maps anti-pattern types from the analyzer to optimization suggestions.
-_ANTI_PATTERN_SUGGESTIONS: dict[str, dict[str, str]] = {
+# Entries with a "descriptions" dict support dialect-aware text; those with
+# a plain "description" string are dialect-agnostic.
+_ANTI_PATTERN_SUGGESTIONS_BASE: dict[str, dict[str, Any]] = {
     "SELECT_STAR": {
         "type": "REWRITE",
-        "description": "Replace SELECT * with explicit column list to reduce data transfer",
+        "descriptions": {
+            "snowflake": "Replace SELECT * with explicit column list — Snowflake's columnar storage only reads needed columns, reducing bytes scanned",
+            "postgres": "Replace SELECT * with explicit column list to avoid unnecessary network transfer and enable index-only scans",
+            "duckdb": "Replace SELECT * with explicit column list to leverage DuckDB's columnar scan optimization",
+            "_default": "Replace SELECT * with explicit column list to reduce data transfer",
+        },
         "impact": "high",
     },
     "SELECT_STAR_IN_SUBQUERY": {
@@ -37,7 +44,11 @@ _ANTI_PATTERN_SUGGESTIONS: dict[str, dict[str, str]] = {
     },
     "ORDER_BY_WITHOUT_LIMIT": {
         "type": "PERFORMANCE",
-        "description": "Add LIMIT clause to ORDER BY to avoid sorting the entire result set",
+        "descriptions": {
+            "snowflake": "Add LIMIT clause to ORDER BY — sorting large result sets consumes warehouse credits",
+            "postgres": "Add LIMIT clause to ORDER BY — sorting large result sets may spill to disk",
+            "_default": "Add LIMIT clause to ORDER BY to avoid sorting the entire result set",
+        },
         "impact": "medium",
     },
     "CORRELATED_SUBQUERY": {
@@ -47,12 +58,21 @@ _ANTI_PATTERN_SUGGESTIONS: dict[str, dict[str, str]] = {
     },
     "FUNCTION_IN_FILTER": {
         "type": "PERFORMANCE",
-        "description": "Restructure filter to avoid function on column, enabling partition pruning",
+        "descriptions": {
+            "snowflake": "Restructure filter to avoid function on column, enabling Snowflake partition pruning",
+            "postgres": "Restructure filter to avoid function on column, enabling PostgreSQL index usage (or create an expression index)",
+            "duckdb": "Restructure filter to avoid function on column, enabling filter push-down",
+            "_default": "Restructure filter to avoid function on column, enabling index or partition pruning",
+        },
         "impact": "medium",
     },
     "FUNCTION_IN_JOIN": {
         "type": "PERFORMANCE",
-        "description": "Remove function from JOIN condition to allow optimal join pruning",
+        "descriptions": {
+            "snowflake": "Remove function from JOIN condition to allow Snowflake's optimal join pruning",
+            "postgres": "Remove function from JOIN condition to allow PostgreSQL index-based joins",
+            "_default": "Remove function from JOIN condition to allow optimal join pruning",
+        },
         "impact": "medium",
     },
     "UNUSED_CTE": {
@@ -67,12 +87,21 @@ _ANTI_PATTERN_SUGGESTIONS: dict[str, dict[str, str]] = {
     },
     "LIKE_LEADING_WILDCARD": {
         "type": "PERFORMANCE",
-        "description": "Leading wildcard in LIKE prevents index/clustering key usage",
+        "descriptions": {
+            "snowflake": "Leading wildcard in LIKE prevents clustering key usage — consider Snowflake SEARCH optimization",
+            "postgres": "Leading wildcard in LIKE prevents B-tree index usage — consider a trigram (pg_trgm) index",
+            "duckdb": "Leading wildcard in LIKE forces a full table scan",
+            "_default": "Leading wildcard in LIKE prevents index/clustering key usage",
+        },
         "impact": "medium",
     },
     "LARGE_IN_LIST": {
         "type": "REWRITE",
-        "description": "Replace large IN list with CTE VALUES clause or temporary table",
+        "descriptions": {
+            "postgres": "Replace large IN list with CTE VALUES clause or = ANY(array) pattern",
+            "snowflake": "Large IN lists cause query compilation overhead in Snowflake. Use CTE with VALUES or temporary table",
+            "_default": "Replace large IN list with CTE VALUES clause or temporary table",
+        },
         "impact": "medium",
     },
     "CARTESIAN_PRODUCT": {
@@ -87,7 +116,11 @@ _ANTI_PATTERN_SUGGESTIONS: dict[str, dict[str, str]] = {
     },
     "OR_IN_JOIN": {
         "type": "REWRITE",
-        "description": "Split OR condition in JOIN into separate JOINs with UNION ALL for better optimization",
+        "descriptions": {
+            "snowflake": "Split OR condition in JOIN into separate JOINs with UNION ALL — reduces bytes scanned in Snowflake",
+            "postgres": "Split OR condition in JOIN into separate JOINs with UNION ALL — enables hash/merge joins in PostgreSQL",
+            "_default": "Split OR condition in JOIN into separate JOINs with UNION ALL for better optimization",
+        },
         "impact": "medium",
     },
     "NON_EQUI_JOIN": {
@@ -112,10 +145,23 @@ _ANTI_PATTERN_SUGGESTIONS: dict[str, dict[str, str]] = {
     },
     "MISSING_LIMIT": {
         "type": "PERFORMANCE",
-        "description": "Add LIMIT clause to prevent unexpectedly large result sets",
+        "descriptions": {
+            "snowflake": "Add LIMIT clause — Snowflake charges per byte scanned even for unbounded result sets",
+            "postgres": "Add LIMIT clause to prevent unbounded result sets that consume memory and bandwidth",
+            "_default": "Add LIMIT clause to prevent unexpectedly large result sets",
+        },
         "impact": "low",
     },
 }
+
+
+def _resolve_suggestion_description(entry: dict[str, Any], dialect: str) -> str:
+    """Resolve the description for a suggestion entry, respecting dialect."""
+    descriptions = entry.get("descriptions")
+    if descriptions:
+        d = (dialect or "").lower()
+        return descriptions.get(d, descriptions.get("_default", ""))
+    return entry.get("description", "")
 
 
 def _safe_sql(node: exp.Expression, dialect: str) -> str:
@@ -255,7 +301,9 @@ def _extract_select_list(ast: exp.Expression, dialect: str) -> str | None:
     return None
 
 
-def _suggestions_from_anti_patterns(anti_patterns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _suggestions_from_anti_patterns(
+    anti_patterns: list[dict[str, Any]], dialect: str = "snowflake"
+) -> list[dict[str, Any]]:
     """Generate optimization suggestions from detected anti-patterns."""
     suggestions: list[dict[str, Any]] = []
     seen_types: set[str] = set()
@@ -266,13 +314,13 @@ def _suggestions_from_anti_patterns(anti_patterns: list[dict[str, Any]]) -> list
             continue
         seen_types.add(pattern_type)
 
-        template = _ANTI_PATTERN_SUGGESTIONS.get(pattern_type)
+        template = _ANTI_PATTERN_SUGGESTIONS_BASE.get(pattern_type)
         if not template:
             continue
 
         suggestions.append({
             "type": template["type"],
-            "description": template["description"],
+            "description": _resolve_suggestion_description(template, dialect),
             "before": pattern.get("location"),
             "after": None,
             "impact": template["impact"],
@@ -357,7 +405,7 @@ def optimize_sql(
         ))
 
     # Suggestions from anti-pattern analysis
-    suggestions.extend(_suggestions_from_anti_patterns(anti_patterns))
+    suggestions.extend(_suggestions_from_anti_patterns(anti_patterns, dialect))
 
     # Step 6: Determine overall confidence
     confidence = analysis.get("confidence", "high")

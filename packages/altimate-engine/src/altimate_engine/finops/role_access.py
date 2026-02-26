@@ -79,17 +79,19 @@ def query_grants(
 
     try:
         connector.connect()
+        try:
+            connector.set_statement_timeout(60_000)
 
-        role_f = f"AND grantee_name = '{role}'" if role else ""
-        obj_f = f"AND name = '{object_name}'" if object_name else ""
+            role_f = f"AND grantee_name = '{role}'" if role else ""
+            obj_f = f"AND name = '{object_name}'" if object_name else ""
 
-        sql = _SNOWFLAKE_GRANTS_ON_SQL.format(
-            role_filter=role_f, object_filter=obj_f, limit=limit
-        )
-        rows = connector.execute(sql)
-        grants = [dict(r) if not isinstance(r, dict) else r for r in rows]
-
-        connector.close()
+            sql = _SNOWFLAKE_GRANTS_ON_SQL.format(
+                role_filter=role_f, object_filter=obj_f, limit=limit
+            )
+            rows = connector.execute(sql)
+            grants = [dict(r) if not isinstance(r, dict) else r for r in rows]
+        finally:
+            connector.close()
 
         # Summarize by privilege
         privilege_summary: dict[str, int] = {}
@@ -123,9 +125,12 @@ def query_role_hierarchy(warehouse: str) -> dict:
 
     try:
         connector.connect()
-        rows = connector.execute(_SNOWFLAKE_ROLE_HIERARCHY_SQL)
-        hierarchy = [dict(r) if not isinstance(r, dict) else r for r in rows]
-        connector.close()
+        try:
+            connector.set_statement_timeout(60_000)
+            rows = connector.execute(_SNOWFLAKE_ROLE_HIERARCHY_SQL)
+            hierarchy = [dict(r) if not isinstance(r, dict) else r for r in rows]
+        finally:
+            connector.close()
 
         return {
             "success": True,
@@ -160,11 +165,14 @@ def query_user_roles(
 
     try:
         connector.connect()
-        user_f = f"AND grantee_name = '{user}'" if user else ""
-        sql = _SNOWFLAKE_USER_ROLES_SQL.format(user_filter=user_f, limit=limit)
-        rows = connector.execute(sql)
-        assignments = [dict(r) if not isinstance(r, dict) else r for r in rows]
-        connector.close()
+        try:
+            connector.set_statement_timeout(60_000)
+            user_f = f"AND grantee_name = '{user}'" if user else ""
+            sql = _SNOWFLAKE_USER_ROLES_SQL.format(user_filter=user_f, limit=limit)
+            rows = connector.execute(sql)
+            assignments = [dict(r) if not isinstance(r, dict) else r for r in rows]
+        finally:
+            connector.close()
 
         return {
             "success": True,

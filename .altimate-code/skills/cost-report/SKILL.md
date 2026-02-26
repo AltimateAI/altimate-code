@@ -5,6 +5,10 @@ description: Analyze Snowflake query costs and identify optimization opportuniti
 
 # Cost Report
 
+## Requirements
+**Agent:** any (read-only analysis)
+**Tools used:** sql_execute, sql_analyze, sql_predict_cost, sql_record_feedback
+
 Analyze Snowflake warehouse query costs, identify the most expensive queries, detect anti-patterns, and recommend optimizations.
 
 ## Workflow

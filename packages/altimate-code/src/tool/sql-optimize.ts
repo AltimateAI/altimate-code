@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "./tool"
 import { Bridge } from "../bridge/client"
-import type { SqlOptimizeResult, SqlOptimizeSuggestion } from "../bridge/protocol"
+import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../bridge/protocol"
 
 export const SqlOptimizeTool = Tool.define("sql_optimize", {
   description:
@@ -151,9 +151,7 @@ function formatOptimization(result: SqlOptimizeResult): string {
       const conf = ap.confidence !== "high" ? ` [${ap.confidence} confidence]` : ""
       lines.push(`  [${(ap.severity ?? "warning").toUpperCase()}] ${ap.type}${conf}`)
       lines.push(`    ${ap.message}${loc}`)
-      if (ap.recommendation) {
-        lines.push(`    -> ${ap.recommendation}`)
-      }
+      lines.push(`    -> ${ap.recommendation}`)
       lines.push("")
     }
   }

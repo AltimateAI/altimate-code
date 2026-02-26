@@ -66,14 +66,16 @@ def advise_warehouse_sizing(
 
     try:
         connector.connect()
+        try:
+            connector.set_statement_timeout(60_000)
 
-        load_rows = connector.execute(_WAREHOUSE_LOAD_SQL.format(days=days))
-        load_data = [dict(r) if not isinstance(r, dict) else r for r in load_rows]
+            load_rows = connector.execute(_WAREHOUSE_LOAD_SQL.format(days=days))
+            load_data = [dict(r) if not isinstance(r, dict) else r for r in load_rows]
 
-        sizing_rows = connector.execute(_WAREHOUSE_SIZING_SQL.format(days=days))
-        sizing_data = [dict(r) if not isinstance(r, dict) else r for r in sizing_rows]
-
-        connector.close()
+            sizing_rows = connector.execute(_WAREHOUSE_SIZING_SQL.format(days=days))
+            sizing_data = [dict(r) if not isinstance(r, dict) else r for r in sizing_rows]
+        finally:
+            connector.close()
 
         recommendations = _generate_sizing_recommendations(load_data, sizing_data)
 

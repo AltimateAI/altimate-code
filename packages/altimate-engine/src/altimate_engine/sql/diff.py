@@ -29,13 +29,13 @@ def diff_sql(original: str, modified: str, context_lines: int = 3) -> dict:
     ))
     unified_text = "".join(unified)
 
-    # Count changes
-    additions = sum(1 for line in unified if line.startswith("+") and not line.startswith("+++"))
-    deletions = sum(1 for line in unified if line.startswith("-") and not line.startswith("---"))
-
     # Similarity ratio
     matcher = difflib.SequenceMatcher(None, original, modified)
     similarity = round(matcher.ratio(), 4)
+
+    # Count changes (character-level)
+    additions = sum(j2 - j1 for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag in ("insert", "replace"))
+    deletions = sum(i2 - i1 for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag in ("delete", "replace"))
 
     # Get opcodes for structured changes
     changes = []

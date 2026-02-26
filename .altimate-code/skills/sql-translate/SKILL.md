@@ -5,6 +5,10 @@ description: Translate SQL queries between database dialects (Snowflake, BigQuer
 
 # SQL Translate
 
+## Requirements
+**Agent:** builder or migrator (may write translated SQL to files)
+**Tools used:** sql_translate, read, write, sql_validate
+
 Translate SQL queries from one database dialect to another using sqlglot's transpilation engine.
 
 ## Workflow
