@@ -217,7 +217,7 @@ class TestAnalyzeCredits:
         mock_registry.list.return_value = mock_list()
         result = analyze_credits("my-duck")
         assert result["success"] is False
-        assert "Snowflake" in result["error"]
+        assert "not available" in result["error"]
 
     @patch("altimate_engine.finops.credit_analyzer.ConnectionRegistry")
     def test_snowflake_success_empty(self, mock_registry):
@@ -266,7 +266,7 @@ class TestGetExpensiveQueries:
         mock_registry.list.return_value = mock_list()
         result = get_expensive_queries("my-duck")
         assert result["success"] is False
-        assert "Snowflake" in result["error"]
+        assert "not available" in result["error"]
 
     @patch("altimate_engine.finops.credit_analyzer.ConnectionRegistry")
     def test_snowflake_success(self, mock_registry):
@@ -360,7 +360,7 @@ class TestAdviseWarehouseSizing:
         mock_registry.list.return_value = mock_list()
         result = advise_warehouse_sizing("my-duck")
         assert result["success"] is False
-        assert "Snowflake" in result["error"]
+        assert "not available" in result["error"]
 
     @patch("altimate_engine.finops.warehouse_advisor.ConnectionRegistry")
     def test_snowflake_success(self, mock_registry):
@@ -402,7 +402,7 @@ class TestFindUnusedResources:
         mock_registry.list.return_value = mock_list()
         result = find_unused_resources("my-duck")
         assert result["success"] is False
-        assert "Snowflake" in result["error"]
+        assert "not available" in result["error"]
 
     @patch("altimate_engine.finops.unused_resources.ConnectionRegistry")
     def test_snowflake_success_empty(self, mock_registry):
@@ -474,7 +474,7 @@ class TestQueryGrants:
         mock_registry.list.return_value = mock_list()
         result = query_grants("my-duck")
         assert result["success"] is False
-        assert "Snowflake" in result["error"]
+        assert "not available" in result["error"]
 
     @patch("altimate_engine.finops.role_access.ConnectionRegistry")
     def test_snowflake_success_empty(self, mock_registry):

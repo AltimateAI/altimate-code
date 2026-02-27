@@ -21,6 +21,9 @@ warehouses = [
     "cryptography>=41.0",
     "google-cloud-bigquery>=3.0",
     "databricks-sql-connector>=3.0",
+    "boto3>=1.28",
+    "mysql-connector-python>=8.0",
+    "pyodbc>=5.0",
 ]
 
 [tool.hatch.build.targets.wheel]

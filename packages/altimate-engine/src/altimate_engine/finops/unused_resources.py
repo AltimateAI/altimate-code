@@ -5,7 +5,11 @@ from __future__ import annotations
 from altimate_engine.connections import ConnectionRegistry
 
 
-_UNUSED_TABLES_SQL = """
+# ---------------------------------------------------------------------------
+# Snowflake SQL templates
+# ---------------------------------------------------------------------------
+
+_SNOWFLAKE_UNUSED_TABLES_SQL = """
 SELECT
     table_catalog as database_name,
     table_schema as schema_name,
@@ -30,7 +34,7 @@ LIMIT {limit}
 """
 
 # Fallback: simpler query without ACCESS_HISTORY (which needs Enterprise+)
-_UNUSED_TABLES_SIMPLE_SQL = """
+_SNOWFLAKE_UNUSED_TABLES_SIMPLE_SQL = """
 SELECT
     table_catalog as database_name,
     table_schema as schema_name,
@@ -48,7 +52,7 @@ ORDER BY size_bytes DESC NULLS LAST
 LIMIT {limit}
 """
 
-_IDLE_WAREHOUSES_SQL = """
+_SNOWFLAKE_IDLE_WAREHOUSES_SQL = """
 SELECT
     name as warehouse_name,
     type,
@@ -69,6 +73,52 @@ WHERE deleted_on IS NULL
 ORDER BY is_idle DESC, warehouse_name
 """
 
+# ---------------------------------------------------------------------------
+# BigQuery SQL templates
+# ---------------------------------------------------------------------------
+
+_BIGQUERY_UNUSED_TABLES_SQL = """
+SELECT
+    table_catalog as database_name,
+    table_schema as schema_name,
+    table_name,
+    row_count,
+    size_bytes,
+    TIMESTAMP_MILLIS(last_modified_time) as last_altered,
+    creation_time as created
+FROM `region-{location}.INFORMATION_SCHEMA.TABLE_STORAGE`
+WHERE NOT deleted
+  AND last_modified_time < UNIX_MILLIS(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY))
+ORDER BY size_bytes DESC
+LIMIT {limit}
+"""
+
+# ---------------------------------------------------------------------------
+# Databricks SQL templates
+# ---------------------------------------------------------------------------
+
+_DATABRICKS_UNUSED_TABLES_SQL = """
+SELECT
+    table_catalog as database_name,
+    table_schema as schema_name,
+    table_name,
+    0 as row_count,
+    0 as size_bytes,
+    last_altered,
+    created
+FROM system.information_schema.tables
+WHERE last_altered < DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL '{days}' DAY)
+ORDER BY last_altered ASC
+LIMIT {limit}
+"""
+
+
+def _get_wh_type(warehouse: str) -> str:
+    for wh in ConnectionRegistry.list():
+        if wh["name"] == warehouse:
+            return wh.get("type", "unknown")
+    return "unknown"
+
 
 def find_unused_resources(
     warehouse: str,
@@ -79,23 +129,19 @@ def find_unused_resources(
 
     Looks for:
     - Tables not accessed in the specified period
-    - Warehouses with no query activity
+    - Warehouses with no query activity (Snowflake only)
     """
     try:
         connector = ConnectionRegistry.get(warehouse)
     except ValueError:
         return {"success": False, "error": f"Connection '{warehouse}' not found."}
 
-    wh_type = "unknown"
-    for wh in ConnectionRegistry.list():
-        if wh["name"] == warehouse:
-            wh_type = wh.get("type", "unknown")
-            break
+    wh_type = _get_wh_type(warehouse)
 
-    if wh_type != "snowflake":
+    if wh_type not in ("snowflake", "bigquery", "databricks"):
         return {
             "success": False,
-            "error": f"Unused resource detection is only available for Snowflake (got {wh_type}).",
+            "error": f"Unused resource detection is not available for {wh_type} warehouses.",
         }
 
     unused_tables = []
@@ -107,24 +153,21 @@ def find_unused_resources(
         try:
             connector.set_statement_timeout(60_000)
 
-            # Try ACCESS_HISTORY first, fall back to simple query
-            try:
-                rows = connector.execute(_UNUSED_TABLES_SQL.format(days=days, limit=limit))
-                unused_tables = [dict(r) if not isinstance(r, dict) else r for r in rows]
-            except Exception:
-                try:
-                    rows = connector.execute(_UNUSED_TABLES_SIMPLE_SQL.format(days=days, limit=limit))
-                    unused_tables = [dict(r) if not isinstance(r, dict) else r for r in rows]
-                except Exception as e:
-                    errors.append(f"Could not query unused tables: {e}")
-
-            # Find idle warehouses
-            try:
-                rows = connector.execute(_IDLE_WAREHOUSES_SQL.format(days=days))
-                idle_warehouses = [dict(r) if not isinstance(r, dict) else r for r in rows]
-                idle_warehouses = [w for w in idle_warehouses if w.get("is_idle")]
-            except Exception as e:
-                errors.append(f"Could not query idle warehouses: {e}")
+            if wh_type == "snowflake":
+                unused_tables = _fetch_snowflake_unused_tables(connector, days, limit, errors)
+                idle_warehouses = _fetch_snowflake_idle_warehouses(connector, days, errors)
+            elif wh_type == "bigquery":
+                unused_tables = _fetch_tables(
+                    connector,
+                    _BIGQUERY_UNUSED_TABLES_SQL.format(days=days, limit=limit, location="US"),
+                    errors,
+                )
+            elif wh_type == "databricks":
+                unused_tables = _fetch_tables(
+                    connector,
+                    _DATABRICKS_UNUSED_TABLES_SQL.format(days=days, limit=limit),
+                    errors,
+                )
         finally:
             connector.close()
 
@@ -146,3 +189,38 @@ def find_unused_resources(
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def _fetch_tables(connector, sql: str, errors: list) -> list[dict]:
+    """Execute a table query and return results as dicts."""
+    try:
+        rows = connector.execute(sql)
+        return [dict(r) if not isinstance(r, dict) else r for r in rows]
+    except Exception as e:
+        errors.append(f"Could not query unused tables: {e}")
+        return []
+
+
+def _fetch_snowflake_unused_tables(connector, days: int, limit: int, errors: list) -> list[dict]:
+    """Try ACCESS_HISTORY first, fall back to simple query."""
+    try:
+        rows = connector.execute(_SNOWFLAKE_UNUSED_TABLES_SQL.format(days=days, limit=limit))
+        return [dict(r) if not isinstance(r, dict) else r for r in rows]
+    except Exception:
+        try:
+            rows = connector.execute(_SNOWFLAKE_UNUSED_TABLES_SIMPLE_SQL.format(days=days, limit=limit))
+            return [dict(r) if not isinstance(r, dict) else r for r in rows]
+        except Exception as e:
+            errors.append(f"Could not query unused tables: {e}")
+            return []
+
+
+def _fetch_snowflake_idle_warehouses(connector, days: int, errors: list) -> list[dict]:
+    """Find idle Snowflake warehouses."""
+    try:
+        rows = connector.execute(_SNOWFLAKE_IDLE_WAREHOUSES_SQL.format(days=days))
+        warehouses = [dict(r) if not isinstance(r, dict) else r for r in rows]
+        return [w for w in warehouses if w.get("is_idle")]
+    except Exception as e:
+        errors.append(f"Could not query idle warehouses: {e}")
+        return []

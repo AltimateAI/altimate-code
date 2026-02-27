@@ -1,0 +1,36 @@
+title: altimate-code
+description: The data engineering agent for dbt, SQL, and cloud warehouses
+remote_theme: just-the-docs/just-the-docs@v0.10.0
+url: https://altimateai.github.io/altimate-code
+
+color_scheme: dark
+
+aux_links:
+  "GitHub":
+    - "https://github.com/AltimateAI/altimate-code"
+
+nav_sort: order
+
+search_enabled: true
+search.button: true
+
+heading_anchors: true
+
+back_to_top: true
+back_to_top_text: "Back to top"
+
+footer_content: "&copy; 2026 Altimate Inc. All rights reserved."
+
+callouts:
+  warning:
+    title: Warning
+    color: yellow
+  tip:
+    title: Tip
+    color: green
+  note:
+    title: Note
+    color: blue
+  cost:
+    title: Cost Alert
+    color: red

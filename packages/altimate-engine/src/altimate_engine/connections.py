@@ -121,6 +121,83 @@ class ConnectionRegistry:
                 schema=config.get("schema"),
                 **{k: v for k, v in config.items() if k not in _databricks_keys},
             )
+        elif dialect == "redshift":
+            from altimate_engine.connectors.redshift import RedshiftConnector
+
+            _redshift_keys = {
+                "type",
+                "host",
+                "port",
+                "database",
+                "user",
+                "password",
+                "connection_string",
+                "iam_role",
+                "region",
+                "cluster_identifier",
+            }
+            return RedshiftConnector(
+                host=config.get("host", ""),
+                port=config.get("port", 5439),
+                database=config.get("database", "dev"),
+                user=config.get("user"),
+                password=config.get("password"),
+                connection_string=config.get("connection_string"),
+                iam_role=config.get("iam_role"),
+                region=config.get("region"),
+                cluster_identifier=config.get("cluster_identifier"),
+                **{k: v for k, v in config.items() if k not in _redshift_keys},
+            )
+        elif dialect == "mysql":
+            from altimate_engine.connectors.mysql import MySQLConnector
+
+            _mysql_keys = {
+                "type",
+                "host",
+                "port",
+                "database",
+                "user",
+                "password",
+                "ssl_ca",
+                "ssl_cert",
+                "ssl_key",
+            }
+            return MySQLConnector(
+                host=config.get("host", "localhost"),
+                port=config.get("port", 3306),
+                database=config.get("database"),
+                user=config.get("user"),
+                password=config.get("password"),
+                ssl_ca=config.get("ssl_ca"),
+                ssl_cert=config.get("ssl_cert"),
+                ssl_key=config.get("ssl_key"),
+                **{k: v for k, v in config.items() if k not in _mysql_keys},
+            )
+        elif dialect == "sqlserver":
+            from altimate_engine.connectors.sqlserver import SQLServerConnector
+
+            _sqlserver_keys = {
+                "type",
+                "host",
+                "port",
+                "database",
+                "user",
+                "password",
+                "driver",
+                "azure_auth",
+                "trust_server_certificate",
+            }
+            return SQLServerConnector(
+                host=config.get("host", "localhost"),
+                port=config.get("port", 1433),
+                database=config.get("database"),
+                user=config.get("user"),
+                password=config.get("password"),
+                driver=config.get("driver", "ODBC Driver 18 for SQL Server"),
+                azure_auth=config.get("azure_auth", False),
+                trust_server_certificate=config.get("trust_server_certificate", False),
+                **{k: v for k, v in config.items() if k not in _sqlserver_keys},
+            )
         else:
             raise ValueError(f"Unsupported connector type: {dialect}")
 

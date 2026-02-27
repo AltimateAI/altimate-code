@@ -21,10 +21,17 @@ from altimate_engine.models import (
     CostGateResult,
     DbtManifestParams,
     DbtRunParams,
+    DbtProfilesParams,
+    DbtProfileConnection,
+    DbtProfilesResult,
     JsonRpcError,
     JsonRpcRequest,
     JsonRpcResponse,
     LineageCheckParams,
+    LocalSchemaSyncParams,
+    LocalSchemaSyncResult,
+    LocalTestParams,
+    LocalTestResult,
     SchemaCacheStatusParams,
     SchemaCacheStatusResult,
     SchemaCacheWarehouseStatus,
@@ -140,6 +147,9 @@ from altimate_engine.sql.guard import (
     guard_explain,
     guard_check,
 )
+from altimate_engine.dbt.profiles import discover_dbt_connections
+from altimate_engine.local.schema_sync import sync_schema
+from altimate_engine.local.test_local import test_sql_local
 from altimate_engine.models import (
     SqlGuardValidateParams,
     SqlGuardLintParams,
@@ -467,6 +477,42 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             p = SqlGuardCheckParams(**params)
             raw = guard_check(p.sql, p.schema_path, p.schema_context)
             result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        # --- dbt discovery ---
+        elif method == "dbt.profiles":
+            p = DbtProfilesParams(**params)
+            raw = discover_dbt_connections(p.path)
+            connections = [
+                DbtProfileConnection(
+                    name=name,
+                    type=config.get("type", "unknown"),
+                    config=config,
+                )
+                for name, config in raw.items()
+            ]
+            result = DbtProfilesResult(
+                success=True,
+                connections=connections,
+                connection_count=len(connections),
+            )
+        # --- Local testing ---
+        elif method == "local.schema_sync":
+            p = LocalSchemaSyncParams(**params)
+            raw = sync_schema(
+                warehouse=p.warehouse,
+                target_path=p.target_path,
+                schemas=p.schemas,
+                sample_rows=p.sample_rows,
+                limit=p.limit,
+            )
+            result = LocalSchemaSyncResult(**raw)
+        elif method == "local.test":
+            p = LocalTestParams(**params)
+            raw = test_sql_local(
+                sql=p.sql,
+                target_path=p.target_path,
+                target_dialect=p.target_dialect,
+            )
+            result = LocalTestResult(**raw)
         elif method == "ping":
             return JsonRpcResponse(result={"status": "ok"}, id=request.id)
         else:

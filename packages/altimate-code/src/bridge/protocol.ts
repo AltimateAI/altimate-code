@@ -722,6 +722,64 @@ export interface SqlGuardResult {
   error?: string
 }
 
+// --- dbt Profile Discovery ---
+
+export interface DbtProfilesParams {
+  path?: string
+}
+
+export interface DbtProfileConnection {
+  name: string
+  type: string
+  config: Record<string, unknown>
+}
+
+export interface DbtProfilesResult {
+  success: boolean
+  connections: DbtProfileConnection[]
+  connection_count: number
+  error?: string
+}
+
+// --- Local Schema Sync ---
+
+export interface LocalSchemaSyncParams {
+  warehouse: string
+  target_path?: string
+  schemas?: string[]
+  sample_rows?: number
+  limit?: number
+}
+
+export interface LocalSchemaSyncResult {
+  success: boolean
+  warehouse?: string
+  target_path?: string
+  tables_synced: number
+  columns_synced: number
+  schemas_synced: number
+  errors?: string[]
+  error?: string
+}
+
+// --- Local SQL Test ---
+
+export interface LocalTestParams {
+  sql: string
+  target_path?: string
+  target_dialect?: string
+}
+
+export interface LocalTestResult {
+  success: boolean
+  row_count: number
+  columns: string[]
+  sample_rows: Record<string, unknown>[]
+  transpiled: boolean
+  transpile_warnings?: string[]
+  error?: string
+}
+
 // --- Method registry ---
 
 export const BridgeMethods = {
@@ -759,6 +817,11 @@ export const BridgeMethods = {
   "sql.rewrite": {} as { params: SqlRewriteParams; result: SqlRewriteResult },
   "ci.cost_gate": {} as { params: CostGateParams; result: CostGateResult },
   "sql.schema_diff": {} as { params: SchemaDiffParams; result: SchemaDiffResult },
+  // --- dbt discovery ---
+  "dbt.profiles": {} as { params: DbtProfilesParams; result: DbtProfilesResult },
+  // --- local testing ---
+  "local.schema_sync": {} as { params: LocalSchemaSyncParams; result: LocalSchemaSyncResult },
+  "local.test": {} as { params: LocalTestParams; result: LocalTestResult },
   // --- sqlguard ---
   "sqlguard.validate": {} as { params: SqlGuardValidateParams; result: SqlGuardResult },
   "sqlguard.lint": {} as { params: SqlGuardLintParams; result: SqlGuardResult },

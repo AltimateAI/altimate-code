@@ -4,6 +4,9 @@ from altimate_engine.connectors.postgres import PostgresConnector
 from altimate_engine.connectors.snowflake import SnowflakeConnector
 from altimate_engine.connectors.bigquery import BigQueryConnector
 from altimate_engine.connectors.databricks import DatabricksConnector
+from altimate_engine.connectors.redshift import RedshiftConnector
+from altimate_engine.connectors.mysql import MySQLConnector
+from altimate_engine.connectors.sqlserver import SQLServerConnector
 
 __all__ = [
     "Connector",
@@ -12,4 +15,7 @@ __all__ = [
     "SnowflakeConnector",
     "BigQueryConnector",
     "DatabricksConnector",
+    "RedshiftConnector",
+    "MySQLConnector",
+    "SQLServerConnector",
 ]

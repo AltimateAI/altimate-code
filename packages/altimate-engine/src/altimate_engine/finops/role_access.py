@@ -5,6 +5,10 @@ from __future__ import annotations
 from altimate_engine.connections import ConnectionRegistry
 
 
+# ---------------------------------------------------------------------------
+# Snowflake SQL templates
+# ---------------------------------------------------------------------------
+
 _SNOWFLAKE_GRANTS_ON_SQL = """
 SELECT
     privilege,
@@ -49,6 +53,67 @@ ORDER BY grantee_name, role
 LIMIT {limit}
 """
 
+# ---------------------------------------------------------------------------
+# BigQuery SQL templates
+# ---------------------------------------------------------------------------
+
+_BIGQUERY_GRANTS_SQL = """
+SELECT
+    privilege_type as privilege,
+    object_type,
+    object_name,
+    grantee as granted_to,
+    'NO' as grant_option,
+    '' as granted_by,
+    '' as created_on
+FROM `region-{location}.INFORMATION_SCHEMA.OBJECT_PRIVILEGES`
+WHERE 1=1
+{grantee_filter}
+ORDER BY object_type, object_name
+LIMIT {limit}
+"""
+
+# ---------------------------------------------------------------------------
+# Databricks SQL templates
+# ---------------------------------------------------------------------------
+
+_DATABRICKS_GRANTS_SQL = """
+SELECT
+    privilege_type as privilege,
+    inherited_from as object_type,
+    table_name as object_name,
+    grantee as granted_to,
+    'NO' as grant_option,
+    grantor as granted_by,
+    '' as created_on
+FROM system.information_schema.table_privileges
+WHERE 1=1
+{grantee_filter}
+ORDER BY table_name
+LIMIT {limit}
+"""
+
+
+def _get_wh_type(warehouse: str) -> str:
+    for wh in ConnectionRegistry.list():
+        if wh["name"] == warehouse:
+            return wh.get("type", "unknown")
+    return "unknown"
+
+
+def _build_grants_sql(wh_type: str, role: str | None, object_name: str | None, limit: int) -> str | None:
+    if wh_type == "snowflake":
+        role_f = f"AND grantee_name = '{role}'" if role else ""
+        obj_f = f"AND name = '{object_name}'" if object_name else ""
+        return _SNOWFLAKE_GRANTS_ON_SQL.format(role_filter=role_f, object_filter=obj_f, limit=limit)
+    elif wh_type == "bigquery":
+        grantee_f = f"AND grantee = '{role}'" if role else ""
+        return _BIGQUERY_GRANTS_SQL.format(grantee_filter=grantee_f, limit=limit, location="US")
+    elif wh_type == "databricks":
+        grantee_f = f"AND grantee = '{role}'" if role else ""
+        return _DATABRICKS_GRANTS_SQL.format(grantee_filter=grantee_f, limit=limit)
+    return None
+
 
 def query_grants(
     warehouse: str,
@@ -56,12 +121,12 @@ def query_grants(
     object_name: str | None = None,
     limit: int = 100,
 ) -> dict:
-    """Query RBAC grants on a Snowflake account.
+    """Query RBAC grants on a warehouse account.
 
     Args:
         warehouse: Connection name
-        role: Filter to grants for a specific role
-        object_name: Filter to grants on a specific object
+        role: Filter to grants for a specific role/grantee
+        object_name: Filter to grants on a specific object (Snowflake only)
         limit: Maximum results
     """
     try:
@@ -70,24 +135,19 @@ def query_grants(
         return {"success": False, "grants": [], "error": f"Connection '{warehouse}' not found."}
 
     wh_type = _get_wh_type(warehouse)
-    if wh_type != "snowflake":
+
+    sql = _build_grants_sql(wh_type, role, object_name, limit)
+    if sql is None:
         return {
             "success": False,
             "grants": [],
-            "error": f"Role/access queries are only available for Snowflake (got {wh_type}).",
+            "error": f"Role/access queries are not available for {wh_type} warehouses.",
         }
 
     try:
         connector.connect()
         try:
             connector.set_statement_timeout(60_000)
-
-            role_f = f"AND grantee_name = '{role}'" if role else ""
-            obj_f = f"AND name = '{object_name}'" if object_name else ""
-
-            sql = _SNOWFLAKE_GRANTS_ON_SQL.format(
-                role_filter=role_f, object_filter=obj_f, limit=limit
-            )
             rows = connector.execute(sql)
             grants = [dict(r) if not isinstance(r, dict) else r for r in rows]
         finally:
@@ -110,17 +170,23 @@ def query_grants(
 
 
 def query_role_hierarchy(warehouse: str) -> dict:
-    """Get the role hierarchy (role-to-role grants)."""
+    """Get the role hierarchy (role-to-role grants).
+
+    Only available for Snowflake. BigQuery and Databricks use IAM/Unity Catalog
+    for access management which does not have Snowflake-style role hierarchies.
+    """
     try:
         connector = ConnectionRegistry.get(warehouse)
     except ValueError:
         return {"success": False, "error": f"Connection '{warehouse}' not found."}
 
     wh_type = _get_wh_type(warehouse)
-    if wh_type != "snowflake":
+    if wh_type not in ("snowflake",):
         return {
             "success": False,
-            "error": f"Role hierarchy is only available for Snowflake (got {wh_type}).",
+            "error": f"Role hierarchy is not available for {wh_type}. "
+                     f"Use {'BigQuery IAM' if wh_type == 'bigquery' else 'Databricks Unity Catalog' if wh_type == 'databricks' else wh_type} "
+                     f"for access management.",
         }
 
     try:
@@ -150,17 +216,23 @@ def query_user_roles(
     user: str | None = None,
     limit: int = 100,
 ) -> dict:
-    """Get role assignments for users."""
+    """Get role assignments for users.
+
+    Only available for Snowflake. BigQuery and Databricks use IAM/Unity Catalog
+    for access management which does not have Snowflake-style user-role assignments.
+    """
     try:
         connector = ConnectionRegistry.get(warehouse)
     except ValueError:
         return {"success": False, "error": f"Connection '{warehouse}' not found."}
 
     wh_type = _get_wh_type(warehouse)
-    if wh_type != "snowflake":
+    if wh_type not in ("snowflake",):
         return {
             "success": False,
-            "error": f"User role queries are only available for Snowflake (got {wh_type}).",
+            "error": f"User role queries are not available for {wh_type}. "
+                     f"Use {'BigQuery IAM' if wh_type == 'bigquery' else 'Databricks Unity Catalog' if wh_type == 'databricks' else wh_type} "
+                     f"for access management.",
         }
 
     try:
@@ -181,10 +253,3 @@ def query_user_roles(
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
-def _get_wh_type(warehouse: str) -> str:
-    for wh in ConnectionRegistry.list():
-        if wh["name"] == warehouse:
-            return wh.get("type", "unknown")
-    return "unknown"

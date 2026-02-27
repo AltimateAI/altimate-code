@@ -393,6 +393,67 @@ class DbtManifestResult(BaseModel):
     seed_count: int = 0
 
 
+# --- dbt Profile Discovery ---
+
+
+class DbtProfilesParams(BaseModel):
+    path: str | None = None
+
+
+class DbtProfileConnection(BaseModel):
+    name: str
+    type: str
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class DbtProfilesResult(BaseModel):
+    success: bool
+    connections: list[DbtProfileConnection] = Field(default_factory=list)
+    connection_count: int = 0
+    error: str | None = None
+
+
+# --- Local Schema Sync ---
+
+
+class LocalSchemaSyncParams(BaseModel):
+    warehouse: str
+    target_path: str = ":memory:"
+    schemas: list[str] | None = None
+    sample_rows: int = 0
+    limit: int | None = None
+
+
+class LocalSchemaSyncResult(BaseModel):
+    success: bool
+    warehouse: str | None = None
+    target_path: str | None = None
+    tables_synced: int = 0
+    columns_synced: int = 0
+    schemas_synced: int = 0
+    errors: list[str] | None = None
+    error: str | None = None
+
+
+# --- Local SQL Test ---
+
+
+class LocalTestParams(BaseModel):
+    sql: str
+    target_path: str = ":memory:"
+    target_dialect: str | None = None
+
+
+class LocalTestResult(BaseModel):
+    success: bool
+    row_count: int = 0
+    columns: list[str] = Field(default_factory=list)
+    sample_rows: list[dict[str, Any]] = Field(default_factory=list)
+    transpiled: bool = False
+    transpile_warnings: list[str] | None = None
+    error: str | None = None
+
+
 # --- Warehouse ---
 
 
