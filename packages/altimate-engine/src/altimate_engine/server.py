@@ -126,7 +126,7 @@ from altimate_engine.dbt.runner import run_dbt
 from altimate_engine.dbt.manifest import parse_manifest
 from altimate_engine.dbt.lineage import dbt_lineage
 from altimate_engine.connections import ConnectionRegistry
-from altimate_engine.lineage.check import check_lineage
+# lineage.check now delegates to sqlguard via guard_column_lineage
 from altimate_engine.sql.feedback_store import FeedbackStore
 from altimate_engine.schema.cache import SchemaCache
 from altimate_engine.finops.query_history import get_query_history
@@ -237,6 +237,28 @@ INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
 # Lazily-initialized singletons
+def _schema_context_to_dict(
+    schema_context: dict[str, list] | None,
+) -> dict | None:
+    """Convert LineageCheckParams schema_context to guard.py format.
+
+    Input:  {"table_name": [ModelColumn(name=..., data_type=...), ...]}
+    Output: {"tables": {"table_name": {"columns": [{"name": ..., "type": ...}]}}, "version": "1"}
+    """
+    if not schema_context:
+        return None
+    tables = {}
+    for table_name, columns in schema_context.items():
+        cols = []
+        for col in columns:
+            if hasattr(col, "name"):
+                cols.append({"name": col.name, "type": getattr(col, "data_type", "")})
+            elif isinstance(col, dict):
+                cols.append({"name": col.get("name", ""), "type": col.get("data_type", "")})
+        tables[table_name] = {"columns": cols}
+    return {"tables": tables, "version": "1"}
+
+
 _feedback_store: FeedbackStore | None = None
 _schema_cache: SchemaCache | None = None
 
@@ -355,7 +377,13 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             )
             result = SqlOptimizeResult(**result_dict)
         elif method == "lineage.check":
-            result = check_lineage(LineageCheckParams(**params))
+            p = LineageCheckParams(**params)
+            raw = guard_column_lineage(
+                p.sql,
+                dialect=p.dialect or "",
+                schema_context=_schema_context_to_dict(p.schema_context) if p.schema_context else None,
+            )
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
         elif method == "dbt.run":
             result = run_dbt(DbtRunParams(**params))
         elif method == "dbt.manifest":

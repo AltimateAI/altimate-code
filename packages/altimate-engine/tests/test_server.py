@@ -32,9 +32,8 @@ class TestDispatch:
         )
         response = dispatch(request)
         assert response.error is None
-        assert "edges" in response.result
-        assert "confidence" in response.result
-        assert "confidence_factors" in response.result
+        assert "success" in response.result
+        assert "data" in response.result
 
     def test_method_not_found(self):
         request = JsonRpcRequest(method="nonexistent.method", id=6)

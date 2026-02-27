@@ -136,11 +136,9 @@ export interface LineageEdge {
 }
 
 export interface LineageCheckResult {
-  edges: LineageEdge[]
-  tables: string[]
-  columns: string[]
-  confidence: string
-  confidence_factors: string[]
+  success: boolean
+  data: Record<string, unknown>
+  error?: string
 }
 
 // --- dbt ---
@@ -916,9 +914,7 @@ export interface DbtLineageResult {
   model_name: string
   model_unique_id?: string
   compiled_sql?: string
-  edges: LineageEdge[]
-  tables: string[]
-  columns: string[]
+  raw_lineage: Record<string, unknown>
   confidence: string
   confidence_factors: string[]
 }

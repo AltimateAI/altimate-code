@@ -416,19 +416,46 @@ def guard_resolve_term(
         return {"success": False, "error": str(e)}
 
 
+def _ensure_init() -> None:
+    """Lazily initialize sqlguard SDK for gated functions (lineage, etc.).
+
+    Reads credentials from ~/.altimate/altimate.json if present.
+    No-op if already initialized or if config file is missing.
+    """
+    global _SDK_INITIALIZED
+    if _SDK_INITIALIZED:
+        return
+    try:
+        sqlguard.init()
+        _SDK_INITIALIZED = True
+    except Exception:
+        # init() failed — gated functions will raise at call time
+        pass
+
+
+_SDK_INITIALIZED = False
+
+
 def guard_column_lineage(
     sql: str,
     dialect: str = "",
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
+    default_database: str = "",
+    default_schema: str = "",
 ) -> dict:
-    """Schema-aware column lineage."""
+    """Schema-aware column lineage (requires sqlguard.init)."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
+        _ensure_init()
         schema = _resolve_schema(schema_path, schema_context)
         return sqlguard.column_lineage(
-            sql, dialect=dialect or "generic", schema=schema
+            sql,
+            dialect=dialect or "generic",
+            schema=schema,
+            default_database=default_database or None,
+            default_schema=default_schema or None,
         )
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -439,10 +466,11 @@ def guard_track_lineage(
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
-    """Track lineage across multiple queries."""
+    """Track lineage across multiple queries (requires sqlguard.init)."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
+        _ensure_init()
         schema = _schema_or_empty(schema_path, schema_context)
         return sqlguard.track_lineage(queries, schema)
     except Exception as e:

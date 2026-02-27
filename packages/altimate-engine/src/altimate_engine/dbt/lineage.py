@@ -7,12 +7,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from altimate_engine.lineage.check import check_lineage
+from altimate_engine.sql.guard import guard_column_lineage
 from altimate_engine.models import (
     DbtLineageParams,
     DbtLineageResult,
-    LineageCheckParams,
-    ModelColumn,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,15 +21,12 @@ def dbt_lineage(params: DbtLineageParams) -> DbtLineageResult:
 
     Loads the manifest, finds the target model (by name or unique_id),
     extracts its compiled SQL + upstream schemas, and delegates to
-    the lineage checker.
+    sqlguard's column_lineage via guard_column_lineage.
     """
     manifest_path = Path(params.manifest_path)
     if not manifest_path.exists():
         return DbtLineageResult(
             model_name=params.model,
-            edges=[],
-            tables=[],
-            columns=[],
             confidence="low",
             confidence_factors=["Manifest file not found"],
         )
@@ -42,9 +37,6 @@ def dbt_lineage(params: DbtLineageParams) -> DbtLineageResult:
     except (json.JSONDecodeError, OSError) as e:
         return DbtLineageResult(
             model_name=params.model,
-            edges=[],
-            tables=[],
-            columns=[],
             confidence="low",
             confidence_factors=[f"Failed to parse manifest: {e}"],
         )
@@ -57,9 +49,6 @@ def dbt_lineage(params: DbtLineageParams) -> DbtLineageResult:
     if model_node is None:
         return DbtLineageResult(
             model_name=params.model,
-            edges=[],
-            tables=[],
-            columns=[],
             confidence="low",
             confidence_factors=[f"Model '{params.model}' not found in manifest"],
         )
@@ -69,9 +58,6 @@ def dbt_lineage(params: DbtLineageParams) -> DbtLineageResult:
     if not sql:
         return DbtLineageResult(
             model_name=params.model,
-            edges=[],
-            tables=[],
-            columns=[],
             confidence="low",
             confidence_factors=["No compiled SQL found — run `dbt compile` first"],
         )
@@ -85,40 +71,33 @@ def dbt_lineage(params: DbtLineageParams) -> DbtLineageResult:
     upstream_ids = model_node.get("depends_on", {}).get("nodes", [])
     schema_context = _build_schema_context(nodes, sources, upstream_ids)
 
-    # Delegate to lineage checker
-    lineage_result = check_lineage(
-        LineageCheckParams(
-            sql=sql,
-            dialect=dialect,
-            schema_context=schema_context if schema_context else None,
-        )
+    # Delegate to sqlguard column_lineage
+    raw = guard_column_lineage(
+        sql,
+        dialect=dialect,
+        schema_context=schema_context if schema_context else None,
     )
 
+    # Extract database/schema defaults from model node
     return DbtLineageResult(
         model_name=model_node.get("name", params.model),
         model_unique_id=_get_unique_id(nodes, params.model),
         compiled_sql=sql,
-        edges=lineage_result.edges,
-        tables=lineage_result.tables,
-        columns=lineage_result.columns,
-        confidence=lineage_result.confidence,
-        confidence_factors=lineage_result.confidence_factors,
+        raw_lineage=raw,
+        confidence="high" if not raw.get("error") else "low",
+        confidence_factors=[raw["error"]] if raw.get("error") else [],
     )
 
 
 def _find_model(nodes: dict[str, Any], model: str) -> dict[str, Any] | None:
     """Find model node by name or unique_id."""
-    # Try exact unique_id match first
     if model in nodes:
         return nodes[model]
-
-    # Try model.{name} format
     for node_id, node in nodes.items():
         if node.get("resource_type") != "model":
             continue
         if node.get("name") == model:
             return node
-
     return None
 
 
@@ -134,7 +113,6 @@ def _get_unique_id(nodes: dict[str, Any], model: str) -> str | None:
 
 def _detect_dialect(manifest: dict[str, Any], model_node: dict[str, Any]) -> str:
     """Detect SQL dialect from manifest metadata."""
-    # Check adapter type in metadata
     metadata = manifest.get("metadata", {})
     adapter = metadata.get("adapter_type", "")
     if adapter:
@@ -148,7 +126,6 @@ def _detect_dialect(manifest: dict[str, Any], model_node: dict[str, Any]) -> str
             "duckdb": "duckdb",
         }
         return dialect_map.get(adapter, adapter)
-
     return "snowflake"
 
 
@@ -156,20 +133,19 @@ def _build_schema_context(
     nodes: dict[str, Any],
     sources: dict[str, Any],
     upstream_ids: list[str],
-) -> dict[str, list[ModelColumn]]:
+) -> dict | None:
     """Build schema context from upstream model/source columns.
 
-    Returns a dict mapping table names to column definitions for
-    the lineage checker's schema_context param.
+    Returns sqlguard schema format:
+    {"tables": {"table_name": {"columns": [{"name": ..., "type": ...}]}}, "version": "1"}
     """
-    schema: dict[str, list[ModelColumn]] = {}
+    tables: dict[str, dict] = {}
 
     for uid in upstream_ids:
         node = nodes.get(uid) or sources.get(uid)
         if node is None:
             continue
 
-        # Use alias if available, else name
         table_name = node.get("alias") or node.get("name", "")
         if not table_name:
             continue
@@ -179,14 +155,14 @@ def _build_schema_context(
             continue
 
         cols = [
-            ModelColumn(
-                name=col.get("name", col_name),
-                data_type=col.get("data_type") or col.get("type") or "",
-            )
+            {"name": col.get("name", col_name), "type": col.get("data_type") or col.get("type") or ""}
             for col_name, col in columns_dict.items()
         ]
 
         if cols:
-            schema[table_name] = cols
+            tables[table_name] = {"columns": cols}
 
-    return schema
+    if not tables:
+        return None
+
+    return {"tables": tables, "version": "1"}

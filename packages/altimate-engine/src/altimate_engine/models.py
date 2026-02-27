@@ -406,9 +406,7 @@ class DbtLineageResult(BaseModel):
     model_name: str
     model_unique_id: str | None = None
     compiled_sql: str | None = None
-    edges: list[LineageEdge] = Field(default_factory=list)
-    tables: list[str] = Field(default_factory=list)
-    columns: list[str] = Field(default_factory=list)
+    raw_lineage: dict[str, Any] = Field(default_factory=dict)
     confidence: str = "high"
     confidence_factors: list[str] = Field(default_factory=list)
 

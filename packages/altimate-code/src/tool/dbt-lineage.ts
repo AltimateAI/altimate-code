@@ -5,7 +5,7 @@ import type { DbtLineageResult } from "../bridge/protocol"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
-    "Compute column-level lineage for a dbt model. Takes a manifest.json path and model name, extracts compiled SQL and upstream schemas, and traces how source columns flow to output columns.",
+    "Compute column-level lineage for a dbt model using the Rust-based sqlguard engine. Takes a manifest.json path and model name, extracts compiled SQL and upstream schemas, and traces column flow.",
   parameters: z.object({
     manifest_path: z.string().describe("Path to dbt manifest.json file"),
     model: z.string().describe("Model name or unique_id (e.g. 'my_model' or 'model.project.my_model')"),
@@ -19,12 +19,12 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
         dialect: args.dialect,
       })
 
+      const hasError = result.confidence_factors.length > 0 && result.confidence === "low"
+
       return {
-        title: `dbt Lineage: ${result.model_name} — ${result.edges.length} edge(s) [${result.confidence}]`,
+        title: `dbt Lineage: ${result.model_name} [${result.confidence}]`,
         metadata: {
           model_name: result.model_name,
-          edgeCount: result.edges.length,
-          tableCount: result.tables.length,
           confidence: result.confidence,
         },
         output: formatDbtLineage(result),
@@ -33,7 +33,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "dbt Lineage: ERROR",
-        metadata: { model_name: args.model, edgeCount: 0, tableCount: 0, confidence: "unknown" },
+        metadata: { model_name: args.model, confidence: "unknown" },
         output: `Failed: ${msg}`,
       }
     }
@@ -53,25 +53,37 @@ function formatDbtLineage(result: DbtLineageResult): string {
     lines.push("")
   }
 
-  if (result.edges.length === 0) {
-    lines.push("No column-level lineage edges detected.")
+  const lineage = result.raw_lineage
+  if (!lineage || Object.keys(lineage).length === 0) {
+    lines.push("No lineage data returned.")
     if (!result.compiled_sql) {
       lines.push("Run `dbt compile` first to generate compiled SQL.")
     }
     return lines.join("\n")
   }
 
-  lines.push("Column Lineage:")
-  lines.push("Source → Target | Transform")
-  lines.push("".padEnd(60, "-"))
-
-  for (const edge of result.edges) {
-    const transform = edge.transform ? ` | ${edge.transform}` : ""
-    lines.push(`${edge.source_table}.${edge.source_column} → ${edge.target_table}.${edge.target_column}${transform}`)
+  // column_dict: output columns -> source columns mapping
+  const columnDict = lineage.column_dict as Record<string, unknown> | undefined
+  if (columnDict) {
+    lines.push("Column Mappings:")
+    for (const [target, sources] of Object.entries(columnDict)) {
+      lines.push(`  ${target} ← ${JSON.stringify(sources)}`)
+    }
+    lines.push("")
   }
 
-  lines.push("")
-  lines.push(`Tables: ${result.tables.join(", ")}`)
+  // column_lineage: detailed edge list
+  const edges = lineage.column_lineage as unknown[] | undefined
+  if (edges?.length) {
+    lines.push("Lineage Edges:")
+    for (const edge of edges) {
+      lines.push(`  ${JSON.stringify(edge)}`)
+    }
+  }
+
+  if (!columnDict && !edges) {
+    lines.push(JSON.stringify(lineage, null, 2))
+  }
 
   return lines.join("\n")
 }

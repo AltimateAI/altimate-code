@@ -5,7 +5,7 @@ import type { LineageCheckResult } from "../bridge/protocol"
 
 export const LineageCheckTool = Tool.define("lineage_check", {
   description:
-    "Check column-level lineage for a SQL query. Traces how source columns flow through transformations to output columns. Useful for impact analysis and understanding data flow.",
+    "Check column-level lineage for a SQL query using the Rust-based sqlguard engine. Traces how source columns flow through transformations to output columns. Useful for impact analysis and understanding data flow.",
   parameters: z.object({
     sql: z.string().describe("SQL query to trace lineage for"),
     dialect: z
@@ -26,54 +26,54 @@ export const LineageCheckTool = Tool.define("lineage_check", {
         schema_context: args.schema_context,
       })
 
+      const data = result.data as Record<string, any>
+      if (result.error) {
+        return {
+          title: "Lineage: ERROR",
+          metadata: { success: false },
+          output: `Error: ${result.error}`,
+        }
+      }
+
       return {
-        title: `Lineage: ${result.edges.length} edge${result.edges.length !== 1 ? "s" : ""}, ${result.tables.length} table${result.tables.length !== 1 ? "s" : ""} [${result.confidence}]`,
-        metadata: {
-          edgeCount: result.edges.length,
-          tableCount: result.tables.length,
-          columnCount: result.columns.length,
-          confidence: result.confidence,
-        },
-        output: formatLineage(result),
+        title: `Lineage: ${result.success ? "OK" : "PARTIAL"}`,
+        metadata: { success: result.success },
+        output: formatLineage(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Lineage: ERROR",
-        metadata: { edgeCount: 0, tableCount: 0, columnCount: 0, confidence: "unknown" },
-        output: `Failed to check lineage: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        metadata: { success: false },
+        output: `Failed to check lineage: ${msg}\n\nEnsure the Python bridge is running and sqlguard is initialized.`,
       }
     }
   },
 })
 
-function formatLineage(result: LineageCheckResult): string {
+function formatLineage(data: Record<string, any>): string {
   const lines: string[] = []
 
-  if (result.confidence_factors.length > 0) {
-    lines.push(`Confidence: ${result.confidence}`)
-    lines.push(`  Note: ${result.confidence_factors.join("; ")}`)
+  // column_dict: output columns -> source columns mapping
+  if (data.column_dict) {
+    lines.push("Column Mappings:")
+    for (const [target, sources] of Object.entries(data.column_dict)) {
+      lines.push(`  ${target} ← ${JSON.stringify(sources)}`)
+    }
     lines.push("")
   }
 
-  if (result.edges.length === 0) {
-    lines.push("No column-level lineage edges detected.")
-    lines.push("This may indicate the query uses SELECT * or has complex expressions that couldn't be traced.")
-    return lines.join("\n")
+  // column_lineage: detailed edge list
+  if (data.column_lineage?.length) {
+    lines.push("Lineage Edges:")
+    for (const edge of data.column_lineage) {
+      lines.push(`  ${JSON.stringify(edge)}`)
+    }
   }
 
-  lines.push("Column Lineage Edges:")
-  lines.push("Source Table.Column → Target Table.Column | Transform")
-  lines.push("".padEnd(60, "-"))
-
-  for (const edge of result.edges) {
-    const transform = edge.transform ? ` | ${edge.transform}` : ""
-    lines.push(`${edge.source_table}.${edge.source_column} → ${edge.target_table}.${edge.target_column}${transform}`)
+  if (lines.length === 0) {
+    lines.push(JSON.stringify(data, null, 2))
   }
-
-  lines.push("")
-  lines.push(`Tables: ${result.tables.join(", ")}`)
-  lines.push(`Columns: ${result.columns.join(", ")}`)
 
   return lines.join("\n")
 }
