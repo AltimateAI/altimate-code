@@ -60,6 +60,39 @@ import { SqlGuardLintTool } from "./sqlguard-lint"
 import { SqlGuardSafetyTool } from "./sqlguard-safety"
 import { SqlGuardTranspileTool } from "./sqlguard-transpile"
 import { SqlGuardCheckTool } from "./sqlguard-check"
+// Phase 1 (P0)
+import { SqlGuardFixTool } from "./sqlguard-fix"
+import { SqlGuardPolicyTool } from "./sqlguard-policy"
+import { SqlGuardComplexityTool } from "./sqlguard-complexity"
+import { SqlGuardSemanticsTool } from "./sqlguard-semantics"
+import { SqlGuardTestgenTool } from "./sqlguard-testgen"
+// Phase 2 (P1)
+import { SqlGuardEquivalenceTool } from "./sqlguard-equivalence"
+import { SqlGuardMigrationTool } from "./sqlguard-migration"
+import { SqlGuardSchemaDiffTool } from "./sqlguard-schema-diff"
+import { SqlGuardRewriteTool } from "./sqlguard-rewrite"
+import { SqlGuardCorrectTool } from "./sqlguard-correct"
+import { SqlGuardGradeTool } from "./sqlguard-grade"
+import { SqlGuardCostTool } from "./sqlguard-cost"
+// Phase 3 (P2)
+import { SqlGuardClassifyPiiTool } from "./sqlguard-classify-pii"
+import { SqlGuardQueryPiiTool } from "./sqlguard-query-pii"
+import { SqlGuardResolveTermTool } from "./sqlguard-resolve-term"
+import { SqlGuardColumnLineageTool } from "./sqlguard-column-lineage"
+import { SqlGuardTrackLineageTool } from "./sqlguard-track-lineage"
+import { SqlGuardFormatTool } from "./sqlguard-format"
+import { SqlGuardExtractMetadataTool } from "./sqlguard-extract-metadata"
+import { SqlGuardCompareTool } from "./sqlguard-compare"
+import { SqlGuardCompleteTool } from "./sqlguard-complete"
+import { SqlGuardOptimizeContextTool } from "./sqlguard-optimize-context"
+import { SqlGuardOptimizeForQueryTool } from "./sqlguard-optimize-for-query"
+import { SqlGuardPruneSchemaTool } from "./sqlguard-prune-schema"
+import { SqlGuardImportDdlTool } from "./sqlguard-import-ddl"
+import { SqlGuardExportDdlTool } from "./sqlguard-export-ddl"
+import { SqlGuardFingerprintTool } from "./sqlguard-fingerprint"
+import { SqlGuardIntrospectionSqlTool } from "./sqlguard-introspection-sql"
+import { SqlGuardParseDbtTool } from "./sqlguard-parse-dbt"
+import { SqlGuardIsSafeTool } from "./sqlguard-is-safe"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -186,6 +219,39 @@ export namespace ToolRegistry {
       SqlGuardSafetyTool,
       SqlGuardTranspileTool,
       SqlGuardCheckTool,
+      // Phase 1 (P0)
+      SqlGuardFixTool,
+      SqlGuardPolicyTool,
+      SqlGuardComplexityTool,
+      SqlGuardSemanticsTool,
+      SqlGuardTestgenTool,
+      // Phase 2 (P1)
+      SqlGuardEquivalenceTool,
+      SqlGuardMigrationTool,
+      SqlGuardSchemaDiffTool,
+      SqlGuardRewriteTool,
+      SqlGuardCorrectTool,
+      SqlGuardGradeTool,
+      SqlGuardCostTool,
+      // Phase 3 (P2)
+      SqlGuardClassifyPiiTool,
+      SqlGuardQueryPiiTool,
+      SqlGuardResolveTermTool,
+      SqlGuardColumnLineageTool,
+      SqlGuardTrackLineageTool,
+      SqlGuardFormatTool,
+      SqlGuardExtractMetadataTool,
+      SqlGuardCompareTool,
+      SqlGuardCompleteTool,
+      SqlGuardOptimizeContextTool,
+      SqlGuardOptimizeForQueryTool,
+      SqlGuardPruneSchemaTool,
+      SqlGuardImportDdlTool,
+      SqlGuardExportDdlTool,
+      SqlGuardFingerprintTool,
+      SqlGuardIntrospectionSqlTool,
+      SqlGuardParseDbtTool,
+      SqlGuardIsSafeTool,
       ...custom,
     ]
   }

@@ -722,6 +722,188 @@ export interface SqlGuardResult {
   error?: string
 }
 
+// --- sqlguard Phase 1 (P0) ---
+
+export interface SqlGuardFixParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+  dialect?: string
+}
+
+export interface SqlGuardPolicyParams {
+  sql: string
+  policy_yaml: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardComplexityParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+  dialect?: string
+}
+
+export interface SqlGuardSemanticsParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardTestgenParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+// --- sqlguard Phase 2 (P1) ---
+
+export interface SqlGuardEquivalenceParams {
+  sql1: string
+  sql2: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardMigrationParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardSchemaDiffParams {
+  schema1_path: string
+  schema2_path: string
+}
+
+export interface SqlGuardRewriteParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardCorrectParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+  max_iterations?: number
+}
+
+export interface SqlGuardGradeParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardCostParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+  dialect?: string
+}
+
+// --- sqlguard Phase 3 (P2) ---
+
+export interface SqlGuardClassifyPiiParams {
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardQueryPiiParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardResolveTermParams {
+  term: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardColumnLineageParams {
+  sql: string
+  dialect?: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardTrackLineageParams {
+  queries: string[]
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardFormatSqlParams {
+  sql: string
+  dialect?: string
+}
+
+export interface SqlGuardExtractMetadataParams {
+  sql: string
+  dialect?: string
+}
+
+export interface SqlGuardCompareQueriesParams {
+  left_sql: string
+  right_sql: string
+  dialect?: string
+}
+
+export interface SqlGuardCompleteToolParams {
+  sql: string
+  cursor_pos: number
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardOptimizeContextParams {
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardOptimizeForQueryParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardPruneSchemaParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardImportDdlParams {
+  ddl: string
+  dialect?: string
+}
+
+export interface SqlGuardExportDdlParams {
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardFingerprintParams {
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardIntrospectionSqlParams {
+  db_type: string
+  database: string
+  schema_name?: string
+}
+
+export interface SqlGuardParseDbtParams {
+  project_dir: string
+}
+
+export interface SqlGuardIsSafeParams {
+  sql: string
+}
+
 // --- dbt Profile Discovery ---
 
 export interface DbtProfilesParams {
@@ -822,13 +1004,46 @@ export const BridgeMethods = {
   // --- local testing ---
   "local.schema_sync": {} as { params: LocalSchemaSyncParams; result: LocalSchemaSyncResult },
   "local.test": {} as { params: LocalTestParams; result: LocalTestResult },
-  // --- sqlguard ---
+  // --- sqlguard (existing) ---
   "sqlguard.validate": {} as { params: SqlGuardValidateParams; result: SqlGuardResult },
   "sqlguard.lint": {} as { params: SqlGuardLintParams; result: SqlGuardResult },
   "sqlguard.safety": {} as { params: SqlGuardSafetyParams; result: SqlGuardResult },
   "sqlguard.transpile": {} as { params: SqlGuardTranspileParams; result: SqlGuardResult },
   "sqlguard.explain": {} as { params: SqlGuardExplainParams; result: SqlGuardResult },
   "sqlguard.check": {} as { params: SqlGuardCheckParams; result: SqlGuardResult },
+  // --- sqlguard Phase 1 (P0) ---
+  "sqlguard.fix": {} as { params: SqlGuardFixParams; result: SqlGuardResult },
+  "sqlguard.policy": {} as { params: SqlGuardPolicyParams; result: SqlGuardResult },
+  "sqlguard.complexity": {} as { params: SqlGuardComplexityParams; result: SqlGuardResult },
+  "sqlguard.semantics": {} as { params: SqlGuardSemanticsParams; result: SqlGuardResult },
+  "sqlguard.testgen": {} as { params: SqlGuardTestgenParams; result: SqlGuardResult },
+  // --- sqlguard Phase 2 (P1) ---
+  "sqlguard.equivalence": {} as { params: SqlGuardEquivalenceParams; result: SqlGuardResult },
+  "sqlguard.migration": {} as { params: SqlGuardMigrationParams; result: SqlGuardResult },
+  "sqlguard.schema_diff": {} as { params: SqlGuardSchemaDiffParams; result: SqlGuardResult },
+  "sqlguard.rewrite": {} as { params: SqlGuardRewriteParams; result: SqlGuardResult },
+  "sqlguard.correct": {} as { params: SqlGuardCorrectParams; result: SqlGuardResult },
+  "sqlguard.grade": {} as { params: SqlGuardGradeParams; result: SqlGuardResult },
+  "sqlguard.cost": {} as { params: SqlGuardCostParams; result: SqlGuardResult },
+  // --- sqlguard Phase 3 (P2) ---
+  "sqlguard.classify_pii": {} as { params: SqlGuardClassifyPiiParams; result: SqlGuardResult },
+  "sqlguard.query_pii": {} as { params: SqlGuardQueryPiiParams; result: SqlGuardResult },
+  "sqlguard.resolve_term": {} as { params: SqlGuardResolveTermParams; result: SqlGuardResult },
+  "sqlguard.column_lineage": {} as { params: SqlGuardColumnLineageParams; result: SqlGuardResult },
+  "sqlguard.track_lineage": {} as { params: SqlGuardTrackLineageParams; result: SqlGuardResult },
+  "sqlguard.format": {} as { params: SqlGuardFormatSqlParams; result: SqlGuardResult },
+  "sqlguard.metadata": {} as { params: SqlGuardExtractMetadataParams; result: SqlGuardResult },
+  "sqlguard.compare": {} as { params: SqlGuardCompareQueriesParams; result: SqlGuardResult },
+  "sqlguard.complete": {} as { params: SqlGuardCompleteToolParams; result: SqlGuardResult },
+  "sqlguard.optimize_context": {} as { params: SqlGuardOptimizeContextParams; result: SqlGuardResult },
+  "sqlguard.optimize_for_query": {} as { params: SqlGuardOptimizeForQueryParams; result: SqlGuardResult },
+  "sqlguard.prune_schema": {} as { params: SqlGuardPruneSchemaParams; result: SqlGuardResult },
+  "sqlguard.import_ddl": {} as { params: SqlGuardImportDdlParams; result: SqlGuardResult },
+  "sqlguard.export_ddl": {} as { params: SqlGuardExportDdlParams; result: SqlGuardResult },
+  "sqlguard.fingerprint": {} as { params: SqlGuardFingerprintParams; result: SqlGuardResult },
+  "sqlguard.introspection_sql": {} as { params: SqlGuardIntrospectionSqlParams; result: SqlGuardResult },
+  "sqlguard.parse_dbt": {} as { params: SqlGuardParseDbtParams; result: SqlGuardResult },
+  "sqlguard.is_safe": {} as { params: SqlGuardIsSafeParams; result: SqlGuardResult },
   ping: {} as { params: Record<string, never>; result: { status: string } },
 } as const
 

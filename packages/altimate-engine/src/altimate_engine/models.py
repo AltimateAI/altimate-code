@@ -689,6 +689,7 @@ class SqlDiffResult(BaseModel):
     change_count: int = 0
     similarity: float = 1.0
     changes: list[dict[str, Any]] = Field(default_factory=list)
+    semantic_equivalent: bool | None = None
 
 
 # --- SQL Rewrite ---
@@ -812,6 +813,191 @@ class SqlGuardResult(BaseModel):
     success: bool = True
     data: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+
+
+# --- sqlguard Phase 1 (P0) ---
+
+
+class SqlGuardFixParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+    dialect: str = ""
+
+
+class SqlGuardPolicyParams(BaseModel):
+    sql: str
+    policy_yaml: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardComplexityParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+    dialect: str = ""
+
+
+class SqlGuardSemanticsParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardTestgenParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+# --- sqlguard Phase 2 (P1) ---
+
+
+class SqlGuardEquivalenceParams(BaseModel):
+    sql1: str
+    sql2: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardMigrationParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardSchemaDiffParams(BaseModel):
+    schema1_path: str
+    schema2_path: str
+
+
+class SqlGuardGuardRewriteParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardCorrectParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+    max_iterations: int = 5
+
+
+class SqlGuardGradeParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardCostParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+    dialect: str = ""
+
+
+# --- sqlguard Phase 3 (P2) ---
+
+
+class SqlGuardClassifyPiiParams(BaseModel):
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardQueryPiiParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardResolveTermParams(BaseModel):
+    term: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardColumnLineageParams(BaseModel):
+    sql: str
+    dialect: str = ""
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardTrackLineageParams(BaseModel):
+    queries: list[str]
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardFormatSqlParams(BaseModel):
+    sql: str
+    dialect: str = ""
+
+
+class SqlGuardExtractMetadataParams(BaseModel):
+    sql: str
+    dialect: str = ""
+
+
+class SqlGuardCompareQueriesParams(BaseModel):
+    left_sql: str
+    right_sql: str
+    dialect: str = ""
+
+
+class SqlGuardCompleteParams(BaseModel):
+    sql: str
+    cursor_pos: int
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardOptimizeContextParams(BaseModel):
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardOptimizeForQueryParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardPruneSchemaParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardImportDdlParams(BaseModel):
+    ddl: str
+    dialect: str = ""
+
+
+class SqlGuardExportDdlParams(BaseModel):
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardSchemaFingerprintParams(BaseModel):
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardIntrospectionSqlParams(BaseModel):
+    db_type: str
+    database: str
+    schema_name: str | None = None
+
+
+class SqlGuardParseDbtProjectParams(BaseModel):
+    project_dir: str
+
+
+class SqlGuardIsSafeParams(BaseModel):
+    sql: str
 
 
 # --- JSON-RPC ---

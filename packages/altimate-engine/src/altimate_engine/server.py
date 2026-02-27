@@ -146,6 +146,39 @@ from altimate_engine.sql.guard import (
     guard_transpile,
     guard_explain,
     guard_check,
+    # Phase 1 (P0)
+    guard_fix as guard_fix_sql,
+    guard_check_policy,
+    guard_complexity_score,
+    guard_check_semantics,
+    guard_generate_tests,
+    # Phase 2 (P1)
+    guard_check_equivalence,
+    guard_analyze_migration,
+    guard_diff_schemas,
+    guard_rewrite as guard_rewrite_sql,
+    guard_correct,
+    guard_evaluate,
+    guard_estimate_cost,
+    # Phase 3 (P2)
+    guard_classify_pii,
+    guard_check_query_pii,
+    guard_resolve_term,
+    guard_column_lineage,
+    guard_track_lineage,
+    guard_format_sql,
+    guard_extract_metadata,
+    guard_compare_queries,
+    guard_complete,
+    guard_optimize_context,
+    guard_optimize_for_query,
+    guard_prune_schema,
+    guard_import_ddl,
+    guard_export_ddl,
+    guard_schema_fingerprint,
+    guard_introspection_sql,
+    guard_parse_dbt_project,
+    guard_is_safe,
 )
 from altimate_engine.dbt.profiles import discover_dbt_connections
 from altimate_engine.local.schema_sync import sync_schema
@@ -158,6 +191,39 @@ from altimate_engine.models import (
     SqlGuardExplainParams,
     SqlGuardCheckParams,
     SqlGuardResult,
+    # Phase 1 (P0)
+    SqlGuardFixParams,
+    SqlGuardPolicyParams,
+    SqlGuardComplexityParams,
+    SqlGuardSemanticsParams,
+    SqlGuardTestgenParams,
+    # Phase 2 (P1)
+    SqlGuardEquivalenceParams,
+    SqlGuardMigrationParams,
+    SqlGuardSchemaDiffParams,
+    SqlGuardGuardRewriteParams,
+    SqlGuardCorrectParams,
+    SqlGuardGradeParams,
+    SqlGuardCostParams,
+    # Phase 3 (P2)
+    SqlGuardClassifyPiiParams,
+    SqlGuardQueryPiiParams,
+    SqlGuardResolveTermParams,
+    SqlGuardColumnLineageParams,
+    SqlGuardTrackLineageParams,
+    SqlGuardFormatSqlParams,
+    SqlGuardExtractMetadataParams,
+    SqlGuardCompareQueriesParams,
+    SqlGuardCompleteParams,
+    SqlGuardOptimizeContextParams,
+    SqlGuardOptimizeForQueryParams,
+    SqlGuardPruneSchemaParams,
+    SqlGuardImportDdlParams,
+    SqlGuardExportDdlParams,
+    SqlGuardSchemaFingerprintParams,
+    SqlGuardIntrospectionSqlParams,
+    SqlGuardParseDbtProjectParams,
+    SqlGuardIsSafeParams,
 )
 
 
@@ -235,6 +301,37 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                         confidence=issue.get("confidence", "high"),
                     )
                 )
+            # Append sqlguard semantic checks if available
+            sem_result = guard_check_semantics(
+                params_obj.sql,
+                schema_context=params_obj.schema_context,
+            )
+            if sem_result.get("issues"):
+                for si in sem_result["issues"]:
+                    issues.append(
+                        SqlAnalyzeIssue(
+                            type=f"SEMANTIC_{si.get('rule', si.get('type', 'UNKNOWN'))}",
+                            severity=si.get("severity", "warning"),
+                            message=si.get("message", ""),
+                            recommendation=si.get("suggestion", si.get("recommendation", "")),
+                            location=si.get("location"),
+                            confidence=si.get("confidence", "medium"),
+                        )
+                    )
+            # Append sqlguard safety scan if available
+            safety_result = guard_scan_safety(params_obj.sql)
+            if safety_result.get("threats"):
+                for threat in safety_result["threats"]:
+                    issues.append(
+                        SqlAnalyzeIssue(
+                            type=f"SAFETY_{threat.get('type', 'THREAT')}",
+                            severity=threat.get("severity", "error"),
+                            message=threat.get("description", threat.get("message", "")),
+                            recommendation="Review this SQL for potential security risks.",
+                            location=threat.get("location"),
+                            confidence="high",
+                        )
+                    )
             result = SqlAnalyzeResult(
                 success=raw_result.get("success", True),
                 issues=issues,
@@ -285,6 +382,15 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             pc_params = SqlPredictCostParams(**params)
             store = _get_feedback_store()
             prediction = store.predict(sql=pc_params.sql, dialect=pc_params.dialect)
+            # Merge sqlguard cost estimate if feedback store has no data
+            if prediction.get("method") == "no_data":
+                guard_cost = guard_estimate_cost(
+                    pc_params.sql, dialect=pc_params.dialect
+                )
+                if guard_cost.get("bytes_scanned") or guard_cost.get("estimated_usd"):
+                    prediction["predicted_bytes"] = guard_cost.get("bytes_scanned")
+                    prediction["predicted_credits"] = guard_cost.get("estimated_usd")
+                    prediction["method"] = "sqlguard_estimate"
             result = SqlPredictCostResult(**prediction)
         elif method == "sql.format":
             fmt_params = SqlFormatParams(**params)
@@ -296,17 +402,39 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = explain_sql(SqlExplainParams(**params))
         elif method == "sql.fix":
             fix_params = SqlFixParams(**params)
-            fix_result = fix_sql(
-                fix_params.sql, fix_params.error_message, fix_params.dialect
-            )
-            result = SqlFixResult(
-                success=fix_result["success"],
-                original_sql=fix_result["original_sql"],
-                fixed_sql=fix_result.get("fixed_sql"),
-                error_message=fix_result["error_message"],
-                suggestions=[SqlFixSuggestion(**s) for s in fix_result["suggestions"]],
-                suggestion_count=fix_result["suggestion_count"],
-            )
+            # Try sqlguard.fix first for Rust-powered fixing
+            guard_result = guard_fix_sql(fix_params.sql, dialect=fix_params.dialect)
+            if guard_result.get("success") and guard_result.get("fixed_sql"):
+                result = SqlFixResult(
+                    success=True,
+                    original_sql=fix_params.sql,
+                    fixed_sql=guard_result["fixed_sql"],
+                    error_message=fix_params.error_message,
+                    suggestions=[
+                        SqlFixSuggestion(
+                            type="SQLGUARD_FIX",
+                            message="Auto-fixed by sqlguard Rust engine",
+                            confidence="high",
+                            fixed_sql=guard_result["fixed_sql"],
+                        )
+                    ],
+                    suggestion_count=1,
+                )
+            else:
+                # Fall back to sqlglot-based fixer
+                fix_result = fix_sql(
+                    fix_params.sql, fix_params.error_message, fix_params.dialect
+                )
+                result = SqlFixResult(
+                    success=fix_result["success"],
+                    original_sql=fix_result["original_sql"],
+                    fixed_sql=fix_result.get("fixed_sql"),
+                    error_message=fix_result["error_message"],
+                    suggestions=[
+                        SqlFixSuggestion(**s) for s in fix_result["suggestions"]
+                    ],
+                    suggestion_count=fix_result["suggestion_count"],
+                )
         elif method == "sql.autocomplete":
             ac_params = SqlAutocompleteParams(**params)
             cache = _get_schema_cache()
@@ -428,20 +556,47 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         elif method == "sql.diff":
             p = SqlDiffParams(**params)
             raw = diff_sql(p.original, p.modified, p.context_lines)
+            # Add semantic equivalence check via sqlguard
+            equiv = guard_check_equivalence(p.original, p.modified)
+            if equiv.get("equivalent") is not None:
+                raw["semantic_equivalent"] = equiv["equivalent"]
             result = SqlDiffResult(**raw)
         # --- SQL rewrite ---
         elif method == "sql.rewrite":
             p = SqlRewriteParams(**params)
-            raw = rewrite_sql(p.sql, p.dialect, p.schema_context)
-            result = SqlRewriteResult(
-                success=raw["success"],
-                original_sql=raw["original_sql"],
-                rewritten_sql=raw.get("rewritten_sql"),
-                rewrites_applied=[
-                    SqlRewriteRule(**r) for r in raw.get("rewrites_applied", [])
-                ],
-                error=raw.get("error"),
-            )
+            # Try sqlguard.rewrite first for Rust-powered rewriting
+            guard_rw = guard_rewrite_sql(p.sql, schema_context=p.schema_context)
+            if guard_rw.get("success") and guard_rw.get("rewritten_sql"):
+                rewrites = []
+                for r in guard_rw.get("rewrites", []):
+                    rewrites.append(
+                        SqlRewriteRule(
+                            rule=r.get("rule", "SQLGUARD_REWRITE"),
+                            original_fragment=r.get("original_fragment", ""),
+                            rewritten_fragment=r.get("rewritten_fragment", ""),
+                            explanation=r.get("explanation", "Rewritten by sqlguard"),
+                            can_auto_apply=True,
+                        )
+                    )
+                result = SqlRewriteResult(
+                    success=True,
+                    original_sql=p.sql,
+                    rewritten_sql=guard_rw["rewritten_sql"],
+                    rewrites_applied=rewrites,
+                )
+            else:
+                # Fall back to sqlglot-based rewriter
+                raw = rewrite_sql(p.sql, p.dialect, p.schema_context)
+                result = SqlRewriteResult(
+                    success=raw["success"],
+                    original_sql=raw["original_sql"],
+                    rewritten_sql=raw.get("rewritten_sql"),
+                    rewrites_applied=[
+                        SqlRewriteRule(**r)
+                        for r in raw.get("rewrites_applied", [])
+                    ],
+                    error=raw.get("error"),
+                )
         # --- sqlguard ---
         elif method == "sqlguard.validate":
             p = SqlGuardValidateParams(**params)
@@ -477,6 +632,159 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             p = SqlGuardCheckParams(**params)
             raw = guard_check(p.sql, p.schema_path, p.schema_context)
             result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        # --- sqlguard Phase 1 (P0) ---
+        elif method == "sqlguard.fix":
+            p = SqlGuardFixParams(**params)
+            raw = guard_fix_sql(p.sql, p.schema_path, p.schema_context, p.dialect)
+            result = SqlGuardResult(
+                success=raw.get("success", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.policy":
+            p = SqlGuardPolicyParams(**params)
+            raw = guard_check_policy(
+                p.sql, p.policy_yaml, p.schema_path, p.schema_context
+            )
+            result = SqlGuardResult(
+                success=raw.get("pass", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.complexity":
+            p = SqlGuardComplexityParams(**params)
+            raw = guard_complexity_score(
+                p.sql, p.schema_path, p.schema_context, p.dialect
+            )
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.semantics":
+            p = SqlGuardSemanticsParams(**params)
+            raw = guard_check_semantics(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(
+                success=raw.get("valid", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.testgen":
+            p = SqlGuardTestgenParams(**params)
+            raw = guard_generate_tests(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        # --- sqlguard Phase 2 (P1) ---
+        elif method == "sqlguard.equivalence":
+            p = SqlGuardEquivalenceParams(**params)
+            raw = guard_check_equivalence(
+                p.sql1, p.sql2, p.schema_path, p.schema_context
+            )
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.migration":
+            p = SqlGuardMigrationParams(**params)
+            raw = guard_analyze_migration(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.schema_diff":
+            p = SqlGuardSchemaDiffParams(**params)
+            raw = guard_diff_schemas(p.schema1_path, p.schema2_path)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.rewrite":
+            p = SqlGuardGuardRewriteParams(**params)
+            raw = guard_rewrite_sql(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(
+                success=raw.get("success", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.correct":
+            p = SqlGuardCorrectParams(**params)
+            raw = guard_correct(
+                p.sql, p.schema_path, p.schema_context, p.max_iterations
+            )
+            result = SqlGuardResult(
+                success=raw.get("success", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.grade":
+            p = SqlGuardGradeParams(**params)
+            raw = guard_evaluate(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.cost":
+            p = SqlGuardCostParams(**params)
+            raw = guard_estimate_cost(
+                p.sql, p.schema_path, p.schema_context, p.dialect
+            )
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        # --- sqlguard Phase 3 (P2) ---
+        elif method == "sqlguard.classify_pii":
+            p = SqlGuardClassifyPiiParams(**params)
+            raw = guard_classify_pii(p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.query_pii":
+            p = SqlGuardQueryPiiParams(**params)
+            raw = guard_check_query_pii(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.resolve_term":
+            p = SqlGuardResolveTermParams(**params)
+            raw = guard_resolve_term(p.term, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.column_lineage":
+            p = SqlGuardColumnLineageParams(**params)
+            raw = guard_column_lineage(
+                p.sql, p.dialect, p.schema_path, p.schema_context
+            )
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.track_lineage":
+            p = SqlGuardTrackLineageParams(**params)
+            raw = guard_track_lineage(p.queries, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.format":
+            p = SqlGuardFormatSqlParams(**params)
+            raw = guard_format_sql(p.sql, p.dialect)
+            result = SqlGuardResult(
+                success=raw.get("success", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.metadata":
+            p = SqlGuardExtractMetadataParams(**params)
+            raw = guard_extract_metadata(p.sql, p.dialect)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.compare":
+            p = SqlGuardCompareQueriesParams(**params)
+            raw = guard_compare_queries(p.left_sql, p.right_sql, p.dialect)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.complete":
+            p = SqlGuardCompleteParams(**params)
+            raw = guard_complete(p.sql, p.cursor_pos, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.optimize_context":
+            p = SqlGuardOptimizeContextParams(**params)
+            raw = guard_optimize_context(p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.optimize_for_query":
+            p = SqlGuardOptimizeForQueryParams(**params)
+            raw = guard_optimize_for_query(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.prune_schema":
+            p = SqlGuardPruneSchemaParams(**params)
+            raw = guard_prune_schema(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.import_ddl":
+            p = SqlGuardImportDdlParams(**params)
+            raw = guard_import_ddl(p.ddl, p.dialect)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.export_ddl":
+            p = SqlGuardExportDdlParams(**params)
+            raw = guard_export_ddl(p.schema_path, p.schema_context)
+            result = SqlGuardResult(
+                success=raw.get("success", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.fingerprint":
+            p = SqlGuardSchemaFingerprintParams(**params)
+            raw = guard_schema_fingerprint(p.schema_path, p.schema_context)
+            result = SqlGuardResult(
+                success=raw.get("success", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.introspection_sql":
+            p = SqlGuardIntrospectionSqlParams(**params)
+            raw = guard_introspection_sql(p.db_type, p.database, p.schema_name)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.parse_dbt":
+            p = SqlGuardParseDbtProjectParams(**params)
+            raw = guard_parse_dbt_project(p.project_dir)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
+        elif method == "sqlguard.is_safe":
+            p = SqlGuardIsSafeParams(**params)
+            raw = guard_is_safe(p.sql)
+            result = SqlGuardResult(
+                success=True, data=raw, error=raw.get("error")
+            )
         # --- dbt discovery ---
         elif method == "dbt.profiles":
             p = DbtProfilesParams(**params)
