@@ -18,36 +18,6 @@ export interface SqlExecuteResult {
   truncated: boolean
 }
 
-export interface SqlValidateParams {
-  sql: string
-  dialect?: string
-}
-
-export interface SqlValidateResult {
-  valid: boolean
-  errors: string[]
-  normalized?: string
-}
-
-export interface SqlCheckParams {
-  sql: string
-  mode?: "full" | "read-only"
-  dialect?: string
-}
-
-export interface SqlCheckIssue {
-  code: string
-  message: string
-  severity: string
-  line?: number
-  column?: number
-}
-
-export interface SqlCheckResult {
-  safe: boolean
-  issues: SqlCheckIssue[]
-}
-
 // --- SQL Analyze ---
 
 export interface SqlAnalyzeParams {
@@ -633,12 +603,129 @@ export interface SqlDiffResult {
   changes: Record<string, unknown>[]
 }
 
+// --- SQL Rewrite ---
+
+export interface SqlRewriteRule {
+  rule: string // "SELECT_STAR", "NON_SARGABLE", "LARGE_IN_LIST"
+  original_fragment: string
+  rewritten_fragment: string
+  explanation: string
+  can_auto_apply: boolean
+}
+
+export interface SqlRewriteParams {
+  sql: string
+  dialect?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlRewriteResult {
+  success: boolean
+  original_sql: string
+  rewritten_sql?: string
+  rewrites_applied: SqlRewriteRule[]
+  error?: string
+}
+
+// --- CI Cost Gate ---
+
+export interface CostGateFileResult {
+  file: string
+  status: string // "pass", "fail", "skipped"
+  reason?: string
+  issues: Record<string, unknown>[]
+}
+
+export interface CostGateParams {
+  file_paths: string[]
+  dialect?: string
+}
+
+export interface CostGateResult {
+  success: boolean
+  passed: boolean
+  exit_code: number
+  files_scanned: number
+  files_skipped: number
+  total_issues: number
+  critical_count: number
+  file_results: CostGateFileResult[]
+  error?: string
+}
+
+// --- Schema Change Detection ---
+
+export interface ColumnChange {
+  column: string
+  change_type: string // "DROPPED", "ADDED", "TYPE_CHANGED", "RENAMED"
+  severity: string // "breaking", "warning", "info"
+  message: string
+  old_type?: string
+  new_type?: string
+  new_name?: string
+}
+
+export interface SchemaDiffParams {
+  old_sql: string
+  new_sql: string
+  dialect?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SchemaDiffResult {
+  success: boolean
+  changes: ColumnChange[]
+  has_breaking_changes: boolean
+  summary: Record<string, number>
+  error?: string
+}
+
+// --- sqlguard ---
+
+export interface SqlGuardValidateParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardLintParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardSafetyParams {
+  sql: string
+}
+
+export interface SqlGuardTranspileParams {
+  sql: string
+  from_dialect: string
+  to_dialect: string
+}
+
+export interface SqlGuardExplainParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardCheckParams {
+  sql: string
+  schema_path?: string
+  schema_context?: Record<string, any>
+}
+
+export interface SqlGuardResult {
+  success: boolean
+  data: Record<string, unknown>
+  error?: string
+}
+
 // --- Method registry ---
 
 export const BridgeMethods = {
   "sql.execute": {} as { params: SqlExecuteParams; result: SqlExecuteResult },
-  "sql.validate": {} as { params: SqlValidateParams; result: SqlValidateResult },
-  "sql.check": {} as { params: SqlCheckParams; result: SqlCheckResult },
   "sql.analyze": {} as { params: SqlAnalyzeParams; result: SqlAnalyzeResult },
   "sql.optimize": {} as { params: SqlOptimizeParams; result: SqlOptimizeResult },
   "sql.translate": {} as { params: SqlTranslateParams; result: SqlTranslateResult },
@@ -669,6 +756,16 @@ export const BridgeMethods = {
   "schema.tags": {} as { params: TagsGetParams; result: TagsGetResult },
   "schema.tags_list": {} as { params: TagsListParams; result: TagsListResult },
   "sql.diff": {} as { params: SqlDiffParams; result: SqlDiffResult },
+  "sql.rewrite": {} as { params: SqlRewriteParams; result: SqlRewriteResult },
+  "ci.cost_gate": {} as { params: CostGateParams; result: CostGateResult },
+  "sql.schema_diff": {} as { params: SchemaDiffParams; result: SchemaDiffResult },
+  // --- sqlguard ---
+  "sqlguard.validate": {} as { params: SqlGuardValidateParams; result: SqlGuardResult },
+  "sqlguard.lint": {} as { params: SqlGuardLintParams; result: SqlGuardResult },
+  "sqlguard.safety": {} as { params: SqlGuardSafetyParams; result: SqlGuardResult },
+  "sqlguard.transpile": {} as { params: SqlGuardTranspileParams; result: SqlGuardResult },
+  "sqlguard.explain": {} as { params: SqlGuardExplainParams; result: SqlGuardResult },
+  "sqlguard.check": {} as { params: SqlGuardCheckParams; result: SqlGuardResult },
   ping: {} as { params: Record<string, never>; result: { status: string } },
 } as const
 

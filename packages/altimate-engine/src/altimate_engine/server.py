@@ -15,6 +15,10 @@ import sys
 import traceback
 
 from altimate_engine.models import (
+    ColumnChange,
+    CostGateFileResult,
+    CostGateParams,
+    CostGateResult,
     DbtManifestParams,
     DbtRunParams,
     JsonRpcError,
@@ -24,6 +28,8 @@ from altimate_engine.models import (
     SchemaCacheStatusParams,
     SchemaCacheStatusResult,
     SchemaCacheWarehouseStatus,
+    SchemaDiffParams,
+    SchemaDiffResult,
     SchemaIndexParams,
     SchemaIndexResult,
     SchemaInspectParams,
@@ -37,7 +43,6 @@ from altimate_engine.models import (
     SqlAutocompleteParams,
     SqlAutocompleteResult,
     SqlAutocompleteSuggestion,
-    SqlCheckParams,
     SqlExecuteParams,
     SqlExplainParams,
     SqlExplainResult,
@@ -52,9 +57,11 @@ from altimate_engine.models import (
     SqlPredictCostResult,
     SqlRecordFeedbackParams,
     SqlRecordFeedbackResult,
+    SqlRewriteParams,
+    SqlRewriteResult,
+    SqlRewriteRule,
     SqlTranslateParams,
     SqlTranslateResult,
-    SqlValidateParams,
     WarehouseInfo,
     WarehouseListResult,
     WarehouseTestParams,
@@ -84,8 +91,14 @@ from altimate_engine.models import (
     TagsListResult,
     SqlDiffParams,
     SqlDiffResult,
+    SqlGuardValidateParams,
+    SqlGuardLintParams,
+    SqlGuardSafetyParams,
+    SqlGuardTranspileParams,
+    SqlGuardExplainParams,
+    SqlGuardCheckParams,
+    SqlGuardResult,
 )
-from altimate_engine.sql.guard import check_sql, validate_sql
 from altimate_engine.sql.executor import execute_sql
 from altimate_engine.sql.analyzer import analyze_sql
 from altimate_engine.sql.optimizer import optimize_sql
@@ -95,6 +108,9 @@ from altimate_engine.sql.explainer import explain_sql
 from altimate_engine.sql.fixer import fix_sql
 from altimate_engine.sql.autocomplete import autocomplete_sql
 from altimate_engine.sql.diff import diff_sql
+from altimate_engine.sql.rewriter import rewrite_sql
+from altimate_engine.sql.schema_diff import diff_schema
+from altimate_engine.ci.cost_gate import scan_files
 from altimate_engine.schema.inspector import inspect_schema
 from altimate_engine.schema.pii_detector import detect_pii
 from altimate_engine.schema.tags import get_tags, list_tags
@@ -105,10 +121,34 @@ from altimate_engine.lineage.check import check_lineage
 from altimate_engine.sql.feedback_store import FeedbackStore
 from altimate_engine.schema.cache import SchemaCache
 from altimate_engine.finops.query_history import get_query_history
-from altimate_engine.finops.credit_analyzer import analyze_credits, get_expensive_queries
+from altimate_engine.finops.credit_analyzer import (
+    analyze_credits,
+    get_expensive_queries,
+)
 from altimate_engine.finops.warehouse_advisor import advise_warehouse_sizing
 from altimate_engine.finops.unused_resources import find_unused_resources
-from altimate_engine.finops.role_access import query_grants, query_role_hierarchy, query_user_roles
+from altimate_engine.finops.role_access import (
+    query_grants,
+    query_role_hierarchy,
+    query_user_roles,
+)
+from altimate_engine.sql.guard import (
+    guard_validate,
+    guard_lint,
+    guard_scan_safety,
+    guard_transpile,
+    guard_explain,
+    guard_check,
+)
+from altimate_engine.models import (
+    SqlGuardValidateParams,
+    SqlGuardLintParams,
+    SqlGuardSafetyParams,
+    SqlGuardTranspileParams,
+    SqlGuardExplainParams,
+    SqlGuardCheckParams,
+    SqlGuardResult,
+)
 
 
 # JSON-RPC error codes
@@ -143,7 +183,7 @@ def _compute_overall_confidence(issues: list) -> str:
     """Compute overall confidence from individual issue confidences."""
     if not issues:
         return "high"
-    confidences = [getattr(i, 'confidence', 'high') for i in issues]
+    confidences = [getattr(i, "confidence", "high") for i in issues]
     if "low" in confidences:
         return "low"
     if "medium" in confidences:
@@ -165,11 +205,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
     params = request.params or {}
 
     try:
-        if method == "sql.validate":
-            result = validate_sql(SqlValidateParams(**params))
-        elif method == "sql.check":
-            result = check_sql(SqlCheckParams(**params))
-        elif method == "sql.execute":
+        if method == "sql.execute":
             result = execute_sql(SqlExecuteParams(**params))
         elif method == "schema.inspect":
             result = inspect_schema(SchemaInspectParams(**params))
@@ -179,14 +215,16 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             # Convert raw dict result to SqlAnalyzeResult model
             issues = []
             for issue in raw_result.get("issues", []):
-                issues.append(SqlAnalyzeIssue(
-                    type=issue["type"],
-                    severity=issue.get("severity", "warning"),
-                    message=issue["message"],
-                    recommendation=issue.get("recommendation", ""),
-                    location=issue.get("location"),
-                    confidence=issue.get("confidence", "high"),
-                ))
+                issues.append(
+                    SqlAnalyzeIssue(
+                        type=issue["type"],
+                        severity=issue.get("severity", "warning"),
+                        message=issue["message"],
+                        recommendation=issue.get("recommendation", ""),
+                        location=issue.get("location"),
+                        confidence=issue.get("confidence", "high"),
+                    )
+                )
             result = SqlAnalyzeResult(
                 success=raw_result.get("success", True),
                 issues=issues,
@@ -197,11 +235,15 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             )
         elif method == "sql.translate":
             params_obj = SqlTranslateParams(**params)
-            result_dict = translate_sql(params_obj.sql, params_obj.source_dialect, params_obj.target_dialect)
+            result_dict = translate_sql(
+                params_obj.sql, params_obj.source_dialect, params_obj.target_dialect
+            )
             result = SqlTranslateResult(**result_dict)
         elif method == "sql.optimize":
             params_obj = SqlOptimizeParams(**params)
-            result_dict = optimize_sql(params_obj.sql, params_obj.dialect, params_obj.schema_context)
+            result_dict = optimize_sql(
+                params_obj.sql, params_obj.dialect, params_obj.schema_context
+            )
             result = SqlOptimizeResult(**result_dict)
         elif method == "lineage.check":
             result = check_lineage(LineageCheckParams(**params))
@@ -236,13 +278,17 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = SqlPredictCostResult(**prediction)
         elif method == "sql.format":
             fmt_params = SqlFormatParams(**params)
-            fmt_result = format_sql(fmt_params.sql, fmt_params.dialect, fmt_params.indent)
+            fmt_result = format_sql(
+                fmt_params.sql, fmt_params.dialect, fmt_params.indent
+            )
             result = SqlFormatResult(**fmt_result)
         elif method == "sql.explain":
             result = explain_sql(SqlExplainParams(**params))
         elif method == "sql.fix":
             fix_params = SqlFixParams(**params)
-            fix_result = fix_sql(fix_params.sql, fix_params.error_message, fix_params.dialect)
+            fix_result = fix_sql(
+                fix_params.sql, fix_params.error_message, fix_params.dialect
+            )
             result = SqlFixResult(
                 success=fix_result["success"],
                 original_sql=fix_result["original_sql"],
@@ -263,7 +309,9 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                 cache=cache,
             )
             result = SqlAutocompleteResult(
-                suggestions=[SqlAutocompleteSuggestion(**s) for s in ac_result["suggestions"]],
+                suggestions=[
+                    SqlAutocompleteSuggestion(**s) for s in ac_result["suggestions"]
+                ],
                 prefix=ac_result["prefix"],
                 position=ac_result["position"],
                 suggestion_count=ac_result["suggestion_count"],
@@ -281,7 +329,9 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                         wh_type = wh.get("type", "unknown")
                         break
                 cache = _get_schema_cache()
-                idx_result = cache.index_warehouse(idx_params.warehouse, wh_type, connector)
+                idx_result = cache.index_warehouse(
+                    idx_params.warehouse, wh_type, connector
+                )
                 result = SchemaIndexResult(**idx_result)
             finally:
                 connector.close()
@@ -311,7 +361,9 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         # --- FinOps methods ---
         elif method == "finops.query_history":
             p = QueryHistoryParams(**params)
-            raw = get_query_history(p.warehouse, p.days, p.limit, p.user, p.warehouse_filter)
+            raw = get_query_history(
+                p.warehouse, p.days, p.limit, p.user, p.warehouse_filter
+            )
             result = QueryHistoryResult(**raw)
         elif method == "finops.analyze_credits":
             p = CreditAnalysisParams(**params)
@@ -367,6 +419,54 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             p = SqlDiffParams(**params)
             raw = diff_sql(p.original, p.modified, p.context_lines)
             result = SqlDiffResult(**raw)
+        # --- SQL rewrite ---
+        elif method == "sql.rewrite":
+            p = SqlRewriteParams(**params)
+            raw = rewrite_sql(p.sql, p.dialect, p.schema_context)
+            result = SqlRewriteResult(
+                success=raw["success"],
+                original_sql=raw["original_sql"],
+                rewritten_sql=raw.get("rewritten_sql"),
+                rewrites_applied=[
+                    SqlRewriteRule(**r) for r in raw.get("rewrites_applied", [])
+                ],
+                error=raw.get("error"),
+            )
+        # --- sqlguard ---
+        elif method == "sqlguard.validate":
+            p = SqlGuardValidateParams(**params)
+            raw = guard_validate(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(
+                success=raw.get("valid", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.lint":
+            p = SqlGuardLintParams(**params)
+            raw = guard_lint(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(
+                success=raw.get("clean", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.safety":
+            p = SqlGuardSafetyParams(**params)
+            raw = guard_scan_safety(p.sql)
+            result = SqlGuardResult(
+                success=raw.get("safe", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.transpile":
+            p = SqlGuardTranspileParams(**params)
+            raw = guard_transpile(p.sql, p.from_dialect, p.to_dialect)
+            result = SqlGuardResult(
+                success=raw.get("success", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.explain":
+            p = SqlGuardExplainParams(**params)
+            raw = guard_explain(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(
+                success=raw.get("valid", True), data=raw, error=raw.get("error")
+            )
+        elif method == "sqlguard.check":
+            p = SqlGuardCheckParams(**params)
+            raw = guard_check(p.sql, p.schema_path, p.schema_context)
+            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
         elif method == "ping":
             return JsonRpcResponse(result={"status": "ok"}, id=request.id)
         else:
@@ -391,7 +491,9 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             id=request.id,
         )
     except Exception as e:
-        trace_data = traceback.format_exc() if os.environ.get("ALTIMATE_ENGINE_DEBUG") else None
+        trace_data = (
+            traceback.format_exc() if os.environ.get("ALTIMATE_ENGINE_DEBUG") else None
+        )
         return JsonRpcResponse(
             error=JsonRpcError(
                 code=INTERNAL_ERROR,

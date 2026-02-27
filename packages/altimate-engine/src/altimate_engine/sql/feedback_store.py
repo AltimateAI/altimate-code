@@ -238,13 +238,21 @@ class FeedbackStore:
         """Compute median-based predictions from a list of observations."""
         count = len(rows)
 
-        bytes_values = [r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]
-        time_values = [r["execution_time_ms"] for r in rows if r["execution_time_ms"] is not None]
-        credit_values = [r["credits_used"] for r in rows if r["credits_used"] is not None]
+        bytes_values = [
+            r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None
+        ]
+        time_values = [
+            r["execution_time_ms"] for r in rows if r["execution_time_ms"] is not None
+        ]
+        credit_values = [
+            r["credits_used"] for r in rows if r["credits_used"] is not None
+        ]
 
         predicted_bytes = int(statistics.median(bytes_values)) if bytes_values else None
         predicted_time_ms = int(statistics.median(time_values)) if time_values else None
-        predicted_credits = round(statistics.median(credit_values), 6) if credit_values else None
+        predicted_credits = (
+            round(statistics.median(credit_values), 6) if credit_values else None
+        )
 
         # Confidence based on observation count
         if count >= 10:
@@ -264,9 +272,7 @@ class FeedbackStore:
             "observation_count": count,
         }
 
-    def _estimate_from_tables(
-        self, sql: str, dialect: str
-    ) -> dict[str, Any] | None:
+    def _estimate_from_tables(self, sql: str, dialect: str) -> dict[str, Any] | None:
         """Tier 3: Estimate cost based on historical data for the tables in the query.
 
         Looks up all observations involving the same tables (via template patterns)
@@ -300,9 +306,19 @@ class FeedbackStore:
         if rows:
             # We have some observations but less than 3 (otherwise tier 1 would catch it)
             return {
-                "predicted_bytes": self._safe_median([r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]),
-                "predicted_time_ms": self._safe_median([r["execution_time_ms"] for r in rows if r["execution_time_ms"] is not None]),
-                "predicted_credits": self._safe_median_float([r["credits_used"] for r in rows if r["credits_used"] is not None]),
+                "predicted_bytes": self._safe_median(
+                    [r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]
+                ),
+                "predicted_time_ms": self._safe_median(
+                    [
+                        r["execution_time_ms"]
+                        for r in rows
+                        if r["execution_time_ms"] is not None
+                    ]
+                ),
+                "predicted_credits": self._safe_median_float(
+                    [r["credits_used"] for r in rows if r["credits_used"] is not None]
+                ),
                 "observation_count": len(rows),
             }
 
@@ -311,9 +327,19 @@ class FeedbackStore:
         rows = self._fetch_observations_by_template(template_hash)
         if rows:
             return {
-                "predicted_bytes": self._safe_median([r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]),
-                "predicted_time_ms": self._safe_median([r["execution_time_ms"] for r in rows if r["execution_time_ms"] is not None]),
-                "predicted_credits": self._safe_median_float([r["credits_used"] for r in rows if r["credits_used"] is not None]),
+                "predicted_bytes": self._safe_median(
+                    [r["bytes_scanned"] for r in rows if r["bytes_scanned"] is not None]
+                ),
+                "predicted_time_ms": self._safe_median(
+                    [
+                        r["execution_time_ms"]
+                        for r in rows
+                        if r["execution_time_ms"] is not None
+                    ]
+                ),
+                "predicted_credits": self._safe_median_float(
+                    [r["credits_used"] for r in rows if r["credits_used"] is not None]
+                ),
                 "observation_count": len(rows),
             }
 
@@ -323,18 +349,28 @@ class FeedbackStore:
     # bytes_scanned and credits are None for databases that don't expose them.
     _HEURISTIC_PROFILES: dict[str, dict[str, int | float | None]] = {
         "snowflake": {
-            "base_bytes": 10_000_000,  # 10 MB — Snowflake X-Small warehouse
+            "base_bytes": 10_000_000,
             "base_time_ms": 500,
             "base_credits": 0.001,
         },
         "postgres": {
-            "base_bytes": None,  # Postgres doesn't expose bytes scanned
+            "base_bytes": None,
             "base_time_ms": 100,
             "base_credits": None,
         },
         "duckdb": {
-            "base_bytes": None,  # DuckDB is embedded, no bytes-scanned metric
+            "base_bytes": None,
             "base_time_ms": 10,
+            "base_credits": None,
+        },
+        "bigquery": {
+            "base_bytes": 10_000_000,
+            "base_time_ms": 500,
+            "base_credits": None,
+        },
+        "databricks": {
+            "base_bytes": 10_000_000,
+            "base_time_ms": 500,
             "base_credits": None,
         },
     }
@@ -408,9 +444,17 @@ class FeedbackStore:
         base_time_ms = profile["base_time_ms"]
         base_credits = profile["base_credits"]
 
-        predicted_bytes = int(base_bytes * complexity_score) if base_bytes is not None else None
-        predicted_time_ms = int(base_time_ms * complexity_score) if base_time_ms is not None else None
-        predicted_credits = round(base_credits * complexity_score, 6) if base_credits is not None else None
+        predicted_bytes = (
+            int(base_bytes * complexity_score) if base_bytes is not None else None
+        )
+        predicted_time_ms = (
+            int(base_time_ms * complexity_score) if base_time_ms is not None else None
+        )
+        predicted_credits = (
+            round(base_credits * complexity_score, 6)
+            if base_credits is not None
+            else None
+        )
 
         return {
             "tier": 4,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -33,17 +32,6 @@ class SqlExecuteResult(BaseModel):
     truncated: bool = False
 
 
-class SqlValidateParams(BaseModel):
-    sql: str
-    dialect: str | None = None
-
-
-class SqlValidateResult(BaseModel):
-    valid: bool
-    errors: list[str] = Field(default_factory=list)
-    normalized: str | None = None
-
-
 class SqlTranslateParams(BaseModel):
     sql: str
     source_dialect: str
@@ -57,30 +45,6 @@ class SqlTranslateResult(BaseModel):
     target_dialect: str
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
-
-
-class SqlCheckMode(str, Enum):
-    READ_ONLY = "read-only"
-    FULL = "full"
-
-
-class SqlCheckParams(BaseModel):
-    sql: str
-    mode: SqlCheckMode = SqlCheckMode.FULL
-    dialect: str | None = None
-
-
-class SqlCheckIssue(BaseModel):
-    code: str
-    message: str
-    severity: str = "warning"
-    line: int | None = None
-    column: int | None = None
-
-
-class SqlCheckResult(BaseModel):
-    safe: bool
-    issues: list[SqlCheckIssue] = Field(default_factory=list)
 
 
 # --- SQL Analyze ---
@@ -664,6 +628,129 @@ class SqlDiffResult(BaseModel):
     change_count: int = 0
     similarity: float = 1.0
     changes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# --- SQL Rewrite ---
+
+
+class SqlRewriteRule(BaseModel):
+    rule: str  # "SELECT_STAR", "NON_SARGABLE", "LARGE_IN_LIST"
+    original_fragment: str
+    rewritten_fragment: str
+    explanation: str
+    can_auto_apply: bool = True
+
+
+class SqlRewriteParams(BaseModel):
+    sql: str
+    dialect: str = "snowflake"
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlRewriteResult(BaseModel):
+    success: bool
+    original_sql: str
+    rewritten_sql: str | None = None
+    rewrites_applied: list[SqlRewriteRule] = Field(default_factory=list)
+    error: str | None = None
+
+
+# --- CI Cost Gate ---
+
+
+class CostGateFileResult(BaseModel):
+    file: str
+    status: str  # "pass", "fail", "skipped"
+    reason: str | None = None
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CostGateParams(BaseModel):
+    file_paths: list[str]
+    dialect: str = "snowflake"
+
+
+class CostGateResult(BaseModel):
+    success: bool
+    passed: bool
+    exit_code: int = 0
+    files_scanned: int = 0
+    files_skipped: int = 0
+    total_issues: int = 0
+    critical_count: int = 0
+    file_results: list[CostGateFileResult] = Field(default_factory=list)
+    error: str | None = None
+
+
+# --- Schema Change Detection ---
+
+
+class ColumnChange(BaseModel):
+    column: str
+    change_type: str  # "DROPPED", "ADDED", "TYPE_CHANGED", "RENAMED"
+    severity: str  # "breaking", "warning", "info"
+    message: str
+    old_type: str | None = None
+    new_type: str | None = None
+    new_name: str | None = None
+
+
+class SchemaDiffParams(BaseModel):
+    old_sql: str
+    new_sql: str
+    dialect: str = "snowflake"
+    schema_context: dict[str, Any] | None = None
+
+
+class SchemaDiffResult(BaseModel):
+    success: bool
+    changes: list[ColumnChange] = Field(default_factory=list)
+    has_breaking_changes: bool = False
+    summary: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+
+# --- sqlguard ---
+
+
+class SqlGuardValidateParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardLintParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardSafetyParams(BaseModel):
+    sql: str
+
+
+class SqlGuardTranspileParams(BaseModel):
+    sql: str
+    from_dialect: str
+    to_dialect: str
+
+
+class SqlGuardExplainParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardCheckParams(BaseModel):
+    sql: str
+    schema_path: str = ""
+    schema_context: dict[str, Any] | None = None
+
+
+class SqlGuardResult(BaseModel):
+    success: bool = True
+    data: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
 
 
 # --- JSON-RPC ---

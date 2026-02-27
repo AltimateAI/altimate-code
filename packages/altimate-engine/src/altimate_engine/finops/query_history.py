@@ -58,6 +58,54 @@ LIMIT {limit}
 # DuckDB — no native query history, return empty
 _DUCKDB_HISTORY_SQL = None
 
+# BigQuery INFORMATION_SCHEMA.JOBS
+_BIGQUERY_HISTORY_SQL = """
+SELECT
+    job_id as query_id,
+    query as query_text,
+    job_type as query_type,
+    user_email as user_name,
+    '' as warehouse_name,
+    reservation_id as warehouse_size,
+    state as execution_status,
+    NULL as error_code,
+    error_message,
+    start_time,
+    end_time,
+    TIMESTAMP_DIFF(end_time, start_time, SECOND) as execution_time_sec,
+    total_bytes_billed as bytes_scanned,
+    total_rows as rows_produced,
+    0 as credits_used_cloud_services
+FROM `region-{location}.INFORMATION_SCHEMA.JOBS`
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+ORDER BY creation_time DESC
+LIMIT {limit}
+"""
+
+# Databricks system.query.history (Unity Catalog)
+_DATABRICKS_HISTORY_SQL = """
+SELECT
+    query_id,
+    query_text,
+    statement_type as query_type,
+    user_name,
+    warehouse_id as warehouse_name,
+    '' as warehouse_size,
+    status as execution_status,
+    NULL as error_code,
+    error_message,
+    start_time,
+    end_time,
+    execution_time_ms / 1000.0 as execution_time_sec,
+    bytes_read as bytes_scanned,
+    rows_produced,
+    0 as credits_used_cloud_services
+FROM system.query.history
+WHERE start_time >= DATE_SUB(CURRENT_TIMESTAMP(), {days})
+ORDER BY start_time DESC
+LIMIT {limit}
+"""
+
 
 def get_query_history(
     warehouse: str,
@@ -130,7 +178,9 @@ def get_query_history(
             "total_bytes_scanned": total_bytes,
             "total_execution_time_sec": round(total_time, 2),
             "error_count": error_count,
-            "avg_execution_time_sec": round(total_time / len(queries), 2) if queries else 0,
+            "avg_execution_time_sec": round(total_time / len(queries), 2)
+            if queries
+            else 0,
         }
 
         return {
@@ -161,4 +211,8 @@ def _build_history_query(
         return _POSTGRES_HISTORY_SQL.format(limit=limit)
     elif wh_type == "duckdb":
         return _DUCKDB_HISTORY_SQL
+    elif wh_type == "bigquery":
+        return _BIGQUERY_HISTORY_SQL.format(days=days, limit=limit, location="US")
+    elif wh_type == "databricks":
+        return _DATABRICKS_HISTORY_SQL.format(days=days, limit=limit)
     return None

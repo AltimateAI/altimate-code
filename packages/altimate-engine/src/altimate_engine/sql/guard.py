@@ -1,165 +1,165 @@
-"""SQL validation and safety checking using sqlglot."""
+"""Thin wrapper for sqlguard Rust bindings with graceful fallback."""
 
 from __future__ import annotations
 
-import sqlglot
-from sqlglot import exp
+import json
+import tempfile
+from typing import Any
 
-from altimate_engine.models import (
-    SqlCheckIssue,
-    SqlCheckMode,
-    SqlCheckParams,
-    SqlCheckResult,
-    SqlValidateParams,
-    SqlValidateResult,
-)
+try:
+    import sqlguard
 
-# Statement types that modify data or schema
-_WRITE_TYPES = (
-    exp.Insert,
-    exp.Update,
-    exp.Delete,
-    exp.Drop,
-    exp.Create,
-    exp.Alter,
-    exp.AlterColumn,
-    exp.Merge,
-)
+    SQLGUARD_AVAILABLE = True
+except ImportError:
+    SQLGUARD_AVAILABLE = False
 
-# Statement types considered dangerous/DDL
-_DDL_TYPES = (
-    exp.Drop,
-    exp.Create,
-    exp.Alter,
-    exp.AlterColumn,
+_NOT_INSTALLED_MSG = (
+    "sqlguard not installed. Run: cd sqlguard/crates/sqlguard-python && "
+    "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin build --release && "
+    "pip install target/wheels/sqlguard-*.whl"
 )
 
 
-def validate_sql(params: SqlValidateParams) -> SqlValidateResult:
-    """Validate SQL syntax by parsing with sqlglot."""
-    dialect = params.dialect or None
-    errors: list[str] = []
+def _not_installed_result() -> dict:
+    return {"success": False, "error": _NOT_INSTALLED_MSG}
+
+
+def _parse_json(result: str) -> dict:
+    return json.loads(result)
+
+
+def _resolve_schema(
+    schema_path: str, schema_context: dict[str, Any] | None
+) -> tuple[str, bool]:
+    """Resolve schema source.
+
+    Returns:
+        Tuple of (schema_path, should_cleanup)
+    """
+    if schema_path:
+        return schema_path, False
+    if schema_context:
+        path = _write_temp_schema(schema_context)
+        return path, True
+    return "", False
+
+
+def _write_temp_schema(schema_context: dict[str, Any]) -> str:
+    """Write schema context to a temporary YAML file."""
+    import yaml
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(schema_context, f)
+        return f.name
+
+
+def _cleanup_temp_schema(path: str) -> None:
+    """Clean up a temporary schema file."""
+    import os
 
     try:
-        parsed = sqlglot.parse(params.sql, dialect=dialect)
-        if not parsed or all(p is None for p in parsed):
-            errors.append("Empty or unparseable SQL")
-            return SqlValidateResult(valid=False, errors=errors)
-
-        normalized = None
-        if not errors and len(parsed) == 1 and parsed[0] is not None:
-            try:
-                normalized = parsed[0].sql(dialect=dialect)
-            except Exception:
-                pass
-
-        return SqlValidateResult(
-            valid=len(errors) == 0,
-            errors=errors,
-            normalized=normalized,
-        )
-    except sqlglot.errors.ParseError as e:
-        errors.append(str(e))
-        return SqlValidateResult(valid=False, errors=errors)
-    except Exception as e:
-        errors.append(f"Validation error: {e}")
-        return SqlValidateResult(valid=False, errors=errors)
+        os.unlink(path)
+    except OSError:
+        pass
 
 
-def check_sql(params: SqlCheckParams) -> SqlCheckResult:
-    """Check SQL for safety issues and read-only enforcement using sqlglot AST."""
-    dialect = params.dialect or None
-    issues: list[SqlCheckIssue] = []
-
+def guard_validate(
+    sql: str,
+    schema_path: str = "",
+    schema_context: dict[str, Any] | None = None,
+) -> dict:
+    """Validate SQL against schema using sqlguard."""
+    if not SQLGUARD_AVAILABLE:
+        return _not_installed_result()
     try:
-        parsed = sqlglot.parse(params.sql, dialect=dialect)
-    except sqlglot.errors.ParseError as e:
-        issues.append(
-            SqlCheckIssue(
-                code="PARSE_ERROR",
-                message=f"SQL parse error: {e}",
-                severity="error",
-            )
-        )
-        return SqlCheckResult(safe=False, issues=issues)
+        path, cleanup = _resolve_schema(schema_path, schema_context)
+        try:
+            result = sqlguard.validate(sql, path or "")
+        finally:
+            if cleanup:
+                _cleanup_temp_schema(path)
+        return _parse_json(result)
     except Exception as e:
-        issues.append(
-            SqlCheckIssue(
-                code="PARSE_ERROR",
-                message=f"Unexpected parse error: {e}",
-                severity="error",
-            )
-        )
-        return SqlCheckResult(safe=False, issues=issues)
+        return {"success": False, "error": str(e)}
 
-    if not parsed or all(p is None for p in parsed):
-        issues.append(
-            SqlCheckIssue(
-                code="EMPTY_SQL",
-                message="Empty or unparseable SQL",
-                severity="error",
-            )
-        )
-        return SqlCheckResult(safe=False, issues=issues)
 
-    for statement in parsed:
-        if statement is None:
-            continue
+def guard_lint(
+    sql: str,
+    schema_path: str = "",
+    schema_context: dict[str, Any] | None = None,
+) -> dict:
+    """Lint SQL for anti-patterns using sqlguard."""
+    if not SQLGUARD_AVAILABLE:
+        return _not_installed_result()
+    try:
+        path, cleanup = _resolve_schema(schema_path, schema_context)
+        try:
+            result = sqlguard.lint(sql, path or "")
+        finally:
+            if cleanup:
+                _cleanup_temp_schema(path)
+        return _parse_json(result)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-        # Check for DDL (DROP, CREATE, ALTER)
-        if isinstance(statement, _DDL_TYPES):
-            stmt_type = type(statement).__name__.upper()
-            issues.append(
-                SqlCheckIssue(
-                    code="DDL_DETECTED",
-                    message=f"{stmt_type} statement detected — modifies database schema",
-                    severity="error",
-                )
-            )
 
-        # Check for DML writes (INSERT, UPDATE, DELETE, MERGE)
-        if isinstance(statement, _WRITE_TYPES) and not isinstance(statement, _DDL_TYPES):
-            stmt_type = type(statement).__name__.upper()
-            issues.append(
-                SqlCheckIssue(
-                    code="DML_WRITE",
-                    message=f"{stmt_type} statement modifies data",
-                    severity="info",
-                )
-            )
+def guard_scan_safety(sql: str) -> dict:
+    """Scan SQL for injection patterns and safety threats."""
+    if not SQLGUARD_AVAILABLE:
+        return _not_installed_result()
+    try:
+        result = sqlguard.scan_safety(sql)
+        return _parse_json(result)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-        # Check for DROP TABLE/DATABASE specifically
-        if isinstance(statement, exp.Drop):
-            drop_kind = statement.args.get("kind", "")
-            issues.append(
-                SqlCheckIssue(
-                    code="DROP_DETECTED",
-                    message=f"DROP {drop_kind} detected — destructive operation",
-                    severity="error",
-                )
-            )
 
-        # Check for TRUNCATE
-        if isinstance(statement, exp.Command) and statement.this and str(statement.this).upper().startswith("TRUNCATE"):
-            issues.append(
-                SqlCheckIssue(
-                    code="TRUNCATE_DETECTED",
-                    message="TRUNCATE statement detected — removes all rows",
-                    severity="error",
-                )
-            )
+def guard_transpile(sql: str, from_dialect: str, to_dialect: str) -> dict:
+    """Transpile SQL between dialects."""
+    if not SQLGUARD_AVAILABLE:
+        return _not_installed_result()
+    try:
+        result = sqlguard.transpile(sql, from_dialect, to_dialect)
+        return _parse_json(result)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-        # Enforce read-only mode
-        if params.mode == SqlCheckMode.READ_ONLY:
-            if isinstance(statement, _WRITE_TYPES):
-                stmt_type = type(statement).__name__.upper()
-                issues.append(
-                    SqlCheckIssue(
-                        code="READ_ONLY_VIOLATION",
-                        message=f"{stmt_type} statement not allowed in read-only mode",
-                        severity="error",
-                    )
-                )
 
-    safe = not any(i.severity == "error" for i in issues)
-    return SqlCheckResult(safe=safe, issues=issues)
+def guard_explain(
+    sql: str,
+    schema_path: str = "",
+    schema_context: dict[str, Any] | None = None,
+) -> dict:
+    """Explain SQL query plan, lineage, and cost signals."""
+    if not SQLGUARD_AVAILABLE:
+        return _not_installed_result()
+    try:
+        path, cleanup = _resolve_schema(schema_path, schema_context)
+        try:
+            result = sqlguard.explain(sql, path or "")
+        finally:
+            if cleanup:
+                _cleanup_temp_schema(path)
+        return _parse_json(result)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def guard_check(
+    sql: str,
+    schema_path: str = "",
+    schema_context: dict[str, Any] | None = None,
+) -> dict:
+    """Run full analysis pipeline: validate + lint + safety + PII."""
+    if not SQLGUARD_AVAILABLE:
+        return _not_installed_result()
+    try:
+        path, cleanup = _resolve_schema(schema_path, schema_context)
+        try:
+            result = sqlguard.check(sql, path or "")
+        finally:
+            if cleanup:
+                _cleanup_temp_schema(path)
+        return _parse_json(result)
+    except Exception as e:
+        return {"success": False, "error": str(e)}

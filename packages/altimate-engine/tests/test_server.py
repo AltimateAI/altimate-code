@@ -13,26 +13,6 @@ class TestDispatch:
         assert response.result == {"status": "ok"}
         assert response.error is None
 
-    def test_sql_validate(self):
-        request = JsonRpcRequest(
-            method="sql.validate",
-            params={"sql": "SELECT 1"},
-            id=2,
-        )
-        response = dispatch(request)
-        assert response.error is None
-        assert response.result["valid"] is True
-
-    def test_sql_check(self):
-        request = JsonRpcRequest(
-            method="sql.check",
-            params={"sql": "SELECT 1"},
-            id=3,
-        )
-        response = dispatch(request)
-        assert response.error is None
-        assert response.result["safe"] is True
-
     def test_sql_analyze(self):
         request = JsonRpcRequest(
             method="sql.analyze",
@@ -64,7 +44,7 @@ class TestDispatch:
 
     def test_invalid_params(self):
         request = JsonRpcRequest(
-            method="sql.validate",
+            method="sql.analyze",
             params={"wrong_param": "value"},
             id=7,
         )

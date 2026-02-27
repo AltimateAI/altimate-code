@@ -25,7 +25,6 @@ import { Truncate } from "./truncation"
 import { PlanExitTool, PlanEnterTool } from "./plan"
 import { ApplyPatchTool } from "./apply_patch"
 import { SqlExecuteTool } from "./sql-execute"
-import { SqlValidateTool } from "./sql-validate"
 import { SchemaInspectTool } from "./schema-inspect"
 import { SqlAnalyzeTool } from "./sql-analyze"
 import { SqlOptimizeTool } from "./sql-optimize"
@@ -53,6 +52,14 @@ import { FinopsUnusedResourcesTool } from "./finops-unused-resources"
 import { FinopsRoleGrantsTool, FinopsRoleHierarchyTool, FinopsUserRolesTool } from "./finops-role-access"
 import { SchemaDetectPiiTool } from "./schema-detect-pii"
 import { SchemaTagsTool, SchemaTagsListTool } from "./schema-tags"
+import { SqlRewriteTool } from "./sql-rewrite"
+import { CiCostGateTool } from "./ci-cost-gate"
+import { SchemaDiffTool } from "./schema-diff"
+import { SqlGuardValidateTool } from "./sqlguard-validate"
+import { SqlGuardLintTool } from "./sqlguard-lint"
+import { SqlGuardSafetyTool } from "./sqlguard-safety"
+import { SqlGuardTranspileTool } from "./sqlguard-transpile"
+import { SqlGuardCheckTool } from "./sqlguard-check"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -141,7 +148,6 @@ export namespace ToolRegistry {
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.ALTIMATE_CLI_EXPERIMENTAL_PLAN_MODE && Flag.ALTIMATE_CLI_CLIENT === "cli" ? [PlanExitTool, PlanEnterTool] : []),
       SqlExecuteTool,
-      SqlValidateTool,
       SchemaInspectTool,
       SqlAnalyzeTool,
       SqlOptimizeTool,
@@ -172,6 +178,14 @@ export namespace ToolRegistry {
       SchemaDetectPiiTool,
       SchemaTagsTool,
       SchemaTagsListTool,
+      SqlRewriteTool,
+      CiCostGateTool,
+      SchemaDiffTool,
+      SqlGuardValidateTool,
+      SqlGuardLintTool,
+      SqlGuardSafetyTool,
+      SqlGuardTranspileTool,
+      SqlGuardCheckTool,
       ...custom,
     ]
   }

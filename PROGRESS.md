@@ -1,8 +1,8 @@
 # altimate-code Implementation Progress
-Last updated: 2026-02-25 23:30
+Last updated: 2026-02-27 00:40
 
 ## Current Phase: COMPLETE (all unblocked phases done)
-## Status: Phase 0-6 complete + Phase 7 CoCo parity (except 3B blocked, 3E blocked)
+## Status: Phase 0-7 complete + Phase 8 BigQuery/Databricks connectors (except 3B blocked, 3E blocked)
 
 ### Completed
 - [x] Phase 1A: Bridge contract parity + warehouse tools (18 rules, 10 bridge methods)
@@ -36,6 +36,10 @@ Last updated: 2026-02-25 23:30
   - SQL: diff view (Updated to character-based stats for snippet precision)
   - Skills: model-scaffold, yaml-config, dbt-docs, medallion-patterns, incremental-logic
 - [x] Fixed `sql.diff` benchmark — parameters renamed to original/modified, expectations updated to character-level (100% pass)
+- [x] Phase 8: BigQuery + Databricks connectors — 2 new connectors, FinOps parity, dryRun cost prediction
+  - BigQuery: service account JSON + ADC auth, INFORMATION_SCHEMA.JOBS, dryRun cost prediction
+  - Databricks: PAT auth, Unity Catalog + Hive metastore fallback, system.query.history
+  - FinOps: BigQuery JOBS, Databricks query.history SQL templates
 
 ### Blocked
 - [ ] Phase 3B: dbt runner completion (needs real dbt project for testing)

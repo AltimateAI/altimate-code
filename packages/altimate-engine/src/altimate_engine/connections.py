@@ -69,8 +69,16 @@ class ConnectionRegistry:
             from altimate_engine.connectors.snowflake import SnowflakeConnector
 
             _snowflake_keys = {
-                "type", "account", "user", "password", "private_key_path",
-                "private_key_passphrase", "warehouse", "database", "schema", "role",
+                "type",
+                "account",
+                "user",
+                "password",
+                "private_key_path",
+                "private_key_passphrase",
+                "warehouse",
+                "database",
+                "schema",
+                "role",
             }
             return SnowflakeConnector(
                 account=config.get("account", ""),
@@ -83,6 +91,35 @@ class ConnectionRegistry:
                 schema=config.get("schema"),
                 role=config.get("role"),
                 **{k: v for k, v in config.items() if k not in _snowflake_keys},
+            )
+        elif dialect == "bigquery":
+            from altimate_engine.connectors.bigquery import BigQueryConnector
+
+            _bigquery_keys = {"type", "project", "credentials_path", "location"}
+            return BigQueryConnector(
+                project=config.get("project", ""),
+                credentials_path=config.get("credentials_path"),
+                location=config.get("location", "US"),
+                **{k: v for k, v in config.items() if k not in _bigquery_keys},
+            )
+        elif dialect == "databricks":
+            from altimate_engine.connectors.databricks import DatabricksConnector
+
+            _databricks_keys = {
+                "type",
+                "server_hostname",
+                "http_path",
+                "access_token",
+                "catalog",
+                "schema",
+            }
+            return DatabricksConnector(
+                server_hostname=config.get("server_hostname", ""),
+                http_path=config.get("http_path", ""),
+                access_token=config.get("access_token"),
+                catalog=config.get("catalog"),
+                schema=config.get("schema"),
+                **{k: v for k, v in config.items() if k not in _databricks_keys},
             )
         else:
             raise ValueError(f"Unsupported connector type: {dialect}")
@@ -105,4 +142,3 @@ class ConnectionRegistry:
             return {"connected": True, "error": None}
         except Exception as e:
             return {"connected": False, "error": str(e)}
-

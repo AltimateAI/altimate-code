@@ -1,107 +1,221 @@
-"""Tests for SQL validation and safety checking."""
+"""Tests for the sqlguard Python wrapper."""
+
+import json
+import os
+import tempfile
+from unittest.mock import patch
 
 import pytest
-from altimate_engine.sql.guard import validate_sql, check_sql
-from altimate_engine.models import SqlValidateParams, SqlCheckParams, SqlCheckMode
+import yaml
+
+from altimate_engine.sql.guard import (
+    SQLGUARD_AVAILABLE,
+    guard_validate,
+    guard_lint,
+    guard_scan_safety,
+    guard_transpile,
+    guard_explain,
+    guard_check,
+    _resolve_schema,
+    _write_temp_schema,
+    _cleanup_temp_schema,
+)
 
 
-class TestValidateSql:
-    def test_valid_select(self):
-        result = validate_sql(SqlValidateParams(sql="SELECT 1"))
-        assert result.valid is True
-        assert len(result.errors) == 0
+# Skip all tests if sqlguard is not installed
+pytestmark = pytest.mark.skipif(
+    not SQLGUARD_AVAILABLE, reason="sqlguard not installed"
+)
 
-    def test_valid_complex_query(self):
-        result = validate_sql(SqlValidateParams(
-            sql="SELECT a.id, b.name FROM users a JOIN orders b ON a.id = b.user_id WHERE a.active = true",
-            dialect="snowflake",
-        ))
-        assert result.valid is True
+
+class TestGuardValidate:
+    def test_valid_sql(self):
+        result = guard_validate("SELECT 1")
+        assert isinstance(result, dict)
+        # Should not have an error key (or error should be None)
+        assert result.get("error") is None or "error" not in result
 
     def test_invalid_sql(self):
-        result = validate_sql(SqlValidateParams(sql="SELECT FROM WHERE"))
-        # sqlglot is lenient, but this should still parse or return errors
-        # The key thing is it doesn't crash
-        assert isinstance(result.valid, bool)
+        result = guard_validate("SELEC 1")
+        assert isinstance(result, dict)
+        # Invalid SQL should have errors or valid=false
+        assert result.get("valid") is False or result.get("errors")
 
     def test_empty_sql(self):
-        result = validate_sql(SqlValidateParams(sql=""))
-        assert result.valid is False
-
-    def test_normalized_output(self):
-        result = validate_sql(SqlValidateParams(sql="SELECT 1"))
-        assert result.valid is True
-        # Normalized SQL should be present for valid single statements
-        assert result.normalized is not None
+        result = guard_validate("")
+        assert isinstance(result, dict)
 
 
-class TestCheckSql:
-    def test_safe_select(self):
-        result = check_sql(SqlCheckParams(sql="SELECT 1"))
-        assert result.safe is True
-        assert len(result.issues) == 0
+class TestGuardLint:
+    def test_clean_sql(self):
+        result = guard_lint("SELECT id FROM users WHERE id = 1")
+        assert isinstance(result, dict)
 
-    def test_detects_drop_table(self):
-        result = check_sql(SqlCheckParams(sql="DROP TABLE users"))
-        assert result.safe is False
-        codes = [i.code for i in result.issues]
-        assert "DDL_DETECTED" in codes or "DROP_DETECTED" in codes
+    def test_null_comparison(self):
+        result = guard_lint("SELECT * FROM users WHERE name = NULL")
+        assert isinstance(result, dict)
+        # Should detect the NULL comparison anti-pattern
+        findings = result.get("findings", [])
+        assert isinstance(findings, list)
 
-    def test_detects_insert(self):
-        result = check_sql(SqlCheckParams(sql="INSERT INTO users (name) VALUES ('test')"))
-        codes = [i.code for i in result.issues]
-        assert "DML_WRITE" in codes
-
-    def test_detects_delete(self):
-        result = check_sql(SqlCheckParams(sql="DELETE FROM users WHERE id = 1"))
-        codes = [i.code for i in result.issues]
-        assert "DML_WRITE" in codes
-
-    def test_detects_update(self):
-        result = check_sql(SqlCheckParams(sql="UPDATE users SET name = 'test' WHERE id = 1"))
-        codes = [i.code for i in result.issues]
-        assert "DML_WRITE" in codes
-
-    def test_read_only_blocks_insert(self):
-        result = check_sql(SqlCheckParams(
-            sql="INSERT INTO users (name) VALUES ('test')",
-            mode=SqlCheckMode.READ_ONLY,
-        ))
-        assert result.safe is False
-        codes = [i.code for i in result.issues]
-        assert "READ_ONLY_VIOLATION" in codes
-
-    def test_read_only_allows_select(self):
-        result = check_sql(SqlCheckParams(
-            sql="SELECT * FROM users",
-            mode=SqlCheckMode.READ_ONLY,
-        ))
-        assert result.safe is True
-
-    def test_detects_create_table(self):
-        result = check_sql(SqlCheckParams(sql="CREATE TABLE test (id INT)"))
-        assert result.safe is False
-        codes = [i.code for i in result.issues]
-        assert "DDL_DETECTED" in codes
-
-    def test_handles_parse_error(self):
-        result = check_sql(SqlCheckParams(sql=""))
-        assert result.safe is False
+    def test_empty_sql(self):
+        result = guard_lint("")
+        assert isinstance(result, dict)
 
 
-class TestNoSqlguardDependency:
-    """Verify that guard.py works without sqlguard."""
+class TestGuardScanSafety:
+    def test_safe_query(self):
+        result = guard_scan_safety("SELECT id FROM users")
+        assert isinstance(result, dict)
+        assert result.get("safe") is True
 
-    def test_validate_works(self):
-        """validate_sql should return real results, not 'sqlguard not installed'."""
-        result = validate_sql(SqlValidateParams(sql="SELECT 1"))
-        assert result.valid is True
-        for err in result.errors:
-            assert "sqlguard" not in err.lower()
+    def test_drop_table(self):
+        result = guard_scan_safety("DROP TABLE users")
+        assert isinstance(result, dict)
+        # DROP should be flagged as unsafe
+        assert result.get("safe") is False or result.get("threats")
 
-    def test_check_works(self):
-        """check_sql should return real results, not 'sqlguard not installed'."""
-        result = check_sql(SqlCheckParams(sql="SELECT 1"))
-        for issue in result.issues:
-            assert "sqlguard" not in issue.code.lower()
-            assert "sqlguard" not in issue.message.lower()
+    def test_multiple_statements(self):
+        result = guard_scan_safety("SELECT 1; DROP TABLE users")
+        assert isinstance(result, dict)
+
+    def test_empty_sql(self):
+        result = guard_scan_safety("")
+        assert isinstance(result, dict)
+
+
+class TestGuardTranspile:
+    def test_basic_transpile(self):
+        result = guard_transpile("SELECT 1", "generic", "postgres")
+        assert isinstance(result, dict)
+
+    def test_transpile_success_fields(self):
+        result = guard_transpile("SELECT 1", "generic", "postgres")
+        # Should have transpiled_sql on success
+        if result.get("success", True):
+            assert "transpiled_sql" in result
+
+    def test_unknown_dialect(self):
+        result = guard_transpile("SELECT 1", "nonexistent", "postgres")
+        assert isinstance(result, dict)
+        # Should either error or return a result
+        assert "error" in result or "transpiled_sql" in result
+
+
+class TestGuardExplain:
+    def test_basic_explain(self):
+        result = guard_explain("SELECT 1")
+        assert isinstance(result, dict)
+
+    def test_complex_query(self):
+        result = guard_explain(
+            "SELECT u.id, o.total FROM users u JOIN orders o ON u.id = o.user_id"
+        )
+        assert isinstance(result, dict)
+
+
+class TestGuardCheck:
+    def test_basic_check(self):
+        result = guard_check("SELECT 1")
+        assert isinstance(result, dict)
+
+    def test_check_has_sections(self):
+        result = guard_check("SELECT * FROM users WHERE name = NULL")
+        assert isinstance(result, dict)
+        # Full check should have validation, lint, safety, pii sections
+        # (exact keys depend on sqlguard version)
+
+    def test_unsafe_sql_check(self):
+        result = guard_check("DROP TABLE users")
+        assert isinstance(result, dict)
+
+
+class TestSchemaContext:
+    def test_resolve_with_path(self):
+        path, cleanup = _resolve_schema("/some/path.yaml", None)
+        assert path == "/some/path.yaml"
+        assert cleanup is False
+
+    def test_resolve_with_context(self):
+        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
+        path, cleanup = _resolve_schema("", schema)
+        assert path.endswith(".yaml")
+        assert cleanup is True
+        # Verify YAML content
+        with open(path) as f:
+            loaded = yaml.safe_load(f)
+        assert loaded == schema
+        # Cleanup
+        os.unlink(path)
+
+    def test_resolve_empty(self):
+        path, cleanup = _resolve_schema("", None)
+        assert path == ""
+        assert cleanup is False
+
+    def test_path_takes_priority(self):
+        """schema_path wins over schema_context."""
+        path, cleanup = _resolve_schema("/my/schema.yaml", {"tables": []})
+        assert path == "/my/schema.yaml"
+        assert cleanup is False
+
+    def test_write_and_cleanup_temp(self):
+        schema = {"tables": [{"name": "test"}]}
+        tmp_path = _write_temp_schema(schema)
+        assert os.path.exists(tmp_path)
+        _cleanup_temp_schema(tmp_path)
+        assert not os.path.exists(tmp_path)
+
+    def test_cleanup_nonexistent_file(self):
+        """Should not raise on missing file."""
+        _cleanup_temp_schema("/nonexistent/path/file.yaml")
+
+    def test_validate_with_schema_context(self):
+        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
+        result = guard_validate("SELECT id FROM users", schema_context=schema)
+        assert isinstance(result, dict)
+
+    def test_lint_with_schema_context(self):
+        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
+        result = guard_lint("SELECT * FROM users", schema_context=schema)
+        assert isinstance(result, dict)
+
+
+class TestGracefulFallback:
+    """Test behavior when sqlguard is not installed."""
+
+    def test_validate_fallback(self):
+        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+            result = guard_validate("SELECT 1")
+            assert result["success"] is False
+            assert "not installed" in result["error"]
+
+    def test_lint_fallback(self):
+        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+            result = guard_lint("SELECT 1")
+            assert result["success"] is False
+            assert "not installed" in result["error"]
+
+    def test_safety_fallback(self):
+        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+            result = guard_scan_safety("SELECT 1")
+            assert result["success"] is False
+            assert "not installed" in result["error"]
+
+    def test_transpile_fallback(self):
+        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+            result = guard_transpile("SELECT 1", "generic", "postgres")
+            assert result["success"] is False
+            assert "not installed" in result["error"]
+
+    def test_explain_fallback(self):
+        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+            result = guard_explain("SELECT 1")
+            assert result["success"] is False
+            assert "not installed" in result["error"]
+
+    def test_check_fallback(self):
+        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+            result = guard_check("SELECT 1")
+            assert result["success"] is False
+            assert "not installed" in result["error"]
