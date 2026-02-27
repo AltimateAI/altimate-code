@@ -32,13 +32,11 @@ class TestGuardValidate:
     def test_valid_sql(self):
         result = guard_validate("SELECT 1")
         assert isinstance(result, dict)
-        # Should not have an error key (or error should be None)
-        assert result.get("error") is None or "error" not in result
+        assert result.get("valid") is True
 
     def test_invalid_sql(self):
         result = guard_validate("SELEC 1")
         assert isinstance(result, dict)
-        # Invalid SQL should have errors or valid=false
         assert result.get("valid") is False or result.get("errors")
 
     def test_empty_sql(self):
@@ -55,7 +53,7 @@ class TestGuardLint:
         result = guard_lint("SELECT * FROM users WHERE name = NULL")
         assert isinstance(result, dict)
         # Should detect the NULL comparison anti-pattern
-        findings = result.get("findings", [])
+        findings = result.get("findings", result.get("violations", []))
         assert isinstance(findings, list)
 
     def test_empty_sql(self):
@@ -118,12 +116,12 @@ class TestGuardCheck:
     def test_basic_check(self):
         result = guard_check("SELECT 1")
         assert isinstance(result, dict)
+        # Composite result has validation, lint, safety keys
+        assert "validation" in result or "success" in result
 
     def test_check_has_sections(self):
         result = guard_check("SELECT * FROM users WHERE name = NULL")
         assert isinstance(result, dict)
-        # Full check should have validation, lint, safety, pii sections
-        # (exact keys depend on sqlguard version)
 
     def test_unsafe_sql_check(self):
         result = guard_check("DROP TABLE users")
@@ -132,32 +130,20 @@ class TestGuardCheck:
 
 class TestSchemaContext:
     def test_resolve_with_path(self):
-        path, cleanup = _resolve_schema("/some/path.yaml", None)
-        assert path == "/some/path.yaml"
-        assert cleanup is False
-
-    def test_resolve_with_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        path, cleanup = _resolve_schema("", schema)
-        assert path.endswith(".yaml")
-        assert cleanup is True
-        # Verify YAML content
-        with open(path) as f:
-            loaded = yaml.safe_load(f)
-        assert loaded == schema
-        # Cleanup
-        os.unlink(path)
+        # Write a valid YAML file first
+        schema = {"tables": {"test": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(schema, f)
+            path = f.name
+        try:
+            s = _resolve_schema(path, None)
+            assert s is not None
+        finally:
+            os.unlink(path)
 
     def test_resolve_empty(self):
-        path, cleanup = _resolve_schema("", None)
-        assert path == ""
-        assert cleanup is False
-
-    def test_path_takes_priority(self):
-        """schema_path wins over schema_context."""
-        path, cleanup = _resolve_schema("/my/schema.yaml", {"tables": []})
-        assert path == "/my/schema.yaml"
-        assert cleanup is False
+        s = _resolve_schema("", None)
+        assert s is None
 
     def test_write_and_cleanup_temp(self):
         schema = {"tables": [{"name": "test"}]}
@@ -171,12 +157,12 @@ class TestSchemaContext:
         _cleanup_temp_schema("/nonexistent/path/file.yaml")
 
     def test_validate_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
+        schema = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
         result = guard_validate("SELECT id FROM users", schema_context=schema)
         assert isinstance(result, dict)
 
     def test_lint_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
+        schema = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
         result = guard_lint("SELECT * FROM users", schema_context=schema)
         assert isinstance(result, dict)
 

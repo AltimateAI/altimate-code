@@ -403,7 +403,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         elif method == "sql.fix":
             fix_params = SqlFixParams(**params)
             # Try sqlguard.fix first for Rust-powered fixing
-            guard_result = guard_fix_sql(fix_params.sql, dialect=fix_params.dialect)
+            guard_result = guard_fix_sql(fix_params.sql)
             if guard_result.get("success") and guard_result.get("fixed_sql"):
                 result = SqlFixResult(
                     success=True,
@@ -635,14 +635,14 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         # --- sqlguard Phase 1 (P0) ---
         elif method == "sqlguard.fix":
             p = SqlGuardFixParams(**params)
-            raw = guard_fix_sql(p.sql, p.schema_path, p.schema_context, p.dialect)
+            raw = guard_fix_sql(p.sql, p.schema_path, p.schema_context, p.max_iterations)
             result = SqlGuardResult(
                 success=raw.get("success", True), data=raw, error=raw.get("error")
             )
         elif method == "sqlguard.policy":
             p = SqlGuardPolicyParams(**params)
             raw = guard_check_policy(
-                p.sql, p.policy_yaml, p.schema_path, p.schema_context
+                p.sql, p.policy_json, p.schema_path, p.schema_context
             )
             result = SqlGuardResult(
                 success=raw.get("pass", True), data=raw, error=raw.get("error")
@@ -650,7 +650,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         elif method == "sqlguard.complexity":
             p = SqlGuardComplexityParams(**params)
             raw = guard_complexity_score(
-                p.sql, p.schema_path, p.schema_context, p.dialect
+                p.sql, p.schema_path, p.schema_context
             )
             result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
         elif method == "sqlguard.semantics":
@@ -676,7 +676,10 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
         elif method == "sqlguard.schema_diff":
             p = SqlGuardSchemaDiffParams(**params)
-            raw = guard_diff_schemas(p.schema1_path, p.schema2_path)
+            raw = guard_diff_schemas(
+                p.schema1_path, p.schema2_path,
+                p.schema1_context, p.schema2_context,
+            )
             result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
         elif method == "sqlguard.rewrite":
             p = SqlGuardGuardRewriteParams(**params)
@@ -687,7 +690,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         elif method == "sqlguard.correct":
             p = SqlGuardCorrectParams(**params)
             raw = guard_correct(
-                p.sql, p.schema_path, p.schema_context, p.max_iterations
+                p.sql, p.schema_path, p.schema_context
             )
             result = SqlGuardResult(
                 success=raw.get("success", True), data=raw, error=raw.get("error")

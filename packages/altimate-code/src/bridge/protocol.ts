@@ -728,12 +728,12 @@ export interface SqlGuardFixParams {
   sql: string
   schema_path?: string
   schema_context?: Record<string, any>
-  dialect?: string
+  max_iterations?: number
 }
 
 export interface SqlGuardPolicyParams {
   sql: string
-  policy_yaml: string
+  policy_json: string
   schema_path?: string
   schema_context?: Record<string, any>
 }
@@ -742,7 +742,6 @@ export interface SqlGuardComplexityParams {
   sql: string
   schema_path?: string
   schema_context?: Record<string, any>
-  dialect?: string
 }
 
 export interface SqlGuardSemanticsParams {
@@ -773,8 +772,10 @@ export interface SqlGuardMigrationParams {
 }
 
 export interface SqlGuardSchemaDiffParams {
-  schema1_path: string
-  schema2_path: string
+  schema1_path?: string
+  schema2_path?: string
+  schema1_context?: Record<string, any>
+  schema2_context?: Record<string, any>
 }
 
 export interface SqlGuardRewriteParams {
@@ -787,7 +788,6 @@ export interface SqlGuardCorrectParams {
   sql: string
   schema_path?: string
   schema_context?: Record<string, any>
-  max_iterations?: number
 }
 
 export interface SqlGuardGradeParams {

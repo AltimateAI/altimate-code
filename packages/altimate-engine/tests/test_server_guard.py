@@ -40,7 +40,8 @@ class TestSqlGuardValidateDispatch:
             params={
                 "sql": "SELECT id FROM users",
                 "schema_context": {
-                    "tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]
+                    "tables": {"users": {"columns": [{"name": "id", "type": "int"}]}},
+                    "version": "1",
                 },
             },
             id=3,

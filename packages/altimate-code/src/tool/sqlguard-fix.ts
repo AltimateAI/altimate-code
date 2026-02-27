@@ -9,7 +9,7 @@ export const SqlGuardFixTool = Tool.define("sqlguard_fix", {
     sql: z.string().describe("SQL query to fix"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
-    dialect: z.string().optional().describe("SQL dialect (e.g. snowflake, bigquery, postgres)"),
+    max_iterations: z.number().optional().describe("Maximum fix iterations (default: 5)"),
   }),
   async execute(args, ctx) {
     try {
@@ -17,7 +17,7 @@ export const SqlGuardFixTool = Tool.define("sqlguard_fix", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
-        dialect: args.dialect ?? "",
+        max_iterations: args.max_iterations ?? 5,
       })
       const data = result.data as Record<string, any>
       return {

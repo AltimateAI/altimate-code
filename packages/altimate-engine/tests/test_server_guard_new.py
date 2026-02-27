@@ -1,10 +1,37 @@
-"""Tests for new sqlguard JSON-RPC server dispatch (Phases 1-3)."""
+"""Tests for new sqlguard JSON-RPC server dispatch (Phases 1-3).
+
+Updated for new sqlguard API: Schema objects, renamed params.
+"""
+
+import os
+import tempfile
 
 import pytest
+import yaml
 
 from altimate_engine.models import JsonRpcRequest
 from altimate_engine.server import dispatch
 from altimate_engine.sql.guard import SQLGUARD_AVAILABLE
+
+
+# Schema context in the format sqlguard expects
+SCHEMA_CTX = {
+    "tables": {
+        "users": {
+            "columns": [
+                {"name": "id", "type": "int"},
+                {"name": "name", "type": "varchar"},
+            ]
+        },
+        "orders": {
+            "columns": [
+                {"name": "id", "type": "int"},
+                {"name": "user_id", "type": "int"},
+            ]
+        },
+    },
+    "version": "1",
+}
 
 
 # Skip all tests if sqlguard is not installed
@@ -30,10 +57,10 @@ class TestSqlGuardFixDispatch:
         assert "data" in response.result
         assert "success" in response.result
 
-    def test_fix_with_dialect(self):
+    def test_fix_with_max_iterations(self):
         request = JsonRpcRequest(
             method="sqlguard.fix",
-            params={"sql": "SELCT 1", "dialect": "snowflake"},
+            params={"sql": "SELCT 1", "max_iterations": 3},
             id=101,
         )
         response = dispatch(request)
@@ -42,10 +69,7 @@ class TestSqlGuardFixDispatch:
     def test_fix_with_schema_context(self):
         request = JsonRpcRequest(
             method="sqlguard.fix",
-            params={
-                "sql": "SELCT id FORM orders",
-                "schema_context": {"tables": [{"name": "orders", "columns": [{"name": "id", "type": "int"}]}]},
-            },
+            params={"sql": "SELCT id FORM orders", "schema_context": SCHEMA_CTX},
             id=102,
         )
         response = dispatch(request)
@@ -56,7 +80,7 @@ class TestSqlGuardPolicyDispatch:
     def test_basic_policy(self):
         request = JsonRpcRequest(
             method="sqlguard.policy",
-            params={"sql": "SELECT * FROM users", "policy_yaml": "rules:\n  - no_select_star: true"},
+            params={"sql": "SELECT * FROM users", "policy_json": '{"rules": []}'},
             id=110,
         )
         response = dispatch(request)
@@ -66,7 +90,7 @@ class TestSqlGuardPolicyDispatch:
     def test_empty_policy(self):
         request = JsonRpcRequest(
             method="sqlguard.policy",
-            params={"sql": "SELECT 1", "policy_yaml": ""},
+            params={"sql": "SELECT 1", "policy_json": ""},
             id=111,
         )
         response = dispatch(request)
@@ -84,10 +108,10 @@ class TestSqlGuardComplexityDispatch:
         assert response.error is None
         assert "data" in response.result
 
-    def test_with_dialect(self):
+    def test_with_schema_context(self):
         request = JsonRpcRequest(
             method="sqlguard.complexity",
-            params={"sql": "SELECT 1", "dialect": "bigquery"},
+            params={"sql": "SELECT 1", "schema_context": SCHEMA_CTX},
             id=121,
         )
         response = dispatch(request)
@@ -108,10 +132,7 @@ class TestSqlGuardSemanticsDispatch:
     def test_with_schema_context(self):
         request = JsonRpcRequest(
             method="sqlguard.semantics",
-            params={
-                "sql": "SELECT id FROM users",
-                "schema_context": {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]},
-            },
+            params={"sql": "SELECT id FROM users", "schema_context": SCHEMA_CTX},
             id=131,
         )
         response = dispatch(request)
@@ -170,12 +191,8 @@ class TestSqlGuardMigrationDispatch:
 
 class TestSqlGuardSchemaDiffDispatch:
     def test_basic_diff(self):
-        import os
-        import tempfile
-        import yaml
-
-        schema1 = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        schema2 = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}, {"name": "email", "type": "varchar"}]}]}
+        schema1 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
+        schema2 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}, {"name": "email", "type": "varchar"}]}}, "version": "1"}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f1:
             yaml.dump(schema1, f1)
             path1 = f1.name
@@ -194,6 +211,18 @@ class TestSqlGuardSchemaDiffDispatch:
         finally:
             os.unlink(path1)
             os.unlink(path2)
+
+    def test_diff_with_context(self):
+        s1 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
+        s2 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "varchar"}]}}, "version": "1"}
+        request = JsonRpcRequest(
+            method="sqlguard.schema_diff",
+            params={"schema1_context": s1, "schema2_context": s2},
+            id=221,
+        )
+        response = dispatch(request)
+        assert response.error is None
+        assert "data" in response.result
 
 
 class TestSqlGuardRewriteDispatch:
@@ -218,15 +247,6 @@ class TestSqlGuardCorrectDispatch:
         response = dispatch(request)
         assert response.error is None
         assert "data" in response.result
-
-    def test_with_max_iterations(self):
-        request = JsonRpcRequest(
-            method="sqlguard.correct",
-            params={"sql": "SELCT * FORM orders", "max_iterations": 3},
-            id=241,
-        )
-        response = dispatch(request)
-        assert response.error is None
 
 
 class TestSqlGuardGradeDispatch:
@@ -269,15 +289,20 @@ class TestSqlGuardCostDispatch:
 
 class TestSqlGuardClassifyPiiDispatch:
     def test_with_schema_context(self):
-        request = JsonRpcRequest(
-            method="sqlguard.classify_pii",
-            params={
-                "schema_context": {
-                    "tables": [
-                        {"name": "users", "columns": [{"name": "email", "type": "varchar"}, {"name": "ssn", "type": "varchar"}]}
+        schema = {
+            "tables": {
+                "users": {
+                    "columns": [
+                        {"name": "email", "type": "varchar"},
+                        {"name": "ssn", "type": "varchar"},
                     ]
                 }
             },
+            "version": "1",
+        }
+        request = JsonRpcRequest(
+            method="sqlguard.classify_pii",
+            params={"schema_context": schema},
             id=300,
         )
         response = dispatch(request)
@@ -394,9 +419,7 @@ class TestSqlGuardOptimizeContextDispatch:
     def test_with_schema_context(self):
         request = JsonRpcRequest(
             method="sqlguard.optimize_context",
-            params={
-                "schema_context": {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-            },
+            params={"schema_context": SCHEMA_CTX},
             id=390,
         )
         response = dispatch(request)
@@ -444,9 +467,7 @@ class TestSqlGuardExportDdlDispatch:
     def test_with_schema_context(self):
         request = JsonRpcRequest(
             method="sqlguard.export_ddl",
-            params={
-                "schema_context": {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-            },
+            params={"schema_context": SCHEMA_CTX},
             id=430,
         )
         response = dispatch(request)
@@ -458,9 +479,7 @@ class TestSqlGuardFingerprintDispatch:
     def test_with_schema_context(self):
         request = JsonRpcRequest(
             method="sqlguard.fingerprint",
-            params={
-                "schema_context": {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-            },
+            params={"schema_context": SCHEMA_CTX},
             id=440,
         )
         response = dispatch(request)
@@ -547,7 +566,7 @@ class TestSqlGuardNewInvalidParams:
         response = dispatch(request)
         assert response.error is not None
 
-    def test_policy_no_policy_yaml(self):
+    def test_policy_no_policy_json(self):
         request = JsonRpcRequest(
             method="sqlguard.policy",
             params={"sql": "SELECT 1"},
@@ -588,15 +607,6 @@ class TestSqlGuardNewInvalidParams:
             method="sqlguard.equivalence",
             params={},
             id=506,
-        )
-        response = dispatch(request)
-        assert response.error is not None
-
-    def test_schema_diff_no_params(self):
-        request = JsonRpcRequest(
-            method="sqlguard.schema_diff",
-            params={},
-            id=507,
         )
         response = dispatch(request)
         assert response.error is not None

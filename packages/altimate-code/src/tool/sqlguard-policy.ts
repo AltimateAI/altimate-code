@@ -7,7 +7,7 @@ export const SqlGuardPolicyTool = Tool.define("sqlguard_policy", {
     "Check SQL against YAML-based governance policy guardrails using the Rust-based sqlguard engine. Validates compliance with custom rules like allowed tables, forbidden operations, and data access restrictions.",
   parameters: z.object({
     sql: z.string().describe("SQL query to check against policy"),
-    policy_yaml: z.string().describe("YAML string defining the policy rules"),
+    policy_json: z.string().describe("JSON string defining the policy rules"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
@@ -15,7 +15,7 @@ export const SqlGuardPolicyTool = Tool.define("sqlguard_policy", {
     try {
       const result = await Bridge.call("sqlguard.policy", {
         sql: args.sql,
-        policy_yaml: args.policy_yaml,
+        policy_json: args.policy_json,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
       })

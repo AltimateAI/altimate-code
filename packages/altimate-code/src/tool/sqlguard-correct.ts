@@ -9,7 +9,6 @@ export const SqlGuardCorrectTool = Tool.define("sqlguard_correct", {
     sql: z.string().describe("SQL query to correct"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
-    max_iterations: z.number().optional().describe("Maximum correction iterations (default: 5)"),
   }),
   async execute(args, ctx) {
     try {
@@ -17,7 +16,6 @@ export const SqlGuardCorrectTool = Tool.define("sqlguard_correct", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
-        max_iterations: args.max_iterations ?? 5,
       })
       const data = result.data as Record<string, any>
       return {

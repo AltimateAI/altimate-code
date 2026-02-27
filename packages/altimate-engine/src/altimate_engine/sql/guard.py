@@ -1,4 +1,8 @@
-"""Thin wrapper for sqlguard Rust bindings with graceful fallback."""
+"""Thin wrapper for sqlguard Rust bindings with graceful fallback.
+
+sqlguard functions now return dicts directly and accept Schema objects
+instead of file path strings.
+"""
 
 from __future__ import annotations
 
@@ -24,26 +28,26 @@ def _not_installed_result() -> dict:
     return {"success": False, "error": _NOT_INSTALLED_MSG}
 
 
-def _parse_json(result: str) -> dict:
-    return json.loads(result)
-
-
 def _resolve_schema(
     schema_path: str, schema_context: dict[str, Any] | None
-) -> tuple[str, bool]:
-    """Resolve schema source.
+) -> "sqlguard.Schema | None":
+    """Build a sqlguard.Schema from a YAML file path or an inline dict.
 
-    Returns:
-        Tuple of (schema_path, should_cleanup)
+    Returns None when neither source is provided.
     """
     if schema_path:
-        return schema_path, False
+        return sqlguard.Schema.from_yaml_file(schema_path)
     if schema_context:
-        path = _write_temp_schema(schema_context)
-        return path, True
-    return "", False
+        return sqlguard.Schema.from_json(json.dumps(schema_context))
+    return None
 
 
+def _empty_schema() -> "sqlguard.Schema":
+    """Return a minimal empty Schema for calls that require one."""
+    return sqlguard.Schema.from_ddl("CREATE TABLE _empty_ (id INT);")
+
+
+# Keep old helpers around for backwards compat in tests
 def _write_temp_schema(schema_context: dict[str, Any]) -> str:
     """Write schema context to a temporary YAML file."""
     import yaml
@@ -63,6 +67,19 @@ def _cleanup_temp_schema(path: str) -> None:
         pass
 
 
+def _schema_or_empty(
+    schema_path: str, schema_context: dict[str, Any] | None
+) -> "sqlguard.Schema":
+    """Resolve schema, falling back to an empty Schema if none provided."""
+    s = _resolve_schema(schema_path, schema_context)
+    return s if s is not None else _empty_schema()
+
+
+# ---------------------------------------------------------------------------
+# Original 6 functions (updated for new API)
+# ---------------------------------------------------------------------------
+
+
 def guard_validate(
     sql: str,
     schema_path: str = "",
@@ -72,13 +89,8 @@ def guard_validate(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.validate(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.validate(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -92,13 +104,8 @@ def guard_lint(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.lint(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.lint(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -108,8 +115,7 @@ def guard_scan_safety(sql: str) -> dict:
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.scan_safety(sql)
-        return _parse_json(result)
+        return sqlguard.scan_sql(sql)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -119,8 +125,7 @@ def guard_transpile(sql: str, from_dialect: str, to_dialect: str) -> dict:
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.transpile(sql, from_dialect, to_dialect)
-        return _parse_json(result)
+        return sqlguard.transpile(sql, from_dialect, to_dialect)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -134,13 +139,8 @@ def guard_explain(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.explain(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.explain(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -150,17 +150,22 @@ def guard_check(
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
-    """Run full analysis pipeline: validate + lint + safety + PII."""
+    """Run full analysis pipeline: validate + lint + safety.
+
+    sqlguard.check was removed; this composes validate + lint + scan_sql.
+    """
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.check(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        validation = sqlguard.validate(sql, schema)
+        lint_result = sqlguard.lint(sql, schema)
+        safety = sqlguard.scan_sql(sql)
+        return {
+            "validation": validation,
+            "lint": lint_result,
+            "safety": safety,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -174,40 +179,30 @@ def guard_fix(
     sql: str,
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
-    dialect: str = "",
+    max_iterations: int = 5,
 ) -> dict:
     """Auto-fix SQL errors via fuzzy matching and re-validation."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.fix(sql, path or "", dialect or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.fix(sql, schema, max_iterations=max_iterations)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 def guard_check_policy(
     sql: str,
-    policy_yaml: str,
+    policy_json: str,
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
-    """Check SQL against YAML-based governance guardrails."""
+    """Check SQL against JSON-based governance guardrails."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.check_policy(sql, path or "", policy_yaml)
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.check_policy(sql, schema, policy_json)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -216,19 +211,13 @@ def guard_complexity_score(
     sql: str,
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
-    dialect: str = "",
 ) -> dict:
     """Score multi-dimensional complexity and estimated cloud cost."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.complexity_score(sql, path or "", dialect or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.complexity_score(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -242,13 +231,8 @@ def guard_check_semantics(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.check_semantics(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.check_semantics(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -262,13 +246,8 @@ def guard_generate_tests(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.generate_tests(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.generate_tests(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -288,13 +267,8 @@ def guard_check_equivalence(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.check_equivalence(sql1, sql2, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.check_equivalence(sql1, sql2, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -308,27 +282,25 @@ def guard_analyze_migration(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.analyze_migration(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.analyze_migration(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 def guard_diff_schemas(
-    schema1_path: str,
-    schema2_path: str,
+    schema1_path: str = "",
+    schema2_path: str = "",
+    schema1_context: dict[str, Any] | None = None,
+    schema2_context: dict[str, Any] | None = None,
 ) -> dict:
     """Diff two schemas with breaking change detection."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.diff_schemas(schema1_path, schema2_path)
-        return _parse_json(result)
+        s1 = _schema_or_empty(schema1_path, schema1_context)
+        s2 = _schema_or_empty(schema2_path, schema2_context)
+        return sqlguard.diff_schemas(s1, s2)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -342,13 +314,8 @@ def guard_rewrite(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.rewrite(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.rewrite(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -357,19 +324,13 @@ def guard_correct(
     sql: str,
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
-    max_iterations: int = 5,
 ) -> dict:
     """Iterative propose-verify-refine correction loop."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.correct(sql, path or "", max_iterations)
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.correct(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -383,13 +344,8 @@ def guard_evaluate(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.evaluate(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.evaluate(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -404,13 +360,8 @@ def guard_estimate_cost(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.estimate_cost(sql, path or "", dialect or "generic")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.estimate_cost(sql, schema, dialect or "generic")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -428,13 +379,8 @@ def guard_classify_pii(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.classify_pii(path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.classify_pii(schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -448,13 +394,8 @@ def guard_check_query_pii(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.check_query_pii(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.check_query_pii(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -468,13 +409,9 @@ def guard_resolve_term(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.resolve_term(term, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        matches = sqlguard.resolve_term(term, schema)
+        return {"matches": matches}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -485,19 +422,14 @@ def guard_column_lineage(
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
-    """Schema-aware column lineage (gated, requires init)."""
+    """Schema-aware column lineage."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.column_lineage(
-                sql, dialect=dialect or "generic", schema=path or ""
-            )
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _resolve_schema(schema_path, schema_context)
+        return sqlguard.column_lineage(
+            sql, dialect=dialect or "generic", schema=schema
+        )
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -507,17 +439,12 @@ def guard_track_lineage(
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
-    """Track lineage across multiple queries (gated, requires init)."""
+    """Track lineage across multiple queries."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.track_lineage(queries, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.track_lineage(queries, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -527,8 +454,7 @@ def guard_format_sql(sql: str, dialect: str = "") -> dict:
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.format_sql(sql, dialect or "generic")
-        return _parse_json(result)
+        return sqlguard.format_sql(sql, dialect or "generic")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -538,8 +464,7 @@ def guard_extract_metadata(sql: str, dialect: str = "") -> dict:
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.extract_metadata(sql, dialect or "generic")
-        return _parse_json(result)
+        return sqlguard.extract_metadata(sql, dialect or "generic")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -551,8 +476,7 @@ def guard_compare_queries(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.compare_queries(left_sql, right_sql, dialect or "generic")
-        return _parse_json(result)
+        return sqlguard.compare_queries(left_sql, right_sql, dialect or "generic")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -567,13 +491,8 @@ def guard_complete(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.complete(sql, cursor_pos, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.complete(sql, cursor_pos, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -586,13 +505,8 @@ def guard_optimize_context(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.optimize_context(path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.optimize_context(schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -606,13 +520,8 @@ def guard_optimize_for_query(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.optimize_for_query(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.optimize_for_query(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -626,13 +535,8 @@ def guard_prune_schema(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.prune_schema(sql, path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        return _parse_json(result)
+        schema = _schema_or_empty(schema_path, schema_context)
+        return sqlguard.prune_schema(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -646,7 +550,7 @@ def guard_import_ddl(ddl: str, dialect: str = "") -> dict:
         # import_ddl returns a Schema object; convert to dict
         if hasattr(result, "to_dict"):
             return {"success": True, "schema": result.to_dict()}
-        return _parse_json(result)
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -659,19 +563,12 @@ def guard_export_ddl(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.export_ddl(path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
-        # export_ddl may return a plain string
+        schema = _schema_or_empty(schema_path, schema_context)
+        result = sqlguard.export_ddl(schema)
+        # export_ddl returns a plain string
         if isinstance(result, str):
-            try:
-                return _parse_json(result)
-            except (json.JSONDecodeError, ValueError):
-                return {"success": True, "ddl": result}
-        return {"success": True, "ddl": str(result)}
+            return {"success": True, "ddl": result}
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -684,19 +581,12 @@ def guard_schema_fingerprint(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        path, cleanup = _resolve_schema(schema_path, schema_context)
-        try:
-            result = sqlguard.schema_fingerprint(path or "")
-        finally:
-            if cleanup:
-                _cleanup_temp_schema(path)
+        schema = _schema_or_empty(schema_path, schema_context)
+        result = sqlguard.schema_fingerprint(schema)
         # schema_fingerprint returns a plain string hash
         if isinstance(result, str):
-            try:
-                return _parse_json(result)
-            except (json.JSONDecodeError, ValueError):
-                return {"success": True, "fingerprint": result}
-        return {"success": True, "fingerprint": str(result)}
+            return {"success": True, "fingerprint": result}
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -710,8 +600,7 @@ def guard_introspection_sql(
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.introspection_sql(db_type, database, schema_name or "")
-        return _parse_json(result)
+        return sqlguard.introspection_sql(db_type, database, schema_name)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -721,8 +610,7 @@ def guard_parse_dbt_project(project_dir: str) -> dict:
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
-        result = sqlguard.parse_dbt_project(project_dir)
-        return _parse_json(result)
+        return sqlguard.parse_dbt_project(project_dir)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -736,6 +624,6 @@ def guard_is_safe(sql: str) -> dict:
         # is_safe returns a boolean
         if isinstance(result, bool):
             return {"success": True, "safe": result}
-        return _parse_json(result)
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}

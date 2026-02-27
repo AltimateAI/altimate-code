@@ -1,4 +1,8 @@
-"""Tests for the new sqlguard Python wrapper functions (Phases 1-3)."""
+"""Tests for the new sqlguard Python wrapper functions (Phases 1-3).
+
+Updated for new sqlguard API: Schema objects instead of path strings,
+dicts returned directly, renamed/removed params.
+"""
 
 import json
 import os
@@ -46,6 +50,41 @@ from altimate_engine.sql.guard import (
 )
 
 
+# Schema context in the format sqlguard expects
+SCHEMA_CTX = {
+    "tables": {
+        "users": {
+            "columns": [
+                {"name": "id", "type": "int"},
+                {"name": "name", "type": "varchar"},
+                {"name": "email", "type": "varchar"},
+            ]
+        },
+        "orders": {
+            "columns": [
+                {"name": "id", "type": "int"},
+                {"name": "user_id", "type": "int"},
+                {"name": "total", "type": "decimal"},
+            ]
+        },
+    },
+    "version": "1",
+}
+
+# Minimal schema for single-table tests
+SIMPLE_SCHEMA = {
+    "tables": {
+        "users": {
+            "columns": [
+                {"name": "id", "type": "int"},
+                {"name": "name", "type": "varchar"},
+            ]
+        }
+    },
+    "version": "1",
+}
+
+
 # Skip all tests if sqlguard is not installed
 pytestmark = pytest.mark.skipif(
     not SQLGUARD_AVAILABLE, reason="sqlguard not installed"
@@ -66,13 +105,12 @@ class TestGuardFix:
         result = guard_fix("SELECT * FROM orders")
         assert isinstance(result, dict)
 
-    def test_fix_with_dialect(self):
-        result = guard_fix("SELECT 1", dialect="snowflake")
+    def test_fix_with_max_iterations(self):
+        result = guard_fix("SELECT 1", max_iterations=3)
         assert isinstance(result, dict)
 
     def test_fix_with_schema_context(self):
-        schema = {"tables": [{"name": "orders", "columns": [{"name": "id", "type": "int"}]}]}
-        result = guard_fix("SELCT id FORM orders", schema_context=schema)
+        result = guard_fix("SELCT id FORM orders", schema_context=SCHEMA_CTX)
         assert isinstance(result, dict)
 
     def test_fix_empty_sql(self):
@@ -82,7 +120,7 @@ class TestGuardFix:
 
 class TestGuardCheckPolicy:
     def test_basic_policy(self):
-        policy = "rules:\n  - no_select_star: true"
+        policy = '{"rules": [{"no_select_star": true}]}'
         result = guard_check_policy("SELECT * FROM users", policy)
         assert isinstance(result, dict)
 
@@ -91,8 +129,7 @@ class TestGuardCheckPolicy:
         assert isinstance(result, dict)
 
     def test_policy_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        result = guard_check_policy("SELECT * FROM users", "rules: []", schema_context=schema)
+        result = guard_check_policy("SELECT * FROM users", "{}", schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
 
@@ -108,8 +145,8 @@ class TestGuardComplexityScore:
         )
         assert isinstance(result, dict)
 
-    def test_with_dialect(self):
-        result = guard_complexity_score("SELECT 1", dialect="bigquery")
+    def test_with_schema_context(self):
+        result = guard_complexity_score("SELECT 1", schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
     def test_empty_sql(self):
@@ -127,8 +164,7 @@ class TestGuardCheckSemantics:
         assert isinstance(result, dict)
 
     def test_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        result = guard_check_semantics("SELECT id FROM users", schema_context=schema)
+        result = guard_check_semantics("SELECT id FROM users", schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
     def test_empty_sql(self):
@@ -148,8 +184,7 @@ class TestGuardGenerateTests:
         assert isinstance(result, dict)
 
     def test_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "varchar"}]}]}
-        result = guard_generate_tests("SELECT id, name FROM users", schema_context=schema)
+        result = guard_generate_tests("SELECT id, name FROM users", schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
     def test_empty_sql(self):
@@ -198,8 +233,7 @@ class TestGuardAnalyzeMigration:
 
 class TestGuardDiffSchemas:
     def test_diff_same_schema(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        # Write two temp files
+        schema = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f1:
             yaml.dump(schema, f1)
             path1 = f1.name
@@ -214,8 +248,8 @@ class TestGuardDiffSchemas:
             os.unlink(path2)
 
     def test_diff_different_schemas(self):
-        schema1 = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        schema2 = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}, {"name": "email", "type": "varchar"}]}]}
+        schema1 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
+        schema2 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}, {"name": "email", "type": "varchar"}]}}, "version": "1"}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f1:
             yaml.dump(schema1, f1)
             path1 = f1.name
@@ -228,6 +262,12 @@ class TestGuardDiffSchemas:
         finally:
             os.unlink(path1)
             os.unlink(path2)
+
+    def test_diff_with_context(self):
+        s1 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
+        s2 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "varchar"}]}}, "version": "1"}
+        result = guard_diff_schemas(schema1_context=s1, schema2_context=s2)
+        assert isinstance(result, dict)
 
 
 class TestGuardRewrite:
@@ -251,10 +291,6 @@ class TestGuardCorrect:
 
     def test_valid_sql(self):
         result = guard_correct("SELECT * FROM orders")
-        assert isinstance(result, dict)
-
-    def test_with_max_iterations(self):
-        result = guard_correct("SELCT * FORM orders", max_iterations=3)
         assert isinstance(result, dict)
 
     def test_empty_sql(self):
@@ -305,16 +341,16 @@ class TestGuardEstimateCost:
 class TestGuardClassifyPii:
     def test_with_schema_context(self):
         schema = {
-            "tables": [
-                {
-                    "name": "users",
+            "tables": {
+                "users": {
                     "columns": [
                         {"name": "id", "type": "int"},
                         {"name": "email", "type": "varchar"},
                         {"name": "ssn", "type": "varchar"},
-                    ],
+                    ]
                 }
-            ]
+            },
+            "version": "1",
         }
         result = guard_classify_pii(schema_context=schema)
         assert isinstance(result, dict)
@@ -342,15 +378,18 @@ class TestGuardResolveTerm:
     def test_basic_resolve(self):
         result = guard_resolve_term("customer")
         assert isinstance(result, dict)
+        assert "matches" in result
 
     def test_with_schema_context(self):
-        schema = {"tables": [{"name": "customers", "columns": [{"name": "id", "type": "int"}]}]}
+        schema = {"tables": {"customers": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
         result = guard_resolve_term("customer", schema_context=schema)
         assert isinstance(result, dict)
+        assert "matches" in result
 
     def test_empty_term(self):
         result = guard_resolve_term("")
         assert isinstance(result, dict)
+        assert "matches" in result
 
 
 class TestGuardColumnLineage:
@@ -434,8 +473,7 @@ class TestGuardComplete:
         assert isinstance(result, dict)
 
     def test_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        result = guard_complete("SELECT  FROM users", 7, schema_context=schema)
+        result = guard_complete("SELECT  FROM users", 7, schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
     def test_zero_cursor(self):
@@ -445,13 +483,7 @@ class TestGuardComplete:
 
 class TestGuardOptimizeContext:
     def test_with_schema_context(self):
-        schema = {
-            "tables": [
-                {"name": "users", "columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "varchar"}]},
-                {"name": "orders", "columns": [{"name": "id", "type": "int"}, {"name": "user_id", "type": "int"}]},
-            ]
-        }
-        result = guard_optimize_context(schema_context=schema)
+        result = guard_optimize_context(schema_context=SCHEMA_CTX)
         assert isinstance(result, dict)
 
     def test_empty_schema(self):
@@ -465,13 +497,7 @@ class TestGuardOptimizeForQuery:
         assert isinstance(result, dict)
 
     def test_with_schema_context(self):
-        schema = {
-            "tables": [
-                {"name": "users", "columns": [{"name": "id", "type": "int"}]},
-                {"name": "orders", "columns": [{"name": "id", "type": "int"}]},
-            ]
-        }
-        result = guard_optimize_for_query("SELECT id FROM users", schema_context=schema)
+        result = guard_optimize_for_query("SELECT id FROM users", schema_context=SCHEMA_CTX)
         assert isinstance(result, dict)
 
 
@@ -481,13 +507,7 @@ class TestGuardPruneSchema:
         assert isinstance(result, dict)
 
     def test_with_schema_context(self):
-        schema = {
-            "tables": [
-                {"name": "users", "columns": [{"name": "id", "type": "int"}]},
-                {"name": "orders", "columns": [{"name": "id", "type": "int"}]},
-            ]
-        }
-        result = guard_prune_schema("SELECT id FROM users", schema_context=schema)
+        result = guard_prune_schema("SELECT id FROM users", schema_context=SCHEMA_CTX)
         assert isinstance(result, dict)
 
 
@@ -509,8 +529,7 @@ class TestGuardImportDdl:
 
 class TestGuardExportDdl:
     def test_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        result = guard_export_ddl(schema_context=schema)
+        result = guard_export_ddl(schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
     def test_empty_schema(self):
@@ -520,8 +539,7 @@ class TestGuardExportDdl:
 
 class TestGuardSchemaFingerprint:
     def test_with_schema_context(self):
-        schema = {"tables": [{"name": "users", "columns": [{"name": "id", "type": "int"}]}]}
-        result = guard_schema_fingerprint(schema_context=schema)
+        result = guard_schema_fingerprint(schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
     def test_empty_schema(self):
@@ -557,7 +575,6 @@ class TestGuardIsSafe:
     def test_safe_query(self):
         result = guard_is_safe("SELECT 1")
         assert isinstance(result, dict)
-        # Should indicate safe
         if result.get("success"):
             assert result.get("safe") is True
 
@@ -592,7 +609,7 @@ class TestGracefulFallbackNew:
 
     def test_check_policy_fallback(self):
         with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
-            result = guard_check_policy("SELECT 1", "rules: []")
+            result = guard_check_policy("SELECT 1", "{}")
             assert result["success"] is False
             assert "not installed" in result["error"]
 

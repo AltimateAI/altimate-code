@@ -822,12 +822,12 @@ class SqlGuardFixParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
-    dialect: str = ""
+    max_iterations: int = 5
 
 
 class SqlGuardPolicyParams(BaseModel):
     sql: str
-    policy_yaml: str
+    policy_json: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
@@ -836,7 +836,6 @@ class SqlGuardComplexityParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
-    dialect: str = ""
 
 
 class SqlGuardSemanticsParams(BaseModel):
@@ -868,8 +867,10 @@ class SqlGuardMigrationParams(BaseModel):
 
 
 class SqlGuardSchemaDiffParams(BaseModel):
-    schema1_path: str
-    schema2_path: str
+    schema1_path: str = ""
+    schema2_path: str = ""
+    schema1_context: dict[str, Any] | None = None
+    schema2_context: dict[str, Any] | None = None
 
 
 class SqlGuardGuardRewriteParams(BaseModel):
@@ -882,7 +883,6 @@ class SqlGuardCorrectParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
-    max_iterations: int = 5
 
 
 class SqlGuardGradeParams(BaseModel):
