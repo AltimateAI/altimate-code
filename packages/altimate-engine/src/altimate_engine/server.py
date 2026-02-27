@@ -19,6 +19,7 @@ from altimate_engine.models import (
     CostGateFileResult,
     CostGateParams,
     CostGateResult,
+    DbtLineageParams,
     DbtManifestParams,
     DbtRunParams,
     DbtProfilesParams,
@@ -123,6 +124,7 @@ from altimate_engine.schema.pii_detector import detect_pii
 from altimate_engine.schema.tags import get_tags, list_tags
 from altimate_engine.dbt.runner import run_dbt
 from altimate_engine.dbt.manifest import parse_manifest
+from altimate_engine.dbt.lineage import dbt_lineage
 from altimate_engine.connections import ConnectionRegistry
 from altimate_engine.lineage.check import check_lineage
 from altimate_engine.sql.feedback_store import FeedbackStore
@@ -358,6 +360,8 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = run_dbt(DbtRunParams(**params))
         elif method == "dbt.manifest":
             result = parse_manifest(DbtManifestParams(**params))
+        elif method == "dbt.lineage":
+            result = dbt_lineage(DbtLineageParams(**params))
         elif method == "warehouse.list":
             warehouses = [WarehouseInfo(**w) for w in ConnectionRegistry.list()]
             result = WarehouseListResult(warehouses=warehouses)

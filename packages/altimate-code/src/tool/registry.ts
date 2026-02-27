@@ -36,6 +36,8 @@ import { SqlRecordFeedbackTool } from "./sql-record-feedback"
 import { SqlPredictCostTool } from "./sql-predict-cost"
 import { DbtRunTool } from "./dbt-run"
 import { DbtManifestTool } from "./dbt-manifest"
+import { DbtProfilesTool } from "./dbt-profiles"
+import { DbtLineageTool } from "./dbt-lineage"
 import { SchemaIndexTool } from "./schema-index"
 import { SchemaSearchTool } from "./schema-search"
 import { SchemaCacheStatusTool } from "./schema-cache-status"
@@ -192,6 +194,8 @@ export namespace ToolRegistry {
       SqlPredictCostTool,
       DbtRunTool,
       DbtManifestTool,
+      DbtProfilesTool,
+      DbtLineageTool,
       SchemaIndexTool,
       SchemaSearchTool,
       SchemaCacheStatusTool,

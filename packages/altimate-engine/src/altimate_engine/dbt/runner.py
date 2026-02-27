@@ -7,12 +7,35 @@ import subprocess
 from altimate_engine.models import DbtRunParams, DbtRunResult
 
 
+def _ensure_upstream_selector(select: str, command: str) -> str:
+    """Prepend + to selector for build/run/test to include upstream deps.
+
+    The + operator tells dbt to also build all upstream dependencies of the
+    selected node, which prevents partial builds from failing due to missing
+    upstream models.
+    """
+    if command not in ("build", "run", "test"):
+        return select
+
+    # Already has + prefix — nothing to do
+    if select.startswith("+"):
+        return select
+
+    # Tag/path/source selectors: tag:daily, path:models/, source:raw
+    # Don't touch these — + doesn't apply the same way
+    if ":" in select and not select.startswith("+"):
+        return select
+
+    return f"+{select}"
+
+
 def run_dbt(params: DbtRunParams) -> DbtRunResult:
     """Run a dbt CLI command via subprocess."""
     cmd = ["dbt", params.command]
 
     if params.select:
-        cmd.extend(["--select", params.select])
+        select = _ensure_upstream_selector(params.select, params.command)
+        cmd.extend(["--select", select])
 
     cmd.extend(params.args)
 

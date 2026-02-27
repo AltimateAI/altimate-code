@@ -13,12 +13,17 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       .optional()
       .default("snowflake")
       .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
+    schema_context: z
+      .record(z.string(), z.array(z.object({ name: z.string(), data_type: z.string() })))
+      .optional()
+      .describe("Schema context mapping table names to column definitions for accurate lineage"),
   }),
   async execute(args, ctx) {
     try {
       const result = await Bridge.call("lineage.check", {
         sql: args.sql,
         dialect: args.dialect,
+        schema_context: args.schema_context,
       })
 
       return {

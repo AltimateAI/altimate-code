@@ -904,6 +904,25 @@ export interface SqlGuardIsSafeParams {
   sql: string
 }
 
+// --- dbt Lineage ---
+
+export interface DbtLineageParams {
+  manifest_path: string
+  model: string
+  dialect?: string
+}
+
+export interface DbtLineageResult {
+  model_name: string
+  model_unique_id?: string
+  compiled_sql?: string
+  edges: LineageEdge[]
+  tables: string[]
+  columns: string[]
+  confidence: string
+  confidence_factors: string[]
+}
+
 // --- dbt Profile Discovery ---
 
 export interface DbtProfilesParams {
@@ -982,6 +1001,7 @@ export const BridgeMethods = {
   "lineage.check": {} as { params: LineageCheckParams; result: LineageCheckResult },
   "dbt.run": {} as { params: DbtRunParams; result: DbtRunResult },
   "dbt.manifest": {} as { params: DbtManifestParams; result: DbtManifestResult },
+  "dbt.lineage": {} as { params: DbtLineageParams; result: DbtLineageResult },
   "warehouse.list": {} as { params: WarehouseListParams; result: WarehouseListResult },
   "warehouse.test": {} as { params: WarehouseTestParams; result: WarehouseTestResult },
   "finops.query_history": {} as { params: QueryHistoryParams; result: QueryHistoryResult },

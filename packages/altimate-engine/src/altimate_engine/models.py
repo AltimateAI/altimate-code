@@ -393,6 +393,26 @@ class DbtManifestResult(BaseModel):
     seed_count: int = 0
 
 
+# --- dbt Lineage ---
+
+
+class DbtLineageParams(BaseModel):
+    manifest_path: str
+    model: str
+    dialect: str | None = None
+
+
+class DbtLineageResult(BaseModel):
+    model_name: str
+    model_unique_id: str | None = None
+    compiled_sql: str | None = None
+    edges: list[LineageEdge] = Field(default_factory=list)
+    tables: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list)
+    confidence: str = "high"
+    confidence_factors: list[str] = Field(default_factory=list)
+
+
 # --- dbt Profile Discovery ---
 
 
