@@ -11,8 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import sqlglot
-from sqlglot import exp
+from altimate_engine.sql.guard import guard_extract_metadata, guard_complexity_score
 
 
 _CREATE_TABLE_SQL = """
@@ -46,7 +45,7 @@ def _default_db_path() -> str:
 
 
 def _regex_strip_literals(sql: str) -> str:
-    """Fallback regex-based literal stripping when sqlglot parsing fails.
+    """Regex-based literal stripping for SQL fingerprinting.
 
     Replaces string literals, numeric literals, and boolean literals with
     placeholders. Normalizes whitespace.
@@ -159,62 +158,19 @@ class FeedbackStore:
         return self._static_heuristic(sql, dialect)
 
     def _fingerprint(self, sql: str, dialect: str) -> str:
-        """Normalize SQL to a canonical fingerprint (strip literals, normalize whitespace).
-
-        Uses sqlglot to parse, strip all literal values, and regenerate the SQL.
-        Falls back to regex-based normalization if parsing fails.
-        """
-        try:
-            ast = sqlglot.parse_one(sql, dialect=dialect)
-            self._replace_literals_in_place(ast)
-            normalized = ast.sql(dialect=dialect).upper()
-            # Normalize whitespace
-            normalized = re.sub(r"\s+", " ", normalized).strip()
-            return hashlib.sha256(normalized.encode()).hexdigest()
-        except Exception:
-            # Fallback to regex-based normalization
-            normalized = _regex_strip_literals(sql)
-            return hashlib.sha256(normalized.encode()).hexdigest()
+        """Normalize SQL to a canonical fingerprint (strip literals, normalize whitespace)."""
+        normalized = _regex_strip_literals(sql)
+        return hashlib.sha256(normalized.encode()).hexdigest()
 
     def _template_hash(self, sql: str, dialect: str) -> str:
-        """Generalized hash: preserve table structure, replace all literals with ?.
-
-        Parses with sqlglot, replaces every Literal node with a placeholder '?',
-        then hashes the resulting SQL string.
-        """
-        try:
-            ast = sqlglot.parse_one(sql, dialect=dialect)
-            self._replace_literals_with_placeholder(ast)
-            template_sql = ast.sql(dialect=dialect).upper()
-            template_sql = re.sub(r"\s+", " ", template_sql).strip()
-            return hashlib.sha256(template_sql.encode()).hexdigest()
-        except Exception:
-            # Fallback: same as fingerprint for unparseable SQL
-            normalized = _regex_strip_literals(sql)
-            return hashlib.sha256(normalized.encode()).hexdigest()
+        """Generalized hash: preserve table structure, replace all literals with ?."""
+        # Replace string literals with '?', numbers with ?
+        result = re.sub(r"'[^']*'", "'?'", sql)
+        result = re.sub(r"\b\d+(\.\d+)?\b", "?", result)
+        result = re.sub(r"\s+", " ", result).strip().upper()
+        return hashlib.sha256(result.encode()).hexdigest()
 
     # --- Internal helpers ---
-
-    @staticmethod
-    def _replace_literals_in_place(ast: exp.Expression) -> None:
-        """Replace all Literal nodes with a canonical placeholder value.
-
-        For fingerprinting: numbers become 0, strings become empty string.
-        This preserves the query structure while normalizing values.
-        """
-        for literal in list(ast.find_all(exp.Literal)):
-            if literal.is_number:
-                literal.args["this"] = "0"
-            else:
-                literal.args["this"] = ""
-
-    @staticmethod
-    def _replace_literals_with_placeholder(ast: exp.Expression) -> None:
-        """Replace all Literal nodes with a ? placeholder for template hashing."""
-        for literal in list(ast.find_all(exp.Literal)):
-            literal.args["this"] = "?"
-            # Ensure it looks like a string placeholder
-            literal.args["is_string"] = False
 
     def _fetch_observations_by_fingerprint(self, fingerprint: str) -> list[sqlite3.Row]:
         """Fetch all observations matching a fingerprint."""
@@ -278,29 +234,17 @@ class FeedbackStore:
         Looks up all observations involving the same tables (via template patterns)
         and produces a rough average. Returns None if no relevant data is found.
         """
-        try:
-            ast = sqlglot.parse_one(sql, dialect=dialect)
-        except Exception:
-            return None
-
-        # Extract table names from the query
+        metadata = guard_extract_metadata(sql, dialect)
         table_names = set()
-        for table in ast.find_all(exp.Table):
-            name = table.name
+        for t in metadata.get("tables", []):
+            name = t.get("name", t) if isinstance(t, dict) else str(t)
             if name:
                 table_names.add(name.upper())
 
         if not table_names:
             return None
 
-        # Search for any observations that reference these tables by looking
-        # at all stored queries. This is a simple heuristic: find rows where
-        # the fingerprint corresponds to queries touching the same tables.
-        placeholders = ",".join("?" for _ in table_names)
-        # We can't easily search by table names in the DB schema. Instead,
-        # use a LIKE search on raw SQL would require storing raw SQL.
-        # Since we don't store raw SQL, fall back: if we have any fingerprint
-        # observations at all (even < 3), use them for a rough estimate.
+        # If we have any fingerprint observations (even < 3), use them
         fingerprint = self._fingerprint(sql, dialect)
         rows = self._fetch_observations_by_fingerprint(fingerprint)
         if rows:
@@ -384,56 +328,13 @@ class FeedbackStore:
     def _static_heuristic(self, sql: str, dialect: str) -> dict[str, Any]:
         """Tier 4: Estimate cost based on query complexity analysis.
 
-        Analyzes the SQL structure to produce a rough cost estimate based on:
-        - Number of joins (each join multiplies potential data)
-        - Presence of aggregations
-        - Subquery depth
-        - UNION operations
-
+        Uses sqlguard complexity scoring, falling back to length-based heuristic.
         Base costs are dialect-dependent: Snowflake uses bytes-scanned and
         credit metrics, while Postgres and DuckDB use execution-time only.
         """
-        complexity_score = 1.0
-
-        try:
-            ast = sqlglot.parse_one(sql, dialect=dialect)
-
-            # Count joins
-            join_count = len(list(ast.find_all(exp.Join)))
-            complexity_score += join_count * 2.0
-
-            # Count subqueries
-            subquery_count = len(list(ast.find_all(exp.Subquery)))
-            complexity_score += subquery_count * 1.5
-
-            # Check for aggregations
-            agg_count = len(list(ast.find_all(exp.AggFunc)))
-            if agg_count > 0:
-                complexity_score += 1.0
-
-            # Check for UNION
-            union_count = len(list(ast.find_all(exp.Union)))
-            complexity_score += union_count * 2.0
-
-            # Check for window functions
-            window_count = len(list(ast.find_all(exp.Window)))
-            complexity_score += window_count * 1.0
-
-            # Check for ORDER BY (sorting is expensive)
-            if ast.find(exp.Order):
-                complexity_score += 1.0
-
-            # Check for DISTINCT
-            if isinstance(ast, exp.Select) and ast.args.get("distinct"):
-                complexity_score += 1.0
-
-            # Check for cross joins
-            for join in ast.find_all(exp.Join):
-                if join.kind == "CROSS":
-                    complexity_score += 5.0
-
-        except Exception:
-            # If parsing fails, use length-based heuristic
+        complexity = guard_complexity_score(sql)
+        complexity_score = complexity.get("total", complexity.get("score"))
+        if not complexity_score:
             complexity_score = max(1.0, len(sql) / 100.0)
 
         # Select dialect-specific base costs

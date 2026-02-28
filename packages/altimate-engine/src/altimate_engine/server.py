@@ -67,6 +67,7 @@ from altimate_engine.models import (
     SqlFormatResult,
     SqlOptimizeParams,
     SqlOptimizeResult,
+    SqlOptimizeSuggestion,
     SqlPredictCostParams,
     SqlPredictCostResult,
     SqlRecordFeedbackParams,
@@ -114,16 +115,9 @@ from altimate_engine.models import (
     SqlGuardResult,
 )
 from altimate_engine.sql.executor import execute_sql
-from altimate_engine.sql.analyzer import analyze_sql
-from altimate_engine.sql.optimizer import optimize_sql
-from altimate_engine.sql.translator import translate_sql
-from altimate_engine.sql.formatter import format_sql
 from altimate_engine.sql.explainer import explain_sql
-from altimate_engine.sql.fixer import fix_sql
 from altimate_engine.sql.autocomplete import autocomplete_sql
 from altimate_engine.sql.diff import diff_sql
-from altimate_engine.sql.rewriter import rewrite_sql
-from altimate_engine.sql.schema_diff import diff_schema
 from altimate_engine.ci.cost_gate import scan_files
 from altimate_engine.schema.inspector import inspect_schema
 from altimate_engine.schema.pii_detector import detect_pii
@@ -132,7 +126,7 @@ from altimate_engine.dbt.runner import run_dbt
 from altimate_engine.dbt.manifest import parse_manifest
 from altimate_engine.dbt.lineage import dbt_lineage
 from altimate_engine.connections import ConnectionRegistry
-# lineage.check now delegates to sqlguard via guard_column_lineage
+# lineage.check delegates to guard_column_lineage
 from altimate_engine.sql.feedback_store import FeedbackStore
 from altimate_engine.schema.cache import SchemaCache
 from altimate_engine.finops.query_history import get_query_history
@@ -317,21 +311,23 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = inspect_schema(SchemaInspectParams(**params))
         elif method == "sql.analyze":
             params_obj = SqlAnalyzeParams(**params)
-            raw_result = analyze_sql(params_obj.sql, params_obj.dialect or "snowflake")
-            # Convert raw dict result to SqlAnalyzeResult model
             issues = []
-            for issue in raw_result.get("issues", []):
+
+            # Anti-pattern detection via sqlguard lint
+            lint_result = guard_lint(params_obj.sql, schema_context=params_obj.schema_context)
+            for issue in lint_result.get("findings", lint_result.get("issues", [])):
                 issues.append(
                     SqlAnalyzeIssue(
-                        type=issue["type"],
+                        type=issue.get("rule", issue.get("type", "LINT")),
                         severity=issue.get("severity", "warning"),
-                        message=issue["message"],
-                        recommendation=issue.get("recommendation", ""),
+                        message=issue.get("message", ""),
+                        recommendation=issue.get("suggestion", issue.get("recommendation", "")),
                         location=issue.get("location"),
                         confidence=issue.get("confidence", "high"),
                     )
                 )
-            # Append sqlguard semantic checks if available
+
+            # Semantic checks
             sem_result = guard_check_semantics(
                 params_obj.sql,
                 schema_context=params_obj.schema_context,
@@ -348,7 +344,8 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                             confidence=si.get("confidence", "medium"),
                         )
                     )
-            # Append sqlguard safety scan if available
+
+            # Safety scan
             safety_result = guard_scan_safety(params_obj.sql)
             if safety_result.get("threats"):
                 for threat in safety_result["threats"]:
@@ -362,26 +359,60 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                             confidence="high",
                         )
                     )
+
             result = SqlAnalyzeResult(
-                success=raw_result.get("success", True),
+                success=not lint_result.get("error"),
                 issues=issues,
                 issue_count=len(issues),
                 confidence=_compute_overall_confidence(issues),
-                confidence_factors=_get_confidence_factors(raw_result),
-                error=raw_result.get("error"),
+                confidence_factors=[] if not lint_result.get("error") else ["Lint parse failed"],
+                error=lint_result.get("error"),
             )
         elif method == "sql.translate":
             params_obj = SqlTranslateParams(**params)
-            result_dict = translate_sql(
-                params_obj.sql, params_obj.source_dialect, params_obj.target_dialect
+            raw = guard_transpile(params_obj.sql, params_obj.source_dialect, params_obj.target_dialect)
+            result = SqlTranslateResult(
+                success=raw.get("success", True),
+                translated_sql=raw.get("sql", raw.get("translated_sql")),
+                source_dialect=params_obj.source_dialect,
+                target_dialect=params_obj.target_dialect,
+                warnings=raw.get("warnings", []),
+                error=raw.get("error"),
             )
-            result = SqlTranslateResult(**result_dict)
         elif method == "sql.optimize":
             params_obj = SqlOptimizeParams(**params)
-            result_dict = optimize_sql(
-                params_obj.sql, params_obj.dialect, params_obj.schema_context
+            # Rewrite for optimization
+            rw = guard_rewrite_sql(params_obj.sql, schema_context=params_obj.schema_context)
+            # Lint for remaining issues
+            lint = guard_lint(params_obj.sql, schema_context=params_obj.schema_context)
+
+            suggestions = []
+            for r in rw.get("rewrites", []):
+                suggestions.append(
+                    SqlOptimizeSuggestion(
+                        type="REWRITE",
+                        description=r.get("explanation", "Optimization rewrite"),
+                        before=r.get("original_fragment", ""),
+                        after=r.get("rewritten_fragment", ""),
+                    )
+                )
+
+            anti_patterns = []
+            for issue in lint.get("findings", lint.get("issues", [])):
+                anti_patterns.append({
+                    "type": issue.get("rule", issue.get("type", "LINT")),
+                    "message": issue.get("message", ""),
+                    "suggestion": issue.get("suggestion", ""),
+                })
+
+            result = SqlOptimizeResult(
+                success=True,
+                original_sql=params_obj.sql,
+                optimized_sql=rw.get("rewritten_sql", params_obj.sql),
+                suggestions=suggestions,
+                anti_patterns=anti_patterns,
+                error=rw.get("error"),
             )
-            result = SqlOptimizeResult(**result_dict)
         elif method == "lineage.check":
             p = LineageCheckParams(**params)
             raw = guard_column_lineage(
@@ -457,46 +488,45 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = SqlPredictCostResult(**prediction)
         elif method == "sql.format":
             fmt_params = SqlFormatParams(**params)
-            fmt_result = format_sql(
-                fmt_params.sql, fmt_params.dialect, fmt_params.indent
+            raw = guard_format_sql(fmt_params.sql, fmt_params.dialect)
+            result = SqlFormatResult(
+                success=raw.get("success", True),
+                formatted_sql=raw.get("formatted_sql", raw.get("sql")),
+                statement_count=raw.get("statement_count", 1),
+                error=raw.get("error"),
             )
-            result = SqlFormatResult(**fmt_result)
         elif method == "sql.explain":
             result = explain_sql(SqlExplainParams(**params))
         elif method == "sql.fix":
             fix_params = SqlFixParams(**params)
-            # Try sqlguard.fix first for Rust-powered fixing
             guard_result = guard_fix_sql(fix_params.sql)
-            if guard_result.get("success") and guard_result.get("fixed_sql"):
+            fixed = guard_result.get("fixed", guard_result.get("success", False))
+            fixed_sql = guard_result.get("fixed_sql")
+            if fixed and fixed_sql:
                 result = SqlFixResult(
                     success=True,
                     original_sql=fix_params.sql,
-                    fixed_sql=guard_result["fixed_sql"],
+                    fixed_sql=fixed_sql,
                     error_message=fix_params.error_message,
                     suggestions=[
                         SqlFixSuggestion(
                             type="SQLGUARD_FIX",
-                            message="Auto-fixed by sqlguard Rust engine",
+                            message="Auto-fixed by sqlguard engine",
                             confidence="high",
-                            fixed_sql=guard_result["fixed_sql"],
+                            fixed_sql=fixed_sql,
                         )
                     ],
                     suggestion_count=1,
                 )
             else:
-                # Fall back to sqlglot-based fixer
-                fix_result = fix_sql(
-                    fix_params.sql, fix_params.error_message, fix_params.dialect
-                )
                 result = SqlFixResult(
-                    success=fix_result["success"],
-                    original_sql=fix_result["original_sql"],
-                    fixed_sql=fix_result.get("fixed_sql"),
-                    error_message=fix_result["error_message"],
-                    suggestions=[
-                        SqlFixSuggestion(**s) for s in fix_result["suggestions"]
-                    ],
-                    suggestion_count=fix_result["suggestion_count"],
+                    success=False,
+                    original_sql=fix_params.sql,
+                    fixed_sql=fixed_sql,
+                    error_message=fix_params.error_message,
+                    suggestions=[],
+                    suggestion_count=0,
+                    error=guard_result.get("error", "Unable to auto-fix"),
                 )
         elif method == "sql.autocomplete":
             ac_params = SqlAutocompleteParams(**params)
@@ -627,7 +657,6 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         # --- SQL rewrite ---
         elif method == "sql.rewrite":
             p = SqlRewriteParams(**params)
-            # Try sqlguard.rewrite first for Rust-powered rewriting
             guard_rw = guard_rewrite_sql(p.sql, schema_context=p.schema_context)
             if guard_rw.get("success") and guard_rw.get("rewritten_sql"):
                 rewrites = []
@@ -648,17 +677,12 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                     rewrites_applied=rewrites,
                 )
             else:
-                # Fall back to sqlglot-based rewriter
-                raw = rewrite_sql(p.sql, p.dialect, p.schema_context)
                 result = SqlRewriteResult(
-                    success=raw["success"],
-                    original_sql=raw["original_sql"],
-                    rewritten_sql=raw.get("rewritten_sql"),
-                    rewrites_applied=[
-                        SqlRewriteRule(**r)
-                        for r in raw.get("rewrites_applied", [])
-                    ],
-                    error=raw.get("error"),
+                    success=False,
+                    original_sql=p.sql,
+                    rewritten_sql=None,
+                    rewrites_applied=[],
+                    error=guard_rw.get("error", "No rewrites applicable"),
                 )
         # --- sqlguard ---
         elif method == "sqlguard.validate":
