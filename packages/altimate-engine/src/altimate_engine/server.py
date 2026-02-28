@@ -16,6 +16,12 @@ import traceback
 
 from altimate_engine.models import (
     ColumnChange,
+    WarehouseAddParams,
+    WarehouseAddResult,
+    WarehouseRemoveParams,
+    WarehouseRemoveResult,
+    DockerContainer,
+    WarehouseDiscoverResult,
     CostGateFileResult,
     CostGateParams,
     CostGateResult,
@@ -397,6 +403,31 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             test_params = WarehouseTestParams(**params)
             test_result = ConnectionRegistry.test(test_params.name)
             result = WarehouseTestResult(**test_result)
+        elif method == "warehouse.add":
+            p = WarehouseAddParams(**params)
+            try:
+                ConnectionRegistry.add(p.name, p.config)
+                result = WarehouseAddResult(success=True, name=p.name, type=p.config.get("type", "unknown"))
+            except Exception as e:
+                result = WarehouseAddResult(success=False, name=p.name, type="", error=str(e))
+        elif method == "warehouse.remove":
+            p = WarehouseRemoveParams(**params)
+            try:
+                removed = ConnectionRegistry.remove(p.name)
+                result = WarehouseRemoveResult(success=removed)
+            except Exception as e:
+                result = WarehouseRemoveResult(success=False, error=str(e))
+        elif method == "warehouse.discover":
+            from altimate_engine.docker_discovery import discover_containers
+            try:
+                containers = discover_containers()
+                result = WarehouseDiscoverResult(
+                    containers=[DockerContainer(**c) for c in containers],
+                    container_count=len(containers),
+                )
+            except Exception as e:
+                result = WarehouseDiscoverResult(error=str(e))
+
         elif method == "sql.record_feedback":
             fb_params = SqlRecordFeedbackParams(**params)
             store = _get_feedback_store()

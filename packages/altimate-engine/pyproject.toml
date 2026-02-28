@@ -25,6 +25,9 @@ warehouses = [
     "mysql-connector-python>=8.0",
     "pyodbc>=5.0",
 ]
+security = ["keyring>=24.0"]
+docker = ["docker>=7.0"]
+tunneling = ["sshtunnel>=0.4", "paramiko>=3.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/altimate_engine"]

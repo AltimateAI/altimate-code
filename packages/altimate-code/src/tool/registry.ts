@@ -32,6 +32,9 @@ import { SqlTranslateTool } from "./sql-translate"
 import { LineageCheckTool } from "./lineage-check"
 import { WarehouseListTool } from "./warehouse-list"
 import { WarehouseTestTool } from "./warehouse-test"
+import { WarehouseAddTool } from "./warehouse-add"
+import { WarehouseRemoveTool } from "./warehouse-remove"
+import { WarehouseDiscoverTool } from "./warehouse-discover"
 import { SqlRecordFeedbackTool } from "./sql-record-feedback"
 import { SqlPredictCostTool } from "./sql-predict-cost"
 import { DbtRunTool } from "./dbt-run"
@@ -190,6 +193,9 @@ export namespace ToolRegistry {
       LineageCheckTool,
       WarehouseListTool,
       WarehouseTestTool,
+      WarehouseAddTool,
+      WarehouseRemoveTool,
+      WarehouseDiscoverTool,
       SqlRecordFeedbackTool,
       SqlPredictCostTool,
       DbtRunTool,
