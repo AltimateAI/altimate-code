@@ -35,7 +35,7 @@
     "@types/bun": "catalog:",
     "@types/mime-types": "3.0.1",
     "@types/turndown": "5.0.5",
-    "@types/yargs": "17.0.33",
+    "@types/yargs": "17.0.35",
     "@typescript/native-preview": "catalog:",
     "drizzle-kit": "1.0.0-beta.12-a5629fb",
     "drizzle-orm": "1.0.0-beta.12-a5629fb",
