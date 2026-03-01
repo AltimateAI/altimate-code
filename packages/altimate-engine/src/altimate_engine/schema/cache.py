@@ -7,7 +7,6 @@ that pre-indexes all databases/schemas/tables/columns for instant search.
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from datetime import datetime, timezone
