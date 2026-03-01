@@ -58,7 +58,14 @@ export namespace Bridge {
 
     // 4. Production: uv-managed engine
     const { ensureEngine, enginePythonPath } = await import("./engine")
-    await ensureEngine()
+    try {
+      await ensureEngine()
+    } catch (err) {
+      throw new Error(
+        `Failed to bootstrap Python engine: ${err instanceof Error ? err.message : String(err)}. ` +
+          `Set ALTIMATE_CLI_PYTHON to a Python 3.10+ interpreter to skip automatic bootstrap.`,
+      )
+    }
     return enginePythonPath()
   }
 

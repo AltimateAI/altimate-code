@@ -7,6 +7,14 @@ import pytest
 
 from altimate_engine.ci.cost_gate import scan_files, _has_jinja, _split_statements
 
+try:
+    import sqlguard
+    _HAS_SQLGUARD = True
+except ImportError:
+    _HAS_SQLGUARD = False
+
+_needs_sqlguard = pytest.mark.skipif(not _HAS_SQLGUARD, reason="sqlguard not installed")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,6 +81,7 @@ class TestScanFiles:
         finally:
             os.unlink(path)
 
+    @_needs_sqlguard
     def test_cartesian_product_has_warnings(self):
         """CROSS JOIN produces lint warnings (SELECT *, missing aliases, no LIMIT)."""
         path = _write_temp_sql("SELECT * FROM a CROSS JOIN b")
@@ -133,6 +142,7 @@ class TestScanFiles:
             os.unlink(clean_path)
             os.unlink(warn_path)
 
+    @_needs_sqlguard
     def test_multiple_statements_in_file(self):
         """Multiple statements: lint runs on each; warnings don't fail the gate."""
         path = _write_temp_sql("SELECT 1; SELECT * FROM a CROSS JOIN b;")

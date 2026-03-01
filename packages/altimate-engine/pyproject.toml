@@ -52,6 +52,7 @@ tunneling = ["sshtunnel>=0.4", "paramiko>=3.0"]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",
+    "duckdb>=0.9",
 ]
 
 [tool.hatch.build.targets.wheel]
