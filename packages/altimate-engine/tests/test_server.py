@@ -10,7 +10,8 @@ class TestDispatch:
     def test_ping(self):
         request = JsonRpcRequest(method="ping", id=1)
         response = dispatch(request)
-        assert response.result == {"status": "ok"}
+        assert response.result["status"] == "ok"
+        assert "version" in response.result
         assert response.error is None
 
     def test_sql_analyze(self):
