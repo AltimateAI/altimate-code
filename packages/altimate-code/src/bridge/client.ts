@@ -105,6 +105,14 @@ export namespace Bridge {
       if (msg) console.error(`[altimate-engine] ${msg}`)
     })
 
+    child.on("error", (err) => {
+      for (const [id, p] of pending) {
+        p.reject(new Error(`Failed to start Python engine: ${err.message}`))
+        pending.delete(id)
+      }
+      child = undefined
+    })
+
     child.on("exit", (code) => {
       if (code !== 0) restartCount++
       for (const [id, p] of pending) {
