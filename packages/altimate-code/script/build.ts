@@ -10,12 +10,19 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const dir = path.resolve(__dirname, "..")
 
+// Read engine version from pyproject.toml
+const enginePyproject = await Bun.file(
+  path.resolve(dir, "../altimate-engine/pyproject.toml")
+).text()
+const engineVersion = enginePyproject.match(/version\s*=\s*"([^"]+)"/)?.[1] ?? "0.1.0"
+console.log(`Engine version: ${engineVersion}`)
+
 process.chdir(dir)
 
 import { Script } from "@altimate/cli-script"
 import pkg from "../package.json"
 
-const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
+const modelsUrl = process.env.ALTIMATE_CLI_MODELS_URL || "https://models.dev"
 // Fetch and generate models.dev snapshot
 const modelsData = process.env.MODELS_DEV_API_JSON
   ? await Bun.file(process.env.MODELS_DEV_API_JSON).text()
@@ -179,18 +186,19 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
-      execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
+      outfile: `dist/${name}/bin/altimate-code`,
+      execArgv: [`--user-agent=altimate-code/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
     entrypoints: ["./src/index.ts", parserWorker, workerPath],
     define: {
-      OPENCODE_VERSION: `'${Script.version}'`,
+      ALTIMATE_CLI_VERSION: `'${Script.version}'`,
+      ALTIMATE_ENGINE_VERSION: `'${engineVersion}'`,
       ALTIMATE_CLI_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
-      OPENCODE_WORKER_PATH: workerPath,
-      OPENCODE_CHANNEL: `'${Script.channel}'`,
-      OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
+      ALTIMATE_CLI_WORKER_PATH: workerPath,
+      ALTIMATE_CLI_CHANNEL: `'${Script.channel}'`,
+      ALTIMATE_CLI_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
     },
   })
 

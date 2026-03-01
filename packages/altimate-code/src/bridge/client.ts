@@ -43,7 +43,7 @@ export namespace Bridge {
     })
   }
 
-  function resolvePython(): string {
+  async function resolvePython(): Promise<string> {
     // 1. Explicit env var
     if (process.env.ALTIMATE_CLI_PYTHON) return process.env.ALTIMATE_CLI_PYTHON
 
@@ -56,12 +56,14 @@ export namespace Bridge {
     const cwdVenv = path.join(process.cwd(), ".venv", "bin", "python")
     if (existsSync(cwdVenv)) return cwdVenv
 
-    // 4. Fallback
-    return "python3"
+    // 4. Production: uv-managed engine
+    const { ensureEngine, enginePythonPath } = await import("./engine")
+    await ensureEngine()
+    return enginePythonPath()
   }
 
   async function start() {
-    const pythonCmd = resolvePython()
+    const pythonCmd = await resolvePython()
     child = spawn(pythonCmd, ["-m", "altimate_engine.server"], {
       stdio: ["pipe", "pipe", "pipe"],
     })

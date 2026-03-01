@@ -857,7 +857,8 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             )
             result = LocalTestResult(**raw)
         elif method == "ping":
-            return JsonRpcResponse(result={"status": "ok"}, id=request.id)
+            from altimate_engine import __version__
+            return JsonRpcResponse(result={"status": "ok", "version": __version__}, id=request.id)
         else:
             return JsonRpcResponse(
                 error=JsonRpcError(

@@ -2,7 +2,7 @@ import type { Hooks, PluginInput, Plugin as PluginInstance } from "@altimate/cli
 import { Config } from "../config/config"
 import { Bus } from "../bus"
 import { Log } from "../util/log"
-import { createOpencodeClient } from "@altimate/cli-sdk"
+import { createAltimateClient } from "@altimate/cli-sdk"
 import { Server } from "../server/server"
 import { BunProc } from "../bun"
 import { Instance } from "../project/instance"
@@ -11,7 +11,7 @@ import { CodexAuthPlugin } from "./codex"
 import { Session } from "../session"
 import { NamedError } from "@altimate/cli-util/error"
 import { CopilotAuthPlugin } from "./copilot"
-// @ts-ignore - @gitlab/opencode-gitlab-auth exports Plugin from @opencode-ai/plugin, not @altimate/cli-plugin
+// @ts-ignore - @gitlab/opencode-gitlab-auth exports Plugin from @opencode-ai/plugin (legacy naming), not @altimate/cli-plugin
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
 
 export namespace Plugin {
@@ -23,7 +23,7 @@ export namespace Plugin {
   const INTERNAL_PLUGINS: PluginInstance[] = [CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin as unknown as PluginInstance]
 
   const state = Instance.state(async () => {
-    const client = createOpencodeClient({
+    const client = createAltimateClient({
       baseUrl: "http://localhost:4096",
       directory: Instance.directory,
       // @ts-ignore - fetch type incompatibility
