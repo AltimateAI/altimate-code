@@ -7,6 +7,14 @@ import pytest
 
 from altimate_engine.sql.feedback_store import FeedbackStore, _regex_strip_literals
 
+try:
+    import sqlguard
+    _HAS_SQLGUARD = True
+except ImportError:
+    _HAS_SQLGUARD = False
+
+_needs_sqlguard = pytest.mark.skipif(not _HAS_SQLGUARD, reason="sqlguard not installed")
+
 
 @pytest.fixture
 def store(tmp_path):
@@ -325,6 +333,7 @@ class TestPredictTier4Heuristic:
         windowed = store.predict("SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM t")
         assert windowed["predicted_bytes"] >= base["predicted_bytes"]
 
+    @_needs_sqlguard
     def test_tier4_cross_join_high_complexity(self, store):
         """CROSS JOINs should significantly increase the estimate."""
         simple = store.predict("SELECT id FROM t")

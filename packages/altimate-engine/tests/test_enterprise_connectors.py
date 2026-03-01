@@ -6,6 +6,12 @@ import pytest
 
 from altimate_engine.connections import ConnectionRegistry
 
+try:
+    import boto3
+    _HAS_BOTO3 = True
+except ImportError:
+    _HAS_BOTO3 = False
+
 
 @pytest.fixture(autouse=True)
 def reset_registry():
@@ -37,6 +43,7 @@ class TestRedshiftConnector:
 
         assert issubclass(RedshiftConnector, PostgresConnector)
 
+    @pytest.mark.skipif(not _HAS_BOTO3, reason="boto3 not installed")
     def test_iam_role_requires_cluster_id(self):
         from altimate_engine.connectors.redshift import RedshiftConnector
 

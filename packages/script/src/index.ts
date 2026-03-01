@@ -31,7 +31,7 @@ const CHANNEL = await (async () => {
 const IS_PREVIEW = CHANNEL !== "latest"
 
 const VERSION = await (async () => {
-  if (env.ALTIMATE_CLI_VERSION) return env.ALTIMATE_CLI_VERSION
+  if (env.ALTIMATE_CLI_VERSION) return env.ALTIMATE_CLI_VERSION.replace(/^v/, "")
   if (IS_PREVIEW) return `0.0.0-${CHANNEL}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`
   const version = await fetch("https://registry.npmjs.org/altimate-code-ai/latest")
     .then((res) => {

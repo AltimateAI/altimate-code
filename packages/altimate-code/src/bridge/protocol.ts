@@ -1107,7 +1107,7 @@ export const BridgeMethods = {
   "sqlguard.introspection_sql": {} as { params: SqlGuardIntrospectionSqlParams; result: SqlGuardResult },
   "sqlguard.parse_dbt": {} as { params: SqlGuardParseDbtParams; result: SqlGuardResult },
   "sqlguard.is_safe": {} as { params: SqlGuardIsSafeParams; result: SqlGuardResult },
-  ping: {} as { params: Record<string, never>; result: { status: string } },
+  ping: {} as { params: Record<string, never>; result: { status: string; version: string } },
 } as const
 
 export type BridgeMethod = keyof typeof BridgeMethods

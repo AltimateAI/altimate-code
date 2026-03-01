@@ -1,3 +1,3 @@
-"""DataPilot Engine - Python sidecar for the DataPilot CLI."""
+"""Altimate Engine — Python sidecar for the Altimate Code CLI."""
 
 __version__ = "0.1.0"

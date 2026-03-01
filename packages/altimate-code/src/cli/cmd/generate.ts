@@ -14,9 +14,9 @@ export const GenerateCommand = {
           {
             lang: "js",
             source: [
-              `import { createOpencodeClient } from "@altimate/cli-sdk`,
+              `import { createAltimateClient } from "@altimate/cli-sdk`,
               ``,
-              `const client = createOpencodeClient()`,
+              `const client = createAltimateClient()`,
               `await client.${operation.operationId}({`,
               `  ...`,
               `})`,

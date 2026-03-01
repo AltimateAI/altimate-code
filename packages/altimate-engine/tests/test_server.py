@@ -5,14 +5,24 @@ import pytest
 from altimate_engine.server import dispatch, handle_line
 from altimate_engine.models import JsonRpcRequest
 
+try:
+    import sqlguard
+    _HAS_SQLGUARD = True
+except ImportError:
+    _HAS_SQLGUARD = False
+
+_needs_sqlguard = pytest.mark.skipif(not _HAS_SQLGUARD, reason="sqlguard not installed")
+
 
 class TestDispatch:
     def test_ping(self):
         request = JsonRpcRequest(method="ping", id=1)
         response = dispatch(request)
-        assert response.result == {"status": "ok"}
+        assert response.result["status"] == "ok"
+        assert "version" in response.result
         assert response.error is None
 
+    @_needs_sqlguard
     def test_sql_analyze(self):
         request = JsonRpcRequest(
             method="sql.analyze",
@@ -82,6 +92,7 @@ class TestDispatch:
         assert response.error is None
         assert "warehouses" in response.result
 
+    @_needs_sqlguard
     def test_sql_format(self):
         request = JsonRpcRequest(
             method="sql.format",
