@@ -25,7 +25,6 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.0",
-    "sqlglot>=25.0",
     "pyyaml>=6.0",
 ]
 
@@ -47,6 +46,9 @@ warehouses = [
     "mysql-connector-python>=8.0",
     "pyodbc>=5.0",
 ]
+security = ["keyring>=24.0"]
+docker = ["docker>=7.0"]
+tunneling = ["sshtunnel>=0.4", "paramiko>=3.0"]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",

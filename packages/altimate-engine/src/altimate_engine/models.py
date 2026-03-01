@@ -497,6 +497,47 @@ class WarehouseTestResult(BaseModel):
     connected: bool
     error: str | None = None
 
+# --- Warehouse Management ---
+
+
+class WarehouseAddParams(BaseModel):
+    name: str
+    config: dict[str, Any]
+
+
+class WarehouseAddResult(BaseModel):
+    success: bool
+    name: str
+    type: str
+    error: str | None = None
+
+
+class WarehouseRemoveParams(BaseModel):
+    name: str
+
+
+class WarehouseRemoveResult(BaseModel):
+    success: bool
+    error: str | None = None
+
+
+class DockerContainer(BaseModel):
+    container_id: str
+    name: str
+    image: str
+    db_type: str
+    host: str
+    port: int
+    user: str | None = None
+    password: str | None = None
+    database: str | None = None
+    status: str
+
+
+class WarehouseDiscoverResult(BaseModel):
+    containers: list[DockerContainer] = Field(default_factory=list)
+    container_count: int = 0
+    error: str | None = None
 
 # --- FinOps: Query History ---
 

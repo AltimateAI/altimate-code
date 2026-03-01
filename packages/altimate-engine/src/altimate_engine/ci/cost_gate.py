@@ -1,11 +1,11 @@
 """CI cost gate — scan changed SQL files for critical issues.
 
-Reads SQL files, runs existing analyze_sql(), and returns
+Reads SQL files, runs lint analysis, and returns
 pass/fail based on whether CRITICAL severity issues are found.
 
 Skips:
   - Jinja templates ({{ }}, {% %})
-  - sqlglot parse errors (likely Jinja or non-standard SQL)
+  - Parse errors (likely Jinja or non-standard SQL)
   - Non-SQL files
 """
 
@@ -15,7 +15,7 @@ import os
 import re
 from typing import Any
 
-from altimate_engine.sql.analyzer import analyze_sql
+from altimate_engine.sql.guard import guard_lint
 
 
 # Jinja pattern: {{ ... }} or {% ... %} or {# ... #}
@@ -119,19 +119,19 @@ def scan_files(
         file_issues: list[dict[str, Any]] = []
 
         for stmt in statements:
-            # Run analyzer
-            analysis = analyze_sql(stmt, dialect)
-            if not analysis.get("success", True):
+            # Run lint analysis
+            lint_result = guard_lint(stmt)
+            if lint_result.get("error"):
                 # Parse error — skip this statement (likely incomplete SQL)
                 continue
 
-            for issue in analysis.get("issues", []):
-                severity = issue.get("severity", "warning")
+            for finding in lint_result.get("findings", lint_result.get("issues", [])):
+                severity = finding.get("severity", "warning")
                 file_issues.append({
-                    "type": issue.get("type", "UNKNOWN"),
+                    "type": finding.get("rule", finding.get("type", "UNKNOWN")),
                     "severity": severity,
-                    "message": issue.get("message", ""),
-                    "source": "analyzer",
+                    "message": finding.get("message", ""),
+                    "source": "lint",
                 })
                 total_issues += 1
                 if severity in ("error", "critical"):

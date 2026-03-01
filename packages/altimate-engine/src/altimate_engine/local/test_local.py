@@ -12,7 +12,7 @@ def test_sql_local(
 ) -> dict[str, Any]:
     """Execute SQL against a local DuckDB database for validation.
 
-    If target_dialect differs from DuckDB, auto-transpiles via sqlglot first.
+    If target_dialect differs from DuckDB, auto-transpiles first.
 
     Args:
         sql: The SQL to test.
@@ -37,11 +37,12 @@ def test_sql_local(
 
     if target_dialect and target_dialect.lower() not in ("duckdb", "duck"):
         try:
-            from altimate_engine.sql.translator import translate_sql
+            from altimate_engine.sql.guard import guard_transpile
 
-            result = translate_sql(sql, target_dialect, "duckdb")
-            if result.get("success") and result.get("translated_sql"):
-                test_sql = result["translated_sql"]
+            result = guard_transpile(sql, target_dialect, "duckdb")
+            translated = result.get("sql", result.get("translated_sql"))
+            if result.get("success") and translated:
+                test_sql = translated
                 transpiled = True
                 transpile_warnings = result.get("warnings", [])
         except Exception as e:

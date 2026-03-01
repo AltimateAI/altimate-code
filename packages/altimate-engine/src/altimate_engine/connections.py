@@ -6,6 +6,17 @@ from pathlib import Path
 from typing import Any
 
 from altimate_engine.connectors.base import Connector
+from altimate_engine.credential_store import resolve_config
+from altimate_engine.ssh_tunnel import start, stop
+
+SSH_FIELDS = {
+    "ssh_host",
+    "ssh_port",
+    "ssh_user",
+    "ssh_auth_type",
+    "ssh_key_path",
+    "ssh_password",
+}
 
 
 class ConnectionRegistry:
@@ -44,7 +55,33 @@ class ConnectionRegistry:
         if name not in cls._connections:
             raise ValueError(f"Connection '{name}' not found in registry")
 
-        config = cls._connections[name]
+        config = dict(cls._connections[name])
+        config = resolve_config(name, config)
+
+        ssh_host = config.get("ssh_host")
+        if ssh_host:
+            if config.get("connection_string"):
+                raise ValueError(
+                    "SSH tunneling requires explicit host/port — "
+                    "cannot be used with connection_string"
+                )
+            ssh_config = {
+                k: config.pop(k) for k in list(config.keys()) if k in SSH_FIELDS
+            }
+            local_port = start(
+                name=name,
+                ssh_host=ssh_config.get("ssh_host", ""),
+                remote_host=config.get("host", "localhost"),
+                remote_port=config.get("port", 5432),
+                ssh_port=ssh_config.get("ssh_port", 22),
+                ssh_user=ssh_config.get("ssh_user"),
+                ssh_auth_type=ssh_config.get("ssh_auth_type", "key"),
+                ssh_key_path=ssh_config.get("ssh_key_path"),
+                ssh_password=ssh_config.get("ssh_password"),
+            )
+            config["host"] = "127.0.0.1"
+            config["port"] = local_port
+
         dialect = config.get("type", "duckdb")
 
         if dialect == "duckdb":
@@ -219,3 +256,26 @@ class ConnectionRegistry:
             return {"connected": True, "error": None}
         except Exception as e:
             return {"connected": False, "error": str(e)}
+        finally:
+            stop(name)
+
+    @classmethod
+    def add(cls, name: str, config: dict[str, Any]) -> dict[str, Any]:
+        from altimate_engine.credential_store import save_connection
+
+        result = save_connection(name, config)
+        cls._loaded = False
+        return result
+
+    @classmethod
+    def remove(cls, name: str) -> bool:
+        from altimate_engine.credential_store import remove_connection
+
+        result = remove_connection(name)
+        cls._loaded = False
+        return result
+
+    @classmethod
+    def reload(cls) -> None:
+        cls._loaded = False
+        cls._connections.clear()

@@ -6,17 +6,20 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from altimate_engine.connections import ConnectionRegistry
+from altimate_engine.connections import ConnectionRegistry, SSH_FIELDS
+import altimate_engine.credential_store as _cred_mod
 
 
 @pytest.fixture(autouse=True)
 def reset_registry():
-    """Reset the ConnectionRegistry class state before each test."""
+    """Reset the ConnectionRegistry class state and keyring cache before each test."""
     ConnectionRegistry._connections = {}
     ConnectionRegistry._loaded = False
+    _cred_mod._keyring_cache = None
     yield
     ConnectionRegistry._connections = {}
     ConnectionRegistry._loaded = False
+    _cred_mod._keyring_cache = None
 
 
 class TestConnectionRegistryLoad:
@@ -338,3 +341,161 @@ class TestDuckDBConnectorIntegration:
 
         connector = ConnectionRegistry.get("extra")
         assert connector.options.get("read_only") is False
+
+
+class TestSSHFields:
+    """SSH field constant validation."""
+
+    def test_ssh_fields_complete(self):
+        assert "ssh_host" in SSH_FIELDS
+        assert "ssh_port" in SSH_FIELDS
+        assert "ssh_user" in SSH_FIELDS
+        assert "ssh_auth_type" in SSH_FIELDS
+        assert "ssh_key_path" in SSH_FIELDS
+        assert "ssh_password" in SSH_FIELDS
+
+
+class TestConnectionRegistryGetWithSSH:
+    """SSH tunnel integration in get()."""
+
+    def test_ssh_rewrites_host_and_port(self):
+        """When ssh_host is present, get() should tunnel and rewrite host/port."""
+        ConnectionRegistry._connections = {
+            "ssh_pg": {
+                "type": "duckdb",
+                "path": ":memory:",
+                "host": "10.0.1.50",
+                "port": 5432,
+                "ssh_host": "bastion.example.com",
+                "ssh_user": "deploy",
+                "ssh_auth_type": "key",
+                "ssh_key_path": "/home/.ssh/id_rsa",
+            }
+        }
+        ConnectionRegistry._loaded = True
+
+        with patch("altimate_engine.connections.resolve_config", side_effect=lambda n, c: dict(c)), \
+             patch("altimate_engine.connections.start", return_value=54321) as mock_start:
+            connector = ConnectionRegistry.get("ssh_pg")
+            mock_start.assert_called_once()
+            call_kwargs = mock_start.call_args
+            assert call_kwargs.kwargs.get("ssh_host") == "bastion.example.com" or \
+                   call_kwargs[1].get("ssh_host") == "bastion.example.com"
+
+    def test_ssh_with_connection_string_raises(self):
+        """SSH + connection_string should raise ValueError."""
+        ConnectionRegistry._connections = {
+            "bad": {
+                "type": "postgres",
+                "connection_string": "postgres://localhost/db",
+                "ssh_host": "bastion.example.com",
+            }
+        }
+        ConnectionRegistry._loaded = True
+
+        with patch("altimate_engine.connections.resolve_config", side_effect=lambda n, c: dict(c)):
+            with pytest.raises(ValueError, match="SSH tunneling requires explicit host/port"):
+                ConnectionRegistry.get("bad")
+
+    def test_ssh_fields_stripped_from_config(self):
+        """SSH fields should not leak into connector kwargs."""
+        ConnectionRegistry._connections = {
+            "ssh_duck": {
+                "type": "duckdb",
+                "path": ":memory:",
+                "ssh_host": "bastion.example.com",
+                "ssh_user": "deploy",
+                "ssh_auth_type": "key",
+            }
+        }
+        ConnectionRegistry._loaded = True
+
+        with patch("altimate_engine.connections.resolve_config", side_effect=lambda n, c: dict(c)), \
+             patch("altimate_engine.connections.start", return_value=54321):
+            connector = ConnectionRegistry.get("ssh_duck")
+            # SSH fields should not appear in connector options
+            for field in SSH_FIELDS:
+                assert field not in connector.options
+
+
+class TestConnectionRegistryGetWithResolveConfig:
+    """Secret resolution via resolve_config in get()."""
+
+    def test_resolve_config_called_on_get(self):
+        """get() should call resolve_config before creating connector."""
+        ConnectionRegistry._connections = {
+            "resolved": {"type": "duckdb", "path": ":memory:", "password": None}
+        }
+        ConnectionRegistry._loaded = True
+
+        with patch("altimate_engine.connections.resolve_config") as mock_resolve:
+            mock_resolve.return_value = {"type": "duckdb", "path": ":memory:"}
+            ConnectionRegistry.get("resolved")
+            mock_resolve.assert_called_once_with("resolved", {"type": "duckdb", "path": ":memory:", "password": None})
+
+
+class TestConnectionRegistryAdd:
+    """Adding connections via add()."""
+
+    def test_add_delegates_to_save_connection(self):
+        with patch("altimate_engine.credential_store.save_connection") as mock_save:
+            mock_save.return_value = {"type": "duckdb", "path": ":memory:"}
+            result = ConnectionRegistry.add("new_db", {"type": "duckdb", "path": ":memory:"})
+            mock_save.assert_called_once_with("new_db", {"type": "duckdb", "path": ":memory:"})
+            assert result["type"] == "duckdb"
+
+    def test_add_resets_loaded_flag(self):
+        ConnectionRegistry._loaded = True
+        with patch("altimate_engine.credential_store.save_connection", return_value={}):
+            ConnectionRegistry.add("db", {"type": "duckdb"})
+        assert ConnectionRegistry._loaded is False
+
+
+class TestConnectionRegistryRemove:
+    """Removing connections via remove()."""
+
+    def test_remove_delegates_to_remove_connection(self):
+        with patch("altimate_engine.credential_store.remove_connection") as mock_remove:
+            mock_remove.return_value = True
+            result = ConnectionRegistry.remove("old_db")
+            mock_remove.assert_called_once_with("old_db")
+            assert result is True
+
+    def test_remove_resets_loaded_flag(self):
+        ConnectionRegistry._loaded = True
+        with patch("altimate_engine.credential_store.remove_connection", return_value=False):
+            ConnectionRegistry.remove("db")
+        assert ConnectionRegistry._loaded is False
+
+
+class TestConnectionRegistryReload:
+    """Reloading the registry."""
+
+    def test_reload_clears_state(self):
+        ConnectionRegistry._connections = {"db": {"type": "duckdb"}}
+        ConnectionRegistry._loaded = True
+
+        ConnectionRegistry.reload()
+
+        assert ConnectionRegistry._loaded is False
+        assert ConnectionRegistry._connections == {}
+
+
+class TestConnectionRegistryTestWithTunnelCleanup:
+    """test() should clean up SSH tunnels in finally block."""
+
+    def test_tunnel_stopped_on_success(self):
+        ConnectionRegistry._connections = {"duck": {"type": "duckdb", "path": ":memory:"}}
+        ConnectionRegistry._loaded = True
+
+        with patch("altimate_engine.connections.stop") as mock_stop:
+            ConnectionRegistry.test("duck")
+            mock_stop.assert_called_once_with("duck")
+
+    def test_tunnel_stopped_on_failure(self):
+        ConnectionRegistry._connections = {}
+        ConnectionRegistry._loaded = True
+
+        with patch("altimate_engine.connections.stop") as mock_stop:
+            ConnectionRegistry.test("nonexistent")
+            mock_stop.assert_called_once_with("nonexistent")

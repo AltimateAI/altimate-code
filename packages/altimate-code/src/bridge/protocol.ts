@@ -218,6 +218,50 @@ export interface WarehouseTestResult {
   error?: string
 }
 
+// --- Warehouse Management ---
+
+export interface WarehouseAddParams {
+  name: string
+  config: Record<string, unknown>
+}
+
+export interface WarehouseAddResult {
+  success: boolean
+  name: string
+  type: string
+  error?: string
+}
+
+export interface WarehouseRemoveParams {
+  name: string
+}
+
+export interface WarehouseRemoveResult {
+  success: boolean
+  error?: string
+}
+
+// --- Docker Discovery ---
+
+export interface DockerContainer {
+  container_id: string
+  name: string
+  image: string
+  db_type: string
+  host: string
+  port: number
+  user?: string
+  password?: string
+  database?: string
+  status: string
+}
+
+export interface WarehouseDiscoverResult {
+  containers: DockerContainer[]
+  container_count: number
+  error?: string
+}
+
 // --- Schema Cache (Indexing & Search) ---
 
 export interface SchemaIndexParams {
@@ -1000,6 +1044,9 @@ export const BridgeMethods = {
   "dbt.lineage": {} as { params: DbtLineageParams; result: DbtLineageResult },
   "warehouse.list": {} as { params: WarehouseListParams; result: WarehouseListResult },
   "warehouse.test": {} as { params: WarehouseTestParams; result: WarehouseTestResult },
+  "warehouse.add": {} as { params: WarehouseAddParams; result: WarehouseAddResult },
+  "warehouse.remove": {} as { params: WarehouseRemoveParams; result: WarehouseRemoveResult },
+  "warehouse.discover": {} as { params: Record<string, never>; result: WarehouseDiscoverResult },
   "finops.query_history": {} as { params: QueryHistoryParams; result: QueryHistoryResult },
   "finops.analyze_credits": {} as { params: CreditAnalysisParams; result: CreditAnalysisResult },
   "finops.expensive_queries": {} as { params: ExpensiveQueriesParams; result: ExpensiveQueriesResult },
