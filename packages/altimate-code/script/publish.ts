@@ -171,11 +171,17 @@ if (!Script.preview) {
     console.error("GITHUB_TOKEN is required to update homebrew tap")
     process.exit(1)
   }
-  const tap = `https://x-access-token:${token}@github.com/AltimateAI/homebrew-tap.git`
+  // Clone public repo (read doesn't need auth), push with token via env var
+  // to avoid leaking the token in process args (visible via ps) or CI logs
+  const gitAuthEnv = {
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
+  }
   await $`rm -rf ./dist/homebrew-tap`
-  await $`git clone ${tap} ./dist/homebrew-tap`
+  await $`git clone https://github.com/AltimateAI/homebrew-tap.git ./dist/homebrew-tap`
   await Bun.file("./dist/homebrew-tap/altimate-code.rb").write(homebrewFormula)
   await $`cd ./dist/homebrew-tap && git add altimate-code.rb`
   await $`cd ./dist/homebrew-tap && git commit -m "Update to v${Script.version}"`
-  await $`cd ./dist/homebrew-tap && git push`
+  await $`cd ./dist/homebrew-tap && git push`.env(gitAuthEnv)
 }

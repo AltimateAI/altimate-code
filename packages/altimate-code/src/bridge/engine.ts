@@ -21,6 +21,9 @@ import { UI } from "../cli/ui"
 declare const ALTIMATE_ENGINE_VERSION: string
 declare const ALTIMATE_CLI_VERSION: string
 
+// Mutex to prevent concurrent ensureEngine/ensureUv calls from corrupting state
+let pendingEnsure: Promise<void> | null = null
+
 interface Manifest {
   engine_version: string
   python_version: string
@@ -129,8 +132,19 @@ export async function ensureUv(): Promise<void> {
   UI.println(`${UI.Style.TEXT_SUCCESS}uv installed${UI.Style.TEXT_NORMAL}`)
 }
 
-/** Creates venv + installs altimate-engine. Upgrades on version mismatch. */
+/** Creates venv + installs altimate-engine. Upgrades on version mismatch.
+ *  Uses a promise-based mutex so concurrent callers coalesce into one operation. */
 export async function ensureEngine(): Promise<void> {
+  if (pendingEnsure) return pendingEnsure
+  pendingEnsure = ensureEngineImpl()
+  try {
+    await pendingEnsure
+  } finally {
+    pendingEnsure = null
+  }
+}
+
+async function ensureEngineImpl(): Promise<void> {
   const manifest = await readManifest()
   if (manifest && manifest.engine_version === ALTIMATE_ENGINE_VERSION) return
 
