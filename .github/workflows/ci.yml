@@ -15,6 +15,11 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Configure git for tests
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@test.local"
+
       - name: Install dependencies
         run: bun install
 
