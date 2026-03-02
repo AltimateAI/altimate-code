@@ -129,10 +129,10 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
 
   if (method !== "curl" && method !== "unknown") {
     const cmds: Record<string, string> = {
-      npm: "npm uninstall -g altimate-code-ai",
-      pnpm: "pnpm uninstall -g altimate-code-ai",
-      bun: "bun remove -g altimate-code-ai",
-      yarn: "yarn global remove altimate-code-ai",
+      npm: "npm uninstall -g @altimateai/altimate-code",
+      pnpm: "pnpm uninstall -g @altimateai/altimate-code",
+      bun: "bun remove -g @altimateai/altimate-code",
+      yarn: "yarn global remove @altimateai/altimate-code",
       brew: "brew uninstall altimate-code",
       choco: "choco uninstall altimate-code",
       scoop: "scoop uninstall altimate-code",
@@ -180,10 +180,10 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
 
   if (method !== "curl" && method !== "unknown") {
     const cmds: Record<string, string[]> = {
-      npm: ["npm", "uninstall", "-g", "altimate-code-ai"],
-      pnpm: ["pnpm", "uninstall", "-g", "altimate-code-ai"],
-      bun: ["bun", "remove", "-g", "altimate-code-ai"],
-      yarn: ["yarn", "global", "remove", "altimate-code-ai"],
+      npm: ["npm", "uninstall", "-g", "@altimateai/altimate-code"],
+      pnpm: ["pnpm", "uninstall", "-g", "@altimateai/altimate-code"],
+      bun: ["bun", "remove", "-g", "@altimateai/altimate-code"],
+      yarn: ["yarn", "global", "remove", "@altimateai/altimate-code"],
       brew: ["brew", "uninstall", "altimate-code"],
       choco: ["choco", "uninstall", "altimate-code"],
       scoop: ["scoop", "uninstall", "altimate-code"],

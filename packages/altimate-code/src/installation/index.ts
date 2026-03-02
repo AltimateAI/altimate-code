@@ -104,7 +104,7 @@ export namespace Installation {
     for (const check of checks) {
       const output = await check.command()
       const installedName =
-        check.name === "brew" || check.name === "choco" || check.name === "scoop" ? "altimate-code" : "altimate-code-ai"
+        check.name === "brew" || check.name === "choco" || check.name === "scoop" ? "altimate-code" : "@altimateai/altimate-code"
       if (output.includes(installedName)) {
         return check.name
       }
@@ -121,8 +121,8 @@ export namespace Installation {
   )
 
   async function getBrewFormula() {
-    const tapFormula = await $`brew list --formula altimate/tap/altimate-code`.throws(false).quiet().text()
-    if (tapFormula.includes("altimate-code")) return "altimate/tap/altimate-code"
+    const tapFormula = await $`brew list --formula AltimateAI/tap/altimate-code`.throws(false).quiet().text()
+    if (tapFormula.includes("altimate-code")) return "AltimateAI/tap/altimate-code"
     const coreFormula = await $`brew list --formula altimate-code`.throws(false).quiet().text()
     if (coreFormula.includes("altimate-code")) return "altimate-code"
     return "altimate-code"
@@ -138,19 +138,19 @@ export namespace Installation {
         })
         break
       case "npm":
-        cmd = $`npm install -g altimate-code-ai@${target}`
+        cmd = $`npm install -g @altimateai/altimate-code@${target}`
         break
       case "pnpm":
-        cmd = $`pnpm install -g altimate-code-ai@${target}`
+        cmd = $`pnpm install -g @altimateai/altimate-code@${target}`
         break
       case "bun":
-        cmd = $`bun install -g altimate-code-ai@${target}`
+        cmd = $`bun install -g @altimateai/altimate-code@${target}`
         break
       case "brew": {
         const formula = await getBrewFormula()
         if (formula.includes("/")) {
           cmd =
-            $`brew tap altimate/tap && cd "$(brew --repo altimate/tap)" && git pull --ff-only && brew upgrade ${formula}`.env(
+            $`brew tap AltimateAI/tap && cd "$(brew --repo AltimateAI/tap)" && git pull --ff-only && brew upgrade ${formula}`.env(
               {
                 HOMEBREW_NO_AUTO_UPDATE: "1",
                 ...process.env,
@@ -220,7 +220,7 @@ export namespace Installation {
         return reg.endsWith("/") ? reg.slice(0, -1) : reg
       })
       const channel = CHANNEL
-      return fetch(`${registry}/altimate-code-ai/${channel}`)
+      return fetch(`${registry}/@altimateai/altimate-code/${channel}`)
         .then((res) => {
           if (!res.ok) throw new Error(res.statusText)
           return res.json()
