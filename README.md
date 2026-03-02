@@ -4,7 +4,7 @@
 
 **The AI coding agent for data teams.**
 
-An [opencode](https://github.com/anomalyco/opencode) fork with batteries included for SQL, dbt, and data warehouses.
+Batteries included for SQL, dbt, and data warehouses.
 
 [![npm](https://img.shields.io/npm/v/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
 [![PyPI](https://img.shields.io/pypi/v/altimate-engine)](https://pypi.org/project/altimate-engine/)
@@ -15,7 +15,7 @@ An [opencode](https://github.com/anomalyco/opencode) fork with batteries include
 
 ---
 
-altimate-code takes the open-source AI coding agent [opencode](https://github.com/anomalyco/opencode) and adds everything a data team needs out of the box: SQL analysis, column-level lineage, dbt integration, warehouse connectivity, and 40+ specialized data tools -- all available to any AI provider.
+An AI coding agent with 40+ specialized data tools, column-level lineage, dbt integration, and warehouse connectivity built in -- all available to any AI provider.
 
 ## Install
 
@@ -29,23 +29,20 @@ brew install AltimateAI/tap/altimate-code
 
 Then run `altimate-code` to launch the interactive TUI, or `altimate-code run "your prompt"` for one-shot mode.
 
-## What makes this different from opencode?
+## Highlights
 
-opencode is a great general-purpose AI coding agent. altimate-code extends it with a Python engine that gives the AI deep understanding of your data stack:
-
-| | opencode | altimate-code |
-|---|---|---|
-| AI coding agent | yes | yes |
-| 15+ AI providers | yes | yes |
-| TUI + headless mode | yes | yes |
-| MCP + LSP support | yes | yes |
-| **SQL analysis (lint, format, transpile, optimize)** | -- | **40+ tools** |
-| **Column-level lineage** | -- | **built-in** |
-| **dbt integration (manifest, profiles, lineage)** | -- | **built-in** |
-| **Warehouse connectivity (Snowflake, BigQuery, ...)** | -- | **9 warehouses** |
-| **PII detection & data classification** | -- | **built-in** |
-| **Query cost prediction** | -- | **built-in** |
-| **FinOps (credit analysis, query history)** | -- | **built-in** |
+| Capability | Details |
+|---|---|
+| **SQL analysis** | 40+ tools -- lint, format, transpile, optimize, safety checks |
+| **Column-level lineage** | Trace data flow through complex SQL and dbt models |
+| **dbt integration** | Manifest parsing, profile management, `+` operator |
+| **Warehouse connectivity** | Snowflake, BigQuery, Redshift, Databricks, Postgres, DuckDB, MySQL, SQL Server |
+| **PII detection** | Classify sensitive columns, flag risky queries |
+| **Query cost prediction** | Estimate execution costs before running |
+| **FinOps** | Credit analysis, query history insights |
+| **AI providers** | 15+ providers -- Anthropic, OpenAI, Gemini, Bedrock, and more |
+| **TUI + headless** | Interactive terminal UI or `altimate-code serve` for CI/CD |
+| **MCP + LSP** | Model Context Protocol and Language Server Protocol support |
 
 ## Features
 
@@ -92,7 +89,7 @@ Use any model you want. altimate-code supports 15+ providers via the Vercel AI S
 
 Anthropic, OpenAI, Google Gemini, Google Vertex AI, Amazon Bedrock, Azure OpenAI, Mistral, Groq, DeepInfra, Cerebras, Cohere, Together AI, Perplexity, xAI, OpenRouter, GitHub Copilot, GitLab
 
-### Everything else from opencode
+### And more
 
 - Interactive TUI with Solid.js + OpenTUI
 - Headless server mode (`altimate-code serve`)
@@ -155,6 +152,10 @@ Full docs at [altimate-code.sh](https://altimate-code.sh).
 ## Contributing
 
 Contributions welcome! Please read the [Contributing Guide](./CONTRIBUTING.md) before opening a PR.
+
+## Acknowledgements
+
+altimate-code is a fork of [opencode](https://github.com/anomalyco/opencode), the open-source AI coding agent. We build on top of their excellent foundation to add data-team-specific capabilities.
 
 ## License
 
