@@ -12,28 +12,22 @@ description: Compare column-level lineage and schema between two versions of a S
 Compare two versions of a SQL model to identify changes in column-level data flow and structural schema changes.
 
 ## Workflow
-
 1. **Detect dialect and warehouse context** -- Call `warehouse_list` or `dbt_profiles` to discover configured connections and auto-detect the SQL dialect (`snowflake`, `bigquery`, `postgres`, etc.). Pass the detected dialect to all subsequent tool calls that accept it.
-
 2. **Get the original SQL (before)** -- Either:
    - Use `git show HEAD:<path>` via `bash` to get the last committed version
    - Use `git show <branch>:<path>` if comparing against a specific branch
    - Accept "before" SQL directly from the user
-
 3. **Get the modified SQL (after)** -- Either:
    - `read` the current file on disk (working copy)
    - Accept "after" SQL directly from the user
-
 4. **Run schema diff** -- Call `schema_diff` with the before SQL, after SQL, and detected `dialect`. This catches structural changes that affect data contracts:
    - **Dropped columns** -- Output columns that no longer exist
    - **Added columns** -- New output columns introduced
    - **Renamed columns** -- Columns that changed name
    - **Type changes** -- Columns whose data type changed
-
 5. **Run column-level lineage on both versions** -- Choose the appropriate lineage tool:
    - **dbt project detected**: Call `dbt_lineage` for both versions if manifest covers both states. Fall back to `lineage_check` for the before version if the manifest only reflects the current state.
    - **SQL-only mode**: Call `lineage_check` with the before SQL and `dialect`, then again with the after SQL and `dialect`.
-
 6. **Compute the lineage diff** -- Compare the two lineage results edge by edge:
    - **Added edges**: Data flow paths that exist in the new version but not the old
    - **Removed edges**: Data flow paths that existed in the old version but are gone
@@ -41,12 +35,10 @@ Compare two versions of a SQL model to identify changes in column-level data flo
    - **Unchanged edges**: Identical in both versions
 
    Two edges match when all four fields are equal: `source_table`, `source_column`, `target_table`, `target_column`. The `transform` field is compared separately to detect logic changes on the same column path.
-
 7. **Load DAG context (if dbt project)** -- Call `dbt_manifest` to understand where this model sits in the dependency graph. Report:
    - How many downstream models consume this model
    - Whether any removed edges feed columns used downstream
    - Suggest running `/impact-analysis` for full downstream classification
-
 8. **Generate the lineage diff report**:
 
 ```

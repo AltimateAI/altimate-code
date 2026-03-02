@@ -15,29 +15,21 @@ description: >
 Help convert batch models to incremental or fix existing incremental logic. Covers `is_incremental()` patterns, strategy selection, merge keys, and common pitfalls.
 
 ## Workflow
-
 1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
    - Call `warehouse_list` to check for configured connections
    - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
    - If neither yields a result, ask the user which warehouse they are using
    - The dialect determines which incremental strategies are available
-
 2. **Read the model** -- Use `glob` and `read` to find and understand the current model SQL
-
 3. **Check existing config** -- Call `dbt_manifest` to detect whether the model is already incremental, its current strategy, unique_key, and materialization settings
-
 4. **Analyze the query** -- Use `sql_analyze` with the detected `dialect` to check for anti-patterns and `lineage_check` to understand column flow
-
 5. **Inspect the schema** -- Use `schema_inspect` to understand column types, especially timestamp columns suitable for `event_time` or incremental filtering
-
 6. **Choose the strategy** -- Select the right incremental approach based on:
    - The warehouse adapter (see Strategy Support Matrix below)
    - The data pattern (append-only vs mutable vs partitioned)
    - Table size and query performance requirements
    - See `references/` for warehouse-specific guidance
-
 7. **Generate the incremental version** -- Rewrite the model with proper `is_incremental()` logic
-
 8. **Update config** -- Add `unique_key`, `on_schema_change`, strategy settings, and any adapter-specific config
 
 ## Strategy Support Matrix

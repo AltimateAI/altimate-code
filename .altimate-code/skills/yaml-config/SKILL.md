@@ -18,21 +18,13 @@ description: >
 Generate or update dbt YAML configuration files by inspecting warehouse schemas and existing models.
 
 ## Workflow
-
 1. **Detect warehouse** -- Use `warehouse_list` or `dbt_profiles` to discover the connected warehouse type and dialect. This determines default schema quoting, database structure, and available configurations.
-
 2. **Determine config type** -- sources.yml, schema.yml, or properties.yml.
-
 3. **Read existing configs** -- Use `glob` to find existing YAML files in the project and `read` to understand the current organization pattern (one file per directory vs. one file per model). Match the existing convention.
-
 4. **Inspect warehouse schema** -- Use `schema_inspect` and `schema_search` to discover tables and columns.
-
 5. **Read the manifest** -- If available, use `dbt_manifest` to find existing model definitions and avoid duplicating entries.
-
 6. **Generate the YAML** based on the config type below.
-
 7. **Merge with existing** -- If YAML files already exist, merge new entries without duplicating existing definitions. Preserve human-written descriptions. Use `edit` for surgical updates, `write` only for new files.
-
 8. **Write the output** -- Use `write` or `edit` to save the YAML file.
 
 ## Config Types

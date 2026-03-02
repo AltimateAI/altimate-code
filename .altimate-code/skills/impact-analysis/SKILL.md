@@ -12,34 +12,27 @@ description: Analyze the downstream impact of SQL or dbt model changes by combin
 Determine which downstream models, tests, and exposures are affected when a SQL model changes. Classify each impact as BREAKING, WARNING, or SAFE.
 
 ## Workflow
-
 1. **Detect dialect and warehouse context** -- Call `warehouse_list` or `dbt_profiles` to discover configured connections and auto-detect the SQL dialect (`snowflake`, `bigquery`, `postgres`, etc.). Pass the detected dialect to all subsequent tool calls that accept it.
-
 2. **Identify the changed model** -- Either:
    - Accept a model name or file path from the user
    - Detect changed `.sql` files via `git diff --name-only` using `bash`
    - If multiple models changed, analyze each one sequentially
-
 3. **Obtain the before and after SQL** --
    - **Before**: `git show HEAD:<path>` via `bash` to get the last committed version
    - **After**: `read` the current file on disk
    - If the model is new (no prior version), skip diffing and report it as a new addition
-
 4. **Run schema diff** -- Call `schema_diff` with the before SQL, after SQL, and detected `dialect`. This reveals:
    - **Dropped columns** -- Columns removed from the output (high break risk)
    - **Renamed columns** -- Columns that changed name (break risk unless downstream is updated)
    - **Type changes** -- Columns whose data type changed (subtle break risk)
    - **Added columns** -- New output columns (generally safe)
-
 5. **Run column-level lineage** -- Choose the appropriate lineage tool:
    - **dbt project detected** (manifest exists): Call `dbt_lineage` with `manifest_path` and `model` name for manifest-aware lineage that resolves `ref()` and `source()` calls accurately. This is more reliable than SQL-only parsing.
    - **SQL-only mode**: Call `lineage_check` with the after SQL and `dialect` to trace column-level data flow from sources to output.
-
 6. **Load the dbt dependency graph** -- Call `dbt_manifest` to get the full DAG. Use `glob` to search for `target/manifest.json` if the path is not provided.
    - Extract downstream models: walk `depends_on` edges recursively to build the full downstream tree with depth levels
    - Identify tests that reference the changed model or its columns
    - Identify exposures (dashboards, applications) that depend on downstream models
-
 7. **Cross-reference schema changes with downstream consumers** -- For each downstream model:
    - Read its SQL via `read`
    - Check if it references any dropped or renamed columns from step 4
@@ -52,9 +45,7 @@ Determine which downstream models, tests, and exposures are affected when a SQL 
    | **BREAKING** | References a dropped or renamed column | Must update before deploy |
    | **WARNING** | References a type-changed column, or uses column in a CAST/comparison that may fail | Review and test |
    | **SAFE** | No reference to any changed column | No action needed |
-
 8. **Run anti-pattern check** -- Call `sql_analyze` with the modified SQL and `dialect` to flag any new anti-patterns introduced by the change.
-
 9. **Generate the impact report**:
 
 ```

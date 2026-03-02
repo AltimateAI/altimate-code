@@ -12,7 +12,6 @@ description: Analyze Snowflake query costs and identify optimization opportuniti
 Analyze Snowflake warehouse query costs, identify the most expensive queries, detect anti-patterns, and recommend optimizations.
 
 ## Workflow
-
 1. **Query SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY** for the top 20 most expensive queries by credits used:
 
    ```sql
@@ -37,19 +36,16 @@ Analyze Snowflake warehouse query costs, identify the most expensive queries, de
    ```
 
    Use `sql_execute` to run this query against the connected Snowflake warehouse.
-
 2. **Group and summarize** the results by:
    - **User**: Which users are driving the most cost?
    - **Warehouse**: Which warehouses consume the most credits?
    - **Query type**: SELECT vs INSERT vs CREATE TABLE AS SELECT vs MERGE, etc.
 
    Present each grouping as a markdown table.
-
 3. **Analyze the top offenders** - For each of the top 10 most expensive queries:
    - Run `sql_analyze` on the query text to detect anti-patterns (SELECT *, missing LIMIT, cartesian products, correlated subqueries, etc.)
    - Run `sql_predict_cost` to get the cost tier prediction based on historical feedback data
    - Summarize anti-patterns found and their severity
-
 4. **Classify each query into a cost tier**:
 
    | Tier | Credits | Label | Action |
@@ -58,10 +54,8 @@ Analyze Snowflake warehouse query costs, identify the most expensive queries, de
    | 2 | $0.01 - $1.00 | Moderate | Review if frequent |
    | 3 | $1.00 - $100.00 | Expensive | Optimize or review warehouse sizing |
    | 4 | > $100.00 | Dangerous | Immediate review required |
-
 5. **Record feedback** - For each query analyzed, call `sql_record_feedback` to store the execution metrics so future predictions improve:
    - Pass `bytes_scanned`, `execution_time_ms`, `credits_used`, and `warehouse_size` from the query history results
-
 6. **Output the final report** as a structured markdown document:
 
    ```
