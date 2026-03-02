@@ -1,0 +1,195 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  GH_REPO: AltimateAI/altimate-code
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build all targets
+        run: bun run packages/altimate-code/script/build.ts
+        env:
+          ALTIMATE_CLI_VERSION: ${{ github.ref_name }}
+          ALTIMATE_CLI_CHANNEL: latest
+          ALTIMATE_CLI_RELEASE: "1"
+          GH_REPO: ${{ env.GH_REPO }}
+          MODELS_DEV_API_JSON: test/tool/fixtures/models-api.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: packages/altimate-code/dist/
+
+  publish-npm:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: packages/altimate-code/dist/
+
+      - name: Configure npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # TODO: Uncomment when AUR publishing is enabled (see publish.ts for setup steps)
+      # - name: Configure SSH for AUR
+      #   if: ${{ !contains(github.ref_name, '-') }}
+      #   run: |
+      #     mkdir -p ~/.ssh
+      #     echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+      #     chmod 600 ~/.ssh/aur
+      #     ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+      #     cat >> ~/.ssh/config << 'EOF'
+      #     Host aur.archlinux.org
+      #       IdentityFile ~/.ssh/aur
+      #       User aur
+      #     EOF
+      #   env:
+      #     AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+      - name: Publish to npm
+        run: bun run packages/altimate-code/script/publish.ts
+        env:
+          ALTIMATE_CLI_VERSION: ${{ github.ref_name }}
+          ALTIMATE_CLI_CHANNEL: latest
+          ALTIMATE_CLI_RELEASE: "1"
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_REPO: ${{ env.GH_REPO }}
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  publish-engine:
+    name: Publish engine to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+        working-directory: packages/altimate-engine
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/altimate-engine/dist/
+
+  github-release:
+    name: Create GitHub Release
+    needs: [build, publish-npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Validate tag format to prevent injection
+          if ! echo "$CURRENT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$'; then
+            echo "::error::Invalid tag format: $CURRENT_TAG"
+            exit 1
+          fi
+
+          # Get the previous tag
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | head -2 | tail -1)
+
+          # Generate changelog from commits between tags
+          echo "## What's Changed" > notes.md
+          echo "" >> notes.md
+
+          if [ -n "$PREV_TAG" ]; then
+            # Categorize commits
+            echo "### Features" >> notes.md
+            git log "${PREV_TAG}".."${CURRENT_TAG}" --pretty=format:"- %s (%h)" --grep="^feat" >> notes.md || true
+            echo "" >> notes.md
+            echo "" >> notes.md
+
+            echo "### Bug Fixes" >> notes.md
+            git log "${PREV_TAG}".."${CURRENT_TAG}" --pretty=format:"- %s (%h)" --grep="^fix" >> notes.md || true
+            echo "" >> notes.md
+            echo "" >> notes.md
+
+            echo "### Other Changes" >> notes.md
+            git log "${PREV_TAG}".."${CURRENT_TAG}" --pretty=format:"- %s (%h)" --invert-grep --grep="^feat" --grep="^fix" >> notes.md || true
+            echo "" >> notes.md
+          else
+            echo "Initial release" >> notes.md
+          fi
+
+          echo "" >> notes.md
+          echo "### Install" >> notes.md
+          echo '```bash' >> notes.md
+          echo "npm install -g @altimateai/altimate-code@${CURRENT_TAG#v}" >> notes.md
+          echo "# or" >> notes.md
+          echo "brew install AltimateAI/tap/altimate-code" >> notes.md
+          echo '```' >> notes.md
+
+          echo "" >> notes.md
+          echo "**Full Changelog**: https://github.com/${GH_REPO}/compare/${PREV_TAG}...${CURRENT_TAG}" >> notes.md
+        env:
+          GH_REPO: ${{ env.GH_REPO }}
+          CURRENT_TAG: ${{ github.ref_name }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: packages/altimate-code/dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            packages/altimate-code/dist/*.tar.gz
+            packages/altimate-code/dist/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
