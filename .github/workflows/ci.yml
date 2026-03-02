@@ -20,6 +20,7 @@ jobs:
 
       - name: Run tests
         run: bun test
+        working-directory: packages/altimate-code
 
   python:
     name: Python ${{ matrix.python-version }}
