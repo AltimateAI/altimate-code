@@ -14,20 +14,14 @@ description: Generate dbt tests for models using built-in tests, dbt_expectation
 Generate comprehensive dbt test definitions for a model. This skill discovers existing tests, inspects the model's schema and SQL, and produces appropriate tests using built-in generics, `dbt_utils`, `dbt_expectations`, and `elementary`.
 
 ## Workflow
-
 1. **Detect dialect and warehouse** -- Use `dbt_profiles` to discover the active profile and warehouse type. This determines which test features are available and which SQL patterns apply.
-
 2. **Discover existing tests** -- Use `dbt_manifest` to load the project manifest. Extract:
    - All tests already defined for the target model (avoid duplicates)
    - Which test packages are installed (`dbt_utils`, `dbt_expectations`, `elementary`)
    - Upstream/downstream model dependencies
-
 3. **Find the model file** -- Use `glob` to locate the model SQL file and any existing schema YAML (`schema.yml`, `_schema.yml`, `_<model>__models.yml`) in the same directory.
-
 4. **Read the model SQL** -- Understand transformations, joins, filters, GROUP BY, window functions, and column expressions.
-
 5. **Inspect the schema** -- Use `schema_inspect` to get column names, types, nullability, and constraints from the warehouse. If no warehouse connection is available, infer columns from the SQL.
-
 6. **Generate tests** based on column patterns, model layer, and installed packages:
 
 ### Built-in Tests (always available)
@@ -122,9 +116,7 @@ models:
             - order_id
             - line_item_id
 ```
-
 7. **Write or patch the schema.yml** -- If a schema.yml exists, use `edit` to merge new tests (skip any that already exist). If none exists, use `write` to create one in the same directory as the model.
-
 8. **Suggest package installation** -- If the model would benefit from tests in a package that is not installed, suggest adding it to `packages.yml`:
 
 ```yaml

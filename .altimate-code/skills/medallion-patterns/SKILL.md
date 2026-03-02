@@ -15,11 +15,9 @@ description: >
 Guide and scaffold dbt projects following layered architecture patterns. Adapts to the project's existing conventions rather than imposing a single naming scheme.
 
 ## Workflow
-
 1. **Detect the warehouse dialect** -- Determines adapter-specific materialization defaults.
    - Call `warehouse_list` to check for configured connections
    - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
-
 2. **Detect existing conventions** -- This step is critical. Never impose a naming scheme without checking first.
    - Call `dbt_manifest` to inventory existing models, their names, and materializations
    - Use `glob` to scan `models/` directory structure for folder patterns
@@ -34,11 +32,8 @@ Guide and scaffold dbt projects following layered architecture patterns. Adapts 
    | `staging/`, `intermediate/`, `marts/` dirs | **dbt directory** | staging / intermediate / marts |
    | `raw_`, `clean_`, `mart_` prefixes | **custom** | detect and follow |
    | No clear pattern | **greenfield** | recommend dbt canonical (most widely adopted) |
-
 3. **Follow the detected convention** -- Match whatever the project already uses. If the project uses `stg_/int_/fct_/dim_`, use that. If it uses `brz_/slv_/gld_`, use that. Consistency with the existing project matters more than any theoretical ideal.
-
 4. **Audit and recommend** -- Identify models that don't fit their layer's responsibilities (e.g., a staging model with joins, or a mart model referencing sources directly)
-
 5. **Scaffold or reorganize** -- Create directory structure and template models, using the detected convention
 
 ## Layer Definitions

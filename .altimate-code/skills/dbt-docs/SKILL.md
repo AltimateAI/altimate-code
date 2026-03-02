@@ -14,19 +14,12 @@ description: Generate or improve dbt model documentation -- column descriptions,
 Generate comprehensive documentation for dbt models by analyzing SQL logic, schema metadata, and existing docs.
 
 ## Workflow
-
 1. **Detect dialect and warehouse** -- Use `dbt_profiles` to discover the active profile and warehouse type. This informs column type descriptions and warehouse-specific nuances.
-
 2. **Find the target model** -- Use `glob` to locate the model SQL and any existing schema YAML (`schema.yml`, `_schema.yml`, `_<model>__models.yml`).
-
 3. **Read the model SQL** -- Understand the transformations, business logic, and column derivations.
-
 4. **Read existing docs** -- Check for existing schema YAML and `docs/` blocks. Note which columns already have descriptions to preserve them.
-
 5. **Inspect schema** -- Use `schema_inspect` to get column types, nullability, and constraints from the warehouse.
-
 6. **Read upstream models** -- Use `dbt_manifest` to find dependencies, then `read` upstream SQL to understand data flow and inherited column semantics.
-
 7. **Generate documentation**:
 
 ### Model-Level Description
@@ -99,7 +92,6 @@ columns:
   - name: customer_id
     description: '{{ doc("customer_id") }}'
 ```
-
 8. **Write output** -- Use `edit` to update existing YAML or `write` to create new files. Preserve any existing descriptions that are already accurate.
 
 ## Quality Checklist

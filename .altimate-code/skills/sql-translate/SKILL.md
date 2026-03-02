@@ -16,32 +16,26 @@ description: >
 Translate SQL queries from one database dialect to another using sqlglot's transpilation engine, with awareness of common pitfalls across dialect boundaries.
 
 ## Workflow
-
 1. **Detect available warehouse connections** -- Before asking the user for dialects:
    - Call `warehouse_list` to check for configured connections
    - Call `dbt_profiles` if no warehouse connections are found
    - Use discovered connections to suggest or auto-fill the source or target dialect
    - If both source and target are still unknown, ask the user to specify them
-
 2. **Determine source and target dialects** -- If not fully specified:
    - Use context clues from the SQL syntax to infer the source dialect (e.g., `DATEADD` suggests Snowflake/SQL Server, `DATE_ADD` suggests BigQuery/MySQL, `||` for concat suggests Postgres/Snowflake)
    - Ask the user to confirm or specify any dialect that cannot be confidently inferred
-
 3. **Get the SQL to translate** -- Either:
    - Read from a file path provided by the user (use `read`)
    - Accept inline SQL from the user's message
    - Search for SQL files with `glob` if the user references a model or directory
-
 4. **Call `sql_translate`** with:
    - `sql`: The SQL query text
    - `source_dialect`: The source dialect
    - `target_dialect`: The target dialect
-
 5. **Review the result**:
    - If `success` is true, present the translated SQL
    - If there are `warnings`, explain each one clearly -- these indicate constructs that may need manual review
    - If `success` is false, explain the error and suggest fixes (e.g., syntax the user may need to adjust before translation)
-
 6. **Flag high-risk translation areas** that sqlglot may handle syntactically but require semantic verification:
    - **Date/time functions**: `DATEADD`/`DATE_ADD`/`INTERVAL`, timezone handling, epoch conversions
    - **Data types**: `VARCHAR` vs `STRING`, `TIMESTAMP_NTZ` vs `TIMESTAMP`, `NUMBER` vs `INT64`
@@ -49,13 +43,11 @@ Translate SQL queries from one database dialect to another using sqlglot's trans
    - **Semi-structured data**: `VARIANT`/`PARSE_JSON` (Snowflake) vs `JSON` type and functions (BigQuery/Postgres)
    - **DDL differences**: Temp tables, `CREATE OR REPLACE`, materialized views, clustering/partitioning syntax
    - **Stored procedures / scripting**: JavaScript UDFs (Snowflake) vs SQL UDFs (BigQuery) vs PL/pgSQL (Postgres) -- these rarely translate automatically
-
 7. **Format the output** clearly:
    - Show original SQL labeled with source dialect
    - Show translated SQL labeled with target dialect
    - List any warnings or areas requiring manual review
    - Note which constructs were translated automatically vs which need human attention
-
 8. **Offer next steps**:
    - Suggest running `sql_validate` on the translated SQL to verify syntax in the target dialect
    - Offer to write the translated SQL to a file
