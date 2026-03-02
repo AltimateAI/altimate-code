@@ -1,98 +1,114 @@
 ---
 name: impact-analysis
-description: Analyze the downstream impact of changes to a dbt model by combining column-level lineage with the dbt dependency graph.
+description: Analyze the downstream impact of SQL or dbt model changes by combining column-level lineage, schema diffing, and the dbt dependency graph. Use when a user changes a model and wants to know what breaks downstream, when reviewing a PR that modifies SQL, or when renaming/dropping columns.
 ---
 
 # Impact Analysis
 
 ## Requirements
 **Agent:** any (read-only analysis)
-**Tools used:** dbt_manifest, lineage_check, sql_analyze, glob, bash, read
+**Tools used:** dbt_lineage, dbt_manifest, lineage_check, schema_diff, sql_analyze, warehouse_list, dbt_profiles, glob, bash, read
 
-Determine which downstream models, tests, and dashboards are affected when a dbt model changes.
+Determine which downstream models, tests, and exposures are affected when a SQL model changes. Classify each impact as BREAKING, WARNING, or SAFE.
 
 ## Workflow
 
-1. **Identify the changed model** — Either:
+1. **Detect dialect and warehouse context** -- Call `warehouse_list` or `dbt_profiles` to discover configured connections and auto-detect the SQL dialect (`snowflake`, `bigquery`, `postgres`, etc.). Pass the detected dialect to all subsequent tool calls that accept it.
+
+2. **Identify the changed model** -- Either:
    - Accept a model name or file path from the user
    - Detect changed `.sql` files via `git diff --name-only` using `bash`
+   - If multiple models changed, analyze each one sequentially
 
-2. **Load the dbt manifest** — Call `dbt_manifest` with the project's `target/manifest.json` path.
-   - If the user specifies a manifest path, use that
-   - Otherwise search for `target/manifest.json` or `manifest.json` using `glob`
+3. **Obtain the before and after SQL** --
+   - **Before**: `git show HEAD:<path>` via `bash` to get the last committed version
+   - **After**: `read` the current file on disk
+   - If the model is new (no prior version), skip diffing and report it as a new addition
 
-3. **Find the changed model in the manifest** — Match by model name or file path.
-   Extract: `unique_id`, `depends_on`, `columns`, `materialized`
+4. **Run schema diff** -- Call `schema_diff` with the before SQL, after SQL, and detected `dialect`. This reveals:
+   - **Dropped columns** -- Columns removed from the output (high break risk)
+   - **Renamed columns** -- Columns that changed name (break risk unless downstream is updated)
+   - **Type changes** -- Columns whose data type changed (subtle break risk)
+   - **Added columns** -- New output columns (generally safe)
 
-4. **Build the downstream dependency graph** — From the manifest:
-   - Find all models whose `depends_on` includes the changed model's `unique_id`
-   - Recursively expand to get the full downstream tree (depth-first)
-   - Track depth level for each downstream model
+5. **Run column-level lineage** -- Choose the appropriate lineage tool:
+   - **dbt project detected** (manifest exists): Call `dbt_lineage` with `manifest_path` and `model` name for manifest-aware lineage that resolves `ref()` and `source()` calls accurately. This is more reliable than SQL-only parsing.
+   - **SQL-only mode**: Call `lineage_check` with the after SQL and `dialect` to trace column-level data flow from sources to output.
 
-5. **Run column-level lineage** — Call `lineage_check` on the changed model's SQL to get:
-   - Which source columns flow to which output columns
-   - Which columns were added, removed, or renamed (if comparing old vs new)
+6. **Load the dbt dependency graph** -- Call `dbt_manifest` to get the full DAG. Use `glob` to search for `target/manifest.json` if the path is not provided.
+   - Extract downstream models: walk `depends_on` edges recursively to build the full downstream tree with depth levels
+   - Identify tests that reference the changed model or its columns
+   - Identify exposures (dashboards, applications) that depend on downstream models
 
-6. **Cross-reference lineage with downstream models** — For each downstream model:
-   - Check if it references any of the changed columns
-   - Run `lineage_check` on the downstream model's SQL if available
-   - Classify impact: BREAKING (removed/renamed column used downstream), SAFE (added column, no downstream reference), UNKNOWN (can't determine)
+7. **Cross-reference schema changes with downstream consumers** -- For each downstream model:
+   - Read its SQL via `read`
+   - Check if it references any dropped or renamed columns from step 4
+   - If a dbt project is available, call `dbt_lineage` on the downstream model to trace which specific source columns it consumes
+   - Otherwise, call `lineage_check` on its SQL with `dialect`
+   - Classify the impact:
 
-7. **Generate the impact report**:
+   | Classification | Condition | Action |
+   |----------------|-----------|--------|
+   | **BREAKING** | References a dropped or renamed column | Must update before deploy |
+   | **WARNING** | References a type-changed column, or uses column in a CAST/comparison that may fail | Review and test |
+   | **SAFE** | No reference to any changed column | No action needed |
+
+8. **Run anti-pattern check** -- Call `sql_analyze` with the modified SQL and `dialect` to flag any new anti-patterns introduced by the change.
+
+9. **Generate the impact report**:
 
 ```
 Impact Analysis: stg_orders
-════════════════════════════
+============================
 
+Dialect: snowflake (auto-detected)
 Changed Model: stg_orders (materialized: view)
-  Source columns: 5 → 6 (+1 added)
-  Removed columns: none
-  Modified columns: order_total (renamed from total_amount)
 
-Downstream Impact (3 models affected):
+Schema Changes:
+  DROPPED: total_amount
+  RENAMED: order_total (was: total_amount)
+  ADDED:   discount_pct
+  TYPE:    quantity (NUMBER(10,0) -> NUMBER(18,0))
+
+Downstream Impact (3 models, 4 tests affected):
 
   Depth 1:
     [BREAKING] int_order_metrics
-      References: order_total (was total_amount) — COLUMN RENAMED
-      Action needed: Update column reference
+      - References `total_amount` (DROPPED) in SUM(total_amount)
+      - Action: Replace with `order_total`
 
     [SAFE] int_order_summary
-      No references to changed columns
+      - No references to changed columns
 
   Depth 2:
     [BREAKING] mart_revenue
-      References: order_total via int_order_metrics — CASCADING BREAK
-      Action needed: Verify after fixing int_order_metrics
+      - Cascading break via int_order_metrics.total_amount
+      - Action: Fix int_order_metrics first, then verify
 
 Tests at Risk: 4
-  - not_null_stg_orders_order_total
-  - unique_int_order_metrics_order_id
-  - accepted_values_stg_orders_status
-  - relationships_int_order_metrics_order_id
+  - not_null_stg_orders_total_amount (WILL FAIL: column dropped)
+  - unique_int_order_metrics_order_id (OK)
+  - accepted_values_stg_orders_status (OK)
+  - relationships_int_order_metrics_order_id (OK)
 
-Summary: 2 BREAKING, 1 SAFE, 0 UNKNOWN
+Anti-Patterns in Modified SQL: 1
+  - [WARNING] SELECT_STAR on line 3
+
+Summary: 2 BREAKING, 0 WARNING, 1 SAFE
   Recommended: Fix int_order_metrics first, then run `dbt test -s stg_orders+`
 ```
 
 ## Without Manifest (SQL-only mode)
 
-If no dbt manifest is available, fall back to SQL-only analysis:
-1. Run `lineage_check` on the changed SQL
-2. Show the column-level data flow
-3. Note that downstream impact cannot be determined without a manifest
-4. Suggest running `dbt docs generate` to create a manifest
+If no dbt manifest is available:
+1. Run `schema_diff` to identify structural column changes between versions
+2. Run `lineage_check` on the modified SQL with `dialect` to show column-level data flow
+3. Report the schema changes and column lineage
+4. Note that downstream impact cannot be fully determined without a manifest
+5. Suggest running `dbt docs generate` or providing a manifest path
 
-## Tools Used
+## Usage
 
-- `dbt_manifest` — Load the dbt dependency graph
-- `lineage_check` — Column-level lineage for each model
-- `sql_analyze` — Check for anti-patterns in changed SQL
-- `glob` — Find manifest and SQL files
-- `bash` — Git operations for detecting changes
-- `read` — Read SQL files from disk
-
-## Usage Examples
-
-- `/impact-analysis stg_orders` — Analyze impact of changes to stg_orders
-- `/impact-analysis models/staging/stg_orders.sql` — Analyze by file path
-- `/impact-analysis` — Auto-detect changed models from git diff
+- `/impact-analysis stg_orders` -- Analyze impact of changes to stg_orders
+- `/impact-analysis models/staging/stg_orders.sql` -- Analyze by file path
+- `/impact-analysis` -- Auto-detect changed models from git diff
