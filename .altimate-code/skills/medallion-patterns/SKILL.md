@@ -1,85 +1,99 @@
 ---
 name: medallion-patterns
-description: Apply medallion architecture (bronze/silver/gold) patterns to organize dbt models into clean data layers.
+description: >
+  Apply medallion architecture (bronze/silver/gold) patterns to organize dbt models into clean data layers.
+  Use when the user asks about layered data architecture, bronze/silver/gold organization, staging vs marts structure,
+  data mesh patterns, or wants to reorganize their dbt project into proper transformation layers.
 ---
 
 # Medallion Architecture Patterns
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** glob, read, dbt_manifest, dbt_run, write, edit
+**Tools used:** warehouse_list, dbt_profiles, dbt_manifest, glob, read, dbt_run, write, edit
 
-Guide and scaffold dbt projects following the medallion (bronze/silver/gold) architecture pattern.
+Guide and scaffold dbt projects following layered architecture patterns. Adapts to the project's existing conventions rather than imposing a single naming scheme.
 
 ## Workflow
 
-1. **Audit current structure** — Use `glob` to scan the project's `models/` directory and `dbt_manifest` to understand existing organization
-2. **Identify the current state** — Classify existing models into medallion layers based on naming and content
-3. **Recommend reorganization** — Suggest how to reorganize models into proper layers
-4. **Scaffold missing layers** — Create directory structure and template models for gaps
+1. **Detect the warehouse dialect** -- Determines adapter-specific materialization defaults.
+   - Call `warehouse_list` to check for configured connections
+   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
 
-## Medallion Layer Definitions
+2. **Detect existing conventions** -- This step is critical. Never impose a naming scheme without checking first.
+   - Call `dbt_manifest` to inventory existing models, their names, and materializations
+   - Use `glob` to scan `models/` directory structure for folder patterns
+   - Use `read` to check `dbt_project.yml` for configured model paths and materializations
+   - Classify the project's current convention:
 
-### Bronze (Raw / Staging)
+   | Signal | Convention | Layer Mapping |
+   |--------|-----------|---------------|
+   | `stg_`, `int_`, `fct_`, `dim_` prefixes | **dbt canonical** | staging / intermediate / marts |
+   | `brz_`, `slv_`, `gld_` prefixes | **medallion prefix** | bronze / silver / gold |
+   | `bronze/`, `silver/`, `gold/` dirs | **medallion directory** | bronze / silver / gold |
+   | `staging/`, `intermediate/`, `marts/` dirs | **dbt directory** | staging / intermediate / marts |
+   | `raw_`, `clean_`, `mart_` prefixes | **custom** | detect and follow |
+   | No clear pattern | **greenfield** | recommend dbt canonical (most widely adopted) |
+
+3. **Follow the detected convention** -- Match whatever the project already uses. If the project uses `stg_/int_/fct_/dim_`, use that. If it uses `brz_/slv_/gld_`, use that. Consistency with the existing project matters more than any theoretical ideal.
+
+4. **Audit and recommend** -- Identify models that don't fit their layer's responsibilities (e.g., a staging model with joins, or a mart model referencing sources directly)
+
+5. **Scaffold or reorganize** -- Create directory structure and template models, using the detected convention
+
+## Layer Definitions
+
+The medallion architecture has three layers. The terminology varies but the responsibilities are universal:
+
+### Layer 1: Source-Conformed (Bronze / Staging)
 **Purpose**: Ingest raw data with minimal transformation. Preserve source fidelity.
 
-```
-models/
-  bronze/
-    source_system/
-      _source_system__sources.yml
-      brz_source_system__table.sql
-```
+**Responsibilities**:
+- 1:1 mapping with source tables
+- Type casting, column renaming, deduplication only
+- No joins, no business logic
+- Materialized as `view` or `ephemeral`
 
 **Pattern**:
 ```sql
--- brz_stripe__payments.sql
 {{ config(materialized='view') }}
 
 with source as (
     select * from {{ source('stripe', 'payments') }}
 ),
 
-cast as (
+renamed as (
     select
         cast(id as varchar) as payment_id,
         cast(amount as integer) as amount_cents,
         cast(created as timestamp) as created_at,
-        _loaded_at  -- preserve load metadata
+        _loaded_at
     from source
 )
 
-select * from cast
+select * from renamed
 ```
 
-**Rules**:
-- 1:1 mapping with source tables
-- Only type casting, renaming, deduplication
-- No joins, no business logic
-- Materialized as `view` or `ephemeral`
-- Naming: `brz_<source>__<table>`
+### Layer 2: Business-Conformed (Silver / Intermediate)
+**Purpose**: Cross-source joins, business logic, data quality transformations.
 
-### Silver (Cleaned / Intermediate)
-**Purpose**: Business-conformant data. Joins, deduplication, standardization.
-
-```
-models/
-  silver/
-    domain/
-      slv_domain__entity.sql
-```
+**Responsibilities**:
+- Cross-source joins allowed
+- Business logic transformations (currency conversion, status mapping)
+- Data quality filters (remove nulls, deduplicate)
+- Standardized naming conventions
+- Materialized as `ephemeral`, `view`, or `table`
 
 **Pattern**:
 ```sql
--- slv_finance__orders_enriched.sql
-{{ config(materialized='table') }}
+{{ config(materialized='ephemeral') }}
 
 with orders as (
-    select * from {{ ref('brz_stripe__payments') }}
+    select * from {{ ref('stg_stripe__payments') }}
 ),
 
 customers as (
-    select * from {{ ref('brz_crm__customers') }}
+    select * from {{ ref('stg_crm__customers') }}
 ),
 
 enriched as (
@@ -91,42 +105,30 @@ enriched as (
         o.created_at
     from orders o
     left join customers c on o.customer_id = c.customer_id
-    where o.created_at is not null  -- quality filter
+    where o.created_at is not null
 )
 
 select * from enriched
 ```
 
-**Rules**:
-- Cross-source joins allowed
-- Business logic transformations
-- Data quality filters (remove nulls, duplicates)
-- Standardized naming conventions
+### Layer 3: Consumption-Ready (Gold / Marts)
+**Purpose**: Business-ready aggregations, metrics, and dimensional models for BI.
+
+**Responsibilities**:
+- Aggregations, metrics, KPIs
+- Wide denormalized tables for BI tools
+- Fact tables and dimension tables (Kimball style)
 - Materialized as `table` or `incremental`
-- Naming: `slv_<domain>__<entity>`
-
-### Gold (Business / Marts)
-**Purpose**: Business-ready aggregations and metrics. Direct consumption by BI/analytics.
-
-```
-models/
-  gold/
-    domain/
-      fct_metric.sql
-      dim_entity.sql
-```
 
 **Pattern**:
 ```sql
--- fct_daily_revenue.sql
 {{ config(
     materialized='incremental',
-    unique_key='revenue_date',
-    on_schema_change='append_new_columns'
+    unique_key='revenue_date'
 ) }}
 
 with orders as (
-    select * from {{ ref('slv_finance__orders_enriched') }}
+    select * from {{ ref('int_orders__enriched') }}
     {% if is_incremental() %}
     where created_at > (select max(revenue_date) from {{ this }})
     {% endif %}
@@ -145,39 +147,48 @@ daily as (
 select * from daily
 ```
 
-**Rules**:
-- Aggregations, metrics, KPIs
-- Wide denormalized tables for BI
-- Fact tables (`fct_`) and dimension tables (`dim_`)
-- Materialized as `table` or `incremental`
-- Naming: `fct_<metric>` or `dim_<entity>`
+## Convention Mapping Reference
+
+When the project uses one convention but the user asks about another, use this mapping:
+
+| Medallion | dbt Canonical | Typical Prefix | Directory |
+|-----------|--------------|----------------|-----------|
+| Bronze | Staging | `stg_` or `brz_` | `staging/` or `bronze/` |
+| Silver | Intermediate | `int_` or `slv_` | `intermediate/` or `silver/` |
+| Gold (facts) | Marts (facts) | `fct_` | `marts/` or `gold/` |
+| Gold (dimensions) | Marts (dimensions) | `dim_` | `marts/` or `gold/` |
+| Gold (metrics) | Marts (metrics) | `mrt_` or `met_` | `marts/` or `gold/` |
+
+## Materialization Defaults by Layer
+
+Configure in `dbt_project.yml`:
+```yaml
+models:
+  my_project:
+    staging:         # or bronze
+      +materialized: view
+    intermediate:    # or silver
+      +materialized: ephemeral
+    marts:           # or gold
+      +materialized: table
+```
 
 ## Migration Checklist
 
 When reorganizing an existing project:
 
-1. Create the directory structure (`bronze/`, `silver/`, `gold/`)
-2. Map existing `stg_` models → `bronze/` layer
-3. Map existing `int_` models → `silver/` layer
-4. Map existing `fct_`/`dim_` models → `gold/` layer
-5. Update `dbt_project.yml` with layer-specific materializations:
-```yaml
-models:
-  my_project:
-    bronze:
-      +materialized: view
-    silver:
-      +materialized: table
-    gold:
-      +materialized: incremental
-```
-6. Update all `ref()` calls to match new model names
-7. Run `dbt build` to verify no breakages
+1. **Inventory** -- Call `dbt_manifest` to catalog all models with their current materializations
+2. **Map layers** -- Classify each model into its target layer based on content (not just name)
+3. **Create directories** -- Set up the target directory structure
+4. **Move and rename** -- Relocate models, updating names to match the convention
+5. **Update refs** -- Update all `ref()` calls to match new model names
+6. **Update dbt_project.yml** -- Add layer-specific materialization configs
+7. **Verify** -- Run `dbt build` to confirm no breakages
 
 ## Usage
 
-- `/medallion-patterns audit` — Analyze current project structure
-- `/medallion-patterns scaffold stripe` — Create bronze/silver/gold for a new source
-- `/medallion-patterns migrate` — Plan migration of existing stg/int/mart to medallion
+- `/medallion-patterns audit` -- Analyze current project structure and conventions
+- `/medallion-patterns scaffold stripe` -- Create layered models for a new source
+- `/medallion-patterns migrate` -- Plan migration of existing models to layered architecture
 
-Use the tools: `glob`, `read`, `dbt_manifest`, `dbt_run`, `write`, `edit`.
+Use the tools: `warehouse_list`, `dbt_profiles`, `dbt_manifest`, `glob`, `read`, `dbt_run`, `write`, `edit`.

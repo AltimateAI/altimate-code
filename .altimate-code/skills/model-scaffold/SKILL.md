@@ -1,27 +1,44 @@
 ---
 name: model-scaffold
-description: Scaffold a new dbt model following staging/intermediate/mart patterns with proper naming, materialization, and structure.
+description: >
+  Scaffold a new dbt model following staging/intermediate/mart patterns with proper naming,
+  materialization, and structure. Use when the user wants to create a new dbt model, add a
+  staging/intermediate/mart layer, scaffold a model from a source table, or set up a new
+  dbt model file with the correct naming conventions and project structure.
 ---
 
 # Scaffold dbt Model
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** glob, read, dbt_manifest, schema_inspect, schema_search, write
+**Tools used:** warehouse_list, dbt_profiles, glob, read, dbt_manifest, schema_inspect, schema_search, write
 
-Generate a new dbt model file following established data modeling patterns. Supports staging, intermediate, and mart layer scaffolding.
+Generate a new dbt model file following established data modeling patterns. Supports staging, intermediate, and mart layer scaffolding with warehouse-aware materialization defaults.
 
 ## Workflow
 
-1. **Determine layer** — Ask or infer whether this is a staging, intermediate, or mart model
-2. **Read the dbt project** — Use `glob` to find `dbt_project.yml` and understand the project structure (model paths, naming conventions)
-3. **Read the manifest** — If available, use `dbt_manifest` to understand existing models, sources, and dependencies
-4. **Inspect source schema** — Use `schema_inspect` or `schema_search` to discover source table columns and types
-5. **Generate the model SQL** based on the layer pattern:
+1. **Detect warehouse** -- Use `warehouse_list` or `dbt_profiles` to discover the connected warehouse type (Snowflake, BigQuery, Databricks, PostgreSQL, etc.). This determines materialization defaults and SQL dialect.
 
-### Layer Patterns
+2. **Determine layer** -- Ask or infer whether this is a staging, intermediate, or mart model based on the user's request.
 
-#### Staging (`stg_`)
+3. **Read the dbt project** -- Use `glob` to find `dbt_project.yml` and understand the project structure (model paths, naming conventions, existing directory layout).
+
+4. **Read the manifest** -- If available, use `dbt_manifest` to understand existing models, sources, and dependencies. Check for naming conventions already in use.
+
+5. **Inspect source schema** -- Use `schema_inspect` or `schema_search` to discover source table columns and types.
+
+6. **Generate the model SQL** based on the layer pattern below.
+
+7. **Generate companion YAML** -- Create a `_<directory>__models.yml` (one YAML file per directory) with column descriptions and basic tests. Follow the project's existing YAML organization pattern if one exists.
+
+8. **Write the files** -- Use `write` to create the SQL model and schema YAML in the correct directory.
+
+## Layer Patterns
+
+### Staging (`stg_`)
+
+Staging models are the atomic building blocks of the project. Each staging model has a 1:1 relationship with a source table.
+
 ```sql
 with source as (
     select * from {{ source('source_name', 'table_name') }}
@@ -44,12 +61,18 @@ renamed as (
 
 select * from renamed
 ```
-- **Materialization**: `view` (lightweight, always fresh)
-- **Naming**: `stg_<source>__<table>.sql`
-- **Location**: `models/staging/<source>/`
-- **Purpose**: 1:1 with source table, rename columns, cast types, no joins
 
-#### Intermediate (`int_`)
+| Attribute | Convention |
+|-----------|-----------|
+| Materialization | `view` (always fresh, lightweight) |
+| Naming | `stg_<source>__<table>.sql` (double underscore) |
+| Location | `models/staging/<source>/` |
+| Purpose | Rename columns, cast types, basic cleaning. No joins, no aggregations. |
+
+### Intermediate (`int_`)
+
+Intermediate models break complex transformations into reusable, purpose-built steps between staging and marts.
+
 ```sql
 with orders as (
     select * from {{ ref('stg_source__orders') }}
@@ -67,17 +90,24 @@ joined as (
         orders.order_date,
         orders.amount
     from orders
-    left join customers on orders.customer_id = customers.customer_id
+    left join customers
+        on orders.customer_id = customers.customer_id
 )
 
 select * from joined
 ```
-- **Materialization**: `ephemeral` or `view`
-- **Naming**: `int_<entity>__<verb>.sql` (e.g., `int_orders__joined`)
-- **Location**: `models/intermediate/`
-- **Purpose**: Joins, filters, business logic transformations
 
-#### Mart (`fct_` / `dim_`)
+| Attribute | Convention |
+|-----------|-----------|
+| Materialization | `ephemeral` (default) or `view` (if queried directly for debugging) |
+| Naming | `int_<entity>__<verb>.sql` (e.g., `int_orders__joined`, `int_payments__pivoted`) |
+| Location | `models/intermediate/` or `models/intermediate/<domain>/` |
+| Purpose | Joins, filters, pivots, business logic. Multiple inputs allowed, but should serve a single clear purpose. |
+
+### Mart (`fct_` / `dim_`)
+
+Marts are the final business-facing models, organized by domain (e.g., finance, marketing, product).
+
 ```sql
 with final as (
     select
@@ -92,18 +122,47 @@ with final as (
 
 select * from final
 ```
-- **Materialization**: `table` or `incremental`
-- **Naming**: `fct_<entity>.sql` (facts) or `dim_<entity>.sql` (dimensions)
-- **Location**: `models/marts/<domain>/`
-- **Purpose**: Business-facing, wide tables, aggregations, final metrics
 
-6. **Generate schema.yml** — Create a companion `_<model_name>__models.yml` with column descriptions and basic tests
-7. **Write the files** — Use `write` to create the SQL model and schema YAML
+| Attribute | Convention |
+|-----------|-----------|
+| Materialization | See warehouse defaults below |
+| Naming | `fct_<entity>.sql` (facts/events) or `dim_<entity>.sql` (dimensions/entities) |
+| Location | `models/marts/<domain>/` |
+| Purpose | Business-facing, wide tables, aggregations, final metrics. Named after the entity they represent. |
+
+## Warehouse-Specific Materialization Defaults
+
+Apply these defaults for mart models unless the user specifies otherwise:
+
+| Warehouse | Small marts | Large/append-only marts | Incremental strategy |
+|-----------|-------------|------------------------|---------------------|
+| Snowflake | `table` | `incremental` | `merge` (default) or `delete+insert` |
+| BigQuery | `table` | `incremental` | `merge` or `insert_overwrite` |
+| Databricks | `table` | `incremental` | `merge` (Delta) or `append` |
+| PostgreSQL | `table` | `incremental` | `delete+insert` |
+
+For incremental marts, always include:
+- `unique_key` in the config block
+- An `{% if is_incremental() %}` filter on the timestamp column
+- `on_schema_change: 'append_new_columns'` for forward compatibility
+
+## Model Governance (dbt Mesh)
+
+When scaffolding models in projects that use dbt Mesh or multi-project setups, include access modifiers in the companion YAML:
+
+| Layer | Default access | When to use `public` |
+|-------|---------------|---------------------|
+| Staging | `protected` | Never -- staging models are internal building blocks |
+| Intermediate | `private` or `protected` | Never -- intermediate models are implementation details |
+| Mart | `protected` | When consumed by other dbt projects or BI tools outside the project |
+
+For public mart models, also consider adding `contract: {enforced: true}` with explicit column `data_type` definitions.
 
 ## Usage
 
 - `/model-scaffold staging orders from raw.public.orders`
 - `/model-scaffold mart fct_daily_revenue`
 - `/model-scaffold intermediate int_orders__enriched`
+- `/model-scaffold dim_customers from stg_stripe__customers and stg_app__users`
 
-Use the tools: `glob`, `read`, `dbt_manifest`, `schema_inspect`, `schema_search`, `write`.
+Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `dbt_manifest`, `schema_inspect`, `schema_search`, `write`.
