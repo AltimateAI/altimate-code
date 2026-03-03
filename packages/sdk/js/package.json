@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "@altimate/cli-sdk",
+  "name": "@altimateai/altimate-code-sdk",
   "version": "0.1.0",
   "type": "module",
   "license": "MIT",

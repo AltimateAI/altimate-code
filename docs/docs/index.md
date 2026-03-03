@@ -25,7 +25,7 @@ Unlike general-purpose coding agents, altimate-code is built for data teams:
 
 ```bash
 # Install
-npm install -g @altimate/cli
+npm install -g @altimateai/altimate-code
 
 # Launch the TUI
 altimate-code

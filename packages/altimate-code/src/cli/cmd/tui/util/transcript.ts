@@ -1,4 +1,4 @@
-import type { AssistantMessage, Part, UserMessage } from "@altimate/cli-sdk/v2"
+import type { AssistantMessage, Part, UserMessage } from "@altimateai/altimate-code-sdk/v2"
 import { Locale } from "@/util/locale"
 
 export type TranscriptOptions = {

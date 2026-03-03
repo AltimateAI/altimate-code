@@ -3,8 +3,8 @@ import { Plugin } from "../plugin"
 import { map, filter, pipe, fromEntries, mapValues } from "remeda"
 import z from "zod"
 import { fn } from "@/util/fn"
-import type { AuthOuathResult, Hooks } from "@altimate/cli-plugin"
-import { NamedError } from "@altimate/cli-util/error"
+import type { AuthOuathResult, Hooks } from "@altimateai/altimate-code-plugin"
+import { NamedError } from "@altimateai/altimate-code-util/error"
 import { Auth } from "@/auth"
 
 export namespace ProviderAuth {

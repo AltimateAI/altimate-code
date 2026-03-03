@@ -1,4 +1,4 @@
-import type { Hooks, PluginInput } from "@altimate/cli-plugin"
+import type { Hooks, PluginInput } from "@altimateai/altimate-code-plugin"
 import { Installation } from "@/installation"
 import { iife } from "@/util/iife"
 

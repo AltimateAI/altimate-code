@@ -1,4 +1,4 @@
-import { NamedError } from "@altimate/cli-util/error"
+import { NamedError } from "@altimateai/altimate-code-util/error"
 import matter from "gray-matter"
 import { z } from "zod"
 import { Filesystem } from "../util/filesystem"

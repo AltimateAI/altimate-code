@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package",
-  "name": "@altimate/cli-script",
+  "name": "@altimateai/altimate-code-script",
   "license": "MIT",
   "devDependencies": {
     "@types/bun": "catalog:"

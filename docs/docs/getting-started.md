@@ -3,7 +3,7 @@
 ## Installation
 
 ```bash
-npm install -g @altimate/cli
+npm install -g @altimateai/altimate-code
 ```
 
 ## First run

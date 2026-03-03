@@ -1,4 +1,4 @@
-import { createOpencodeClient, createOpencodeServer } from "@altimate/cli-sdk"
+import { createOpencodeClient, createOpencodeServer } from "@altimateai/altimate-code-sdk"
 import { pathToFileURL } from "bun"
 
 const server = await createOpencodeServer()

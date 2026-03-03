@@ -1,4 +1,4 @@
-import { createOpencodeClient, type Event } from "@altimate/cli-sdk/v2"
+import { createOpencodeClient, type Event } from "@altimateai/altimate-code-sdk/v2"
 import { createSimpleContext } from "./helper"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { batch, onCleanup, onMount } from "solid-js"

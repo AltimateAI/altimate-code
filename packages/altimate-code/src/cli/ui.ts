@@ -1,6 +1,6 @@
 import z from "zod"
 import { EOL } from "os"
-import { NamedError } from "@altimate/cli-util/error"
+import { NamedError } from "@altimateai/altimate-code-util/error"
 import { logo as glyphs } from "./logo"
 
 export namespace UI {

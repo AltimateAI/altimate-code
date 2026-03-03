@@ -43,10 +43,10 @@ Thank you for your interest in contributing to altimate-code! This guide will he
 
 | Directory | Description |
 |---|---|
-| `packages/altimate-code/` | Main TypeScript CLI (`@altimate/cli`). Entry point, TUI, AI providers, MCP server, and dbt integration. |
+| `packages/altimate-code/` | Main TypeScript CLI (`@altimateai/altimate-code`). Entry point, TUI, AI providers, MCP server, and dbt integration. |
 | `packages/altimate-engine/` | Python engine. SQL parsing, analysis, lineage computation, and warehouse connectivity. |
-| `packages/plugin/` | CLI plugin system (`@altimate/cli-plugin`). Extend the CLI with custom tools. |
-| `packages/sdk/js/` | JavaScript SDK (`@altimate/cli-sdk`). OpenAPI-generated client for the Altimate API. |
+| `packages/plugin/` | CLI plugin system (`@altimateai/altimate-code-plugin`). Extend the CLI with custom tools. |
+| `packages/sdk/js/` | JavaScript SDK (`@altimateai/altimate-code-sdk`). OpenAPI-generated client for the Altimate API. |
 | `packages/util/` | Shared TypeScript utilities (error handling, logging). |
 
 ## Making Changes

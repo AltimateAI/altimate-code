@@ -1,13 +1,12 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 1,
   "workspaces": {
     "": {
       "name": "altimate-code",
       "dependencies": {
-        "@altimate/cli-plugin": "workspace:*",
-        "@altimate/cli-script": "workspace:*",
-        "@altimate/cli-sdk": "workspace:*",
+        "@altimateai/altimate-code-plugin": "workspace:*",
+        "@altimateai/altimate-code-script": "workspace:*",
+        "@altimateai/altimate-code-sdk": "workspace:*",
         "typescript": "catalog:",
       },
       "devDependencies": {
@@ -16,7 +15,7 @@
       },
     },
     "packages/altimate-code": {
-      "name": "@altimate/cli",
+      "name": "@altimateai/altimate-code",
       "version": "0.1.0",
       "bin": {
         "altimate-code": "./bin/altimate-code",
@@ -44,10 +43,10 @@
         "@ai-sdk/togetherai": "1.0.34",
         "@ai-sdk/vercel": "1.0.33",
         "@ai-sdk/xai": "2.0.51",
-        "@altimate/cli-plugin": "workspace:*",
-        "@altimate/cli-script": "workspace:*",
-        "@altimate/cli-sdk": "workspace:*",
-        "@altimate/cli-util": "workspace:*",
+        "@altimateai/altimate-code-plugin": "workspace:*",
+        "@altimateai/altimate-code-script": "workspace:*",
+        "@altimateai/altimate-code-sdk": "workspace:*",
+        "@altimateai/altimate-code-util": "workspace:*",
         "@aws-sdk/credential-providers": "3.993.0",
         "@clack/prompts": "1.0.0-alpha.1",
         "@gitlab/gitlab-ai-provider": "3.6.0",
@@ -103,7 +102,7 @@
         "zod-to-json-schema": "3.24.5",
       },
       "devDependencies": {
-        "@altimate/cli-script": "workspace:*",
+        "@altimateai/altimate-code-script": "workspace:*",
         "@babel/core": "7.28.4",
         "@octokit/webhooks-types": "7.6.1",
         "@parcel/watcher-darwin-arm64": "2.5.1",
@@ -130,10 +129,10 @@
       },
     },
     "packages/plugin": {
-      "name": "@altimate/cli-plugin",
+      "name": "@altimateai/altimate-code-plugin",
       "version": "0.1.0",
       "dependencies": {
-        "@altimate/cli-sdk": "workspace:*",
+        "@altimateai/altimate-code-sdk": "workspace:*",
         "zod": "catalog:",
       },
       "devDependencies": {
@@ -144,13 +143,13 @@
       },
     },
     "packages/script": {
-      "name": "@altimate/cli-script",
+      "name": "@altimateai/altimate-code-script",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
     "packages/sdk/js": {
-      "name": "@altimate/cli-sdk",
+      "name": "@altimateai/altimate-code-sdk",
       "version": "0.1.0",
       "devDependencies": {
         "@hey-api/openapi-ts": "0.90.10",
@@ -161,7 +160,7 @@
       },
     },
     "packages/util": {
-      "name": "@altimate/cli-util",
+      "name": "@altimateai/altimate-code-util",
       "version": "0.1.0",
       "dependencies": {
         "zod": "catalog:",
@@ -264,15 +263,15 @@
 
     "@ai-sdk/xai": ["@ai-sdk/xai@2.0.51", "", { "dependencies": { "@ai-sdk/openai-compatible": "1.0.30", "@ai-sdk/provider": "2.0.1", "@ai-sdk/provider-utils": "3.0.20" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-AI3le03qiegkZvn9hpnpDwez49lOvQLj4QUBT8H41SMbrdTYOxn3ktTwrsSu90cNDdzKGMvoH0u2GHju1EdnCg=="],
 
-    "@altimate/cli": ["@altimate/cli@workspace:packages/altimate-code"],
+    "@altimateai/altimate-code": ["@altimateai/altimate-code@workspace:packages/altimate-code"],
 
-    "@altimate/cli-plugin": ["@altimate/cli-plugin@workspace:packages/plugin"],
+    "@altimateai/altimate-code-plugin": ["@altimateai/altimate-code-plugin@workspace:packages/plugin"],
 
-    "@altimate/cli-script": ["@altimate/cli-script@workspace:packages/script"],
+    "@altimateai/altimate-code-script": ["@altimateai/altimate-code-script@workspace:packages/script"],
 
-    "@altimate/cli-sdk": ["@altimate/cli-sdk@workspace:packages/sdk/js"],
+    "@altimateai/altimate-code-sdk": ["@altimateai/altimate-code-sdk@workspace:packages/sdk/js"],
 
-    "@altimate/cli-util": ["@altimate/cli-util@workspace:packages/util"],
+    "@altimateai/altimate-code-util": ["@altimateai/altimate-code-util@workspace:packages/util"],
 
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],
 

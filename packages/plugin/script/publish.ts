@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Script } from "@altimate/cli-script"
+import { Script } from "@altimateai/altimate-code-script"
 import { $ } from "bun"
 import { fileURLToPath } from "url"
 

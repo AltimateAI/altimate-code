@@ -12,7 +12,7 @@ const dir = path.resolve(__dirname, "..")
 
 process.chdir(dir)
 
-import { Script } from "@altimate/cli-script"
+import { Script } from "@altimateai/altimate-code-script"
 import pkg from "../package.json"
 
 const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
@@ -212,7 +212,7 @@ for (const item of targets) {
 
 if (Script.release) {
   for (const key of Object.keys(binaries)) {
-    const archiveName = key.replace(/^@altimate\//, "")
+    const archiveName = key.replace(/^@altimateai\//, "")
     const archivePath = path.resolve("dist", archiveName)
     if (key.includes("linux")) {
       await $`tar -czf ${archivePath}.tar.gz *`.cwd(`dist/${key}/bin`)

@@ -10,7 +10,7 @@ import { Config } from "../../config/config"
 import { Global } from "../../global"
 import { Plugin } from "../../plugin"
 import { Instance } from "../../project/instance"
-import type { Hooks } from "@altimate/cli-plugin"
+import type { Hooks } from "@altimateai/altimate-code-plugin"
 
 type PluginAuth = NonNullable<Hooks["auth"]>
 

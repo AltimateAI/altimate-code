@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "@altimate/cli-plugin",
+  "name": "@altimateai/altimate-code-plugin",
   "version": "0.1.0",
   "type": "module",
   "license": "MIT",
@@ -16,7 +16,7 @@
     "dist"
   ],
   "dependencies": {
-    "@altimate/cli-sdk": "workspace:*",
+    "@altimateai/altimate-code-sdk": "workspace:*",
     "zod": "catalog:"
   },
   "devDependencies": {

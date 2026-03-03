@@ -1,5 +1,5 @@
 import type { McpServer } from "@agentclientprotocol/sdk"
-import type { OpencodeClient } from "@altimate/cli-sdk/v2"
+import type { OpencodeClient } from "@altimateai/altimate-code-sdk/v2"
 
 export interface ACPSessionState {
   id: string

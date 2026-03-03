@@ -1,4 +1,4 @@
-import type { NamedError } from "@altimate/cli-util/error"
+import type { NamedError } from "@altimateai/altimate-code-util/error"
 import { MessageV2 } from "./message-v2"
 import { iife } from "@/util/iife"
 

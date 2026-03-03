@@ -41,9 +41,9 @@
     "turbo": "2.5.6"
   },
   "dependencies": {
-    "@altimate/cli-plugin": "workspace:*",
-    "@altimate/cli-script": "workspace:*",
-    "@altimate/cli-sdk": "workspace:*",
+    "@altimateai/altimate-code-plugin": "workspace:*",
+    "@altimateai/altimate-code-script": "workspace:*",
+    "@altimateai/altimate-code-sdk": "workspace:*",
     "typescript": "catalog:"
   },
   "license": "MIT",

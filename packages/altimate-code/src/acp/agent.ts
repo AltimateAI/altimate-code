@@ -41,7 +41,7 @@ import { Config } from "@/config/config"
 import { Todo } from "@/session/todo"
 import { z } from "zod"
 import { LoadAPIKeyError } from "ai"
-import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse } from "@altimate/cli-sdk/v2"
+import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse } from "@altimateai/altimate-code-sdk/v2"
 import { applyPatch } from "diff"
 
 type ModeOption = { id: string; name: string; description?: string }

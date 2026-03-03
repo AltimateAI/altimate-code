@@ -9,7 +9,7 @@ import { mergeDeep, pipe, unique } from "remeda"
 import { Global } from "../global"
 import fs from "fs/promises"
 import { lazy } from "../util/lazy"
-import { NamedError } from "@altimate/cli-util/error"
+import { NamedError } from "@altimateai/altimate-code-util/error"
 import { Flag } from "../flag/flag"
 import { Auth } from "../auth"
 import {
@@ -273,7 +273,7 @@ export namespace Config {
     }))
     json.dependencies = {
       ...json.dependencies,
-      "@altimate/cli-plugin": targetVersion,
+      "@altimateai/altimate-code-plugin": targetVersion,
     }
     await Filesystem.writeJson(pkg, json)
     await new Promise((resolve) => setTimeout(resolve, 3000))
@@ -324,15 +324,15 @@ export namespace Config {
 
     const parsed = await Filesystem.readJson<{ dependencies?: Record<string, string> }>(pkg).catch(() => null)
     const dependencies = parsed?.dependencies ?? {}
-    const depVersion = dependencies["@altimate/cli-plugin"]
+    const depVersion = dependencies["@altimateai/altimate-code-plugin"]
     if (!depVersion) return true
 
     const targetVersion = Installation.isLocal() ? "latest" : Installation.VERSION
     if (targetVersion === "latest") {
-      const isOutdated = await PackageRegistry.isOutdated("@altimate/cli-plugin", depVersion, dir)
+      const isOutdated = await PackageRegistry.isOutdated("@altimateai/altimate-code-plugin", depVersion, dir)
       if (!isOutdated) return false
       log.info("Cached version is outdated, proceeding with install", {
-        pkg: "@altimate/cli-plugin",
+        pkg: "@altimateai/altimate-code-plugin",
         cachedVersion: depVersion,
       })
       return true

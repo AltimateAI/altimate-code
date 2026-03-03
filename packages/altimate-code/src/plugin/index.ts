@@ -1,18 +1,18 @@
-import type { Hooks, PluginInput, Plugin as PluginInstance } from "@altimate/cli-plugin"
+import type { Hooks, PluginInput, Plugin as PluginInstance } from "@altimateai/altimate-code-plugin"
 import { Config } from "../config/config"
 import { Bus } from "../bus"
 import { Log } from "../util/log"
-import { createOpencodeClient } from "@altimate/cli-sdk"
+import { createOpencodeClient } from "@altimateai/altimate-code-sdk"
 import { Server } from "../server/server"
 import { BunProc } from "../bun"
 import { Instance } from "../project/instance"
 import { Flag } from "../flag/flag"
 import { CodexAuthPlugin } from "./codex"
 import { Session } from "../session"
-import { NamedError } from "@altimate/cli-util/error"
+import { NamedError } from "@altimateai/altimate-code-util/error"
 import { CopilotAuthPlugin } from "./copilot"
 import { AnthropicAuthPlugin } from "./anthropic"
-// @ts-ignore - @gitlab/opencode-gitlab-auth exports Plugin from @opencode-ai/plugin, not @altimate/cli-plugin
+// @ts-ignore - @gitlab/opencode-gitlab-auth exports Plugin from @opencode-ai/plugin, not @altimateai/altimate-code-plugin
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
 
 export namespace Plugin {

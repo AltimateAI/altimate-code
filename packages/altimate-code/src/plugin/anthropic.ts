@@ -1,4 +1,4 @@
-import type { Hooks, PluginInput } from "@altimate/cli-plugin"
+import type { Hooks, PluginInput } from "@altimateai/altimate-code-plugin"
 import { generatePKCE } from "@openauthjs/openauth/pkce"
 import { Auth, OAUTH_DUMMY_KEY } from "@/auth"
 

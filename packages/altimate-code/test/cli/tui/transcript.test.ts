@@ -5,7 +5,7 @@ import {
   formatPart,
   formatTranscript,
 } from "../../../src/cli/cmd/tui/util/transcript"
-import type { AssistantMessage, Part, UserMessage } from "@altimate/cli-sdk/v2"
+import type { AssistantMessage, Part, UserMessage } from "@altimateai/altimate-code-sdk/v2"
 
 describe("transcript", () => {
   describe("formatAssistantHeader", () => {

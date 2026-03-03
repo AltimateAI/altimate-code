@@ -1,4 +1,4 @@
-import { Slug } from "@altimate/cli-util/slug"
+import { Slug } from "@altimateai/altimate-code-util/slug"
 import path from "path"
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"

@@ -88,7 +88,7 @@ describe("tool.registry", () => {
           JSON.stringify({
             name: "custom-tools",
             dependencies: {
-              "@altimate/cli-plugin": "^0.0.0",
+              "@altimateai/altimate-code-plugin": "^0.0.0",
               cowsay: "^1.6.0",
             },
           }),

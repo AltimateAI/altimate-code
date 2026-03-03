@@ -5,7 +5,7 @@ import z from "zod"
 import { Identifier } from "../id/id"
 import { Log } from "../util/log"
 import { Instance } from "../project/instance"
-import { lazy } from "@altimate/cli-util/lazy"
+import { lazy } from "@altimateai/altimate-code-util/lazy"
 import { Shell } from "@/shell/shell"
 import { Plugin } from "@/plugin"
 

@@ -33,9 +33,9 @@ We appreciate the efforts of security researchers. With your consent, we will cr
 
 This policy applies to:
 
-- The `altimate-code` CLI (`@altimate/cli`)
+- The `altimate-code` CLI (`@altimateai/altimate-code`)
 - The `altimate-engine` Python package
-- The `@altimate/cli-sdk` and `@altimate/cli-plugin` packages
+- The `@altimateai/altimate-code-sdk` and `@altimateai/altimate-code-plugin` packages
 - Official Docker images
 
 ## Best Practices
