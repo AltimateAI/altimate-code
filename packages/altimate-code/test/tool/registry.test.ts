@@ -6,10 +6,10 @@ import { Instance } from "../../src/project/instance"
 import { ToolRegistry } from "../../src/tool/registry"
 
 describe("tool.registry", () => {
-  test("loads tools from .opencode/tool (singular)", async () => {
+  test("loads tools from .altimate-code/tool (singular)", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        const opencodeDir = path.join(dir, ".opencode")
+        const opencodeDir = path.join(dir, ".altimate-code")
         await fs.mkdir(opencodeDir, { recursive: true })
 
         const toolDir = path.join(opencodeDir, "tool")
@@ -40,10 +40,10 @@ describe("tool.registry", () => {
     })
   })
 
-  test("loads tools from .opencode/tools (plural)", async () => {
+  test("loads tools from .altimate-code/tools (plural)", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        const opencodeDir = path.join(dir, ".opencode")
+        const opencodeDir = path.join(dir, ".altimate-code")
         await fs.mkdir(opencodeDir, { recursive: true })
 
         const toolsDir = path.join(opencodeDir, "tools")
@@ -77,7 +77,7 @@ describe("tool.registry", () => {
   test("loads tools with external dependencies without crashing", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        const opencodeDir = path.join(dir, ".opencode")
+        const opencodeDir = path.join(dir, ".altimate-code")
         await fs.mkdir(opencodeDir, { recursive: true })
 
         const toolsDir = path.join(opencodeDir, "tools")

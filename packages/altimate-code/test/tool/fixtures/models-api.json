@@ -20975,7 +20975,7 @@
   },
   "opencode": {
     "id": "opencode",
-    "env": ["OPENCODE_API_KEY"],
+    "env": ["ALTIMATE_CLI_API_KEY"],
     "npm": "@ai-sdk/openai-compatible",
     "api": "https://opencode.ai/zen/v1",
     "name": "OpenCode Zen",

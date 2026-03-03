@@ -22,11 +22,11 @@ This skill is loaded from the global home directory.
   )
 }
 
-test("discovers skills from .opencode/skill/ directory", async () => {
+test("discovers skills from .altimate-code/skill/ directory", async () => {
   await using tmp = await tmpdir({
     git: true,
     init: async (dir) => {
-      const skillDir = path.join(dir, ".opencode", "skill", "test-skill")
+      const skillDir = path.join(dir, ".altimate-code", "skill", "test-skill")
       await Bun.write(
         path.join(skillDir, "SKILL.md"),
         `---
@@ -59,7 +59,7 @@ test("returns skill directories from Skill.dirs", async () => {
   await using tmp = await tmpdir({
     git: true,
     init: async (dir) => {
-      const skillDir = path.join(dir, ".opencode", "skill", "dir-skill")
+      const skillDir = path.join(dir, ".altimate-code", "skill", "dir-skill")
       await Bun.write(
         path.join(skillDir, "SKILL.md"),
         `---
@@ -73,30 +73,30 @@ description: Skill for dirs test.
     },
   })
 
-  const home = process.env.OPENCODE_TEST_HOME
-  process.env.OPENCODE_TEST_HOME = tmp.path
+  const home = process.env.ALTIMATE_CLI_TEST_HOME
+  process.env.ALTIMATE_CLI_TEST_HOME = tmp.path
 
   try {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const dirs = await Skill.dirs()
-        const skillDir = path.join(tmp.path, ".opencode", "skill", "dir-skill")
+        const skillDir = path.join(tmp.path, ".altimate-code", "skill", "dir-skill")
         expect(dirs).toContain(skillDir)
         expect(dirs.length).toBe(1)
       },
     })
   } finally {
-    process.env.OPENCODE_TEST_HOME = home
+    process.env.ALTIMATE_CLI_TEST_HOME = home
   }
 })
 
-test("discovers multiple skills from .opencode/skill/ directory", async () => {
+test("discovers multiple skills from .altimate-code/skill/ directory", async () => {
   await using tmp = await tmpdir({
     git: true,
     init: async (dir) => {
-      const skillDir1 = path.join(dir, ".opencode", "skill", "skill-one")
-      const skillDir2 = path.join(dir, ".opencode", "skill", "skill-two")
+      const skillDir1 = path.join(dir, ".altimate-code", "skill", "skill-one")
+      const skillDir2 = path.join(dir, ".altimate-code", "skill", "skill-two")
       await Bun.write(
         path.join(skillDir1, "SKILL.md"),
         `---
@@ -135,7 +135,7 @@ test("skips skills with missing frontmatter", async () => {
   await using tmp = await tmpdir({
     git: true,
     init: async (dir) => {
-      const skillDir = path.join(dir, ".opencode", "skill", "no-frontmatter")
+      const skillDir = path.join(dir, ".altimate-code", "skill", "no-frontmatter")
       await Bun.write(
         path.join(skillDir, "SKILL.md"),
         `# No Frontmatter
@@ -188,8 +188,8 @@ description: A skill in the .claude/skills directory.
 test("discovers global skills from ~/.claude/skills/ directory", async () => {
   await using tmp = await tmpdir({ git: true })
 
-  const originalHome = process.env.OPENCODE_TEST_HOME
-  process.env.OPENCODE_TEST_HOME = tmp.path
+  const originalHome = process.env.ALTIMATE_CLI_TEST_HOME
+  process.env.ALTIMATE_CLI_TEST_HOME = tmp.path
 
   try {
     await createGlobalSkill(tmp.path)
@@ -204,7 +204,7 @@ test("discovers global skills from ~/.claude/skills/ directory", async () => {
       },
     })
   } finally {
-    process.env.OPENCODE_TEST_HOME = originalHome
+    process.env.ALTIMATE_CLI_TEST_HOME = originalHome
   }
 })
 
@@ -253,8 +253,8 @@ description: A skill in the .agents/skills directory.
 test("discovers global skills from ~/.agents/skills/ directory", async () => {
   await using tmp = await tmpdir({ git: true })
 
-  const originalHome = process.env.OPENCODE_TEST_HOME
-  process.env.OPENCODE_TEST_HOME = tmp.path
+  const originalHome = process.env.ALTIMATE_CLI_TEST_HOME
+  process.env.ALTIMATE_CLI_TEST_HOME = tmp.path
 
   try {
     const skillDir = path.join(tmp.path, ".agents", "skills", "global-agent-skill")
@@ -283,7 +283,7 @@ This skill is loaded from the global home directory.
       },
     })
   } finally {
-    process.env.OPENCODE_TEST_HOME = originalHome
+    process.env.ALTIMATE_CLI_TEST_HOME = originalHome
   }
 })
 
@@ -331,8 +331,8 @@ test("properly resolves directories that skills live in", async () => {
   await using tmp = await tmpdir({
     git: true,
     init: async (dir) => {
-      const opencodeSkillDir = path.join(dir, ".opencode", "skill", "agent-skill")
-      const opencodeSkillsDir = path.join(dir, ".opencode", "skills", "agent-skill")
+      const opencodeSkillDir = path.join(dir, ".altimate-code", "skill", "agent-skill")
+      const opencodeSkillsDir = path.join(dir, ".altimate-code", "skills", "agent-skill")
       const claudeDir = path.join(dir, ".claude", "skills", "claude-skill")
       const agentDir = path.join(dir, ".agents", "skills", "agent-skill")
       await Bun.write(
@@ -359,7 +359,7 @@ description: A skill in the .agents/skills directory.
         path.join(opencodeSkillDir, "SKILL.md"),
         `---
 name: opencode-skill
-description: A skill in the .opencode/skill directory.
+description: A skill in the .altimate-code/skill directory.
 ---
 
 # OpenCode Skill
@@ -369,7 +369,7 @@ description: A skill in the .opencode/skill directory.
         path.join(opencodeSkillsDir, "SKILL.md"),
         `---
 name: opencode-skill
-description: A skill in the .opencode/skills directory.
+description: A skill in the .altimate-code/skills directory.
 ---
 
 # OpenCode Skill

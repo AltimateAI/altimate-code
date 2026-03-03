@@ -10,9 +10,9 @@ test("agent color parsed from project config", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
-        path.join(dir, "opencode.json"),
+        path.join(dir, "altimate-code.json"),
         JSON.stringify({
-          $schema: "https://opencode.ai/config.json",
+          $schema: "https://altimate-code.dev/config.json",
           agent: {
             build: { color: "#FFA500" },
             plan: { color: "primary" },
@@ -35,9 +35,9 @@ test("Agent.get includes color from config", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
-        path.join(dir, "opencode.json"),
+        path.join(dir, "altimate-code.json"),
         JSON.stringify({
-          $schema: "https://opencode.ai/config.json",
+          $schema: "https://altimate-code.dev/config.json",
           agent: {
             plan: { color: "#A855F7" },
             build: { color: "accent" },
