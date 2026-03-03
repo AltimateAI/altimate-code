@@ -1,4 +1,4 @@
-# opencode database guide
+# altimate-code database guide
 
 ## Database
 
