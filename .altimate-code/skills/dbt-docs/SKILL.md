@@ -108,4 +108,4 @@ columns:
 - `/dbt-docs stg_stripe__payments`
 - `/dbt-docs --all models/staging/stripe/` -- Document all models in a directory
 
-Use the tools: `dbt_profiles`, `dbt_manifest`, `glob`, `read`, `schema_inspect`, `edit`, `write`.
+Use the tools: `dbt_manifest`, `glob`, `read`, `schema_inspect`, `edit`, `write`.

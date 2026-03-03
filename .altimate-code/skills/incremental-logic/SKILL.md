@@ -50,7 +50,7 @@ Help convert batch models to incremental or fix existing incremental logic. Cove
 | Immutable event streams | `append` | Rows never change after creation (logs, clicks, IoT) |
 | Mutable records, small-medium tables | `merge` | Records update (orders, customers). Tables under ~100M rows |
 | Mutable records, large tables | `delete+insert` | Same as merge but better performance on 100M+ row tables |
-| Date-partitioned facts | `insert_overwrite` | Full partition replacement. Best for BigQuery/Databricks partitioned tables |
+| Date-partitioned facts | `insert_overwrite` | Full partition replacement. Best for Snowflake/Databricks/Postgres partitioned tables (not supported on BigQuery) |
 | Large time-series, controlled batching | `microbatch` | Need automatic time-based batching with late-arrival handling |
 
 ## Core Patterns

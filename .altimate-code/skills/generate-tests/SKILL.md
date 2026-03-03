@@ -135,4 +135,4 @@ The user invokes this skill with a model name or path:
 - `/generate-tests stg_orders`
 - `/generate-tests --all models/staging/stripe/` -- Generate tests for all models in a directory
 
-Use the tools: `dbt_profiles`, `dbt_manifest`, `glob`, `read`, `schema_inspect`, `write`, `edit`.
+Use the tools: `dbt_manifest`, `glob`, `read`, `schema_inspect`, `write`, `edit`.

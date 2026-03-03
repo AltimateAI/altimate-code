@@ -778,7 +778,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         # --- SQL rewrite ---
         elif method == "sql.rewrite":
             p = SqlRewriteParams(**params)
-            guard_rw = guard_rewrite_sql(p.sql, schema_context=p.schema_context)
+            guard_rw = guard_rewrite_sql(p.sql, schema_context=p.schema_context, dialect=p.dialect)
             if guard_rw.get("success") and guard_rw.get("rewritten_sql"):
                 rewrites = []
                 for r in guard_rw.get("rewrites", []):

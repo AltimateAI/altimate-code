@@ -764,7 +764,7 @@ class SqlRewriteRule(BaseModel):
 
 class SqlRewriteParams(BaseModel):
     sql: str
-    dialect: str = "snowflake"
+    dialect: str | None = None
     schema_context: dict[str, Any] | None = None
 
 

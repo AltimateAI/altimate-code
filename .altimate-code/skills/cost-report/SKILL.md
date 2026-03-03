@@ -19,9 +19,10 @@ Generate a comprehensive cost and efficiency report for any supported warehouse.
 3. **Find expensive queries** -- Call `finops_expensive_queries` with the time period to get the top costly queries ranked by resource consumption. This surfaces the biggest optimization targets.
 4. **Analyze warehouse efficiency** -- Call `finops_warehouse_advice` to get sizing recommendations, utilization metrics, and auto-suspend configuration for each warehouse/cluster.
 5. **Check for waste** -- Call `finops_unused_resources` to identify unused tables, idle warehouses, and stale objects that incur storage or compute cost with no return.
-6. **Review access patterns** (optional) -- If the user wants cost attribution by role or user:
+6. **Review access patterns** (Snowflake only, optional) -- If the user has a Snowflake connection and wants cost attribution by role or user:
    - Call `finops_role_grants` to see which roles have access to expensive resources
    - Call `finops_user_roles` to map users to roles for cost allocation
+   - Skip this step for non-Snowflake warehouses — these tools query Snowflake ACCOUNT_USAGE views
 7. **Analyze anti-patterns** -- For each of the top 5-10 expensive queries from step 3:
    - Call `sql_analyze` with the query text and detected `dialect` to identify optimization opportunities (SELECT *, missing LIMIT, cartesian joins, correlated subqueries, etc.)
    - Note which anti-patterns have the highest cost impact

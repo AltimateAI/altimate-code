@@ -140,7 +140,7 @@ export const FinopsRoleGrantsTool = Tool.define("finops_role_grants", {
 })
 
 export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
-  description: "Show the role hierarchy — which roles inherit from which other roles.",
+  description: "Show the role hierarchy — which roles inherit from which other roles. Snowflake only.",
   parameters: z.object({
     warehouse: z.string().describe("Warehouse connection name"),
   }),
@@ -173,7 +173,7 @@ export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
 })
 
 export const FinopsUserRolesTool = Tool.define("finops_user_roles", {
-  description: "Show which roles are assigned to users.",
+  description: "Show which roles are assigned to users. Snowflake only.",
   parameters: z.object({
     warehouse: z.string().describe("Warehouse connection name"),
     user: z.string().optional().describe("Filter to a specific user"),
