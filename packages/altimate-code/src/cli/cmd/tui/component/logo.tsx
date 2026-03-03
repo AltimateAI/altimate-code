@@ -76,7 +76,7 @@ export function Logo() {
         {(line, index) => (
           <box flexDirection="row" gap={1}>
             <box flexDirection="row">{renderLine(line, theme.primary, false)}</box>
-            <box flexDirection="row">{renderLine(logo.right[index()], theme.primary, true)}</box>
+            <box flexDirection="row">{renderLine(logo.right[index()], theme.accent, true)}</box>
           </box>
         )}
       </For>
