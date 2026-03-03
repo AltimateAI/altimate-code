@@ -30,7 +30,6 @@ theme:
         name: Switch to light mode
   features:
     - navigation.sections
-    - navigation.expand
     - navigation.top
     - search.suggest
     - search.highlight
@@ -56,22 +55,27 @@ nav:
       - GitHub: usage/github.md
       - GitLab: usage/gitlab.md
   - Configure:
-      - Configuration: configure/config.md
-      - Providers: configure/providers.md
-      - Tools: configure/tools.md
-      - Rules: configure/rules.md
-      - Agents: configure/agents.md
-      - Models: configure/models.md
-      - Themes: configure/themes.md
-      - Keybinds: configure/keybinds.md
-      - Commands: configure/commands.md
-      - Formatters: configure/formatters.md
-      - Permissions: configure/permissions.md
-      - LSP Servers: configure/lsp.md
-      - MCP Servers: configure/mcp-servers.md
-      - ACP Support: configure/acp.md
-      - Agent Skills: configure/skills.md
-      - Custom Tools: configure/custom-tools.md
+      - Overview: configure/config.md
+      - Providers & Models:
+          - Providers: configure/providers.md
+          - Models: configure/models.md
+      - Agents & Tools:
+          - Agents: configure/agents.md
+          - Tools: configure/tools.md
+          - Agent Skills: configure/skills.md
+          - Custom Tools: configure/custom-tools.md
+          - Commands: configure/commands.md
+      - Behavior:
+          - Rules: configure/rules.md
+          - Permissions: configure/permissions.md
+          - Formatters: configure/formatters.md
+      - Appearance:
+          - Themes: configure/themes.md
+          - Keybinds: configure/keybinds.md
+      - Integrations:
+          - LSP Servers: configure/lsp.md
+          - MCP Servers: configure/mcp-servers.md
+          - ACP Support: configure/acp.md
   - Data Engineering:
       - Agent Modes: data-engineering/agent-modes.md
       - Tools:
@@ -93,6 +97,7 @@ nav:
       - Server: develop/server.md
       - Plugins: develop/plugins.md
       - Ecosystem: develop/ecosystem.md
-  - Network: network.md
-  - Troubleshooting: troubleshooting.md
-  - Windows / WSL: windows-wsl.md
+  - Reference:
+      - Network: network.md
+      - Troubleshooting: troubleshooting.md
+      - Windows / WSL: windows-wsl.md
