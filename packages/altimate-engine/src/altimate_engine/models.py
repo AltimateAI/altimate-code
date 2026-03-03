@@ -870,7 +870,7 @@ class SqlGuardCheckParams(BaseModel):
 
 class SqlGuardResult(BaseModel):
     success: bool = True
-    data: dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] | None = Field(default_factory=dict)
     error: str | None = None
 
 

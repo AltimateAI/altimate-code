@@ -30,5 +30,8 @@ docker = ["docker>=7.0"]
 tunneling = ["sshtunnel>=0.4", "paramiko>=3.0"]
 dev = ["pytest>=7.0", "ruff>=0.1"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/altimate_engine"]
