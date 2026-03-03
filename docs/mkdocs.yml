@@ -35,6 +35,9 @@ theme:
     - search.highlight
     - content.code.copy
 
+extra_css:
+  - assets/css/extra.css
+
 markdown_extensions:
   - admonition
   - pymdownx.details
@@ -47,6 +50,22 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
+  - Data Engineering:
+      - Agent Modes: data-engineering/agent-modes.md
+      - Tools:
+          - Overview: data-engineering/tools/index.md
+          - SQL Tools: data-engineering/tools/sql-tools.md
+          - Schema Tools: data-engineering/tools/schema-tools.md
+          - FinOps Tools: data-engineering/tools/finops-tools.md
+          - Lineage Tools: data-engineering/tools/lineage-tools.md
+          - dbt Tools: data-engineering/tools/dbt-tools.md
+          - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+      - Guides:
+          - Overview: data-engineering/guides/index.md
+          - Cost Optimization: data-engineering/guides/cost-optimization.md
+          - Migration: data-engineering/guides/migration.md
+          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
+          - Using with Codex: data-engineering/guides/using-with-codex.md
   - Usage:
       - TUI: usage/tui.md
       - CLI: usage/cli.md
@@ -76,22 +95,6 @@ nav:
           - LSP Servers: configure/lsp.md
           - MCP Servers: configure/mcp-servers.md
           - ACP Support: configure/acp.md
-  - Data Engineering:
-      - Agent Modes: data-engineering/agent-modes.md
-      - Tools:
-          - Overview: data-engineering/tools/index.md
-          - SQL Tools: data-engineering/tools/sql-tools.md
-          - Schema Tools: data-engineering/tools/schema-tools.md
-          - FinOps Tools: data-engineering/tools/finops-tools.md
-          - Lineage Tools: data-engineering/tools/lineage-tools.md
-          - dbt Tools: data-engineering/tools/dbt-tools.md
-          - Warehouse Tools: data-engineering/tools/warehouse-tools.md
-      - Guides:
-          - Overview: data-engineering/guides/index.md
-          - Cost Optimization: data-engineering/guides/cost-optimization.md
-          - Migration: data-engineering/guides/migration.md
-          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
-          - Using with Codex: data-engineering/guides/using-with-codex.md
   - Develop:
       - SDK: develop/sdk.md
       - Server: develop/server.md
