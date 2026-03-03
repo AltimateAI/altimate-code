@@ -1,7 +1,7 @@
 ---
 name: sql-translate
 description: >
-  Translate SQL queries between database dialects using sqlglot transpilation.
+  Translate SQL queries between database dialects.
   Use when the user asks to convert, translate, migrate, or port SQL from one warehouse
   to another, or mentions moving from Snowflake/BigQuery/Postgres/Oracle/Teradata/SQL Server
   to a different platform.
@@ -18,12 +18,12 @@ tools:
   - write
   - glob
 docs:
-  - title: "SQLGlot Documentation"
-    url: "https://sqlglot.com/sqlglot.html"
-    context: "Transpilation engine powering dialect conversion, supported dialects and transforms"
   - title: "Snowflake SQL Reference"
     url: "https://docs.snowflake.com/en/sql-reference"
     context: "Snowflake-specific SQL syntax for migration source/target validation"
+  - title: "BigQuery Standard SQL Reference"
+    url: "https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax"
+    context: "BigQuery-specific syntax differences for migration target validation"
 ---
 
 # SQL Translate
@@ -32,14 +32,13 @@ docs:
 **Agent:** builder or migrator (may write translated SQL to files)
 **Tools used:** sql_translate, sql_validate, warehouse_list, dbt_profiles, read, write, glob
 
-Translate SQL queries from one database dialect to another using sqlglot's transpilation engine, with awareness of common pitfalls across dialect boundaries.
+Translate SQL queries from one database dialect to another using the `sql_translate` tool, with awareness of common pitfalls across dialect boundaries.
 
 ## Workflow
 1. **Detect available warehouse connections** -- Before asking the user for dialects:
-   - Call `warehouse_list` to check for configured connections
-   - Call `dbt_profiles` if no warehouse connections are found
-   - Use discovered connections to suggest or auto-fill the source or target dialect
-   - If both source and target are still unknown, ask the user to specify them
+   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` to suggest or auto-fill source or target dialect.
+   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
+   - If both source and target are still unknown, ask the user to specify them.
 2. **Determine source and target dialects** -- If not fully specified:
    - Use context clues from the SQL syntax to infer the source dialect (e.g., `DATEADD` suggests Snowflake/SQL Server, `DATE_ADD` suggests BigQuery/MySQL, `||` for concat suggests Postgres/Snowflake)
    - Ask the user to confirm or specify any dialect that cannot be confidently inferred

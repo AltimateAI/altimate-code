@@ -32,9 +32,9 @@ Scan database schemas for columns that contain or may contain personally identif
 
 ## Workflow
 1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` to check for configured connections
-   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
-   - If neither yields a result, ask the user which warehouse they are using
+   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
+   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
+   - If neither yields a result, ask the user which warehouse they are using.
 2. **Determine scan scope** -- Based on user input:
    - Specific schema: scan only that schema (e.g., `raw.public`)
    - Specific database: scan all schemas in that database

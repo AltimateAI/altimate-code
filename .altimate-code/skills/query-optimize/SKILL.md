@@ -36,10 +36,10 @@ Analyze SQL queries for performance anti-patterns, generate concrete rewrites, a
 
 ## Workflow
 1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` to check for configured connections (returns name, type, database)
-   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
-   - If neither yields a result, ask the user which warehouse they are using
-   - Pass the detected dialect to all subsequent tool calls via the `dialect` parameter
+   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
+   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
+   - If neither yields a result, ask the user which warehouse they are using.
+   - Pass the detected dialect to all subsequent tool calls via the `dialect` parameter.
 2. **Get the SQL query** -- Either:
    - Read SQL from a file path provided by the user (use `read`)
    - Accept SQL directly from the conversation

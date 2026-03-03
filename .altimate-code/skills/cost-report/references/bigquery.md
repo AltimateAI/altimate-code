@@ -1,27 +1,79 @@
-# BigQuery Cost Model
+# BigQuery Cost Calculation
 
-## How Costs Work
-BigQuery has two pricing models:
-- **On-demand** — Charged per TB of data scanned by queries. Current rate: $6.25/TB (first 1 TB/month free). Only bytes in columns referenced by the query are counted.
-- **Capacity (Editions)** — Purchase slot-hours (Standard, Enterprise, Enterprise Plus). Slots are units of compute; cost is fixed regardless of data scanned. Best for predictable, high-volume workloads.
-- **Storage** — $0.02/GB/month for active storage, $0.01/GB/month for long-term (90+ days untouched). Applies to both models.
+## Cost Structure
+BigQuery has two pricing models: on-demand (per TB scanned) and capacity (slot-hours). Storage is billed separately by both models.
 
-## Key Metrics
-- `total_bytes_processed` — Data volume scanned; directly determines on-demand cost
-- `total_slot_ms` — Compute time in slot-milliseconds; key metric for capacity pricing
-- `estimated_cost` — Approximate dollar cost based on bytes processed
-- `cache_hit` — Whether the query used cached results (zero cost if true)
-- `bi_engine_statistics` — Indicates BI Engine acceleration usage
+## How to Calculate Query Cost
 
-## Cost Estimation
-On-demand: `cost = (total_bytes_processed / 1TB) * $6.25`
-Capacity: `cost = (total_slot_hours * slot_price_per_hour)`
+### Primary Data Source: `INFORMATION_SCHEMA.JOBS`
+Available per-project and per-organization. Retains 180 days of query metadata.
 
-## Optimization Tips
-- **Partition pruning** — Always filter on the partition column (`_PARTITIONTIME`, `date`, etc.) to avoid full-table scans. Partitioned tables can reduce scan volume by 100x+.
-- **Clustering** — Cluster on frequently filtered columns (up to 4). BigQuery automatically re-clusters; no maintenance needed. Order columns by filter cardinality (low to high).
-- **Avoid SELECT *** — BigQuery is columnar; selecting unused columns scans unnecessary data and increases cost proportionally.
-- **Use LIMIT with previews only** — `LIMIT` does not reduce bytes scanned in BigQuery. Use the preview feature or `_PARTITIONTIME` filters instead.
-- **Materialized views** — Automatic, incremental refresh. BigQuery rewrites queries to use them transparently.
-- **BI Engine** — In-memory acceleration for sub-second dashboard queries.
-- **Dry run** — Use `--dry_run` to estimate cost before executing.
+```sql
+-- Per-project: region-specific
+SELECT
+  job_id,
+  user_email,
+  query,
+  total_bytes_processed,
+  total_bytes_billed,
+  total_slot_ms,
+  creation_time,
+  end_time,
+  TIMESTAMP_DIFF(end_time, start_time, SECOND) AS duration_seconds,
+  -- On-demand cost estimate:
+  (total_bytes_billed / POW(1024, 4)) * 6.25 AS estimated_cost_usd,
+  cache_hit,
+  statement_type
+FROM `region-us`.INFORMATION_SCHEMA.JOBS
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+  AND job_type = 'QUERY'
+  AND state = 'DONE'
+ORDER BY total_bytes_billed DESC;
+```
+
+### Organization-Wide View
+```sql
+-- Cross-project cost view (requires org-level access)
+SELECT
+  project_id,
+  user_email,
+  SUM(total_bytes_billed) / POW(1024, 4) AS total_tb_billed,
+  SUM(total_bytes_billed) / POW(1024, 4) * 6.25 AS estimated_cost_usd,
+  COUNT(*) AS query_count
+FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_ORGANIZATION
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+  AND job_type = 'QUERY'
+GROUP BY project_id, user_email
+ORDER BY estimated_cost_usd DESC;
+```
+
+### On-Demand Pricing
+- **$6.25 per TB** of data scanned (first 1 TB/month free per billing account)
+- `total_bytes_billed` is the billable amount (rounded up to minimum 10 MB per query)
+- `cache_hit = true` means zero bytes billed (free)
+- Queries against `INFORMATION_SCHEMA` are free
+
+### Capacity Pricing (Editions)
+- Standard: $0.04/slot-hour
+- Enterprise: $0.06/slot-hour
+- Enterprise Plus: $0.10/slot-hour
+- Cost = `total_slot_ms / 3,600,000 * slot_price_per_hour`
+
+### Storage Cost
+```sql
+SELECT
+  table_schema,
+  table_name,
+  total_rows,
+  total_logical_bytes / POW(1024, 3) AS size_gb,
+  -- Active: $0.02/GB/month, Long-term (90+ days): $0.01/GB/month
+  (total_logical_bytes / POW(1024, 3)) * 0.02 AS monthly_storage_cost_usd
+FROM `project`.`dataset`.INFORMATION_SCHEMA.TABLE_STORAGE
+ORDER BY total_logical_bytes DESC;
+```
+
+## Key Cost Signals
+- `total_bytes_billed >> total_bytes_processed` — minimum billing rounding (10 MB floor per query)
+- `cache_hit = false` on repeated identical queries — non-deterministic functions prevent caching
+- `total_slot_ms` very high relative to bytes — query is compute-bound, not I/O-bound
+- `bi_engine_statistics.bi_engine_mode = 'DISABLED'` — BI Engine not accelerating eligible queries

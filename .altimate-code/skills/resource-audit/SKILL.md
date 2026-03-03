@@ -30,10 +30,10 @@ docs:
 Find wasted resources across the warehouse: unused tables consuming storage, idle warehouses burning credits, over-provisioned clusters, and stale objects. Produces a savings estimate with prioritized action items.
 
 ## Workflow
-1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` to check for configured connections
-   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
-   - If neither yields a result, ask the user which warehouse they are using
+1. **Detect the warehouse type** -- This is the critical first step. Never assume a dialect.
+   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
+   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
+   - If neither yields a result, ask the user which warehouse they are using.
 2. **Find unused resources** -- Call `finops_unused_resources` to identify stale objects
    - Unused tables: no reads in the lookback period (default: 90 days)
    - Idle warehouses: running but with zero or near-zero query volume

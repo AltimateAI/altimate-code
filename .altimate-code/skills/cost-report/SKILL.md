@@ -37,11 +37,11 @@ docs:
 Generate a comprehensive cost and efficiency report for any supported warehouse. Uses finops tools for data gathering -- no raw SQL needed.
 
 ## Workflow
-1. **Detect the warehouse** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` to check for configured connections
-   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
-   - If neither yields a result, ask the user which warehouse they are using
-   - Load the appropriate reference file from `references/` for warehouse-specific cost context
+1. **Detect the warehouse type** -- This is the critical first step. Never assume a dialect.
+   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect for all subsequent tool calls.
+   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type (`snowflake`, `bigquery`, `postgres`, `databricks`, `redshift`) indicates the warehouse.
+   - If neither yields a result, ask the user which warehouse they are using.
+   - Load the appropriate reference file from `references/` for warehouse-specific cost tables and calculation formulas.
 2. **Gather cost data** -- Call `finops_analyze_credits` to get credit/cost breakdown over the requested time period (default: 30 days). This returns total spend, daily trends, and cost by service category.
 3. **Find expensive queries** -- Call `finops_expensive_queries` with the time period to get the top costly queries ranked by resource consumption. This surfaces the biggest optimization targets.
 4. **Analyze warehouse efficiency** -- Call `finops_warehouse_advice` to get sizing recommendations, utilization metrics, and auto-suspend configuration for each warehouse/cluster.

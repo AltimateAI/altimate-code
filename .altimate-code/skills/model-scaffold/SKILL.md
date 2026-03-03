@@ -34,7 +34,7 @@ docs:
 Generate a new dbt model file following established data modeling patterns. Supports staging, intermediate, and mart layer scaffolding with warehouse-aware materialization defaults.
 
 ## Workflow
-1. **Detect warehouse** -- Use `warehouse_list` or `dbt_profiles` to discover the connected warehouse type (Snowflake, BigQuery, Databricks, PostgreSQL, etc.). This determines materialization defaults and SQL dialect.
+1. **Detect warehouse** -- Call `warehouse_list` (returns connections with `name`, `type`, `database` — use `type` as the dialect) or `dbt_profiles` (adapter type indicates the warehouse). This determines materialization defaults and SQL dialect.
 2. **Determine layer** -- Ask or infer whether this is a staging, intermediate, or mart model based on the user's request.
 3. **Read the dbt project** -- Use `glob` to find `dbt_project.yml` and scan the `models/` directory structure. Use `read` on `dbt_project.yml` to understand model paths, naming conventions, and materialization defaults.
 4. **Inspect source schema** -- Use `schema_inspect` or `schema_search` to discover source table columns and types.

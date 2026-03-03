@@ -36,14 +36,15 @@ Diagnose and fix SQL queries that fail, run slowly, or produce unexpected result
 
 ## Workflow
 1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` to check for configured connections
-   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
-   - If neither yields a result, ask the user which warehouse they are using
-   - Pass the detected dialect to all subsequent tool calls
-2. **Get the problematic SQL** -- Either:
-   - Read SQL from a file path provided by the user (use `read`)
-   - Accept SQL directly from the conversation
-   - Search for SQL files with `glob` if the user references a model by name
+   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
+   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
+   - If neither yields a result, ask the user which warehouse they are using.
+   - Pass the detected dialect to all subsequent tool calls.
+2. **Get the problematic SQL** -- This skill works with any SQL, not just dbt models:
+   - **Raw SQL**: Accept SQL pasted directly in the conversation or from any `.sql` file
+   - **dbt model**: If the user references a dbt model name, search with `glob` for `**/models/**/{name}.sql` and read the file
+   - **File path**: Read SQL from a file path provided by the user (use `read`)
+   - **Non-SQL files**: If the user points to a stored procedure, view definition, or migration file, extract the SQL portion
    - If the user mentions a recent error, ask for the full error message
 3. **Validate syntax** -- Call `sql_validate` with the SQL and detected `dialect`
    - If valid: proceed to performance analysis (step 5)
@@ -107,8 +108,9 @@ Anti-Patterns Found:
 
 ## Usage
 
-- `/debug-query SELECT * FROM users WHER active = true` -- Fix a broken query
-- `/debug-query models/staging/stg_orders.sql` -- Debug a slow model
+- `/debug-query SELECT * FROM users WHER active = true` -- Fix a broken query (raw SQL)
+- `/debug-query models/staging/stg_orders.sql` -- Debug a slow dbt model
+- `/debug-query scripts/etl/daily_load.sql` -- Debug a standalone SQL script
 - `/debug-query` -- Debug the most recently discussed query in the conversation
 
 Use the tools: `sql_validate`, `sql_fix`, `sql_explain`, `sql_analyze`, `sql_format`, `sql_execute`, `warehouse_list`, `dbt_profiles`, `read`, `glob`.

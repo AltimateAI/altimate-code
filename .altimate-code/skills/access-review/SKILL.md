@@ -1,9 +1,10 @@
 ---
 name: access-review
 description: >
-  Audit role-based access control (RBAC) -- review role hierarchies, user assignments, privilege
-  grants, and identify over-permissioned roles or orphaned grants. Use when the user needs a security
-  audit, wants to review who has access to what, or needs to clean up roles and permissions.
+  Audit Snowflake role-based access control (RBAC) -- review role hierarchies, user assignments,
+  privilege grants, and identify over-permissioned roles or orphaned grants. Snowflake-specific:
+  uses ACCOUNT_USAGE views for role/grant analysis. Use when the user needs a security audit,
+  wants to review who has access to what, or needs to clean up Snowflake roles and permissions.
 persona:
   - platform-engineer
 domain: governance
@@ -16,22 +17,23 @@ tools:
 docs:
   - title: "Snowflake Access Control"
     url: "https://docs.snowflake.com/en/user-guide/security-access-control-overview"
-    context: "Role hierarchy, privilege inheritance, system roles"
+    context: "Role hierarchy, privilege inheritance, system roles (ACCOUNTADMIN, SECURITYADMIN, SYSADMIN)"
 ---
 
-# Access Review
+# Access Review (Snowflake)
 
 ## Requirements
 **Agent:** any (read-only analysis)
+**Warehouse:** Snowflake only — the `finops_role_hierarchy`, `finops_user_roles`, and `finops_role_grants` tools query Snowflake's `ACCOUNT_USAGE` views.
 **Tools used:** finops_role_hierarchy, finops_user_roles, finops_role_grants, warehouse_list, dbt_profiles
 
-Audit role-based access control across the warehouse. Reviews role hierarchies, user-to-role mappings, and privilege grants to surface security risks: over-permissioned roles, orphaned grants, excessive ACCOUNTADMIN usage, and privilege escalation paths.
+Audit Snowflake role-based access control. Reviews role hierarchies, user-to-role mappings, and privilege grants to surface security risks: over-permissioned roles, orphaned grants, excessive ACCOUNTADMIN usage, and privilege escalation paths.
 
 ## Workflow
-1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` to check for configured connections
-   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
-   - If neither yields a result, ask the user which warehouse they are using
+1. **Verify Snowflake connection** -- This skill requires a Snowflake connection.
+   - Call `warehouse_list` — returns configured database connections with `name`, `type`, and `database`. Confirm a connection with `type: snowflake` exists.
+   - If no Snowflake connection, call `dbt_profiles` to check for a Snowflake adapter.
+   - If no Snowflake connection is available, inform the user that this skill requires a Snowflake warehouse and cannot run against other databases.
 2. **Pull role hierarchy** -- Call `finops_role_hierarchy` to get the full role inheritance tree
    - Map parent-child relationships between roles
    - Identify system roles (ACCOUNTADMIN, SECURITYADMIN, SYSADMIN, PUBLIC)

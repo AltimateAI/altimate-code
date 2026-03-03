@@ -35,8 +35,8 @@ Guide and scaffold dbt projects following layered architecture patterns. Adapts 
 
 ## Workflow
 1. **Detect the warehouse dialect** -- Determines adapter-specific materialization defaults.
-   - Call `warehouse_list` to check for configured connections
-   - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
+   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
+   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
 2. **Detect existing conventions** -- This step is critical. Never impose a naming scheme without checking first.
    - Use `glob` to scan `models/` directory structure for folder patterns and model file names
    - Use `read` to check `dbt_project.yml` for configured model paths and materializations
