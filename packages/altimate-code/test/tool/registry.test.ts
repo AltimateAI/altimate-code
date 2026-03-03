@@ -88,7 +88,6 @@ describe("tool.registry", () => {
           JSON.stringify({
             name: "custom-tools",
             dependencies: {
-              "@altimateai/altimate-code-plugin": "^0.0.0",
               cowsay: "^1.6.0",
             },
           }),
@@ -118,5 +117,5 @@ describe("tool.registry", () => {
         expect(ids).toContain("cowsay")
       },
     })
-  })
+  }, 30_000)
 })

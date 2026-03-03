@@ -124,7 +124,7 @@ describe("session.retry.retryable", () => {
 })
 
 describe("session.message-v2.fromError", () => {
-  test.concurrent(
+  test(
     "converts ECONNRESET socket errors to retryable APIError",
     async () => {
       using server = Bun.serve({

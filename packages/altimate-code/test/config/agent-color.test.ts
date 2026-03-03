@@ -14,7 +14,7 @@ test("agent color parsed from project config", async () => {
         JSON.stringify({
           $schema: "https://altimate-code.dev/config.json",
           agent: {
-            build: { color: "#FFA500" },
+            builder: { color: "#FFA500" },
             plan: { color: "primary" },
           },
         }),
@@ -25,7 +25,7 @@ test("agent color parsed from project config", async () => {
     directory: tmp.path,
     fn: async () => {
       const cfg = await Config.get()
-      expect(cfg.agent?.["build"]?.color).toBe("#FFA500")
+      expect(cfg.agent?.["builder"]?.color).toBe("#FFA500")
       expect(cfg.agent?.["plan"]?.color).toBe("primary")
     },
   })
@@ -40,7 +40,7 @@ test("Agent.get includes color from config", async () => {
           $schema: "https://altimate-code.dev/config.json",
           agent: {
             plan: { color: "#A855F7" },
-            build: { color: "accent" },
+            builder: { color: "accent" },
           },
         }),
       )
@@ -51,7 +51,7 @@ test("Agent.get includes color from config", async () => {
     fn: async () => {
       const plan = await AgentSvc.get("plan")
       expect(plan?.color).toBe("#A855F7")
-      const build = await AgentSvc.get("build")
+      const build = await AgentSvc.get("builder")
       expect(build?.color).toBe("accent")
     },
   })

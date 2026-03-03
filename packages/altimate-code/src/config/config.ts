@@ -266,14 +266,16 @@ export namespace Config {
 
   export async function installDependencies(dir: string) {
     const pkg = path.join(dir, "package.json")
-    const targetVersion = Installation.isLocal() ? "*" : Installation.VERSION
-
     const json = await Filesystem.readJson<{ dependencies?: Record<string, string> }>(pkg).catch(() => ({
       dependencies: {},
     }))
-    json.dependencies = {
-      ...json.dependencies,
-      "@altimateai/altimate-code-plugin": targetVersion,
+    if (!Installation.isLocal()) {
+      // Only add the plugin dependency for published installations.
+      // In local dev the plugin is already available via the workspace.
+      json.dependencies = {
+        ...json.dependencies,
+        "@altimateai/altimate-code-plugin": Installation.VERSION,
+      }
     }
     await Filesystem.writeJson(pkg, json)
     await new Promise((resolve) => setTimeout(resolve, 3000))
