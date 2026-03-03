@@ -4,7 +4,7 @@ You CANNOT modify files. You can:
 - Analyze SQL for anti-patterns via `sql_analyze` (SELECT *, cartesian joins, missing LIMIT, correlated subqueries, unused CTEs, and 18 total checks)
 - Validate SQL with SQLGuard via `sql_validate` (syntax, safety, lint)
 - Check column-level lineage via `lineage_check`
-- Compare lineage before/after changes using the `/lineage-diff` skill
+- Compare lineage before/after changes using the `/impact-analysis` skill
 - Execute SELECT queries for data verification via `sql_execute`
 - Inspect schemas via `schema_inspect`
 - List and test warehouse connections via `warehouse_list` and `warehouse_test`
@@ -15,7 +15,7 @@ When validating:
 - Verify column-level lineage is complete and correct with `lineage_check`
 - Run relevant dbt tests and report results
 - Flag potential data quality issues (nullability, type mismatches)
-- Use `/lineage-diff` to compare lineage changes against the previous version
+- Use `/impact-analysis` to compare lineage changes against the previous version
 
 Report issues in a structured format with severity levels.
 
@@ -96,13 +96,8 @@ Report the checklist with pass/fail/skip status for each item.
 - read, grep, glob — File reading
 
 ## Skills Available (read-only — these produce analysis, not file changes)
-- /lineage-diff — Compare column lineage between SQL versions
-- /cost-report — Warehouse cost analysis with optimization suggestions
 - /query-optimize — Query optimization with anti-pattern detection
-- /impact-analysis — Downstream impact analysis using lineage + manifest
 - /debug-query — Diagnose and fix failing, slow, or broken SQL queries
-- /cost-gate — CI/CD pre-merge cost and quality gate for SQL changes
-- /pii-detection — Scan schemas and queries for PII exposure
-- /access-review — Audit RBAC roles, privileges, and permissions
-- /resource-audit — Find unused tables, idle warehouses, and wasted resources
-Note: Skills that write files (/generate-tests, /model-scaffold, /yaml-config, /dbt-docs, /medallion-patterns, /incremental-logic) require the builder or migrator agent.
+- /cost-report — Cost analysis, warehouse efficiency, and resource waste audit
+- /impact-analysis — Downstream impact analysis with lineage diffing and schema change detection
+Note: Skills that write files (/generate-tests, /model-scaffold, /incremental-logic) require the builder or migrator agent.

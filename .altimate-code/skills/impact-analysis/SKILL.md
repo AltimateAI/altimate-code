@@ -1,6 +1,6 @@
 ---
 name: impact-analysis
-description: Analyze the downstream impact of SQL or dbt model changes by combining column-level lineage, schema diffing, and the dbt dependency graph. Use when a user changes a model and wants to know what breaks downstream, when reviewing a PR that modifies SQL, or when renaming/dropping columns.
+description: Analyze the downstream impact of SQL or dbt model changes by combining column-level lineage, schema diffing, and the dbt dependency graph. Also compares lineage between two versions of a model to show exactly how data flow changed. Use when a user changes a model and wants to know what breaks downstream, when reviewing a PR that modifies SQL, or when renaming/dropping columns.
 ---
 
 # Impact Analysis
@@ -9,7 +9,7 @@ description: Analyze the downstream impact of SQL or dbt model changes by combin
 **Agent:** any (read-only analysis)
 **Tools used:** dbt_lineage, dbt_manifest, lineage_check, schema_diff, sql_analyze, warehouse_list, dbt_profiles, glob, bash, read
 
-Determine which downstream models, tests, and exposures are affected when a SQL model changes. Classify each impact as BREAKING, WARNING, or SAFE.
+Determine which downstream models, tests, and exposures are affected when a SQL model changes. Classify each impact as BREAKING, WARNING, or SAFE. Optionally compare column-level lineage between versions to show exactly which data flow edges changed.
 
 ## Workflow
 1. **Detect the SQL dialect** -- Required: `schema_diff` and `lineage_check` need the dialect for correct SQL parsing. Pass it to all tool calls.
@@ -20,16 +20,24 @@ Determine which downstream models, tests, and exposures are affected when a SQL 
 3. **Obtain the before and after SQL** --
    - **Before**: `git show HEAD:<path>` via `bash` to get the last committed version
    - **After**: `read` the current file on disk
+   - If comparing against a specific branch: `git show <branch>:<path>`
    - If the model is new (no prior version), skip diffing and report it as a new addition
 4. **Run schema diff** -- Call `schema_diff` with the before SQL, after SQL, and detected `dialect`. This reveals:
    - **Dropped columns** -- Columns removed from the output (high break risk)
    - **Renamed columns** -- Columns that changed name (break risk unless downstream is updated)
    - **Type changes** -- Columns whose data type changed (subtle break risk)
    - **Added columns** -- New output columns (generally safe)
-5. **Run column-level lineage** -- Choose the appropriate lineage tool:
-   - **dbt project detected** (manifest exists): Call `dbt_lineage` with `manifest_path` and `model` name for manifest-aware lineage that resolves `ref()` and `source()` calls accurately. This is more reliable than SQL-only parsing.
-   - **SQL-only mode**: Call `lineage_check` with the after SQL and `dialect` to trace column-level data flow from sources to output.
-6. **Cross-reference schema changes with downstream consumers** -- Load the dbt DAG now (lazy): call `dbt_manifest` to get the full dependency graph. Use `glob` to search for `target/manifest.json` if the path is not provided. For complex projects with runtime vars, `dbt_manifest` provides the most accurate DAG. Extract downstream models by walking `depends_on` edges recursively with depth levels, identify tests and exposures. Then for each downstream model:
+5. **Run column-level lineage on both versions** -- Choose the appropriate lineage tool:
+   - **dbt project detected** (manifest exists): Call `dbt_lineage` with `manifest_path` and `model` name for manifest-aware lineage that resolves `ref()` and `source()` calls accurately.
+   - **SQL-only mode**: Call `lineage_check` with the SQL and `dialect` to trace column-level data flow from sources to output.
+   - Run on **both** the before and after SQL to enable lineage diffing (step 6).
+6. **Compute the lineage diff** -- Compare the two lineage results edge by edge:
+   - **Added edges**: Data flow paths that exist in the new version but not the old
+   - **Removed edges**: Data flow paths that existed in the old version but are gone
+   - **Modified edges**: Same source-target pair but different transform expression
+   - **Unchanged edges**: Identical in both versions
+   Two edges match when `source_table`, `source_column`, `target_table`, `target_column` are all equal. Compare the `transform` field separately to detect logic changes on the same column path.
+7. **Cross-reference schema changes with downstream consumers** -- Load the dbt DAG now (lazy): call `dbt_manifest` to get the full dependency graph. Use `glob` to search for `target/manifest.json` if the path is not provided. For complex projects with runtime vars, `dbt_manifest` provides the most accurate DAG. Extract downstream models by walking `depends_on` edges recursively with depth levels, identify tests and exposures. Then for each downstream model:
    - Read its SQL via `read`
    - Check if it references any dropped or renamed columns from step 4
    - If a dbt project is available, call `dbt_lineage` on the downstream model to trace which specific source columns it consumes
@@ -41,8 +49,8 @@ Determine which downstream models, tests, and exposures are affected when a SQL 
    | **BREAKING** | References a dropped or renamed column | Must update before deploy |
    | **WARNING** | References a type-changed column, or uses column in a CAST/comparison that may fail | Review and test |
    | **SAFE** | No reference to any changed column | No action needed |
-7. **Run anti-pattern check** -- Call `sql_analyze` with the modified SQL and `dialect` to flag any new anti-patterns introduced by the change.
-8. **Generate the impact report**:
+8. **Run anti-pattern check** -- Call `sql_analyze` with the modified SQL and `dialect` to flag any new anti-patterns introduced by the change.
+9. **Generate the impact report**:
 
 ```
 Impact Analysis: stg_orders
@@ -50,12 +58,27 @@ Impact Analysis: stg_orders
 
 Dialect: snowflake (auto-detected)
 Changed Model: stg_orders (materialized: view)
+Comparing: HEAD vs working copy
 
 Schema Changes:
   DROPPED: total_amount
   RENAMED: order_total (was: total_amount)
   ADDED:   discount_pct
   TYPE:    quantity (NUMBER(10,0) -> NUMBER(18,0))
+
+Lineage Changes:
+  + ADDED (new data flow):
+    + raw_orders.amount -> stg_orders.discount_pct  [amount * discount_rate]
+
+  - REMOVED (data flow no longer exists):
+    - raw_orders.amount -> stg_orders.total_amount  [SUM(amount)]
+
+  ~ MODIFIED (same column path, different transform):
+    ~ raw_orders.quantity -> stg_orders.quantity
+      Before: CAST(quantity AS NUMBER(10,0))
+      After:  CAST(quantity AS NUMBER(18,0))
+
+  = UNCHANGED: 8 edges
 
 Downstream Impact (3 models, 4 tests affected):
 
@@ -89,13 +112,15 @@ Summary: 2 BREAKING, 0 WARNING, 1 SAFE
 
 If no dbt manifest is available:
 1. Run `schema_diff` to identify structural column changes between versions
-2. Run `lineage_check` on the modified SQL with `dialect` to show column-level data flow
-3. Report the schema changes and column lineage
-4. Note that downstream impact cannot be fully determined without a manifest
-5. Suggest running `dbt docs generate` or providing a manifest path
+2. Run `lineage_check` on both versions with `dialect` to show column-level data flow changes
+3. Compute and report the lineage edge diff
+4. Report the schema changes and column lineage
+5. Note that downstream impact cannot be fully determined without a manifest
+6. Suggest running `dbt docs generate` or providing a manifest path
 
 ## Usage
 
 - `/impact-analysis stg_orders` -- Analyze impact of changes to stg_orders
 - `/impact-analysis models/staging/stg_orders.sql` -- Analyze by file path
+- `/impact-analysis models/marts/dim_customers.sql main` -- Compare against a specific branch
 - `/impact-analysis` -- Auto-detect changed models from git diff

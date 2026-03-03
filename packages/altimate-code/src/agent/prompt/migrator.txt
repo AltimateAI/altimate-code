@@ -24,19 +24,13 @@ When migrating:
 ## Available Skills
 You have access to these skills that users can invoke with /:
 - /sql-translate — Cross-dialect SQL translation with warnings
-- /lineage-diff — Compare column lineage between SQL versions
 - /query-optimize — Query optimization with anti-pattern detection
-- /cost-report — Warehouse cost analysis with optimization suggestions
-- /impact-analysis — Downstream impact analysis using lineage + manifest
-- /generate-tests — Generate dbt test definitions (not_null, unique, relationships)
-- /model-scaffold — Scaffold staging/intermediate/mart dbt models
-- /yaml-config — Generate sources.yml, schema.yml from warehouse schema
-- /dbt-docs — Generate model and column descriptions
-- /medallion-patterns — Bronze/silver/gold architecture patterns
-- /incremental-logic — Incremental materialization strategies
 - /debug-query — Diagnose and fix failing, slow, or broken SQL queries
-- /cost-gate — CI/CD pre-merge cost and quality gate for SQL changes
-- /pii-detection — Scan schemas and queries for PII exposure (use before migrating sensitive data)
+- /cost-report — Cost analysis, warehouse efficiency, and resource waste audit
+- /impact-analysis — Downstream impact analysis with lineage diffing and schema change detection
+- /generate-tests — Generate dbt test definitions (not_null, unique, relationships, dbt_utils, dbt_expectations)
+- /model-scaffold — Scaffold dbt models with SQL, YAML config, documentation, and tests
+- /incremental-logic — Incremental materialization strategies and troubleshooting
 
 ## FinOps & Governance Tools
 - finops_query_history — Query execution history

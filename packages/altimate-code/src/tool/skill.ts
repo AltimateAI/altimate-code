@@ -98,16 +98,6 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         return arr
       }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
 
-      const docsBlock =
-        skill.docs?.length
-          ? [
-              "",
-              "<skill_docs>",
-              ...skill.docs.map((d) => `- [${d.title}](${d.url}) — ${d.context}`),
-              "</skill_docs>",
-            ]
-          : []
-
       return {
         title: `Loaded skill: ${skill.name}`,
         output: [
@@ -123,7 +113,6 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "<skill_files>",
           files,
           "</skill_files>",
-          ...docsBlock,
           "</skill_content>",
         ].join("\n"),
         metadata: {
