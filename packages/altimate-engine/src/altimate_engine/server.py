@@ -15,16 +15,12 @@ import sys
 import traceback
 
 from altimate_engine.models import (
-    ColumnChange,
     WarehouseAddParams,
     WarehouseAddResult,
     WarehouseRemoveParams,
     WarehouseRemoveResult,
     DockerContainer,
     WarehouseDiscoverResult,
-    CostGateFileResult,
-    CostGateParams,
-    CostGateResult,
     DbtLineageParams,
     DbtManifestParams,
     DbtRunParams,
@@ -39,11 +35,8 @@ from altimate_engine.models import (
     LocalSchemaSyncResult,
     LocalTestParams,
     LocalTestResult,
-    SchemaCacheStatusParams,
     SchemaCacheStatusResult,
     SchemaCacheWarehouseStatus,
-    SchemaDiffParams,
-    SchemaDiffResult,
     SchemaIndexParams,
     SchemaIndexResult,
     SchemaInspectParams,
@@ -59,7 +52,6 @@ from altimate_engine.models import (
     SqlAutocompleteSuggestion,
     SqlExecuteParams,
     SqlExplainParams,
-    SqlExplainResult,
     SqlFixParams,
     SqlFixResult,
     SqlFixSuggestion,
@@ -118,7 +110,6 @@ from altimate_engine.sql.executor import execute_sql
 from altimate_engine.sql.explainer import explain_sql
 from altimate_engine.sql.autocomplete import autocomplete_sql
 from altimate_engine.sql.diff import diff_sql
-from altimate_engine.ci.cost_gate import scan_files
 from altimate_engine.schema.inspector import inspect_schema
 from altimate_engine.schema.pii_detector import detect_pii
 from altimate_engine.schema.tags import get_tags, list_tags
@@ -187,14 +178,6 @@ from altimate_engine.dbt.profiles import discover_dbt_connections
 from altimate_engine.local.schema_sync import sync_schema
 from altimate_engine.local.test_local import test_sql_local
 from altimate_engine.models import (
-    SqlGuardValidateParams,
-    SqlGuardLintParams,
-    SqlGuardSafetyParams,
-    SqlGuardTranspileParams,
-    SqlGuardExplainParams,
-    SqlGuardCheckParams,
-    SqlGuardResult,
-    # Phase 1 (P0)
     SqlGuardFixParams,
     SqlGuardPolicyParams,
     SqlGuardComplexityParams,

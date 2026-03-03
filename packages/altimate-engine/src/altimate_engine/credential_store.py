@@ -20,7 +20,7 @@ def _keyring_available() -> bool:
     if _keyring_cache is not None:
         return _keyring_cache
     try:
-        import keyring
+        import keyring  # noqa: F401
         _keyring_cache = True
     except ImportError:
         _keyring_cache = False
