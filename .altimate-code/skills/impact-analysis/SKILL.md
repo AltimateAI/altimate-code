@@ -34,7 +34,7 @@ docs:
 Determine which downstream models, tests, and exposures are affected when a SQL model changes. Classify each impact as BREAKING, WARNING, or SAFE.
 
 ## Workflow
-1. **Detect dialect and warehouse context** -- Call `warehouse_list` (returns connections with `name`, `type`, `database` — use `type` as the dialect) or `dbt_profiles` (adapter type indicates the warehouse). Pass the detected dialect to all subsequent tool calls that accept it.
+1. **Detect the SQL dialect** -- Required: `schema_diff` and `lineage_check` need the dialect for correct SQL parsing. Pass it to all tool calls.
 2. **Identify the changed model** -- Either:
    - Accept a model name or file path from the user
    - Detect changed `.sql` files via `git diff --name-only` using `bash`

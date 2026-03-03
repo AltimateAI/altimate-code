@@ -9,8 +9,6 @@ persona:
   - analytics-engineer
   - data-engineer
 tools:
-  - warehouse_list
-  - dbt_profiles
   - glob
   - read
   - dbt_run
@@ -29,15 +27,12 @@ docs:
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** warehouse_list, dbt_profiles, glob, read, dbt_run, write, edit
+**Tools used:** glob, read, dbt_run, write, edit
 
 Guide and scaffold dbt projects following layered architecture patterns. Adapts to the project's existing conventions rather than imposing a single naming scheme.
 
 ## Workflow
-1. **Detect the warehouse dialect** -- Determines adapter-specific materialization defaults.
-   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
-   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
-2. **Detect existing conventions** -- This step is critical. Never impose a naming scheme without checking first.
+1. **Detect existing conventions** -- This step is critical. Never impose a naming scheme without checking first.
    - Use `glob` to scan `models/` directory structure for folder patterns and model file names
    - Use `read` to check `dbt_project.yml` for configured model paths and materializations
    - Classify the project's current convention from directory names and file prefixes:
@@ -204,4 +199,4 @@ When reorganizing an existing project:
 - `/medallion-patterns scaffold stripe` -- Create layered models for a new source
 - `/medallion-patterns migrate` -- Plan migration of existing models to layered architecture
 
-Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `dbt_run`, `write`, `edit`.
+Use the tools: `glob`, `read`, `dbt_run`, `write`, `edit`.

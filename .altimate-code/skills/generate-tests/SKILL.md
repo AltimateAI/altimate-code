@@ -5,7 +5,6 @@ domain: dbt
 persona:
   - analytics-engineer
 tools:
-  - dbt_profiles
   - dbt_manifest
   - glob
   - read
@@ -28,15 +27,14 @@ docs:
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** dbt_profiles, dbt_manifest, glob, read, schema_inspect, write, edit
+**Tools used:** dbt_manifest, glob, read, schema_inspect, write, edit
 
 > **When to use this vs other skills:** Use /generate-tests for automated test scaffolding based on column patterns and data quality best practices. Use /yaml-config for generating full schema.yml from scratch. Use /dbt-docs for adding descriptions to existing YAML.
 
 Generate comprehensive dbt test definitions for a model. This skill discovers existing tests, inspects the model's schema and SQL, and produces appropriate tests using built-in generics, `dbt_utils`, `dbt_expectations`, and `elementary`.
 
 ## Workflow
-1. **Detect dialect and warehouse** -- Use `dbt_profiles` to discover the active profile and warehouse type. This determines which test features are available and which SQL patterns apply.
-2. **Discover existing tests** -- Use `dbt_manifest` to load the project manifest. Extract:
+1. **Discover existing tests** -- Use `dbt_manifest` to load the project manifest. Extract:
    - All tests already defined for the target model (avoid duplicates)
    - Which test packages are installed (`dbt_utils`, `dbt_expectations`, `elementary`)
    - Upstream/downstream model dependencies

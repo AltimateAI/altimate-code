@@ -37,11 +37,7 @@ docs:
 Help convert batch models to incremental or fix existing incremental logic. Covers `is_incremental()` patterns, strategy selection, merge keys, and common pitfalls.
 
 ## Workflow
-1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
-   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
-   - If neither yields a result, ask the user which warehouse they are using.
-   - The dialect determines which incremental strategies are available.
+1. **Detect the database adapter** -- Required: the adapter determines which incremental strategies are available (see Strategy Support Matrix below).
 2. **Read the model** -- Use `glob` and `read` to find and understand the current model SQL
 3. **Check existing config** -- Call `dbt_manifest` to detect whether the model is already incremental, its current strategy, unique_key, and materialization settings
 4. **Analyze the query** -- Use `sql_analyze` with the detected `dialect` to check for anti-patterns and `lineage_check` to understand column flow

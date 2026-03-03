@@ -31,10 +31,7 @@ docs:
 Scan database schemas for columns that contain or may contain personally identifiable information. Identifies PII by column name patterns, data type heuristics, and sample data analysis. Produces an audit report with risk levels and masking recommendations.
 
 ## Workflow
-1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
-   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
-   - If neither yields a result, ask the user which warehouse they are using.
+1. **Detect the database dialect** -- Required: `schema_detect_pii` needs the dialect for schema inspection and masking policy detection.
 2. **Determine scan scope** -- Based on user input:
    - Specific schema: scan only that schema (e.g., `raw.public`)
    - Specific database: scan all schemas in that database

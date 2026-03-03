@@ -35,11 +35,7 @@ docs:
 Diagnose and fix SQL queries that fail, run slowly, or produce unexpected results. Combines syntax validation, explain plan analysis, anti-pattern detection, and automated rewrites into a single diagnostic workflow.
 
 ## Workflow
-1. **Detect the warehouse dialect** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
-   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
-   - If neither yields a result, ask the user which warehouse they are using.
-   - Pass the detected dialect to all subsequent tool calls.
+1. **Detect the database dialect** -- Required: the dialect (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`) determines how to parse, explain, and fix the SQL. Pass it to all subsequent tool calls.
 2. **Get the problematic SQL** -- This skill works with any SQL, not just dbt models:
    - **Raw SQL**: Accept SQL pasted directly in the conversation or from any `.sql` file
    - **dbt model**: If the user references a dbt model name, search with `glob` for `**/models/**/{name}.sql` and read the file

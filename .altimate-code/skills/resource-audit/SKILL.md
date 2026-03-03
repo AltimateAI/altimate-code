@@ -12,8 +12,6 @@ tools:
   - finops_unused_resources
   - finops_warehouse_advice
   - finops_expensive_queries
-  - warehouse_list
-  - dbt_profiles
   - schema_inspect
 docs:
   - title: "Snowflake Resource Monitors"
@@ -25,16 +23,12 @@ docs:
 
 ## Requirements
 **Agent:** any (read-only analysis)
-**Tools used:** finops_unused_resources, finops_warehouse_advice, finops_expensive_queries, warehouse_list, dbt_profiles, schema_inspect
+**Tools used:** finops_unused_resources, finops_warehouse_advice, finops_expensive_queries, schema_inspect
 
 Find wasted resources across the warehouse: unused tables consuming storage, idle warehouses burning credits, over-provisioned clusters, and stale objects. Produces a savings estimate with prioritized action items.
 
 ## Workflow
-1. **Detect the warehouse type** -- This is the critical first step. Never assume a dialect.
-   - Call `warehouse_list` — returns configured database connections, each with a `name`, `type` (e.g., `snowflake`, `bigquery`, `postgres`, `databricks`), and `database`. Use the `type` field as the dialect.
-   - If no connections returned, call `dbt_profiles` to read dbt profile configuration — the adapter type indicates the warehouse.
-   - If neither yields a result, ask the user which warehouse they are using.
-2. **Find unused resources** -- Call `finops_unused_resources` to identify stale objects
+1. **Find unused resources** -- Call `finops_unused_resources` to identify stale objects
    - Unused tables: no reads in the lookback period (default: 90 days)
    - Idle warehouses: running but with zero or near-zero query volume
    - Stale schemas: entire schemas with no recent activity
@@ -119,4 +113,4 @@ Estimated right-sizing savings: $X/month
 - `/resource-audit --warehouse ANALYTICS_WH` -- Focus on a specific warehouse
 - `/resource-audit --database raw` -- Scope to a specific database
 
-Use the tools: `finops_unused_resources`, `finops_warehouse_advice`, `finops_expensive_queries`, `warehouse_list`, `dbt_profiles`, `schema_inspect`.
+Use the tools: `finops_unused_resources`, `finops_warehouse_advice`, `finops_expensive_queries`, `schema_inspect`.

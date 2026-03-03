@@ -5,7 +5,6 @@ domain: dbt
 persona:
   - analytics-engineer
 tools:
-  - dbt_profiles
   - dbt_lineage
   - dbt_manifest
   - glob
@@ -26,15 +25,14 @@ docs:
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** dbt_profiles, dbt_manifest, glob, read, schema_inspect, edit, write
+**Tools used:** dbt_manifest, glob, read, schema_inspect, edit, write
 
 > **When to use this vs other skills:** Use /dbt-docs to add or improve descriptions in existing schema.yml. Use /yaml-config to create schema.yml from scratch. Use /generate-tests to add test scaffolding.
 
 Generate comprehensive documentation for dbt models by analyzing SQL logic, schema metadata, and existing docs.
 
 ## Workflow
-1. **Detect dialect and warehouse** -- Use `dbt_profiles` to discover the active profile and warehouse type. This informs column type descriptions and warehouse-specific nuances.
-2. **Find the target model** -- Use `glob` to locate the model SQL and any existing schema YAML (`schema.yml`, `_schema.yml`, `_<model>__models.yml`).
+1. **Find the target model** -- Use `glob` to locate the model SQL and any existing schema YAML (`schema.yml`, `_schema.yml`, `_<model>__models.yml`).
 3. **Read the model SQL** -- Understand the transformations, business logic, and column derivations.
 4. **Read existing docs** -- Check for existing schema YAML and `docs/` blocks. Note which columns already have descriptions to preserve them.
 5. **Inspect schema** -- Use `schema_inspect` to get column types, nullability, and constraints from the warehouse.

@@ -9,8 +9,6 @@ domain: dbt
 persona:
   - analytics-engineer
 tools:
-  - warehouse_list
-  - dbt_profiles
   - glob
   - read
   - schema_inspect
@@ -27,15 +25,14 @@ docs:
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** warehouse_list, dbt_profiles, glob, read, schema_inspect, schema_search, write, edit
+**Tools used:** glob, read, schema_inspect, schema_search, write, edit
 
 > **When to use this vs other skills:** Use `/yaml-config` to generate sources.yml or schema.yml from warehouse metadata. Use `/generate-tests` to add test definitions. Use `/dbt-docs` to enrich existing YAML with descriptions.
 
 Generate or update dbt YAML configuration files by inspecting warehouse schemas and existing models.
 
 ## Workflow
-1. **Detect warehouse** -- Call `warehouse_list` (returns connections with `name`, `type`, `database` — use `type` as the dialect) or `dbt_profiles` (adapter type indicates the warehouse). This determines default schema quoting, database structure, and available configurations.
-2. **Determine config type** -- sources.yml, schema.yml, or properties.yml.
+1. **Determine config type** -- sources.yml, schema.yml, or properties.yml.
 3. **Read existing configs** -- Use `glob` to find existing YAML files in the project and `read` to understand the current organization pattern (one file per directory vs. one file per model). Match the existing convention.
 4. **Inspect warehouse schema** -- Use `schema_inspect` and `schema_search` to discover tables and columns.
 5. **Generate the YAML** based on the config type below.
@@ -170,4 +167,4 @@ Contracts require every column to have a `data_type` that matches the warehouse 
 - `/yaml-config schema stg_stripe__payments` -- Generate schema.yml for a model
 - `/yaml-config properties fct_daily_revenue` -- Generate properties.yml with config and contract
 
-Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `schema_inspect`, `schema_search`, `write`, `edit`.
+Use the tools: `glob`, `read`, `schema_inspect`, `schema_search`, `write`, `edit`.

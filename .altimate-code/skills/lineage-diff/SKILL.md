@@ -30,7 +30,7 @@ docs:
 Compare two versions of a SQL model to identify changes in column-level data flow and structural schema changes.
 
 ## Workflow
-1. **Detect dialect and warehouse context** -- Call `warehouse_list` (returns connections with `name`, `type`, `database` — use `type` as the dialect) or `dbt_profiles` (adapter type indicates the warehouse). Pass the detected dialect to all subsequent tool calls that accept it.
+1. **Detect the SQL dialect** -- Required: `schema_diff` and `lineage_check` need the dialect for correct SQL parsing. Pass it to all tool calls.
 2. **Get the original SQL (before)** -- Either:
    - Use `git show HEAD:<path>` via `bash` to get the last committed version
    - Use `git show <branch>:<path>` if comparing against a specific branch
@@ -96,7 +96,7 @@ Summary: 2 added, 2 removed, 1 modified, 8 unchanged
 ## Without dbt (SQL-only mode)
 
 When no dbt project is detected:
-1. Detect dialect via `warehouse_list` (use the `type` field from the returned connections)
+1. Detect dialect (needed for SQL parsing)
 2. Run `schema_diff` for structural changes
 3. Run `lineage_check` on both versions with `dialect`
 4. Compute and report the edge diff

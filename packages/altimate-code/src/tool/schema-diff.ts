@@ -5,7 +5,7 @@ import type { SchemaDiffResult, ColumnChange } from "../bridge/protocol"
 
 export const SchemaDiffTool = Tool.define("schema_diff", {
   description:
-    "Compare two versions of a SQL model to detect column-level breaking changes. Purely static via sqlglot — no warehouse connection needed. Detects dropped columns (BREAKING), type changes (WARNING), added columns (INFO), and renames (WARNING via Levenshtein distance).",
+    "Compare two versions of a SQL model to detect column-level breaking changes. Static analysis — no warehouse connection needed. Detects dropped columns (BREAKING), type changes (WARNING), added columns (INFO), and renames (WARNING).",
   parameters: z.object({
     old_sql: z.string().describe("Previous version of the SQL model"),
     new_sql: z.string().describe("New version of the SQL model"),

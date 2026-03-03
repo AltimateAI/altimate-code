@@ -9,8 +9,6 @@ domain: dbt
 persona:
   - analytics-engineer
 tools:
-  - warehouse_list
-  - dbt_profiles
   - glob
   - read
   - schema_inspect
@@ -29,13 +27,12 @@ docs:
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** warehouse_list, dbt_profiles, glob, read, schema_inspect, schema_search, write
+**Tools used:** glob, read, schema_inspect, schema_search, write
 
 Generate a new dbt model file following established data modeling patterns. Supports staging, intermediate, and mart layer scaffolding with warehouse-aware materialization defaults.
 
 ## Workflow
-1. **Detect warehouse** -- Call `warehouse_list` (returns connections with `name`, `type`, `database` — use `type` as the dialect) or `dbt_profiles` (adapter type indicates the warehouse). This determines materialization defaults and SQL dialect.
-2. **Determine layer** -- Ask or infer whether this is a staging, intermediate, or mart model based on the user's request.
+1. **Determine layer** -- Ask or infer whether this is a staging, intermediate, or mart model based on the user's request.
 3. **Read the dbt project** -- Use `glob` to find `dbt_project.yml` and scan the `models/` directory structure. Use `read` on `dbt_project.yml` to understand model paths, naming conventions, and materialization defaults.
 4. **Inspect source schema** -- Use `schema_inspect` or `schema_search` to discover source table columns and types.
 5. **Generate the model SQL** based on the layer pattern below.
@@ -174,4 +171,4 @@ For public mart models, also consider adding `contract: {enforced: true}` with e
 - `/model-scaffold intermediate int_orders__enriched`
 - `/model-scaffold dim_customers from stg_stripe__customers and stg_app__users`
 
-Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `schema_inspect`, `schema_search`, `write`.
+Use the tools: `glob`, `read`, `schema_inspect`, `schema_search`, `write`.
