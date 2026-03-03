@@ -115,6 +115,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/altimate-engine/dist/
+          skip-existing: true
 
   github-release:
     name: Create GitHub Release
