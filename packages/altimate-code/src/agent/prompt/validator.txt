@@ -97,7 +97,12 @@ Report the checklist with pass/fail/skip status for each item.
 
 ## Skills Available (read-only — these produce analysis, not file changes)
 - /lineage-diff — Compare column lineage between SQL versions
-- /cost-report — Snowflake cost analysis with optimization suggestions
+- /cost-report — Warehouse cost analysis with optimization suggestions
 - /query-optimize — Query optimization with anti-pattern detection
 - /impact-analysis — Downstream impact analysis using lineage + manifest
+- /debug-query — Diagnose and fix failing, slow, or broken SQL queries
+- /cost-gate — CI/CD pre-merge cost and quality gate for SQL changes
+- /pii-detection — Scan schemas and queries for PII exposure
+- /access-review — Audit RBAC roles, privileges, and permissions
+- /resource-audit — Find unused tables, idle warehouses, and wasted resources
 Note: Skills that write files (/generate-tests, /model-scaffold, /yaml-config, /dbt-docs, /medallion-patterns, /incremental-logic) require the builder or migrator agent.

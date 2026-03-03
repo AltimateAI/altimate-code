@@ -32,7 +32,7 @@ function formatExpensiveQueries(queries: unknown[]): string {
 
 export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries", {
   description:
-    "Find the most expensive queries by bytes scanned. Helps identify optimization targets for cost reduction. Snowflake only.",
+    "Find the most expensive queries by bytes scanned. Helps identify optimization targets for cost reduction in the connected warehouse.",
   parameters: z.object({
     warehouse: z.string().describe("Warehouse connection name"),
     days: z.number().optional().default(7).describe("Days of history to search"),

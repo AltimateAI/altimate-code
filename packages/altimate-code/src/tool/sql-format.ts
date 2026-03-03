@@ -7,7 +7,7 @@ export const SqlFormatTool = Tool.define("sql_format", {
     "Format and beautify SQL code with consistent indentation, keyword casing, and line breaks. Supports all major SQL dialects.",
   parameters: z.object({
     sql: z.string().describe("SQL to format"),
-    dialect: z.string().optional().default("snowflake").describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
+    dialect: z.string().optional().describe("SQL dialect (e.g. snowflake, bigquery, postgres, databricks, redshift) — auto-detected from warehouse connections if omitted"),
     indent: z.number().optional().default(2).describe("Indentation width in spaces"),
   }),
   async execute(args, ctx) {

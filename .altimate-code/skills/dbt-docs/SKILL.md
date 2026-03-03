@@ -1,6 +1,25 @@
 ---
 name: dbt-docs
 description: Generate or improve dbt model documentation -- column descriptions, model descriptions, and doc blocks. Use when the user wants to document a model, add column descriptions, improve existing docs, or generate documentation for undocumented models.
+domain: dbt
+persona:
+  - analytics-engineer
+tools:
+  - dbt_profiles
+  - dbt_lineage
+  - dbt_manifest
+  - glob
+  - read
+  - schema_inspect
+  - edit
+  - write
+docs:
+  - title: "dbt Documentation Guide"
+    url: "https://docs.getdbt.com/docs/build/documentation"
+    context: "Doc blocks, descriptions, schema.yml documentation patterns"
+  - title: "dbt Best Practices: How we structure our dbt projects"
+    url: "https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview"
+    context: "Naming conventions, layer patterns, documentation standards"
 ---
 
 # Generate dbt Documentation
@@ -19,7 +38,7 @@ Generate comprehensive documentation for dbt models by analyzing SQL logic, sche
 3. **Read the model SQL** -- Understand the transformations, business logic, and column derivations.
 4. **Read existing docs** -- Check for existing schema YAML and `docs/` blocks. Note which columns already have descriptions to preserve them.
 5. **Inspect schema** -- Use `schema_inspect` to get column types, nullability, and constraints from the warehouse.
-6. **Read upstream models** -- Use `dbt_manifest` to find dependencies, then `read` upstream SQL to understand data flow and inherited column semantics.
+6. **Read upstream models** -- Use `dbt_lineage` to get this model's upstream dependencies, then `read` upstream SQL to understand data flow and inherited column semantics. For complex projects with runtime vars, fall back to `dbt_manifest` for full DAG resolution.
 7. **Generate documentation**:
 
 ### Model-Level Description

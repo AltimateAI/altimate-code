@@ -52,7 +52,12 @@ function formatConnections(connections: Array<{ name: string; type: string; conf
   for (const conn of connections) {
     lines.push(`${conn.name} (${conn.type})`)
     for (const [key, val] of Object.entries(conn.config)) {
-      if (key === "password" || key === "private_key_passphrase" || key === "access_token") {
+      const SENSITIVE_KEYS = new Set([
+        "password", "private_key", "private_key_passphrase", "access_token",
+        "token", "keyfile", "client_secret", "refresh_token",
+        "service_account_json", "credentials_path", "private_key_path",
+      ])
+      if (SENSITIVE_KEYS.has(key)) {
         lines.push(`  ${key}: ****`)
       } else {
         lines.push(`  ${key}: ${val}`)

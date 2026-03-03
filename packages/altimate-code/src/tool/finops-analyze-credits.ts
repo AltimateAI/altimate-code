@@ -63,7 +63,7 @@ function formatCreditsAnalysis(
 
 export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
   description:
-    "Analyze Snowflake credit consumption — daily breakdown by warehouse, total credits, and cost optimization recommendations. Requires ACCOUNT_USAGE access.",
+    "Analyze warehouse credit consumption — daily breakdown by warehouse, total credits, and cost optimization recommendations.",
   parameters: z.object({
     warehouse: z.string().describe("Warehouse connection name"),
     days: z.number().optional().default(30).describe("Days of history to analyze"),

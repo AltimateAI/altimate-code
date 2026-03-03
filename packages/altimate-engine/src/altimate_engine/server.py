@@ -98,6 +98,8 @@ from altimate_engine.models import (
     TagsListResult,
     SqlDiffParams,
     SqlDiffResult,
+    SchemaDiffParams,
+    SchemaDiffResult,
     SqlGuardValidateParams,
     SqlGuardLintParams,
     SqlGuardSafetyParams,
@@ -246,6 +248,22 @@ def _schema_context_to_dict(
     return {"tables": tables, "version": "1"}
 
 
+_SENSITIVE_KEYS = frozenset({
+    "password", "private_key", "private_key_passphrase", "access_token",
+    "token", "keyfile", "client_secret", "refresh_token",
+    "service_account_json", "credentials_path", "private_key_path",
+})
+
+
+def _strip_credentials(obj: object) -> object:
+    """Recursively strip sensitive keys from dicts."""
+    if isinstance(obj, dict):
+        return {k: _strip_credentials(v) for k, v in obj.items() if k not in _SENSITIVE_KEYS}
+    if isinstance(obj, list):
+        return [_strip_credentials(item) for item in obj]
+    return obj
+
+
 _feedback_store: FeedbackStore | None = None
 _schema_cache: SchemaCache | None = None
 
@@ -329,7 +347,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             for stmt_idx, stmt in enumerate(statements):
                 label = f"[Query {stmt_idx + 1}] " if len(statements) > 1 else ""
 
-                lint_result = guard_lint(stmt, schema_context=params_obj.schema_context)
+                lint_result = guard_lint(stmt, schema_context=params_obj.schema_context, dialect=params_obj.dialect)
                 if lint_result.get("error"):
                     any_error = lint_result["error"]
                     continue
@@ -404,11 +422,9 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         elif method == "sql.optimize":
             params_obj = SqlOptimizeParams(**params)
             # Rewrite for optimization
-            rw = guard_rewrite_sql(
-                params_obj.sql, schema_context=params_obj.schema_context
-            )
+            rw = guard_rewrite_sql(params_obj.sql, schema_context=params_obj.schema_context, dialect=params_obj.dialect)
             # Lint for remaining issues
-            lint = guard_lint(params_obj.sql, schema_context=params_obj.schema_context)
+            lint = guard_lint(params_obj.sql, schema_context=params_obj.schema_context, dialect=params_obj.dialect)
 
             suggestions = []
             for r in rw.get("rewrites", []):
@@ -753,6 +769,12 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             if equiv.get("equivalent") is not None:
                 raw["semantic_equivalent"] = equiv["equivalent"]
             result = SqlDiffResult(**raw)
+        # --- Schema diff (column-level) ---
+        elif method == "sql.schema_diff":
+            from altimate_engine.sql.schema_diff import diff_schema
+            p = SchemaDiffParams(**params)
+            raw = diff_schema(p.old_sql, p.new_sql, p.dialect or "ansi")
+            result = SchemaDiffResult(**raw)
         # --- SQL rewrite ---
         elif method == "sql.rewrite":
             p = SqlRewriteParams(**params)
@@ -978,7 +1000,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                 DbtProfileConnection(
                     name=name,
                     type=config.get("type", "unknown"),
-                    config=config,
+                    config=_strip_credentials(config),
                 )
                 for name, config in raw.items()
             ]

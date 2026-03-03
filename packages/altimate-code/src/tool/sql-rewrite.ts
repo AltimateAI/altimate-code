@@ -11,8 +11,7 @@ export const SqlRewriteTool = Tool.define("sql_rewrite", {
     dialect: z
       .string()
       .optional()
-      .default("snowflake")
-      .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
+      .describe("SQL dialect (e.g. snowflake, bigquery, postgres, databricks, redshift) — auto-detected from warehouse connections if omitted"),
     schema_context: z
       .record(z.string(), z.any())
       .optional()

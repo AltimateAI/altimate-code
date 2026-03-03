@@ -5,13 +5,29 @@ description: >
   warehouse schema or existing models. Use when the user wants to create or update dbt YAML
   files, define sources, add model documentation and tests in YAML, generate schema.yml from
   a table, or configure model properties like materialization and contracts.
+domain: dbt
+persona:
+  - analytics-engineer
+tools:
+  - warehouse_list
+  - dbt_profiles
+  - glob
+  - read
+  - schema_inspect
+  - schema_search
+  - write
+  - edit
+docs:
+  - title: "dbt YAML Selectors and Properties"
+    url: "https://docs.getdbt.com/reference/model-properties"
+    context: "Model properties, column definitions, data_tests, contracts, access modifiers"
 ---
 
 # Generate dbt YAML Config
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** warehouse_list, dbt_profiles, glob, read, schema_inspect, schema_search, dbt_manifest, write, edit
+**Tools used:** warehouse_list, dbt_profiles, glob, read, schema_inspect, schema_search, write, edit
 
 > **When to use this vs other skills:** Use `/yaml-config` to generate sources.yml or schema.yml from warehouse metadata. Use `/generate-tests` to add test definitions. Use `/dbt-docs` to enrich existing YAML with descriptions.
 
@@ -22,10 +38,9 @@ Generate or update dbt YAML configuration files by inspecting warehouse schemas 
 2. **Determine config type** -- sources.yml, schema.yml, or properties.yml.
 3. **Read existing configs** -- Use `glob` to find existing YAML files in the project and `read` to understand the current organization pattern (one file per directory vs. one file per model). Match the existing convention.
 4. **Inspect warehouse schema** -- Use `schema_inspect` and `schema_search` to discover tables and columns.
-5. **Read the manifest** -- If available, use `dbt_manifest` to find existing model definitions and avoid duplicating entries.
-6. **Generate the YAML** based on the config type below.
-7. **Merge with existing** -- If YAML files already exist, merge new entries without duplicating existing definitions. Preserve human-written descriptions. Use `edit` for surgical updates, `write` only for new files.
-8. **Write the output** -- Use `write` or `edit` to save the YAML file.
+5. **Generate the YAML** based on the config type below.
+6. **Merge with existing** -- If YAML files already exist, merge new entries without duplicating existing definitions. Preserve human-written descriptions. Use `edit` for surgical updates, `write` only for new files.
+7. **Write the output** -- Use `write` or `edit` to save the YAML file.
 
 ## Config Types
 
@@ -155,4 +170,4 @@ Contracts require every column to have a `data_type` that matches the warehouse 
 - `/yaml-config schema stg_stripe__payments` -- Generate schema.yml for a model
 - `/yaml-config properties fct_daily_revenue` -- Generate properties.yml with config and contract
 
-Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `schema_inspect`, `schema_search`, `dbt_manifest`, `write`, `edit`.
+Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `schema_inspect`, `schema_search`, `write`, `edit`.

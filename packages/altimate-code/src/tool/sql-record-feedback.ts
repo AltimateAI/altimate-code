@@ -7,7 +7,7 @@ export const SqlRecordFeedbackTool = Tool.define("sql_record_feedback", {
     "Record query execution metrics (bytes scanned, execution time, credits) for cost prediction. Builds a local feedback store that improves future cost estimates.",
   parameters: z.object({
     sql: z.string().describe("The SQL query that was executed"),
-    dialect: z.string().optional().default("snowflake").describe("SQL dialect"),
+    dialect: z.string().optional().describe("SQL dialect (e.g. snowflake, bigquery, postgres, databricks, redshift) — auto-detected from warehouse connections if omitted"),
     bytes_scanned: z.number().optional().describe("Bytes scanned during execution"),
     rows_produced: z.number().optional().describe("Number of rows returned"),
     execution_time_ms: z.number().optional().describe("Execution time in milliseconds"),

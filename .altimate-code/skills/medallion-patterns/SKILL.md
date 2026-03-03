@@ -4,13 +4,32 @@ description: >
   Apply medallion architecture (bronze/silver/gold) patterns to organize dbt models into clean data layers.
   Use when the user asks about layered data architecture, bronze/silver/gold organization, staging vs marts structure,
   data mesh patterns, or wants to reorganize their dbt project into proper transformation layers.
+domain: dbt
+persona:
+  - analytics-engineer
+  - data-engineer
+tools:
+  - warehouse_list
+  - dbt_profiles
+  - glob
+  - read
+  - dbt_run
+  - write
+  - edit
+docs:
+  - title: "dbt Best Practices: How we structure our dbt projects"
+    url: "https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview"
+    context: "Staging/intermediate/mart layer definitions and conventions"
+  - title: "Medallion Architecture (Databricks)"
+    url: "https://www.databricks.com/glossary/medallion-architecture"
+    context: "Bronze/silver/gold pattern origin, layer responsibilities, Delta Lake context"
 ---
 
 # Medallion Architecture Patterns
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** warehouse_list, dbt_profiles, dbt_manifest, glob, read, dbt_run, write, edit
+**Tools used:** warehouse_list, dbt_profiles, glob, read, dbt_run, write, edit
 
 Guide and scaffold dbt projects following layered architecture patterns. Adapts to the project's existing conventions rather than imposing a single naming scheme.
 
@@ -19,10 +38,9 @@ Guide and scaffold dbt projects following layered architecture patterns. Adapts 
    - Call `warehouse_list` to check for configured connections
    - If no connections found, call `dbt_profiles` to discover warehouse type from dbt configuration
 2. **Detect existing conventions** -- This step is critical. Never impose a naming scheme without checking first.
-   - Call `dbt_manifest` to inventory existing models, their names, and materializations
-   - Use `glob` to scan `models/` directory structure for folder patterns
+   - Use `glob` to scan `models/` directory structure for folder patterns and model file names
    - Use `read` to check `dbt_project.yml` for configured model paths and materializations
-   - Classify the project's current convention:
+   - Classify the project's current convention from directory names and file prefixes:
 
    | Signal | Convention | Layer Mapping |
    |--------|-----------|---------------|
@@ -172,7 +190,7 @@ models:
 
 When reorganizing an existing project:
 
-1. **Inventory** -- Call `dbt_manifest` to catalog all models with their current materializations
+1. **Inventory** -- Use `glob` on `models/` to catalog all model files and `read` `dbt_project.yml` for materializations
 2. **Map layers** -- Classify each model into its target layer based on content (not just name)
 3. **Create directories** -- Set up the target directory structure
 4. **Move and rename** -- Relocate models, updating names to match the convention
@@ -186,4 +204,4 @@ When reorganizing an existing project:
 - `/medallion-patterns scaffold stripe` -- Create layered models for a new source
 - `/medallion-patterns migrate` -- Plan migration of existing models to layered architecture
 
-Use the tools: `warehouse_list`, `dbt_profiles`, `dbt_manifest`, `glob`, `read`, `dbt_run`, `write`, `edit`.
+Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `dbt_run`, `write`, `edit`.

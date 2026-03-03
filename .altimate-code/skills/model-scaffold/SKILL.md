@@ -5,25 +5,42 @@ description: >
   materialization, and structure. Use when the user wants to create a new dbt model, add a
   staging/intermediate/mart layer, scaffold a model from a source table, or set up a new
   dbt model file with the correct naming conventions and project structure.
+domain: dbt
+persona:
+  - analytics-engineer
+tools:
+  - warehouse_list
+  - dbt_profiles
+  - glob
+  - read
+  - schema_inspect
+  - schema_search
+  - write
+docs:
+  - title: "dbt Best Practices: How we structure our dbt projects"
+    url: "https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview"
+    context: "Staging, intermediate, mart layer conventions, naming, materialization defaults"
+  - title: "dbt Style Guide"
+    url: "https://docs.getdbt.com/best-practices/how-we-style/0-how-we-style-our-dbt-projects"
+    context: "SQL style, CTE naming, model naming conventions"
 ---
 
 # Scaffold dbt Model
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** warehouse_list, dbt_profiles, glob, read, dbt_manifest, schema_inspect, schema_search, write
+**Tools used:** warehouse_list, dbt_profiles, glob, read, schema_inspect, schema_search, write
 
 Generate a new dbt model file following established data modeling patterns. Supports staging, intermediate, and mart layer scaffolding with warehouse-aware materialization defaults.
 
 ## Workflow
 1. **Detect warehouse** -- Use `warehouse_list` or `dbt_profiles` to discover the connected warehouse type (Snowflake, BigQuery, Databricks, PostgreSQL, etc.). This determines materialization defaults and SQL dialect.
 2. **Determine layer** -- Ask or infer whether this is a staging, intermediate, or mart model based on the user's request.
-3. **Read the dbt project** -- Use `glob` to find `dbt_project.yml` and understand the project structure (model paths, naming conventions, existing directory layout).
-4. **Read the manifest** -- If available, use `dbt_manifest` to understand existing models, sources, and dependencies. Check for naming conventions already in use.
-5. **Inspect source schema** -- Use `schema_inspect` or `schema_search` to discover source table columns and types.
-6. **Generate the model SQL** based on the layer pattern below.
-7. **Generate companion YAML** -- Create a `_<directory>__models.yml` (one YAML file per directory) with column descriptions and basic tests. Follow the project's existing YAML organization pattern if one exists.
-8. **Write the files** -- Use `write` to create the SQL model and schema YAML in the correct directory.
+3. **Read the dbt project** -- Use `glob` to find `dbt_project.yml` and scan the `models/` directory structure. Use `read` on `dbt_project.yml` to understand model paths, naming conventions, and materialization defaults.
+4. **Inspect source schema** -- Use `schema_inspect` or `schema_search` to discover source table columns and types.
+5. **Generate the model SQL** based on the layer pattern below.
+6. **Generate companion YAML** -- Create a `_<directory>__models.yml` (one YAML file per directory) with column descriptions and basic tests. Follow the project's existing YAML organization pattern if one exists.
+7. **Write the files** -- Use `write` to create the SQL model and schema YAML in the correct directory.
 
 ## Layer Patterns
 
@@ -157,4 +174,4 @@ For public mart models, also consider adding `contract: {enforced: true}` with e
 - `/model-scaffold intermediate int_orders__enriched`
 - `/model-scaffold dim_customers from stg_stripe__customers and stg_app__users`
 
-Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `dbt_manifest`, `schema_inspect`, `schema_search`, `write`.
+Use the tools: `warehouse_list`, `dbt_profiles`, `glob`, `read`, `schema_inspect`, `schema_search`, `write`.

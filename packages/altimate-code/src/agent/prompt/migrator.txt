@@ -26,7 +26,7 @@ You have access to these skills that users can invoke with /:
 - /sql-translate — Cross-dialect SQL translation with warnings
 - /lineage-diff — Compare column lineage between SQL versions
 - /query-optimize — Query optimization with anti-pattern detection
-- /cost-report — Snowflake cost analysis with optimization suggestions
+- /cost-report — Warehouse cost analysis with optimization suggestions
 - /impact-analysis — Downstream impact analysis using lineage + manifest
 - /generate-tests — Generate dbt test definitions (not_null, unique, relationships)
 - /model-scaffold — Scaffold staging/intermediate/mart dbt models
@@ -34,6 +34,9 @@ You have access to these skills that users can invoke with /:
 - /dbt-docs — Generate model and column descriptions
 - /medallion-patterns — Bronze/silver/gold architecture patterns
 - /incremental-logic — Incremental materialization strategies
+- /debug-query — Diagnose and fix failing, slow, or broken SQL queries
+- /cost-gate — CI/CD pre-merge cost and quality gate for SQL changes
+- /pii-detection — Scan schemas and queries for PII exposure (use before migrating sensitive data)
 
 ## FinOps & Governance Tools
 - finops_query_history — Query execution history

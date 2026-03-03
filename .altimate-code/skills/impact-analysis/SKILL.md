@@ -1,6 +1,28 @@
 ---
 name: impact-analysis
 description: Analyze the downstream impact of SQL or dbt model changes by combining column-level lineage, schema diffing, and the dbt dependency graph. Use when a user changes a model and wants to know what breaks downstream, when reviewing a PR that modifies SQL, or when renaming/dropping columns.
+domain: lineage
+persona:
+  - analytics-engineer
+  - data-engineer
+tools:
+  - dbt_lineage
+  - dbt_manifest
+  - lineage_check
+  - schema_diff
+  - sql_analyze
+  - warehouse_list
+  - dbt_profiles
+  - glob
+  - bash
+  - read
+docs:
+  - title: "dbt Model Governance"
+    url: "https://docs.getdbt.com/docs/collaborate/govern/about-access"
+    context: "Access modifiers, contracts, model versions for managing downstream impact"
+  - title: "Column-Level Lineage"
+    url: "https://docs.getdbt.com/docs/collaborate/column-level-lineage"
+    context: "dbt Explorer column-level lineage for tracing data flow through models"
 ---
 
 # Impact Analysis
@@ -29,11 +51,7 @@ Determine which downstream models, tests, and exposures are affected when a SQL 
 5. **Run column-level lineage** -- Choose the appropriate lineage tool:
    - **dbt project detected** (manifest exists): Call `dbt_lineage` with `manifest_path` and `model` name for manifest-aware lineage that resolves `ref()` and `source()` calls accurately. This is more reliable than SQL-only parsing.
    - **SQL-only mode**: Call `lineage_check` with the after SQL and `dialect` to trace column-level data flow from sources to output.
-6. **Load the dbt dependency graph** -- Call `dbt_manifest` to get the full DAG. Use `glob` to search for `target/manifest.json` if the path is not provided.
-   - Extract downstream models: walk `depends_on` edges recursively to build the full downstream tree with depth levels
-   - Identify tests that reference the changed model or its columns
-   - Identify exposures (dashboards, applications) that depend on downstream models
-7. **Cross-reference schema changes with downstream consumers** -- For each downstream model:
+6. **Cross-reference schema changes with downstream consumers** -- Load the dbt DAG now (lazy): call `dbt_manifest` to get the full dependency graph. Use `glob` to search for `target/manifest.json` if the path is not provided. For complex projects with runtime vars, `dbt_manifest` provides the most accurate DAG. Extract downstream models by walking `depends_on` edges recursively with depth levels, identify tests and exposures. Then for each downstream model:
    - Read its SQL via `read`
    - Check if it references any dropped or renamed columns from step 4
    - If a dbt project is available, call `dbt_lineage` on the downstream model to trace which specific source columns it consumes
@@ -45,8 +63,8 @@ Determine which downstream models, tests, and exposures are affected when a SQL 
    | **BREAKING** | References a dropped or renamed column | Must update before deploy |
    | **WARNING** | References a type-changed column, or uses column in a CAST/comparison that may fail | Review and test |
    | **SAFE** | No reference to any changed column | No action needed |
-8. **Run anti-pattern check** -- Call `sql_analyze` with the modified SQL and `dialect` to flag any new anti-patterns introduced by the change.
-9. **Generate the impact report**:
+7. **Run anti-pattern check** -- Call `sql_analyze` with the modified SQL and `dialect` to flag any new anti-patterns introduced by the change.
+8. **Generate the impact report**:
 
 ```
 Impact Analysis: stg_orders

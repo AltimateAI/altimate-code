@@ -96,12 +96,20 @@ def guard_lint(
     sql: str,
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
+    dialect: str | None = None,
 ) -> dict:
     """Lint SQL for anti-patterns using altimate_core."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
+        if dialect:
+            try:
+                return altimate_core.lint(sql, schema, dialect=dialect)
+            except TypeError:
+                import logging
+                logging.getLogger(__name__).warning("altimate_core does not accept dialect parameter, falling back")
+                return altimate_core.lint(sql, schema)
         return altimate_core.lint(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -345,12 +353,20 @@ def guard_rewrite(
     sql: str,
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
+    dialect: str | None = None,
 ) -> dict:
     """Suggest query optimization rewrites."""
     if not SQLGUARD_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
+        if dialect:
+            try:
+                return altimate_core.rewrite(sql, schema, dialect=dialect)
+            except TypeError:
+                import logging
+                logging.getLogger(__name__).warning("altimate_core does not accept dialect parameter, falling back")
+                return altimate_core.rewrite(sql, schema)
         return altimate_core.rewrite(sql, schema)
     except Exception as e:
         return {"success": False, "error": str(e)}

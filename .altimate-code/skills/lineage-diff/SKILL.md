@@ -1,6 +1,24 @@
 ---
 name: lineage-diff
 description: Compare column-level lineage and schema between two versions of a SQL model to show how data flow changed. Use when reviewing a PR that modifies SQL, when checking what a refactor changed in column lineage, or when investigating unexpected data flow differences between environments.
+domain: lineage
+persona:
+  - analytics-engineer
+  - data-engineer
+tools:
+  - lineage_check
+  - dbt_lineage
+  - dbt_manifest
+  - schema_diff
+  - warehouse_list
+  - dbt_profiles
+  - read
+  - bash
+  - glob
+docs:
+  - title: "Column-Level Lineage"
+    url: "https://docs.getdbt.com/docs/collaborate/column-level-lineage"
+    context: "dbt Explorer column-level lineage for tracing data flow through models"
 ---
 
 # Lineage Diff

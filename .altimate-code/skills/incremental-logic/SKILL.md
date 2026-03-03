@@ -4,6 +4,28 @@ description: >
   Add or fix incremental materialization logic in dbt models.
   Use when the user asks to convert a model to incremental, fix is_incremental() logic,
   choose an incremental strategy, troubleshoot duplicate rows, or optimize large table builds.
+domain: dbt
+persona:
+  - analytics-engineer
+  - data-engineer
+tools:
+  - warehouse_list
+  - dbt_profiles
+  - dbt_manifest
+  - glob
+  - read
+  - sql_analyze
+  - lineage_check
+  - schema_inspect
+  - edit
+  - write
+docs:
+  - title: "dbt Incremental Models"
+    url: "https://docs.getdbt.com/docs/build/incremental-models"
+    context: "Official guide for incremental strategies, unique_key, on_schema_change"
+  - title: "dbt Incremental Strategy Deep Dive"
+    url: "https://docs.getdbt.com/docs/build/incremental-strategy"
+    context: "merge, delete+insert, insert_overwrite, microbatch strategy details"
 ---
 
 # Incremental Logic Assistant

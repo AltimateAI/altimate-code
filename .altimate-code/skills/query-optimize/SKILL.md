@@ -4,6 +4,26 @@ description: >
   Detect SQL anti-patterns and rewrite queries for better performance across any warehouse.
   Use when the user asks to optimize, tune, speed up, or review a SQL query for performance,
   or mentions slow queries, high cost, full table scans, or query performance issues.
+domain: sql-analysis
+persona:
+  - data-engineer
+  - analytics-engineer
+  - data-analyst
+tools:
+  - sql_optimize
+  - sql_analyze
+  - warehouse_list
+  - dbt_profiles
+  - schema_inspect
+  - read
+  - glob
+docs:
+  - title: "Snowflake Query Performance"
+    url: "https://docs.snowflake.com/en/user-guide/performance-query"
+    context: "Clustering, pruning, result cache, warehouse sizing for Snowflake optimization"
+  - title: "BigQuery Query Optimization"
+    url: "https://cloud.google.com/bigquery/docs/best-practices-performance-compute"
+    context: "Slot usage, partition pruning, clustering, materialized views for BigQuery"
 ---
 
 # Query Optimize

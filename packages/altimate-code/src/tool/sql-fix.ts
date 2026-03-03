@@ -9,7 +9,7 @@ export const SqlFixTool = Tool.define("sql_fix", {
   parameters: z.object({
     sql: z.string().describe("The failing SQL query"),
     error_message: z.string().describe("Error message returned by the database"),
-    dialect: z.string().optional().default("snowflake").describe("SQL dialect"),
+    dialect: z.string().optional().describe("SQL dialect (e.g. snowflake, bigquery, postgres, databricks, redshift) — auto-detected from warehouse connections if omitted"),
   }),
   async execute(args, ctx) {
     try {

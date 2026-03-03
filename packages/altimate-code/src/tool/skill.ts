@@ -35,13 +35,19 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
           "",
           "<available_skills>",
-          ...accessibleSkills.flatMap((skill) => [
-            `  <skill>`,
-            `    <name>${skill.name}</name>`,
-            `    <description>${skill.description}</description>`,
-            `    <location>${pathToFileURL(skill.location).href}</location>`,
-            `  </skill>`,
-          ]),
+          ...accessibleSkills.flatMap((skill) => {
+            const attrs = [
+              `name="${skill.name}"`,
+              ...(skill.domain ? [`domain="${skill.domain}"`] : []),
+              ...(skill.persona?.length ? [`persona="${skill.persona.join(", ")}"`] : []),
+            ].join(" ")
+            return [
+              `  <skill ${attrs}>`,
+              `    <description>${skill.description}</description>`,
+              `    <location>${pathToFileURL(skill.location).href}</location>`,
+              `  </skill>`,
+            ]
+          }),
           "</available_skills>",
         ].join("\n")
 
@@ -96,6 +102,16 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         return arr
       }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
 
+      const docsBlock =
+        skill.docs?.length
+          ? [
+              "",
+              "<skill_docs>",
+              ...skill.docs.map((d) => `- [${d.title}](${d.url}) — ${d.context}`),
+              "</skill_docs>",
+            ]
+          : []
+
       return {
         title: `Loaded skill: ${skill.name}`,
         output: [
@@ -111,6 +127,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "<skill_files>",
           files,
           "</skill_files>",
+          ...docsBlock,
           "</skill_content>",
         ].join("\n"),
         metadata: {

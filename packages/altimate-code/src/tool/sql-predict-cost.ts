@@ -8,7 +8,7 @@ export const SqlPredictCostTool = Tool.define("sql_predict_cost", {
     "Predict the cost of a SQL query based on historical execution data. Uses a multi-tier approach: fingerprint match, template match, table scan estimate, or static heuristic.",
   parameters: z.object({
     sql: z.string().describe("SQL query to predict cost for"),
-    dialect: z.string().optional().default("snowflake").describe("SQL dialect"),
+    dialect: z.string().optional().describe("SQL dialect (e.g. snowflake, bigquery, postgres, databricks, redshift) — auto-detected from warehouse connections if omitted"),
   }),
   async execute(args, ctx) {
     try {

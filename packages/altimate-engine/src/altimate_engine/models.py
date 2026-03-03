@@ -819,7 +819,7 @@ class ColumnChange(BaseModel):
 class SchemaDiffParams(BaseModel):
     old_sql: str
     new_sql: str
-    dialect: str = "snowflake"
+    dialect: str = "ansi"
     schema_context: dict[str, Any] | None = None
 
 

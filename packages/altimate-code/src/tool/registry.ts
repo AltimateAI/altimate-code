@@ -60,6 +60,7 @@ import { SchemaTagsTool, SchemaTagsListTool } from "./schema-tags"
 import { SqlRewriteTool } from "./sql-rewrite"
 import { CiCostGateTool } from "./ci-cost-gate"
 import { SchemaDiffTool } from "./schema-diff"
+import { SqlValidateTool } from "./sql-validate"
 import { SqlGuardValidateTool } from "./sqlguard-validate"
 import { SqlGuardLintTool } from "./sqlguard-lint"
 import { SqlGuardSafetyTool } from "./sqlguard-safety"
@@ -190,6 +191,7 @@ export namespace ToolRegistry {
       SqlAnalyzeTool,
       SqlOptimizeTool,
       SqlTranslateTool,
+      SqlValidateTool,
       LineageCheckTool,
       WarehouseListTool,
       WarehouseTestTool,

@@ -5,6 +5,25 @@ description: >
   Use when the user asks to convert, translate, migrate, or port SQL from one warehouse
   to another, or mentions moving from Snowflake/BigQuery/Postgres/Oracle/Teradata/SQL Server
   to a different platform.
+domain: sql-analysis
+persona:
+  - data-engineer
+  - analytics-engineer
+tools:
+  - sql_translate
+  - sql_validate
+  - warehouse_list
+  - dbt_profiles
+  - read
+  - write
+  - glob
+docs:
+  - title: "SQLGlot Documentation"
+    url: "https://sqlglot.com/sqlglot.html"
+    context: "Transpilation engine powering dialect conversion, supported dialects and transforms"
+  - title: "Snowflake SQL Reference"
+    url: "https://docs.snowflake.com/en/sql-reference"
+    context: "Snowflake-specific SQL syntax for migration source/target validation"
 ---
 
 # SQL Translate
