@@ -5,22 +5,6 @@ description: >
   Use when the user asks to convert, translate, migrate, or port SQL from one warehouse
   to another, or mentions moving from Snowflake/BigQuery/Postgres/Oracle/Teradata/SQL Server
   to a different platform.
-domain: sql-analysis
-tools:
-  - sql_translate
-  - sql_validate
-  - warehouse_list
-  - dbt_profiles
-  - read
-  - write
-  - glob
-docs:
-  - title: "Snowflake SQL Reference"
-    url: "https://docs.snowflake.com/en/sql-reference"
-    context: "Snowflake-specific SQL syntax for migration source/target validation"
-  - title: "BigQuery Standard SQL Reference"
-    url: "https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax"
-    context: "BigQuery-specific syntax differences for migration target validation"
 ---
 
 # SQL Translate

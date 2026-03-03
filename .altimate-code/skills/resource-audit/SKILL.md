@@ -4,16 +4,6 @@ description: >
   Find unused tables, idle warehouses, and wasted storage -- identify resources that can be downsized,
   suspended, or removed to reduce costs. Use when the user wants to cut cloud spend, find stale data,
   right-size warehouses, or run a resource cleanup.
-domain: finops
-tools:
-  - finops_unused_resources
-  - finops_warehouse_advice
-  - finops_expensive_queries
-  - schema_inspect
-docs:
-  - title: "Snowflake Resource Monitors"
-    url: "https://docs.snowflake.com/en/user-guide/resource-monitors"
-    context: "Setting up resource monitors, credit quotas, alerts"
 ---
 
 # Resource Audit

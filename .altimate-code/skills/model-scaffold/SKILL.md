@@ -5,20 +5,6 @@ description: >
   materialization, and structure. Use when the user wants to create a new dbt model, add a
   staging/intermediate/mart layer, scaffold a model from a source table, or set up a new
   dbt model file with the correct naming conventions and project structure.
-domain: dbt
-tools:
-  - glob
-  - read
-  - schema_inspect
-  - schema_search
-  - write
-docs:
-  - title: "dbt Best Practices: How we structure our dbt projects"
-    url: "https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview"
-    context: "Staging, intermediate, mart layer conventions, naming, materialization defaults"
-  - title: "dbt Style Guide"
-    url: "https://docs.getdbt.com/best-practices/how-we-style/0-how-we-style-our-dbt-projects"
-    context: "SQL style, CTE naming, model naming conventions"
 ---
 
 # Scaffold dbt Model

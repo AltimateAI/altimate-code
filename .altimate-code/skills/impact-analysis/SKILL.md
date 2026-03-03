@@ -1,25 +1,6 @@
 ---
 name: impact-analysis
 description: Analyze the downstream impact of SQL or dbt model changes by combining column-level lineage, schema diffing, and the dbt dependency graph. Use when a user changes a model and wants to know what breaks downstream, when reviewing a PR that modifies SQL, or when renaming/dropping columns.
-domain: lineage
-tools:
-  - dbt_lineage
-  - dbt_manifest
-  - lineage_check
-  - schema_diff
-  - sql_analyze
-  - warehouse_list
-  - dbt_profiles
-  - glob
-  - bash
-  - read
-docs:
-  - title: "dbt Model Governance"
-    url: "https://docs.getdbt.com/docs/collaborate/govern/about-access"
-    context: "Access modifiers, contracts, model versions for managing downstream impact"
-  - title: "Column-Level Lineage"
-    url: "https://docs.getdbt.com/docs/collaborate/column-level-lineage"
-    context: "dbt Explorer column-level lineage for tracing data flow through models"
 ---
 
 # Impact Analysis

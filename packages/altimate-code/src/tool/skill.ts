@@ -36,10 +36,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "",
           "<available_skills>",
           ...accessibleSkills.flatMap((skill) => {
-            const attrs = [
-              `name="${skill.name}"`,
-              ...(skill.domain ? [`domain="${skill.domain}"`] : []),
-            ].join(" ")
+            const attrs = `name="${skill.name}"`
             return [
               `  <skill ${attrs}>`,
               `    <description>${skill.description}</description>`,

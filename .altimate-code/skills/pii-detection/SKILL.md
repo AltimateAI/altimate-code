@@ -4,19 +4,6 @@ description: >
   Scan database schemas and SQL queries for personally identifiable information (PII) exposure --
   column names, data patterns, and unmasked sensitive fields. Use when the user wants a privacy audit,
   needs to find PII before a migration, or wants to verify masking policies are in place.
-domain: governance
-tools:
-  - schema_detect_pii
-  - schema_inspect
-  - schema_search
-  - warehouse_list
-  - dbt_profiles
-  - glob
-  - read
-docs:
-  - title: "Snowflake Dynamic Data Masking"
-    url: "https://docs.snowflake.com/en/user-guide/security-column-ddm-intro"
-    context: "Column-level masking policies, tagging sensitive columns"
 ---
 
 # PII Detection

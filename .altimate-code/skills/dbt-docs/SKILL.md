@@ -1,22 +1,6 @@
 ---
 name: dbt-docs
 description: Generate or improve dbt model documentation -- column descriptions, model descriptions, and doc blocks. Use when the user wants to document a model, add column descriptions, improve existing docs, or generate documentation for undocumented models.
-domain: dbt
-tools:
-  - dbt_lineage
-  - dbt_manifest
-  - glob
-  - read
-  - schema_inspect
-  - edit
-  - write
-docs:
-  - title: "dbt Documentation Guide"
-    url: "https://docs.getdbt.com/docs/build/documentation"
-    context: "Doc blocks, descriptions, schema.yml documentation patterns"
-  - title: "dbt Best Practices: How we structure our dbt projects"
-    url: "https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview"
-    context: "Naming conventions, layer patterns, documentation standards"
 ---
 
 # Generate dbt Documentation

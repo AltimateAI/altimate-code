@@ -4,20 +4,6 @@ description: >
   Apply medallion architecture (bronze/silver/gold) patterns to organize dbt models into clean data layers.
   Use when the user asks about layered data architecture, bronze/silver/gold organization, staging vs marts structure,
   data mesh patterns, or wants to reorganize their dbt project into proper transformation layers.
-domain: dbt
-tools:
-  - glob
-  - read
-  - dbt_run
-  - write
-  - edit
-docs:
-  - title: "dbt Best Practices: How we structure our dbt projects"
-    url: "https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview"
-    context: "Staging/intermediate/mart layer definitions and conventions"
-  - title: "Medallion Architecture (Databricks)"
-    url: "https://www.databricks.com/glossary/medallion-architecture"
-    context: "Bronze/silver/gold pattern origin, layer responsibilities, Delta Lake context"
 ---
 
 # Medallion Architecture Patterns

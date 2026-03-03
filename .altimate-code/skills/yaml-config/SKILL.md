@@ -5,18 +5,6 @@ description: >
   warehouse schema or existing models. Use when the user wants to create or update dbt YAML
   files, define sources, add model documentation and tests in YAML, generate schema.yml from
   a table, or configure model properties like materialization and contracts.
-domain: dbt
-tools:
-  - glob
-  - read
-  - schema_inspect
-  - schema_search
-  - write
-  - edit
-docs:
-  - title: "dbt YAML Selectors and Properties"
-    url: "https://docs.getdbt.com/reference/model-properties"
-    context: "Model properties, column definitions, data_tests, contracts, access modifiers"
 ---
 
 # Generate dbt YAML Config

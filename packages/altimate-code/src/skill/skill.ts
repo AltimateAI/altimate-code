@@ -21,17 +21,6 @@ export namespace Skill {
     description: z.string(),
     location: z.string(),
     content: z.string(),
-    domain: z.string().optional(),
-    tools: z.array(z.string()).optional(),
-    docs: z
-      .array(
-        z.object({
-          title: z.string(),
-          url: z.string(),
-          context: z.string(),
-        }),
-      )
-      .optional(),
   })
   export type Info = z.infer<typeof Info>
 
@@ -79,9 +68,6 @@ export namespace Skill {
       const parsed = Info.pick({
         name: true,
         description: true,
-        domain: true,
-        tools: true,
-        docs: true,
       }).safeParse(md.data)
       if (!parsed.success) return
 
@@ -101,9 +87,6 @@ export namespace Skill {
         description: parsed.data.description,
         location: match,
         content: md.content,
-        ...(parsed.data.domain ? { domain: parsed.data.domain } : {}),
-        ...(parsed.data.tools ? { tools: parsed.data.tools } : {}),
-        ...(parsed.data.docs ? { docs: parsed.data.docs } : {}),
       }
     }
 

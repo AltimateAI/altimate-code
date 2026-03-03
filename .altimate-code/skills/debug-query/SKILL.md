@@ -4,22 +4,6 @@ description: >
   Diagnose and fix failing, slow, or messy SQL queries using explain plans, anti-pattern detection,
   formatting, and automated fixes. Use when the user has a broken query, a syntax error, a slow query,
   or wants help understanding why a query fails or performs poorly.
-domain: sql-analysis
-tools:
-  - sql_explain
-  - sql_fix
-  - sql_format
-  - sql_analyze
-  - sql_execute
-  - sql_validate
-  - warehouse_list
-  - dbt_profiles
-  - read
-  - glob
-docs:
-  - title: "Reading Query Explain Plans"
-    url: "https://docs.snowflake.com/en/user-guide/ui-query-profile"
-    context: "Snowflake query profile interpretation, operator nodes, spilling"
 ---
 
 # Debug Query

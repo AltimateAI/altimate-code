@@ -1,24 +1,6 @@
 ---
 name: generate-tests
 description: Generate dbt tests for models using built-in tests, dbt_expectations, dbt_utils, and elementary. Use when the user wants to add data tests, improve test coverage, scaffold test definitions, or validate data quality for a dbt model.
-domain: dbt
-tools:
-  - dbt_manifest
-  - glob
-  - read
-  - schema_inspect
-  - write
-  - edit
-docs:
-  - title: "dbt Data Tests"
-    url: "https://docs.getdbt.com/docs/build/data-tests"
-    context: "Built-in generic tests (unique, not_null, accepted_values, relationships)"
-  - title: "dbt_expectations Package"
-    url: "https://hub.getdbt.com/calogica/dbt_expectations/latest/"
-    context: "50+ Great Expectations-style tests for dbt: ranges, regex, distributions"
-  - title: "dbt_utils Package"
-    url: "https://hub.getdbt.com/dbt-labs/dbt_utils/latest/"
-    context: "Composite uniqueness, recency, expression tests, cross-relation helpers"
 ---
 
 # Generate dbt Tests

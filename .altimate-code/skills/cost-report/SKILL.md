@@ -4,23 +4,6 @@ description: >
   Generate a warehouse cost and efficiency report using finops tools.
   Use when the user asks about query costs, credit consumption, warehouse spend,
   cost optimization, or wants a spending breakdown by user, warehouse, or query type.
-domain: finops
-tools:
-  - finops_analyze_credits
-  - finops_expensive_queries
-  - finops_warehouse_advice
-  - finops_unused_resources
-  - finops_role_grants
-  - finops_user_roles
-  - sql_analyze
-  - sql_predict_cost
-docs:
-  - title: "Snowflake Cost Management"
-    url: "https://docs.snowflake.com/en/user-guide/cost-managing"
-    context: "Credit consumption, warehouse billing, resource monitors, cost controls"
-  - title: "BigQuery Pricing"
-    url: "https://cloud.google.com/bigquery/pricing"
-    context: "On-demand vs capacity pricing, storage costs, free tier limits"
 ---
 
 # Cost Report

@@ -4,19 +4,6 @@ description: >
   CI/CD pre-merge cost and quality gate -- scan changed SQL files for anti-patterns, estimate cost
   impact, and produce a pass/fail report. Use when the user wants to check SQL changes before merging,
   run a cost review on a PR, or enforce quality gates on SQL modifications.
-domain: finops
-tools:
-  - ci_cost_gate
-  - sql_analyze
-  - sql_predict_cost
-  - sql_optimize
-  - glob
-  - read
-  - bash
-docs:
-  - title: "dbt CI/CD Best Practices"
-    url: "https://docs.getdbt.com/docs/deploy/continuous-integration"
-    context: "Setting up CI jobs, slim CI, state comparison"
 ---
 
 # Cost Gate
