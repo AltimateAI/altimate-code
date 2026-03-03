@@ -48,18 +48,51 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - Agent Modes: agent-modes.md
-  - Tools:
-      - Overview: tools/index.md
-      - SQL Tools: tools/sql-tools.md
-      - Schema Tools: tools/schema-tools.md
-      - FinOps Tools: tools/finops-tools.md
-      - Lineage Tools: tools/lineage-tools.md
-      - dbt Tools: tools/dbt-tools.md
-      - Warehouse Tools: tools/warehouse-tools.md
-  - Guides:
-      - Overview: guides/index.md
-      - Cost Optimization: guides/cost-optimization.md
-      - Migration: guides/migration.md
-      - Using with Claude Code: guides/using-with-claude-code.md
-      - Using with Codex: guides/using-with-codex.md
+  - Usage:
+      - TUI: usage/tui.md
+      - CLI: usage/cli.md
+      - Web: usage/web.md
+      - IDE: usage/ide.md
+      - GitHub: usage/github.md
+      - GitLab: usage/gitlab.md
+  - Configure:
+      - Configuration: configure/config.md
+      - Providers: configure/providers.md
+      - Tools: configure/tools.md
+      - Rules: configure/rules.md
+      - Agents: configure/agents.md
+      - Models: configure/models.md
+      - Themes: configure/themes.md
+      - Keybinds: configure/keybinds.md
+      - Commands: configure/commands.md
+      - Formatters: configure/formatters.md
+      - Permissions: configure/permissions.md
+      - LSP Servers: configure/lsp.md
+      - MCP Servers: configure/mcp-servers.md
+      - ACP Support: configure/acp.md
+      - Agent Skills: configure/skills.md
+      - Custom Tools: configure/custom-tools.md
+  - Data Engineering:
+      - Agent Modes: data-engineering/agent-modes.md
+      - Tools:
+          - Overview: data-engineering/tools/index.md
+          - SQL Tools: data-engineering/tools/sql-tools.md
+          - Schema Tools: data-engineering/tools/schema-tools.md
+          - FinOps Tools: data-engineering/tools/finops-tools.md
+          - Lineage Tools: data-engineering/tools/lineage-tools.md
+          - dbt Tools: data-engineering/tools/dbt-tools.md
+          - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+      - Guides:
+          - Overview: data-engineering/guides/index.md
+          - Cost Optimization: data-engineering/guides/cost-optimization.md
+          - Migration: data-engineering/guides/migration.md
+          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
+          - Using with Codex: data-engineering/guides/using-with-codex.md
+  - Develop:
+      - SDK: develop/sdk.md
+      - Server: develop/server.md
+      - Plugins: develop/plugins.md
+      - Ecosystem: develop/ecosystem.md
+  - Network: network.md
+  - Troubleshooting: troubleshooting.md
+  - Windows / WSL: windows-wsl.md

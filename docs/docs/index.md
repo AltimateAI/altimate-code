@@ -73,6 +73,17 @@ altimate-code is model-agnostic. Use it with:
 - MySQL
 - SQL Server
 
+## Documentation
+
+| Section | Description |
+|---------|------------|
+| [Getting Started](getting-started.md) | Installation, first run, warehouse configuration |
+| [Usage](usage/tui.md) | TUI, CLI, web UI, IDE, and CI/CD integration |
+| [Configure](configure/config.md) | Configuration, providers, tools, agents, themes, keybinds |
+| [Data Engineering](data-engineering/agent-modes.md) | Agent modes, SQL/schema/FinOps/lineage/dbt tools, guides |
+| [Develop](develop/sdk.md) | SDK, server API, plugins, ecosystem |
+| [Troubleshooting](troubleshooting.md) | Logs, common issues, debug mode |
+
 ---
 
 !!! note
