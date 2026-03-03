@@ -5,9 +5,6 @@ description: >
   Use when the user asks about layered data architecture, bronze/silver/gold organization, staging vs marts structure,
   data mesh patterns, or wants to reorganize their dbt project into proper transformation layers.
 domain: dbt
-persona:
-  - analytics-engineer
-  - data-engineer
 tools:
   - glob
   - read

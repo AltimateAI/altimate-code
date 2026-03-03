@@ -4,9 +4,6 @@ description: >
   CI/CD pre-merge cost and quality gate -- scan changed SQL files for anti-patterns, estimate cost
   impact, and produce a pass/fail report. Use when the user wants to check SQL changes before merging,
   run a cost review on a PR, or enforce quality gates on SQL modifications.
-persona:
-  - data-engineer
-  - platform-engineer
 domain: finops
 tools:
   - ci_cost_gate

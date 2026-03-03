@@ -2,9 +2,6 @@
 name: lineage-diff
 description: Compare column-level lineage and schema between two versions of a SQL model to show how data flow changed. Use when reviewing a PR that modifies SQL, when checking what a refactor changed in column lineage, or when investigating unexpected data flow differences between environments.
 domain: lineage
-persona:
-  - analytics-engineer
-  - data-engineer
 tools:
   - lineage_check
   - dbt_lineage

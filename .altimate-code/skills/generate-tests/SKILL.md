@@ -2,8 +2,6 @@
 name: generate-tests
 description: Generate dbt tests for models using built-in tests, dbt_expectations, dbt_utils, and elementary. Use when the user wants to add data tests, improve test coverage, scaffold test definitions, or validate data quality for a dbt model.
 domain: dbt
-persona:
-  - analytics-engineer
 tools:
   - dbt_manifest
   - glob

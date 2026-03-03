@@ -5,10 +5,6 @@ description: >
   Use when the user asks to optimize, tune, speed up, or review a SQL query for performance,
   or mentions slow queries, high cost, full table scans, or query performance issues.
 domain: sql-analysis
-persona:
-  - data-engineer
-  - analytics-engineer
-  - data-analyst
 tools:
   - sql_optimize
   - sql_analyze

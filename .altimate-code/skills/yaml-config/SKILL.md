@@ -6,8 +6,6 @@ description: >
   files, define sources, add model documentation and tests in YAML, generate schema.yml from
   a table, or configure model properties like materialization and contracts.
 domain: dbt
-persona:
-  - analytics-engineer
 tools:
   - glob
   - read

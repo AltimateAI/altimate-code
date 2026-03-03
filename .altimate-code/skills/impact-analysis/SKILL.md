@@ -2,9 +2,6 @@
 name: impact-analysis
 description: Analyze the downstream impact of SQL or dbt model changes by combining column-level lineage, schema diffing, and the dbt dependency graph. Use when a user changes a model and wants to know what breaks downstream, when reviewing a PR that modifies SQL, or when renaming/dropping columns.
 domain: lineage
-persona:
-  - analytics-engineer
-  - data-engineer
 tools:
   - dbt_lineage
   - dbt_manifest

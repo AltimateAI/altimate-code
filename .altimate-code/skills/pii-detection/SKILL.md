@@ -4,9 +4,6 @@ description: >
   Scan database schemas and SQL queries for personally identifiable information (PII) exposure --
   column names, data patterns, and unmasked sensitive fields. Use when the user wants a privacy audit,
   needs to find PII before a migration, or wants to verify masking policies are in place.
-persona:
-  - platform-engineer
-  - data-engineer
 domain: governance
 tools:
   - schema_detect_pii

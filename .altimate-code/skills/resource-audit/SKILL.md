@@ -4,9 +4,6 @@ description: >
   Find unused tables, idle warehouses, and wasted storage -- identify resources that can be downsized,
   suspended, or removed to reduce costs. Use when the user wants to cut cloud spend, find stale data,
   right-size warehouses, or run a resource cleanup.
-persona:
-  - data-engineer
-  - platform-engineer
 domain: finops
 tools:
   - finops_unused_resources

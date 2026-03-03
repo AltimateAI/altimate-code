@@ -5,9 +5,6 @@ description: >
   Use when the user asks about query costs, credit consumption, warehouse spend,
   cost optimization, or wants a spending breakdown by user, warehouse, or query type.
 domain: finops
-persona:
-  - data-engineer
-  - platform-engineer
 tools:
   - finops_analyze_credits
   - finops_expensive_queries

@@ -2,8 +2,6 @@
 name: dbt-docs
 description: Generate or improve dbt model documentation -- column descriptions, model descriptions, and doc blocks. Use when the user wants to document a model, add column descriptions, improve existing docs, or generate documentation for undocumented models.
 domain: dbt
-persona:
-  - analytics-engineer
 tools:
   - dbt_lineage
   - dbt_manifest

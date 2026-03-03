@@ -6,9 +6,6 @@ description: >
   to another, or mentions moving from Snowflake/BigQuery/Postgres/Oracle/Teradata/SQL Server
   to a different platform.
 domain: sql-analysis
-persona:
-  - data-engineer
-  - analytics-engineer
 tools:
   - sql_translate
   - sql_validate

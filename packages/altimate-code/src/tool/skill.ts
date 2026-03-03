@@ -39,7 +39,6 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
             const attrs = [
               `name="${skill.name}"`,
               ...(skill.domain ? [`domain="${skill.domain}"`] : []),
-              ...(skill.persona?.length ? [`persona="${skill.persona.join(", ")}"`] : []),
             ].join(" ")
             return [
               `  <skill ${attrs}>`,

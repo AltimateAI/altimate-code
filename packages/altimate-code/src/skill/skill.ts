@@ -21,7 +21,6 @@ export namespace Skill {
     description: z.string(),
     location: z.string(),
     content: z.string(),
-    persona: z.array(z.string()).optional(),
     domain: z.string().optional(),
     tools: z.array(z.string()).optional(),
     docs: z
@@ -80,7 +79,6 @@ export namespace Skill {
       const parsed = Info.pick({
         name: true,
         description: true,
-        persona: true,
         domain: true,
         tools: true,
         docs: true,
@@ -103,7 +101,6 @@ export namespace Skill {
         description: parsed.data.description,
         location: match,
         content: md.content,
-        ...(parsed.data.persona ? { persona: parsed.data.persona } : {}),
         ...(parsed.data.domain ? { domain: parsed.data.domain } : {}),
         ...(parsed.data.tools ? { tools: parsed.data.tools } : {}),
         ...(parsed.data.docs ? { docs: parsed.data.docs } : {}),

@@ -5,9 +5,6 @@ description: >
   Use when the user asks to convert a model to incremental, fix is_incremental() logic,
   choose an incremental strategy, troubleshoot duplicate rows, or optimize large table builds.
 domain: dbt
-persona:
-  - analytics-engineer
-  - data-engineer
 tools:
   - warehouse_list
   - dbt_profiles

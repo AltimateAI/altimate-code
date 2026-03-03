@@ -5,8 +5,6 @@ description: >
   privilege grants, and identify over-permissioned roles or orphaned grants. Snowflake-specific:
   uses ACCOUNT_USAGE views for role/grant analysis. Use when the user needs a security audit,
   wants to review who has access to what, or needs to clean up Snowflake roles and permissions.
-persona:
-  - platform-engineer
 domain: governance
 tools:
   - finops_role_grants

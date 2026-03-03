@@ -4,10 +4,6 @@ description: >
   Diagnose and fix failing, slow, or messy SQL queries using explain plans, anti-pattern detection,
   formatting, and automated fixes. Use when the user has a broken query, a syntax error, a slow query,
   or wants help understanding why a query fails or performs poorly.
-persona:
-  - data-analyst
-  - analytics-engineer
-  - data-engineer
 domain: sql-analysis
 tools:
   - sql_explain

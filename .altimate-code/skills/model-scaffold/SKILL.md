@@ -6,8 +6,6 @@ description: >
   staging/intermediate/mart layer, scaffold a model from a source table, or set up a new
   dbt model file with the correct naming conventions and project structure.
 domain: dbt
-persona:
-  - analytics-engineer
 tools:
   - glob
   - read
