@@ -27,7 +27,7 @@ export abstract class NamedError extends Error {
       }
 
       static isInstance(input: any): input is InstanceType<typeof result> {
-        return typeof input === "object" && "name" in input && input.name === name
+        return input != null && typeof input === "object" && "name" in input && input.name === name
       }
 
       schema() {

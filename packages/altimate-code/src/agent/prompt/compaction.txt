@@ -9,6 +9,13 @@ Focus on information that would be helpful for continuing the conversation, incl
 - Key user requests, constraints, or preferences that should persist
 - Important technical decisions and why they were made
 
+For data engineering conversations, also preserve:
+- Warehouse connections and discovered schemas/tables
+- dbt project context (models, sources, tests)
+- Lineage findings and query patterns
+- SQL dialects and translation contexts
+- FinOps findings (costs, warehouse sizing)
+
 Your summary should be comprehensive enough to provide context but concise enough to be quickly understood.
 
 Do not respond to any questions in the conversation, only output the summary.

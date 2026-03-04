@@ -14,9 +14,52 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+import { Telemetry } from "@/telemetry"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
+
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
+  function truncateArgs(input: Record<string, any> | null | undefined, maxLen: number): string {
+    if (!input || typeof input !== "object") return ""
+    let str: string
+    try {
+      str = Object.entries(input)
+        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+        .join(", ")
+    } catch {
+      return "[unserializable]"
+    }
+    if (str.length <= maxLen) return str
+    // Avoid slicing mid-surrogate pair by finding a safe boundary
+    let end = maxLen
+    const code = str.charCodeAt(end - 1)
+    if (code >= 0xd800 && code <= 0xdbff) end--
+    return str.slice(0, end) + "…"
+  }
+
+  export function createObservationMask(part: MessageV2.ToolPart): string {
+    const output =
+      (part.state.status === "completed" ? part.state.output : "") || ""
+    const lines = output.split("\n").length
+    const bytes = Buffer.byteLength(output, "utf8")
+    const args = truncateArgs(
+      part.state.status === "completed" ||
+        part.state.status === "running" ||
+        part.state.status === "error"
+        ? part.state.input
+        : {},
+      80,
+    )
+    const firstLine = output.split("\n")[0]?.slice(0, 80) || ""
+    const fingerprint = firstLine ? ` — "${firstLine}"` : ""
+    return `[Tool output cleared — ${part.tool}(${args}) returned ${lines} lines, ${formatBytes(bytes)}${fingerprint}]`
+  }
 
   export const Event = {
     Compacted: BusEvent.define(
@@ -39,11 +82,11 @@ export namespace SessionCompaction {
       input.tokens.total ||
       input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
 
-    const reserved =
-      config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const reserved = config.compaction?.reserved ?? COMPACTION_BUFFER
     const usable = input.model.limit.input
-      ? input.model.limit.input - reserved
-      : context - ProviderTransform.maxOutputTokens(input.model)
+      ? input.model.limit.input - Math.max(reserved, maxOutput)
+      : context - maxOutput - reserved
     return count >= usable
   }
 
@@ -90,11 +133,23 @@ export namespace SessionCompaction {
     if (pruned > PRUNE_MINIMUM) {
       for (const part of toPrune) {
         if (part.state.status === "completed") {
+          const mask = createObservationMask(part)
           part.state.time.compacted = Date.now()
+          part.state.metadata = {
+            ...part.state.metadata,
+            observation_mask: mask,
+          }
           await Session.updatePart(part)
         }
       }
       log.info("pruned", { count: toPrune.length })
+      Telemetry.track({
+        type: "tool_outputs_pruned",
+        timestamp: Date.now(),
+        session_id: input.sessionID,
+        count: toPrune.length,
+        tokens_pruned: pruned,
+      })
     }
   }
 
@@ -162,6 +217,15 @@ When constructing the summary, try to stick to this template:
 
 - [What important instructions did the user give you that are relevant]
 - [If there is a plan or spec, include information about it so next agent can continue using it]
+
+## Data Context
+
+- [What warehouse(s) or database(s) are we connected to?]
+- [What schemas, tables, or columns were discovered or are relevant?]
+- [What dbt models, sources, or tests are involved?]
+- [Any lineage findings (upstream/downstream dependencies)?]
+- [Any query patterns, anti-patterns, or optimization opportunities found?]
+- [Skip this section entirely if the task is not data-engineering related]
 
 ## Discoveries
 

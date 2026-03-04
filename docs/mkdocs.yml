@@ -91,6 +91,7 @@ nav:
       - Behavior:
           - Rules: configure/rules.md
           - Permissions: configure/permissions.md
+          - Context Management: configure/context-management.md
           - Formatters: configure/formatters.md
       - Appearance:
           - Themes: configure/themes.md

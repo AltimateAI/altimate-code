@@ -784,6 +784,272 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ])
   })
+
+  test("uses observation mask from metadata when compacted", () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "this should be cleared",
+              title: "Bash",
+              metadata: {
+                observation_mask:
+                  '[Tool output cleared — bash(cmd: "ls") returned 1 lines, 22 B]',
+              },
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const toolResult = result[2] as any
+    expect(toolResult.content[0].output.value).toBe(
+      '[Tool output cleared — bash(cmd: "ls") returned 1 lines, 22 B]',
+    )
+  })
+
+  test("falls back to old placeholder when compacted but no observation mask", () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "this should be cleared",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const toolResult = result[2] as any
+    expect(toolResult.content[0].output.value).toBe("[Old tool result content cleared]")
+  })
+
+  // ─── Observation mask edge cases ────────────────────────────────────
+
+  test("falls back to placeholder when observation_mask is a number (type safety)", () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "cleared",
+              title: "Bash",
+              metadata: { observation_mask: 42 }, // Non-string should fallback
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const toolResult = result[2] as any
+    expect(toolResult.content[0].output.value).toBe("[Old tool result content cleared]")
+  })
+
+  test("falls back to placeholder when observation_mask is an object (type safety)", () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "cleared",
+              title: "Bash",
+              metadata: { observation_mask: { nested: "object" } }, // Object should fallback
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const toolResult = result[2] as any
+    expect(toolResult.content[0].output.value).toBe("[Old tool result content cleared]")
+  })
+
+  test("falls back to placeholder when observation_mask is null", () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "cleared",
+              title: "Bash",
+              metadata: { observation_mask: null },
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const toolResult = result[2] as any
+    expect(toolResult.content[0].output.value).toBe("[Old tool result content cleared]")
+  })
+
+  test("uses empty string observation mask when present (edge case)", () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "cleared",
+              title: "Bash",
+              metadata: { observation_mask: "" }, // Empty string falls back to placeholder
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const toolResult = result[2] as any
+    // Empty string mask falls back to placeholder (avoids sending empty tool_result to model)
+    expect(toolResult.content[0].output.value).toBe("[Old tool result content cleared]")
+  })
+
+  test("non-compacted tool output is unaffected by observation_mask in metadata", () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "actual tool output",
+              title: "Bash",
+              metadata: { observation_mask: "this should be ignored" },
+              time: { start: 0, end: 1 }, // No compacted timestamp!
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = MessageV2.toModelMessages(input, model)
+    const toolResult = result[2] as any
+    // Should use the actual output, not the mask
+    expect(toolResult.content[0].output.value).toBe("actual tool output")
+  })
 })
 
 describe("session.message-v2.fromError", () => {

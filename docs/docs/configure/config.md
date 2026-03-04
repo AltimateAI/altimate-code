@@ -57,7 +57,7 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 | `skills` | `object` | Skill paths and URLs |
 | `plugin` | `string[]` | Plugin specifiers |
 | `instructions` | `string[]` | Glob patterns for instruction files |
-| `compaction` | `object` | Context compaction settings |
+| `compaction` | `object` | Context compaction settings (see [Context Management](context-management.md)) |
 | `experimental` | `object` | Experimental feature flags |
 
 ## Value Substitution
@@ -132,4 +132,4 @@ Control how context is managed when conversations grow long:
 | `reserved` | — | Token buffer to reserve |
 
 !!! info
-    Compaction automatically summarizes older messages to free up context window space, allowing longer conversations without losing important context.
+    Compaction automatically summarizes older messages to free up context window space, allowing longer conversations without losing important context. See [Context Management](context-management.md) for full details.

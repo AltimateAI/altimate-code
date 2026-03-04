@@ -295,6 +295,8 @@ export namespace SessionPrompt {
     let sessionTotalCost = 0
     let sessionTotalTokens = 0
     let toolCallCount = 0
+    let compactionAttempts = 0
+    const MAX_COMPACTION_ATTEMPTS = 3
     const session = await Session.get(sessionID)
     await Telemetry.init()
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
@@ -552,6 +554,24 @@ export namespace SessionPrompt {
         lastFinished.summary !== true &&
         (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
       ) {
+        compactionAttempts++
+        if (compactionAttempts > MAX_COMPACTION_ATTEMPTS) {
+          log.warn("compaction loop detected, stopping", { compactionAttempts, sessionID })
+          Bus.publish(Session.Event.Error, {
+            sessionID,
+            error: new NamedError.Unknown({
+              message: `Context still too large after ${MAX_COMPACTION_ATTEMPTS} compaction attempts. Try starting a new conversation.`,
+            }).toObject(),
+          })
+          break
+        }
+        Telemetry.track({
+          type: "compaction_triggered",
+          timestamp: Date.now(),
+          session_id: sessionID,
+          trigger: "overflow_detection",
+          attempt: compactionAttempts,
+        })
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -730,6 +750,24 @@ export namespace SessionPrompt {
 
       if (result === "stop") break
       if (result === "compact") {
+        compactionAttempts++
+        if (compactionAttempts > MAX_COMPACTION_ATTEMPTS) {
+          log.warn("compaction loop detected, stopping", { compactionAttempts, sessionID })
+          Bus.publish(Session.Event.Error, {
+            sessionID,
+            error: new NamedError.Unknown({
+              message: `Context still too large after ${MAX_COMPACTION_ATTEMPTS} compaction attempts. Try starting a new conversation.`,
+            }).toObject(),
+          })
+          break
+        }
+        Telemetry.track({
+          type: "compaction_triggered",
+          timestamp: Date.now(),
+          session_id: sessionID,
+          trigger: "error_recovery",
+          attempt: compactionAttempts,
+        })
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,

@@ -85,6 +85,28 @@ export namespace Telemetry {
         command_source: "command" | "mcp" | "skill" | "unknown"
         message_id: string
       }
+    | {
+        type: "context_overflow_recovered"
+        timestamp: number
+        session_id: string
+        model_id: string
+        provider_id: string
+        tokens_used: number
+      }
+    | {
+        type: "compaction_triggered"
+        timestamp: number
+        session_id: string
+        trigger: "overflow_detection" | "error_recovery" | "manual"
+        attempt: number
+      }
+    | {
+        type: "tool_outputs_pruned"
+        timestamp: number
+        session_id: string
+        count: number
+        tokens_pruned: number
+      }
 
   type Batch = {
     session_id: string
