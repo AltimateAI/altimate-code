@@ -98,6 +98,7 @@ import { SqlGuardFingerprintTool } from "./sqlguard-fingerprint"
 import { SqlGuardIntrospectionSqlTool } from "./sqlguard-introspection-sql"
 import { SqlGuardParseDbtTool } from "./sqlguard-parse-dbt"
 import { SqlGuardIsSafeTool } from "./sqlguard-is-safe"
+import { ProjectScanTool } from "./project-scan"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -262,6 +263,7 @@ export namespace ToolRegistry {
       SqlGuardIntrospectionSqlTool,
       SqlGuardParseDbtTool,
       SqlGuardIsSafeTool,
+      ProjectScanTool,
       ...custom,
     ]
   }
