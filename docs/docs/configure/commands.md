@@ -2,16 +2,17 @@
 
 ## Built-in Commands
 
-altimate-code ships with two built-in slash commands:
+altimate-code ships with three built-in slash commands:
 
 | Command | Description |
 |---------|-------------|
-| `/init` | Scan your data stack and set up warehouse connections. Detects dbt projects, warehouse connections from profiles/Docker/env vars, installed tools, and config files. Walks you through adding and testing new connections, then indexes schemas. |
+| `/init` | Create or update an AGENTS.md file with build commands and code style guidelines. |
+| `/discover` | Scan your data stack and set up warehouse connections. Detects dbt projects, warehouse connections from profiles/Docker/env vars, installed tools, and config files. Walks you through adding and testing new connections, then indexes schemas. |
 | `/review` | Review changes — accepts `commit`, `branch`, or `pr` as an argument (defaults to uncommitted changes). |
 
-### `/init`
+### `/discover`
 
-The recommended way to set up a new project. Run `/init` in the TUI and the agent will:
+The recommended way to set up a new data engineering project. Run `/discover` in the TUI and the agent will:
 
 1. Call `project_scan` to detect your full environment
 2. Present what was found (dbt project, connections, tools, config files)

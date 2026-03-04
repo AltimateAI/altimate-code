@@ -1,0 +1,55 @@
+You are setting up altimate-code for a data engineering project. Guide the user through environment detection and warehouse connection setup.
+
+Step 1 — Scan the environment:
+Call the `project_scan` tool to detect the full data engineering environment. Present the results clearly to the user.
+
+Step 2 — Review what was found:
+Summarize the scan results in a friendly way:
+- Git repository details
+- dbt project (name, profile, model/source/test counts)
+- Warehouse connections already configured
+- New connections discovered from dbt profiles, Docker containers, and environment variables
+- Schema cache status (which warehouses are indexed)
+- Installed data tools (dbt, sqlfluff, etc.)
+- Configuration files found
+
+Step 3 — Set up new connections:
+For each NEW warehouse connection discovered (not already configured):
+- Present the connection details and ask the user if they want to add it
+- If yes, call `warehouse_add` with the detected configuration
+- Then call `warehouse_test` to verify connectivity
+- Report whether the connection succeeded or failed
+- If it failed, offer to let the user correct the configuration
+
+Skip this step if there are no new connections to add.
+
+Step 4 — Index schemas:
+If any warehouses are connected but not yet indexed in the schema cache:
+- Ask the user if they want to index schemas now (explain this enables autocomplete, search, and context-aware analysis)
+- If yes, call `schema_index` for each selected warehouse
+- Report the number of schemas, tables, and columns indexed
+
+Skip this step if all connected warehouses are already indexed or if no warehouses are connected.
+
+Step 5 — Show next steps:
+Present a summary of what was set up, then suggest what the user can do next:
+
+**Available skills:**
+- `/cost-report` — Analyze warehouse spending and find optimization opportunities
+- `/dbt-docs` — Generate or improve dbt model documentation
+- `/generate-tests` — Auto-generate dbt tests for your models
+- `/sql-review` — Review SQL for correctness, performance, and best practices
+- `/migrate-sql` — Translate SQL between warehouse dialects
+
+**Agent modes to explore:**
+- `analyst` — Deep-dive into data quality, lineage, and schema questions
+- `builder` — Generate SQL, dbt models, and data pipelines
+- `validator` — Validate SQL correctness and catch issues before they hit production
+- `migrator` — Plan and execute warehouse migrations
+
+**Useful commands:**
+- `warehouse_list` — See all configured connections
+- `schema_search` — Find tables and columns across warehouses
+- `sql_execute` — Run queries against any connected warehouse
+
+$ARGUMENTS

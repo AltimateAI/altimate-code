@@ -12,13 +12,13 @@ npm install -g @altimateai/altimate-code
 altimate-code
 ```
 
-The TUI launches with an interactive terminal. On first run, use the `/init` command to auto-detect your data stack:
+The TUI launches with an interactive terminal. On first run, use the `/discover` command to auto-detect your data stack:
 
 ```
-/init
+/discover
 ```
 
-`/init` scans your environment and sets up everything automatically:
+`/discover` scans your environment and sets up everything automatically:
 
 1. **Detects your dbt project** — finds `dbt_project.yml`, parses the manifest, and reads profiles
 2. **Discovers warehouse connections** — from `~/.dbt/profiles.yml`, running Docker containers, and environment variables (e.g. `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABASE_URL`)

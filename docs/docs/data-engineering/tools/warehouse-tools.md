@@ -2,10 +2,10 @@
 
 ## project_scan
 
-Scan the entire data engineering environment in one call. Detects dbt projects, warehouse connections, Docker databases, installed tools, and configuration files. Used by the `/init` command.
+Scan the entire data engineering environment in one call. Detects dbt projects, warehouse connections, Docker databases, installed tools, and configuration files. Used by the `/discover` command.
 
 ```
-> /init
+> /discover
 
 # Environment Scan
 
