@@ -149,7 +149,7 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
     },
     {
       type: "postgres",
-      signals: ["PGHOST", "PGDATABASE", "DATABASE_URL"],
+      signals: ["PGHOST", "PGDATABASE"],
       configMap: {
         host: "PGHOST",
         port: "PGPORT",
@@ -187,13 +187,14 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
     const matchedSignal = wh.signals.find((s) => process.env[s])
     if (!matchedSignal) continue
 
+    const sensitiveKeys = new Set(["password", "access_token", "connection_string", "private_key_path"])
     const config: Record<string, string> = {}
     for (const [key, envNames] of Object.entries(wh.configMap)) {
       const names = Array.isArray(envNames) ? envNames : [envNames]
       for (const envName of names) {
         const val = process.env[envName]
         if (val) {
-          config[key] = val
+          config[key] = sensitiveKeys.has(key) ? "***" : val
           break
         }
       }
@@ -206,6 +207,32 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
       signal: matchedSignal,
       config,
     })
+  }
+
+  // DATABASE_URL can point to any database type — parse the scheme to categorize correctly
+  const databaseUrl = process.env["DATABASE_URL"]
+  if (databaseUrl && !connections.some((c) => c.signal === "DATABASE_URL")) {
+    const scheme = databaseUrl.split("://")[0]?.toLowerCase() ?? ""
+    const schemeTypeMap: Record<string, string> = {
+      postgresql: "postgres",
+      postgres: "postgres",
+      mysql: "mysql",
+      mysql2: "mysql",
+      redshift: "redshift",
+      sqlite: "sqlite",
+      sqlite3: "sqlite",
+    }
+    const dbType = schemeTypeMap[scheme] ?? "postgres"
+    // Only add if we don't already have this type detected from other env vars
+    if (!connections.some((c) => c.type === dbType)) {
+      connections.push({
+        name: `env_${dbType}`,
+        type: dbType,
+        source: "env-var",
+        signal: "DATABASE_URL",
+        config: { connection_string: "***" },
+      })
+    }
   }
 
   return connections
@@ -233,28 +260,27 @@ export function parseToolVersion(output: string): string | undefined {
 export async function detectDataTools(skip: boolean): Promise<DataToolInfo[]> {
   if (skip) return []
 
-  const results: DataToolInfo[] = []
-
-  for (const tool of DATA_TOOL_NAMES) {
-    try {
-      const result = Bun.spawnSync([tool, "--version"], {
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 5000,
-      })
-      if (result.exitCode === 0) {
-        results.push({
-          name: tool,
-          installed: true,
-          version: parseToolVersion(result.stdout.toString()),
+  const results = await Promise.all(
+    DATA_TOOL_NAMES.map(async (tool): Promise<DataToolInfo> => {
+      try {
+        const result = Bun.spawnSync([tool, "--version"], {
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 5000,
         })
-      } else {
-        results.push({ name: tool, installed: false })
+        if (result.exitCode === 0) {
+          return {
+            name: tool,
+            installed: true,
+            version: parseToolVersion(result.stdout.toString()),
+          }
+        }
+        return { name: tool, installed: false }
+      } catch {
+        return { name: tool, installed: false }
       }
-    } catch {
-      results.push({ name: tool, installed: false })
-    }
-  }
+    }),
+  )
 
   return results
 }

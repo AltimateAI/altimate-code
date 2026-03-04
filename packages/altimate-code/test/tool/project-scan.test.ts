@@ -380,7 +380,7 @@ describe("detectEnvVars", () => {
     expect(db).toBeDefined()
     expect(db!.signal).toBe("DATABRICKS_HOST")
     expect(db!.config.server_hostname).toBe("adb-1234.cloud.databricks.com")
-    expect(db!.config.access_token).toBe("dapi123456")
+    expect(db!.config.access_token).toBe("***")
     expect(db!.config.http_path).toBe("/sql/1.0/warehouses/abc")
   })
 
@@ -426,7 +426,7 @@ describe("detectEnvVars", () => {
     expect(pg!.config.user).toBe("pgadmin")
   })
 
-  test("detects Postgres via DATABASE_URL", async () => {
+  test("detects Postgres via DATABASE_URL scheme", async () => {
     clearWarehouseEnvVars()
     process.env.DATABASE_URL = "postgresql://user:pass@host:5432/db"
 
@@ -434,7 +434,28 @@ describe("detectEnvVars", () => {
     const pg = result.find((r) => r.type === "postgres")
     expect(pg).toBeDefined()
     expect(pg!.signal).toBe("DATABASE_URL")
-    expect(pg!.config.connection_string).toBe("postgresql://user:pass@host:5432/db")
+    expect(pg!.config.connection_string).toBe("***")
+  })
+
+  test("detects MySQL via DATABASE_URL with mysql scheme", async () => {
+    clearWarehouseEnvVars()
+    process.env.DATABASE_URL = "mysql://user:pass@host:3306/db"
+
+    const result = await detectEnvVars()
+    const my = result.find((r) => r.type === "mysql")
+    expect(my).toBeDefined()
+    expect(my!.signal).toBe("DATABASE_URL")
+  })
+
+  test("DATABASE_URL does not duplicate when type already detected", async () => {
+    clearWarehouseEnvVars()
+    process.env.PGHOST = "localhost"
+    process.env.DATABASE_URL = "postgresql://user:pass@host:5432/db"
+
+    const result = await detectEnvVars()
+    const pgConns = result.filter((r) => r.type === "postgres")
+    expect(pgConns.length).toBe(1)
+    expect(pgConns[0].signal).toBe("PGHOST")
   })
 
   test("detects MySQL via MYSQL_HOST", async () => {
