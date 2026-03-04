@@ -6,7 +6,6 @@ import { PermissionNext } from "../permission/next"
 import type { Agent } from "../agent/agent"
 import { Scheduler } from "../scheduler"
 import { Filesystem } from "../util/filesystem"
-import { Glob } from "../util/glob"
 
 export namespace Truncate {
   export const MAX_LINES = 2000
@@ -35,8 +34,9 @@ export namespace Truncate {
 
   export async function cleanup() {
     const cutoff = Identifier.timestamp(Identifier.create("tool", false, Date.now() - RETENTION_MS))
-    const entries = await Glob.scan("tool_*", { cwd: DIR, include: "file" }).catch(() => [] as string[])
+    const entries = await fs.readdir(DIR).catch(() => [] as string[])
     for (const entry of entries) {
+      if (!entry.startsWith("tool_")) continue
       if (Identifier.timestamp(entry) >= cutoff) continue
       await fs.unlink(path.join(DIR, entry)).catch(() => {})
     }
