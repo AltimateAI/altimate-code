@@ -43,7 +43,7 @@ ENV_VAR_SIGNALS: dict[str, dict] = {
         },
     },
     "postgres": {
-        "signals": ["PGHOST", "PGDATABASE", "DATABASE_URL"],
+        "signals": ["PGHOST", "PGDATABASE"],
         "config_map": {
             "host": "PGHOST",
             "port": "PGPORT",
@@ -76,8 +76,24 @@ ENV_VAR_SIGNALS: dict[str, dict] = {
 }
 
 
+SENSITIVE_KEYS = {"password", "access_token", "connection_string", "private_key_path"}
+
+DATABASE_URL_SCHEME_MAP: dict[str, str] = {
+    "postgresql": "postgres",
+    "postgres": "postgres",
+    "mysql": "mysql",
+    "mysql2": "mysql",
+    "redshift": "redshift",
+    "sqlite": "sqlite",
+    "sqlite3": "sqlite",
+}
+
+
 def detect_env_connections(env: dict[str, str] | None = None) -> list[dict]:
     """Detect warehouse connections from environment variables.
+
+    Mirrors the TypeScript detectEnvVars implementation. Sensitive values
+    (password, access_token, connection_string) are redacted with "***".
 
     Args:
         env: Environment dict to scan. Defaults to os.environ.
@@ -101,18 +117,18 @@ def detect_env_connections(env: dict[str, str] | None = None) -> list[dict]:
         if triggered_signal is None:
             continue
 
-        # Build config from env vars
+        # Build config from env vars, redacting sensitive fields
         config: dict[str, str] = {}
         for config_key, env_key in spec["config_map"].items():
             if isinstance(env_key, list):
                 # First match wins
                 for key in env_key:
                     if key in env and env[key]:
-                        config[config_key] = env[key]
+                        config[config_key] = "***" if config_key in SENSITIVE_KEYS else env[key]
                         break
             else:
                 if env_key in env and env[env_key]:
-                    config[config_key] = env[env_key]
+                    config[config_key] = "***" if config_key in SENSITIVE_KEYS else env[env_key]
 
         results.append({
             "name": f"env_{wh_type}",
@@ -121,6 +137,21 @@ def detect_env_connections(env: dict[str, str] | None = None) -> list[dict]:
             "signal": triggered_signal,
             "config": config,
         })
+
+    # DATABASE_URL scheme-based detection
+    database_url = env.get("DATABASE_URL", "")
+    if database_url and not any(r.get("signal") == "DATABASE_URL" for r in results):
+        scheme = database_url.split("://")[0].lower() if "://" in database_url else ""
+        db_type = DATABASE_URL_SCHEME_MAP.get(scheme, "postgres")
+        # Only add if this type wasn't already detected from other env vars
+        if not any(r["type"] == db_type for r in results):
+            results.append({
+                "name": f"env_{db_type}",
+                "type": db_type,
+                "source": "env-var",
+                "signal": "DATABASE_URL",
+                "config": {"connection_string": "***"},
+            })
 
     return results
 
@@ -151,6 +182,10 @@ class TestSnowflakeDetection:
         result = detect_env_connections(env)
         assert len(result) == 1
         assert len(result[0]["config"]) == 7
+        # Password should be redacted
+        assert result[0]["config"]["password"] == "***"
+        # Non-sensitive values should be present
+        assert result[0]["config"]["account"] == "org.region"
 
     def test_not_detected_without_account(self):
         env = {"SNOWFLAKE_USER": "admin", "SNOWFLAKE_PASSWORD": "pass"}
@@ -220,12 +255,27 @@ class TestPostgresDetection:
         assert len(pg) == 1
         assert pg[0]["config"]["host"] == "localhost"
 
-    def test_detected_with_database_url(self):
+    def test_detected_with_database_url_postgres_scheme(self):
         env = {"DATABASE_URL": "postgresql://user:pass@localhost:5432/mydb"}
         result = detect_env_connections(env)
         pg = [r for r in result if r["type"] == "postgres"]
         assert len(pg) == 1
-        assert pg[0]["config"]["connection_string"] == env["DATABASE_URL"]
+        assert pg[0]["signal"] == "DATABASE_URL"
+        assert pg[0]["config"]["connection_string"] == "***"
+
+    def test_database_url_mysql_scheme(self):
+        env = {"DATABASE_URL": "mysql://user:pass@localhost:3306/mydb"}
+        result = detect_env_connections(env)
+        my = [r for r in result if r["type"] == "mysql"]
+        assert len(my) == 1
+        assert my[0]["signal"] == "DATABASE_URL"
+
+    def test_database_url_does_not_duplicate(self):
+        env = {"PGHOST": "localhost", "DATABASE_URL": "postgresql://user:pass@host/db"}
+        result = detect_env_connections(env)
+        pg = [r for r in result if r["type"] == "postgres"]
+        assert len(pg) == 1
+        assert pg[0]["signal"] == "PGHOST"
 
     def test_detected_with_pgdatabase_only(self):
         env = {"PGDATABASE": "analytics"}
