@@ -1,5 +1,19 @@
 # Getting Started
 
+## Why altimate-code?
+
+Unlike general-purpose coding agents, altimate-code is built for data teams:
+
+| Capability | General coding agents | altimate-code |
+|---|---|---|
+| SQL anti-pattern detection | None | 19 rules with confidence scoring |
+| Column-level lineage | None | Automatic from SQL |
+| Schema-aware autocomplete | None | Indexes your warehouse metadata |
+| Cross-dialect translation | None | Snowflake, BigQuery, Databricks, Redshift |
+| FinOps analysis | None | Credit analysis, expensive queries, warehouse sizing |
+| PII detection | None | Automatic column scanning |
+| dbt integration | Basic file editing | Manifest parsing, test generation, model scaffolding |
+
 ## Installation
 
 ```bash

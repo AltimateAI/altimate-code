@@ -147,19 +147,19 @@
   border-color: rgba(255, 255, 255, 0.12);
 }
 
-/* --- Doc links table --- */
-.doc-links table {
-  font-size: 0.83rem;
+/* --- Doc links footer --- */
+.doc-links {
+  text-align: center;
+  font-size: 0.85rem;
+  line-height: 1.8;
 }
 
-.doc-links table th,
-.doc-links table td {
-  border: none;
-  padding: 0.35rem 0.75rem;
+.doc-links a {
+  text-decoration: none;
 }
 
-.doc-links table th {
-  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+.doc-links a:hover {
+  text-decoration: underline;
 }
 
 /* --- Dividers --- */

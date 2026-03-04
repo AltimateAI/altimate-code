@@ -153,11 +153,8 @@ npm install -g @altimateai/altimate-code
 
 <div class="doc-links" markdown>
 
-| | |
-|---|---|
-| **Documentation** | **Develop & Extend** |
-| [Getting Started](getting-started.md) — Install, configure, connect | [SDK](develop/sdk.md) — Build integrations |
-| [Data Engineering](data-engineering/agent-modes.md) — Agent modes, tools, guides | [Plugins](develop/plugins.md) — Custom tools |
-| [Configuration](configure/config.md) — Providers, agents, themes | [Server API](develop/server.md) — Headless mode |
+**Documentation** — [Getting Started](getting-started.md) | [Data Engineering](data-engineering/agent-modes.md) | [Configuration](configure/config.md)
+
+**Develop & Extend** — [SDK](develop/sdk.md) | [Plugins](develop/plugins.md) | [Server API](develop/server.md)
 
 </div>
