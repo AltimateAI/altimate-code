@@ -1,6 +1,6 @@
 # Tools Reference
 
-altimate-code has 55+ specialized tools organized by function.
+altimate has 55+ specialized tools organized by function.
 
 | Category | Tools | Purpose |
 |---|---|---|

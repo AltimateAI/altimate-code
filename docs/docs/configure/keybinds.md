@@ -1,6 +1,6 @@
 # Keybinds
 
-altimate-code supports 85+ customizable keybindings for the TUI.
+altimate supports 85+ customizable keybindings for the TUI.
 
 ## Leader Key
 

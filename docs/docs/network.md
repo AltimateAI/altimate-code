@@ -8,7 +8,7 @@ Set the `HTTPS_PROXY` environment variable:
 
 ```bash
 export HTTPS_PROXY=http://proxy.example.com:8080
-altimate-code
+altimate
 ```
 
 Also supports `HTTP_PROXY` and `NO_PROXY`:
@@ -24,14 +24,14 @@ For environments with custom certificate authorities:
 
 ```bash
 export NODE_EXTRA_CA_CERTS=/path/to/ca-bundle.crt
-altimate-code
+altimate
 ```
 
 This is common in corporate environments with TLS inspection.
 
 ## Firewall Requirements
 
-altimate-code needs outbound HTTPS access to:
+altimate needs outbound HTTPS access to:
 
 | Destination | Purpose |
 |-------------|---------|

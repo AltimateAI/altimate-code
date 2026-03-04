@@ -3,6 +3,7 @@ import { Project } from "../../src/project/project"
 import { Log } from "../../src/util/log"
 import { $ } from "bun"
 import path from "path"
+import fs from "fs/promises"
 import { tmpdir } from "../fixture/fixture"
 import { Filesystem } from "../../src/util/filesystem"
 import { GlobalBus } from "../../src/bus/global"
@@ -78,7 +79,7 @@ describe("Project.fromDirectory", () => {
     expect(project.vcs).toBe("git")
     expect(project.worktree).toBe(tmp.path)
 
-    const opencodeFile = path.join(tmp.path, ".git", "altimate-code")
+    const opencodeFile = path.join(tmp.path, ".git", "altimate")
     const fileExists = await Filesystem.exists(opencodeFile)
     expect(fileExists).toBe(false)
   })
@@ -94,9 +95,30 @@ describe("Project.fromDirectory", () => {
     expect(project.vcs).toBe("git")
     expect(project.worktree).toBe(tmp.path)
 
-    const opencodeFile = path.join(tmp.path, ".git", "altimate-code")
+    const opencodeFile = path.join(tmp.path, ".git", "altimate")
     const fileExists = await Filesystem.exists(opencodeFile)
     expect(fileExists).toBe(true)
+  })
+
+  test("should read project id from legacy .git/altimate-code file (backward compat)", async () => {
+    const p = await loadProject()
+    await using tmp = await tmpdir({ git: true })
+
+    // First call creates .git/altimate with the project id
+    const { project: first } = await p.fromDirectory(tmp.path)
+    expect(first.id).not.toBe("global")
+
+    const newFile = path.join(tmp.path, ".git", "altimate")
+    const legacyFile = path.join(tmp.path, ".git", "altimate-code")
+
+    // Move the new file to the legacy location to simulate an old installation
+    const id = await Filesystem.readText(newFile)
+    await fs.unlink(newFile)
+    await fs.writeFile(legacyFile, id)
+
+    // Should still resolve the same project id from the legacy file
+    const { project: second } = await p.fromDirectory(tmp.path)
+    expect(second.id).toBe(first.id)
   })
 
   test("keeps git vcs when rev-list exits non-zero with empty output", async () => {

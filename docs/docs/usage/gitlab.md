@@ -1,6 +1,6 @@
 # GitLab
 
-altimate-code integrates with GitLab CI for automated merge request review.
+altimate integrates with GitLab CI for automated merge request review.
 
 !!! warning "Work in Progress"
     GitLab integration is under active development. Some features may be incomplete.
@@ -11,12 +11,12 @@ altimate-code integrates with GitLab CI for automated merge request review.
 
 ```yaml
 # .gitlab-ci.yml
-altimate-code-review:
+altimate-review:
   image: node:22
   stage: review
   script:
     - npm install -g @altimateai/altimate-code
-    - altimate-code github  # Uses GitHub-compatible interface
+    - altimate github  # Uses GitHub-compatible interface
   variables:
     ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
   rules:

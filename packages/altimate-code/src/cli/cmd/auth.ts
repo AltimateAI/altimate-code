@@ -251,7 +251,7 @@ export const AuthLoginCommand = cmd({
   describe: "log in to a provider",
   builder: (yargs) =>
     yargs.positional("url", {
-      describe: "altimate-code auth provider",
+      describe: "altimate auth provider",
       type: "string",
     }),
   async handler(args) {

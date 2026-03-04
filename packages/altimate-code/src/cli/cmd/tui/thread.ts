@@ -45,12 +45,12 @@ function createEventSource(client: RpcClient): EventSource {
 
 export const TuiThreadCommand = cmd({
   command: "$0 [project]",
-  describe: "start altimate-code tui",
+  describe: "start altimate tui",
   builder: (yargs) =>
     withNetworkOptions(yargs)
       .positional("project", {
         type: "string",
-        describe: "path to start altimate-code in",
+        describe: "path to start altimate in",
       })
       .option("model", {
         type: "string",

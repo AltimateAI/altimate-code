@@ -180,8 +180,8 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/altimate-code`,
-      execArgv: [`--user-agent=altimate-code/${Script.version}`, "--use-system-ca", "--"],
+      outfile: `dist/${name}/bin/altimate`,
+      execArgv: [`--user-agent=altimate/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
     entrypoints: ["./src/index.ts", parserWorker, workerPath],
@@ -194,6 +194,13 @@ for (const item of targets) {
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
     },
   })
+
+  // Create backward-compatible altimate-code alias
+  if (item.os === "win32") {
+    await $`cp dist/${name}/bin/altimate.exe dist/${name}/bin/altimate-code.exe`.nothrow()
+  } else {
+    await $`ln -sf altimate dist/${name}/bin/altimate-code`.nothrow()
+  }
 
   await $`rm -rf ./dist/${name}/bin/tui`
   await Bun.file(`dist/${name}/package.json`).write(

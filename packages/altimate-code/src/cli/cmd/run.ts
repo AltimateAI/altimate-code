@@ -247,7 +247,7 @@ function normalizePath(input?: string) {
 
 export const RunCommand = cmd({
   command: "run [message..]",
-  describe: "run altimate-code with a message",
+  describe: "run altimate with a message",
   builder: (yargs: Argv) => {
     return yargs
       .positional("message", {
@@ -305,7 +305,7 @@ export const RunCommand = cmd({
       })
       .option("attach", {
         type: "string",
-        describe: "attach to a running altimate-code server (e.g., http://localhost:4096)",
+        describe: "attach to a running altimate server (e.g., http://localhost:4096)",
       })
       .option("dir", {
         type: "string",

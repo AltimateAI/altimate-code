@@ -12,7 +12,7 @@ export function FormatError(input: unknown) {
     return [
       `Model not found: ${providerID}/${modelID}`,
       ...(Array.isArray(suggestions) && suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
-      `Try: \`altimate-code models\` to list available models`,
+      `Try: \`altimate models\` to list available models`,
       `Or check your config (altimate-code.json) provider/model names`,
     ].join("\n")
   }

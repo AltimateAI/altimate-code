@@ -1,10 +1,10 @@
 # Formatters
 
-altimate-code auto-formats files after editing using language-specific formatters.
+altimate auto-formats files after editing using language-specific formatters.
 
 ## How It Works
 
-When a file is modified by an agent, altimate-code:
+When a file is modified by an agent, altimate:
 
 1. Detects the file extension
 2. Finds a matching formatter

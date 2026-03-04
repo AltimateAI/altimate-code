@@ -2,7 +2,7 @@
 
 ## Built-in Commands
 
-altimate-code ships with three built-in slash commands:
+altimate ships with three built-in slash commands:
 
 | Command | Description |
 |---------|-------------|

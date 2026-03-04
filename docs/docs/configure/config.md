@@ -1,6 +1,6 @@
 # Configuration
 
-altimate-code uses JSON (or JSONC) configuration files. The config file is named `altimate-code.json` or `altimate-code.jsonc`.
+altimate uses JSON (or JSONC) configuration files. The config file is named `altimate-code.json` or `altimate-code.jsonc`.
 
 ## Config File Locations
 

@@ -1,13 +1,13 @@
 # Agent Modes
 
-altimate-code runs in one of four specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
+altimate runs in one of four specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
 
 ## Builder
 
 **Full read/write access. For creating and modifying data pipelines.**
 
 ```bash
-altimate-code --agent builder
+altimate --agent builder
 ```
 
 Builder mode follows a strict pre-execution protocol for every SQL operation:
@@ -72,7 +72,7 @@ I'll create a staging model with proper typing, deduplication, and column naming
 **Read-only access. Safe for production environments.**
 
 ```bash
-altimate-code --agent analyst
+altimate --agent analyst
 ```
 
 Analyst mode enforces strict guardrails:
@@ -131,7 +131,7 @@ Estimated savings: ~60 credits/week (71% reduction on this query alone)
 **Read + validate. For data quality and integrity checks.**
 
 ```bash
-altimate-code --agent validator
+altimate --agent validator
 ```
 
 ### Example: Audit a model before merging
@@ -167,7 +167,7 @@ Issues found:
 **Cross-warehouse migration specialist.**
 
 ```bash
-altimate-code --agent migrator
+altimate --agent migrator
 ```
 
 ### Example: Migrate from Snowflake to BigQuery

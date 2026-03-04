@@ -152,6 +152,6 @@ Rpc.listen(rpc)
 function getAuthorizationHeader(): string | undefined {
   const password = Flag.ALTIMATE_CLI_SERVER_PASSWORD
   if (!password) return undefined
-  const username = Flag.ALTIMATE_CLI_SERVER_USERNAME ?? "altimate-code"
+  const username = Flag.ALTIMATE_CLI_SERVER_USERNAME ?? "altimate"
   return `Basic ${btoa(`${username}:${password}`)}`
 }

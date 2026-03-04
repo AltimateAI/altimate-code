@@ -5,7 +5,7 @@ import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 
 export const AttachCommand = cmd({
   command: "attach <url>",
-  describe: "attach to a running altimate-code server",
+  describe: "attach to a running altimate server",
   builder: (yargs) =>
     yargs
       .positional("url", {
@@ -60,7 +60,7 @@ export const AttachCommand = cmd({
       const headers = (() => {
         const password = args.password ?? process.env.ALTIMATE_CLI_SERVER_PASSWORD
         if (!password) return undefined
-        const auth = `Basic ${Buffer.from(`altimate-code:${password}`).toString("base64")}`
+        const auth = `Basic ${Buffer.from(`altimate:${password}`).toString("base64")}`
         return { Authorization: auth }
       })()
       await tui({

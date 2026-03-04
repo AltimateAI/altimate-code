@@ -1,5 +1,5 @@
 ---
-title: altimate-code
+title: altimate
 hide:
   - toc
 ---

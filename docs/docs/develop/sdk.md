@@ -1,6 +1,6 @@
 # SDK
 
-The altimate-code SDK (`@altimateai/altimate-code-sdk`) provides a TypeScript client for programmatic access to altimate-code functionality.
+The altimate SDK (`@altimateai/altimate-code-sdk`) provides a TypeScript client for programmatic access to altimate functionality.
 
 ## Installation
 

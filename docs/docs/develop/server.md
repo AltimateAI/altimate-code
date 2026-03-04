@@ -1,17 +1,17 @@
 # Server
 
-altimate-code includes an HTTP API server for remote access and integrations.
+altimate includes an HTTP API server for remote access and integrations.
 
 ## Starting the Server
 
 ```bash
-altimate-code serve
+altimate serve
 ```
 
 Or use the web UI (which includes the API):
 
 ```bash
-altimate-code web
+altimate web
 ```
 
 ## Configuration
@@ -35,7 +35,7 @@ Set credentials via environment variables:
 ```bash
 export ALTIMATE_CLI_SERVER_USERNAME=admin
 export ALTIMATE_CLI_SERVER_PASSWORD=secret
-altimate-code serve
+altimate serve
 ```
 
 The server uses HTTP Basic Authentication when credentials are set.
@@ -55,7 +55,7 @@ Use the [SDK](sdk.md) for a typed client, or call the API directly.
 
 ## mDNS Discovery
 
-Enable mDNS to discover altimate-code servers on your local network:
+Enable mDNS to discover altimate servers on your local network:
 
 ```json
 {

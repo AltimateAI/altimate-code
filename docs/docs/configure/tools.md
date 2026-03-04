@@ -1,6 +1,6 @@
 # Tools
 
-altimate-code includes built-in tools that agents use to interact with your codebase and environment.
+altimate includes built-in tools that agents use to interact with your codebase and environment.
 
 ## Built-in Tools
 
@@ -24,7 +24,7 @@ altimate-code includes built-in tools that agents use to interact with your code
 
 ## Data Engineering Tools
 
-In addition to built-in tools, altimate-code provides 55+ specialized data engineering tools. See the [Data Engineering Tools](../data-engineering/tools/index.md) section for details.
+In addition to built-in tools, altimate provides 55+ specialized data engineering tools. See the [Data Engineering Tools](../data-engineering/tools/index.md) section for details.
 
 ## Tool Permissions
 

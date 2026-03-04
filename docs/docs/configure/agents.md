@@ -116,5 +116,5 @@ Each agent can have its own permission overrides that restrict or expand the def
 ## Switching Agents
 
 - **TUI**: Press leader + `a` or use `/agent <name>`
-- **CLI**: `altimate-code --agent analyst`
+- **CLI**: `altimate --agent analyst`
 - **In conversation**: Type `/agent validator`

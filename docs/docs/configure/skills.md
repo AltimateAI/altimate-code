@@ -66,7 +66,7 @@ Skills are loaded from these locations (in priority order):
 
 ## Built-in Data Engineering Skills
 
-altimate-code includes skills for common data engineering tasks:
+altimate includes skills for common data engineering tasks:
 
 - SQL analysis and optimization
 - dbt model generation

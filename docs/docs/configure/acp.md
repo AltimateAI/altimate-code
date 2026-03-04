@@ -1,14 +1,14 @@
 # ACP Support
 
-altimate-code implements the Agent Communication Protocol (ACP), allowing it to act as a backend for editors and IDEs.
+altimate implements the Agent Communication Protocol (ACP), allowing it to act as a backend for editors and IDEs.
 
 ## Usage
 
 ```bash
-altimate-code acp
+altimate acp
 ```
 
-This starts altimate-code in ACP mode, ready to accept connections from compatible editors.
+This starts altimate in ACP mode, ready to accept connections from compatible editors.
 
 ## Editor Configuration
 
@@ -19,8 +19,8 @@ Add to your Zed settings:
 ```json
 {
   "language_models": {
-    "altimate-code": {
-      "command": ["altimate-code", "acp"]
+    "altimate": {
+      "command": ["altimate", "acp"]
     }
   }
 }
@@ -28,15 +28,15 @@ Add to your Zed settings:
 
 ### JetBrains IDEs
 
-Configure altimate-code as an external AI provider in your JetBrains IDE settings.
+Configure altimate as an external AI provider in your JetBrains IDE settings.
 
 ### Neovim
 
-Use an ACP-compatible Neovim plugin to connect to altimate-code:
+Use an ACP-compatible Neovim plugin to connect to altimate:
 
 ```lua
 require("acp").setup({
-  command = { "altimate-code", "acp" }
+  command = { "altimate", "acp" }
 })
 ```
 

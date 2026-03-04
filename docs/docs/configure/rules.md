@@ -4,7 +4,7 @@ Rules are instructions that guide agent behavior. They are loaded automatically 
 
 ## Instruction Files
 
-altimate-code looks for instruction files in these locations:
+altimate looks for instruction files in these locations:
 
 - `AGENTS.md` — Primary instruction file (searched up directory tree)
 - `CLAUDE.md` — Fallback instruction file

@@ -1,6 +1,6 @@
 # MCP Servers
 
-altimate-code supports the Model Context Protocol (MCP) for connecting to external tool servers.
+altimate supports the Model Context Protocol (MCP) for connecting to external tool servers.
 
 ## Local MCP Servers
 
@@ -79,10 +79,10 @@ For remote servers requiring OAuth:
 
 ```bash
 # List configured MCP servers
-altimate-code mcp
+altimate mcp
 
 # Test a server connection
-altimate-code mcp test my-tools
+altimate mcp test my-tools
 ```
 
 ## Experimental Settings

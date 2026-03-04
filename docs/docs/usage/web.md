@@ -1,9 +1,9 @@
 # Web
 
-altimate-code includes a web-based interface for browser access.
+altimate includes a web-based interface for browser access.
 
 ```bash
-altimate-code web
+altimate web
 ```
 
 ## Configuration
@@ -37,7 +37,7 @@ Set basic auth credentials:
 ```bash
 export ALTIMATE_CLI_SERVER_USERNAME=admin
 export ALTIMATE_CLI_SERVER_PASSWORD=secret
-altimate-code web
+altimate web
 ```
 
 ## Features

@@ -102,5 +102,5 @@ Set permissions via environment variable:
 
 ```bash
 export ALTIMATE_CLI_PERMISSION='{"bash":"deny","write":"deny"}'
-altimate-code
+altimate
 ```

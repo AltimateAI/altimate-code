@@ -5,7 +5,7 @@ import { $ } from "bun"
 
 export const PrCommand = cmd({
   command: "pr <number>",
-  describe: "fetch and checkout a GitHub PR branch, then run altimate-code",
+  describe: "fetch and checkout a GitHub PR branch, then run altimate",
   builder: (yargs) =>
     yargs.positional("number", {
       type: "number",
@@ -71,7 +71,7 @@ export const PrCommand = cmd({
                 UI.println(`Found altimate-code session: ${sessionUrl}`)
                 UI.println(`Importing session...`)
 
-                const importResult = await $`altimate-code import ${sessionUrl}`.nothrow()
+                const importResult = await $`altimate import ${sessionUrl}`.nothrow()
                 if (importResult.exitCode === 0) {
                   const importOutput = importResult.text().trim()
                   // Extract session ID from the output (format: "Imported session: <session-id>")
@@ -88,13 +88,13 @@ export const PrCommand = cmd({
 
         UI.println(`Successfully checked out PR #${prNumber} as branch '${localBranchName}'`)
         UI.println()
-        UI.println("Starting altimate-code...")
+        UI.println("Starting altimate...")
         UI.println()
 
-        // Launch altimate-code TUI with session ID if available
+        // Launch altimate TUI with session ID if available
         const { spawn } = await import("child_process")
         const altimateCodeArgs = sessionId ? ["-s", sessionId] : []
-        const altimateCodeProcess = spawn("altimate-code", altimateCodeArgs, {
+        const altimateCodeProcess = spawn("altimate", altimateCodeArgs, {
           stdio: "inherit",
           cwd: process.cwd(),
         })
@@ -102,7 +102,7 @@ export const PrCommand = cmd({
         await new Promise<void>((resolve, reject) => {
           altimateCodeProcess.on("exit", (code) => {
             if (code === 0) resolve()
-            else reject(new Error(`altimate-code exited with code ${code}`))
+            else reject(new Error(`altimate exited with code ${code}`))
           })
           altimateCodeProcess.on("error", reject)
         })

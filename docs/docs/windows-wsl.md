@@ -1,6 +1,6 @@
 # Windows / WSL
 
-altimate-code is supported on Windows through WSL (Windows Subsystem for Linux).
+altimate is supported on Windows through WSL (Windows Subsystem for Linux).
 
 ## WSL Setup
 
@@ -15,14 +15,14 @@ altimate-code is supported on Windows through WSL (Windows Subsystem for Linux).
    sudo apt-get install -y nodejs
    ```
 
-3. Install altimate-code:
+3. Install altimate:
    ```bash
    npm install -g @altimateai/altimate-code
    ```
 
 4. Launch:
    ```bash
-   altimate-code
+   altimate
    ```
 
 ## Git Bash Path

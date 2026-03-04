@@ -85,7 +85,7 @@ export const McpListCommand = cmd({
 
         if (servers.length === 0) {
           prompts.log.warn("No MCP servers configured")
-          prompts.outro("Add servers with: altimate-code mcp add")
+          prompts.outro("Add servers with: altimate mcp add")
           return
         }
 
@@ -481,7 +481,7 @@ export const McpAddCommand = cmd({
         if (type === "local") {
           const command = await prompts.text({
             message: "Enter command to run",
-            placeholder: "e.g., altimate-code x @modelcontextprotocol/server-filesystem",
+            placeholder: "e.g., altimate x @modelcontextprotocol/server-filesystem",
             validate: (x) => (x && x.length > 0 ? undefined : "Required"),
           })
           if (prompts.isCancel(command)) throw new UI.CancelledError()

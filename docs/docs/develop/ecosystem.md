@@ -1,6 +1,6 @@
 # Ecosystem
 
-altimate-code has a growing ecosystem of plugins, tools, and integrations.
+altimate has a growing ecosystem of plugins, tools, and integrations.
 
 ## Official Packages
 

@@ -47,7 +47,7 @@ process.on("uncaughtException", (e) => {
 
 const cli = yargs(hideBin(process.argv))
   .parserConfiguration({ "populate--": true })
-  .scriptName("altimate-code")
+  .scriptName("altimate")
   .wrap(100)
   .help("help", "show help")
   .alias("help", "h")

@@ -1,6 +1,6 @@
 # Cost Optimization Guide
 
-altimate-code is your cost advocate. Here's how to use it to cut warehouse spend.
+altimate is your cost advocate. Here's how to use it to cut warehouse spend.
 
 ## Step 1: Find where money is going
 

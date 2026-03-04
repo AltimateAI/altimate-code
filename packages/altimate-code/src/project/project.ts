@@ -100,9 +100,13 @@ export namespace Project {
         const gitBinary = Bun.which("git")
 
         // cached id calculation
-        let id = await Filesystem.readText(path.join(dotgit, "altimate-code"))
+        let id = await Filesystem.readText(path.join(dotgit, "altimate"))
           .then((x) => x.trim())
-          .catch(() => undefined)
+          .catch(() =>
+            Filesystem.readText(path.join(dotgit, "altimate-code"))
+              .then((x) => x.trim())
+              .catch(() => undefined),
+          )
 
         if (!gitBinary) {
           return {
@@ -138,7 +142,7 @@ export namespace Project {
 
           id = roots[0]
           if (id) {
-            void Filesystem.write(path.join(dotgit, "altimate-code"), id).catch(() => undefined)
+            void Filesystem.write(path.join(dotgit, "altimate"), id).catch(() => undefined)
           }
         }
 

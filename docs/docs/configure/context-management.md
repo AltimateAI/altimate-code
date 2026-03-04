@@ -1,10 +1,10 @@
 # Context Management
 
-altimate-code automatically manages conversation context so you can work through long sessions without hitting model limits. When a conversation grows large, the CLI summarizes older messages, prunes stale tool outputs, and recovers from provider overflow errors — all without losing the important details of your work.
+altimate automatically manages conversation context so you can work through long sessions without hitting model limits. When a conversation grows large, the CLI summarizes older messages, prunes stale tool outputs, and recovers from provider overflow errors — all without losing the important details of your work.
 
 ## How It Works
 
-Every LLM has a finite context window. As you work, each message, tool call, and tool result adds tokens to the conversation. When the conversation approaches the model's limit, altimate-code takes action:
+Every LLM has a finite context window. As you work, each message, tool call, and tool result adds tokens to the conversation. When the conversation approaches the model's limit, altimate takes action:
 
 1. **Prune** — Old tool outputs (file reads, command results, query results) are replaced with compact summaries
 2. **Compact** — The entire conversation history is summarized into a continuation prompt
@@ -14,7 +14,7 @@ This happens automatically by default. You do not need to manually manage contex
 
 ## Auto-Compaction
 
-When enabled (the default), altimate-code monitors token usage after each model response. If the conversation is approaching the context limit, it triggers compaction automatically.
+When enabled (the default), altimate monitors token usage after each model response. If the conversation is approaching the context limit, it triggers compaction automatically.
 
 During compaction:
 
@@ -30,7 +30,7 @@ You will see a compaction indicator in the TUI when this happens. The conversati
 
 ## Observation Masking (Pruning)
 
-Before compaction, altimate-code prunes old tool outputs to reclaim context space. This is called "observation masking."
+Before compaction, altimate prunes old tool outputs to reclaim context space. This is called "observation masking."
 
 When a tool output is pruned, it is replaced with a brief fingerprint:
 
@@ -62,7 +62,7 @@ This means you can run a long data exploration session and compaction will not l
 
 ## Provider Overflow Detection
 
-If compaction does not trigger in time and the model returns a context overflow error, altimate-code detects it and automatically compacts the conversation.
+If compaction does not trigger in time and the model returns a context overflow error, altimate detects it and automatically compacts the conversation.
 
 Overflow detection works with all major providers:
 
@@ -83,7 +83,7 @@ When an overflow is detected, the CLI automatically compacts and retries. No act
 
 ### Loop Protection
 
-If compaction fails to reduce context sufficiently and overflow keeps recurring, altimate-code stops after 3 consecutive compaction attempts within the same turn. You will see a message asking you to start a new conversation. The counter resets after each successful processing step, so compactions spread across different turns do not count against the limit.
+If compaction fails to reduce context sufficiently and overflow keeps recurring, altimate stops after 3 consecutive compaction attempts within the same turn. You will see a message asking you to start a new conversation. The counter resets after each successful processing step, so compactions spread across different turns do not count against the limit.
 
 !!! note
     Some providers (such as z.ai) may accept oversized inputs silently. For these, the automatic token-based compaction trigger is the primary safeguard.
@@ -129,7 +129,7 @@ You can trigger compaction at any time from the TUI by pressing `leader` + `c`, 
 
 ## Token Estimation
 
-altimate-code uses content-aware heuristics to estimate token counts without calling a tokenizer. This keeps overhead low while maintaining accuracy.
+altimate uses content-aware heuristics to estimate token counts without calling a tokenizer. This keeps overhead low while maintaining accuracy.
 
 The estimator detects content type and adjusts its ratio:
 

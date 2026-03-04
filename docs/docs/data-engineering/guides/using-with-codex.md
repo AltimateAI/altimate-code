@@ -1,13 +1,13 @@
-# Using altimate-code with Codex (ChatGPT Subscription)
+# Using altimate with Codex (ChatGPT Subscription)
 
-If you have a ChatGPT Plus or Pro subscription, you can use Codex as your LLM backend in altimate-code at no additional API cost. Your subscription covers all usage.
+If you have a ChatGPT Plus or Pro subscription, you can use Codex as your LLM backend in altimate at no additional API cost. Your subscription covers all usage.
 
 ## Setup
 
-### 1. Launch altimate-code
+### 1. Launch altimate
 
 ```bash
-altimate-code
+altimate
 ```
 
 ### 2. Run /connect
@@ -16,7 +16,7 @@ In the TUI, type `/connect` and select **Codex** as your provider.
 
 ### 3. Authenticate
 
-A browser window opens for OAuth authentication with your ChatGPT account. Sign in and authorize altimate-code.
+A browser window opens for OAuth authentication with your ChatGPT account. Sign in and authorize altimate.
 
 For headless environments (SSH, containers), a device code flow is available:
 
@@ -27,7 +27,7 @@ Enter code: ABCD-1234
 
 ### 4. Start using
 
-Once authenticated, all altimate-code tools work with Codex as the LLM backend. No API keys needed.
+Once authenticated, all altimate tools work with Codex as the LLM backend. No API keys needed.
 
 ## Available models
 
@@ -40,7 +40,7 @@ Once authenticated, all altimate-code tools work with Codex as the LLM backend. 
 
 ## How it works
 
-- altimate-code authenticates via PKCE OAuth flow with ChatGPT
+- altimate authenticates via PKCE OAuth flow with ChatGPT
 - Requests route through `chatgpt.com/backend-api/codex/responses`
 - Your subscription covers all token usage — no per-token billing
 - Token is stored locally at `~/.altimate/data/auth.json`
@@ -50,7 +50,7 @@ Once authenticated, all altimate-code tools work with Codex as the LLM backend. 
 With Codex subscription:
 - **LLM cost**: $0 (covered by subscription)
 - **Warehouse cost**: Normal warehouse credits apply for SQL execution
-- altimate-code helps minimize warehouse costs through cost prediction and optimization
+- altimate helps minimize warehouse costs through cost prediction and optimization
 
 ## Comparison with API keys
 

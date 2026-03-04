@@ -13,6 +13,7 @@
     "db": "bun drizzle-kit"
   },
   "bin": {
+    "altimate": "./bin/altimate",
     "altimate-code": "./bin/altimate-code"
   },
   "exports": {

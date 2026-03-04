@@ -1,6 +1,6 @@
 # LSP Servers
 
-altimate-code integrates with Language Server Protocol (LSP) servers for diagnostics, completions, and code intelligence.
+altimate integrates with Language Server Protocol (LSP) servers for diagnostics, completions, and code intelligence.
 
 ## Built-in Servers
 

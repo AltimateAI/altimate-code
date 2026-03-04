@@ -83,7 +83,7 @@ export namespace Server {
           if (c.req.method === "OPTIONS") return next()
           const password = Flag.ALTIMATE_CLI_SERVER_PASSWORD
           if (!password) return next()
-          const username = Flag.ALTIMATE_CLI_SERVER_USERNAME ?? "altimate-code"
+          const username = Flag.ALTIMATE_CLI_SERVER_USERNAME ?? "altimate"
           return basicAuth({ username, password })(c, next)
         })
         .use(async (c, next) => {
@@ -215,9 +215,9 @@ export namespace Server {
           openAPIRouteHandler(app, {
             documentation: {
               info: {
-                title: "altimate-code",
+                title: "altimate",
                 version: "0.0.3",
-                description: "altimate-code api",
+                description: "altimate api",
               },
               openapi: "3.1.1",
             },
@@ -563,9 +563,9 @@ export namespace Server {
     const result = await generateSpecs(App() as Hono, {
       documentation: {
         info: {
-          title: "altimate-code",
+          title: "altimate",
           version: "1.0.0",
-          description: "altimate-code api",
+          description: "altimate api",
         },
         openapi: "3.1.1",
       },

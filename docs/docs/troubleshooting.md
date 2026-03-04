@@ -11,7 +11,7 @@ Logs are stored at:
 Enable verbose logging:
 
 ```bash
-altimate-code --print-logs --log-level DEBUG
+altimate --print-logs --log-level DEBUG
 ```
 
 ## Common Issues
@@ -56,7 +56,7 @@ altimate-code --print-logs --log-level DEBUG
 
 **Solutions:**
 
-1. Test your warehouse credentials outside altimate-code
+1. Test your warehouse credentials outside altimate
 2. Check that the warehouse hostname and port are reachable
 3. Verify the role/user has the required permissions
 4. For Snowflake: ensure the warehouse is not suspended
@@ -114,7 +114,7 @@ Or manually compact in the TUI: leader + `Shift+C`.
 Run with full debug output:
 
 ```bash
-altimate-code --print-logs --log-level DEBUG 2>debug.log
+altimate --print-logs --log-level DEBUG 2>debug.log
 ```
 
 Then share `debug.log` when reporting issues.

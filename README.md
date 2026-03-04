@@ -2,7 +2,7 @@
 
 <img src="docs/docs/assets/images/altimate-code-banner.png" alt="altimate-code" width="600" />
 
-# altimate-code
+# altimate
 
 **The data engineering agent for dbt, SQL, and cloud warehouses.**
 
@@ -20,15 +20,15 @@ understands your data, and helps you ship faster.
 
 ---
 
-## Why altimate-code?
+## Why altimate?
 
 General-purpose coding agents can write SQL, but they don't *understand* it. They can't trace lineage, detect anti-patterns, check PII exposure, or optimize warehouse costs — because they don't have the tools.
 
-altimate-code is a fork of [OpenCode](https://github.com/anomalyco/opencode) rebuilt for data teams. It gives any LLM access to 55+ specialized data engineering tools, 11 purpose-built skills, and direct warehouse connectivity — so the AI works with your actual schemas, not guesses.
+altimate is a fork of [OpenCode](https://github.com/anomalyco/opencode) rebuilt for data teams. It gives any LLM access to 55+ specialized data engineering tools, 11 purpose-built skills, and direct warehouse connectivity — so the AI works with your actual schemas, not guesses.
 
-## General agents vs altimate-code
+## General agents vs altimate
 
-| Capability | General coding agents | altimate-code |
+| Capability | General coding agents | altimate |
 |---|---|---|
 | SQL anti-pattern detection | None | 19 rules with confidence scoring |
 | Column-level lineage | None | Automatic from SQL |
@@ -90,9 +90,11 @@ brew install AltimateAI/tap/altimate-code
 Then:
 
 ```bash
-altimate-code            # Launch the interactive TUI
-altimate-code /discover  # Auto-detect your data stack and go
+altimate              # Launch the interactive TUI
+altimate /discover    # Auto-detect your data stack and go
 ```
+
+> **Note:** `altimate-code` still works as a backward-compatible alias.
 
 `/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more).
 
@@ -123,7 +125,7 @@ Anthropic · OpenAI · Google Gemini · Google Vertex AI · Amazon Bedrock · Az
 ## Architecture
 
 ```
-altimate-code (TypeScript CLI)
+altimate (TypeScript CLI)
         |
    JSON-RPC 2.0 (stdio)
         |
@@ -172,7 +174,7 @@ cd packages/altimate-engine && python -m venv .venv && source .venv/bin/activate
 
 ## Acknowledgements
 
-altimate-code is a fork of [OpenCode](https://github.com/anomalyco/opencode), the open-source AI coding agent. We build on top of their excellent foundation to add data-team-specific capabilities.
+altimate is a fork of [OpenCode](https://github.com/anomalyco/opencode), the open-source AI coding agent. We build on top of their excellent foundation to add data-team-specific capabilities.
 
 ## License
 

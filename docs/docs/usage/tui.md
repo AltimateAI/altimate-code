@@ -1,9 +1,9 @@
 # TUI
 
-altimate-code launches a terminal-based user interface (TUI) by default.
+altimate launches a terminal-based user interface (TUI) by default.
 
 ```bash
-altimate-code
+altimate
 ```
 
 ## Interface Layout

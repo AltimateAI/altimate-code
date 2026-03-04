@@ -24,7 +24,7 @@ interface RemovalTargets {
 
 export const UninstallCommand = {
   command: "uninstall",
-  describe: "uninstall altimate-code and remove all related files",
+  describe: "uninstall altimate and remove all related files",
   builder: (yargs: Argv) =>
     yargs
       .option("keep-config", {
@@ -133,9 +133,9 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
       pnpm: "pnpm uninstall -g @altimateai/altimate-code",
       bun: "bun remove -g @altimateai/altimate-code",
       yarn: "yarn global remove @altimateai/altimate-code",
-      brew: "brew uninstall altimate-code",
-      choco: "choco uninstall altimate-code",
-      scoop: "scoop uninstall altimate-code",
+      brew: "brew uninstall altimate",
+      choco: "choco uninstall altimate",
+      scoop: "scoop uninstall altimate",
     }
     prompts.log.info(`  ✓ Package: ${cmds[method] || method}`)
   }
@@ -184,9 +184,9 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
       pnpm: ["pnpm", "uninstall", "-g", "@altimateai/altimate-code"],
       bun: ["bun", "remove", "-g", "@altimateai/altimate-code"],
       yarn: ["yarn", "global", "remove", "@altimateai/altimate-code"],
-      brew: ["brew", "uninstall", "altimate-code"],
-      choco: ["choco", "uninstall", "altimate-code"],
-      scoop: ["scoop", "uninstall", "altimate-code"],
+      brew: ["brew", "uninstall", "altimate"],
+      choco: ["choco", "uninstall", "altimate"],
+      scoop: ["scoop", "uninstall", "altimate"],
     }
 
     const cmd = cmds[method]
@@ -194,7 +194,7 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
       spinner.start(`Running ${cmd.join(" ")}...`)
       const result =
         method === "choco"
-          ? await $`echo Y | choco uninstall altimate-code -y -r`.quiet().nothrow()
+          ? await $`echo Y | choco uninstall altimate -y -r`.quiet().nothrow()
           : await $`${cmd}`.quiet().nothrow()
       if (result.exitCode !== 0) {
         spinner.stop(`Package manager uninstall failed: exit code ${result.exitCode}`, 1)

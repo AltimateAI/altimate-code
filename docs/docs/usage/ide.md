@@ -1,6 +1,6 @@
 # IDE
 
-altimate-code integrates with VS Code and Cursor as an AI assistant.
+altimate integrates with VS Code and Cursor as an AI assistant.
 
 !!! warning "Beta"
     IDE integration is currently in beta. Features may change.
@@ -9,8 +9,8 @@ altimate-code integrates with VS Code and Cursor as an AI assistant.
 
 ### Setup
 
-1. Install the altimate-code extension from the marketplace
-2. Ensure `altimate-code` is installed globally:
+1. Install the altimate extension from the marketplace
+2. Ensure `altimate` is installed globally:
    ```bash
    npm install -g @altimateai/altimate-code
    ```
@@ -18,7 +18,7 @@ altimate-code integrates with VS Code and Cursor as an AI assistant.
 
 ### Features
 
-- Inline chat with altimate-code agents
+- Inline chat with altimate agents
 - File context awareness from your editor
 - Tool call results displayed inline
 - Agent mode switching from the command palette

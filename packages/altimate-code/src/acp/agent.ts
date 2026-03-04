@@ -507,8 +507,8 @@ export namespace ACP {
       log.info("initialize", { protocolVersion: params.protocolVersion })
 
       const authMethod: AuthMethod = {
-        description: "Run `altimate-code auth login` in the terminal",
-        name: "Login with altimate-code",
+        description: "Run `altimate auth login` in the terminal",
+        name: "Login with altimate",
         id: "altimate-code-login",
       }
 
@@ -516,7 +516,7 @@ export namespace ACP {
       if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
         authMethod._meta = {
           "terminal-auth": {
-            command: "altimate-code",
+            command: "altimate",
             args: ["auth", "login"],
             label: "Altimate CLI Login",
           },

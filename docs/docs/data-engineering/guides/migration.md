@@ -5,7 +5,7 @@ Use migrator mode to translate SQL across warehouse dialects while preserving li
 ## Start migrator mode
 
 ```bash
-altimate-code --agent migrator
+altimate --agent migrator
 ```
 
 ## Translation workflow

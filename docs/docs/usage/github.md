@@ -1,16 +1,16 @@
 # GitHub
 
-altimate-code integrates with GitHub for automated code review and issue handling.
+altimate integrates with GitHub for automated code review and issue handling.
 
 ## GitHub Actions
 
-Run altimate-code as a GitHub Actions bot that responds to PRs and issues.
+Run altimate as a GitHub Actions bot that responds to PRs and issues.
 
 ### Setup
 
 ```yaml
-# .github/workflows/altimate-code.yml
-name: altimate-code
+# .github/workflows/altimate.yml
+name: altimate
 on:
   issues:
     types: [opened, labeled]
@@ -30,10 +30,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install altimate-code
+      - name: Install altimate
         run: npm install -g @altimateai/altimate-code
       - name: Run agent
-        run: altimate-code github
+        run: altimate github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -50,20 +50,20 @@ jobs:
 
 ### PR Commands
 
-Comment on a PR to interact with altimate-code:
+Comment on a PR to interact with altimate:
 
 ```
-@altimate-code review this PR
-@altimate-code check for SQL anti-patterns
-@altimate-code estimate query costs
+@altimate review this PR
+@altimate check for SQL anti-patterns
+@altimate estimate query costs
 ```
 
 ## CLI Usage
 
 ```bash
 # Run GitHub integration locally
-altimate-code github
+altimate github
 
 # Work with PRs
-altimate-code pr
+altimate pr
 ```

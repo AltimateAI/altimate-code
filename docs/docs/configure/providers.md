@@ -1,6 +1,6 @@
 # Providers
 
-altimate-code supports 35+ LLM providers. Configure them in the `provider` section of your config file.
+altimate supports 35+ LLM providers. Configure them in the `provider` section of your config file.
 
 ## Provider Configuration
 
@@ -114,7 +114,7 @@ Uses the standard AWS credential chain. Set `AWS_PROFILE` or provide credentials
 No API key needed — runs entirely on your local machine.
 
 !!! info
-    Make sure Ollama is running before starting altimate-code. Install it from [ollama.com](https://ollama.com) and pull your desired model with `ollama pull llama3.1`.
+    Make sure Ollama is running before starting altimate. Install it from [ollama.com](https://ollama.com) and pull your desired model with `ollama pull llama3.1`.
 
 ## OpenRouter
 
@@ -142,7 +142,7 @@ Access 150+ models through a single API key.
 }
 ```
 
-Uses your GitHub Copilot subscription. Authenticate with `altimate-code auth`.
+Uses your GitHub Copilot subscription. Authenticate with `altimate auth`.
 
 ## Custom / OpenAI-Compatible
 

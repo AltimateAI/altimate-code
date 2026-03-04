@@ -1,6 +1,6 @@
 # Custom Tools
 
-Create custom tools using TypeScript and the altimate-code plugin system.
+Create custom tools using TypeScript and the altimate plugin system.
 
 ## Quick Start
 

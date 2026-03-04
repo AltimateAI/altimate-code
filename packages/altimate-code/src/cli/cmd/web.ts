@@ -31,7 +31,7 @@ function getNetworkIPs() {
 export const WebCommand = cmd({
   command: "web",
   builder: (yargs) => withNetworkOptions(yargs),
-  describe: "start altimate-code server and open web interface",
+  describe: "start altimate server and open web interface",
   handler: async (args) => {
     if (!Flag.ALTIMATE_CLI_SERVER_PASSWORD) {
       UI.println(UI.Style.TEXT_WARNING_BOLD + "!  " + "ALTIMATE_CLI_SERVER_PASSWORD is not set; server is unsecured.")

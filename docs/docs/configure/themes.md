@@ -1,6 +1,6 @@
 # Themes
 
-altimate-code includes 12+ built-in themes and supports custom themes.
+altimate includes 12+ built-in themes and supports custom themes.
 
 ## Switching Themes
 
@@ -57,4 +57,4 @@ Place custom themes in one of these directories:
 | `.altimate-code/themes/` | Project-specific |
 
 !!! tip
-    Name your theme file `my-theme.json` and set `"theme": "my-theme"` in your config. altimate-code will find it automatically in the theme directories.
+    Name your theme file `my-theme.json` and set `"theme": "my-theme"` in your config. altimate will find it automatically in the theme directories.

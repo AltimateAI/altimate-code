@@ -1,6 +1,6 @@
 # Plugins
 
-Plugins extend altimate-code with custom tools, hooks, and behaviors.
+Plugins extend altimate with custom tools, hooks, and behaviors.
 
 ## Creating a Plugin
 

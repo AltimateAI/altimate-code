@@ -81,15 +81,15 @@ export namespace Installation {
       },
       {
         name: "brew" as const,
-        command: () => $`brew list --formula altimate-code`.throws(false).quiet().text(),
+        command: () => $`brew list --formula altimate`.throws(false).quiet().text(),
       },
       {
         name: "scoop" as const,
-        command: () => $`scoop list altimate-code`.throws(false).quiet().text(),
+        command: () => $`scoop list altimate`.throws(false).quiet().text(),
       },
       {
         name: "choco" as const,
-        command: () => $`choco list --limit-output altimate-code`.throws(false).quiet().text(),
+        command: () => $`choco list --limit-output altimate`.throws(false).quiet().text(),
       },
     ]
 
@@ -104,7 +104,7 @@ export namespace Installation {
     for (const check of checks) {
       const output = await check.command()
       const installedName =
-        check.name === "brew" || check.name === "choco" || check.name === "scoop" ? "altimate-code" : "@altimateai/altimate-code"
+        check.name === "brew" || check.name === "choco" || check.name === "scoop" ? "altimate" : "@altimateai/altimate-code"
       if (output.includes(installedName)) {
         return check.name
       }
@@ -121,11 +121,11 @@ export namespace Installation {
   )
 
   async function getBrewFormula() {
-    const tapFormula = await $`brew list --formula AltimateAI/tap/altimate-code`.throws(false).quiet().text()
-    if (tapFormula.includes("altimate-code")) return "AltimateAI/tap/altimate-code"
-    const coreFormula = await $`brew list --formula altimate-code`.throws(false).quiet().text()
-    if (coreFormula.includes("altimate-code")) return "altimate-code"
-    return "altimate-code"
+    const tapFormula = await $`brew list --formula AltimateAI/tap/altimate`.throws(false).quiet().text()
+    if (tapFormula.includes("altimate")) return "AltimateAI/tap/altimate"
+    const coreFormula = await $`brew list --formula altimate`.throws(false).quiet().text()
+    if (coreFormula.includes("altimate")) return "altimate"
+    return "altimate"
   }
 
   export async function upgrade(method: Method, target: string) {
@@ -165,10 +165,10 @@ export namespace Installation {
         break
       }
       case "choco":
-        cmd = $`echo Y | choco upgrade altimate-code --version=${target}`
+        cmd = $`echo Y | choco upgrade altimate --version=${target}`
         break
       case "scoop":
-        cmd = $`scoop install altimate-code@${target}`
+        cmd = $`scoop install altimate@${target}`
         break
       default:
         throw new Error(`Unknown method: ${method}`)
@@ -205,7 +205,7 @@ export namespace Installation {
         if (!version) throw new Error(`Could not detect version for tap formula: ${formula}`)
         return version
       }
-      return fetch("https://formulae.brew.sh/api/formula/altimate-code.json")
+      return fetch("https://formulae.brew.sh/api/formula/altimate.json")
         .then((res) => {
           if (!res.ok) throw new Error(res.statusText)
           return res.json()
@@ -230,7 +230,7 @@ export namespace Installation {
 
     if (detectedMethod === "choco") {
       return fetch(
-        "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27altimate-code%27%20and%20IsLatestVersion&$select=Version",
+        "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27altimate%27%20and%20IsLatestVersion&$select=Version",
         { headers: { Accept: "application/json;odata=verbose" } },
       )
         .then((res) => {
@@ -241,7 +241,7 @@ export namespace Installation {
     }
 
     if (detectedMethod === "scoop") {
-      return fetch("https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/altimate-code.json", {
+      return fetch("https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/altimate.json", {
         headers: { Accept: "application/json" },
       })
         .then((res) => {

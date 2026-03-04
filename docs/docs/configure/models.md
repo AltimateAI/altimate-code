@@ -1,6 +1,6 @@
 # Models
 
-altimate-code supports models from all configured providers. Use the `model` and `small_model` fields to set defaults.
+altimate supports models from all configured providers. Use the `model` and `small_model` fields to set defaults.
 
 ## Configuration
 

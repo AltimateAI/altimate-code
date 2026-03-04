@@ -1,19 +1,21 @@
 # CLI
 
-altimate-code provides subcommands for headless operation, automation, and integration.
+altimate provides subcommands for headless operation, automation, and integration.
 
 ## Basic Usage
 
 ```bash
 # Launch the TUI (default)
-altimate-code
+altimate
 
 # Run a prompt non-interactively
-altimate-code run "analyze my most expensive queries"
+altimate run "analyze my most expensive queries"
 
 # Start with a specific agent
-altimate-code --agent analyst
+altimate --agent analyst
 ```
+
+> **Note:** `altimate-code` still works as a backward-compatible alias for all commands.
 
 ## Subcommands
 
@@ -34,7 +36,7 @@ altimate-code --agent analyst
 | `github` | GitHub integration |
 | `pr` | Pull request tools |
 | `upgrade` | Upgrade to latest version |
-| `uninstall` | Uninstall altimate-code |
+| `uninstall` | Uninstall altimate |
 
 ## Global Flags
 
@@ -97,11 +99,11 @@ Configuration can be controlled via environment variables:
 
 ```bash
 # Pipe input
-echo "explain this SQL" | altimate-code run
+echo "explain this SQL" | altimate run
 
 # With a specific model
-altimate-code run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
+altimate run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
 
 # Print logs for debugging
-altimate-code --print-logs --log-level DEBUG run "test query"
+altimate --print-logs --log-level DEBUG run "test query"
 ```
