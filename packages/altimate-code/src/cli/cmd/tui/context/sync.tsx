@@ -399,20 +399,26 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         })
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
-          // non-blocking
+          // non-blocking — each request catches errors individually so one
+          // failure doesn't prevent the others from populating the store.
+          const safe = <T,>(p: Promise<T>) => p.catch((e) => {
+            Log.Default.warn("non-blocking sync request failed", {
+              error: e instanceof Error ? e.message : String(e),
+            })
+          })
           Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
-            sdk.client.command.list().then((x) => setStore("command", reconcile(x.data ?? []))),
-            sdk.client.lsp.status().then((x) => setStore("lsp", reconcile(x.data!))),
-            sdk.client.mcp.status().then((x) => setStore("mcp", reconcile(x.data!))),
-            sdk.client.experimental.resource.list().then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
-            sdk.client.formatter.status().then((x) => setStore("formatter", reconcile(x.data!))),
-            sdk.client.session.status().then((x) => {
+            ...(args.continue ? [] : [safe(sessionListPromise.then((sessions) => setStore("session", reconcile(sessions))))]),
+            safe(sdk.client.command.list().then((x) => setStore("command", reconcile(x.data ?? [])))),
+            safe(sdk.client.lsp.status().then((x) => setStore("lsp", reconcile(x.data!)))),
+            safe(sdk.client.mcp.status().then((x) => setStore("mcp", reconcile(x.data!)))),
+            safe(sdk.client.experimental.resource.list().then((x) => setStore("mcp_resource", reconcile(x.data ?? {})))),
+            safe(sdk.client.formatter.status().then((x) => setStore("formatter", reconcile(x.data!)))),
+            safe(sdk.client.session.status().then((x) => {
               setStore("session_status", reconcile(x.data!))
-            }),
-            sdk.client.provider.auth().then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
-            sdk.client.vcs.get().then((x) => setStore("vcs", reconcile(x.data))),
-            sdk.client.path.get().then((x) => setStore("path", reconcile(x.data!))),
+            })),
+            safe(sdk.client.provider.auth().then((x) => setStore("provider_auth", reconcile(x.data ?? {})))),
+            safe(sdk.client.vcs.get().then((x) => setStore("vcs", reconcile(x.data)))),
+            safe(sdk.client.path.get().then((x) => setStore("path", reconcile(x.data!)))),
           ]).then(() => {
             setStore("status", "complete")
           })

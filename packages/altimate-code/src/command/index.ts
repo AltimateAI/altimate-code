@@ -106,46 +106,56 @@ export namespace Command {
         hints: hints(command.template),
       }
     }
-    for (const [name, prompt] of Object.entries(await MCP.prompts())) {
-      result[name] = {
-        name,
-        source: "mcp",
-        description: prompt.description,
-        get template() {
-          // since a getter can't be async we need to manually return a promise here
-          return new Promise<string>(async (resolve, reject) => {
-            const template = await MCP.getPrompt(
-              prompt.client,
-              prompt.name,
-              prompt.arguments
-                ? // substitute each argument with $1, $2, etc.
-                  Object.fromEntries(prompt.arguments?.map((argument, i) => [argument.name, `$${i + 1}`]))
-                : {},
-            ).catch(reject)
-            resolve(
-              template?.messages
-                .map((message) => (message.content.type === "text" ? message.content.text : ""))
-                .join("\n") || "",
-            )
-          })
-        },
-        hints: prompt.arguments?.map((_, i) => `$${i + 1}`) ?? [],
+    // MCP and skill loading must not prevent default commands from being served.
+    // Wrap each in try/catch so init, discover, review are always available.
+    try {
+      for (const [name, prompt] of Object.entries(await MCP.prompts())) {
+        result[name] = {
+          name,
+          source: "mcp",
+          description: prompt.description,
+          get template() {
+            // since a getter can't be async we need to manually return a promise here
+            return new Promise<string>(async (resolve, reject) => {
+              const template = await MCP.getPrompt(
+                prompt.client,
+                prompt.name,
+                prompt.arguments
+                  ? // substitute each argument with $1, $2, etc.
+                    Object.fromEntries(prompt.arguments?.map((argument, i) => [argument.name, `$${i + 1}`]))
+                  : {},
+              ).catch(reject)
+              resolve(
+                template?.messages
+                  .map((message) => (message.content.type === "text" ? message.content.text : ""))
+                  .join("\n") || "",
+              )
+            })
+          },
+          hints: prompt.arguments?.map((_, i) => `$${i + 1}`) ?? [],
+        }
       }
+    } catch {
+      // MCP prompt loading failed — continue with default commands
     }
 
     // Add skills as invokable commands
-    for (const skill of await Skill.all()) {
-      // Skip if a command with this name already exists
-      if (result[skill.name]) continue
-      result[skill.name] = {
-        name: skill.name,
-        description: skill.description,
-        source: "skill",
-        get template() {
-          return skill.content
-        },
-        hints: [],
+    try {
+      for (const skill of await Skill.all()) {
+        // Skip if a command with this name already exists
+        if (result[skill.name]) continue
+        result[skill.name] = {
+          name: skill.name,
+          description: skill.description,
+          source: "skill",
+          get template() {
+            return skill.content
+          },
+          hints: [],
+        }
       }
+    } catch {
+      // Skill loading failed — continue with default commands
     }
 
     return result
