@@ -81,6 +81,10 @@ Overflow detection works with all major providers:
 
 When an overflow is detected, the CLI automatically compacts and retries. No action is needed on your part.
 
+### Loop Protection
+
+If compaction fails to reduce context sufficiently and overflow keeps recurring, altimate-code stops after 3 consecutive compaction attempts within the same turn. You will see a message asking you to start a new conversation. The counter resets after each successful processing step, so compactions spread across different turns do not count against the limit.
+
 !!! note
     Some providers (such as z.ai) may accept oversized inputs silently. For these, the automatic token-based compaction trigger is the primary safeguard.
 
@@ -93,7 +97,7 @@ Control context management behavior in `altimate-code.json`:
   "compaction": {
     "auto": true,
     "prune": true,
-    "reserved": 4096
+    "reserved": 20000
   }
 }
 ```
@@ -102,7 +106,7 @@ Control context management behavior in `altimate-code.json`:
 |-------|------|---------|-------------|
 | `auto` | `boolean` | `true` | Automatically compact when the context window is nearly full |
 | `prune` | `boolean` | `true` | Prune old tool outputs before compaction |
-| `reserved` | `number` | `20000` | Token buffer to reserve below the context limit. Increase this if you see frequent overflow errors |
+| `reserved` | `number` | `20000` | Token buffer to reserve below the context limit. The actual headroom is `max(reserved, model_max_output)`, so this value only takes effect when it exceeds the model's output token limit. Increase if you see frequent overflow errors |
 
 ### Disabling Auto-Compaction
 
@@ -138,3 +142,6 @@ The estimator detects content type and adjusts its ratio:
 | Mixed | ~3.7 | Fallback for content that does not match a specific type |
 
 These ratios are tuned against the cl100k_base tokenizer used by Claude and GPT-4 models. The estimator samples the first 500 characters of content to classify it, so the overhead is negligible.
+
+!!! note "Limitations"
+    The heuristic uses JavaScript string length (UTF-16 code units), which over-estimates tokens for emoji (2 code units but ~1-2 tokens) and CJK characters. For precise token counting, a future update will integrate a native tokenizer.
