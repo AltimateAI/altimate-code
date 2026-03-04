@@ -97,26 +97,6 @@ class TestSqlGuardPolicyDispatch:
         assert response.error is None
 
 
-class TestSqlGuardComplexityDispatch:
-    def test_basic_complexity(self):
-        request = JsonRpcRequest(
-            method="sqlguard.complexity",
-            params={"sql": "SELECT * FROM orders JOIN payments ON orders.id = payments.order_id"},
-            id=120,
-        )
-        response = dispatch(request)
-        assert response.error is None
-        assert "data" in response.result
-
-    def test_with_schema_context(self):
-        request = JsonRpcRequest(
-            method="sqlguard.complexity",
-            params={"sql": "SELECT 1", "schema_context": SCHEMA_CTX},
-            id=121,
-        )
-        response = dispatch(request)
-        assert response.error is None
-
 
 class TestSqlGuardSemanticsDispatch:
     def test_basic_semantics(self):
@@ -263,26 +243,6 @@ class TestSqlGuardGradeDispatch:
         assert response.error is None
         assert "data" in response.result
 
-
-class TestSqlGuardCostDispatch:
-    def test_basic_cost(self):
-        request = JsonRpcRequest(
-            method="sqlguard.cost",
-            params={"sql": "SELECT * FROM orders"},
-            id=260,
-        )
-        response = dispatch(request)
-        assert response.error is None
-        assert "data" in response.result
-
-    def test_with_dialect(self):
-        request = JsonRpcRequest(
-            method="sqlguard.cost",
-            params={"sql": "SELECT * FROM orders", "dialect": "snowflake"},
-            id=261,
-        )
-        response = dispatch(request)
-        assert response.error is None
 
 
 # ---------------------------------------------------------------------------

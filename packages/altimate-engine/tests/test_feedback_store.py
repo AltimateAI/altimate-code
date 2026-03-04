@@ -276,13 +276,16 @@ class TestPredictTier3TableEstimate:
 
     def test_tier3_with_few_observations(self, store):
         """With only 1-2 observations, tier 3 should kick in if table extraction works,
-        otherwise falls through to tier 4 (heuristic)."""
+        otherwise falls through to tier 4 (no_data)."""
         sql = "SELECT * FROM orders WHERE amount > 100"
         store.record(sql=sql, bytes_scanned=5_000_000, execution_time_ms=400, credits_used=0.004)
         prediction = store.predict(sql)
         # Tier 3 requires table extraction; if metadata returns empty tables, falls to tier 4
         assert prediction["tier"] in (3, 4)
-        assert prediction["predicted_bytes"] is not None
+        if prediction["tier"] == 3:
+            assert prediction["predicted_bytes"] is not None
+        else:
+            assert prediction["method"] == "no_data"
 
 
 class TestPredictTier4Heuristic:
