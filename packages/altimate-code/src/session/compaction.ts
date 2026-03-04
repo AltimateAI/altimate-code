@@ -84,9 +84,8 @@ export namespace SessionCompaction {
 
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
     const reserved = config.compaction?.reserved ?? COMPACTION_BUFFER
-    const usable = input.model.limit.input
-      ? input.model.limit.input - Math.max(reserved, maxOutput)
-      : context - maxOutput - reserved
+    const headroom = Math.max(reserved, maxOutput)
+    const usable = (input.model.limit.input ?? context) - headroom
     return count >= usable
   }
 

@@ -409,9 +409,9 @@ describe("session.compaction.isOverflow boundary conditions", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // context=100K, output=32K → usable = 100K - 32K - 20K(buffer) = 48K
+        // context=100K, output=32K → headroom = max(20K, 32K) = 32K → usable = 68K
         const model = createModel({ context: 100_000, output: 32_000 })
-        const tokens = { input: 48_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        const tokens = { input: 68_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
       },
     })
@@ -423,8 +423,8 @@ describe("session.compaction.isOverflow boundary conditions", () => {
       directory: tmp.path,
       fn: async () => {
         const model = createModel({ context: 100_000, output: 32_000 })
-        // usable = 100K - 32K - 20K = 48K; count = 47999
-        const tokens = { input: 47_999, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        // headroom = max(20K, 32K) = 32K → usable = 68K; count = 67999
+        const tokens = { input: 67_999, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
       },
     })
@@ -436,12 +436,13 @@ describe("session.compaction.isOverflow boundary conditions", () => {
       directory: tmp.path,
       fn: async () => {
         const model = createModel({ context: 100_000, output: 32_000 })
-        // total=50K > usable=48K → overflow
+        // headroom = max(20K, 32K) = 32K → usable = 68K
+        // total=70K > usable=68K → overflow
         // component sum would be 10K (not overflow) — total should take precedence
         const tokens = {
           input: 5_000, output: 5_000, reasoning: 0,
           cache: { read: 0, write: 0 },
-          total: 50_000,
+          total: 70_000,
         }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
       },
@@ -454,9 +455,10 @@ describe("session.compaction.isOverflow boundary conditions", () => {
       directory: tmp.path,
       fn: async () => {
         const model = createModel({ context: 100_000, output: 32_000 })
-        // sum = 10K + 5K + 20K + 15K = 50K > usable 48K
+        // headroom = max(20K, 32K) = 32K → usable = 68K
+        // sum = 30K + 10K + 20K + 15K = 75K > usable 68K
         const tokens = {
-          input: 10_000, output: 5_000, reasoning: 0,
+          input: 30_000, output: 10_000, reasoning: 0,
           cache: { read: 20_000, write: 15_000 },
         }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
@@ -502,10 +504,10 @@ describe("session.compaction.isOverflow boundary conditions", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // context=200K, output=32K, reserved=50K → usable=200K-32K-50K=118K
+        // context=200K, output=32K, reserved=50K → headroom=max(50K,32K)=50K → usable=150K
         const model = createModel({ context: 200_000, output: 32_000 })
-        // 120K > 118K → overflow
-        const tokens = { input: 120_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        // 151K > 150K → overflow
+        const tokens = { input: 151_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
       },
     })
@@ -523,9 +525,10 @@ describe("session.compaction.isOverflow boundary conditions", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // input=200K, output=32K, reserved=50K → reserved=max(50K,32K)=50K → usable=150K
+        // input=200K, output=32K, reserved=50K → headroom=max(50K,32K)=50K → usable=150K
         const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
-        const tokens = { input: 150_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        // 151K > 150K → overflow
+        const tokens = { input: 151_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
       },
     })
