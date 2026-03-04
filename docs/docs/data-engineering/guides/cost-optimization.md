@@ -87,21 +87,6 @@ This finds:
 - Warehouses with no queries in 7+ days
 - Temporary tables from old migrations
 
-## Step 5: Automate cost gates in CI
-
-Use `ci_cost_gate` in your CI/CD pipeline to block expensive queries from reaching production:
-
-```
-> ci_cost_gate --threshold 10 models/marts/fct_revenue.sql
-
-Cost Gate Results:
-  fct_revenue.sql: 2.3 credits (PASS — under 10 credit threshold)
-  fct_orders.sql: 0.8 credits (PASS)
-  fct_daily_snapshot.sql: 45.1 credits (FAIL — exceeds threshold)
-
-1 model blocked. Fix fct_daily_snapshot.sql before deploying.
-```
-
 ## Quick wins checklist
 
 | Action | Typical savings | Effort |

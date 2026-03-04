@@ -638,32 +638,6 @@ export interface SqlRewriteResult {
   error?: string
 }
 
-// --- CI Cost Gate ---
-
-export interface CostGateFileResult {
-  file: string
-  status: string // "pass", "fail", "skipped"
-  reason?: string
-  issues: Record<string, unknown>[]
-}
-
-export interface CostGateParams {
-  file_paths: string[]
-  dialect?: string
-}
-
-export interface CostGateResult {
-  success: boolean
-  passed: boolean
-  exit_code: number
-  files_scanned: number
-  files_skipped: number
-  total_issues: number
-  critical_count: number
-  file_results: CostGateFileResult[]
-  error?: string
-}
-
 // --- Schema Change Detection ---
 
 export interface ColumnChange {
@@ -749,12 +723,6 @@ export interface SqlGuardPolicyParams {
   schema_context?: Record<string, any>
 }
 
-export interface SqlGuardComplexityParams {
-  sql: string
-  schema_path?: string
-  schema_context?: Record<string, any>
-}
-
 export interface SqlGuardSemanticsParams {
   sql: string
   schema_path?: string
@@ -805,13 +773,6 @@ export interface SqlGuardGradeParams {
   sql: string
   schema_path?: string
   schema_context?: Record<string, any>
-}
-
-export interface SqlGuardCostParams {
-  sql: string
-  schema_path?: string
-  schema_context?: Record<string, any>
-  dialect?: string
 }
 
 // --- sqlguard Phase 3 (P2) ---
@@ -1027,7 +988,6 @@ export const BridgeMethods = {
   "schema.tags_list": {} as { params: TagsListParams; result: TagsListResult },
   "sql.diff": {} as { params: SqlDiffParams; result: SqlDiffResult },
   "sql.rewrite": {} as { params: SqlRewriteParams; result: SqlRewriteResult },
-  "ci.cost_gate": {} as { params: CostGateParams; result: CostGateResult },
   "sql.schema_diff": {} as { params: SchemaDiffParams; result: SchemaDiffResult },
   // --- dbt discovery ---
   "dbt.profiles": {} as { params: DbtProfilesParams; result: DbtProfilesResult },
@@ -1044,7 +1004,6 @@ export const BridgeMethods = {
   // --- sqlguard Phase 1 (P0) ---
   "sqlguard.fix": {} as { params: SqlGuardFixParams; result: SqlGuardResult },
   "sqlguard.policy": {} as { params: SqlGuardPolicyParams; result: SqlGuardResult },
-  "sqlguard.complexity": {} as { params: SqlGuardComplexityParams; result: SqlGuardResult },
   "sqlguard.semantics": {} as { params: SqlGuardSemanticsParams; result: SqlGuardResult },
   "sqlguard.testgen": {} as { params: SqlGuardTestgenParams; result: SqlGuardResult },
   // --- sqlguard Phase 2 (P1) ---
@@ -1054,7 +1013,6 @@ export const BridgeMethods = {
   "sqlguard.rewrite": {} as { params: SqlGuardRewriteParams; result: SqlGuardResult },
   "sqlguard.correct": {} as { params: SqlGuardCorrectParams; result: SqlGuardResult },
   "sqlguard.grade": {} as { params: SqlGuardGradeParams; result: SqlGuardResult },
-  "sqlguard.cost": {} as { params: SqlGuardCostParams; result: SqlGuardResult },
   // --- sqlguard Phase 3 (P2) ---
   "sqlguard.classify_pii": {} as { params: SqlGuardClassifyPiiParams; result: SqlGuardResult },
   "sqlguard.query_pii": {} as { params: SqlGuardQueryPiiParams; result: SqlGuardResult },

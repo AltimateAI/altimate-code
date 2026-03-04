@@ -744,33 +744,6 @@ class SqlRewriteResult(BaseModel):
     error: str | None = None
 
 
-# --- CI Cost Gate ---
-
-
-class CostGateFileResult(BaseModel):
-    file: str
-    status: str  # "pass", "fail", "skipped"
-    reason: str | None = None
-    issues: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class CostGateParams(BaseModel):
-    file_paths: list[str]
-    dialect: str = "snowflake"
-
-
-class CostGateResult(BaseModel):
-    success: bool
-    passed: bool
-    exit_code: int = 0
-    files_scanned: int = 0
-    files_skipped: int = 0
-    total_issues: int = 0
-    critical_count: int = 0
-    file_results: list[CostGateFileResult] = Field(default_factory=list)
-    error: str | None = None
-
-
 # --- Schema Change Detection ---
 
 
@@ -859,12 +832,6 @@ class SqlGuardPolicyParams(BaseModel):
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardComplexityParams(BaseModel):
-    sql: str
-    schema_path: str = ""
-    schema_context: dict[str, Any] | None = None
-
-
 class SqlGuardSemanticsParams(BaseModel):
     sql: str
     schema_path: str = ""
@@ -916,13 +883,6 @@ class SqlGuardGradeParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
-
-
-class SqlGuardCostParams(BaseModel):
-    sql: str
-    schema_path: str = ""
-    schema_context: dict[str, Any] | None = None
-    dialect: str = ""
 
 
 # --- sqlguard Phase 3 (P2) ---

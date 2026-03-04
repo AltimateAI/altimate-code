@@ -538,15 +538,6 @@ class TestSqlGuardNewInvalidParams:
         response = dispatch(request)
         assert response.error is not None
 
-    def test_complexity_no_sql(self):
-        request = JsonRpcRequest(
-            method="sqlguard.complexity",
-            params={},
-            id=503,
-        )
-        response = dispatch(request)
-        assert response.error is not None
-
     def test_semantics_no_sql(self):
         request = JsonRpcRequest(
             method="sqlguard.semantics",

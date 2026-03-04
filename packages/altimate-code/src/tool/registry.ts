@@ -56,7 +56,7 @@ import { FinopsRoleGrantsTool, FinopsRoleHierarchyTool, FinopsUserRolesTool } fr
 import { SchemaDetectPiiTool } from "./schema-detect-pii"
 import { SchemaTagsTool, SchemaTagsListTool } from "./schema-tags"
 import { SqlRewriteTool } from "./sql-rewrite"
-import { CiCostGateTool } from "./ci-cost-gate"
+
 import { SchemaDiffTool } from "./schema-diff"
 import { SqlGuardValidateTool } from "./sqlguard-validate"
 import { SqlGuardLintTool } from "./sqlguard-lint"
@@ -66,7 +66,7 @@ import { SqlGuardCheckTool } from "./sqlguard-check"
 // Phase 1 (P0)
 import { SqlGuardFixTool } from "./sqlguard-fix"
 import { SqlGuardPolicyTool } from "./sqlguard-policy"
-import { SqlGuardComplexityTool } from "./sqlguard-complexity"
+
 import { SqlGuardSemanticsTool } from "./sqlguard-semantics"
 import { SqlGuardTestgenTool } from "./sqlguard-testgen"
 // Phase 2 (P1)
@@ -76,7 +76,7 @@ import { SqlGuardSchemaDiffTool } from "./sqlguard-schema-diff"
 import { SqlGuardRewriteTool } from "./sqlguard-rewrite"
 import { SqlGuardCorrectTool } from "./sqlguard-correct"
 import { SqlGuardGradeTool } from "./sqlguard-grade"
-import { SqlGuardCostTool } from "./sqlguard-cost"
+
 // Phase 3 (P2)
 import { SqlGuardClassifyPiiTool } from "./sqlguard-classify-pii"
 import { SqlGuardQueryPiiTool } from "./sqlguard-query-pii"
@@ -218,7 +218,6 @@ export namespace ToolRegistry {
       SchemaTagsTool,
       SchemaTagsListTool,
       SqlRewriteTool,
-      CiCostGateTool,
       SchemaDiffTool,
       SqlGuardValidateTool,
       SqlGuardLintTool,
@@ -228,7 +227,6 @@ export namespace ToolRegistry {
       // Phase 1 (P0)
       SqlGuardFixTool,
       SqlGuardPolicyTool,
-      SqlGuardComplexityTool,
       SqlGuardSemanticsTool,
       SqlGuardTestgenTool,
       // Phase 2 (P1)
@@ -238,7 +236,6 @@ export namespace ToolRegistry {
       SqlGuardRewriteTool,
       SqlGuardCorrectTool,
       SqlGuardGradeTool,
-      SqlGuardCostTool,
       // Phase 3 (P2)
       SqlGuardClassifyPiiTool,
       SqlGuardQueryPiiTool,
