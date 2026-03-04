@@ -45,7 +45,6 @@ describe("detectGit", () => {
   test("detects a git repository in the current repo", async () => {
     const result = await detectGit()
     expect(result.isRepo).toBe(true)
-    expect(typeof result.branch).toBe("string")
   })
 
   test("branch is a non-empty string or undefined (detached HEAD)", async () => {
