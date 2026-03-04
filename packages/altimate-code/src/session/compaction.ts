@@ -85,8 +85,9 @@ export namespace SessionCompaction {
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
     const reserved = config.compaction?.reserved ?? COMPACTION_BUFFER
     const headroom = Math.max(reserved, maxOutput)
-    const usable = (input.model.limit.input ?? context) - headroom
-    return count >= usable
+    const base = input.model.limit.input ?? context
+    if (base <= headroom) return false
+    return count >= base - headroom
   }
 
   export const PRUNE_MINIMUM = 20_000

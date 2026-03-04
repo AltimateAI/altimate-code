@@ -97,7 +97,7 @@ export namespace Telemetry {
         type: "compaction_triggered"
         timestamp: number
         session_id: string
-        trigger: "overflow_detection" | "error_recovery" | "manual"
+        trigger: "overflow_detection" | "error_recovery"
         attempt: number
       }
     | {

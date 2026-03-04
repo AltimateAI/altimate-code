@@ -534,6 +534,33 @@ describe("session.compaction.isOverflow boundary conditions", () => {
     })
   })
 
+  test("returns false when headroom exceeds base (negative usable guard)", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // Tiny model: input=32K, output=128K → headroom=128K > base=32K
+        // Without guard this would produce negative usable and always trigger
+        const model = createModel({ context: 200_000, input: 32_000, output: 128_000 })
+        const tokens = { input: 1_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
+      },
+    })
+  })
+
+  test("returns false when headroom equals base exactly", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // headroom = max(20K, 32K) = 32K, base = 32K → usable = 0
+        const model = createModel({ context: 32_000, output: 32_000 })
+        const tokens = { input: 1_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(false)
+      },
+    })
+  })
+
   test("compaction disabled via prune config still allows isOverflow", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
