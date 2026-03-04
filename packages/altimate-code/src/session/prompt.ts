@@ -749,6 +749,12 @@ export namespace SessionPrompt {
       }
 
       if (result === "stop") break
+      if (result === "continue") {
+        // Reset compaction counter after a successful non-compaction step.
+        // The counter protects against tight compact→overflow loops within
+        // a single turn, but should not accumulate across unrelated turns.
+        compactionAttempts = 0
+      }
       if (result === "compact") {
         compactionAttempts++
         if (compactionAttempts > MAX_COMPACTION_ATTEMPTS) {
