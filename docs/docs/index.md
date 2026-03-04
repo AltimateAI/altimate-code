@@ -1,90 +1,163 @@
-# altimate-code
-
-**The data engineering agent for dbt, SQL, and cloud warehouses.**
-
-altimate-code is an AI-powered CLI agent with 55+ specialized tools for SQL analysis, schema inspection, column-level lineage, FinOps, and RBAC. It connects to your warehouse, understands your data, and helps you write better SQL, cut costs, and ship faster.
-
+---
+title: altimate-code
+hide:
+  - toc
 ---
 
-## What makes it different
+<style>
+.md-content h1:first-child { display: none; }
+.hero img { max-width: 280px; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; }
+</style>
 
-Unlike general-purpose coding agents, altimate-code is built for data teams:
+<div class="hero" markdown>
 
-| Capability | General coding agents | altimate-code |
-|---|---|---|
-| SQL anti-pattern detection | None | 19 rules with confidence scoring |
-| Column-level lineage | None | Automatic from SQL |
-| Cost prediction | None | 4-tier system trained on your query history |
-| Schema-aware autocomplete | None | Indexes your warehouse metadata |
-| Cross-dialect translation | None | Snowflake, BigQuery, Databricks, Redshift |
-| FinOps analysis | None | Credit analysis, expensive queries, warehouse sizing |
-| PII detection | None | Automatic column scanning |
-| dbt integration | Basic file editing | Manifest parsing, test generation, model scaffolding |
+<p align="center">
+  <img src="assets/images/altimate-code-banner.png" alt="altimate-code" />
+</p>
 
-## Quick start
+<p class="hero-tagline">The data engineering agent for<br/>dbt, SQL, and cloud warehouses.</p>
+
+<p class="hero-description">An AI-powered CLI with 55+ specialized tools — SQL analysis, schema inspection, column-level lineage, FinOps, and RBAC. Connects to your warehouse, understands your data, and helps you ship faster.</p>
+
+<p class="hero-actions" markdown>
+
+[Get Started](getting-started.md){ .md-button .md-button--primary }
+[View on GitHub :material-github:](https://github.com/AltimateAI/altimate-code){ .md-button }
+
+</p>
+
+</div>
+
+<div class="hero-install" markdown>
 
 ```bash
-# Install
 npm install -g @altimateai/altimate-code
-
-# Launch the TUI
-altimate-code
-
-# Or run with a specific model
-altimate-code --model claude-sonnet-4-6
 ```
 
-On first launch, run `/connect` to set up your LLM provider and warehouse connections.
-
-## Choose your agent mode
-
-| Mode | Purpose | Permissions |
-|---|---|---|
-| **Builder** | Create dbt models, SQL pipelines, data transformations | Full read/write |
-| **Analyst** | Explore data, run SELECT queries, generate insights | Read-only (enforced) |
-| **Validator** | Data quality checks, schema validation, test coverage | Read + validate |
-| **Migrator** | Cross-warehouse SQL translation and migration | Read/write for migration |
-
-```bash
-# Start in analyst mode (read-only, safe for production)
-altimate-code --agent analyst
-```
-
-## Works with any LLM
-
-altimate-code is model-agnostic. Use it with:
-
-- **Anthropic** (Claude Opus, Sonnet, Haiku)
-- **OpenAI / Codex** (GPT-4o, GPT-5, Codex subscription)
-- **Google** (Gemini Pro, Flash)
-- **AWS Bedrock** / **Azure OpenAI**
-- **Ollama** (local models)
-- **OpenRouter** (150+ models)
-- Any OpenAI-compatible API
-
-## Supported warehouses
-
-- Snowflake (password + key-pair auth)
-- BigQuery (service account + ADC)
-- Databricks (PAT + Unity Catalog)
-- PostgreSQL
-- Redshift
-- DuckDB (local development)
-- MySQL
-- SQL Server
-
-## Documentation
-
-| Section | Description |
-|---------|------------|
-| [Getting Started](getting-started.md) | Installation, first run, warehouse configuration |
-| [Usage](usage/tui.md) | TUI, CLI, web UI, IDE, and CI/CD integration |
-| [Configure](configure/config.md) | Configuration, providers, tools, agents, themes, keybinds |
-| [Data Engineering](data-engineering/agent-modes.md) | Agent modes, SQL/schema/FinOps/lineage/dbt tools, guides |
-| [Develop](develop/sdk.md) | SDK, server API, plugins, ecosystem |
-| [Troubleshooting](troubleshooting.md) | Logs, common issues, debug mode |
+</div>
 
 ---
 
-!!! note
-    altimate-code is your cost advocate. Every tool is designed to minimize unnecessary warehouse spend. Cost prediction runs before every query, anti-patterns that burn credits are flagged automatically, and cheaper alternatives are always suggested.
+<h2 class="section-heading">Built for data teams</h2>
+<p class="section-sub">Unlike general-purpose coding agents, every tool is purpose-built for data engineering workflows.</p>
+
+<div class="grid cards" markdown>
+
+-   :material-database-search:{ .lg .middle } **SQL Anti-Pattern Detection**
+
+    ---
+
+    19 rules with confidence scoring. Catches SELECT *, missing filters, cartesian joins, non-sargable predicates, and more.
+
+-   :material-graph-outline:{ .lg .middle } **Column-Level Lineage**
+
+    ---
+
+    Automatic lineage extraction from SQL. Trace any column back through joins, CTEs, and subqueries to its source.
+
+-   :material-cash-multiple:{ .lg .middle } **FinOps & Cost Analysis**
+
+    ---
+
+    Credit analysis, expensive query detection, warehouse right-sizing, and unused resource cleanup.
+
+-   :material-translate:{ .lg .middle } **Cross-Dialect Translation**
+
+    ---
+
+    Transpile SQL between Snowflake, BigQuery, Databricks, Redshift, PostgreSQL, and more.
+
+-   :material-shield-lock-outline:{ .lg .middle } **PII Detection & Safety**
+
+    ---
+
+    Automatic column scanning for PII. Safety checks and policy enforcement before every query execution.
+
+-   :material-pipe:{ .lg .middle } **dbt Native**
+
+    ---
+
+    Manifest parsing, test generation, model scaffolding, incremental model detection, and lineage-aware refactoring.
+
+</div>
+
+---
+
+<h2 class="section-heading">Four specialized agents</h2>
+<p class="section-sub">Each agent has scoped permissions and purpose-built tools for its role.</p>
+
+<div class="grid cards" markdown>
+
+-   :material-hammer-wrench:{ .lg .middle } **Builder**
+
+    ---
+
+    Create dbt models, SQL pipelines, and data transformations with full read/write access.
+
+-   :material-chart-bar:{ .lg .middle } **Analyst**
+
+    ---
+
+    Explore data, run SELECT queries, and generate insights. Read-only access is enforced.
+
+-   :material-check-decagram:{ .lg .middle } **Validator**
+
+    ---
+
+    Data quality checks, schema validation, test coverage analysis, and CI gating.
+
+-   :material-swap-horizontal:{ .lg .middle } **Migrator**
+
+    ---
+
+    Cross-warehouse SQL translation, schema migration, and dialect conversion workflows.
+
+</div>
+
+---
+
+<h2 class="section-heading">Works with any LLM</h2>
+<p class="section-sub">Model-agnostic — bring your own provider or run locally.</p>
+
+<div class="pill-grid" markdown>
+
+- :material-cloud: **Anthropic**
+- :material-creation: **OpenAI**
+- :material-google: **Google**
+- :material-aws: **AWS Bedrock**
+- :material-microsoft-azure: **Azure OpenAI**
+- :material-server: **Ollama**
+- :material-router-wireless: **OpenRouter**
+
+</div>
+
+---
+
+<h2 class="section-heading">Connects to your warehouse</h2>
+<p class="section-sub">First-class support for 8 data platforms.</p>
+
+<div class="pill-grid" markdown>
+
+- :material-snowflake: **Snowflake**
+- :material-google-cloud: **BigQuery**
+- :simple-databricks: **Databricks**
+- :material-elephant: **PostgreSQL**
+- :material-aws: **Redshift**
+- :material-duck: **DuckDB**
+- :material-database: **MySQL**
+- :material-microsoft: **SQL Server**
+
+</div>
+
+---
+
+<div class="doc-links" markdown>
+
+| | |
+|---|---|
+| **Documentation** | **Develop & Extend** |
+| [Getting Started](getting-started.md) — Install, configure, connect | [SDK](develop/sdk.md) — Build integrations |
+| [Data Engineering](data-engineering/agent-modes.md) — Agent modes, tools, guides | [Plugins](develop/plugins.md) — Custom tools |
+| [Configuration](configure/config.md) — Providers, agents, themes | [Server API](develop/server.md) — Headless mode |
+
+</div>

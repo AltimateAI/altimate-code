@@ -7,3 +7,162 @@
   letter-spacing: 0.05em;
   opacity: 1;
 }
+
+/* ================================================
+   HOMEPAGE
+   ================================================ */
+
+/* --- Hero section --- */
+.hero {
+  text-align: center;
+  padding: 1.5rem 0 0.5rem;
+}
+
+.hero-banner {
+  max-width: 280px;
+  margin: 0 auto;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
+.hero-tagline {
+  font-size: 1.45rem;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1rem 0 0.75rem;
+  color: var(--md-default-fg-color);
+  letter-spacing: -0.015em;
+}
+
+.hero-description {
+  font-size: 0.92rem;
+  max-width: 500px;
+  margin: 0 auto 1.5rem;
+  color: var(--md-default-fg-color--light);
+  line-height: 1.6;
+}
+
+.hero-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0;
+}
+
+.hero-actions .md-button {
+  font-size: 0.8rem;
+  padding: 0.5rem 1.4rem;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+/* Install snippet */
+.hero-install {
+  max-width: 460px;
+  margin: 1.25rem auto 0;
+}
+
+.hero-install pre {
+  margin: 0;
+}
+
+.hero-install code {
+  font-size: 0.78rem;
+}
+
+/* --- Section headings --- */
+.section-heading {
+  text-align: center;
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 1.5rem 0 0.2rem;
+  letter-spacing: -0.01em;
+}
+
+.section-sub {
+  text-align: center;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.85rem;
+  margin: 0 auto 1.25rem;
+  max-width: 460px;
+  line-height: 1.5;
+}
+
+/* --- Feature cards --- */
+.grid.cards > ul > li {
+  border-radius: 8px;
+  padding: 0.8rem !important;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.grid.cards > ul > li:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.07);
+  transform: translateY(-1px);
+}
+
+[data-md-color-scheme="slate"] .grid.cards > ul > li:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.grid.cards > ul > li p {
+  font-size: 0.83rem;
+  line-height: 1.55;
+}
+
+/* --- Pill grid (LLM providers, warehouses) --- */
+.pill-grid {
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.pill-grid ul {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.45rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.pill-grid ul li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 100px;
+  font-size: 0.8rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  color: var(--md-default-fg-color--light);
+  white-space: nowrap;
+  margin: 0;
+}
+
+.pill-grid ul li .twemoji {
+  display: inline-flex;
+}
+
+[data-md-color-scheme="slate"] .pill-grid ul li {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* --- Doc links table --- */
+.doc-links table {
+  font-size: 0.83rem;
+}
+
+.doc-links table th,
+.doc-links table td {
+  border: none;
+  padding: 0.35rem 0.75rem;
+}
+
+.doc-links table th {
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* --- Dividers --- */
+.md-content hr {
+  margin: 1.5rem 0;
+}
