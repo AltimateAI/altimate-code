@@ -772,218 +772,218 @@ class SchemaDiffResult(BaseModel):
     error: str | None = None
 
 
-# --- sqlguard ---
+# --- altimate_core ---
 
 
-class SqlGuardValidateParams(BaseModel):
+class AltimateCoreValidateParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardLintParams(BaseModel):
+class AltimateCoreLintParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardSafetyParams(BaseModel):
+class AltimateCoreSafetyParams(BaseModel):
     sql: str
 
 
-class SqlGuardTranspileParams(BaseModel):
+class AltimateCoreTranspileParams(BaseModel):
     sql: str
     from_dialect: str
     to_dialect: str
 
 
-class SqlGuardExplainParams(BaseModel):
+class AltimateCoreExplainParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardCheckParams(BaseModel):
+class AltimateCoreCheckParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardResult(BaseModel):
+class AltimateCoreResult(BaseModel):
     success: bool = True
     data: dict[str, Any] | None = Field(default_factory=dict)
     error: str | None = None
 
 
-# --- sqlguard Phase 1 (P0) ---
+# --- altimate_core Phase 1 (P0) ---
 
 
-class SqlGuardFixParams(BaseModel):
+class AltimateCoreFixParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
     max_iterations: int = 5
 
 
-class SqlGuardPolicyParams(BaseModel):
+class AltimateCorePolicyParams(BaseModel):
     sql: str
     policy_json: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardSemanticsParams(BaseModel):
+class AltimateCoreSemanticsParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardTestgenParams(BaseModel):
+class AltimateCoreTestgenParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-# --- sqlguard Phase 2 (P1) ---
+# --- altimate_core Phase 2 (P1) ---
 
 
-class SqlGuardEquivalenceParams(BaseModel):
+class AltimateCoreEquivalenceParams(BaseModel):
     sql1: str
     sql2: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardMigrationParams(BaseModel):
+class AltimateCoreMigrationParams(BaseModel):
     old_ddl: str
     new_ddl: str
     dialect: str = ""
 
 
-class SqlGuardSchemaDiffParams(BaseModel):
+class AltimateCoreSchemaDiffParams(BaseModel):
     schema1_path: str = ""
     schema2_path: str = ""
     schema1_context: dict[str, Any] | None = None
     schema2_context: dict[str, Any] | None = None
 
 
-class SqlGuardGuardRewriteParams(BaseModel):
+class AltimateCoreGuardRewriteParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardCorrectParams(BaseModel):
+class AltimateCoreCorrectParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardGradeParams(BaseModel):
+class AltimateCoreGradeParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-# --- sqlguard Phase 3 (P2) ---
+# --- altimate_core Phase 3 (P2) ---
 
 
-class SqlGuardClassifyPiiParams(BaseModel):
+class AltimateCoreClassifyPiiParams(BaseModel):
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardQueryPiiParams(BaseModel):
+class AltimateCoreQueryPiiParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardResolveTermParams(BaseModel):
+class AltimateCoreResolveTermParams(BaseModel):
     term: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardColumnLineageParams(BaseModel):
+class AltimateCoreColumnLineageParams(BaseModel):
     sql: str
     dialect: str = ""
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardTrackLineageParams(BaseModel):
+class AltimateCoreTrackLineageParams(BaseModel):
     queries: list[str]
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardFormatSqlParams(BaseModel):
+class AltimateCoreFormatSqlParams(BaseModel):
     sql: str
     dialect: str = ""
 
 
-class SqlGuardExtractMetadataParams(BaseModel):
+class AltimateCoreExtractMetadataParams(BaseModel):
     sql: str
     dialect: str = ""
 
 
-class SqlGuardCompareQueriesParams(BaseModel):
+class AltimateCoreCompareQueriesParams(BaseModel):
     left_sql: str
     right_sql: str
     dialect: str = ""
 
 
-class SqlGuardCompleteParams(BaseModel):
+class AltimateCoreCompleteParams(BaseModel):
     sql: str
     cursor_pos: int
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardOptimizeContextParams(BaseModel):
+class AltimateCoreOptimizeContextParams(BaseModel):
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardOptimizeForQueryParams(BaseModel):
+class AltimateCoreOptimizeForQueryParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardPruneSchemaParams(BaseModel):
+class AltimateCorePruneSchemaParams(BaseModel):
     sql: str
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardImportDdlParams(BaseModel):
+class AltimateCoreImportDdlParams(BaseModel):
     ddl: str
     dialect: str = ""
 
 
-class SqlGuardExportDdlParams(BaseModel):
+class AltimateCoreExportDdlParams(BaseModel):
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardSchemaFingerprintParams(BaseModel):
+class AltimateCoreSchemaFingerprintParams(BaseModel):
     schema_path: str = ""
     schema_context: dict[str, Any] | None = None
 
 
-class SqlGuardIntrospectionSqlParams(BaseModel):
+class AltimateCoreIntrospectionSqlParams(BaseModel):
     db_type: str
     database: str
     schema_name: str | None = None
 
 
-class SqlGuardParseDbtProjectParams(BaseModel):
+class AltimateCoreParseDbtProjectParams(BaseModel):
     project_dir: str
 
 
-class SqlGuardIsSafeParams(BaseModel):
+class AltimateCoreIsSafeParams(BaseModel):
     sql: str
 
 

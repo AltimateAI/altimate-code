@@ -58,44 +58,44 @@ import { SchemaTagsTool, SchemaTagsListTool } from "./schema-tags"
 import { SqlRewriteTool } from "./sql-rewrite"
 
 import { SchemaDiffTool } from "./schema-diff"
-import { SqlGuardValidateTool } from "./sqlguard-validate"
-import { SqlGuardLintTool } from "./sqlguard-lint"
-import { SqlGuardSafetyTool } from "./sqlguard-safety"
-import { SqlGuardTranspileTool } from "./sqlguard-transpile"
-import { SqlGuardCheckTool } from "./sqlguard-check"
+import { AltimateCoreValidateTool } from "./altimate-core-validate"
+import { AltimateCoreLintTool } from "./altimate-core-lint"
+import { AltimateCoreSafetyTool } from "./altimate-core-safety"
+import { AltimateCoreTranspileTool } from "./altimate-core-transpile"
+import { AltimateCoreCheckTool } from "./altimate-core-check"
 // Phase 1 (P0)
-import { SqlGuardFixTool } from "./sqlguard-fix"
-import { SqlGuardPolicyTool } from "./sqlguard-policy"
+import { AltimateCoreFixTool } from "./altimate-core-fix"
+import { AltimateCorePolicyTool } from "./altimate-core-policy"
 
-import { SqlGuardSemanticsTool } from "./sqlguard-semantics"
-import { SqlGuardTestgenTool } from "./sqlguard-testgen"
+import { AltimateCoreSemanticsTool } from "./altimate-core-semantics"
+import { AltimateCoreTestgenTool } from "./altimate-core-testgen"
 // Phase 2 (P1)
-import { SqlGuardEquivalenceTool } from "./sqlguard-equivalence"
-import { SqlGuardMigrationTool } from "./sqlguard-migration"
-import { SqlGuardSchemaDiffTool } from "./sqlguard-schema-diff"
-import { SqlGuardRewriteTool } from "./sqlguard-rewrite"
-import { SqlGuardCorrectTool } from "./sqlguard-correct"
-import { SqlGuardGradeTool } from "./sqlguard-grade"
+import { AltimateCoreEquivalenceTool } from "./altimate-core-equivalence"
+import { AltimateCoreMigrationTool } from "./altimate-core-migration"
+import { AltimateCoreSchemaDiffTool } from "./altimate-core-schema-diff"
+import { AltimateCoreRewriteTool } from "./altimate-core-rewrite"
+import { AltimateCoreCorrectTool } from "./altimate-core-correct"
+import { AltimateCoreGradeTool } from "./altimate-core-grade"
 
 // Phase 3 (P2)
-import { SqlGuardClassifyPiiTool } from "./sqlguard-classify-pii"
-import { SqlGuardQueryPiiTool } from "./sqlguard-query-pii"
-import { SqlGuardResolveTermTool } from "./sqlguard-resolve-term"
-import { SqlGuardColumnLineageTool } from "./sqlguard-column-lineage"
-import { SqlGuardTrackLineageTool } from "./sqlguard-track-lineage"
-import { SqlGuardFormatTool } from "./sqlguard-format"
-import { SqlGuardExtractMetadataTool } from "./sqlguard-extract-metadata"
-import { SqlGuardCompareTool } from "./sqlguard-compare"
-import { SqlGuardCompleteTool } from "./sqlguard-complete"
-import { SqlGuardOptimizeContextTool } from "./sqlguard-optimize-context"
-import { SqlGuardOptimizeForQueryTool } from "./sqlguard-optimize-for-query"
-import { SqlGuardPruneSchemaTool } from "./sqlguard-prune-schema"
-import { SqlGuardImportDdlTool } from "./sqlguard-import-ddl"
-import { SqlGuardExportDdlTool } from "./sqlguard-export-ddl"
-import { SqlGuardFingerprintTool } from "./sqlguard-fingerprint"
-import { SqlGuardIntrospectionSqlTool } from "./sqlguard-introspection-sql"
-import { SqlGuardParseDbtTool } from "./sqlguard-parse-dbt"
-import { SqlGuardIsSafeTool } from "./sqlguard-is-safe"
+import { AltimateCoreClassifyPiiTool } from "./altimate-core-classify-pii"
+import { AltimateCoreQueryPiiTool } from "./altimate-core-query-pii"
+import { AltimateCoreResolveTermTool } from "./altimate-core-resolve-term"
+import { AltimateCoreColumnLineageTool } from "./altimate-core-column-lineage"
+import { AltimateCoreTrackLineageTool } from "./altimate-core-track-lineage"
+import { AltimateCoreFormatTool } from "./altimate-core-format"
+import { AltimateCoreExtractMetadataTool } from "./altimate-core-extract-metadata"
+import { AltimateCoreCompareTool } from "./altimate-core-compare"
+import { AltimateCoreCompleteTool } from "./altimate-core-complete"
+import { AltimateCoreOptimizeContextTool } from "./altimate-core-optimize-context"
+import { AltimateCoreOptimizeForQueryTool } from "./altimate-core-optimize-for-query"
+import { AltimateCorePruneSchemaTool } from "./altimate-core-prune-schema"
+import { AltimateCoreImportDdlTool } from "./altimate-core-import-ddl"
+import { AltimateCoreExportDdlTool } from "./altimate-core-export-ddl"
+import { AltimateCoreFingerprintTool } from "./altimate-core-fingerprint"
+import { AltimateCoreIntrospectionSqlTool } from "./altimate-core-introspection-sql"
+import { AltimateCoreParseDbtTool } from "./altimate-core-parse-dbt"
+import { AltimateCoreIsSafeTool } from "./altimate-core-is-safe"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -219,42 +219,42 @@ export namespace ToolRegistry {
       SchemaTagsListTool,
       SqlRewriteTool,
       SchemaDiffTool,
-      SqlGuardValidateTool,
-      SqlGuardLintTool,
-      SqlGuardSafetyTool,
-      SqlGuardTranspileTool,
-      SqlGuardCheckTool,
+      AltimateCoreValidateTool,
+      AltimateCoreLintTool,
+      AltimateCoreSafetyTool,
+      AltimateCoreTranspileTool,
+      AltimateCoreCheckTool,
       // Phase 1 (P0)
-      SqlGuardFixTool,
-      SqlGuardPolicyTool,
-      SqlGuardSemanticsTool,
-      SqlGuardTestgenTool,
+      AltimateCoreFixTool,
+      AltimateCorePolicyTool,
+      AltimateCoreSemanticsTool,
+      AltimateCoreTestgenTool,
       // Phase 2 (P1)
-      SqlGuardEquivalenceTool,
-      SqlGuardMigrationTool,
-      SqlGuardSchemaDiffTool,
-      SqlGuardRewriteTool,
-      SqlGuardCorrectTool,
-      SqlGuardGradeTool,
+      AltimateCoreEquivalenceTool,
+      AltimateCoreMigrationTool,
+      AltimateCoreSchemaDiffTool,
+      AltimateCoreRewriteTool,
+      AltimateCoreCorrectTool,
+      AltimateCoreGradeTool,
       // Phase 3 (P2)
-      SqlGuardClassifyPiiTool,
-      SqlGuardQueryPiiTool,
-      SqlGuardResolveTermTool,
-      SqlGuardColumnLineageTool,
-      SqlGuardTrackLineageTool,
-      SqlGuardFormatTool,
-      SqlGuardExtractMetadataTool,
-      SqlGuardCompareTool,
-      SqlGuardCompleteTool,
-      SqlGuardOptimizeContextTool,
-      SqlGuardOptimizeForQueryTool,
-      SqlGuardPruneSchemaTool,
-      SqlGuardImportDdlTool,
-      SqlGuardExportDdlTool,
-      SqlGuardFingerprintTool,
-      SqlGuardIntrospectionSqlTool,
-      SqlGuardParseDbtTool,
-      SqlGuardIsSafeTool,
+      AltimateCoreClassifyPiiTool,
+      AltimateCoreQueryPiiTool,
+      AltimateCoreResolveTermTool,
+      AltimateCoreColumnLineageTool,
+      AltimateCoreTrackLineageTool,
+      AltimateCoreFormatTool,
+      AltimateCoreExtractMetadataTool,
+      AltimateCoreCompareTool,
+      AltimateCoreCompleteTool,
+      AltimateCoreOptimizeContextTool,
+      AltimateCoreOptimizeForQueryTool,
+      AltimateCorePruneSchemaTool,
+      AltimateCoreImportDdlTool,
+      AltimateCoreExportDdlTool,
+      AltimateCoreFingerprintTool,
+      AltimateCoreIntrospectionSqlTool,
+      AltimateCoreParseDbtTool,
+      AltimateCoreIsSafeTool,
       ...custom,
     ]
   }

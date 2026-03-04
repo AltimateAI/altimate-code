@@ -1,6 +1,6 @@
-"""Tests for new sqlguard JSON-RPC server dispatch (Phases 1-3).
+"""Tests for new altimate_core JSON-RPC server dispatch (Phases 1-3).
 
-Updated for new sqlguard API: Schema objects, renamed params.
+Updated for new altimate_core API: Schema objects, renamed params.
 """
 
 import os
@@ -11,10 +11,10 @@ import yaml
 
 from altimate_engine.models import JsonRpcRequest
 from altimate_engine.server import dispatch
-from altimate_engine.sql.guard import SQLGUARD_AVAILABLE
+from altimate_engine.sql.guard import ALTIMATE_CORE_AVAILABLE
 
 
-# Schema context in the format sqlguard expects
+# Schema context in the format altimate_core expects
 SCHEMA_CTX = {
     "tables": {
         "users": {
@@ -34,9 +34,9 @@ SCHEMA_CTX = {
 }
 
 
-# Skip all tests if sqlguard is not installed
+# Skip all tests if altimate_core is not installed
 pytestmark = pytest.mark.skipif(
-    not SQLGUARD_AVAILABLE, reason="sqlguard not installed"
+    not ALTIMATE_CORE_AVAILABLE, reason="altimate_core not installed"
 )
 
 
@@ -45,10 +45,10 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
-class TestSqlGuardFixDispatch:
+class TestAltimateCoreFixDispatch:
     def test_basic_fix(self):
         request = JsonRpcRequest(
-            method="sqlguard.fix",
+            method="altimate_core.fix",
             params={"sql": "SELCT * FORM orders"},
             id=100,
         )
@@ -59,7 +59,7 @@ class TestSqlGuardFixDispatch:
 
     def test_fix_with_max_iterations(self):
         request = JsonRpcRequest(
-            method="sqlguard.fix",
+            method="altimate_core.fix",
             params={"sql": "SELCT 1", "max_iterations": 3},
             id=101,
         )
@@ -68,7 +68,7 @@ class TestSqlGuardFixDispatch:
 
     def test_fix_with_schema_context(self):
         request = JsonRpcRequest(
-            method="sqlguard.fix",
+            method="altimate_core.fix",
             params={"sql": "SELCT id FORM orders", "schema_context": SCHEMA_CTX},
             id=102,
         )
@@ -76,10 +76,10 @@ class TestSqlGuardFixDispatch:
         assert response.error is None
 
 
-class TestSqlGuardPolicyDispatch:
+class TestAltimateCorePolicyDispatch:
     def test_basic_policy(self):
         request = JsonRpcRequest(
-            method="sqlguard.policy",
+            method="altimate_core.policy",
             params={"sql": "SELECT * FROM users", "policy_json": '{"rules": []}'},
             id=110,
         )
@@ -89,7 +89,7 @@ class TestSqlGuardPolicyDispatch:
 
     def test_empty_policy(self):
         request = JsonRpcRequest(
-            method="sqlguard.policy",
+            method="altimate_core.policy",
             params={"sql": "SELECT 1", "policy_json": ""},
             id=111,
         )
@@ -98,10 +98,10 @@ class TestSqlGuardPolicyDispatch:
 
 
 
-class TestSqlGuardSemanticsDispatch:
+class TestAltimateCoreSemanticsDispatch:
     def test_basic_semantics(self):
         request = JsonRpcRequest(
-            method="sqlguard.semantics",
+            method="altimate_core.semantics",
             params={"sql": "SELECT * FROM users WHERE name = NULL"},
             id=130,
         )
@@ -111,7 +111,7 @@ class TestSqlGuardSemanticsDispatch:
 
     def test_with_schema_context(self):
         request = JsonRpcRequest(
-            method="sqlguard.semantics",
+            method="altimate_core.semantics",
             params={"sql": "SELECT id FROM users", "schema_context": SCHEMA_CTX},
             id=131,
         )
@@ -119,10 +119,10 @@ class TestSqlGuardSemanticsDispatch:
         assert response.error is None
 
 
-class TestSqlGuardTestgenDispatch:
+class TestAltimateCoreTestgenDispatch:
     def test_basic_testgen(self):
         request = JsonRpcRequest(
-            method="sqlguard.testgen",
+            method="altimate_core.testgen",
             params={"sql": "SELECT id, name FROM users WHERE active = true"},
             id=140,
         )
@@ -136,10 +136,10 @@ class TestSqlGuardTestgenDispatch:
 # ---------------------------------------------------------------------------
 
 
-class TestSqlGuardEquivalenceDispatch:
+class TestAltimateCoreEquivalenceDispatch:
     def test_basic_equivalence(self):
         request = JsonRpcRequest(
-            method="sqlguard.equivalence",
+            method="altimate_core.equivalence",
             params={"sql1": "SELECT 1", "sql2": "SELECT 1"},
             id=200,
         )
@@ -149,7 +149,7 @@ class TestSqlGuardEquivalenceDispatch:
 
     def test_different_queries(self):
         request = JsonRpcRequest(
-            method="sqlguard.equivalence",
+            method="altimate_core.equivalence",
             params={"sql1": "SELECT id FROM users", "sql2": "SELECT name FROM users"},
             id=201,
         )
@@ -157,10 +157,10 @@ class TestSqlGuardEquivalenceDispatch:
         assert response.error is None
 
 
-class TestSqlGuardMigrationDispatch:
+class TestAltimateCoreMigrationDispatch:
     def test_basic_migration(self):
         request = JsonRpcRequest(
-            method="sqlguard.migration",
+            method="altimate_core.migration",
             params={
                 "old_ddl": "CREATE TABLE users (id INT);",
                 "new_ddl": "CREATE TABLE users (id INT, email VARCHAR(255));",
@@ -172,7 +172,7 @@ class TestSqlGuardMigrationDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardSchemaDiffDispatch:
+class TestAltimateCoreSchemaDiffDispatch:
     def test_basic_diff(self):
         schema1 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
         schema2 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}, {"name": "email", "type": "varchar"}]}}, "version": "1"}
@@ -184,7 +184,7 @@ class TestSqlGuardSchemaDiffDispatch:
             path2 = f2.name
         try:
             request = JsonRpcRequest(
-                method="sqlguard.schema_diff",
+                method="altimate_core.schema_diff",
                 params={"schema1_path": path1, "schema2_path": path2},
                 id=220,
             )
@@ -199,7 +199,7 @@ class TestSqlGuardSchemaDiffDispatch:
         s1 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}]}}, "version": "1"}
         s2 = {"tables": {"users": {"columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "varchar"}]}}, "version": "1"}
         request = JsonRpcRequest(
-            method="sqlguard.schema_diff",
+            method="altimate_core.schema_diff",
             params={"schema1_context": s1, "schema2_context": s2},
             id=221,
         )
@@ -208,10 +208,10 @@ class TestSqlGuardSchemaDiffDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardRewriteDispatch:
+class TestAltimateCoreRewriteDispatch:
     def test_basic_rewrite(self):
         request = JsonRpcRequest(
-            method="sqlguard.rewrite",
+            method="altimate_core.rewrite",
             params={"sql": "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)"},
             id=230,
         )
@@ -220,10 +220,10 @@ class TestSqlGuardRewriteDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardCorrectDispatch:
+class TestAltimateCoreCorrectDispatch:
     def test_basic_correct(self):
         request = JsonRpcRequest(
-            method="sqlguard.correct",
+            method="altimate_core.correct",
             params={"sql": "SELCT * FORM orders"},
             id=240,
         )
@@ -232,10 +232,10 @@ class TestSqlGuardCorrectDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardGradeDispatch:
+class TestAltimateCoreGradeDispatch:
     def test_basic_grade(self):
         request = JsonRpcRequest(
-            method="sqlguard.grade",
+            method="altimate_core.grade",
             params={"sql": "SELECT id FROM users WHERE id = 1"},
             id=250,
         )
@@ -250,7 +250,7 @@ class TestSqlGuardGradeDispatch:
 # ---------------------------------------------------------------------------
 
 
-class TestSqlGuardClassifyPiiDispatch:
+class TestAltimateCoreClassifyPiiDispatch:
     def test_with_schema_context(self):
         schema = {
             "tables": {
@@ -264,7 +264,7 @@ class TestSqlGuardClassifyPiiDispatch:
             "version": "1",
         }
         request = JsonRpcRequest(
-            method="sqlguard.classify_pii",
+            method="altimate_core.classify_pii",
             params={"schema_context": schema},
             id=300,
         )
@@ -273,10 +273,10 @@ class TestSqlGuardClassifyPiiDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardQueryPiiDispatch:
+class TestAltimateCoreQueryPiiDispatch:
     def test_basic_pii(self):
         request = JsonRpcRequest(
-            method="sqlguard.query_pii",
+            method="altimate_core.query_pii",
             params={"sql": "SELECT email, ssn FROM users"},
             id=310,
         )
@@ -285,10 +285,10 @@ class TestSqlGuardQueryPiiDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardResolveTermDispatch:
+class TestAltimateCoreResolveTermDispatch:
     def test_basic_resolve(self):
         request = JsonRpcRequest(
-            method="sqlguard.resolve_term",
+            method="altimate_core.resolve_term",
             params={"term": "customer"},
             id=320,
         )
@@ -297,10 +297,10 @@ class TestSqlGuardResolveTermDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardColumnLineageDispatch:
+class TestAltimateCoreColumnLineageDispatch:
     def test_basic_lineage(self):
         request = JsonRpcRequest(
-            method="sqlguard.column_lineage",
+            method="altimate_core.column_lineage",
             params={"sql": "SELECT id FROM users"},
             id=330,
         )
@@ -309,10 +309,10 @@ class TestSqlGuardColumnLineageDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardTrackLineageDispatch:
+class TestAltimateCoreTrackLineageDispatch:
     def test_basic_tracking(self):
         request = JsonRpcRequest(
-            method="sqlguard.track_lineage",
+            method="altimate_core.track_lineage",
             params={"queries": ["SELECT id FROM users", "SELECT user_id FROM orders"]},
             id=340,
         )
@@ -321,10 +321,10 @@ class TestSqlGuardTrackLineageDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardFormatDispatch:
+class TestAltimateCoreFormatDispatch:
     def test_basic_format(self):
         request = JsonRpcRequest(
-            method="sqlguard.format",
+            method="altimate_core.format",
             params={"sql": "select id,name from users where id=1"},
             id=350,
         )
@@ -334,7 +334,7 @@ class TestSqlGuardFormatDispatch:
 
     def test_with_dialect(self):
         request = JsonRpcRequest(
-            method="sqlguard.format",
+            method="altimate_core.format",
             params={"sql": "SELECT 1", "dialect": "postgres"},
             id=351,
         )
@@ -342,10 +342,10 @@ class TestSqlGuardFormatDispatch:
         assert response.error is None
 
 
-class TestSqlGuardMetadataDispatch:
+class TestAltimateCoreMetadataDispatch:
     def test_basic_metadata(self):
         request = JsonRpcRequest(
-            method="sqlguard.metadata",
+            method="altimate_core.metadata",
             params={"sql": "SELECT id, name FROM users WHERE active = true"},
             id=360,
         )
@@ -354,10 +354,10 @@ class TestSqlGuardMetadataDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardCompareDispatch:
+class TestAltimateCoreCompareDispatch:
     def test_basic_compare(self):
         request = JsonRpcRequest(
-            method="sqlguard.compare",
+            method="altimate_core.compare",
             params={"left_sql": "SELECT 1", "right_sql": "SELECT 2"},
             id=370,
         )
@@ -366,10 +366,10 @@ class TestSqlGuardCompareDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardCompleteDispatch:
+class TestAltimateCoreCompleteDispatch:
     def test_basic_complete(self):
         request = JsonRpcRequest(
-            method="sqlguard.complete",
+            method="altimate_core.complete",
             params={"sql": "SELECT ", "cursor_pos": 7},
             id=380,
         )
@@ -378,10 +378,10 @@ class TestSqlGuardCompleteDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardOptimizeContextDispatch:
+class TestAltimateCoreOptimizeContextDispatch:
     def test_with_schema_context(self):
         request = JsonRpcRequest(
-            method="sqlguard.optimize_context",
+            method="altimate_core.optimize_context",
             params={"schema_context": SCHEMA_CTX},
             id=390,
         )
@@ -390,10 +390,10 @@ class TestSqlGuardOptimizeContextDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardOptimizeForQueryDispatch:
+class TestAltimateCoreOptimizeForQueryDispatch:
     def test_basic_optimize(self):
         request = JsonRpcRequest(
-            method="sqlguard.optimize_for_query",
+            method="altimate_core.optimize_for_query",
             params={"sql": "SELECT id FROM users"},
             id=400,
         )
@@ -402,10 +402,10 @@ class TestSqlGuardOptimizeForQueryDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardPruneSchemaDispatch:
+class TestAltimateCorePruneSchemaDispatch:
     def test_basic_prune(self):
         request = JsonRpcRequest(
-            method="sqlguard.prune_schema",
+            method="altimate_core.prune_schema",
             params={"sql": "SELECT id FROM users"},
             id=410,
         )
@@ -414,10 +414,10 @@ class TestSqlGuardPruneSchemaDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardImportDdlDispatch:
+class TestAltimateCoreImportDdlDispatch:
     def test_basic_import(self):
         request = JsonRpcRequest(
-            method="sqlguard.import_ddl",
+            method="altimate_core.import_ddl",
             params={"ddl": "CREATE TABLE users (id INT, name VARCHAR(255))"},
             id=420,
         )
@@ -426,10 +426,10 @@ class TestSqlGuardImportDdlDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardExportDdlDispatch:
+class TestAltimateCoreExportDdlDispatch:
     def test_with_schema_context(self):
         request = JsonRpcRequest(
-            method="sqlguard.export_ddl",
+            method="altimate_core.export_ddl",
             params={"schema_context": SCHEMA_CTX},
             id=430,
         )
@@ -438,10 +438,10 @@ class TestSqlGuardExportDdlDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardFingerprintDispatch:
+class TestAltimateCoreFingerprintDispatch:
     def test_with_schema_context(self):
         request = JsonRpcRequest(
-            method="sqlguard.fingerprint",
+            method="altimate_core.fingerprint",
             params={"schema_context": SCHEMA_CTX},
             id=440,
         )
@@ -450,10 +450,10 @@ class TestSqlGuardFingerprintDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardIntrospectionSqlDispatch:
+class TestAltimateCoreIntrospectionSqlDispatch:
     def test_basic_introspection(self):
         request = JsonRpcRequest(
-            method="sqlguard.introspection_sql",
+            method="altimate_core.introspection_sql",
             params={"db_type": "postgres", "database": "mydb"},
             id=450,
         )
@@ -463,7 +463,7 @@ class TestSqlGuardIntrospectionSqlDispatch:
 
     def test_with_schema_name(self):
         request = JsonRpcRequest(
-            method="sqlguard.introspection_sql",
+            method="altimate_core.introspection_sql",
             params={"db_type": "snowflake", "database": "mydb", "schema_name": "public"},
             id=451,
         )
@@ -471,10 +471,10 @@ class TestSqlGuardIntrospectionSqlDispatch:
         assert response.error is None
 
 
-class TestSqlGuardParseDbtDispatch:
+class TestAltimateCoreParseDbtDispatch:
     def test_basic_parse(self):
         request = JsonRpcRequest(
-            method="sqlguard.parse_dbt",
+            method="altimate_core.parse_dbt",
             params={"project_dir": "/nonexistent/dbt/project"},
             id=460,
         )
@@ -483,10 +483,10 @@ class TestSqlGuardParseDbtDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardIsSafeDispatch:
+class TestAltimateCoreIsSafeDispatch:
     def test_safe_query(self):
         request = JsonRpcRequest(
-            method="sqlguard.is_safe",
+            method="altimate_core.is_safe",
             params={"sql": "SELECT 1"},
             id=470,
         )
@@ -496,7 +496,7 @@ class TestSqlGuardIsSafeDispatch:
 
     def test_unsafe_query(self):
         request = JsonRpcRequest(
-            method="sqlguard.is_safe",
+            method="altimate_core.is_safe",
             params={"sql": "DROP TABLE users"},
             id=471,
         )
@@ -510,10 +510,10 @@ class TestSqlGuardIsSafeDispatch:
 # ---------------------------------------------------------------------------
 
 
-class TestSqlGuardNewInvalidParams:
+class TestAltimateCoreNewInvalidParams:
     def test_fix_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.fix",
+            method="altimate_core.fix",
             params={},
             id=500,
         )
@@ -522,7 +522,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_policy_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.policy",
+            method="altimate_core.policy",
             params={},
             id=501,
         )
@@ -531,7 +531,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_policy_no_policy_json(self):
         request = JsonRpcRequest(
-            method="sqlguard.policy",
+            method="altimate_core.policy",
             params={"sql": "SELECT 1"},
             id=502,
         )
@@ -540,7 +540,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_semantics_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.semantics",
+            method="altimate_core.semantics",
             params={},
             id=504,
         )
@@ -549,7 +549,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_testgen_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.testgen",
+            method="altimate_core.testgen",
             params={},
             id=505,
         )
@@ -558,7 +558,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_equivalence_no_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.equivalence",
+            method="altimate_core.equivalence",
             params={},
             id=506,
         )
@@ -567,7 +567,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_correct_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.correct",
+            method="altimate_core.correct",
             params={},
             id=508,
         )
@@ -576,7 +576,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_complete_no_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.complete",
+            method="altimate_core.complete",
             params={},
             id=509,
         )
@@ -585,7 +585,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_introspection_sql_no_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.introspection_sql",
+            method="altimate_core.introspection_sql",
             params={},
             id=510,
         )
@@ -594,7 +594,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_import_ddl_no_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.import_ddl",
+            method="altimate_core.import_ddl",
             params={},
             id=511,
         )
@@ -603,7 +603,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_compare_no_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.compare",
+            method="altimate_core.compare",
             params={},
             id=512,
         )
@@ -612,7 +612,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_track_lineage_no_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.track_lineage",
+            method="altimate_core.track_lineage",
             params={},
             id=513,
         )
@@ -621,7 +621,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_is_safe_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.is_safe",
+            method="altimate_core.is_safe",
             params={},
             id=514,
         )
@@ -630,7 +630,7 @@ class TestSqlGuardNewInvalidParams:
 
     def test_parse_dbt_no_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.parse_dbt",
+            method="altimate_core.parse_dbt",
             params={},
             id=515,
         )

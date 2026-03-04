@@ -77,7 +77,7 @@ altimate-code --agent analyst
 
 Analyst mode enforces strict guardrails:
 
-- **SELECT only** — INSERT, UPDATE, DELETE, DROP are blocked by SQLGuard
+- **SELECT only** — INSERT, UPDATE, DELETE, DROP are blocked by altimate-core
 - **Cost-first** — Every query gets a cost prediction before execution
 - **LIMIT enforced** — Large scans are automatically limited
 - **No file writes** — Cannot modify your codebase

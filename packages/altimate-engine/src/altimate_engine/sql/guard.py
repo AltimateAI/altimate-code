@@ -14,9 +14,9 @@ from typing import Any
 try:
     import altimate_core
 
-    SQLGUARD_AVAILABLE = True
+    ALTIMATE_CORE_AVAILABLE = True
 except ImportError:
-    SQLGUARD_AVAILABLE = False
+    ALTIMATE_CORE_AVAILABLE = False
 
 _NOT_INSTALLED_MSG = "altimate-core not installed. Run: pip install altimate-core"
 
@@ -83,7 +83,7 @@ def guard_validate(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Validate SQL against schema using altimate_core."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -98,7 +98,7 @@ def guard_lint(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Lint SQL for anti-patterns using altimate_core."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -109,7 +109,7 @@ def guard_lint(
 
 def guard_scan_safety(sql: str) -> dict:
     """Scan SQL for injection patterns and safety threats."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         return altimate_core.scan_sql(sql)
@@ -148,7 +148,7 @@ def _postprocess_qualify(sql: str) -> str:
 
 def guard_transpile(sql: str, from_dialect: str, to_dialect: str) -> dict:
     """Transpile SQL between dialects with IFF/QUALIFY pre/post-processing."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         processed = _preprocess_iff(sql)
@@ -173,7 +173,7 @@ def guard_explain(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Explain SQL query plan, lineage, and cost signals."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -191,7 +191,7 @@ def guard_check(
 
     altimate_core.check was removed; this composes validate + lint + scan_sql.
     """
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -219,7 +219,7 @@ def guard_fix(
     max_iterations: int = 5,
 ) -> dict:
     """Auto-fix SQL errors via fuzzy matching and re-validation."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -235,7 +235,7 @@ def guard_check_policy(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Check SQL against JSON-based governance guardrails."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -250,7 +250,7 @@ def guard_check_semantics(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Run 10 semantic validation rules against SQL."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -265,7 +265,7 @@ def guard_generate_tests(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Generate automated SQL test cases."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -286,7 +286,7 @@ def guard_check_equivalence(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Check semantic equivalence of two queries."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -301,7 +301,7 @@ def guard_analyze_migration(
     dialect: str = "",
 ) -> dict:
     """Analyze DDL migration safety (data loss, type narrowing, defaults)."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         return altimate_core.analyze_migration(old_ddl, new_ddl, dialect or "generic")
@@ -316,7 +316,7 @@ def guard_diff_schemas(
     schema2_context: dict[str, Any] | None = None,
 ) -> dict:
     """Diff two schemas with breaking change detection."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         s1 = _schema_or_empty(schema1_path, schema1_context)
@@ -332,7 +332,7 @@ def guard_rewrite(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Suggest query optimization rewrites."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -347,7 +347,7 @@ def guard_correct(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Iterative propose-verify-refine correction loop."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -362,7 +362,7 @@ def guard_evaluate(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Grade SQL quality on A-F scale."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -381,7 +381,7 @@ def guard_classify_pii(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Classify PII columns in schema."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -396,7 +396,7 @@ def guard_check_query_pii(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Analyze query-level PII exposure."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -411,7 +411,7 @@ def guard_resolve_term(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Fuzzy match business glossary term to schema elements."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -450,7 +450,7 @@ def guard_column_lineage(
     default_schema: str = "",
 ) -> dict:
     """Schema-aware column lineage (requires altimate_core.init)."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         _ensure_init()
@@ -472,7 +472,7 @@ def guard_track_lineage(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Track lineage across multiple queries (requires altimate_core.init)."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         _ensure_init()
@@ -484,7 +484,7 @@ def guard_track_lineage(
 
 def guard_format_sql(sql: str, dialect: str = "") -> dict:
     """Rust-powered SQL formatting."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         return altimate_core.format_sql(sql, dialect or "generic")
@@ -494,7 +494,7 @@ def guard_format_sql(sql: str, dialect: str = "") -> dict:
 
 def guard_extract_metadata(sql: str, dialect: str = "") -> dict:
     """Extract tables, columns, functions, CTEs from SQL."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         return altimate_core.extract_metadata(sql, dialect or "generic")
@@ -504,7 +504,7 @@ def guard_extract_metadata(sql: str, dialect: str = "") -> dict:
 
 def guard_compare_queries(left_sql: str, right_sql: str, dialect: str = "") -> dict:
     """Structural comparison of two queries."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         return altimate_core.compare_queries(left_sql, right_sql, dialect or "generic")
@@ -519,7 +519,7 @@ def guard_complete(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Cursor-aware SQL completion suggestions."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -533,7 +533,7 @@ def guard_optimize_context(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """5-level progressive disclosure for context window optimization."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -548,7 +548,7 @@ def guard_optimize_for_query(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Query-aware schema reduction — prune to relevant tables/columns."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -563,7 +563,7 @@ def guard_prune_schema(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Filter schema to only referenced tables/columns."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -574,7 +574,7 @@ def guard_prune_schema(
 
 def guard_import_ddl(ddl: str, dialect: str = "") -> dict:
     """Parse CREATE TABLE DDL into schema definition."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         result = altimate_core.import_ddl(ddl, dialect or "generic")
@@ -591,7 +591,7 @@ def guard_export_ddl(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Export schema as CREATE TABLE DDL statements."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -609,7 +609,7 @@ def guard_schema_fingerprint(
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
     """Compute SHA-256 fingerprint of schema for caching."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         schema = _schema_or_empty(schema_path, schema_context)
@@ -628,7 +628,7 @@ def guard_introspection_sql(
     schema_name: str | None = None,
 ) -> dict:
     """Generate INFORMATION_SCHEMA introspection queries per dialect."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         return altimate_core.introspection_sql(db_type, database, schema_name)
@@ -638,7 +638,7 @@ def guard_introspection_sql(
 
 def guard_parse_dbt_project(project_dir: str) -> dict:
     """Parse dbt project directory for analysis."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         return altimate_core.parse_dbt_project(project_dir)
@@ -648,7 +648,7 @@ def guard_parse_dbt_project(project_dir: str) -> dict:
 
 def guard_is_safe(sql: str) -> dict:
     """Quick boolean safety check."""
-    if not SQLGUARD_AVAILABLE:
+    if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
         result = altimate_core.is_safe(sql)

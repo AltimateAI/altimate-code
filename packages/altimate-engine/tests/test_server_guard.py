@@ -1,22 +1,22 @@
-"""Tests for sqlguard JSON-RPC server dispatch."""
+"""Tests for altimate-core JSON-RPC server dispatch."""
 
 import pytest
 
 from altimate_engine.models import JsonRpcRequest
 from altimate_engine.server import dispatch
-from altimate_engine.sql.guard import SQLGUARD_AVAILABLE
+from altimate_engine.sql.guard import ALTIMATE_CORE_AVAILABLE
 
 
-# Skip all tests if sqlguard is not installed
+# Skip all tests if altimate-core is not installed
 pytestmark = pytest.mark.skipif(
-    not SQLGUARD_AVAILABLE, reason="sqlguard not installed"
+    not ALTIMATE_CORE_AVAILABLE, reason="altimate-core not installed"
 )
 
 
-class TestSqlGuardValidateDispatch:
+class TestAltimateCoreValidateDispatch:
     def test_basic_validate(self):
         request = JsonRpcRequest(
-            method="sqlguard.validate",
+            method="altimate_core.validate",
             params={"sql": "SELECT 1"},
             id=1,
         )
@@ -27,7 +27,7 @@ class TestSqlGuardValidateDispatch:
 
     def test_validate_with_schema_path(self):
         request = JsonRpcRequest(
-            method="sqlguard.validate",
+            method="altimate_core.validate",
             params={"sql": "SELECT 1", "schema_path": ""},
             id=2,
         )
@@ -36,7 +36,7 @@ class TestSqlGuardValidateDispatch:
 
     def test_validate_with_schema_context(self):
         request = JsonRpcRequest(
-            method="sqlguard.validate",
+            method="altimate_core.validate",
             params={
                 "sql": "SELECT id FROM users",
                 "schema_context": {
@@ -50,10 +50,10 @@ class TestSqlGuardValidateDispatch:
         assert response.error is None
 
 
-class TestSqlGuardLintDispatch:
+class TestAltimateCoreLintDispatch:
     def test_basic_lint(self):
         request = JsonRpcRequest(
-            method="sqlguard.lint",
+            method="altimate_core.lint",
             params={"sql": "SELECT * FROM users WHERE name = NULL"},
             id=10,
         )
@@ -63,7 +63,7 @@ class TestSqlGuardLintDispatch:
 
     def test_clean_sql_lint(self):
         request = JsonRpcRequest(
-            method="sqlguard.lint",
+            method="altimate_core.lint",
             params={"sql": "SELECT id FROM users WHERE id = 1"},
             id=11,
         )
@@ -71,10 +71,10 @@ class TestSqlGuardLintDispatch:
         assert response.error is None
 
 
-class TestSqlGuardSafetyDispatch:
+class TestAltimateCoreSafetyDispatch:
     def test_safe_query(self):
         request = JsonRpcRequest(
-            method="sqlguard.safety",
+            method="altimate_core.safety",
             params={"sql": "SELECT 1"},
             id=20,
         )
@@ -84,7 +84,7 @@ class TestSqlGuardSafetyDispatch:
 
     def test_unsafe_query(self):
         request = JsonRpcRequest(
-            method="sqlguard.safety",
+            method="altimate_core.safety",
             params={"sql": "DROP TABLE users"},
             id=21,
         )
@@ -94,10 +94,10 @@ class TestSqlGuardSafetyDispatch:
         assert data.get("safe") is False or data.get("threats")
 
 
-class TestSqlGuardTranspileDispatch:
+class TestAltimateCoreTranspileDispatch:
     def test_basic_transpile(self):
         request = JsonRpcRequest(
-            method="sqlguard.transpile",
+            method="altimate_core.transpile",
             params={"sql": "SELECT 1", "from_dialect": "generic", "to_dialect": "postgres"},
             id=30,
         )
@@ -107,7 +107,7 @@ class TestSqlGuardTranspileDispatch:
 
     def test_missing_params(self):
         request = JsonRpcRequest(
-            method="sqlguard.transpile",
+            method="altimate_core.transpile",
             params={"sql": "SELECT 1"},
             id=31,
         )
@@ -116,10 +116,10 @@ class TestSqlGuardTranspileDispatch:
         assert response.error is not None
 
 
-class TestSqlGuardExplainDispatch:
+class TestAltimateCoreExplainDispatch:
     def test_basic_explain(self):
         request = JsonRpcRequest(
-            method="sqlguard.explain",
+            method="altimate_core.explain",
             params={"sql": "SELECT 1"},
             id=40,
         )
@@ -128,10 +128,10 @@ class TestSqlGuardExplainDispatch:
         assert "data" in response.result
 
 
-class TestSqlGuardCheckDispatch:
+class TestAltimateCoreCheckDispatch:
     def test_basic_check(self):
         request = JsonRpcRequest(
-            method="sqlguard.check",
+            method="altimate_core.check",
             params={"sql": "SELECT 1"},
             id=50,
         )
@@ -141,7 +141,7 @@ class TestSqlGuardCheckDispatch:
 
     def test_check_unsafe_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.check",
+            method="altimate_core.check",
             params={"sql": "DROP TABLE users; SELECT * FROM passwords"},
             id=51,
         )
@@ -149,10 +149,10 @@ class TestSqlGuardCheckDispatch:
         assert response.error is None
 
 
-class TestSqlGuardInvalidParams:
+class TestAltimateCoreInvalidParams:
     def test_validate_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.validate",
+            method="altimate_core.validate",
             params={},
             id=60,
         )
@@ -161,7 +161,7 @@ class TestSqlGuardInvalidParams:
 
     def test_lint_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.lint",
+            method="altimate_core.lint",
             params={},
             id=61,
         )
@@ -170,7 +170,7 @@ class TestSqlGuardInvalidParams:
 
     def test_safety_no_sql(self):
         request = JsonRpcRequest(
-            method="sqlguard.safety",
+            method="altimate_core.safety",
             params={},
             id=62,
         )

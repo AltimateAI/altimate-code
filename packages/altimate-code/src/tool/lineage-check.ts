@@ -5,7 +5,7 @@ import type { LineageCheckResult } from "../bridge/protocol"
 
 export const LineageCheckTool = Tool.define("lineage_check", {
   description:
-    "Check column-level lineage for a SQL query using the Rust-based sqlguard engine. Traces how source columns flow through transformations to output columns. Useful for impact analysis and understanding data flow.",
+    "Check column-level lineage for a SQL query using the Rust-based altimate-core engine. Traces how source columns flow through transformations to output columns. Useful for impact analysis and understanding data flow.",
   parameters: z.object({
     sql: z.string().describe("SQL query to trace lineage for"),
     dialect: z
@@ -45,7 +45,7 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       return {
         title: "Lineage: ERROR",
         metadata: { success: false },
-        output: `Failed to check lineage: ${msg}\n\nEnsure the Python bridge is running and sqlguard is initialized.`,
+        output: `Failed to check lineage: ${msg}\n\nEnsure the Python bridge is running and altimate-core is initialized.`,
       }
     }
   },

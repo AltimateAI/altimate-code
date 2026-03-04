@@ -21,7 +21,7 @@ def dbt_lineage(params: DbtLineageParams) -> DbtLineageResult:
 
     Loads the manifest, finds the target model (by name or unique_id),
     extracts its compiled SQL + upstream schemas, and delegates to
-    sqlguard's column_lineage via guard_column_lineage.
+    altimate-core's column_lineage via guard_column_lineage.
     """
     manifest_path = Path(params.manifest_path)
     if not manifest_path.exists():
@@ -71,7 +71,7 @@ def dbt_lineage(params: DbtLineageParams) -> DbtLineageResult:
     upstream_ids = model_node.get("depends_on", {}).get("nodes", [])
     schema_context = _build_schema_context(nodes, sources, upstream_ids)
 
-    # Delegate to sqlguard column_lineage
+    # Delegate to altimate-core column_lineage
     raw = guard_column_lineage(
         sql,
         dialect=dialect,
@@ -136,7 +136,7 @@ def _build_schema_context(
 ) -> dict | None:
     """Build schema context from upstream model/source columns.
 
-    Returns sqlguard schema format:
+    Returns altimate-core schema format:
     {"tables": {"table_name": {"columns": [{"name": ..., "type": ...}]}}, "version": "1"}
     """
     tables: dict[str, dict] = {}

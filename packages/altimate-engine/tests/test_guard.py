@@ -1,4 +1,4 @@
-"""Tests for the sqlguard Python wrapper."""
+"""Tests for the altimate-core Python wrapper."""
 
 import json
 import os
@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from altimate_engine.sql.guard import (
-    SQLGUARD_AVAILABLE,
+    ALTIMATE_CORE_AVAILABLE,
     guard_validate,
     guard_lint,
     guard_scan_safety,
@@ -22,9 +22,9 @@ from altimate_engine.sql.guard import (
 )
 
 
-# Skip all tests if sqlguard is not installed
+# Skip all tests if altimate-core is not installed
 pytestmark = pytest.mark.skipif(
-    not SQLGUARD_AVAILABLE, reason="sqlguard not installed"
+    not ALTIMATE_CORE_AVAILABLE, reason="altimate-core not installed"
 )
 
 
@@ -168,40 +168,40 @@ class TestSchemaContext:
 
 
 class TestGracefulFallback:
-    """Test behavior when sqlguard is not installed."""
+    """Test behavior when altimate-core is not installed."""
 
     def test_validate_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+        with patch("altimate_engine.sql.guard.ALTIMATE_CORE_AVAILABLE", False):
             result = guard_validate("SELECT 1")
             assert result["success"] is False
             assert "not installed" in result["error"]
 
     def test_lint_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+        with patch("altimate_engine.sql.guard.ALTIMATE_CORE_AVAILABLE", False):
             result = guard_lint("SELECT 1")
             assert result["success"] is False
             assert "not installed" in result["error"]
 
     def test_safety_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+        with patch("altimate_engine.sql.guard.ALTIMATE_CORE_AVAILABLE", False):
             result = guard_scan_safety("SELECT 1")
             assert result["success"] is False
             assert "not installed" in result["error"]
 
     def test_transpile_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+        with patch("altimate_engine.sql.guard.ALTIMATE_CORE_AVAILABLE", False):
             result = guard_transpile("SELECT 1", "generic", "postgres")
             assert result["success"] is False
             assert "not installed" in result["error"]
 
     def test_explain_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+        with patch("altimate_engine.sql.guard.ALTIMATE_CORE_AVAILABLE", False):
             result = guard_explain("SELECT 1")
             assert result["success"] is False
             assert "not installed" in result["error"]
 
     def test_check_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
+        with patch("altimate_engine.sql.guard.ALTIMATE_CORE_AVAILABLE", False):
             result = guard_check("SELECT 1")
             assert result["success"] is False
             assert "not installed" in result["error"]

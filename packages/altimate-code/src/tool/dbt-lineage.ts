@@ -5,7 +5,7 @@ import type { DbtLineageResult } from "../bridge/protocol"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
-    "Compute column-level lineage for a dbt model using the Rust-based sqlguard engine. Takes a manifest.json path and model name, extracts compiled SQL and upstream schemas, and traces column flow.",
+    "Compute column-level lineage for a dbt model using the Rust-based altimate-core engine. Takes a manifest.json path and model name, extracts compiled SQL and upstream schemas, and traces column flow.",
   parameters: z.object({
     manifest_path: z.string().describe("Path to dbt manifest.json file"),
     model: z.string().describe("Model name or unique_id (e.g. 'my_model' or 'model.project.my_model')"),
