@@ -20,7 +20,7 @@ The TUI has three main areas:
 |--------|--------|---------|
 | `@` | Reference a file | `@src/models/user.sql explain this model` |
 | `!` | Run a shell command | `!dbt run --select my_model` |
-| `/` | Slash command | `/connect`, `/models`, `/theme` |
+| `/` | Slash command | `/discover`, `/connect`, `/review`, `/models`, `/theme` |
 
 ## Leader Key
 

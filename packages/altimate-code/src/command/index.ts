@@ -4,6 +4,7 @@ import { Config } from "../config/config"
 import { Instance } from "../project/instance"
 import { Identifier } from "../id/id"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
+import PROMPT_DISCOVER from "./template/discover.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
@@ -53,6 +54,7 @@ export namespace Command {
 
   export const Default = {
     INIT: "init",
+    DISCOVER: "discover",
     REVIEW: "review",
   } as const
 
@@ -68,6 +70,15 @@ export namespace Command {
           return PROMPT_INITIALIZE.replace("${path}", Instance.worktree)
         },
         hints: hints(PROMPT_INITIALIZE),
+      },
+      [Default.DISCOVER]: {
+        name: Default.DISCOVER,
+        description: "scan data stack and set up connections",
+        source: "command",
+        get template() {
+          return PROMPT_DISCOVER
+        },
+        hints: hints(PROMPT_DISCOVER),
       },
       [Default.REVIEW]: {
         name: Default.REVIEW,

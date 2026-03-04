@@ -12,10 +12,23 @@ npm install -g @altimateai/altimate-code
 altimate-code
 ```
 
-The TUI launches with an interactive terminal. On first run, use the `/connect` command to configure:
+The TUI launches with an interactive terminal. On first run, use the `/discover` command to auto-detect your data stack:
 
-1. **LLM provider** — Choose your AI backend (Anthropic, OpenAI, Codex, etc.)
-2. **Warehouse connection** — Connect to your data warehouse
+```
+/discover
+```
+
+`/discover` scans your environment and sets up everything automatically:
+
+1. **Detects your dbt project** — finds `dbt_project.yml`, parses the manifest, and reads profiles
+2. **Discovers warehouse connections** — from `~/.dbt/profiles.yml`, running Docker containers, and environment variables (e.g. `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABASE_URL`)
+3. **Checks installed tools** — dbt, sqlfluff, airflow, dagster, prefect, soda, sqlmesh, great_expectations, sqlfmt
+4. **Offers to configure connections** — walks you through adding and testing each discovered warehouse
+5. **Indexes schemas** — populates the schema cache for autocomplete and context-aware analysis
+
+You can also configure connections manually — see [Warehouse connections](#warehouse-connections) below.
+
+To set up your LLM provider, use the `/connect` command.
 
 ## Configuration
 

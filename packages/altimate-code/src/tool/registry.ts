@@ -96,6 +96,7 @@ import { AltimateCoreFingerprintTool } from "./altimate-core-fingerprint"
 import { AltimateCoreIntrospectionSqlTool } from "./altimate-core-introspection-sql"
 import { AltimateCoreParseDbtTool } from "./altimate-core-parse-dbt"
 import { AltimateCoreIsSafeTool } from "./altimate-core-is-safe"
+import { ProjectScanTool } from "./project-scan"
 import { Glob } from "../util/glob"
 
 export namespace ToolRegistry {
@@ -255,6 +256,7 @@ export namespace ToolRegistry {
       AltimateCoreIntrospectionSqlTool,
       AltimateCoreParseDbtTool,
       AltimateCoreIsSafeTool,
+      ProjectScanTool,
       ...custom,
     ]
   }
