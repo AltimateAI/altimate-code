@@ -33,7 +33,6 @@ Claude Code: I see changes to models/marts/fct_revenue.sql. Let me check
 
 altimate-code:
   sql_analyze: No anti-patterns detected ✓
-  sql_predict_cost: ~2.3 credits per run (Tier 2, medium confidence)
   lineage_check: Sources stg_orders.amount, dim_products.category
   schema_diff: Added column revenue_category (low severity)
 ```

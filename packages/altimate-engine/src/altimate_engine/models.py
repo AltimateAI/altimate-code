@@ -101,38 +101,6 @@ class SqlOptimizeResult(BaseModel):
     error: str | None = None
 
 
-# --- SQL Feedback & Cost Prediction ---
-
-
-class SqlRecordFeedbackParams(BaseModel):
-    sql: str
-    dialect: str = "snowflake"
-    bytes_scanned: int | None = None
-    rows_produced: int | None = None
-    execution_time_ms: int | None = None
-    credits_used: float | None = None
-    warehouse_size: str | None = None
-
-
-class SqlRecordFeedbackResult(BaseModel):
-    recorded: bool
-
-
-class SqlPredictCostParams(BaseModel):
-    sql: str
-    dialect: str = "snowflake"
-
-
-class SqlPredictCostResult(BaseModel):
-    tier: int
-    confidence: str
-    predicted_bytes: int | None = None
-    predicted_time_ms: int | None = None
-    predicted_credits: float | None = None
-    method: str
-    observation_count: int
-
-
 # --- SQL Explain ---
 
 

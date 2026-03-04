@@ -72,7 +72,6 @@ When validating a dbt model or pipeline, check ALL of these:
 - [ ] Appropriate materialization (table vs view vs incremental)
 - [ ] Incremental models have proper merge/delete+insert logic
 - [ ] Partition/cluster keys used for large tables
-- [ ] sql_predict_cost shows reasonable tier (1-2 preferred)
 
 **Documentation:**
 - [ ] Model has description in YAML

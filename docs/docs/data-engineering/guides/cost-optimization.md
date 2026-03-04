@@ -87,30 +87,7 @@ This finds:
 - Warehouses with no queries in 7+ days
 - Temporary tables from old migrations
 
-## Step 5: Predict before you execute
-
-Every query goes through cost prediction before execution:
-
-```
-You: How much will this query cost?
-
-> sql_predict_cost "SELECT * FROM raw_clickstream"
-
-  Tier 3 estimate: ~45 credits
-  Table size: 890GB, 12B rows
-  Recommendation: Add date filter + column pruning → estimated 2-3 credits
-```
-
-## Step 6: Build a cost feedback loop
-
-After each query, `sql_record_feedback` stores actual execution metrics. This trains the cost prediction model to be more accurate over time.
-
-```
-Query executed: 0.84 credits (predicted: 0.79, Tier 2)
-Feedback recorded → next prediction will be more accurate
-```
-
-## Automation: CI cost gate
+## Step 5: Automate cost gates in CI
 
 Use `ci_cost_gate` in your CI/CD pipeline to block expensive queries from reaching production:
 

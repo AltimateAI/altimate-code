@@ -60,10 +60,6 @@ from altimate_engine.models import (
     SqlOptimizeParams,
     SqlOptimizeResult,
     SqlOptimizeSuggestion,
-    SqlPredictCostParams,
-    SqlPredictCostResult,
-    SqlRecordFeedbackParams,
-    SqlRecordFeedbackResult,
     SqlRewriteParams,
     SqlRewriteResult,
     SqlRewriteRule,
@@ -119,7 +115,6 @@ from altimate_engine.dbt.lineage import dbt_lineage
 from altimate_engine.connections import ConnectionRegistry
 
 # lineage.check delegates to guard_column_lineage
-from altimate_engine.sql.feedback_store import FeedbackStore
 from altimate_engine.schema.cache import SchemaCache
 from altimate_engine.finops.query_history import get_query_history
 from altimate_engine.finops.credit_analyzer import (
@@ -242,16 +237,7 @@ def _schema_context_to_dict(
     return {"tables": tables, "version": "1"}
 
 
-_feedback_store: FeedbackStore | None = None
 _schema_cache: SchemaCache | None = None
-
-
-def _get_feedback_store() -> FeedbackStore:
-    """Return the singleton FeedbackStore, creating it on first use."""
-    global _feedback_store
-    if _feedback_store is None:
-        _feedback_store = FeedbackStore()
-    return _feedback_store
 
 
 def _get_schema_cache() -> SchemaCache:
@@ -504,24 +490,6 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             except Exception as e:
                 result = WarehouseDiscoverResult(error=str(e))
 
-        elif method == "sql.record_feedback":
-            fb_params = SqlRecordFeedbackParams(**params)
-            store = _get_feedback_store()
-            store.record(
-                sql=fb_params.sql,
-                dialect=fb_params.dialect,
-                bytes_scanned=fb_params.bytes_scanned,
-                rows_produced=fb_params.rows_produced,
-                execution_time_ms=fb_params.execution_time_ms,
-                credits_used=fb_params.credits_used,
-                warehouse_size=fb_params.warehouse_size,
-            )
-            result = SqlRecordFeedbackResult(recorded=True)
-        elif method == "sql.predict_cost":
-            pc_params = SqlPredictCostParams(**params)
-            store = _get_feedback_store()
-            prediction = store.predict(sql=pc_params.sql, dialect=pc_params.dialect)
-            result = SqlPredictCostResult(**prediction)
         elif method == "sql.format":
             fmt_params = SqlFormatParams(**params)
             raw = guard_format_sql(fmt_params.sql, fmt_params.dialect)

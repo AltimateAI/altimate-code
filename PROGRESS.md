@@ -20,7 +20,7 @@ Last updated: 2026-02-27 00:40
 - [x] Phase 1 TODO: ConfidenceTracker with 7 AST detection rules — all 7 working
 - [x] Phase 1 TODO: Confidence signals on lineage.check — 4 signal types
 - [x] Phase 2A: Snowflake connector — password + key-pair auth, registered in ConnectionRegistry
-- [x] Phase 2B: Feedback store + cost report skill — SQLite-based, 4-tier prediction, bridge methods working
+- [x] Phase 2B: Cost report skill
 - [x] Phase 2C: dbt manifest parser — columns, sources, test/snapshot/seed counting
 - [x] Phase 3A: Impact analysis skill — downstream dependency graph + column-level impact classification
 - [x] Phase 3C: SQL translation skill — sqlglot transpile, 10 dialect-pair warnings, TS tool + skill
@@ -52,10 +52,9 @@ Last updated: 2026-02-27 00:40
 | 0 | Rules with known accuracy | **19/19** | 19/19 |
 | 0 | Analyzer overall accuracy | **100.00%** | measured |
 | 0 | Lineage edge match rate | **100.0%** | measured |
-| 1-7 | Working bridge methods | **34/34** | 34/34 |
+| 1-7 | Working bridge methods | **32/32** | 32/32 |
 | 1 | ConfidenceTracker rules | **7/7** | 7/7 |
 | 2 | Snowflake connector | **imports OK** | live test |
-| 2 | Feedback store observations | **working** | >0 |
 | 3 | Skills functional end-to-end | **6** | 5+ |
 | 4 | Rules with published benchmarks | **19/19** | 19/19 |
 | 5 | Schema cache tests | **20/20** | 20/20 |
@@ -110,14 +109,13 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 - `packages/altimate-engine/src/altimate_engine/sql/analyzer.py` — 19 rules + ConfidenceTracker
 - `packages/altimate-engine/src/altimate_engine/sql/confidence.py` — 7 AST detection rules
 - `packages/altimate-engine/src/altimate_engine/lineage/check.py` — lineage + 4 confidence signals + Func/Window/Case edges
-- `packages/altimate-engine/src/altimate_engine/server.py` — JSON-RPC dispatch (34 methods)
+- `packages/altimate-engine/src/altimate_engine/server.py` — JSON-RPC dispatch (32 methods)
 - `packages/altimate-engine/src/altimate_engine/models.py` — All Pydantic models
 
 **Phase 2 (connectors + parsers + feedback):**
 - `packages/altimate-engine/src/altimate_engine/connectors/snowflake.py` — password + key-pair auth
 - `packages/altimate-engine/src/altimate_engine/connections.py` — ConnectionRegistry with Snowflake
 - `packages/altimate-engine/src/altimate_engine/dbt/manifest.py` — Enhanced manifest parser
-- `packages/altimate-engine/src/altimate_engine/sql/feedback_store.py` — SQLite feedback + 4-tier prediction
 
 **Phase 3 (skills + tools):**
 - `packages/altimate-engine/src/altimate_engine/sql/translator.py` — sqlglot transpile with lossy warnings
@@ -185,7 +183,7 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 - `experiments/BENCHMARKS.md` — Published benchmark report
 - `experiments/benchmark_report.json` — Machine-readable benchmark data
 
-### Bridge Methods (34 total)
+### Bridge Methods (32 total)
 1. `ping` — Health check
 2. `sql.validate` — SQL syntax validation
 3. `sql.check` — Read-only/mutation safety check
@@ -193,33 +191,31 @@ UNUSED_CTE, WINDOW_WITHOUT_PARTITION
 5. `sql.analyze` — 19 anti-pattern checks with confidence
 6. `sql.translate` — Cross-dialect SQL translation
 7. `sql.optimize` — Query optimization with suggestions
-8. `sql.record_feedback` — Record query execution metrics
-9. `sql.predict_cost` — Predict query cost (4-tier hierarchy)
-10. `schema.inspect` — Table schema inspection
-11. `lineage.check` — Column-level lineage with confidence
-12. `dbt.run` — dbt CLI execution
-13. `dbt.manifest` — Manifest parsing
-14. `warehouse.list` — List configured warehouses
-15. `warehouse.test` — Test warehouse connection
-16. `schema.index` — Index warehouse metadata into SQLite cache
-17. `schema.search` — Search indexed metadata (tables/columns) with natural language
-18. `schema.cache_status` — Show cache status (warehouses indexed, counts, timestamps)
-19. `sql.explain` — Run EXPLAIN on a query (Snowflake/PG/DuckDB dialect-specific syntax)
-20. `sql.format` — Format/beautify SQL via sqlglot pretty-print
-21. `sql.fix` — Diagnose SQL errors and suggest fixes (syntax, patterns, resolution)
-22. `sql.autocomplete` — Schema-aware auto-complete suggestions from cache
-23. `sql.diff` — Compare two SQL queries (unified diff, similarity score)
-24. `finops.query_history` — Query execution history (Snowflake QUERY_HISTORY, PG pg_stat_statements)
-25. `finops.analyze_credits` — Credit consumption analysis with recommendations
-26. `finops.expensive_queries` — Identify most expensive queries by bytes scanned
-27. `finops.warehouse_advice` — Warehouse sizing recommendations (scale up/down/burst)
-28. `finops.unused_resources` — Find stale tables and idle warehouses
-29. `finops.role_grants` — Query RBAC grants on objects/roles
-30. `finops.role_hierarchy` — Map role inheritance hierarchy
-31. `finops.user_roles` — List user-to-role assignments
-32. `schema.detect_pii` — Scan columns for PII patterns (30+ regex, 15 categories)
-33. `schema.tags` — Query metadata/governance tags on objects (Snowflake TAG_REFERENCES)
-34. `schema.tags_list` — List all available tags with usage counts
+8. `schema.inspect` — Table schema inspection
+9. `lineage.check` — Column-level lineage with confidence
+10. `dbt.run` — dbt CLI execution
+11. `dbt.manifest` — Manifest parsing
+12. `warehouse.list` — List configured warehouses
+13. `warehouse.test` — Test warehouse connection
+14. `schema.index` — Index warehouse metadata into SQLite cache
+15. `schema.search` — Search indexed metadata (tables/columns) with natural language
+16. `schema.cache_status` — Show cache status (warehouses indexed, counts, timestamps)
+17. `sql.explain` — Run EXPLAIN on a query (Snowflake/PG/DuckDB dialect-specific syntax)
+18. `sql.format` — Format/beautify SQL via sqlglot pretty-print
+19. `sql.fix` — Diagnose SQL errors and suggest fixes (syntax, patterns, resolution)
+20. `sql.autocomplete` — Schema-aware auto-complete suggestions from cache
+21. `sql.diff` — Compare two SQL queries (unified diff, similarity score)
+22. `finops.query_history` — Query execution history (Snowflake QUERY_HISTORY, PG pg_stat_statements)
+23. `finops.analyze_credits` — Credit consumption analysis with recommendations
+24. `finops.expensive_queries` — Identify most expensive queries by bytes scanned
+25. `finops.warehouse_advice` — Warehouse sizing recommendations (scale up/down/burst)
+26. `finops.unused_resources` — Find stale tables and idle warehouses
+27. `finops.role_grants` — Query RBAC grants on objects/roles
+28. `finops.role_hierarchy` — Map role inheritance hierarchy
+29. `finops.user_roles` — List user-to-role assignments
+30. `schema.detect_pii` — Scan columns for PII patterns (30+ regex, 15 categories)
+31. `schema.tags` — Query metadata/governance tags on objects (Snowflake TAG_REFERENCES)
+32. `schema.tags_list` — List all available tags with usage counts
 
 ### Skills (11 total)
 1. `generate-tests` — Generate dbt test definitions

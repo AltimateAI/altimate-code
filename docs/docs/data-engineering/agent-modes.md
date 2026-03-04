@@ -13,10 +13,8 @@ altimate-code --agent builder
 Builder mode follows a strict pre-execution protocol for every SQL operation:
 
 1. `sql_analyze` — Check for anti-patterns
-2. `sql_predict_cost` — Estimate execution cost
-3. `sql_validate` — Verify syntax and schema references
-4. `sql_execute` — Run the query
-5. `sql_record_feedback` — Store metrics for future cost predictions
+2. `sql_validate` — Verify syntax and schema references
+3. `sql_execute` — Run the query
 
 ### Example: Create a staging model
 
@@ -155,10 +153,6 @@ Validator:
   + Added column: revenue_category (VARCHAR)
   ~ Modified column: total_revenue FLOAT → DECIMAL(18,2)
   Severity: medium (type change may affect downstream)
-
-> sql_predict_cost [fct_revenue.sql]
-  Tier 2 match: ~12.3 credits per run (medium confidence)
-  Previous version: ~11.8 credits — marginal increase
 
 Issues found:
 1. FUNCTION_IN_FILTER on line 23 — use a pre-computed date column instead

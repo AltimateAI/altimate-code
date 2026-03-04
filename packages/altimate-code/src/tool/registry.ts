@@ -35,8 +35,6 @@ import { WarehouseTestTool } from "./warehouse-test"
 import { WarehouseAddTool } from "./warehouse-add"
 import { WarehouseRemoveTool } from "./warehouse-remove"
 import { WarehouseDiscoverTool } from "./warehouse-discover"
-import { SqlRecordFeedbackTool } from "./sql-record-feedback"
-import { SqlPredictCostTool } from "./sql-predict-cost"
 import { DbtRunTool } from "./dbt-run"
 import { DbtManifestTool } from "./dbt-manifest"
 import { DbtProfilesTool } from "./dbt-profiles"
@@ -196,8 +194,6 @@ export namespace ToolRegistry {
       WarehouseAddTool,
       WarehouseRemoveTool,
       WarehouseDiscoverTool,
-      SqlRecordFeedbackTool,
-      SqlPredictCostTool,
       DbtRunTool,
       DbtManifestTool,
       DbtProfilesTool,

@@ -50,32 +50,6 @@ class TestDispatch:
         response = dispatch(request)
         assert response.error is not None
 
-    def test_sql_record_feedback(self):
-        request = JsonRpcRequest(
-            method="sql.record_feedback",
-            params={
-                "sql": "SELECT 1",
-                "dialect": "snowflake",
-                "bytes_scanned": 1000,
-                "execution_time_ms": 100,
-            },
-            id=8,
-        )
-        response = dispatch(request)
-        assert response.error is None
-        assert response.result["recorded"] is True
-
-    def test_sql_predict_cost(self):
-        request = JsonRpcRequest(
-            method="sql.predict_cost",
-            params={"sql": "SELECT 1", "dialect": "snowflake"},
-            id=9,
-        )
-        response = dispatch(request)
-        assert response.error is None
-        assert "tier" in response.result
-        assert "confidence" in response.result
-
     def test_warehouse_list(self):
         request = JsonRpcRequest(method="warehouse.list", params={}, id=10)
         response = dispatch(request)

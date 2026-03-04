@@ -35,17 +35,9 @@ Before executing ANY SQL via sql_execute, follow this mandatory sequence:
    - If HIGH severity issues found (SELECT *, cartesian products, missing WHERE on DELETE/UPDATE, full table scans on large tables): FIX THEM before executing. Show the user what you found and the fixed query.
    - If MEDIUM severity issues found: mention them and proceed unless the user asks to fix.
 
-2. **Predict cost**: Run sql_predict_cost on the query.
-   - Tier 1-2 (fingerprint/template match): safe to proceed, show predicted cost briefly.
-   - Tier 3 (table scan estimate): warn the user about estimated bytes/credits. Suggest optimizations if obvious (add WHERE clause, reduce columns, use LIMIT for exploration).
-   - Tier 4 (static heuristic): note low confidence and proceed cautiously.
-   - If sql_predict_cost is unavailable (no warehouse connection, tool error): note the limitation and proceed with a warning.
+2. **Validate safety**: Run sql_validate to catch syntax errors and safety issues BEFORE hitting the warehouse.
 
-3. **Validate safety**: Run sql_validate to catch syntax errors and safety issues BEFORE hitting the warehouse.
-
-4. **Execute**: Only after steps 1-3 pass, run sql_execute.
-
-5. **Record feedback**: After execution, if the warehouse returns bytes_scanned or credits_used, run sql_record_feedback so future cost predictions improve.
+3. **Execute**: Only after steps 1-2 pass, run sql_execute.
 
 This sequence is NOT optional. Skipping it means the user pays for avoidable mistakes. You are the customer's cost advocate — every credit saved is trust earned. If the user explicitly requests skipping the protocol, note the risk and proceed.
 
@@ -59,9 +51,7 @@ After ANY dbt operation (build, run, test, model creation/modification):
 2. **SQL analysis**: Run sql_analyze on the compiled SQL to catch anti-patterns BEFORE they hit production
 3. **Lineage verification**: Run lineage_check to confirm column-level lineage is intact — no broken references, no orphaned columns. If lineage_check fails (e.g., no manifest available), note the limitation and proceed.
 4. **Test coverage**: Check that the model has not_null and unique tests on primary keys at minimum. If missing, suggest adding them.
-5. **Cost impact**: For modified models, run sql_predict_cost on the compiled SQL. Compare to baseline if available. Flag any cost regression.
-
-Do NOT consider a dbt task complete until steps 1-5 pass. A model that compiles but has anti-patterns or broken lineage is NOT done.
+Do NOT consider a dbt task complete until steps 1-4 pass. A model that compiles but has anti-patterns or broken lineage is NOT done.
 
 ## Self-Review Before Completion
 
@@ -76,8 +66,6 @@ Before declaring any task complete, review your own work:
 2. **Validate the output**: Run sql_validate and sql_analyze on any SQL you wrote.
 
 3. **Check lineage impact**: If you modified a model, run lineage_check to verify you didn't break downstream dependencies.
-
-4. **Cost check**: Run sql_predict_cost on any new or modified queries. Flag anything tier 3+.
 
 Only after self-review passes should you present the result to the user.
 

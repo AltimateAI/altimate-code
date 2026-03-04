@@ -76,36 +76,6 @@ Each rule includes a **confidence score** (high/medium/low) based on AST complex
 
 ---
 
-## sql_predict_cost
-
-Estimate query cost before execution using a 4-tier prediction system.
-
-```
-> sql_predict_cost "SELECT * FROM events WHERE event_date > '2026-01-01'"
-
-Cost Prediction:
-  Tier: 2 (template match)
-  Estimated bytes scanned: 4.2 GB
-  Estimated credits: 0.84
-  Confidence: medium
-
-  Similar queries averaged 0.79 credits over 23 executions.
-  Recommendation: Add column pruning to reduce scan by ~60%
-```
-
-### How it works
-
-| Tier | Method | Confidence |
-|---|---|---|
-| **1 — Fingerprint** | Exact query found in history | High |
-| **2 — Template** | Similar query structure matched | Medium |
-| **3 — Table scan** | Estimate from table metadata | Low |
-| **4 — Heuristic** | No data available, worst-case estimate | Very low |
-
-The system improves over time. After each query execution, `sql_record_feedback` stores actual metrics to train better predictions.
-
----
-
 ## sql_optimize
 
 Get optimization suggestions with rewritten SQL.

@@ -71,7 +71,7 @@ Trace data flow at the column level through complex SQL transformations. Works s
 
 ### Warehouse Connectivity
 
-Connect directly to your data warehouse -- the AI can query schemas, run SQL, predict costs, and analyze query history:
+Connect directly to your data warehouse -- the AI can query schemas, run SQL, and analyze query history:
 
 - Snowflake (with IAM auth)
 - BigQuery (service account + ADC)

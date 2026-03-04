@@ -330,37 +330,6 @@ export interface SchemaCacheStatusResult {
   cache_path: string
 }
 
-// --- SQL Feedback & Cost Prediction ---
-
-export interface SqlRecordFeedbackParams {
-  sql: string
-  dialect?: string
-  bytes_scanned?: number
-  rows_produced?: number
-  execution_time_ms?: number
-  credits_used?: number
-  warehouse_size?: string
-}
-
-export interface SqlRecordFeedbackResult {
-  recorded: boolean
-}
-
-export interface SqlPredictCostParams {
-  sql: string
-  dialect?: string
-}
-
-export interface SqlPredictCostResult {
-  tier: number
-  confidence: string
-  predicted_bytes?: number
-  predicted_time_ms?: number
-  predicted_credits?: number
-  method: string
-  observation_count: number
-}
-
 // --- SQL Explain ---
 
 export interface SqlExplainParams {
@@ -1028,8 +997,6 @@ export const BridgeMethods = {
   "sql.analyze": {} as { params: SqlAnalyzeParams; result: SqlAnalyzeResult },
   "sql.optimize": {} as { params: SqlOptimizeParams; result: SqlOptimizeResult },
   "sql.translate": {} as { params: SqlTranslateParams; result: SqlTranslateResult },
-  "sql.record_feedback": {} as { params: SqlRecordFeedbackParams; result: SqlRecordFeedbackResult },
-  "sql.predict_cost": {} as { params: SqlPredictCostParams; result: SqlPredictCostResult },
   "sql.explain": {} as { params: SqlExplainParams; result: SqlExplainResult },
   "sql.format": {} as { params: SqlFormatParams; result: SqlFormatResult },
   "sql.fix": {} as { params: SqlFixParams; result: SqlFixResult },
