@@ -48,11 +48,12 @@ describe("detectGit", () => {
     expect(typeof result.branch).toBe("string")
   })
 
-  test("returns a branch name", async () => {
+  test("returns a branch name or undefined in detached HEAD", async () => {
     const result = await detectGit()
-    // We are in a real git repo (altimate-code), so branch should be defined
-    expect(result.branch).toBeDefined()
-    expect(result.branch!.length).toBeGreaterThan(0)
+    // In CI, GitHub Actions checks out in detached HEAD, so branch may be undefined
+    if (result.branch !== undefined) {
+      expect(result.branch.length).toBeGreaterThan(0)
+    }
   })
 
   test("returns a remote URL when origin exists", async () => {
