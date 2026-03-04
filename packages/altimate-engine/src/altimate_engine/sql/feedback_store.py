@@ -12,7 +12,6 @@ from typing import Any
 
 from altimate_engine.sql.guard import guard_extract_metadata
 
-
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS query_feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,8 +120,7 @@ class FeedbackStore:
         Tiers:
             1. Fingerprint match (>= 3 observations) — median of matching fingerprints
             2. Template match (>= 3 observations) — median of matching templates
-            3. Table scan estimate — sum of estimated table sizes from schema
-            4. Static heuristic — based on query complexity (joins, aggregations, etc.)
+            3. Table scan estimate — historical data for the same tables
 
         Returns:
             Dictionary with keys: tier, confidence, predicted_bytes, predicted_time_ms,
@@ -153,8 +151,16 @@ class FeedbackStore:
                 "observation_count": table_estimate["observation_count"],
             }
 
-        # Tier 4: Static heuristic
-        return self._static_heuristic(sql, dialect)
+        # No data available
+        return {
+            "tier": 4,
+            "confidence": "none",
+            "predicted_bytes": None,
+            "predicted_time_ms": None,
+            "predicted_credits": None,
+            "method": "no_data",
+            "observation_count": 0,
+        }
 
     def _fingerprint(self, sql: str, dialect: str) -> str:
         """Normalize SQL to a canonical fingerprint (strip literals, normalize whitespace)."""
@@ -287,80 +293,6 @@ class FeedbackStore:
             }
 
         return None
-
-    # Dialect-specific base cost profiles for the static heuristic.
-    # bytes_scanned and credits are None for databases that don't expose them.
-    _HEURISTIC_PROFILES: dict[str, dict[str, int | float | None]] = {
-        "snowflake": {
-            "base_bytes": 10_000_000,
-            "base_time_ms": 500,
-            "base_credits": 0.001,
-        },
-        "postgres": {
-            "base_bytes": None,
-            "base_time_ms": 100,
-            "base_credits": None,
-        },
-        "duckdb": {
-            "base_bytes": None,
-            "base_time_ms": 10,
-            "base_credits": None,
-        },
-        "bigquery": {
-            "base_bytes": 10_000_000,
-            "base_time_ms": 500,
-            "base_credits": None,
-        },
-        "databricks": {
-            "base_bytes": 10_000_000,
-            "base_time_ms": 500,
-            "base_credits": None,
-        },
-    }
-
-    _DEFAULT_HEURISTIC_PROFILE: dict[str, int | float | None] = {
-        "base_bytes": 10_000_000,
-        "base_time_ms": 500,
-        "base_credits": 0.001,
-    }
-
-    def _static_heuristic(self, sql: str, dialect: str) -> dict[str, Any]:
-        """Tier 4: Estimate cost based on query length heuristic.
-
-        Base costs are dialect-dependent: Snowflake uses bytes-scanned and
-        credit metrics, while Postgres and DuckDB use execution-time only.
-        """
-        complexity_score = max(1.0, len(sql) / 100.0)
-
-        # Select dialect-specific base costs
-        d = (dialect or "").lower()
-        profile = self._HEURISTIC_PROFILES.get(d, self._DEFAULT_HEURISTIC_PROFILE)
-
-        base_bytes = profile["base_bytes"]
-        base_time_ms = profile["base_time_ms"]
-        base_credits = profile["base_credits"]
-
-        predicted_bytes = (
-            int(base_bytes * complexity_score) if base_bytes is not None else None
-        )
-        predicted_time_ms = (
-            int(base_time_ms * complexity_score) if base_time_ms is not None else None
-        )
-        predicted_credits = (
-            round(base_credits * complexity_score, 6)
-            if base_credits is not None
-            else None
-        )
-
-        return {
-            "tier": 4,
-            "confidence": "very_low",
-            "predicted_bytes": predicted_bytes,
-            "predicted_time_ms": predicted_time_ms,
-            "predicted_credits": predicted_credits,
-            "method": "static_heuristic",
-            "observation_count": 0,
-        }
 
     @staticmethod
     def _safe_median(values: list[int]) -> int | None:

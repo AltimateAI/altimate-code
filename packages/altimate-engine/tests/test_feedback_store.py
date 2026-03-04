@@ -289,54 +289,15 @@ class TestPredictTier4Heuristic:
     """Tier 4: Static heuristic with no prior observations."""
 
     def test_tier4_no_observations(self, store):
-        """With no observations at all, tier 4 heuristic should be used."""
+        """With no observations at all, tier 4 returns no_data."""
         prediction = store.predict("SELECT * FROM brand_new_table WHERE x = 1")
         assert prediction["tier"] == 4
-        assert prediction["confidence"] == "very_low"
-        assert prediction["method"] == "static_heuristic"
+        assert prediction["confidence"] == "none"
+        assert prediction["method"] == "no_data"
         assert prediction["observation_count"] == 0
-        assert prediction["predicted_bytes"] > 0
-        assert prediction["predicted_time_ms"] > 0
-        assert prediction["predicted_credits"] > 0
-
-    def test_tier4_complexity_scaling(self, store):
-        """More complex queries should produce equal or higher cost estimates."""
-        simple = store.predict("SELECT 1")
-        complex_q = store.predict("""
-            SELECT a.id, b.name, c.total
-            FROM orders a
-            JOIN customers b ON a.customer_id = b.id
-            JOIN order_totals c ON a.id = c.order_id
-            WHERE a.status = 'active'
-            ORDER BY c.total DESC
-        """)
-        assert complex_q["predicted_bytes"] >= simple["predicted_bytes"]
-        assert complex_q["predicted_time_ms"] >= simple["predicted_time_ms"]
-
-    def test_tier4_with_aggregation(self, store):
-        """Aggregation queries should have higher complexity."""
-        simple = store.predict("SELECT id FROM t")
-        agg = store.predict("SELECT COUNT(*), SUM(amount) FROM orders GROUP BY status")
-        assert agg["predicted_bytes"] >= simple["predicted_bytes"]
-
-    def test_tier4_with_window_functions(self, store):
-        """Window functions should increase complexity."""
-        base = store.predict("SELECT id FROM t")
-        windowed = store.predict("SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM t")
-        assert windowed["predicted_bytes"] >= base["predicted_bytes"]
-
-    def test_tier4_cross_join_high_complexity(self, store):
-        """CROSS JOINs should significantly increase the estimate."""
-        simple = store.predict("SELECT id FROM t")
-        cross = store.predict("SELECT * FROM a CROSS JOIN b")
-        assert cross["predicted_bytes"] > simple["predicted_bytes"]
-
-    def test_tier4_unparseable_sql_falls_back_to_length(self, store):
-        """If SQL can't be parsed, heuristic uses length."""
-        # This is valid-ish but may or may not parse
-        prediction = store.predict("INVALID SQL THAT WILL NOT PARSE !@#$")
-        assert prediction["tier"] == 4
-        assert prediction["method"] == "static_heuristic"
+        assert prediction["predicted_bytes"] is None
+        assert prediction["predicted_time_ms"] is None
+        assert prediction["predicted_credits"] is None
 
 
 class TestPredictMedianCalculation:
