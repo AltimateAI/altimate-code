@@ -17,7 +17,6 @@ from altimate_engine.sql.guard import (
     # Phase 1 (P0)
     guard_fix,
     guard_check_policy,
-    guard_complexity_score,
     guard_check_semantics,
     guard_generate_tests,
     # Phase 2 (P1)
@@ -27,7 +26,6 @@ from altimate_engine.sql.guard import (
     guard_rewrite,
     guard_correct,
     guard_evaluate,
-    guard_estimate_cost,
     # Phase 3 (P2)
     guard_classify_pii,
     guard_check_query_pii,
@@ -132,26 +130,6 @@ class TestGuardCheckPolicy:
         result = guard_check_policy("SELECT * FROM users", "{}", schema_context=SIMPLE_SCHEMA)
         assert isinstance(result, dict)
 
-
-class TestGuardComplexityScore:
-    def test_simple_query(self):
-        result = guard_complexity_score("SELECT 1")
-        assert isinstance(result, dict)
-
-    def test_complex_query(self):
-        result = guard_complexity_score(
-            "SELECT u.id, o.total FROM users u JOIN orders o ON u.id = o.user_id "
-            "WHERE o.total > 100 GROUP BY u.id HAVING COUNT(*) > 5"
-        )
-        assert isinstance(result, dict)
-
-    def test_with_schema_context(self):
-        result = guard_complexity_score("SELECT 1", schema_context=SIMPLE_SCHEMA)
-        assert isinstance(result, dict)
-
-    def test_empty_sql(self):
-        result = guard_complexity_score("")
-        assert isinstance(result, dict)
 
 
 class TestGuardCheckSemantics:
@@ -317,26 +295,6 @@ class TestGuardEvaluate:
         result = guard_evaluate("")
         assert isinstance(result, dict)
 
-
-class TestGuardEstimateCost:
-    def test_basic_cost(self):
-        result = guard_estimate_cost("SELECT * FROM orders")
-        assert isinstance(result, dict)
-
-    def test_with_dialect(self):
-        result = guard_estimate_cost("SELECT * FROM orders", dialect="snowflake")
-        assert isinstance(result, dict)
-
-    def test_complex_query(self):
-        result = guard_estimate_cost(
-            "SELECT u.id, SUM(o.total) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.id",
-            dialect="bigquery",
-        )
-        assert isinstance(result, dict)
-
-    def test_empty_sql(self):
-        result = guard_estimate_cost("")
-        assert isinstance(result, dict)
 
 
 # ---------------------------------------------------------------------------
@@ -619,12 +577,6 @@ class TestGracefulFallbackNew:
             assert result["success"] is False
             assert "not installed" in result["error"]
 
-    def test_complexity_score_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
-            result = guard_complexity_score("SELECT 1")
-            assert result["success"] is False
-            assert "not installed" in result["error"]
-
     def test_check_semantics_fallback(self):
         with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
             result = guard_check_semantics("SELECT 1")
@@ -672,12 +624,6 @@ class TestGracefulFallbackNew:
     def test_evaluate_fallback(self):
         with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
             result = guard_evaluate("SELECT 1")
-            assert result["success"] is False
-            assert "not installed" in result["error"]
-
-    def test_estimate_cost_fallback(self):
-        with patch("altimate_engine.sql.guard.SQLGUARD_AVAILABLE", False):
-            result = guard_estimate_cost("SELECT 1")
             assert result["success"] is False
             assert "not installed" in result["error"]
 

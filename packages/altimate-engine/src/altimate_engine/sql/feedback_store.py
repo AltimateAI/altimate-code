@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from altimate_engine.sql.guard import guard_extract_metadata, guard_complexity_score
+from altimate_engine.sql.guard import guard_extract_metadata
 
 
 _CREATE_TABLE_SQL = """
@@ -325,16 +325,12 @@ class FeedbackStore:
     }
 
     def _static_heuristic(self, sql: str, dialect: str) -> dict[str, Any]:
-        """Tier 4: Estimate cost based on query complexity analysis.
+        """Tier 4: Estimate cost based on query length heuristic.
 
-        Uses sqlguard complexity scoring, falling back to length-based heuristic.
         Base costs are dialect-dependent: Snowflake uses bytes-scanned and
         credit metrics, while Postgres and DuckDB use execution-time only.
         """
-        complexity = guard_complexity_score(sql)
-        complexity_score = complexity.get("total", complexity.get("score"))
-        if not complexity_score:
-            complexity_score = max(1.0, len(sql) / 100.0)
+        complexity_score = max(1.0, len(sql) / 100.0)
 
         # Select dialect-specific base costs
         d = (dialect or "").lower()

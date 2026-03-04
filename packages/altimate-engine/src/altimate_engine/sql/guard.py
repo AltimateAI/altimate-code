@@ -244,21 +244,6 @@ def guard_check_policy(
         return {"success": False, "error": str(e)}
 
 
-def guard_complexity_score(
-    sql: str,
-    schema_path: str = "",
-    schema_context: dict[str, Any] | None = None,
-) -> dict:
-    """Score multi-dimensional complexity and estimated cloud cost."""
-    if not SQLGUARD_AVAILABLE:
-        return _not_installed_result()
-    try:
-        schema = _schema_or_empty(schema_path, schema_context)
-        return altimate_core.complexity_score(sql, schema)
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
 def guard_check_semantics(
     sql: str,
     schema_path: str = "",
@@ -382,22 +367,6 @@ def guard_evaluate(
     try:
         schema = _schema_or_empty(schema_path, schema_context)
         return altimate_core.evaluate(sql, schema)
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def guard_estimate_cost(
-    sql: str,
-    schema_path: str = "",
-    schema_context: dict[str, Any] | None = None,
-    dialect: str = "",
-) -> dict:
-    """Estimate per-dialect cloud cost (bytes scanned, USD)."""
-    if not SQLGUARD_AVAILABLE:
-        return _not_installed_result()
-    try:
-        schema = _schema_or_empty(schema_path, schema_context)
-        return altimate_core.estimate_cost(sql, schema, dialect or "generic")
     except Exception as e:
         return {"success": False, "error": str(e)}
 

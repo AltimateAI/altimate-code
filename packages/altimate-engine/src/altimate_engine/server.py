@@ -143,7 +143,6 @@ from altimate_engine.sql.guard import (
     # Phase 1 (P0)
     guard_fix as guard_fix_sql,
     guard_check_policy,
-    guard_complexity_score,
     guard_check_semantics,
     guard_generate_tests,
     # Phase 2 (P1)
@@ -153,7 +152,6 @@ from altimate_engine.sql.guard import (
     guard_rewrite as guard_rewrite_sql,
     guard_correct,
     guard_evaluate,
-    guard_estimate_cost,
     # Phase 3 (P2)
     guard_classify_pii,
     guard_check_query_pii,
@@ -180,7 +178,6 @@ from altimate_engine.local.test_local import test_sql_local
 from altimate_engine.models import (
     SqlGuardFixParams,
     SqlGuardPolicyParams,
-    SqlGuardComplexityParams,
     SqlGuardSemanticsParams,
     SqlGuardTestgenParams,
     # Phase 2 (P1)
@@ -190,7 +187,6 @@ from altimate_engine.models import (
     SqlGuardGuardRewriteParams,
     SqlGuardCorrectParams,
     SqlGuardGradeParams,
-    SqlGuardCostParams,
     # Phase 3 (P2)
     SqlGuardClassifyPiiParams,
     SqlGuardQueryPiiParams,
@@ -525,15 +521,6 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             pc_params = SqlPredictCostParams(**params)
             store = _get_feedback_store()
             prediction = store.predict(sql=pc_params.sql, dialect=pc_params.dialect)
-            # Merge sqlguard cost estimate if feedback store has no data
-            if prediction.get("method") == "no_data":
-                guard_cost = guard_estimate_cost(
-                    pc_params.sql, dialect=pc_params.dialect
-                )
-                if guard_cost.get("bytes_scanned") or guard_cost.get("estimated_usd"):
-                    prediction["predicted_bytes"] = guard_cost.get("bytes_scanned")
-                    prediction["predicted_credits"] = guard_cost.get("estimated_usd")
-                    prediction["method"] = "sqlguard_estimate"
             result = SqlPredictCostResult(**prediction)
         elif method == "sql.format":
             fmt_params = SqlFormatParams(**params)
@@ -835,10 +822,6 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = SqlGuardResult(
                 success=raw.get("pass", True), data=raw, error=raw.get("error")
             )
-        elif method == "sqlguard.complexity":
-            p = SqlGuardComplexityParams(**params)
-            raw = guard_complexity_score(p.sql, p.schema_path, p.schema_context)
-            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
         elif method == "sqlguard.semantics":
             p = SqlGuardSemanticsParams(**params)
             raw = guard_check_semantics(p.sql, p.schema_path, p.schema_context)
@@ -884,10 +867,6 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
         elif method == "sqlguard.grade":
             p = SqlGuardGradeParams(**params)
             raw = guard_evaluate(p.sql, p.schema_path, p.schema_context)
-            result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
-        elif method == "sqlguard.cost":
-            p = SqlGuardCostParams(**params)
-            raw = guard_estimate_cost(p.sql, p.schema_path, p.schema_context, p.dialect)
             result = SqlGuardResult(success=True, data=raw, error=raw.get("error"))
         # --- sqlguard Phase 3 (P2) ---
         elif method == "sqlguard.classify_pii":
