@@ -48,10 +48,12 @@ describe("detectGit", () => {
     expect(typeof result.branch).toBe("string")
   })
 
-  test("returns a branch name or undefined in detached HEAD", async () => {
+  test("branch is a non-empty string or undefined (detached HEAD)", async () => {
     const result = await detectGit()
-    // In CI, GitHub Actions checks out in detached HEAD, so branch may be undefined
+    // In CI, GitHub Actions checks out in detached HEAD → branch is undefined
+    // Locally, branch is a non-empty string
     if (result.branch !== undefined) {
+      expect(typeof result.branch).toBe("string")
       expect(result.branch.length).toBeGreaterThan(0)
     }
   })

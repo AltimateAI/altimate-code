@@ -56,7 +56,7 @@ export async function detectGit(): Promise<GitInfo> {
     stdout: "pipe",
     stderr: "pipe",
   })
-  const branch = branchResult.exitCode === 0 ? branchResult.stdout.toString().trim() : undefined
+  const branch = branchResult.exitCode === 0 ? branchResult.stdout.toString().trim() || undefined : undefined
 
   let remoteUrl: string | undefined
   const remoteResult = Bun.spawnSync(["git", "remote", "get-url", "origin"], {
