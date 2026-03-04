@@ -7,7 +7,7 @@ description: Analyze Snowflake query costs and identify optimization opportuniti
 
 ## Requirements
 **Agent:** any (read-only analysis)
-**Tools used:** sql_execute, sql_analyze, sql_predict_cost, sql_record_feedback
+**Tools used:** sql_execute, sql_analyze, finops_analyze_credits, finops_expensive_queries, finops_warehouse_advice
 
 Analyze Snowflake warehouse query costs, identify the most expensive queries, detect anti-patterns, and recommend optimizations.
 
@@ -47,7 +47,6 @@ Analyze Snowflake warehouse query costs, identify the most expensive queries, de
 
 3. **Analyze the top offenders** - For each of the top 10 most expensive queries:
    - Run `sql_analyze` on the query text to detect anti-patterns (SELECT *, missing LIMIT, cartesian products, correlated subqueries, etc.)
-   - Run `sql_predict_cost` to get the cost tier prediction based on historical feedback data
    - Summarize anti-patterns found and their severity
 
 4. **Classify each query into a cost tier**:
@@ -59,8 +58,7 @@ Analyze Snowflake warehouse query costs, identify the most expensive queries, de
    | 3 | $1.00 - $100.00 | Expensive | Optimize or review warehouse sizing |
    | 4 | > $100.00 | Dangerous | Immediate review required |
 
-5. **Record feedback** - For each query analyzed, call `sql_record_feedback` to store the execution metrics so future predictions improve:
-   - Pass `bytes_scanned`, `execution_time_ms`, `credits_used`, and `warehouse_size` from the query history results
+5. **Warehouse analysis** - Run `finops_warehouse_advice` to check if warehouses used by the top offenders are right-sized.
 
 6. **Output the final report** as a structured markdown document:
 
@@ -97,7 +95,7 @@ Analyze Snowflake warehouse query costs, identify the most expensive queries, de
    2. Add LIMIT clause
    3. Consider partitioning strategy
 
-   **Cost prediction:** Tier 1 (fingerprint match, high confidence)
+   **Cost tier:** Tier 1 (based on credits used)
 
    ...
 
@@ -113,4 +111,4 @@ The user invokes this skill with:
 - `/cost-report` -- Analyze the last 30 days
 - `/cost-report 7` -- Analyze the last 7 days (adjust the DATEADD interval)
 
-Use the tools: `sql_execute`, `sql_analyze`, `sql_predict_cost`, `sql_record_feedback`.
+Use the tools: `sql_execute`, `sql_analyze`, `finops_analyze_credits`, `finops_expensive_queries`, `finops_warehouse_advice`.
