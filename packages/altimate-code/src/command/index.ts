@@ -118,21 +118,17 @@ export namespace Command {
           source: "mcp",
           description: prompt.description,
           get template() {
-            // since a getter can't be async we need to manually return a promise here
-            return new Promise<string>(async (resolve, reject) => {
-              const template = await MCP.getPrompt(
-                prompt.client,
-                prompt.name,
-                prompt.arguments
-                  ? // substitute each argument with $1, $2, etc.
-                    Object.fromEntries(prompt.arguments?.map((argument, i) => [argument.name, `$${i + 1}`]))
-                  : {},
-              ).catch(reject)
-              resolve(
-                template?.messages
-                  .map((message) => (message.content.type === "text" ? message.content.text : ""))
-                  .join("\n") || "",
-              )
+            return MCP.getPrompt(
+              prompt.client,
+              prompt.name,
+              prompt.arguments
+                ? Object.fromEntries(prompt.arguments.map((argument, i) => [argument.name, `$${i + 1}`]))
+                : {},
+            ).then((template) => {
+              if (!template) throw new Error(`Failed to load MCP prompt: ${prompt.name}`)
+              return template.messages
+                .map((message) => (message.content.type === "text" ? message.content.text : ""))
+                .join("\n")
             })
           },
           hints: prompt.arguments?.map((_, i) => `$${i + 1}`) ?? [],

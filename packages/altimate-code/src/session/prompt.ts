@@ -303,6 +303,18 @@ export namespace SessionPrompt {
     const session = await Session.get(sessionID)
     await Telemetry.init()
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
+    const beforeExitHandler = () => {
+      Telemetry.track({
+        type: "session_end",
+        timestamp: Date.now(),
+        session_id: sessionID,
+        total_cost: sessionTotalCost,
+        total_tokens: sessionTotalTokens,
+        tool_call_count: toolCallCount,
+        duration_ms: Date.now() - sessionStartTime,
+      })
+    }
+    process.once("beforeExit", beforeExitHandler)
     try {
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
@@ -796,6 +808,7 @@ export namespace SessionPrompt {
     }
     SessionCompaction.prune({ sessionID })
     } finally {
+      process.removeListener("beforeExit", beforeExitHandler)
       const outcome: "completed" | "abandoned" | "error" = abort.aborted
         ? "abandoned"
         : sessionHadError

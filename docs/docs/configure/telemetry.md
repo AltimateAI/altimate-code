@@ -47,7 +47,7 @@ Telemetry helps us:
 
 ## Disabling Telemetry
 
-To disable all telemetry collection, add this to your configuration file (`~/.config/altimate/config.json`):
+To disable all telemetry collection, add this to your configuration file (`~/.config/altimate-code/altimate-code.json`):
 
 ```json
 {

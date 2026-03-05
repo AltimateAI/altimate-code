@@ -29,6 +29,12 @@ export namespace MCP {
   const log = Log.create({ service: "mcp" })
   const DEFAULT_TIMEOUT = 30_000
 
+  const registeredMcpTools = new Set<string>()
+
+  export function isMcpTool(name: string): boolean {
+    return registeredMcpTools.has(name)
+  }
+
   export const Resource = z
     .object({
       name: z.string(),
@@ -215,7 +221,7 @@ export namespace MCP {
 
   // Helper function to fetch prompts for a specific client
   async function fetchPromptsForClient(clientName: string, client: Client) {
-    const prompts = await client.listPrompts().catch((e) => {
+    const prompts = await withTimeout(client.listPrompts(), DEFAULT_TIMEOUT).catch((e) => {
       log.error("failed to get prompts", { clientName, error: e.message })
       return undefined
     })
@@ -237,7 +243,7 @@ export namespace MCP {
   }
 
   async function fetchResourcesForClient(clientName: string, client: Client) {
-    const resources = await client.listResources().catch((e) => {
+    const resources = await withTimeout(client.listResources(), DEFAULT_TIMEOUT).catch((e) => {
       log.error("failed to get prompts", { clientName, error: e.message })
       return undefined
     })
@@ -683,6 +689,7 @@ export namespace MCP {
       }),
     )
 
+    registeredMcpTools.clear()
     for (const { clientName, client, toolsResult } of toolsResults) {
       if (!toolsResult) continue
       const mcpConfig = config[clientName]
@@ -691,7 +698,9 @@ export namespace MCP {
       for (const mcpTool of toolsResult.tools) {
         const sanitizedClientName = clientName.replace(/[^a-zA-Z0-9_-]/g, "_")
         const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
-        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout)
+        const toolName = sanitizedClientName + "_" + sanitizedToolName
+        registeredMcpTools.add(toolName)
+        result[toolName] = await convertMcpTool(mcpTool, client, timeout)
       }
     }
     return result

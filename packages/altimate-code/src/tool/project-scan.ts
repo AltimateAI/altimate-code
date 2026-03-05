@@ -6,6 +6,7 @@ import path from "path"
 import { Telemetry } from "@/telemetry"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
+import { Skill } from "../skill"
 
 // --- Types ---
 
@@ -572,6 +573,8 @@ export const ProjectScanTool = Tool.define("project_scan", {
     if (Flag.ALTIMATE_CLI_ENABLE_EXA) enabledFlags.push("exa")
     if (Flag.ALTIMATE_CLI_ENABLE_QUESTION_TOOL) enabledFlags.push("question_tool")
 
+    const skillCount = await Skill.all().then(s => s.length).catch(() => 0)
+
     Telemetry.track({
       type: "environment_census",
       timestamp: Date.now(),
@@ -585,7 +588,7 @@ export const ProjectScanTool = Tool.define("project_scan", {
       dbt_test_count_bucket: dbtManifest ? Telemetry.bucketCount(dbtManifest.test_count) : "0",
       connection_sources: connectionSources,
       mcp_server_count: mcpServerCount,
-      skill_count: 0,
+      skill_count: skillCount,
       os: process.platform,
       feature_flags: enabledFlags,
     })

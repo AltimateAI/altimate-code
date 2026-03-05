@@ -298,6 +298,7 @@ export namespace Telemetry {
   let sessionId = ""
   let projectId = ""
   let appInsights: AppInsightsConfig | undefined
+  let droppedEvents = 0
   let initPromise: Promise<void> | undefined
   let initDone = false
 
@@ -345,9 +346,9 @@ export namespace Telemetry {
         time: new Date(timestamp).toISOString(),
         iKey: cfg.iKey,
         tags: {
-          "ai.session.id": sid,
+          "ai.session.id": sid || "startup",
           "ai.user.id": userEmail,
-          "ai.cloud.role": "altimate-code",
+          "ai.cloud.role": "altimate",
           "ai.application.ver": Installation.VERSION,
         },
         data: {
@@ -439,6 +440,7 @@ export namespace Telemetry {
     buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.shift()
+      droppedEvents++
     }
   }
 
@@ -446,6 +448,18 @@ export namespace Telemetry {
     if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
+
+    if (droppedEvents > 0) {
+      events.push({
+        type: "error",
+        timestamp: Date.now(),
+        session_id: sessionId,
+        error_name: "TelemetryBufferOverflow",
+        error_message: `${droppedEvents} events dropped due to buffer overflow`,
+        context: "telemetry",
+      } as Event)
+      droppedEvents = 0
+    }
 
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
@@ -475,6 +489,7 @@ export namespace Telemetry {
     enabled = false
     appInsights = undefined
     buffer = []
+    droppedEvents = 0
     sessionId = ""
     projectId = ""
     initPromise = undefined

@@ -37,7 +37,12 @@ export namespace Truncate {
     const entries = await fs.readdir(DIR).catch(() => [] as string[])
     for (const entry of entries) {
       if (!entry.startsWith("tool_")) continue
-      if (Identifier.timestamp(entry) >= cutoff) continue
+      try {
+        if (Identifier.timestamp(entry) >= cutoff) continue
+      } catch {
+        // Skip malformed IDs (e.g. legacy format or descending IDs)
+        continue
+      }
       await fs.unlink(path.join(DIR, entry)).catch(() => {})
     }
   }

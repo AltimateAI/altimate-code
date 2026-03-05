@@ -16,6 +16,7 @@ import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 import { Telemetry } from "@/telemetry"
+import { MCP } from "@/mcp"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -212,7 +213,7 @@ export namespace SessionProcessor {
                         attachments: value.output.attachments,
                       },
                     })
-                    const toolType = match.tool.startsWith("mcp__") ? "mcp" as const : "standard" as const
+                    const toolType = MCP.isMcpTool(match.tool) ? "mcp" as const : "standard" as const
                     Telemetry.track({
                       type: "tool_call",
                       timestamp: Date.now(),
@@ -241,14 +242,14 @@ export namespace SessionProcessor {
                       state: {
                         status: "error",
                         input: value.input ?? match.state.input,
-                        error: (value.error as any).toString(),
+                        error: (value.error instanceof Error ? value.error.message : String(value.error)).slice(0, 1000),
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),
                         },
                       },
                     })
-                    const errToolType = match.tool.startsWith("mcp__") ? "mcp" as const : "standard" as const
+                    const errToolType = MCP.isMcpTool(match.tool) ? "mcp" as const : "standard" as const
                     Telemetry.track({
                       type: "tool_call",
                       timestamp: Date.now(),
@@ -261,7 +262,7 @@ export namespace SessionProcessor {
                       duration_ms: Date.now() - match.state.time.start,
                       sequence_index: toolCallCounter,
                       previous_tool: previousTool,
-                      error: (value.error as any).toString().slice(0, 500),
+                      error: (value.error instanceof Error ? value.error.message : String(value.error)).slice(0, 500),
                     })
                     toolCallCounter++
                     previousTool = match.tool
@@ -345,7 +346,7 @@ export namespace SessionProcessor {
                     duration_ms: Date.now() - stepStartTime,
                   })
                   // Context utilization tracking
-                  const totalTokens = usage.tokens.input + usage.tokens.output + usage.tokens.cache.read + usage.tokens.cache.write
+                  const totalTokens = usage.tokens.input + usage.tokens.output + usage.tokens.cache.read
                   const contextLimit = input.model.limit?.context ?? 0
                   if (contextLimit > 0) {
                     const cacheRead = usage.tokens.cache.read

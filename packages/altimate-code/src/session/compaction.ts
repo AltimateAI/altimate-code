@@ -298,8 +298,12 @@ When constructing the summary, try to stick to this template:
         },
       })
     }
-    if (processor.message.error) return "stop"
+    if (processor.message.error) {
+      compactionAttempts.delete(input.sessionID)
+      return "stop"
+    }
     Bus.publish(Event.Compacted, { sessionID: input.sessionID })
+    compactionAttempts.delete(input.sessionID)
     return "continue"
   }
 
