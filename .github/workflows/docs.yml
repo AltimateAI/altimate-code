@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: docs/mkdocs.yml
+          cache-dependency-path: docs/requirements.txt
 
       - name: Install mkdocs-material
         run: pip install mkdocs-material
