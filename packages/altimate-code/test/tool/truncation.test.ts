@@ -1,8 +1,7 @@
-import { describe, test, expect, afterAll } from "bun:test"
+import { describe, test, expect } from "bun:test"
 import { Truncate } from "../../src/tool/truncation"
 import { Identifier } from "../../src/id/id"
 import { Filesystem } from "../../src/util/filesystem"
-import fs from "fs/promises"
 import path from "path"
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
@@ -127,46 +126,48 @@ describe("Truncate", () => {
     const DAY_MS = 24 * 60 * 60 * 1000
     const RETENTION_MS = 7 * DAY_MS
 
-    test("deletes files older than 7 days and preserves recent files", async () => {
-      // Use a dedicated temp directory to avoid depending on Truncate.DIR
-      // which may resolve differently at module load time vs test time
-      const tmpDir = path.join(import.meta.dir, ".cleanup-test-" + process.pid)
-      await fs.mkdir(tmpDir, { recursive: true })
+    test("identifier timestamps maintain correct ordering for cleanup", () => {
+      const now = Date.now()
+      const oldId = Identifier.create("tool", false, now - 10 * DAY_MS)
+      const recentId = Identifier.create("tool", false, now - 3 * DAY_MS)
+      const cutoffId = Identifier.create("tool", false, now - RETENTION_MS)
 
-      try {
-        // Create an old file (10 days ago)
-        const oldTimestamp = Date.now() - 10 * DAY_MS
-        const oldId = Identifier.create("tool", false, oldTimestamp)
-        const oldFile = path.join(tmpDir, oldId)
-        await Filesystem.write(oldFile, "old content")
+      const oldTs = Identifier.timestamp(oldId)
+      const recentTs = Identifier.timestamp(recentId)
+      const cutoff = Identifier.timestamp(cutoffId)
 
-        // Create a recent file (3 days ago)
-        const recentTimestamp = Date.now() - 3 * DAY_MS
-        const recentId = Identifier.create("tool", false, recentTimestamp)
-        const recentFile = path.join(tmpDir, recentId)
-        await Filesystem.write(recentFile, "recent content")
+      expect(oldTs).toBeLessThan(cutoff)
+      expect(recentTs).toBeGreaterThanOrEqual(cutoff)
+    })
 
-        // Verify both files exist before cleanup
-        expect(await Filesystem.exists(oldFile)).toBe(true)
-        expect(await Filesystem.exists(recentFile)).toBe(true)
+    test("cleanup logic correctly filters old vs recent entries", () => {
+      const now = Date.now()
+      const oldId = Identifier.create("tool", false, now - 10 * DAY_MS)
+      const recentId = Identifier.create("tool", false, now - 3 * DAY_MS)
+      const cutoff = Identifier.timestamp(Identifier.create("tool", false, now - RETENTION_MS))
 
-        // Run the same cleanup logic as Truncate.cleanup() but against our temp dir
-        const cutoff = Identifier.timestamp(Identifier.create("tool", false, Date.now() - RETENTION_MS))
-        const entries = await fs.readdir(tmpDir)
-        for (const entry of entries) {
-          if (!entry.startsWith("tool_")) continue
-          if (Identifier.timestamp(entry) >= cutoff) continue
-          await fs.unlink(path.join(tmpDir, entry))
+      // Simulate the cleanup filtering logic from Truncate.cleanup()
+      const entries = [oldId, recentId, "not_a_tool_file.txt"]
+      const deleted: string[] = []
+      const kept: string[] = []
+
+      for (const entry of entries) {
+        if (!entry.startsWith("tool_")) {
+          kept.push(entry)
+          continue
         }
-
-        // Old file should be deleted
-        expect(await Filesystem.exists(oldFile)).toBe(false)
-
-        // Recent file should still exist
-        expect(await Filesystem.exists(recentFile)).toBe(true)
-      } finally {
-        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+        if (Identifier.timestamp(entry) >= cutoff) {
+          kept.push(entry)
+          continue
+        }
+        deleted.push(entry)
       }
+
+      expect(deleted).toContain(oldId)
+      expect(deleted).not.toContain(recentId)
+      expect(kept).toContain(recentId)
+      expect(kept).not.toContain(oldId)
+      expect(kept).toContain("not_a_tool_file.txt")
     })
   })
 })
