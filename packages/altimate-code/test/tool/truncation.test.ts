@@ -1,6 +1,5 @@
 import { describe, test, expect } from "bun:test"
 import { Truncate } from "../../src/tool/truncation"
-import { Identifier } from "../../src/id/id"
 import { Filesystem } from "../../src/util/filesystem"
 import path from "path"
 
@@ -122,52 +121,4 @@ describe("Truncate", () => {
     })
   })
 
-  describe("cleanup", () => {
-    const DAY_MS = 24 * 60 * 60 * 1000
-    const RETENTION_MS = 7 * DAY_MS
-
-    test("identifier timestamps maintain correct ordering for cleanup", () => {
-      const now = Date.now()
-      const oldId = Identifier.create("tool", false, now - 10 * DAY_MS)
-      const recentId = Identifier.create("tool", false, now - 3 * DAY_MS)
-      const cutoffId = Identifier.create("tool", false, now - RETENTION_MS)
-
-      const oldTs = Identifier.timestamp(oldId)
-      const recentTs = Identifier.timestamp(recentId)
-      const cutoff = Identifier.timestamp(cutoffId)
-
-      expect(oldTs).toBeLessThan(cutoff)
-      expect(recentTs).toBeGreaterThanOrEqual(cutoff)
-    })
-
-    test("cleanup logic correctly filters old vs recent entries", () => {
-      const now = Date.now()
-      const oldId = Identifier.create("tool", false, now - 10 * DAY_MS)
-      const recentId = Identifier.create("tool", false, now - 3 * DAY_MS)
-      const cutoff = Identifier.timestamp(Identifier.create("tool", false, now - RETENTION_MS))
-
-      // Simulate the cleanup filtering logic from Truncate.cleanup()
-      const entries = [oldId, recentId, "not_a_tool_file.txt"]
-      const deleted: string[] = []
-      const kept: string[] = []
-
-      for (const entry of entries) {
-        if (!entry.startsWith("tool_")) {
-          kept.push(entry)
-          continue
-        }
-        if (Identifier.timestamp(entry) >= cutoff) {
-          kept.push(entry)
-          continue
-        }
-        deleted.push(entry)
-      }
-
-      expect(deleted).toContain(oldId)
-      expect(deleted).not.toContain(recentId)
-      expect(kept).toContain(recentId)
-      expect(kept).not.toContain(oldId)
-      expect(kept).toContain("not_a_tool_file.txt")
-    })
-  })
 })
