@@ -367,15 +367,22 @@ export namespace Telemetry {
 
   export async function init() {
     if (enabled || flushTimer) return
-    if (process.env.ALTIMATE_TELEMETRY_DISABLED === "true") return
+    if (process.env.ALTIMATE_TELEMETRY_DISABLED === "true") {
+      buffer = []
+      return
+    }
     const userConfig = await Config.get()
-    if (userConfig.telemetry?.disabled) return
+    if (userConfig.telemetry?.disabled) {
+      buffer = []
+      return
+    }
     try {
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key
       const connectionString = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING ?? DEFAULT_CONNECTION_STRING
       const cfg = parseConnectionString(connectionString)
       if (!cfg) {
         enabled = false
+        buffer = []
         return
       }
       appInsights = cfg
@@ -388,6 +395,7 @@ export namespace Telemetry {
       flushTimer = timer
     } catch {
       enabled = false
+      buffer = []
     }
   }
 
@@ -401,7 +409,8 @@ export namespace Telemetry {
   }
 
   export function track(event: Event) {
-    if (!enabled) return
+    // Always buffer — events tracked before init() are kept and flushed
+    // once init() completes. If init() disables telemetry, the buffer is cleared.
     buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.shift()

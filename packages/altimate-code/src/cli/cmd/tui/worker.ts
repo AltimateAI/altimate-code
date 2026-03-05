@@ -10,6 +10,7 @@ import { GlobalBus } from "@/bus/global"
 import { createOpencodeClient, type Event } from "@altimateai/altimate-code-sdk/v2"
 import type { BunWebSocketData } from "hono/bun"
 import { Flag } from "@/flag/flag"
+import { Telemetry } from "@/telemetry"
 
 await Log.init({
   print: process.argv.includes("--print-logs"),
@@ -31,6 +32,9 @@ process.on("uncaughtException", (e) => {
     e: e instanceof Error ? e.message : e,
   })
 })
+
+// Initialize telemetry early so MCP/engine events are captured before session starts
+Telemetry.init().catch(() => {})
 
 // Subscribe to global events and forward them via RPC
 GlobalBus.on("event", (event) => {

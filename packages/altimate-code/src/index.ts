@@ -32,6 +32,7 @@ import path from "path"
 import { Global } from "./global"
 import { JsonMigration } from "./storage/json-migration"
 import { Database } from "./storage/db"
+import { Telemetry } from "./telemetry"
 
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {
@@ -75,6 +76,10 @@ const cli = yargs(hideBin(process.argv))
 
     process.env.AGENT = "1"
     process.env.DATAPILOT = "1"
+
+    // Initialize telemetry early so events from MCP, engine, auth are captured.
+    // init() is idempotent — safe to call again later in session prompt.
+    Telemetry.init().catch(() => {})
 
     Log.Default.info("altimate-code", {
       version: Installation.VERSION,
