@@ -217,6 +217,7 @@ for (const item of targets) {
       ALTIMATE_CLI_VERSION: `'${Script.version}'`,
       ALTIMATE_CLI_CHANNEL: `'${Script.channel}'`,
       ALTIMATE_ENGINE_VERSION: `'${engineVersion}'`,
+      ALTIMATE_CLI_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
       ALTIMATE_CLI_MIGRATIONS: JSON.stringify(migrations),
       ALTIMATE_CLI_CHANGELOG: JSON.stringify(changelog),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,

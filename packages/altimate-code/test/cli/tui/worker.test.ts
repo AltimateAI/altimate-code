@@ -3,7 +3,6 @@ import { Rpc } from "../../../src/util/rpc"
 import type { rpc } from "../../../src/cli/cmd/tui/worker"
 import path from "path"
 import { fileURLToPath } from "url"
-import { Filesystem } from "../../../src/util/filesystem"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const workerSrc = path.resolve(__dirname, "../../../src/cli/cmd/tui/worker.ts")

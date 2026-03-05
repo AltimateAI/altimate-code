@@ -838,15 +838,17 @@ export namespace SessionPrompt {
         compactions: totalCompactions,
         outcome,
       })
-      Telemetry.track({
-        type: "session_end",
-        timestamp: Date.now(),
-        session_id: sessionID,
-        total_cost: sessionTotalCost,
-        total_tokens: sessionTotalTokens,
-        tool_call_count: toolCallCount,
-        duration_ms: Date.now() - sessionStartTime,
-      })
+      if (!emergencySessionEndFired) {
+        Telemetry.track({
+          type: "session_end",
+          timestamp: Date.now(),
+          session_id: sessionID,
+          total_cost: sessionTotalCost,
+          total_tokens: sessionTotalTokens,
+          tool_call_count: toolCallCount,
+          duration_ms: Date.now() - sessionStartTime,
+        })
+      }
       await Telemetry.shutdown()
     }
     for await (const item of MessageV2.stream(sessionID)) {

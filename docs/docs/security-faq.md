@@ -150,7 +150,12 @@ The engine is not exposed on any network port — it only communicates through s
 
 ## Does Altimate Code store conversation history?
 
-Conversation context lives in memory during your session. Altimate Code does not persist conversation history to disk or send it to any service. When you end a session, the context is gone.
+Yes. Altimate Code persists session data locally on your machine:
+
+- **Session messages** are stored in a local SQLite database so you can resume, review, and revert conversations.
+- **Prompt history** (your recent inputs) is saved to `~/.state/prompt-history.jsonl` for command-line recall.
+
+This data **never** leaves your machine — it is not sent to any service or included in telemetry. You can delete it at any time by removing the local database and history files.
 
 !!! note
     Your LLM provider may have its own data retention policies. Check your provider's terms to understand how they handle API requests.
