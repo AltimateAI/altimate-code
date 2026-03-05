@@ -122,11 +122,15 @@ export namespace ModelsDev {
 }
 
 if (!Flag.ALTIMATE_CLI_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
-  ModelsDev.refresh()
-  setInterval(
-    async () => {
-      await ModelsDev.refresh()
-    },
-    60 * 1000 * 60,
-  ).unref()
+  // Defer initial refresh to avoid circular dependency — Installation may not
+  // be fully initialized when this module is first evaluated.
+  setTimeout(() => {
+    ModelsDev.refresh()
+    setInterval(
+      async () => {
+        await ModelsDev.refresh()
+      },
+      60 * 1000 * 60,
+    ).unref()
+  }, 0)
 }
