@@ -179,7 +179,7 @@ async function ensureEngineImpl(): Promise<void> {
         timestamp: Date.now(),
         session_id: Telemetry.getContext().sessionId,
         phase: "venv_create",
-        error_message: (e?.message ?? String(e)).slice(0, 500),
+        error_message: (e?.stderr?.toString() || e?.message ?? String(e)).slice(0, 500),
       })
       throw e
     }
@@ -196,7 +196,7 @@ async function ensureEngineImpl(): Promise<void> {
       timestamp: Date.now(),
       session_id: Telemetry.getContext().sessionId,
       phase: "pip_install",
-      error_message: (e?.message ?? String(e)).slice(0, 500),
+      error_message: (e?.stderr?.toString() || e?.message ?? String(e)).slice(0, 500),
     })
     throw e
   }
