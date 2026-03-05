@@ -114,7 +114,7 @@ export async function ensureUv(): Promise<void> {
   // Extract: tar.gz on unix, zip on windows
   if (asset.endsWith(".tar.gz")) {
     // Use tar to extract, the binary is inside a directory named like "uv-aarch64-apple-darwin"
-    execFileSync("tar", ["-xzf", tmpFile, "-C", path.join(dir, "bin")])
+    execFileSync("tar", ["-xzf", tmpFile, "-C", path.join(dir, "bin")], { stdio: "pipe" })
     // The extracted dir has the same name as the asset minus .tar.gz
     const extractedDir = path.join(dir, "bin", asset.replace(".tar.gz", ""))
     // Move uv binary from extracted dir to engine/bin/uv
@@ -126,7 +126,7 @@ export async function ensureUv(): Promise<void> {
     execFileSync("powershell", [
       "-Command",
       `Expand-Archive -Path '${tmpFile}' -DestinationPath '${path.join(dir, "bin")}' -Force`,
-    ])
+    ], { stdio: "pipe" })
     const extractedDir = path.join(dir, "bin", asset.replace(".zip", ""))
     await fs.rename(path.join(extractedDir, "uv.exe"), uv)
     await fs.rm(extractedDir, { recursive: true, force: true })
@@ -172,7 +172,7 @@ async function ensureEngineImpl(): Promise<void> {
   if (!existsSync(venvDir)) {
     UI.println(`${UI.Style.TEXT_DIM}Creating Python environment...${UI.Style.TEXT_NORMAL}`)
     try {
-      execFileSync(uv, ["venv", "--python", "3.12", venvDir])
+      execFileSync(uv, ["venv", "--python", "3.12", venvDir], { stdio: "pipe" })
     } catch (e: any) {
       Telemetry.track({
         type: "engine_error",
@@ -189,7 +189,7 @@ async function ensureEngineImpl(): Promise<void> {
   const pythonPath = enginePythonPath()
   UI.println(`${UI.Style.TEXT_DIM}Installing altimate-engine ${ALTIMATE_ENGINE_VERSION}...${UI.Style.TEXT_NORMAL}`)
   try {
-    execFileSync(uv, ["pip", "install", "--python", pythonPath, `altimate-engine==${ALTIMATE_ENGINE_VERSION}`])
+    execFileSync(uv, ["pip", "install", "--python", pythonPath, `altimate-engine==${ALTIMATE_ENGINE_VERSION}`], { stdio: "pipe" })
   } catch (e: any) {
     Telemetry.track({
       type: "engine_error",
@@ -202,9 +202,9 @@ async function ensureEngineImpl(): Promise<void> {
   }
 
   // Get python version
-  const pyVersion = execFileSync(pythonPath, ["--version"]).toString().trim()
+  const pyVersion = execFileSync(pythonPath, ["--version"], { stdio: "pipe" }).toString().trim()
   // Get uv version
-  const uvVersion = execFileSync(uv, ["--version"]).toString().trim()
+  const uvVersion = execFileSync(uv, ["--version"], { stdio: "pipe" }).toString().trim()
 
   await writeManifest({
     engine_version: ALTIMATE_ENGINE_VERSION,
