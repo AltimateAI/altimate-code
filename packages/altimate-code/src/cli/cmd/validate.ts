@@ -34,8 +34,8 @@ async function getAssets(): Promise<ValidateAssets> {
     }
   }
   // Development fallback: read from disk relative to this source file
-  const hooksDir = path.join(import.meta.dir, "../hooks")
-  const skillsDir = path.join(import.meta.dir, "../skills/validate")
+  const hooksDir = path.join(import.meta.dir, "../../hooks")
+  const skillsDir = path.join(import.meta.dir, "../../skills/validate")
   const [loggerContent, settingsContent, skillMd, batchPy] = await Promise.all([
     fs.readFile(path.join(hooksDir, "langfuse_logger.py"), "utf-8"),
     fs.readFile(path.join(hooksDir, "settings.json"), "utf-8"),
@@ -108,29 +108,6 @@ async function mergeHooks(sourceSettingsContent: string, targetSettingsPath: str
   return mergedCount
 }
 
-async function mergeEnvFile(envPath: string, vars: Record<string, string>): Promise<void> {
-  const existing: Record<string, string> = {}
-
-  const fileExists = await fs
-    .access(envPath)
-    .then(() => true)
-    .catch(() => false)
-  if (fileExists) {
-    const content = await fs.readFile(envPath, "utf-8")
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith("#")) continue
-      const eqIdx = trimmed.indexOf("=")
-      if (eqIdx === -1) continue
-      const key = trimmed.slice(0, eqIdx).trim()
-      const value = trimmed.slice(eqIdx + 1).trim()
-      existing[key] = value
-    }
-  }
-
-  Object.assign(existing, vars)
-  await fs.writeFile(envPath, Object.entries(existing).map(([k, v]) => `${k}=${v}`).join("\n") + "\n")
-}
 
 const InstallSubcommand = cmd({
   command: "install",
@@ -166,42 +143,7 @@ const InstallSubcommand = cmd({
     await fs.writeFile(path.join(skillTargetDir, "batch_validate.py"), batchPy)
     spinner.stop(`Installed /validate skill → ${skillTargetDir}`)
 
-    // 3. Prompt for Langfuse credentials
-    prompts.log.message("")
-    const configureLangfuse = await prompts.confirm({
-      message: "Do you have a Langfuse account and want to configure your own credentials?",
-      initialValue: false,
-    })
-
-    if (!prompts.isCancel(configureLangfuse) && configureLangfuse) {
-      const secretKey = await prompts.text({
-        message: "LANGFUSE_SECRET_KEY_VALIDATION:",
-        placeholder: "sk-lf-...",
-      })
-      const publicKey = await prompts.text({
-        message: "LANGFUSE_PUBLIC_KEY_VALIDATION:",
-        placeholder: "pk-lf-...",
-      })
-      const baseUrl = await prompts.text({
-        message: "LANGFUSE_BASE_URL_VALIDATION:",
-        placeholder: "https://cloud.langfuse.com",
-        defaultValue: "https://cloud.langfuse.com",
-      })
-
-      if (!prompts.isCancel(secretKey) && !prompts.isCancel(publicKey) && !prompts.isCancel(baseUrl)) {
-        spinner.start("Writing Langfuse credentials to ~/.claude/.env...")
-        const envPath = path.join(claudeDir, ".env")
-        await mergeEnvFile(envPath, {
-          LANGFUSE_SECRET_KEY_VALIDATION: secretKey as string,
-          LANGFUSE_PUBLIC_KEY_VALIDATION: publicKey as string,
-          LANGFUSE_BASE_URL_VALIDATION: (baseUrl as string) || "https://cloud.langfuse.com",
-        })
-        spinner.stop(`Credentials written to ${envPath}`)
-      }
-    } else {
-      prompts.log.info("Skipping Langfuse configuration — default keys will be used.")
-    }
-
+    prompts.log.info(`Place your credentials in ${path.join(claudeDir, ".env")}`)
     prompts.outro("Altimate validation hooks installed successfully!")
   },
 })
