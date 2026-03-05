@@ -298,6 +298,7 @@ export namespace SessionPrompt {
     let compactionAttempts = 0
     let totalCompactions = 0
     let sessionAgentName = ""
+    let sessionHadError = false
     const MAX_COMPACTION_ATTEMPTS = 3
     const session = await Session.get(sessionID)
     await Telemetry.init()
@@ -567,6 +568,7 @@ export namespace SessionPrompt {
               message: `Context still too large after ${MAX_COMPACTION_ATTEMPTS} compaction attempts. Try starting a new conversation.`,
             }).toObject(),
           })
+          sessionHadError = true
           break
         }
         Telemetry.track({
@@ -752,7 +754,10 @@ export namespace SessionPrompt {
         }
       }
 
-      if (result === "stop") break
+      if (result === "stop") {
+        if (processor.message.error) sessionHadError = true
+        break
+      }
       if (result === "continue") {
         // Reset compaction counter after a successful non-compaction step.
         // The counter protects against tight compact→overflow loops within
@@ -770,6 +775,7 @@ export namespace SessionPrompt {
               message: `Context still too large after ${MAX_COMPACTION_ATTEMPTS} compaction attempts. Try starting a new conversation.`,
             }).toObject(),
           })
+          sessionHadError = true
           break
         }
         Telemetry.track({
@@ -792,9 +798,11 @@ export namespace SessionPrompt {
     } finally {
       const outcome: "completed" | "abandoned" | "error" = abort.aborted
         ? "abandoned"
-        : sessionTotalCost === 0 && toolCallCount === 0
-          ? "abandoned"
-          : "completed"
+        : sessionHadError
+          ? "error"
+          : sessionTotalCost === 0 && toolCallCount === 0
+            ? "abandoned"
+            : "completed"
       Telemetry.track({
         type: "agent_outcome",
         timestamp: Date.now(),

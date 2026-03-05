@@ -458,7 +458,7 @@ export namespace SessionProcessor {
               timestamp: Date.now(),
               session_id: input.sessionID,
               error_name: e?.name ?? "UnknownError",
-              error_message: (e?.message ?? String(e)).slice(0, 1000),
+              error_message: (e?.message ?? String(e)).slice(0, 500),
               context: "processor",
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })

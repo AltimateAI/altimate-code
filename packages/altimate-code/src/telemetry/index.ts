@@ -367,6 +367,7 @@ export namespace Telemetry {
 
   export async function init() {
     if (enabled || flushTimer) return
+    if (process.env.ALTIMATE_TELEMETRY_DISABLED === "true") return
     const userConfig = await Config.get()
     if (userConfig.telemetry?.disabled) return
     try {

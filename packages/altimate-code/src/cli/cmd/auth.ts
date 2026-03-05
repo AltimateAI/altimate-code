@@ -82,7 +82,7 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
         Telemetry.track({
           type: "auth_login",
           timestamp: Date.now(),
-          session_id: "cli",
+          session_id: Telemetry.getContext().sessionId || "cli",
           provider_id: provider,
           method: "oauth",
           status: "error",
@@ -111,7 +111,7 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
         Telemetry.track({
           type: "auth_login",
           timestamp: Date.now(),
-          session_id: "cli",
+          session_id: Telemetry.getContext().sessionId || "cli",
           provider_id: saveProvider,
           method: "oauth",
           status: "success",
@@ -131,7 +131,7 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
         Telemetry.track({
           type: "auth_login",
           timestamp: Date.now(),
-          session_id: "cli",
+          session_id: Telemetry.getContext().sessionId || "cli",
           provider_id: provider,
           method: "oauth",
           status: "error",
@@ -160,7 +160,7 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
         Telemetry.track({
           type: "auth_login",
           timestamp: Date.now(),
-          session_id: "cli",
+          session_id: Telemetry.getContext().sessionId || "cli",
           provider_id: saveProvider,
           method: "oauth",
           status: "success",
@@ -180,7 +180,7 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
         Telemetry.track({
           type: "auth_login",
           timestamp: Date.now(),
-          session_id: "cli",
+          session_id: Telemetry.getContext().sessionId || "cli",
           provider_id: provider,
           method: "api_key",
           status: "error",
@@ -197,7 +197,7 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
         Telemetry.track({
           type: "auth_login",
           timestamp: Date.now(),
-          session_id: "cli",
+          session_id: Telemetry.getContext().sessionId || "cli",
           provider_id: saveProvider,
           method: "api_key",
           status: "success",
@@ -325,7 +325,7 @@ export const AuthLoginCommand = cmd({
             Telemetry.track({
               type: "auth_login",
               timestamp: Date.now(),
-              session_id: "cli",
+              session_id: Telemetry.getContext().sessionId || "cli",
               provider_id: args.url!,
               method: "api_key",
               status: "error",
@@ -344,7 +344,7 @@ export const AuthLoginCommand = cmd({
           Telemetry.track({
             type: "auth_login",
             timestamp: Date.now(),
-            session_id: "cli",
+            session_id: Telemetry.getContext().sessionId || "cli",
             provider_id: args.url!,
             method: "api_key",
             status: "success",
@@ -483,7 +483,7 @@ export const AuthLoginCommand = cmd({
         Telemetry.track({
           type: "auth_login",
           timestamp: Date.now(),
-          session_id: "cli",
+          session_id: Telemetry.getContext().sessionId || "cli",
           provider_id: provider,
           method: "api_key",
           status: "success",
@@ -519,7 +519,7 @@ export const AuthLogoutCommand = cmd({
     Telemetry.track({
       type: "auth_logout",
       timestamp: Date.now(),
-      session_id: "cli",
+      session_id: Telemetry.getContext().sessionId || "cli",
       provider_id: providerID,
     })
     prompts.outro("Logout successful")

@@ -167,6 +167,7 @@ export namespace MCP {
       const config = cfg.mcp ?? {}
       const clients: Record<string, MCPClient> = {}
       const status: Record<string, Status> = {}
+      const transports: Record<string, "stdio" | "sse" | "streamable-http"> = {}
 
       await Promise.all(
         Object.entries(config).map(async ([key, mcp]) => {
@@ -188,12 +189,14 @@ export namespace MCP {
 
           if (result.mcpClient) {
             clients[key] = result.mcpClient
+            if (result.transport) transports[key] = result.transport
           }
         }),
       )
       return {
         status,
         clients,
+        transports,
       }
     },
     async (state) => {
@@ -283,6 +286,7 @@ export namespace MCP {
     }
     s.clients[name] = result.mcpClient
     s.status[name] = result.status
+    if (result.transport) s.transports[name] = result.transport
 
     return {
       status: s.status,
@@ -301,6 +305,7 @@ export namespace MCP {
     log.info("found", { key, type: mcp.type })
     let mcpClient: MCPClient | undefined
     let status: Status | undefined = undefined
+    let connectedTransport: "stdio" | "sse" | "streamable-http" | undefined = undefined
 
     if (mcp.type === "remote") {
       // OAuth is enabled by default for remote servers unless explicitly disabled with oauth: false
@@ -355,6 +360,7 @@ export namespace MCP {
           await withTimeout(client.connect(transport), connectTimeout)
           registerNotificationHandlers(client, key)
           mcpClient = client
+          connectedTransport = name === "SSE" ? "sse" : "streamable-http"
           log.info("connected", { key, transport: name })
           status = { status: "connected" }
           Telemetry.track({
@@ -362,7 +368,7 @@ export namespace MCP {
             timestamp: Date.now(),
             session_id: Telemetry.getContext().sessionId,
             server_name: key,
-            transport: name === "SSE" ? "sse" : "streamable-http",
+            transport: connectedTransport,
             status: "connected",
             duration_ms: Date.now() - connectStart,
           })
@@ -470,6 +476,7 @@ export namespace MCP {
         await withTimeout(client.connect(transport), connectTimeout)
         registerNotificationHandlers(client, key)
         mcpClient = client
+        connectedTransport = "stdio"
         status = {
           status: "connected",
         }
@@ -563,6 +570,7 @@ export namespace MCP {
     return {
       mcpClient,
       status,
+      transport: connectedTransport,
     }
   }
 
@@ -621,11 +629,13 @@ export namespace MCP {
         })
       }
       s.clients[name] = result.mcpClient
+      if (result.transport) s.transports[name] = result.transport
     }
   }
 
   export async function disconnect(name: string) {
     const s = await state()
+    const transport = s.transports[name] ?? "stdio"
     const client = s.clients[name]
     if (client) {
       await client.close().catch((error) => {
@@ -638,9 +648,10 @@ export namespace MCP {
       timestamp: Date.now(),
       session_id: Telemetry.getContext().sessionId,
       server_name: name,
-      transport: "stdio",
+      transport,
       status: "disconnected",
     })
+    delete s.transports[name]
     s.status[name] = { status: "disabled" }
   }
 
