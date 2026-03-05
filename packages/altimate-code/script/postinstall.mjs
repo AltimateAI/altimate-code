@@ -85,12 +85,48 @@ function prepareBinDirectory(binaryName) {
   return { binDir, targetPath }
 }
 
+function printWelcome(version) {
+  const v = `altimate-code v${version} installed`
+  const lines = [
+    "",
+    "  Get started:",
+    "    altimate              Open the TUI",
+    '    altimate run "hello"  Run a quick task',
+    "    altimate --help       See all commands",
+    "",
+    "  Docs: https://altimate-code.dev",
+    "",
+  ]
+  // Box width: pad all lines to the same length
+  const contentWidth = Math.max(v.length, ...lines.map((l) => l.length)) + 2
+  const pad = (s) => s + " ".repeat(contentWidth - s.length)
+  const top = `  ╭${"─".repeat(contentWidth + 2)}╮`
+  const bot = `  ╰${"─".repeat(contentWidth + 2)}╯`
+  const empty = `  │ ${" ".repeat(contentWidth)} │`
+  const row = (s) => `  │ ${pad(s)} │`
+
+  console.log(top)
+  console.log(empty)
+  console.log(row(` ${v}`))
+  for (const line of lines) console.log(row(line))
+  console.log(bot)
+}
+
 async function main() {
+  let version
+  try {
+    const pkgPath = path.join(__dirname, "package.json")
+    if (fs.existsSync(pkgPath)) {
+      version = JSON.parse(fs.readFileSync(pkgPath, "utf-8")).version
+    }
+  } catch {}
+
   try {
     if (os.platform() === "win32") {
       // On Windows, the .exe is already included in the package and bin field points to it
       // No postinstall setup needed
       console.log("Windows detected: binary setup not needed (using packaged .exe)")
+      if (version) printWelcome(version)
       return
     }
 
@@ -105,6 +141,7 @@ async function main() {
       fs.copyFileSync(binaryPath, target)
     }
     fs.chmodSync(target, 0o755)
+    if (version) printWelcome(version)
   } catch (error) {
     console.error("Failed to setup altimate-code binary:", error.message)
     process.exit(1)

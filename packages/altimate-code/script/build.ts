@@ -25,6 +25,11 @@ if (!engineVersionMatch) {
 const engineVersion = engineVersionMatch[1]
 console.log(`Engine version: ${engineVersion}`)
 
+// Read CHANGELOG.md for bundling
+const changelogPath = path.resolve(dir, "../../CHANGELOG.md")
+const changelog = fs.existsSync(changelogPath) ? await Bun.file(changelogPath).text() : ""
+console.log(`Loaded CHANGELOG.md (${changelog.length} chars)`)
+
 const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
 // Fetch and generate models.dev snapshot
 const modelsData = process.env.MODELS_DEV_API_JSON
@@ -213,6 +218,7 @@ for (const item of targets) {
       ALTIMATE_CLI_CHANNEL: `'${Script.channel}'`,
       ALTIMATE_ENGINE_VERSION: `'${engineVersion}'`,
       ALTIMATE_CLI_MIGRATIONS: JSON.stringify(migrations),
+      ALTIMATE_CLI_CHANGELOG: JSON.stringify(changelog),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
     },
   })
