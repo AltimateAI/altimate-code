@@ -73,7 +73,7 @@ We take your privacy seriously. Altimate Code telemetry **never** collects:
 - Code content, file contents, or file paths
 - Credentials, API keys, or tokens
 - Database connection strings or hostnames
-- Personally identifiable information beyond your email (used only for user correlation)
+- Personally identifiable information (your email is SHA-256 hashed before sending — used only for anonymous user correlation)
 - Tool arguments or outputs
 - AI prompt content or responses
 

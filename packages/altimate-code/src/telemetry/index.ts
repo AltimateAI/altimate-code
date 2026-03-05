@@ -2,6 +2,7 @@ import { Control } from "@/control"
 import { Config } from "@/config/config"
 import { Installation } from "@/installation"
 import { Log } from "@/util/log"
+import { createHash } from "crypto"
 
 const log = Log.create({ service: "telemetry" })
 
@@ -404,9 +405,11 @@ export namespace Telemetry {
       appInsights = cfg
       try {
         const account = Control.account()
-        if (account) userEmail = account.email
+        if (account) {
+          userEmail = createHash("sha256").update(account.email.toLowerCase().trim()).digest("hex")
+        }
       } catch {
-        // Account unavailable — proceed without user email
+        // Account unavailable — proceed without user ID
       }
       enabled = true
       log.info("telemetry initialized", { mode: "appinsights" })
