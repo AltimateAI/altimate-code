@@ -15,6 +15,16 @@ process.chdir(dir)
 import { Script } from "@altimateai/altimate-code-script"
 import pkg from "../package.json"
 
+// Read engine version from pyproject.toml
+const enginePyprojectPath = path.resolve(dir, "../altimate-engine/pyproject.toml")
+const enginePyproject = await Bun.file(enginePyprojectPath).text()
+const engineVersionMatch = enginePyproject.match(/^version\s*=\s*"([^"]+)"/m)
+if (!engineVersionMatch) {
+  throw new Error("Could not read engine version from altimate-engine/pyproject.toml")
+}
+const engineVersion = engineVersionMatch[1]
+console.log(`Engine version: ${engineVersion}`)
+
 const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
 // Fetch and generate models.dev snapshot
 const modelsData = process.env.MODELS_DEV_API_JSON
@@ -187,6 +197,9 @@ for (const item of targets) {
     entrypoints: ["./src/index.ts", parserWorker, workerPath],
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
+      ALTIMATE_CLI_VERSION: `'${Script.version}'`,
+      ALTIMATE_CLI_CHANNEL: `'${Script.channel}'`,
+      ALTIMATE_ENGINE_VERSION: `'${engineVersion}'`,
       ALTIMATE_CLI_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
