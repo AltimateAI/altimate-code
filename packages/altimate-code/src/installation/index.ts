@@ -6,7 +6,6 @@ import { NamedError } from "@altimateai/altimate-code-util/error"
 import { Log } from "../util/log"
 import { iife } from "@/util/iife"
 import { Flag } from "../flag/flag"
-import { Telemetry } from "../telemetry"
 
 declare global {
   const ALTIMATE_CLI_VERSION: string
@@ -175,6 +174,9 @@ export namespace Installation {
         throw new Error(`Unknown method: ${method}`)
     }
     const result = await cmd.quiet().throws(false)
+    // Dynamic import breaks the Installation → Telemetry → Config → ModelsDev → Installation
+    // circular dependency that would cause Installation to be undefined at module load time.
+    const { Telemetry } = await import("../telemetry")
     if (result.exitCode !== 0) {
       const stderr = method === "choco" ? "not running from an elevated command shell" : result.stderr.toString("utf8")
       const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
