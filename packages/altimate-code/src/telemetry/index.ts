@@ -481,6 +481,16 @@ export namespace Telemetry {
   }
 
   export async function shutdown() {
+    // Wait for init to complete so we know whether telemetry is enabled
+    // and have a valid endpoint to flush to.  init() is fire-and-forget
+    // in CLI middleware, so it may still be in-flight when shutdown runs.
+    if (initPromise) {
+      try {
+        await initPromise
+      } catch {
+        // init failed — nothing to flush
+      }
+    }
     if (flushTimer) {
       clearInterval(flushTimer)
       flushTimer = undefined

@@ -200,6 +200,15 @@ try {
   }
   process.exitCode = 1
 } finally {
+  // Flush any buffered telemetry events before exiting.
+  // This is critical for non-session commands (auth, upgrade, mcp, etc.)
+  // that track events but don't go through the session prompt shutdown path.
+  // shutdown() is idempotent — safe even if session prompt already called it.
+  try {
+    await Telemetry.shutdown()
+  } catch {
+    // Telemetry failure must never prevent shutdown
+  }
   // Some subprocesses don't react properly to SIGTERM and similar signals.
   // Most notably, some docker-container-based MCP servers don't handle such signals unless
   // run using `docker run --init`.
