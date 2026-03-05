@@ -17,6 +17,7 @@ import fs from "fs/promises"
 import path from "path"
 import { Global } from "../global"
 import { UI } from "../cli/ui"
+import { Telemetry } from "@/telemetry"
 
 declare const ALTIMATE_ENGINE_VERSION: string
 declare const ALTIMATE_CLI_VERSION: string
@@ -94,7 +95,17 @@ export async function ensureUv(): Promise<void> {
   await fs.mkdir(path.join(dir, "bin"), { recursive: true })
 
   const response = await fetch(url)
-  if (!response.ok) throw new Error(`Failed to download uv: ${response.statusText}`)
+  if (!response.ok) {
+    const errMsg = `Failed to download uv: ${response.statusText}`
+    Telemetry.track({
+      type: "engine_error",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      phase: "uv_download",
+      error_message: errMsg.slice(0, 500),
+    })
+    throw new Error(errMsg)
+  }
   const buffer = Buffer.from(await response.arrayBuffer())
 
   const tmpFile = path.join(dir, "bin", asset)
@@ -146,7 +157,10 @@ export async function ensureEngine(): Promise<void> {
 
 async function ensureEngineImpl(): Promise<void> {
   const manifest = await readManifest()
+  const isUpgrade = manifest !== null
   if (manifest && manifest.engine_version === ALTIMATE_ENGINE_VERSION) return
+
+  const startTime = Date.now()
 
   await ensureUv()
 
@@ -157,13 +171,35 @@ async function ensureEngineImpl(): Promise<void> {
   // Create venv if it doesn't exist
   if (!existsSync(venvDir)) {
     UI.println(`${UI.Style.TEXT_DIM}Creating Python environment...${UI.Style.TEXT_NORMAL}`)
-    execFileSync(uv, ["venv", "--python", "3.12", venvDir])
+    try {
+      execFileSync(uv, ["venv", "--python", "3.12", venvDir])
+    } catch (e: any) {
+      Telemetry.track({
+        type: "engine_error",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        phase: "venv_create",
+        error_message: (e?.message ?? String(e)).slice(0, 500),
+      })
+      throw e
+    }
   }
 
   // Install/upgrade engine
   const pythonPath = enginePythonPath()
   UI.println(`${UI.Style.TEXT_DIM}Installing altimate-engine ${ALTIMATE_ENGINE_VERSION}...${UI.Style.TEXT_NORMAL}`)
-  execFileSync(uv, ["pip", "install", "--python", pythonPath, `altimate-engine==${ALTIMATE_ENGINE_VERSION}`])
+  try {
+    execFileSync(uv, ["pip", "install", "--python", pythonPath, `altimate-engine==${ALTIMATE_ENGINE_VERSION}`])
+  } catch (e: any) {
+    Telemetry.track({
+      type: "engine_error",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      phase: "pip_install",
+      error_message: (e?.message ?? String(e)).slice(0, 500),
+    })
+    throw e
+  }
 
   // Get python version
   const pyVersion = execFileSync(pythonPath, ["--version"]).toString().trim()
@@ -176,6 +212,16 @@ async function ensureEngineImpl(): Promise<void> {
     uv_version: uvVersion,
     cli_version: typeof ALTIMATE_CLI_VERSION === "string" ? ALTIMATE_CLI_VERSION : "local",
     installed_at: new Date().toISOString(),
+  })
+
+  Telemetry.track({
+    type: "engine_started",
+    timestamp: Date.now(),
+    session_id: Telemetry.getContext().sessionId,
+    engine_version: ALTIMATE_ENGINE_VERSION,
+    python_version: pyVersion,
+    status: isUpgrade ? "upgraded" : "started",
+    duration_ms: Date.now() - startTime,
   })
 
   UI.println(`${UI.Style.TEXT_SUCCESS}Engine ready${UI.Style.TEXT_NORMAL}`)

@@ -28,6 +28,7 @@ import { PermissionNext } from "@/permission/next"
 import { Global } from "@/global"
 import type { LanguageModelV2Usage } from "@ai-sdk/provider"
 import { iife } from "@/util/iife"
+import { Telemetry } from "@/telemetry"
 
 export namespace Session {
   const log = Log.create({ service: "session" })
@@ -243,8 +244,10 @@ export namespace Session {
       const msgs = await messages({ sessionID: input.sessionID })
       const idMap = new Map<string, string>()
 
+      let messageCount = 0
       for (const msg of msgs) {
         if (input.messageID && msg.info.id >= input.messageID) break
+        messageCount++
         const newID = Identifier.ascending("message")
         idMap.set(msg.info.id, newID)
 
@@ -265,6 +268,13 @@ export namespace Session {
           })
         }
       }
+      Telemetry.track({
+        type: "session_forked",
+        timestamp: Date.now(),
+        session_id: session.id,
+        parent_session_id: input.sessionID,
+        message_count: messageCount,
+      })
       return session
     },
   )

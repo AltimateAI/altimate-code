@@ -39,6 +39,7 @@ altimate needs outbound HTTPS access to:
 | `registry.npmjs.org` | Package updates |
 | `models.dev` | Model catalog (can be disabled) |
 | Your warehouse endpoints | Database connections |
+| `eastus-8.in.applicationinsights.azure.com` | Telemetry (Azure Application Insights) |
 
 ### Disable Model Fetching
 

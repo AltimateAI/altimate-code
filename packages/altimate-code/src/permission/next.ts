@@ -5,6 +5,7 @@ import { Identifier } from "@/id/id"
 import { Instance } from "@/project/instance"
 import { Database, eq } from "@/storage/db"
 import { PermissionTable } from "@/session/session.sql"
+import { Telemetry } from "@/telemetry"
 import { fn } from "@/util/fn"
 import { Log } from "@/util/log"
 import { Wildcard } from "@/util/wildcard"
@@ -138,8 +139,17 @@ export namespace PermissionNext {
       for (const pattern of request.patterns ?? []) {
         const rule = evaluate(request.permission, pattern, ruleset, s.approved)
         log.info("evaluated", { permission: request.permission, pattern, action: rule })
-        if (rule.action === "deny")
+        if (rule.action === "deny") {
+          Telemetry.track({
+            type: "permission_denied",
+            timestamp: Date.now(),
+            session_id: request.sessionID,
+            tool_name: request.permission,
+            tool_category: Telemetry.categorizeToolName(request.permission, request.permission.startsWith("mcp__") ? "mcp" : "standard"),
+            source: "config_rule",
+          })
           throw new DeniedError(ruleset.filter((r) => Wildcard.match(request.permission, r.permission)))
+        }
         if (rule.action === "ask") {
           const id = input.id ?? Identifier.ascending("permission")
           return new Promise<void>((resolve, reject) => {
@@ -177,6 +187,14 @@ export namespace PermissionNext {
         reply: input.reply,
       })
       if (input.reply === "reject") {
+        Telemetry.track({
+          type: "permission_denied",
+          timestamp: Date.now(),
+          session_id: existing.info.sessionID,
+          tool_name: existing.info.permission,
+          tool_category: Telemetry.categorizeToolName(existing.info.permission, existing.info.permission.startsWith("mcp__") ? "mcp" : "standard"),
+          source: "user",
+        })
         existing.reject(input.message ? new CorrectedError(input.message) : new RejectedError())
         // Reject all other pending permissions for this session
         const sessionID = existing.info.sessionID

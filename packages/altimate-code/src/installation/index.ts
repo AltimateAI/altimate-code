@@ -6,6 +6,7 @@ import { NamedError } from "@altimateai/altimate-code-util/error"
 import { Log } from "../util/log"
 import { iife } from "@/util/iife"
 import { Flag } from "../flag/flag"
+import { Telemetry } from "../telemetry"
 
 declare global {
   const ALTIMATE_CLI_VERSION: string
@@ -176,6 +177,17 @@ export namespace Installation {
     const result = await cmd.quiet().throws(false)
     if (result.exitCode !== 0) {
       const stderr = method === "choco" ? "not running from an elevated command shell" : result.stderr.toString("utf8")
+      const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "npm") as "npm" | "bun" | "brew"
+      Telemetry.track({
+        type: "upgrade_attempted",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId || "cli",
+        from_version: VERSION,
+        to_version: target,
+        method: telemetryMethod,
+        status: "error",
+        error: stderr.slice(0, 500),
+      })
       throw new UpgradeFailedError({
         stderr: stderr,
       })
@@ -185,6 +197,16 @@ export namespace Installation {
       target,
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
+    })
+    const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "npm") as "npm" | "bun" | "brew"
+    Telemetry.track({
+      type: "upgrade_attempted",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId || "cli",
+      from_version: VERSION,
+      to_version: target,
+      method: telemetryMethod,
+      status: "success",
     })
     await $`${process.execPath} --version`.nothrow().quiet().text()
   }

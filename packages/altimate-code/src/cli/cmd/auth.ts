@@ -10,6 +10,7 @@ import { Config } from "../../config/config"
 import { Global } from "../../global"
 import { Plugin } from "../../plugin"
 import { Instance } from "../../project/instance"
+import { Telemetry } from "../../telemetry"
 import type { Hooks } from "@altimateai/altimate-code-plugin"
 
 type PluginAuth = NonNullable<Hooks["auth"]>
@@ -78,6 +79,15 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
       const result = await authorize.callback()
       if (result.type === "failed") {
         spinner.stop("Failed to authorize", 1)
+        Telemetry.track({
+          type: "auth_login",
+          timestamp: Date.now(),
+          session_id: "cli",
+          provider_id: provider,
+          method: "oauth",
+          status: "error",
+          error: "OAuth auto authorization failed",
+        })
       }
       if (result.type === "success") {
         const saveProvider = result.provider ?? provider
@@ -98,6 +108,14 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
           })
         }
         spinner.stop("Login successful")
+        Telemetry.track({
+          type: "auth_login",
+          timestamp: Date.now(),
+          session_id: "cli",
+          provider_id: saveProvider,
+          method: "oauth",
+          status: "success",
+        })
       }
     }
 
@@ -110,6 +128,15 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
       const result = await authorize.callback(code)
       if (result.type === "failed") {
         prompts.log.error("Failed to authorize")
+        Telemetry.track({
+          type: "auth_login",
+          timestamp: Date.now(),
+          session_id: "cli",
+          provider_id: provider,
+          method: "oauth",
+          status: "error",
+          error: "OAuth code authorization failed",
+        })
       }
       if (result.type === "success") {
         const saveProvider = result.provider ?? provider
@@ -130,6 +157,14 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
           })
         }
         prompts.log.success("Login successful")
+        Telemetry.track({
+          type: "auth_login",
+          timestamp: Date.now(),
+          session_id: "cli",
+          provider_id: saveProvider,
+          method: "oauth",
+          status: "success",
+        })
       }
     }
 
@@ -142,6 +177,15 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
       const result = await method.authorize(inputs)
       if (result.type === "failed") {
         prompts.log.error("Failed to authorize")
+        Telemetry.track({
+          type: "auth_login",
+          timestamp: Date.now(),
+          session_id: "cli",
+          provider_id: provider,
+          method: "api_key",
+          status: "error",
+          error: "API key authorization failed",
+        })
       }
       if (result.type === "success") {
         const saveProvider = result.provider ?? provider
@@ -150,6 +194,14 @@ async function handlePluginAuth(plugin: { auth: PluginAuth }, provider: string):
           key: result.key,
         })
         prompts.log.success("Login successful")
+        Telemetry.track({
+          type: "auth_login",
+          timestamp: Date.now(),
+          session_id: "cli",
+          provider_id: saveProvider,
+          method: "api_key",
+          status: "success",
+        })
       }
       prompts.outro("Done")
       return true
@@ -270,6 +322,15 @@ export const AuthLoginCommand = cmd({
           const exit = await proc.exited
           if (exit !== 0) {
             prompts.log.error("Failed")
+            Telemetry.track({
+              type: "auth_login",
+              timestamp: Date.now(),
+              session_id: "cli",
+              provider_id: args.url!,
+              method: "api_key",
+              status: "error",
+              error: "Well-known auth command failed",
+            })
             prompts.outro("Done")
             return
           }
@@ -280,6 +341,14 @@ export const AuthLoginCommand = cmd({
             token: token.trim(),
           })
           prompts.log.success("Logged into " + args.url)
+          Telemetry.track({
+            type: "auth_login",
+            timestamp: Date.now(),
+            session_id: "cli",
+            provider_id: args.url!,
+            method: "api_key",
+            status: "success",
+          })
           prompts.outro("Done")
           return
         }
@@ -411,6 +480,14 @@ export const AuthLoginCommand = cmd({
           type: "api",
           key,
         })
+        Telemetry.track({
+          type: "auth_login",
+          timestamp: Date.now(),
+          session_id: "cli",
+          provider_id: provider,
+          method: "api_key",
+          status: "success",
+        })
 
         prompts.outro("Done")
       },
@@ -439,6 +516,12 @@ export const AuthLogoutCommand = cmd({
     })
     if (prompts.isCancel(providerID)) throw new UI.CancelledError()
     await Auth.remove(providerID)
+    Telemetry.track({
+      type: "auth_logout",
+      timestamp: Date.now(),
+      session_id: "cli",
+      provider_id: providerID,
+    })
     prompts.outro("Logout successful")
   },
 })

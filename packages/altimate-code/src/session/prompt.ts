@@ -296,6 +296,8 @@ export namespace SessionPrompt {
     let sessionTotalTokens = 0
     let toolCallCount = 0
     let compactionAttempts = 0
+    let totalCompactions = 0
+    let sessionAgentName = ""
     const MAX_COMPACTION_ATTEMPTS = 3
     const session = await Session.get(sessionID)
     await Telemetry.init()
@@ -325,6 +327,7 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      if (!sessionAgentName) sessionAgentName = lastUser.agent
       if (
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
@@ -555,6 +558,7 @@ export namespace SessionPrompt {
         (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
       ) {
         compactionAttempts++
+        totalCompactions++
         if (compactionAttempts > MAX_COMPACTION_ATTEMPTS) {
           log.warn("compaction loop detected, stopping", { compactionAttempts, sessionID })
           Bus.publish(Session.Event.Error, {
@@ -757,6 +761,7 @@ export namespace SessionPrompt {
       }
       if (result === "compact") {
         compactionAttempts++
+        totalCompactions++
         if (compactionAttempts > MAX_COMPACTION_ATTEMPTS) {
           log.warn("compaction loop detected, stopping", { compactionAttempts, sessionID })
           Bus.publish(Session.Event.Error, {
@@ -785,6 +790,25 @@ export namespace SessionPrompt {
     }
     SessionCompaction.prune({ sessionID })
     } finally {
+      const outcome: "completed" | "abandoned" | "error" = abort.aborted
+        ? "abandoned"
+        : sessionTotalCost === 0 && toolCallCount === 0
+          ? "abandoned"
+          : "completed"
+      Telemetry.track({
+        type: "agent_outcome",
+        timestamp: Date.now(),
+        session_id: sessionID,
+        agent: sessionAgentName,
+        tool_calls: toolCallCount,
+        generations: step,
+        duration_ms: Date.now() - sessionStartTime,
+        cost: sessionTotalCost,
+        compactions: totalCompactions,
+        doom_loops: 0,
+        permission_denials: 0,
+        outcome,
+      })
       Telemetry.track({
         type: "session_end",
         timestamp: Date.now(),

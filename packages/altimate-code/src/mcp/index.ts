@@ -23,6 +23,7 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
+import { Telemetry } from "@/telemetry"
 
 export namespace MCP {
   const log = Log.create({ service: "mcp" })
@@ -345,6 +346,7 @@ export namespace MCP {
       let lastError: Error | undefined
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       for (const { name, transport } of transports) {
+        const connectStart = Date.now()
         try {
           const client = new Client({
             name: "altimate",
@@ -355,6 +357,27 @@ export namespace MCP {
           mcpClient = client
           log.info("connected", { key, transport: name })
           status = { status: "connected" }
+          Telemetry.track({
+            type: "mcp_server_status",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId,
+            server_name: key,
+            transport: name === "SSE" ? "sse" : "streamable-http",
+            status: "connected",
+            duration_ms: Date.now() - connectStart,
+          })
+          // Census: collect tool and resource counts
+          const remoteToolsList = await client.listTools().catch(() => ({ tools: [] }))
+          const remoteResourcesList = await client.listResources().catch(() => ({ resources: [] }))
+          Telemetry.track({
+            type: "mcp_server_census",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId,
+            server_name: key,
+            transport: name === "SSE" ? "sse" : "streamable-http",
+            tool_count: remoteToolsList.tools.length,
+            resource_count: remoteResourcesList.resources.length,
+          })
           break
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error))
@@ -397,6 +420,16 @@ export namespace MCP {
             url: mcp.url,
             error: lastError.message,
           })
+          Telemetry.track({
+            type: "mcp_server_status",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId,
+            server_name: key,
+            transport: name === "SSE" ? "sse" : "streamable-http",
+            status: "error",
+            error: lastError.message.slice(0, 500),
+            duration_ms: Date.now() - connectStart,
+          })
           status = {
             status: "failed" as const,
             error: lastError.message,
@@ -424,6 +457,7 @@ export namespace MCP {
       })
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const localConnectStart = Date.now()
       try {
         const client = new Client({
           name: "altimate",
@@ -435,6 +469,27 @@ export namespace MCP {
         status = {
           status: "connected",
         }
+        Telemetry.track({
+          type: "mcp_server_status",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          server_name: key,
+          transport: "stdio",
+          status: "connected",
+          duration_ms: Date.now() - localConnectStart,
+        })
+        // Census: collect tool and resource counts
+        const localToolsList = await client.listTools().catch(() => ({ tools: [] }))
+        const localResourcesList = await client.listResources().catch(() => ({ resources: [] }))
+        Telemetry.track({
+          type: "mcp_server_census",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          server_name: key,
+          transport: "stdio",
+          tool_count: localToolsList.tools.length,
+          resource_count: localResourcesList.resources.length,
+        })
       } catch (error) {
         log.error("local mcp startup failed", {
           key,
@@ -442,9 +497,20 @@ export namespace MCP {
           cwd,
           error: error instanceof Error ? error.message : String(error),
         })
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        Telemetry.track({
+          type: "mcp_server_status",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          server_name: key,
+          transport: "stdio",
+          status: "error",
+          error: errorMsg.slice(0, 500),
+          duration_ms: Date.now() - localConnectStart,
+        })
         status = {
           status: "failed" as const,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMsg,
         }
       }
     }
@@ -560,6 +626,14 @@ export namespace MCP {
       })
       delete s.clients[name]
     }
+    Telemetry.track({
+      type: "mcp_server_status",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      server_name: name,
+      transport: "stdio",
+      status: "disconnected",
+    })
     s.status[name] = { status: "disabled" }
   }
 

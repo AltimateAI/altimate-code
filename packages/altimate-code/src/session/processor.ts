@@ -37,6 +37,9 @@ export namespace SessionProcessor {
     let needsCompaction = false
     let stepStartTime = Date.now()
     let toolCallCounter = 0
+    let previousTool: string | null = null
+    let retryErrorType: string | null = null
+    let retryStartTime: number | null = null
 
     const result = {
       get message() {
@@ -179,6 +182,13 @@ export namespace SessionProcessor {
                         always: [value.toolName],
                         ruleset: agent.permission,
                       })
+                      Telemetry.track({
+                        type: "doom_loop_detected",
+                        timestamp: Date.now(),
+                        session_id: input.sessionID,
+                        tool_name: value.toolName,
+                        repeat_count: DOOM_LOOP_THRESHOLD,
+                      })
                     }
                   }
                   break
@@ -201,17 +211,22 @@ export namespace SessionProcessor {
                         attachments: value.output.attachments,
                       },
                     })
-                    toolCallCounter++
+                    const toolType = match.tool.startsWith("mcp__") ? "mcp" as const : "standard" as const
                     Telemetry.track({
                       type: "tool_call",
                       timestamp: Date.now(),
                       session_id: input.sessionID,
                       message_id: input.assistantMessage.id,
                       tool_name: match.tool,
-                      tool_type: match.tool.startsWith("mcp__") ? "mcp" : "standard",
+                      tool_type: toolType,
+                      tool_category: Telemetry.categorizeToolName(match.tool, toolType),
                       status: "success",
                       duration_ms: Date.now() - match.state.time.start,
+                      sequence_index: toolCallCounter,
+                      previous_tool: previousTool,
                     })
+                    toolCallCounter++
+                    previousTool = match.tool
                     delete toolcalls[value.toolCallId]
                   }
                   break
@@ -232,18 +247,23 @@ export namespace SessionProcessor {
                         },
                       },
                     })
-                    toolCallCounter++
+                    const errToolType = match.tool.startsWith("mcp__") ? "mcp" as const : "standard" as const
                     Telemetry.track({
                       type: "tool_call",
                       timestamp: Date.now(),
                       session_id: input.sessionID,
                       message_id: input.assistantMessage.id,
                       tool_name: match.tool,
-                      tool_type: match.tool.startsWith("mcp__") ? "mcp" : "standard",
+                      tool_type: errToolType,
+                      tool_category: Telemetry.categorizeToolName(match.tool, errToolType),
                       status: "error",
                       duration_ms: Date.now() - match.state.time.start,
+                      sequence_index: toolCallCounter,
+                      previous_tool: previousTool,
                       error: (value.error as any).toString().slice(0, 500),
                     })
+                    toolCallCounter++
+                    previousTool = match.tool
                     if (
                       value.error instanceof PermissionNext.RejectedError ||
                       value.error instanceof Question.RejectedError
@@ -270,6 +290,20 @@ export namespace SessionProcessor {
                   break
 
                 case "finish-step":
+                  if (attempt > 0 && retryErrorType) {
+                    Telemetry.track({
+                      type: "error_recovered",
+                      timestamp: Date.now(),
+                      session_id: input.sessionID,
+                      error_type: retryErrorType,
+                      recovery_strategy: "retry",
+                      attempts: attempt,
+                      recovered: true,
+                      duration_ms: Date.now() - (retryStartTime ?? Date.now()),
+                    })
+                    retryErrorType = null
+                    retryStartTime = null
+                  }
                   const usage = Session.getUsage({
                     model: input.model,
                     usage: value.usage,
@@ -308,6 +342,24 @@ export namespace SessionProcessor {
                     cost: usage.cost,
                     duration_ms: Date.now() - stepStartTime,
                   })
+                  // Context utilization tracking
+                  const totalTokens = usage.tokens.input + usage.tokens.output + usage.tokens.cache.read + usage.tokens.cache.write
+                  const contextLimit = input.model.limit?.context ?? 0
+                  if (contextLimit > 0) {
+                    const cacheRead = usage.tokens.cache.read
+                    const totalInput = cacheRead + usage.tokens.input
+                    Telemetry.track({
+                      type: "context_utilization",
+                      timestamp: Date.now(),
+                      session_id: input.sessionID,
+                      model_id: input.model.id,
+                      tokens_used: totalTokens,
+                      context_limit: contextLimit,
+                      utilization_pct: Math.round((totalTokens / contextLimit) * 1000) / 1000,
+                      generation_number: toolCallCounter,
+                      cache_hit_ratio: totalInput > 0 ? Math.round((cacheRead / totalInput) * 1000) / 1000 : 0,
+                    })
+                  }
                   if (snapshot) {
                     const patch = await Snapshot.patch(snapshot)
                     if (patch.files.length) {
@@ -426,6 +478,20 @@ export namespace SessionProcessor {
             }
             const retry = SessionRetry.retryable(error)
             if (retry !== undefined) {
+              Telemetry.track({
+                type: "provider_error",
+                timestamp: Date.now(),
+                session_id: input.sessionID,
+                provider_id: input.model.providerID,
+                model_id: input.model.id,
+                error_type: e?.name ?? "UnknownError",
+                error_message: (e?.message ?? String(e)).slice(0, 500),
+                http_status: (e as any)?.status,
+              })
+              if (attempt === 0) {
+                retryStartTime = Date.now()
+              }
+              retryErrorType = e?.name ?? "UnknownError"
               attempt++
               const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
               SessionStatus.set(input.sessionID, {
