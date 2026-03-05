@@ -133,7 +133,10 @@ describe("Command module", () => {
 // ---------------------------------------------------------------------------
 
 describe("Command loading resilience pattern", () => {
-  // Simulate the command loading logic from command/index.ts
+  // NOTE: These tests duplicate the loading logic from command/index.ts rather than
+  // mocking the real MCP/Skill modules. This avoids complex module mocking but means
+  // loadCommands() below could drift from the real implementation. If the loading
+  // pattern in command/index.ts changes, these tests should be updated to match.
   async function loadCommands(opts: {
     mcpPrompts: () => Promise<Record<string, any>>
     skillAll: () => Promise<Array<{ name: string; description: string; content: string }>>
