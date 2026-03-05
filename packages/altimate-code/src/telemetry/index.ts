@@ -382,10 +382,17 @@ export namespace Telemetry {
         buffer = []
         return
       }
-      const userConfig = await Config.get()
-      if (userConfig.telemetry?.disabled) {
-        buffer = []
-        return
+      // Config.get() may throw outside Instance context (e.g. CLI middleware
+      // before Instance.provide()). Treat config failures as "not disabled" —
+      // the env var check above is the early-init escape hatch.
+      try {
+        const userConfig = await Config.get()
+        if (userConfig.telemetry?.disabled) {
+          buffer = []
+          return
+        }
+      } catch {
+        // Config unavailable — proceed with telemetry enabled
       }
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key
       const connectionString = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING ?? DEFAULT_CONNECTION_STRING
@@ -395,8 +402,12 @@ export namespace Telemetry {
         return
       }
       appInsights = cfg
-      const account = Control.account()
-      if (account) userEmail = account.email
+      try {
+        const account = Control.account()
+        if (account) userEmail = account.email
+      } catch {
+        // Account unavailable — proceed without user email
+      }
       enabled = true
       log.info("telemetry initialized", { mode: "appinsights" })
       const timer = setInterval(flush, FLUSH_INTERVAL_MS)
