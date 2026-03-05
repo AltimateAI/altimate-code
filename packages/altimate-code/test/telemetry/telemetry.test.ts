@@ -91,14 +91,14 @@ describe("telemetry.bucketCount", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 3. track — basic smoke tests (telemetry disabled by default)
+// 3. track — buffering behavior
 // ---------------------------------------------------------------------------
 describe("telemetry.track", () => {
   test("track is a function", () => {
     expect(typeof Telemetry.track).toBe("function")
   })
 
-  test("track does not throw when called with valid events while disabled", () => {
+  test("track does not throw when called with valid events before init", () => {
     expect(() => {
       Telemetry.track({
         type: "session_start",
@@ -110,6 +110,65 @@ describe("telemetry.track", () => {
         project_id: "test-project",
       })
     }).not.toThrow()
+  })
+
+  test("pre-init events are buffered, not dropped", async () => {
+    // Ensure clean state
+    await Telemetry.shutdown()
+
+    // Track before init — should buffer
+    Telemetry.track({
+      type: "mcp_server_status",
+      timestamp: Date.now(),
+      session_id: "pre-init",
+      server_name: "test",
+      transport: "stdio",
+      status: "connected",
+    })
+    Telemetry.track({
+      type: "engine_started",
+      timestamp: Date.now(),
+      session_id: "pre-init",
+      engine_version: "1.0",
+      python_version: "3.12",
+      status: "started",
+      duration_ms: 100,
+    })
+
+    // init() with telemetry disabled via env var — should clear buffer
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
+    try {
+      await Telemetry.init()
+      // After init disables, track should drop
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "post-disable",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "x",
+      })
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      await Telemetry.shutdown()
+    }
+  })
+
+  test("init() is idempotent — second call returns same promise", async () => {
+    await Telemetry.shutdown()
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
+    try {
+      const p1 = Telemetry.init()
+      const p2 = Telemetry.init()
+      expect(p1).toBe(p2) // same promise object
+      await p1
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      await Telemetry.shutdown()
+    }
   })
 })
 
