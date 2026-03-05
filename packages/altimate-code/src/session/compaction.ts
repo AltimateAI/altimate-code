@@ -164,6 +164,9 @@ export namespace SessionCompaction {
   }) {
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
     compactionAttempts.set(input.sessionID, attempt)
+    input.abort.addEventListener("abort", () => {
+      compactionAttempts.delete(input.sessionID)
+    }, { once: true })
     Telemetry.track({
       type: "compaction_triggered",
       timestamp: Date.now(),
