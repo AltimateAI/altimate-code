@@ -180,4 +180,4 @@ For additional safety:
 
 ## Where should I report security vulnerabilities?
 
-Report security issues privately at [github.com/AltimateAI/altimate-code/issues](https://github.com/AltimateAI/altimate-code/issues). Use a descriptive title and mark the issue as security-related. Do not include exploit details in public issues — we'll coordinate disclosure privately.
+**Do not open public GitHub issues for security vulnerabilities.** Instead, email **security@altimate.ai** with a description, reproduction steps, and your severity assessment. You'll receive acknowledgment within 48 hours. See the full [Security Policy](https://github.com/AltimateAI/altimate-code/blob/main/SECURITY.md) for details.
