@@ -126,6 +126,21 @@ Or via environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
+## What happens when I authenticate via a well-known URL?
+
+When you run `altimate auth login <url>`, the CLI fetches `<url>/.well-known/altimate-code` to discover the server's auth command. Before executing anything:
+
+1. **Validation** — The auth command must be an array of strings. Malformed or unexpected types are rejected.
+2. **Confirmation prompt** — You are shown the exact command and must explicitly approve it before it runs.
+
+```
+$ altimate auth login https://mcp.example.com
+◆ The server requests to run: gcloud auth print-access-token. Allow?
+│ ● Yes / ○ No
+```
+
+This prevents a malicious server from silently executing arbitrary commands on your machine.
+
 ## Are MCP servers a security risk?
 
 MCP (Model Context Protocol) servers extend Altimate Code with additional tools. They run as local subprocesses or connect via SSE/HTTP. Security considerations:

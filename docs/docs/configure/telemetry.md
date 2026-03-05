@@ -36,6 +36,12 @@ We collect the following categories of events:
 
 Each event includes a timestamp, anonymous session ID, and the CLI version.
 
+## Delivery & Reliability
+
+Telemetry events are buffered in memory and flushed periodically. If a flush fails (e.g., due to a transient network error), events are re-added to the buffer for one retry. On process exit, the CLI performs a final flush to avoid losing events from the current session.
+
+No events are ever written to disk — if the process is killed before the final flush, buffered events are lost. This is by design to minimize on-disk footprint.
+
 ## Why We Collect Telemetry
 
 Telemetry helps us:
