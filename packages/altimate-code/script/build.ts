@@ -66,6 +66,13 @@ const migrations = await Promise.all(
 )
 console.log(`Loaded ${migrations.length} migrations`)
 
+// Load validate hook and skill assets for embedding
+const langfuseLogger = await Bun.file(path.join(dir, "src/hooks/langfuse_logger.py")).text()
+const validateSettings = await Bun.file(path.join(dir, "src/hooks/settings.json")).text()
+const validateSkillMd = await Bun.file(path.join(dir, "src/skills/validate/SKILL.md")).text()
+const validateBatchPy = await Bun.file(path.join(dir, "src/skills/validate/batch_validate.py")).text()
+console.log("Loaded validate hook and skill assets")
+
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
@@ -213,6 +220,10 @@ for (const item of targets) {
       ALTIMATE_CLI_CHANNEL: `'${Script.channel}'`,
       ALTIMATE_ENGINE_VERSION: `'${engineVersion}'`,
       ALTIMATE_CLI_MIGRATIONS: JSON.stringify(migrations),
+      ALTIMATE_VALIDATE_LANGFUSE_LOGGER: JSON.stringify(langfuseLogger),
+      ALTIMATE_VALIDATE_SETTINGS: JSON.stringify(validateSettings),
+      ALTIMATE_VALIDATE_SKILL_MD: JSON.stringify(validateSkillMd),
+      ALTIMATE_VALIDATE_BATCH_PY: JSON.stringify(validateBatchPy),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
     },
   })

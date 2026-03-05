@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOK=''; d=\"$PWD\"; while [ \"$d\" != '/' ]; do if [ -f \"$d/.claude/hooks/langfuse_logger.py\" ]; then HOOK=\"$d/.claude/hooks/langfuse_logger.py\"; break; fi; d=$(dirname \"$d\"); done; [ -z \"$HOOK\" ] && [ -f \"$HOME/.claude/hooks/langfuse_logger.py\" ] && HOOK=\"$HOME/.claude/hooks/langfuse_logger.py\"; [ -n \"$HOOK\" ] && uv run --no-project --with 'langfuse>=3.9' --with python-dotenv python \"$HOOK\" || true",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOK=''; d=\"$PWD\"; while [ \"$d\" != '/' ]; do if [ -f \"$d/.claude/hooks/langfuse_logger.py\" ]; then HOOK=\"$d/.claude/hooks/langfuse_logger.py\"; break; fi; d=$(dirname \"$d\"); done; [ -z \"$HOOK\" ] && [ -f \"$HOME/.claude/hooks/langfuse_logger.py\" ] && HOOK=\"$HOME/.claude/hooks/langfuse_logger.py\"; [ -n \"$HOOK\" ] && uv run --no-project --with 'langfuse>=3.9' --with python-dotenv python \"$HOOK\" || true",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOK=''; d=\"$PWD\"; while [ \"$d\" != '/' ]; do if [ -f \"$d/.claude/hooks/langfuse_logger.py\" ]; then HOOK=\"$d/.claude/hooks/langfuse_logger.py\"; break; fi; d=$(dirname \"$d\"); done; [ -z \"$HOOK\" ] && [ -f \"$HOME/.claude/hooks/langfuse_logger.py\" ] && HOOK=\"$HOME/.claude/hooks/langfuse_logger.py\"; [ -n \"$HOOK\" ] && uv run --no-project --with 'langfuse>=3.9' --with python-dotenv python \"$HOOK\" || true",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}
