@@ -107,6 +107,7 @@ nav:
       - Plugins: develop/plugins.md
       - Ecosystem: develop/ecosystem.md
   - Reference:
+      - Security FAQ: security-faq.md
       - Network: network.md
       - Troubleshooting: troubleshooting.md
       - Windows / WSL: windows-wsl.md
