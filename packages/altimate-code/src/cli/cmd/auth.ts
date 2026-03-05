@@ -314,7 +314,13 @@ export const AuthLoginCommand = cmd({
         prompts.intro("Add credential")
         if (args.url) {
           const wellknown = await fetch(`${args.url}/.well-known/altimate-code`).then((x) => x.json() as any)
-          const cmd = wellknown.auth.command as string[]
+          const raw = wellknown?.auth?.command
+          if (!Array.isArray(raw) || !raw.every((c: unknown) => typeof c === 'string')) {
+            prompts.log.warn('Invalid auth command from server')
+            prompts.outro('Done')
+            return
+          }
+          const cmd = raw as string[]
           const confirm = await prompts.confirm({
             message: `The server requests to run: ${cmd.join(" ")}. Allow?`,
           })
