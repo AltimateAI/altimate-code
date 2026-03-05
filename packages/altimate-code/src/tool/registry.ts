@@ -56,6 +56,7 @@ import { FinopsRoleGrantsTool, FinopsRoleHierarchyTool, FinopsUserRolesTool } fr
 import { SchemaDetectPiiTool } from "./schema-detect-pii"
 import { SchemaTagsTool, SchemaTagsListTool } from "./schema-tags"
 import { SqlRewriteTool } from "./sql-rewrite"
+import { SqlPreprocessJinjaTool } from "./sql-preprocess-jinja"
 
 import { SchemaDiffTool } from "./schema-diff"
 import { AltimateCoreValidateTool } from "./altimate-core-validate"
@@ -219,6 +220,7 @@ export namespace ToolRegistry {
       SchemaTagsTool,
       SchemaTagsListTool,
       SqlRewriteTool,
+      SqlPreprocessJinjaTool,
       SchemaDiffTool,
       AltimateCoreValidateTool,
       AltimateCoreLintTool,

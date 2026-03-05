@@ -987,6 +987,26 @@ class AltimateCoreIsSafeParams(BaseModel):
     sql: str
 
 
+# --- Jinja Preprocessing ---
+
+
+class SqlPreprocessJinjaParams(BaseModel):
+    sql: str
+
+
+class SqlPreprocessJinjaResult(BaseModel):
+    success: bool = True
+    preprocessed_sql: str
+    original_sql: str
+    was_preprocessed: bool
+    refs_found: list[str] = Field(default_factory=list)
+    sources_found: list[str] = Field(default_factory=list)
+    variables_found: list[str] = Field(default_factory=list)
+    macros_removed: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    error: str = Field(default=None)  # Uses same pattern as rest of file
+
+
 # --- JSON-RPC ---
 
 

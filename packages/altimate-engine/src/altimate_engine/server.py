@@ -170,7 +170,13 @@ from altimate_engine.sql.guard import (
 from altimate_engine.dbt.profiles import discover_dbt_connections
 from altimate_engine.local.schema_sync import sync_schema
 from altimate_engine.local.test_local import test_sql_local
+from altimate_engine.sql.jinja_preprocessor import (
+    contains_jinja,
+    preprocess_jinja,
+)
 from altimate_engine.models import (
+    SqlPreprocessJinjaParams,
+    SqlPreprocessJinjaResult,
     AltimateCoreFixParams,
     AltimateCorePolicyParams,
     AltimateCoreSemanticsParams,
@@ -298,13 +304,48 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
     params = request.params or {}
 
     try:
-        if method == "sql.execute":
+        if method == "sql.preprocess_jinja":
+            pp_params = SqlPreprocessJinjaParams(**params)
+            pp_result = preprocess_jinja(pp_params.sql)
+            result = SqlPreprocessJinjaResult(
+                success=True,
+                preprocessed_sql=pp_result.preprocessed_sql,
+                original_sql=pp_result.original_sql,
+                was_preprocessed=pp_result.was_preprocessed,
+                refs_found=pp_result.refs_found,
+                sources_found=pp_result.sources_found,
+                variables_found=pp_result.variables_found,
+                macros_removed=pp_result.macros_removed,
+                warnings=pp_result.warnings,
+            )
+        elif method == "sql.execute":
             result = execute_sql(SqlExecuteParams(**params))
         elif method == "schema.inspect":
             result = inspect_schema(SchemaInspectParams(**params))
         elif method == "sql.analyze":
             params_obj = SqlAnalyzeParams(**params)
-            statements = _split_sql_statements(params_obj.sql)
+
+            # Auto-preprocess Jinja if present
+            jinja_note = ""
+            sql_to_analyze = params_obj.sql
+            if contains_jinja(sql_to_analyze):
+                pp = preprocess_jinja(sql_to_analyze)
+                if pp.was_preprocessed:
+                    sql_to_analyze = pp.preprocessed_sql
+                    parts = []
+                    if pp.refs_found:
+                        parts.append(f"refs: {', '.join(pp.refs_found)}")
+                    if pp.sources_found:
+                        parts.append(f"sources: {', '.join(pp.sources_found)}")
+                    if pp.variables_found:
+                        parts.append(f"vars: {', '.join(pp.variables_found)}")
+                    detail = f" ({'; '.join(parts)})" if parts else ""
+                    jinja_note = (
+                        f"Jinja templates were preprocessed before analysis{detail}. "
+                        "Results are based on the rendered SQL and may be approximate."
+                    )
+
+            statements = _split_sql_statements(sql_to_analyze)
             issues = []
             any_error = None
 
@@ -360,37 +401,65 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                         )
                     )
 
+            confidence_factors = []
+            if any_error is not None:
+                confidence_factors.append(f"Parse failed on one statement: {any_error}")
+            if jinja_note:
+                confidence_factors.append(jinja_note)
+
             result = SqlAnalyzeResult(
                 success=any_error is None,
                 issues=issues,
                 issue_count=len(issues),
                 confidence=_compute_overall_confidence(issues),
-                confidence_factors=[]
-                if any_error is None
-                else [f"Parse failed on one statement: {any_error}"],
+                confidence_factors=confidence_factors,
                 error=any_error,
             )
         elif method == "sql.translate":
             params_obj = SqlTranslateParams(**params)
+
+            # Auto-preprocess Jinja if present
+            sql_to_translate = params_obj.sql
+            jinja_warnings: list[str] = []
+            if contains_jinja(sql_to_translate):
+                pp = preprocess_jinja(sql_to_translate)
+                if pp.was_preprocessed:
+                    sql_to_translate = pp.preprocessed_sql
+                    jinja_warnings.append(
+                        "Jinja templates were preprocessed before translation. "
+                        "Review the translated SQL and re-apply Jinja syntax as needed."
+                    )
+
             raw = guard_transpile(
-                params_obj.sql, params_obj.source_dialect, params_obj.target_dialect
+                sql_to_translate, params_obj.source_dialect, params_obj.target_dialect
             )
+            all_warnings = jinja_warnings + raw.get("warnings", [])
             result = SqlTranslateResult(
                 success=raw.get("success", True),
                 translated_sql=raw.get("sql", raw.get("translated_sql")),
                 source_dialect=params_obj.source_dialect,
                 target_dialect=params_obj.target_dialect,
-                warnings=raw.get("warnings", []),
+                warnings=all_warnings,
                 error=raw.get("error"),
             )
         elif method == "sql.optimize":
             params_obj = SqlOptimizeParams(**params)
+
+            # Auto-preprocess Jinja if present
+            sql_to_optimize = params_obj.sql
+            jinja_preprocessed = False
+            if contains_jinja(sql_to_optimize):
+                pp = preprocess_jinja(sql_to_optimize)
+                if pp.was_preprocessed:
+                    sql_to_optimize = pp.preprocessed_sql
+                    jinja_preprocessed = True
+
             # Rewrite for optimization
             rw = guard_rewrite_sql(
-                params_obj.sql, schema_context=params_obj.schema_context
+                sql_to_optimize, schema_context=params_obj.schema_context
             )
             # Lint for remaining issues
-            lint = guard_lint(params_obj.sql, schema_context=params_obj.schema_context)
+            lint = guard_lint(sql_to_optimize, schema_context=params_obj.schema_context)
 
             suggestions = []
             for r in rw.get("rewrites", []):
@@ -424,12 +493,17 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                     }
                 )
 
+            opt_confidence = "high"
+            if jinja_preprocessed:
+                opt_confidence = "medium"
+
             result = SqlOptimizeResult(
                 success=True,
                 original_sql=params_obj.sql,
-                optimized_sql=rw.get("rewritten_sql", params_obj.sql),
+                optimized_sql=rw.get("rewritten_sql", sql_to_optimize),
                 suggestions=suggestions,
                 anti_patterns=anti_patterns,
+                confidence=opt_confidence,
                 error=rw.get("error"),
             )
         elif method == "lineage.check":
@@ -492,12 +566,28 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
 
         elif method == "sql.format":
             fmt_params = SqlFormatParams(**params)
-            raw = guard_format_sql(fmt_params.sql, fmt_params.dialect)
+
+            # Auto-preprocess Jinja if present
+            sql_to_format = fmt_params.sql
+            jinja_fmt_note = None
+            if contains_jinja(sql_to_format):
+                pp = preprocess_jinja(sql_to_format)
+                if pp.was_preprocessed:
+                    sql_to_format = pp.preprocessed_sql
+                    jinja_fmt_note = (
+                        "Note: Jinja templates were removed before formatting. "
+                        "The formatted output contains plain SQL only."
+                    )
+
+            raw = guard_format_sql(sql_to_format, fmt_params.dialect)
+            fmt_error = raw.get("error")
+            if jinja_fmt_note and not fmt_error:
+                fmt_error = jinja_fmt_note
             result = SqlFormatResult(
                 success=raw.get("success", True),
                 formatted_sql=raw.get("formatted_sql", raw.get("sql")),
                 statement_count=raw.get("statement_count", 1),
-                error=raw.get("error"),
+                error=fmt_error,
             )
         elif method == "sql.explain":
             result = explain_sql(SqlExplainParams(**params))

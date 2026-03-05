@@ -951,6 +951,25 @@ export interface LocalTestResult {
   error?: string
 }
 
+// --- Jinja Preprocessing ---
+
+export interface SqlPreprocessJinjaParams {
+  sql: string
+}
+
+export interface SqlPreprocessJinjaResult {
+  success: boolean
+  preprocessed_sql: string
+  original_sql: string
+  was_preprocessed: boolean
+  refs_found: string[]
+  sources_found: string[]
+  variables_found: string[]
+  macros_removed: string[]
+  warnings: string[]
+  error?: string
+}
+
 // --- Method registry ---
 
 export const BridgeMethods = {
@@ -986,6 +1005,7 @@ export const BridgeMethods = {
   "schema.detect_pii": {} as { params: PiiDetectParams; result: PiiDetectResult },
   "schema.tags": {} as { params: TagsGetParams; result: TagsGetResult },
   "schema.tags_list": {} as { params: TagsListParams; result: TagsListResult },
+  "sql.preprocess_jinja": {} as { params: SqlPreprocessJinjaParams; result: SqlPreprocessJinjaResult },
   "sql.diff": {} as { params: SqlDiffParams; result: SqlDiffResult },
   "sql.rewrite": {} as { params: SqlRewriteParams; result: SqlRewriteResult },
   "sql.schema_diff": {} as { params: SchemaDiffParams; result: SchemaDiffResult },
