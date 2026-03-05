@@ -177,7 +177,7 @@ export namespace Installation {
     const result = await cmd.quiet().throws(false)
     if (result.exitCode !== 0) {
       const stderr = method === "choco" ? "not running from an elevated command shell" : result.stderr.toString("utf8")
-      const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "npm") as "npm" | "bun" | "brew"
+      const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
       Telemetry.track({
         type: "upgrade_attempted",
         timestamp: Date.now(),
@@ -198,7 +198,7 @@ export namespace Installation {
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
     })
-    const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "npm") as "npm" | "bun" | "brew"
+    const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
     Telemetry.track({
       type: "upgrade_attempted",
       timestamp: Date.now(),

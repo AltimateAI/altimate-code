@@ -805,8 +805,6 @@ export namespace SessionPrompt {
         duration_ms: Date.now() - sessionStartTime,
         cost: sessionTotalCost,
         compactions: totalCompactions,
-        doom_loops: 0,
-        permission_denials: 0,
         outcome,
       })
       Telemetry.track({

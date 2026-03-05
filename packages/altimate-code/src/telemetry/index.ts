@@ -168,7 +168,7 @@ export namespace Telemetry {
         session_id: string
         from_version: string
         to_version: string
-        method: "npm" | "bun" | "brew"
+        method: "npm" | "bun" | "brew" | "other"
         status: "success" | "error"
         error?: string
       }
@@ -232,8 +232,6 @@ export namespace Telemetry {
         duration_ms: number
         cost: number
         compactions: number
-        doom_loops: number
-        permission_denials: number
         outcome: "completed" | "abandoned" | "error"
       }
     | {
@@ -256,16 +254,26 @@ export namespace Telemetry {
         resource_count: number
       }
 
+  const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep", "bash"])
+
+  // Order matters: more specific patterns (e.g. "warehouse_usage") are checked
+  // before broader ones (e.g. "warehouse") to avoid miscategorization.
+  const CATEGORY_PATTERNS: Array<{ category: string; keywords: string[] }> = [
+    { category: "finops", keywords: ["cost", "finops", "warehouse_usage"] },
+    { category: "sql", keywords: ["sql", "query"] },
+    { category: "schema", keywords: ["schema", "column", "table"] },
+    { category: "dbt", keywords: ["dbt"] },
+    { category: "warehouse", keywords: ["warehouse", "connection"] },
+    { category: "lineage", keywords: ["lineage", "dag"] },
+  ]
+
   export function categorizeToolName(name: string, type: "standard" | "mcp"): string {
     if (type === "mcp") return "mcp"
     const n = name.toLowerCase()
-    if (n.includes("sql") || n.includes("query")) return "sql"
-    if (n.includes("schema") || n.includes("column") || n.includes("table")) return "schema"
-    if (n.includes("dbt")) return "dbt"
-    if (n.includes("cost") || n.includes("finops") || n.includes("warehouse_usage")) return "finops"
-    if (n.includes("warehouse") || n.includes("connection")) return "warehouse"
-    if (n.includes("lineage") || n.includes("dag")) return "lineage"
-    if (["read", "write", "edit", "glob", "grep", "bash"].includes(n.toLowerCase())) return "file"
+    if (FILE_TOOLS.has(n)) return "file"
+    for (const { category, keywords } of CATEGORY_PATTERNS) {
+      if (keywords.some((kw) => n.includes(kw))) return category
+    }
     return "standard"
   }
 

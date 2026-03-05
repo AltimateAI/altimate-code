@@ -366,18 +366,22 @@ export namespace MCP {
             status: "connected",
             duration_ms: Date.now() - connectStart,
           })
-          // Census: collect tool and resource counts
-          const remoteToolsList = await client.listTools().catch(() => ({ tools: [] }))
-          const remoteResourcesList = await client.listResources().catch(() => ({ resources: [] }))
-          Telemetry.track({
-            type: "mcp_server_census",
-            timestamp: Date.now(),
-            session_id: Telemetry.getContext().sessionId,
-            server_name: key,
-            transport: name === "SSE" ? "sse" : "streamable-http",
-            tool_count: remoteToolsList.tools.length,
-            resource_count: remoteResourcesList.resources.length,
-          })
+          // Census: collect tool and resource counts (fire-and-forget, never block connect)
+          const remoteTransport = name === "SSE" ? "sse" as const : "streamable-http" as const
+          Promise.all([
+            client.listTools().catch(() => ({ tools: [] })),
+            client.listResources().catch(() => ({ resources: [] })),
+          ]).then(([toolsList, resourcesList]) => {
+            Telemetry.track({
+              type: "mcp_server_census",
+              timestamp: Date.now(),
+              session_id: Telemetry.getContext().sessionId,
+              server_name: key,
+              transport: remoteTransport,
+              tool_count: toolsList.tools.length,
+              resource_count: resourcesList.resources.length,
+            })
+          }).catch(() => {})
           break
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error))
@@ -478,18 +482,21 @@ export namespace MCP {
           status: "connected",
           duration_ms: Date.now() - localConnectStart,
         })
-        // Census: collect tool and resource counts
-        const localToolsList = await client.listTools().catch(() => ({ tools: [] }))
-        const localResourcesList = await client.listResources().catch(() => ({ resources: [] }))
-        Telemetry.track({
-          type: "mcp_server_census",
-          timestamp: Date.now(),
-          session_id: Telemetry.getContext().sessionId,
-          server_name: key,
-          transport: "stdio",
-          tool_count: localToolsList.tools.length,
-          resource_count: localResourcesList.resources.length,
-        })
+        // Census: collect tool and resource counts (fire-and-forget, never block connect)
+        Promise.all([
+          client.listTools().catch(() => ({ tools: [] })),
+          client.listResources().catch(() => ({ resources: [] })),
+        ]).then(([toolsList, resourcesList]) => {
+          Telemetry.track({
+            type: "mcp_server_census",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId,
+            server_name: key,
+            transport: "stdio",
+            tool_count: toolsList.tools.length,
+            resource_count: resourcesList.resources.length,
+          })
+        }).catch(() => {})
       } catch (error) {
         log.error("local mcp startup failed", {
           key,

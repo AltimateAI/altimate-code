@@ -38,6 +38,7 @@ export namespace SessionProcessor {
     let stepStartTime = Date.now()
     let toolCallCounter = 0
     let previousTool: string | null = null
+    let generationCounter = 0
     let retryErrorType: string | null = null
     let retryStartTime: number | null = null
 
@@ -290,6 +291,7 @@ export namespace SessionProcessor {
                   break
 
                 case "finish-step":
+                  generationCounter++
                   if (attempt > 0 && retryErrorType) {
                     Telemetry.track({
                       type: "error_recovered",
@@ -356,7 +358,7 @@ export namespace SessionProcessor {
                       tokens_used: totalTokens,
                       context_limit: contextLimit,
                       utilization_pct: Math.round((totalTokens / contextLimit) * 1000) / 1000,
-                      generation_number: toolCallCounter,
+                      generation_number: generationCounter,
                       cache_hit_ratio: totalInput > 0 ? Math.round((cacheRead / totalInput) * 1000) / 1000 : 0,
                     })
                   }
