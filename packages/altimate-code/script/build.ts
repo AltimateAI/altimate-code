@@ -119,6 +119,9 @@ const allTargets: {
   },
 ]
 
+// If --targets is provided, filter to only matching OS values
+const targetsFlag = process.argv.find(a => a.startsWith('--targets='))?.split('=')[1]?.split(',')
+
 const targets = singleFlag
   ? allTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
@@ -138,7 +141,9 @@ const targets = singleFlag
 
       return true
     })
-  : allTargets
+  : targetsFlag
+    ? allTargets.filter(t => targetsFlag.includes(t.os))
+    : allTargets
 
 await $`rm -rf dist`
 

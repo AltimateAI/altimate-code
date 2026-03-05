@@ -15,6 +15,14 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
       - name: Configure git for tests
         run: |
           git config --global user.name "CI"
@@ -26,6 +34,26 @@ jobs:
       - name: Run tests
         run: bun test
         working-directory: packages/altimate-code
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+          cache-dependency-path: packages/altimate-engine/pyproject.toml
+
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]"
+        working-directory: packages/altimate-engine
+
+      - name: Lint
+        run: ruff check src
+        working-directory: packages/altimate-engine
 
   python:
     name: Python ${{ matrix.python-version }}
@@ -39,6 +67,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: packages/altimate-engine/pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev,warehouses]"
@@ -46,8 +76,4 @@ jobs:
 
       - name: Run tests
         run: pytest
-        working-directory: packages/altimate-engine
-
-      - name: Lint
-        run: ruff check src
         working-directory: packages/altimate-engine

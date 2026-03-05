@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   id-token: write
@@ -14,18 +18,30 @@ env:
 
 jobs:
   build:
-    name: Build
+    name: Build (${{ matrix.os }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, darwin, win32]
     steps:
       - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
       - name: Install dependencies
         run: bun install
 
-      - name: Build all targets
-        run: bun run packages/altimate-code/script/build.ts
+      - name: Build ${{ matrix.os }} targets
+        run: bun run packages/altimate-code/script/build.ts --targets=${{ matrix.os }}
         env:
           ALTIMATE_CLI_VERSION: ${{ github.ref_name }}
           ALTIMATE_CLI_CHANNEL: latest
@@ -36,7 +52,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-${{ matrix.os }}
           path: packages/altimate-code/dist/
 
   publish-npm:
@@ -48,14 +64,23 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
       - name: Install dependencies
         run: bun install
 
-      - name: Download build artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
           path: packages/altimate-code/dist/
+          merge-multiple: true
 
       - name: Configure npm auth
         run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
@@ -91,7 +116,6 @@ jobs:
 
   publish-engine:
     name: Publish engine to PyPI
-    needs: build
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -103,6 +127,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: 'pip'
 
       - name: Install build tools
         run: pip install build
@@ -119,7 +144,7 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: [build, publish-npm]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -177,11 +202,12 @@ jobs:
           GH_REPO: ${{ env.GH_REPO }}
           CURRENT_TAG: ${{ github.ref_name }}
 
-      - name: Download build artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
           path: packages/altimate-code/dist/
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
