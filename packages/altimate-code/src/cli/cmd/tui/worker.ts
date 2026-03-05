@@ -148,6 +148,7 @@ export const rpc = {
       }),
     ])
     if (server) server.stop(true)
+    await Telemetry.shutdown()
   },
 }
 
