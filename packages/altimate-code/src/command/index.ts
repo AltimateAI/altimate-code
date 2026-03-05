@@ -59,10 +59,10 @@ export namespace Command {
     REVIEW: "review",
   } as const
 
-  const state = Instance.state(async () => {
-    const cfg = await Config.get()
-
-    const result: Record<string, Info> = {
+  // Default commands are available immediately; MCP prompts and skills are merged asynchronously
+  // so that /init, /discover, /review show up in the command list without waiting for MCP connections.
+  function defaults(): Record<string, Info> {
+    return {
       [Default.INIT]: {
         name: Default.INIT,
         description: "create/update AGENTS.md",
@@ -92,6 +92,12 @@ export namespace Command {
         hints: hints(PROMPT_REVIEW),
       },
     }
+  }
+
+  const state = Instance.state(async () => {
+    const result: Record<string, Info> = defaults()
+
+    const cfg = await Config.get()
 
     for (const [name, command] of Object.entries(cfg.command ?? {})) {
       result[name] = {
@@ -165,10 +171,23 @@ export namespace Command {
   })
 
   export async function get(name: string) {
-    return state().then((x) => x[name])
+    // If the full state hasn't resolved yet, check defaults first so built-in
+    // commands like /discover are usable before MCP servers connect.
+    const full = state()
+    const resolved = await Promise.race([full, Promise.resolve(undefined)])
+    if (resolved) return resolved[name]
+    // Full state still loading — fall back to defaults
+    const fallback = defaults()[name]
+    if (fallback) return fallback
+    // Not a default command — wait for full resolution
+    return full.then((x) => x[name])
   }
 
   export async function list() {
-    return state().then((x) => Object.values(x))
+    const full = state()
+    const resolved = await Promise.race([full, Promise.resolve(undefined)])
+    if (resolved) return Object.values(resolved)
+    // Full state still loading — return defaults immediately
+    return Object.values(defaults())
   }
 }
