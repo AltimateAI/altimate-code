@@ -79,11 +79,11 @@ jobs:
       pr_author: ${{ steps.pr-info.outputs.pr_author }}
       pr_url: ${{ steps.pr-info.outputs.pr_url }}
       feature_branch: ${{ steps.pr-info.outputs.feature_branch }}
-      has_findings: ${{ steps.analyze.outputs.has_findings }}
-      fixable_count: ${{ steps.analyze.outputs.fixable_count }}
-      unfixable_count: ${{ steps.analyze.outputs.unfixable_count }}
-      skip: ${{ steps.analyze.outputs.skip }}
-      analysis_ran: ${{ steps.analyze.outputs.analysis_ran }}
+      has_findings: ${{ steps.process.outputs.has_findings }}
+      fixable_count: ${{ steps.process.outputs.fixable_count }}
+      unfixable_count: ${{ steps.process.outputs.unfixable_count }}
+      skip: ${{ steps.process.outputs.skip }}
+      analysis_ran: ${{ steps.process.outputs.analysis_ran }}
       has_dangerous_changes: ${{ steps.check-dangerous.outputs.has_dangerous }}
 
     steps:
@@ -223,13 +223,13 @@ jobs:
 
       - name: Process findings
         id: process
+        env:
+          CLAUDE_RESPONSE: ${{ steps.analyze.outputs.result }}
         run: |
-          # Extract JSON from Claude's response
-          RESPONSE='${{ steps.analyze.outputs.result }}'
-
-          echo "$RESPONSE" | python3 -c "
+          # Pass response via env var to avoid shell quoting issues
+          python3 -c "
           import json, sys, re, os
-          text = sys.stdin.read()
+          text = os.environ.get('CLAUDE_RESPONSE', '')
           try:
               data = json.loads(text)
           except:
