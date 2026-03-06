@@ -48,21 +48,19 @@ def _find_claude_dir():
 
 
 def _find_project_root(override=None):
-    """Find project root by walking up from script location.
+    """Find project root by walking up from script location to find .claude directory.
 
     If override is provided, use that path directly.
-    Otherwise, walk up from cwd looking for a .altimate-code or .claude directory
-    as a project root marker. Falls back to cwd if neither is found.
+    Otherwise, walk up from the script's location until a parent named '.claude'
+    is found — the project root is the directory containing '.claude/'.
+    Falls back to cwd if no .claude ancestor is found.
     """
     if override:
         return Path(override).resolve()
 
-    # Walk up from cwd (not script location) to find project root markers
-    current = Path.cwd()
-    for candidate in [current, *current.parents]:
-        if (candidate / ".altimate-code").is_dir() or (candidate / ".claude").is_dir():
-            return candidate
-
+    claude_dir = _find_claude_dir()
+    if claude_dir:
+        return claude_dir.parent
     return Path.cwd()
 
 
@@ -79,16 +77,6 @@ if _claude_dir:
     _env_path = _claude_dir / ".env"
     if _env_path.exists():
         load_dotenv(_env_path)
-else:
-    # Script is not inside a .claude directory (e.g. .altimate-code/skills/validate/).
-    # Fall back to the well-known Claude config locations.
-    for _fallback in [
-        Path.home() / ".claude" / ".env",
-        Path.home() / ".config" / "claude" / ".env",
-    ]:
-        if _fallback.exists():
-            load_dotenv(_fallback)
-            break
 
 # ---------------------------------------------------------------------------
 # Configuration
