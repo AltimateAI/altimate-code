@@ -35,29 +35,29 @@ from dotenv import load_dotenv
 _script_dir = Path(__file__).resolve().parent
 
 
-def _find_claude_dir():
-    """Find the .claude directory by walking up from script location."""
+def _find_altimate_dir():
+    """Find the .altimate-code directory by walking up from script location."""
     current = Path(__file__).resolve()
     for parent in current.parents:
-        if parent.name == ".claude" and parent.is_dir():
+        if parent.name == ".altimate-code" and parent.is_dir():
             return parent
     return None
 
 
 def _find_project_root(override=None):
-    """Find project root by walking up from script location to find .claude directory.
+    """Find project root by walking up from script location to find .altimate-code directory.
 
     If override is provided, use that path directly.
-    Otherwise, walk up from the script's location until a parent named '.claude'
-    is found — the project root is the directory containing '.claude/'.
-    Falls back to cwd if no .claude ancestor is found.
+    Otherwise, walk up from the script's location until a parent named '.altimate-code'
+    is found — the project root is the directory containing '.altimate-code/'.
+    Falls back to cwd if no .altimate-code ancestor is found.
     """
     if override:
         return Path(override).resolve()
 
-    claude_dir = _find_claude_dir()
-    if claude_dir:
-        return claude_dir.parent
+    altimate_dir = _find_altimate_dir()
+    if altimate_dir:
+        return altimate_dir.parent
     return Path.cwd()
 
 
@@ -68,10 +68,10 @@ _project_root = _find_project_root()
 # ---------------------------------------------------------------------------
 # Environment loading
 # ---------------------------------------------------------------------------
-_claude_dir = _find_claude_dir()
+_altimate_dir = _find_altimate_dir()
 
-if _claude_dir:
-    _env_path = _claude_dir / ".env"
+if _altimate_dir:
+    _env_path = _altimate_dir / ".env"
     if _env_path.exists():
         load_dotenv(_env_path)
 
