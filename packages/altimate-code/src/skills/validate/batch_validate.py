@@ -22,13 +22,11 @@ Output:
 import argparse
 import json
 import os
-import ssl
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -195,31 +193,21 @@ def fetch_traces_by_session_id(session_id):
 # ---------------------------------------------------------------------------
 # Validation API call
 # ---------------------------------------------------------------------------
+
+# Session reuses TCP connection and SSL handshake across all traces.
+_SESSION = requests.Session()
+
+
 def validate_trace(trace_id):
     """Call the validation API for a single trace. Returns (response_dict, http_status)."""
-    payload = json.dumps({"trace_id": trace_id}).encode("utf-8")
-    req = urllib.request.Request(
-        API_URL,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {API_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    ctx = ssl.create_default_context()
-
     try:
-        with urllib.request.urlopen(req, timeout=300, context=ctx) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            return body, resp.status
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        try:
-            error_json = json.loads(error_body)
-        except json.JSONDecodeError:
-            error_json = {"detail": error_body}
-        return error_json, e.code
+        resp = _SESSION.post(
+            API_URL,
+            json={"trace_id": trace_id},
+            headers={"Authorization": f"Bearer {API_TOKEN}"},
+            timeout=300,
+        )
+        return resp.json(), resp.status_code
     except Exception as e:
         return {"detail": str(e)}, 0
 
