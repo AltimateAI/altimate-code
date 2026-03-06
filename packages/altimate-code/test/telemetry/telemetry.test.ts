@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test, mock, afterEach, beforeEach, spyOn } from "bun:test"
 import { Telemetry } from "../../src/telemetry"
 
 // ---------------------------------------------------------------------------
@@ -338,6 +338,983 @@ describe("telemetry.naming-convention", () => {
     ]
     for (const t of types) {
       expect(t).toMatch(/^[a-z][a-z0-9_]*$/)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. parseConnectionString (tested indirectly via init + flush)
+// ---------------------------------------------------------------------------
+describe("telemetry.parseConnectionString (indirect)", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("valid connection string enables telemetry and produces correct endpoint in flush", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const fetchCalls: { url: string; body: string }[] = []
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (input: any, init: any) => {
+      fetchCalls.push({ url: String(input), body: String(init?.body ?? "") })
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=test-key-123;IngestionEndpoint=https://example.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: 1000,
+        session_id: "s1",
+        model_id: "m1",
+        provider_id: "p1",
+        agent: "a1",
+        project_id: "proj1",
+      })
+
+      await Telemetry.flush()
+
+      expect(fetchCalls.length).toBe(1)
+      expect(fetchCalls[0].url).toBe("https://example.com/v2/track")
+      const body = JSON.parse(fetchCalls[0].body)
+      expect(body[0].iKey).toBe("test-key-123")
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("missing InstrumentationKey in connection string disables telemetry", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "IngestionEndpoint=https://example.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: 1000,
+        session_id: "s1",
+        model_id: "m1",
+        provider_id: "p1",
+        agent: "a1",
+        project_id: "proj1",
+      })
+
+      await Telemetry.flush()
+
+      // fetch should NOT be called — telemetry disabled due to invalid connection string
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("trailing slash on IngestionEndpoint is handled correctly", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const fetchCalls: { url: string }[] = []
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (input: any) => {
+      fetchCalls.push({ url: String(input) })
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      // Trailing slash — should not double-up
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=key-456;IngestionEndpoint=https://example.com/"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: 1000,
+        session_id: "s1",
+        model_id: "m1",
+        provider_id: "p1",
+        agent: "a1",
+        project_id: "proj1",
+      })
+
+      await Telemetry.flush()
+
+      expect(fetchCalls.length).toBe(1)
+      // Should be /v2/track, not //v2/track
+      expect(fetchCalls[0].url).toBe("https://example.com/v2/track")
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("empty connection string disables telemetry", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = ""
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: 1000,
+        session_id: "s1",
+        model_id: "m1",
+        provider_id: "p1",
+        agent: "a1",
+        project_id: "proj1",
+      })
+
+      await Telemetry.flush()
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9. toAppInsightsEnvelopes (tested indirectly via track + flush)
+// ---------------------------------------------------------------------------
+describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  async function initWithMockedFetch(): {
+    fetchCalls: { url: string; body: string }[]
+    fetchMock: ReturnType<typeof spyOn>
+    cleanup: () => void
+  } {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=test-ikey;IngestionEndpoint=https://test.endpoint.com"
+
+    const fetchCalls: { url: string; body: string }[] = []
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (_input: any, init: any) => {
+      fetchCalls.push({ url: String(_input), body: String(init?.body ?? "") })
+      return new Response("", { status: 200 })
+    })
+
+    await Telemetry.init()
+
+    return {
+      fetchCalls,
+      fetchMock,
+      cleanup: () => {
+        process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+        if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+        else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+        fetchMock.mockRestore()
+      },
+    }
+  }
+
+  test("basic event is converted to envelope format", async () => {
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      Telemetry.setContext({ sessionId: "sess-abc", projectId: "proj-xyz" })
+      Telemetry.track({
+        type: "session_start",
+        timestamp: 1700000000000,
+        session_id: "sess-abc",
+        model_id: "claude-3",
+        provider_id: "anthropic",
+        agent: "builder",
+        project_id: "proj-xyz",
+      })
+
+      await Telemetry.flush()
+
+      expect(fetchCalls.length).toBe(1)
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes.length).toBe(1)
+
+      const env = envelopes[0]
+      expect(env.name).toBe("Microsoft.ApplicationInsights.test-ikey.Event")
+      expect(env.iKey).toBe("test-ikey")
+      expect(env.time).toBe(new Date(1700000000000).toISOString())
+      expect(env.tags["ai.session.id"]).toBe("sess-abc")
+      expect(env.tags["ai.cloud.role"]).toBe("altimate")
+      expect(env.data.baseType).toBe("EventData")
+      expect(env.data.baseData.ver).toBe(2)
+      expect(env.data.baseData.name).toBe("session_start")
+      // String fields go to properties
+      expect(env.data.baseData.properties.model_id).toBe("claude-3")
+      expect(env.data.baseData.properties.provider_id).toBe("anthropic")
+      expect(env.data.baseData.properties.agent).toBe("builder")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("numeric fields go to measurements, string fields go to properties", async () => {
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      Telemetry.track({
+        type: "session_end",
+        timestamp: 1700000000000,
+        session_id: "sess-1",
+        total_cost: 0.05,
+        total_tokens: 1500,
+        tool_call_count: 10,
+        duration_ms: 30000,
+      })
+
+      await Telemetry.flush()
+
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      const baseData = envelopes[0].data.baseData
+      // Numeric fields in measurements
+      expect(baseData.measurements.total_cost).toBe(0.05)
+      expect(baseData.measurements.total_tokens).toBe(1500)
+      expect(baseData.measurements.tool_call_count).toBe(10)
+      expect(baseData.measurements.duration_ms).toBe(30000)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("nested tokens object is flattened with tokens_ prefix", async () => {
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      Telemetry.track({
+        type: "generation",
+        timestamp: 1700000000000,
+        session_id: "sess-1",
+        message_id: "msg-1",
+        model_id: "claude-3",
+        provider_id: "anthropic",
+        agent: "builder",
+        finish_reason: "end_turn",
+        tokens: {
+          input: 100,
+          output: 200,
+          reasoning: 50,
+          cache_read: 10,
+          cache_write: 5,
+        },
+        cost: 0.01,
+        duration_ms: 2000,
+      })
+
+      await Telemetry.flush()
+
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      const measurements = envelopes[0].data.baseData.measurements
+      expect(measurements.tokens_input).toBe(100)
+      expect(measurements.tokens_output).toBe(200)
+      expect(measurements.tokens_reasoning).toBe(50)
+      expect(measurements.tokens_cache_read).toBe(10)
+      expect(measurements.tokens_cache_write).toBe(5)
+      // Raw "tokens" key should not appear in properties
+      expect(envelopes[0].data.baseData.properties.tokens).toBeUndefined()
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("fallback sessionId when none set on event", async () => {
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      // Set context with a session ID
+      Telemetry.setContext({ sessionId: "fallback-sess", projectId: "p" })
+
+      // Track event without session_id in the actual event payload is not possible
+      // since all events require session_id. But we can verify the tags use event's session_id.
+      // If the event session_id is empty, the module falls back to the context sessionId.
+      Telemetry.track({
+        type: "error",
+        timestamp: 1700000000000,
+        session_id: "",
+        error_name: "TestError",
+        error_message: "test",
+        context: "test",
+      })
+
+      await Telemetry.flush()
+
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      // Empty session_id falls back to "startup" (since "" is falsy)
+      // Actually, looking at the code: `const sid = fields.session_id ?? sessionId`
+      // "" is not null/undefined, so sid = "". Then `sid || "startup"` = "startup"
+      expect(envelopes[0].tags["ai.session.id"]).toBe("startup")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("timestamp is included as ISO string", async () => {
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      const ts = 1700000000000
+      Telemetry.track({
+        type: "session_start",
+        timestamp: ts,
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.flush()
+
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes[0].time).toBe(new Date(ts).toISOString())
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 10. flush
+// ---------------------------------------------------------------------------
+describe("telemetry.flush", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("flush sends buffered events via fetch", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    let fetchCallCount = 0
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      fetchCallCount++
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.flush()
+      expect(fetchCallCount).toBe(1)
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("flush clears the buffer after success", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    let fetchCallCount = 0
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      fetchCallCount++
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.flush()
+      expect(fetchCallCount).toBe(1)
+
+      // Second flush should not call fetch — buffer is empty
+      await Telemetry.flush()
+      expect(fetchCallCount).toBe(1)
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("flush re-adds events to buffer on network error", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    let fetchCallCount = 0
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      fetchCallCount++
+      throw new Error("Network error")
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      // First flush — network error, events re-added to buffer
+      await Telemetry.flush()
+      expect(fetchCallCount).toBe(1)
+
+      // Second flush should attempt again (events were re-added with _retried flag)
+      await Telemetry.flush()
+      expect(fetchCallCount).toBe(2)
+
+      // Third flush — events had _retried=true, so after second failure they are
+      // filtered out by `events.filter(e => !e._retried)` and NOT re-added.
+      // Buffer is now empty, so third flush is a no-op.
+      await Telemetry.flush()
+      expect(fetchCallCount).toBe(2)
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("flush handles AbortController timeout", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (_input: any, init: any) => {
+      // Verify that signal is passed
+      expect(init?.signal).toBeDefined()
+      expect(init.signal).toBeInstanceOf(AbortSignal)
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.flush()
+      expect(fetchMock).toHaveBeenCalled()
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("droppedEvents counter is included in flush and reset after", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const fetchBodies: string[] = []
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (_input: any, init: any) => {
+      fetchBodies.push(String(init?.body ?? ""))
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      // Fill buffer beyond MAX_BUFFER_SIZE (200) to trigger drops
+      for (let i = 0; i < 210; i++) {
+        Telemetry.track({
+          type: "session_start",
+          timestamp: Date.now(),
+          session_id: "s1",
+          model_id: "m",
+          provider_id: "p",
+          agent: "a",
+          project_id: "proj",
+        })
+      }
+
+      await Telemetry.flush()
+
+      expect(fetchBodies.length).toBe(1)
+      const envelopes = JSON.parse(fetchBodies[0])
+      // Should include a TelemetryBufferOverflow error event
+      const overflowEvent = envelopes.find(
+        (e: any) => e.data?.baseData?.name === "error" &&
+          e.data?.baseData?.properties?.error_name === "TelemetryBufferOverflow",
+      )
+      expect(overflowEvent).toBeDefined()
+      expect(overflowEvent.data.baseData.properties.error_message).toContain("10 events dropped")
+
+      // Second flush — no more dropped events counter
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+      await Telemetry.flush()
+
+      const envelopes2 = JSON.parse(fetchBodies[1])
+      const overflowEvent2 = envelopes2.find(
+        (e: any) => e.data?.baseData?.properties?.error_name === "TelemetryBufferOverflow",
+      )
+      expect(overflowEvent2).toBeUndefined()
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 11. shutdown
+// ---------------------------------------------------------------------------
+describe("telemetry.shutdown", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("shutdown flushes remaining events", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    let fetchCallCount = 0
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      fetchCallCount++
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      // shutdown should trigger a flush
+      await Telemetry.shutdown()
+      expect(fetchCallCount).toBe(1)
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("shutdown resets all state", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      Telemetry.setContext({ sessionId: "sess-1", projectId: "proj-1" })
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.shutdown()
+
+      // After shutdown, context should be reset
+      const ctx = Telemetry.getContext()
+      expect(ctx.sessionId).toBe("")
+      expect(ctx.projectId).toBe("")
+
+      // After shutdown, track should drop silently (initDone is reset, so it buffers)
+      // But flush without re-init should do nothing since enabled=false
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s2",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+      let fetchCountBefore = fetchMock.mock.calls.length
+      await Telemetry.flush()
+      // flush does nothing because enabled=false after shutdown
+      expect(fetchMock.mock.calls.length).toBe(fetchCountBefore)
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("shutdown clears the flush timer (no further periodic flushes)", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+      await Telemetry.shutdown()
+
+      // After shutdown, init() promise should be reset (can re-init)
+      const p1 = Telemetry.init()
+      // With telemetry disabled env var still unset, this will try to re-init.
+      // The point is that shutdown fully resets, allowing a fresh init.
+      await p1
+      await Telemetry.shutdown()
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 12. buffer overflow
+// ---------------------------------------------------------------------------
+describe("telemetry.buffer overflow", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("buffer beyond MAX_BUFFER_SIZE (200) drops oldest events and keeps newest", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const fetchBodies: string[] = []
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (_input: any, init: any) => {
+      fetchBodies.push(String(init?.body ?? ""))
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      // Track 250 events — first 50 should be dropped
+      for (let i = 0; i < 250; i++) {
+        Telemetry.track({
+          type: "command",
+          timestamp: i, // use index as timestamp to identify ordering
+          session_id: "s1",
+          command_name: `cmd-${i}`,
+          command_source: "command",
+          message_id: `msg-${i}`,
+        })
+      }
+
+      await Telemetry.flush()
+
+      expect(fetchBodies.length).toBe(1)
+      const envelopes = JSON.parse(fetchBodies[0])
+
+      // 200 buffered events + 1 overflow error event = 201
+      expect(envelopes.length).toBe(201)
+
+      // The first event in the buffer should be index 50 (0-49 were dropped)
+      const firstDataEvent = envelopes[0]
+      expect(firstDataEvent.data.baseData.properties.command_name).toBe("cmd-50")
+
+      // The last data event should be index 249
+      const lastDataEvent = envelopes[199]
+      expect(lastDataEvent.data.baseData.properties.command_name).toBe("cmd-249")
+
+      // The overflow error event should be the last one
+      const overflowEvent = envelopes[200]
+      expect(overflowEvent.data.baseData.name).toBe("error")
+      expect(overflowEvent.data.baseData.properties.error_name).toBe("TelemetryBufferOverflow")
+      expect(overflowEvent.data.baseData.properties.error_message).toContain("50 events dropped")
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("droppedEvents counter increments correctly", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const fetchBodies: string[] = []
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (_input: any, init: any) => {
+      fetchBodies.push(String(init?.body ?? ""))
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      // Exactly 205 events — 5 should be dropped
+      for (let i = 0; i < 205; i++) {
+        Telemetry.track({
+          type: "session_start",
+          timestamp: Date.now(),
+          session_id: "s1",
+          model_id: "m",
+          provider_id: "p",
+          agent: "a",
+          project_id: "proj",
+        })
+      }
+
+      await Telemetry.flush()
+
+      const envelopes = JSON.parse(fetchBodies[0])
+      const overflowEvent = envelopes.find(
+        (e: any) => e.data?.baseData?.properties?.error_name === "TelemetryBufferOverflow",
+      )
+      expect(overflowEvent).toBeDefined()
+      expect(overflowEvent.data.baseData.properties.error_message).toContain("5 events dropped")
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 13. init with enabled telemetry
+// ---------------------------------------------------------------------------
+describe("telemetry.init with enabled telemetry", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("init() with telemetry enabled sets up the flush timer", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+
+      // If flush timer is set up, tracking + waiting should eventually trigger flush
+      // We verify indirectly: after init, flush works (meaning enabled=true, appInsights is set)
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.flush()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("init() parses the connection string and configures App Insights", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const fetchCalls: { url: string; body: string }[] = []
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async (input: any, init: any) => {
+      fetchCalls.push({ url: String(input), body: String(init?.body ?? "") })
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=custom-key-abc;IngestionEndpoint=https://custom.endpoint.azure.com"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.flush()
+
+      expect(fetchCalls.length).toBe(1)
+      expect(fetchCalls[0].url).toBe("https://custom.endpoint.azure.com/v2/track")
+      const body = JSON.parse(fetchCalls[0].body)
+      expect(body[0].iKey).toBe("custom-key-abc")
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("init() with ALTIMATE_TELEMETRY_DISABLED=true disables telemetry completely", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
+      await Telemetry.init()
+
+      Telemetry.track({
+        type: "session_start",
+        timestamp: Date.now(),
+        session_id: "s1",
+        model_id: "m",
+        provider_id: "p",
+        agent: "a",
+        project_id: "proj",
+      })
+
+      await Telemetry.flush()
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      fetchMock.mockRestore()
+    }
+  })
+
+  test("init() is idempotent — returns the same promise on concurrent calls", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+
+    const fetchMock = spyOn(global, "fetch").mockImplementation(async () => {
+      return new Response("", { status: 200 })
+    })
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+
+      const p1 = Telemetry.init()
+      const p2 = Telemetry.init()
+      expect(p1).toBe(p2) // Same promise object
+      await p1
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      fetchMock.mockRestore()
     }
   })
 })

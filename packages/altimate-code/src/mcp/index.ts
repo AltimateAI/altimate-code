@@ -188,7 +188,10 @@ export namespace MCP {
             return
           }
 
-          const result = await create(key, mcp).catch(() => undefined)
+          const result = await create(key, mcp).catch((e) => {
+            log.warn("failed to initialize MCP server", { key, error: e instanceof Error ? e.message : String(e) })
+            return undefined
+          })
           if (!result) return
 
           status[key] = result.status
@@ -244,7 +247,7 @@ export namespace MCP {
 
   async function fetchResourcesForClient(clientName: string, client: Client) {
     const resources = await withTimeout(client.listResources(), DEFAULT_TIMEOUT).catch((e) => {
-      log.error("failed to get prompts", { clientName, error: e.message })
+      log.error("failed to get resources", { clientName, error: e.message })
       return undefined
     })
 
@@ -380,7 +383,7 @@ export namespace MCP {
           })
           // Census: collect tool and resource counts (fire-and-forget, never block connect)
           const remoteTransport = name === "SSE" ? "sse" as const : "streamable-http" as const
-          Promise.all([
+          void Promise.all([
             client.listTools().catch(() => ({ tools: [] })),
             client.listResources().catch(() => ({ resources: [] })),
           ]).then(([toolsList, resourcesList]) => {
@@ -496,7 +499,7 @@ export namespace MCP {
           duration_ms: Date.now() - localConnectStart,
         })
         // Census: collect tool and resource counts (fire-and-forget, never block connect)
-        Promise.all([
+        void Promise.all([
           client.listTools().catch(() => ({ tools: [] })),
           client.listResources().catch(() => ({ resources: [] })),
         ]).then(([toolsList, resourcesList]) => {
@@ -781,7 +784,7 @@ export namespace MCP {
     const client = clientsSnapshot[clientName]
 
     if (!client) {
-      log.warn("client not found for prompt", {
+      log.warn("client not found for resource", {
         clientName: clientName,
       })
       return undefined
@@ -792,7 +795,7 @@ export namespace MCP {
         uri: resourceUri,
       })
       .catch((e) => {
-        log.error("failed to get prompt from MCP server", {
+        log.error("failed to read resource from MCP server", {
           clientName: clientName,
           resourceUri: resourceUri,
           error: e.message,

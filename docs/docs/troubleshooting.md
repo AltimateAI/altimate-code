@@ -62,6 +62,23 @@ altimate --print-logs --log-level DEBUG
 4. For Snowflake: ensure the warehouse is not suspended
 5. For BigQuery: check that the service account has the required IAM roles
 
+### MCP Server Initialization Failures
+
+**Symptoms:** MCP tools missing or MCP server not available after startup.
+
+**Solutions:**
+
+1. Check the log files — MCP initialization errors are now logged with the server name and error message:
+   ```
+   WARN failed to initialize MCP server { key: "my-tools", error: "..." }
+   ```
+2. Verify the MCP server command is correct in your config
+3. Test the server manually:
+   ```bash
+   altimate mcp test my-tools
+   ```
+4. Check that required environment variables are set (e.g., API keys referenced in the MCP config)
+
 ### LSP Server Won't Start
 
 **Symptoms:** No diagnostics or completions for a language.

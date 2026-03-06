@@ -555,7 +555,7 @@ function App() {
       title: "Open docs",
       value: "docs.open",
       onSelect: () => {
-        open("https://altimate-code.dev/docs").catch(() => {})
+        open("https://crispy-adventure-6lj1ey3.pages.github.io/").catch(() => {})
         dialog.clear()
       },
       category: "System",

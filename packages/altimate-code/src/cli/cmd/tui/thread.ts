@@ -117,7 +117,7 @@ export const TuiThreadCommand = cmd({
         ),
       })
       worker.onerror = (e) => {
-        Log.Default.error(e)
+        Log.Default.error(e.message, { error: e.error?.stack ?? e.error ?? String(e) })
       }
       const client = Rpc.client<typeof rpc>(worker)
       process.on("uncaughtException", (e) => {

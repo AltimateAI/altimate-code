@@ -474,13 +474,29 @@ export namespace Telemetry {
         log.debug("telemetry flush failed", { status: response.status })
       }
     } catch {
-      // Silently drop on failure — telemetry must never break the CLI
+      // Re-add events that haven't been retried yet to avoid data loss
+      const retriable = events.filter((e) => !(e as any)._retried)
+      for (const e of retriable) {
+        ;(e as any)._retried = true
+      }
+      const space = Math.max(0, MAX_BUFFER_SIZE - buffer.length)
+      buffer.unshift(...retriable.slice(0, space))
     } finally {
       clearTimeout(timeout)
     }
   }
 
   export async function shutdown() {
+    // Wait for init to complete so we know whether telemetry is enabled
+    // and have a valid endpoint to flush to.  init() is fire-and-forget
+    // in CLI middleware, so it may still be in-flight when shutdown runs.
+    if (initPromise) {
+      try {
+        await initPromise
+      } catch {
+        // init failed — nothing to flush
+      }
+    }
     if (flushTimer) {
       clearInterval(flushTimer)
       flushTimer = undefined

@@ -314,9 +314,23 @@ export const AuthLoginCommand = cmd({
         prompts.intro("Add credential")
         if (args.url) {
           const wellknown = await fetch(`${args.url}/.well-known/altimate-code`).then((x) => x.json() as any)
-          prompts.log.info(`Running \`${wellknown.auth.command.join(" ")}\``)
+          const raw = wellknown?.auth?.command
+          if (!Array.isArray(raw) || !raw.every((c: unknown) => typeof c === 'string')) {
+            prompts.log.warn('Invalid auth command from server')
+            prompts.outro('Done')
+            return
+          }
+          const cmd = raw as string[]
+          const confirm = await prompts.confirm({
+            message: `The server requests to run: ${cmd.join(" ")}. Allow?`,
+          })
+          if (prompts.isCancel(confirm) || !confirm) {
+            prompts.log.warn("Aborted.")
+            prompts.outro("Done")
+            return
+          }
           const proc = Bun.spawn({
-            cmd: wellknown.auth.command,
+            cmd,
             stdout: "pipe",
           })
           const exit = await proc.exited

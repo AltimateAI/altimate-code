@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-03-04
+
+### Added
+
+- E2E tests for npm install pipeline: postinstall script, bin wrapper, and publish output (#50)
+
+## [0.2.3] - 2026-03-04
+
+### Added
+
+- Postinstall welcome banner and changelog display after upgrade (#48)
+
+### Fixed
+
+- Security: validate well-known auth command type before execution, add confirmation prompt (#45)
+- CI/CD: SHA-pin all GitHub Actions, per-job least-privilege permissions (#45)
+- MCP: fix copy-paste log messages, log init errors, prefix floating promises (#45)
+- Session compaction: clean up compactionAttempts on abort to prevent memory leak (#45)
+- Telemetry: retry failed flush events once with buffer-size cap (#45, #46)
+- Telemetry: flush events before process exit (#46)
+- TUI: resolve worker startup crash from circular dependency (#47)
+- CLI: define ALTIMATE_CLI build-time constants for correct version reporting (#41)
+- Address 4 issues found in post-v0.2.2 commits (#49)
+- Address remaining code review issues from PR #39 (#43)
+
+### Changed
+
+- CI/CD: optimize pipeline with caching and parallel builds (#42)
+
+### Docs
+
+- Add security FAQ (#44)
+
 ## [0.2.2] - 2026-03-05
 
 ### Fixed

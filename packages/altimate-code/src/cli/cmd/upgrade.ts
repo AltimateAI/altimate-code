@@ -2,6 +2,7 @@ import type { Argv } from "yargs"
 import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
 import { Installation } from "../../installation"
+import { extractChangelog } from "../changelog"
 
 export const UpgradeCommand = {
   command: "upgrade [target]",
@@ -68,6 +69,12 @@ export const UpgradeCommand = {
       return
     }
     spinner.stop("Upgrade complete")
+
+    const changelog = extractChangelog(Installation.VERSION, target)
+    if (changelog) {
+      prompts.log.info("What's new:\n\n" + changelog)
+    }
+
     prompts.outro("Done")
   },
 }

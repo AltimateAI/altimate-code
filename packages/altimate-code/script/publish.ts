@@ -19,6 +19,7 @@ await $`mkdir -p ./dist/${pkg.name}`
 await $`cp -r ./bin ./dist/${pkg.name}/bin`
 await $`cp ./script/postinstall.mjs ./dist/${pkg.name}/postinstall.mjs`
 await Bun.file(`./dist/${pkg.name}/LICENSE`).write(await Bun.file("../../LICENSE").text())
+await Bun.file(`./dist/${pkg.name}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
 
 await Bun.file(`./dist/${pkg.name}/package.json`).write(
   JSON.stringify(
