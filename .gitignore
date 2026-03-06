@@ -32,6 +32,7 @@ __pycache__/
 
 # Runtime logs
 *.log
+logs/
 
 # Large intermediate files at repo root (generated during benchmark runs)
 /queries.json
