@@ -19,6 +19,7 @@
       "name": "@altimateai/altimate-code",
       "version": "0.1.0",
       "bin": {
+        "altimate": "./bin/altimate",
         "altimate-code": "./bin/altimate-code",
       },
       "dependencies": {
