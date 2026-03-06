@@ -68,7 +68,7 @@
     "@ai-sdk/provider-utils": "3.0.21",
     "@ai-sdk/togetherai": "1.0.34",
     "@ai-sdk/vercel": "1.0.33",
-    "@ai-sdk/xai": "2.0.51",
+    "@ai-sdk/xai": "3.0.67",
     "@aws-sdk/credential-providers": "3.993.0",
     "@clack/prompts": "1.0.0-alpha.1",
     "@gitlab/gitlab-ai-provider": "3.6.0",
