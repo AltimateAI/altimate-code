@@ -500,7 +500,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = SqlOptimizeResult(
                 success=True,
                 original_sql=params_obj.sql,
-                optimized_sql=rw.get("rewritten_sql", sql_to_optimize),
+                optimized_sql=rw.get("rewritten_sql", params_obj.sql),
                 suggestions=suggestions,
                 anti_patterns=anti_patterns,
                 confidence=opt_confidence,
@@ -580,14 +580,14 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                     )
 
             raw = guard_format_sql(sql_to_format, fmt_params.dialect)
-            fmt_error = raw.get("error")
-            if jinja_fmt_note and not fmt_error:
-                fmt_error = jinja_fmt_note
+            formatted_sql = raw.get("formatted_sql", raw.get("sql"))
+            if jinja_fmt_note and formatted_sql:
+                formatted_sql = formatted_sql.rstrip() + "\n\n-- " + jinja_fmt_note + "\n"
             result = SqlFormatResult(
                 success=raw.get("success", True),
-                formatted_sql=raw.get("formatted_sql", raw.get("sql")),
+                formatted_sql=formatted_sql,
                 statement_count=raw.get("statement_count", 1),
-                error=fmt_error,
+                error=raw.get("error"),  # Only propagate real errors, not Jinja notes
             )
         elif method == "sql.explain":
             result = explain_sql(SqlExplainParams(**params))

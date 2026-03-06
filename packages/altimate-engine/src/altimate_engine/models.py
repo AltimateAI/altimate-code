@@ -1004,7 +1004,7 @@ class SqlPreprocessJinjaResult(BaseModel):
     variables_found: list[str] = Field(default_factory=list)
     macros_removed: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    error: str = Field(default=None)  # Uses same pattern as rest of file
+    error: str | None = None
 
 
 # --- JSON-RPC ---

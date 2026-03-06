@@ -90,18 +90,19 @@ _RE_MACRO_BLOCK = re.compile(
 
 # 3. {% set ... %} (single-line assignment, or block form {% set x %}...{% endset %})
 _RE_SET_BLOCK = re.compile(
-    r"\{%-?\s*set\b[^%]*?%\}.*?\{%-?\s*endset\s*-?%\}", re.DOTALL
+    r"\{%-?\s*set\b.*?%\}.*?\{%-?\s*endset\s*-?%\}", re.DOTALL
 )
-_RE_SET_LINE = re.compile(r"\{%-?\s*set\b[^%]*?-?%\}")
+_RE_SET_LINE = re.compile(r"\{%-?\s*set\b.*?-?%\}")
 
 # 4. {% if ... %}...{% endif %}  — keep inner content
-_RE_IF_OPEN = re.compile(r"\{%-?\s*if\b[^%]*?-?%\}")
-_RE_ELIF = re.compile(r"\{%-?\s*elif\b[^%]*?-?%\}")
+# Use .*? (not [^%]*?) so % inside expressions (e.g., loop.index % 2) is matched
+_RE_IF_OPEN = re.compile(r"\{%-?\s*if\b.*?-?%\}")
+_RE_ELIF = re.compile(r"\{%-?\s*elif\b.*?-?%\}")
 _RE_ELSE = re.compile(r"\{%-?\s*else\s*-?%\}")
 _RE_ENDIF = re.compile(r"\{%-?\s*endif\s*-?%\}")
 
 # 5. {% for ... %}...{% endfor %}  — keep inner content
-_RE_FOR_OPEN = re.compile(r"\{%-?\s*for\b[^%]*?-?%\}")
+_RE_FOR_OPEN = re.compile(r"\{%-?\s*for\b.*?-?%\}")
 _RE_ENDFOR = re.compile(r"\{%-?\s*endfor\s*-?%\}")
 
 # 6. {{ config(...) }}  — remove entirely
@@ -136,7 +137,7 @@ _RE_UTILITY_CALLS = re.compile(
 )
 
 # 13. Remaining {% ... %} tags (catch-all for unknown block tags)
-_RE_REMAINING_TAG = re.compile(r"\{%-?[^%]*?-?%\}")
+_RE_REMAINING_TAG = re.compile(r"\{%-?.*?-?%\}")
 
 # 14. Remaining {{ ... }} expressions (catch-all)
 _RE_REMAINING_EXPR = re.compile(r"\{\{-?.*?-?\}\}", re.DOTALL)

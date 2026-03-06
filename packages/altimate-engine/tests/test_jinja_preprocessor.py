@@ -302,6 +302,23 @@ class TestIfBlocks:
         assert "{% " not in result.preprocessed_sql
         assert "WHERE updated_at" in result.preprocessed_sql
 
+    def test_if_with_modulo_operator(self):
+        """Modulo operator (%) inside tags must not break regex matching."""
+        sql = """
+        SELECT
+            id,
+            {% if loop.index % 2 == 0 %}
+            'even' AS parity
+            {% else %}
+            'odd' AS parity
+            {% endif %}
+        FROM orders
+        """
+        result = preprocess_jinja(sql)
+        assert "{%" not in result.preprocessed_sql
+        assert "'even' AS parity" in result.preprocessed_sql
+        assert "'odd' AS parity" in result.preprocessed_sql
+
 
 # ---------------------------------------------------------------------------
 # {% for %} / {% endfor %}
