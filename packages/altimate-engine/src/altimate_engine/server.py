@@ -472,7 +472,12 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                     )
                 )
 
-            optimized_sql = rw.get("rewritten_sql", params_obj.sql)
+            # When Jinja was preprocessed and no rewrites occurred, return
+            # the original SQL to avoid silently dropping template syntax.
+            if jinja_preprocessed and not suggestions:
+                optimized_sql = params_obj.sql
+            else:
+                optimized_sql = rw.get("rewritten_sql", params_obj.sql)
             if not suggestions and optimized_sql.strip() != params_obj.sql.strip():
                 suggestions.append(
                     SqlOptimizeSuggestion(
@@ -500,7 +505,7 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = SqlOptimizeResult(
                 success=True,
                 original_sql=params_obj.sql,
-                optimized_sql=rw.get("rewritten_sql", params_obj.sql),
+                optimized_sql=optimized_sql,
                 suggestions=suggestions,
                 anti_patterns=anti_patterns,
                 confidence=opt_confidence,
@@ -508,8 +513,13 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             )
         elif method == "lineage.check":
             p = LineageCheckParams(**params)
+            sql_for_lineage = p.sql
+            if contains_jinja(sql_for_lineage):
+                pp = preprocess_jinja(sql_for_lineage)
+                if pp.was_preprocessed:
+                    sql_for_lineage = pp.preprocessed_sql
             raw = guard_column_lineage(
-                p.sql,
+                sql_for_lineage,
                 dialect=p.dialect or "",
                 schema_context=_schema_context_to_dict(p.schema_context)
                 if p.schema_context
@@ -569,28 +579,33 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
 
             # Auto-preprocess Jinja if present
             sql_to_format = fmt_params.sql
-            jinja_fmt_note = None
             if contains_jinja(sql_to_format):
                 pp = preprocess_jinja(sql_to_format)
                 if pp.was_preprocessed:
                     sql_to_format = pp.preprocessed_sql
-                    jinja_fmt_note = (
-                        "Note: Jinja templates were removed before formatting. "
-                        "The formatted output contains plain SQL only."
-                    )
 
             raw = guard_format_sql(sql_to_format, fmt_params.dialect)
             formatted_sql = raw.get("formatted_sql", raw.get("sql"))
-            if jinja_fmt_note and formatted_sql:
-                formatted_sql = formatted_sql.rstrip() + "\n\n-- " + jinja_fmt_note + "\n"
             result = SqlFormatResult(
                 success=raw.get("success", True),
                 formatted_sql=formatted_sql,
                 statement_count=raw.get("statement_count", 1),
-                error=raw.get("error"),  # Only propagate real errors, not Jinja notes
+                error=raw.get("error"),
             )
         elif method == "sql.explain":
-            result = explain_sql(SqlExplainParams(**params))
+            explain_params = SqlExplainParams(**params)
+            sql_to_explain = explain_params.sql
+            if contains_jinja(sql_to_explain):
+                pp = preprocess_jinja(sql_to_explain)
+                if pp.was_preprocessed:
+                    sql_to_explain = pp.preprocessed_sql
+            result = explain_sql(
+                SqlExplainParams(
+                    sql=sql_to_explain,
+                    warehouse=explain_params.warehouse,
+                    analyze=explain_params.analyze,
+                )
+            )
         elif method == "sql.fix":
             fix_params = SqlFixParams(**params)
             guard_result = guard_fix_sql(fix_params.sql)

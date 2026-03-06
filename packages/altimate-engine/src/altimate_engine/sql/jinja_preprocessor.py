@@ -7,7 +7,8 @@ The preprocessor handles:
   - {{ ref('model') }}            → model
   - {{ source('src', 'table') }}  → src__table
   - {{ config(...) }}             → (removed)
-  - {{ var('name') }}             → '__var_name__'
+  - {{ var('name') }}             → '__var_name__'  (string literal; may break
+                                     identifier contexts like FROM {{ var('t') }})
   - {{ var('name', default) }}    → '__var_name__'
   - {{ this }}                    → __this__
   - {{ this.identifier }}         → __this__
@@ -199,9 +200,10 @@ def preprocess_jinja(sql: str) -> JinjaPreprocessResult:
     # --- Pass 8: Stub this ---
     out = _RE_THIS.sub("__this__", out)
 
-    # --- Pass 9: Remove adapter.dispatch, return, log, exceptions ---
-    out = _RE_ADAPTER_DISPATCH.sub("", out)
-    out = _RE_UTILITY_CALLS.sub("", out)
+    # --- Pass 9: Replace adapter.dispatch, return, log, exceptions with placeholder ---
+    # Use __jinja_expr__ instead of empty string to avoid invalid SQL in expression positions
+    out = _RE_ADAPTER_DISPATCH.sub("__jinja_expr__", out)
+    out = _RE_UTILITY_CALLS.sub("__jinja_expr__", out)
 
     # --- Pass 10: Strip block tags (if/elif/else/endif, for/endfor) — keep content ---
     out = _RE_IF_OPEN.sub("", out)

@@ -402,12 +402,14 @@ class TestUtilityMacros:
         """
         result = preprocess_jinja(sql)
         assert "adapter" not in result.preprocessed_sql
+        assert "__jinja_expr__" in result.preprocessed_sql
         assert "SELECT * FROM orders" in result.preprocessed_sql
 
     def test_return(self):
         sql = "{{ return([]) }}"
         result = preprocess_jinja(sql)
         assert "return" not in result.preprocessed_sql
+        assert "__jinja_expr__" in result.preprocessed_sql
 
     def test_log(self):
         sql = """
@@ -416,6 +418,7 @@ class TestUtilityMacros:
         """
         result = preprocess_jinja(sql)
         assert "log(" not in result.preprocessed_sql
+        assert "__jinja_expr__" in result.preprocessed_sql
 
 
 # ---------------------------------------------------------------------------
