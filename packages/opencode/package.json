@@ -98,7 +98,7 @@
     "bun-pty": "0.4.8",
     "chokidar": "4.0.3",
     "clipboardy": "4.0.0",
-    "decimal.js": "10.5.0",
+    "decimal.js": "10.6.0",
     "diff": "catalog:",
     "drizzle-orm": "1.0.0-beta.12-a5629fb",
     "fuzzysort": "3.1.0",
