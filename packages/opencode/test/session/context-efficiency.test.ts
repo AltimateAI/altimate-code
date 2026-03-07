@@ -491,6 +491,9 @@ description: A test skill for validation.
 describe("createObservationMask", () => {
   test("produces mask with tool name, args, line count, byte size, and preview", () => {
     const part = {
+      id: "part-1",
+      sessionID: "session-1",
+      messageID: "msg-1",
       type: "tool" as const,
       tool: "read",
       callID: "call-1",
@@ -515,6 +518,9 @@ describe("createObservationMask", () => {
 
   test("handles empty output gracefully", () => {
     const part = {
+      id: "part-2",
+      sessionID: "session-1",
+      messageID: "msg-2",
       type: "tool" as const,
       tool: "bash",
       callID: "call-2",
