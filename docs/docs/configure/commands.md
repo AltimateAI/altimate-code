@@ -2,13 +2,14 @@
 
 ## Built-in Commands
 
-altimate ships with three built-in slash commands:
+altimate ships with four built-in slash commands:
 
 | Command | Description |
 |---------|-------------|
 | `/init` | Create or update an AGENTS.md file with build commands and code style guidelines. |
 | `/discover` | Scan your data stack and set up warehouse connections. Detects dbt projects, warehouse connections from profiles/Docker/env vars, installed tools, and config files. Walks you through adding and testing new connections, then indexes schemas. |
 | `/review` | Review changes — accepts `commit`, `branch`, or `pr` as an argument (defaults to uncommitted changes). |
+| `/feedback` | Submit product feedback as a GitHub issue. Guides you through title, category, description, and optional session context. |
 
 ### `/discover`
 
@@ -29,6 +30,22 @@ The recommended way to set up a new data engineering project. Run `/discover` in
 /review branch       # review all changes on the current branch
 /review pr           # review the current pull request
 ```
+
+### `/feedback`
+
+Submit product feedback directly from the CLI. The agent walks you through:
+
+1. **Title** — a short summary of your feedback
+2. **Category** — bug, feature, improvement, or ux
+3. **Description** — detailed explanation
+4. **Session context** (opt-in) — includes working directory name and session ID for debugging
+
+```
+/feedback                    # start the guided feedback flow
+/feedback dark mode support  # pre-fill the description
+```
+
+Requires the `gh` CLI to be installed and authenticated (`gh auth login`).
 
 ## Custom Commands
 

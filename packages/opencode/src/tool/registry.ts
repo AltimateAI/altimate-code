@@ -100,6 +100,7 @@ import { AltimateCoreParseDbtTool } from "../altimate/tools/altimate-core-parse-
 import { AltimateCoreIsSafeTool } from "../altimate/tools/altimate-core-is-safe"
 import { ProjectScanTool } from "../altimate/tools/project-scan"
 import { DatamateManagerTool } from "../altimate/tools/datamate"
+import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
 // altimate_change end
 
 export namespace ToolRegistry {
@@ -263,6 +264,7 @@ export namespace ToolRegistry {
       AltimateCoreIsSafeTool,
       ProjectScanTool,
       DatamateManagerTool,
+      FeedbackSubmitTool,
       // altimate_change end
       ...custom,
     ]

@@ -6,6 +6,7 @@ import { Identifier } from "../id/id"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_DISCOVER from "./template/discover.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import PROMPT_FEEDBACK from "./template/feedback.txt"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import { Log } from "../util/log"
@@ -57,6 +58,7 @@ export namespace Command {
     INIT: "init",
     DISCOVER: "discover",
     REVIEW: "review",
+    FEEDBACK: "feedback",
   } as const
 
   const state = Instance.state(async () => {
@@ -90,6 +92,15 @@ export namespace Command {
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      },
+      [Default.FEEDBACK]: {
+        name: Default.FEEDBACK,
+        description: "submit product feedback as a GitHub issue",
+        source: "command",
+        get template() {
+          return PROMPT_FEEDBACK
+        },
+        hints: hints(PROMPT_FEEDBACK),
       },
     }
 
