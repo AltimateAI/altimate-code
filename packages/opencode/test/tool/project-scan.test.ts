@@ -17,7 +17,7 @@ import {
   type EnvVarConnection,
   type DataToolInfo,
   type ConfigFileInfo,
-} from "../../src/tool/project-scan"
+} from "../../src/altimate/tools/project-scan"
 
 // ---------------------------------------------------------------------------
 // Helpers

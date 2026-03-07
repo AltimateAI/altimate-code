@@ -12,7 +12,7 @@ describe("publish package validation", () => {
   test("optionalDependencies has all expected platform packages", () => {
     // Validate that all expected platforms produce valid package names
     for (const p of EXPECTED_PLATFORMS) {
-      const pkgName = `@opencode-ai/opencode-${p}`
+      const pkgName = `@altimateai/altimate-code-${p}`
       expect(pkgName).toMatch(PACKAGE_NAME_PATTERN)
     }
   })
@@ -24,7 +24,7 @@ describe("publish package validation", () => {
     const version = "1.0.0"
     const binaries: Record<string, string> = {}
     for (const p of EXPECTED_PLATFORMS) {
-      binaries[`@opencode-ai/opencode-${p}`] = version
+      binaries[`@altimateai/altimate-code-${p}`] = version
     }
     for (const [, ver] of Object.entries(binaries)) {
       expect(ver).not.toMatch(/^v/)
@@ -34,7 +34,7 @@ describe("publish package validation", () => {
 
   test("package names follow naming convention", () => {
     for (const p of EXPECTED_PLATFORMS) {
-      const pkgName = `@opencode-ai/opencode-${p}`
+      const pkgName = `@altimateai/altimate-code-${p}`
       expect(pkgName).toMatch(PACKAGE_NAME_PATTERN)
     }
   })
@@ -43,7 +43,7 @@ describe("publish package validation", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_PKG_DIR, "package.json"), "utf-8"))
     expect(pkg.bin).toBeDefined()
     expect(pkg.bin["altimate"]).toBe("./bin/altimate")
-    expect(pkg.bin["altimate-code"]).toBe("./bin/altimate-code")
+    expect(pkg.bin["altimate-code"]).toBe("./bin/altimate")
   })
 
   test("postinstall script has bun-then-node fallback", () => {
@@ -66,10 +66,10 @@ describe("publish package validation", () => {
     // postinstall.mjs uses createRequire for resolving platform packages
     const postinstall = fs.readFileSync(path.join(REPO_PKG_DIR, "script/postinstall.mjs"), "utf-8")
     expect(postinstall).toContain("createRequire")
-    expect(postinstall).toContain("@opencode-ai/opencode-")
+    expect(postinstall).toContain("@altimateai/altimate-code-")
 
     // bin wrapper uses @altimateai scope
-    const wrapper = fs.readFileSync(path.join(REPO_PKG_DIR, "bin/altimate-code"), "utf-8")
+    const wrapper = fs.readFileSync(path.join(REPO_PKG_DIR, "bin/altimate"), "utf-8")
     expect(wrapper).toContain('"@altimateai"')
   })
 })

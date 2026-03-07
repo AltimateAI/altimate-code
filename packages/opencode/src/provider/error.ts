@@ -20,6 +20,8 @@ export namespace ProviderError {
     /exceeded model token limit/i, // Kimi For Coding, Moonshot
     /context[_ ]length[_ ]exceeded/i, // Generic fallback
     /request entity too large/i, // HTTP 413
+    /the request was too long/i, // Azure OpenAI
+    /maximum tokens for requested operation/i, // Azure OpenAI
   ]
 
   function isOpenAiErrorRetryable(e: APICallError) {

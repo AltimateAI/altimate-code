@@ -27,7 +27,7 @@ describe("postinstall.mjs", () => {
     const result = runPostinstall(dir)
     expect(result.exitCode).toBe(0)
 
-    const cachedBinary = path.join(dir, "bin", ".opencode")
+    const cachedBinary = path.join(dir, "bin", ".altimate-code")
     expect(fs.existsSync(cachedBinary)).toBe(true)
     // Verify it's executable
     const stat = fs.statSync(cachedBinary)
@@ -41,8 +41,8 @@ describe("postinstall.mjs", () => {
     createMainPackageDir(dir)
     createBinaryPackage(dir)
 
-    // Create a stale .opencode file
-    const cachedBinary = path.join(dir, "bin", ".opencode")
+    // Create a stale .altimate-code file
+    const cachedBinary = path.join(dir, "bin", ".altimate-code")
     fs.writeFileSync(cachedBinary, "stale content")
 
     const result = runPostinstall(dir)
@@ -65,7 +65,7 @@ describe("postinstall.mjs", () => {
     // The current postinstall does not create bin/ — linkSync/copyFileSync fail
     // This test documents current behavior: it fails when bin/ is missing
     if (result.exitCode === 0) {
-      expect(fs.existsSync(path.join(dir, "bin", ".opencode"))).toBe(true)
+      expect(fs.existsSync(path.join(dir, "bin", ".altimate-code"))).toBe(true)
     } else {
       expect(result.exitCode).toBe(1)
       expect(result.stderr).toContain("Failed to setup altimate-code binary")

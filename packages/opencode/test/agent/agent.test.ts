@@ -18,28 +18,32 @@ test("returns default native agents when no config", async () => {
     fn: async () => {
       const agents = await Agent.list()
       const names = agents.map((a) => a.name)
-      expect(names).toContain("build")
+      expect(names).toContain("builder")
       expect(names).toContain("plan")
       expect(names).toContain("general")
       expect(names).toContain("explore")
       expect(names).toContain("compaction")
       expect(names).toContain("title")
       expect(names).toContain("summary")
+      expect(names).toContain("analyst")
+      expect(names).toContain("executive")
+      expect(names).toContain("validator")
+      expect(names).toContain("migrator")
     },
   })
 })
 
-test("build agent has correct default properties", async () => {
+test("builder agent has correct default properties", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build).toBeDefined()
-      expect(build?.mode).toBe("primary")
-      expect(build?.native).toBe(true)
-      expect(evalPerm(build, "edit")).toBe("allow")
-      expect(evalPerm(build, "bash")).toBe("allow")
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
+      expect(builder?.mode).toBe("primary")
+      expect(builder?.native).toBe(true)
+      expect(evalPerm(builder, "edit")).toBe("allow")
+      expect(evalPerm(builder, "bash")).toBe("allow")
     },
   })
 })
@@ -152,9 +156,9 @@ test("custom agent config overrides native agent properties", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: {
+        builder: {
           model: "anthropic/claude-3",
-          description: "Custom build agent",
+          description: "Custom builder agent",
           temperature: 0.7,
           color: "#FF0000",
         },
@@ -164,14 +168,14 @@ test("custom agent config overrides native agent properties", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build).toBeDefined()
-      expect(build?.model?.providerID).toBe("anthropic")
-      expect(build?.model?.modelID).toBe("claude-3")
-      expect(build?.description).toBe("Custom build agent")
-      expect(build?.temperature).toBe(0.7)
-      expect(build?.color).toBe("#FF0000")
-      expect(build?.native).toBe(true)
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
+      expect(builder?.model?.providerID).toBe("anthropic")
+      expect(builder?.model?.modelID).toBe("claude-3")
+      expect(builder?.description).toBe("Custom builder agent")
+      expect(builder?.temperature).toBe(0.7)
+      expect(builder?.color).toBe("#FF0000")
+      expect(builder?.native).toBe(true)
     },
   })
 })
@@ -200,7 +204,7 @@ test("agent permission config merges with defaults", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: {
+        builder: {
           permission: {
             bash: {
               "rm -rf *": "deny",
@@ -213,12 +217,12 @@ test("agent permission config merges with defaults", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build).toBeDefined()
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
       // Specific pattern is denied
-      expect(PermissionNext.evaluate("bash", "rm -rf *", build!.permission).action).toBe("deny")
+      expect(PermissionNext.evaluate("bash", "rm -rf *", builder!.permission).action).toBe("deny")
       // Edit still allowed
-      expect(evalPerm(build, "edit")).toBe("allow")
+      expect(evalPerm(builder, "edit")).toBe("allow")
     },
   })
 })
@@ -234,9 +238,9 @@ test("global permission config applies to all agents", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build).toBeDefined()
-      expect(evalPerm(build, "bash")).toBe("deny")
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
+      expect(evalPerm(builder, "bash")).toBe("deny")
     },
   })
 })
@@ -245,7 +249,7 @@ test("agent steps/maxSteps config sets steps property", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: { steps: 50 },
+        builder: { steps: 50 },
         plan: { maxSteps: 100 },
       },
     },
@@ -253,9 +257,9 @@ test("agent steps/maxSteps config sets steps property", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
+      const builder = await Agent.get("builder")
       const plan = await Agent.get("plan")
-      expect(build?.steps).toBe(50)
+      expect(builder?.steps).toBe(50)
       expect(plan?.steps).toBe(100)
     },
   })
@@ -282,15 +286,15 @@ test("agent name can be overridden", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: { name: "Builder" },
+        builder: { name: "CustomBuilder" },
       },
     },
   })
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build?.name).toBe("Builder")
+      const builder = await Agent.get("builder")
+      expect(builder?.name).toBe("CustomBuilder")
     },
   })
 })
@@ -299,15 +303,15 @@ test("agent prompt can be set from config", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: { prompt: "Custom system prompt" },
+        builder: { prompt: "Custom system prompt" },
       },
     },
   })
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build?.prompt).toBe("Custom system prompt")
+      const builder = await Agent.get("builder")
+      expect(builder?.prompt).toBe("Custom system prompt")
     },
   })
 })
@@ -316,7 +320,7 @@ test("unknown agent properties are placed into options", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: {
+        builder: {
           random_property: "hello",
           another_random: 123,
         },
@@ -326,9 +330,9 @@ test("unknown agent properties are placed into options", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build?.options.random_property).toBe("hello")
-      expect(build?.options.another_random).toBe(123)
+      const builder = await Agent.get("builder")
+      expect(builder?.options.random_property).toBe("hello")
+      expect(builder?.options.another_random).toBe(123)
     },
   })
 })
@@ -337,7 +341,7 @@ test("agent options merge correctly", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: {
+        builder: {
           options: {
             custom_option: true,
             another_option: "value",
@@ -349,9 +353,9 @@ test("agent options merge correctly", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(build?.options.custom_option).toBe(true)
-      expect(build?.options.another_option).toBe("value")
+      const builder = await Agent.get("builder")
+      expect(builder?.options.custom_option).toBe(true)
+      expect(builder?.options.another_option).toBe("value")
     },
   })
 })
@@ -400,9 +404,9 @@ test("default permission includes doom_loop and external_directory as ask", asyn
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(evalPerm(build, "doom_loop")).toBe("ask")
-      expect(evalPerm(build, "external_directory")).toBe("ask")
+      const builder = await Agent.get("builder")
+      expect(evalPerm(builder, "doom_loop")).toBe("ask")
+      expect(evalPerm(builder, "external_directory")).toBe("ask")
     },
   })
 })
@@ -412,8 +416,8 @@ test("webfetch is allowed by default", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(evalPerm(build, "webfetch")).toBe("allow")
+      const builder = await Agent.get("builder")
+      expect(evalPerm(builder, "webfetch")).toBe("allow")
     },
   })
 })
@@ -422,7 +426,7 @@ test("legacy tools config converts to permissions", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: {
+        builder: {
           tools: {
             bash: false,
             read: false,
@@ -434,9 +438,9 @@ test("legacy tools config converts to permissions", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(evalPerm(build, "bash")).toBe("deny")
-      expect(evalPerm(build, "read")).toBe("deny")
+      const builder = await Agent.get("builder")
+      expect(evalPerm(builder, "bash")).toBe("deny")
+      expect(evalPerm(builder, "read")).toBe("deny")
     },
   })
 })
@@ -445,7 +449,7 @@ test("legacy tools config maps write/edit/patch/multiedit to edit permission", a
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: {
+        builder: {
           tools: {
             write: false,
           },
@@ -456,8 +460,8 @@ test("legacy tools config maps write/edit/patch/multiedit to edit permission", a
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(evalPerm(build, "edit")).toBe("deny")
+      const builder = await Agent.get("builder")
+      expect(evalPerm(builder, "edit")).toBe("deny")
     },
   })
 })
@@ -474,10 +478,10 @@ test("Truncate.GLOB is allowed even when user denies external_directory globally
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(PermissionNext.evaluate("external_directory", Truncate.GLOB, build!.permission).action).toBe("allow")
-      expect(PermissionNext.evaluate("external_directory", Truncate.DIR, build!.permission).action).toBe("deny")
-      expect(PermissionNext.evaluate("external_directory", "/some/other/path", build!.permission).action).toBe("deny")
+      const builder = await Agent.get("builder")
+      expect(PermissionNext.evaluate("external_directory", Truncate.GLOB, builder!.permission).action).toBe("allow")
+      expect(PermissionNext.evaluate("external_directory", Truncate.DIR, builder!.permission).action).toBe("deny")
+      expect(PermissionNext.evaluate("external_directory", "/some/other/path", builder!.permission).action).toBe("deny")
     },
   })
 })
@@ -487,7 +491,7 @@ test("Truncate.GLOB is allowed even when user denies external_directory per-agen
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: {
+        builder: {
           permission: {
             external_directory: "deny",
           },
@@ -498,10 +502,10 @@ test("Truncate.GLOB is allowed even when user denies external_directory per-agen
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(PermissionNext.evaluate("external_directory", Truncate.GLOB, build!.permission).action).toBe("allow")
-      expect(PermissionNext.evaluate("external_directory", Truncate.DIR, build!.permission).action).toBe("deny")
-      expect(PermissionNext.evaluate("external_directory", "/some/other/path", build!.permission).action).toBe("deny")
+      const builder = await Agent.get("builder")
+      expect(PermissionNext.evaluate("external_directory", Truncate.GLOB, builder!.permission).action).toBe("allow")
+      expect(PermissionNext.evaluate("external_directory", Truncate.DIR, builder!.permission).action).toBe("deny")
+      expect(PermissionNext.evaluate("external_directory", "/some/other/path", builder!.permission).action).toBe("deny")
     },
   })
 })
@@ -521,9 +525,9 @@ test("explicit Truncate.GLOB deny is respected", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      const build = await Agent.get("build")
-      expect(PermissionNext.evaluate("external_directory", Truncate.GLOB, build!.permission).action).toBe("deny")
-      expect(PermissionNext.evaluate("external_directory", Truncate.DIR, build!.permission).action).toBe("deny")
+      const builder = await Agent.get("builder")
+      expect(PermissionNext.evaluate("external_directory", Truncate.GLOB, builder!.permission).action).toBe("deny")
+      expect(PermissionNext.evaluate("external_directory", Truncate.DIR, builder!.permission).action).toBe("deny")
     },
   })
 })
@@ -553,10 +557,10 @@ description: Permission skill.
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const build = await Agent.get("build")
+        const builder = await Agent.get("builder")
         const skillDir = path.join(tmp.path, ".opencode", "skill", "perm-skill")
         const target = path.join(skillDir, "reference", "notes.md")
-        expect(PermissionNext.evaluate("external_directory", target, build!.permission).action).toBe("allow")
+        expect(PermissionNext.evaluate("external_directory", target, builder!.permission).action).toBe("allow")
       },
     })
   } finally {
@@ -564,13 +568,13 @@ description: Permission skill.
   }
 })
 
-test("defaultAgent returns build when no default_agent config", async () => {
+test("defaultAgent returns builder when no default_agent config", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
       const agent = await Agent.defaultAgent()
-      expect(agent).toBe("build")
+      expect(agent).toBe("builder")
     },
   })
 })
@@ -652,11 +656,11 @@ test("defaultAgent throws when default_agent points to non-existent agent", asyn
   })
 })
 
-test("defaultAgent returns plan when build is disabled and default_agent not set", async () => {
+test("defaultAgent returns analyst when builder is disabled and default_agent not set", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: { disable: true },
+        builder: { disable: true },
       },
     },
   })
@@ -664,8 +668,8 @@ test("defaultAgent returns plan when build is disabled and default_agent not set
     directory: tmp.path,
     fn: async () => {
       const agent = await Agent.defaultAgent()
-      // build is disabled, so it should return plan (next primary agent)
-      expect(agent).toBe("plan")
+      // builder is disabled, so it should return the next primary agent
+      expect(agent).toBe("analyst")
     },
   })
 })
@@ -674,7 +678,11 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
   await using tmp = await tmpdir({
     config: {
       agent: {
-        build: { disable: true },
+        builder: { disable: true },
+        analyst: { disable: true },
+        executive: { disable: true },
+        validator: { disable: true },
+        migrator: { disable: true },
         plan: { disable: true },
       },
     },
@@ -682,7 +690,7 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      // build and plan are disabled, no primary-capable agents remain
+      // All primary visible agents are disabled
       await expect(Agent.defaultAgent()).rejects.toThrow("no primary visible agent found")
     },
   })

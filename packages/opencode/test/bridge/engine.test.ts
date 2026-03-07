@@ -95,7 +95,7 @@ describe("engine.ts subprocess noise suppression", () => {
     // is actually applied in the production code
     const engineSrc = path.resolve(
       __dirname,
-      "../../src/bridge/engine.ts",
+      "../../src/altimate/bridge/engine.ts",
     )
     const source = await fsp.readFile(engineSrc, "utf-8")
     const lines = source.split("\n")

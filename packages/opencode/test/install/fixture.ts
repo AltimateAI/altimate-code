@@ -8,12 +8,12 @@ const ARCH_MAP: Record<string, string> = { x64: "x64", arm64: "arm64", arm: "arm
 
 export const CURRENT_PLATFORM = PLATFORM_MAP[os.platform()] ?? os.platform()
 export const CURRENT_ARCH = ARCH_MAP[os.arch()] ?? os.arch()
-export const CURRENT_PKG_NAME = `@opencode-ai/opencode-${CURRENT_PLATFORM}-${CURRENT_ARCH}`
+export const CURRENT_PKG_NAME = `@altimateai/altimate-code-${CURRENT_PLATFORM}-${CURRENT_ARCH}`
 export const BINARY_NAME = CURRENT_PLATFORM === "windows" ? "altimate-code.exe" : "altimate-code"
 
 const REPO_PKG_DIR = path.resolve(import.meta.dir, "../..")
 export const POSTINSTALL_SCRIPT = path.join(REPO_PKG_DIR, "script/postinstall.mjs")
-export const BIN_WRAPPER_SCRIPT = path.join(REPO_PKG_DIR, "bin/altimate-code")
+export const BIN_WRAPPER_SCRIPT = path.join(REPO_PKG_DIR, "bin/altimate")
 
 export function installTmpdir(): { dir: string; cleanup: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-install-test-"))
@@ -37,7 +37,7 @@ export function createMainPackageDir(baseDir: string, opts?: MainPackageOpts) {
 
   fs.writeFileSync(
     path.join(baseDir, "package.json"),
-    JSON.stringify({ name: "@opencode-ai/opencode", version }, null, 2),
+    JSON.stringify({ name: "@altimateai/altimate-code", version }, null, 2),
   )
 
   if (!opts?.noBinDir) {
@@ -54,7 +54,7 @@ interface BinaryPackageOpts {
 export function createBinaryPackage(baseDir: string, opts?: BinaryPackageOpts) {
   const platform = opts?.platform ?? CURRENT_PLATFORM
   const arch = opts?.arch ?? CURRENT_ARCH
-  const pkgName = `@opencode-ai/opencode-${platform}-${arch}`
+  const pkgName = `@altimateai/altimate-code-${platform}-${arch}`
   const binaryName = platform === "windows" ? "altimate-code.exe" : "altimate-code"
 
   const pkgDir = path.join(baseDir, "node_modules", "@altimateai", `altimate-code-${platform}-${arch}`)

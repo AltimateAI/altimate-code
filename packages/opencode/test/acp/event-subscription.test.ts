@@ -224,8 +224,8 @@ function createFakeAgent() {
         return {
           data: [
             {
-              name: "build",
-              description: "build",
+              name: "builder",
+              description: "builder",
               mode: "agent",
             },
           ],

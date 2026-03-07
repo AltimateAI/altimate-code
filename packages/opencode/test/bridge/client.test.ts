@@ -16,7 +16,7 @@ let managedPythonPath = "/nonexistent/managed-engine/venv/bin/python"
 // Mock: bridge/engine  (only module we mock — avoids leaking into other tests)
 // ---------------------------------------------------------------------------
 
-mock.module("../../src/bridge/engine", () => ({
+mock.module("../../src/altimate/bridge/engine", () => ({
   ensureEngine: async () => {
     ensureEngineCalls++
   },
@@ -27,7 +27,7 @@ mock.module("../../src/bridge/engine", () => ({
 // Import module under test — AFTER mock.module() calls
 // ---------------------------------------------------------------------------
 
-const { resolvePython } = await import("../../src/bridge/client")
+const { resolvePython } = await import("../../src/altimate/bridge/client")
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -138,7 +138,7 @@ describe("Bridge.start integration", () => {
   })
 
   test("ensureEngine is called when bridge starts", async () => {
-    const { Bridge } = await import("../../src/bridge/client")
+    const { Bridge } = await import("../../src/altimate/bridge/client")
 
     // /bin/echo exists and will spawn successfully but won't respond to
     // the JSON-RPC ping, so start() will eventually fail on verification.

@@ -41,13 +41,13 @@ describe("bin/altimate-code wrapper", () => {
     expect(result.stdout).toContain("altimate-code-test-ok")
   })
 
-  test("uses cached .opencode when present", () => {
+  test("uses cached .altimate-code when present", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
     const wrapperPath = copyBinWrapper(dir)
     const binDir = path.dirname(wrapperPath)
-    createDummyBinary(binDir, ".opencode")
+    createDummyBinary(binDir, ".altimate-code")
 
     const result = runBinWrapper(wrapperPath)
     expect(result.exitCode).toBe(0)
@@ -59,8 +59,8 @@ describe("bin/altimate-code wrapper", () => {
     cleanup = c
 
     // Standard npm flat layout:
-    //   dir/node_modules/@opencode-ai/opencode/bin/altimate-code      (wrapper)
-    //   dir/node_modules/@opencode-ai/opencode-{p}-{a}/bin/binary     (binary)
+    //   dir/node_modules/@altimateai/altimate-code/bin/altimate       (wrapper)
+    //   dir/node_modules/@altimateai/altimate-code-{p}-{a}/bin/binary (binary)
     const wrapperPkgBin = path.join(dir, "node_modules", "@altimateai", "altimate-code", "bin")
     fs.mkdirSync(wrapperPkgBin, { recursive: true })
     const wrapperPath = path.join(wrapperPkgBin, "altimate-code")
@@ -78,8 +78,8 @@ describe("bin/altimate-code wrapper", () => {
     cleanup = c
 
     // Hoisted layout:
-    //   dir/node_modules/@opencode-ai/opencode-{p}-{a}/bin/binary     (hoisted binary)
-    //   dir/packages/app/node_modules/@opencode-ai/opencode/bin/wrapper
+    //   dir/node_modules/@altimateai/altimate-code-{p}-{a}/bin/binary     (hoisted binary)
+    //   dir/packages/app/node_modules/@altimateai/altimate-code/bin/wrapper
     createBinaryPackage(dir)
 
     const nestedBin = path.join(dir, "packages", "app", "node_modules", "@altimateai", "altimate-code", "bin")
@@ -111,6 +111,6 @@ describe("bin/altimate-code wrapper", () => {
 
     const result = runBinWrapper(wrapperPath)
     expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain(`@opencode-ai/opencode-${CURRENT_PLATFORM}-${CURRENT_ARCH}`)
+    expect(result.stderr).toContain(`@altimateai/altimate-code-${CURRENT_PLATFORM}-${CURRENT_ARCH}`)
   })
 })

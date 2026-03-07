@@ -496,7 +496,7 @@ describe("session.compaction.isOverflow boundary conditions", () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
         await Bun.write(
-          `${dir}/altimate-code.json`,
+          `${dir}/opencode.json`,
           JSON.stringify({ compaction: { reserved: 50_000 } }),
         )
       },
@@ -517,7 +517,7 @@ describe("session.compaction.isOverflow boundary conditions", () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
         await Bun.write(
-          `${dir}/altimate-code.json`,
+          `${dir}/opencode.json`,
           JSON.stringify({ compaction: { reserved: 50_000 } }),
         )
       },
@@ -565,7 +565,7 @@ describe("session.compaction.isOverflow boundary conditions", () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
         await Bun.write(
-          `${dir}/altimate-code.json`,
+          `${dir}/opencode.json`,
           JSON.stringify({ compaction: { prune: false } }),
         )
       },
@@ -587,7 +587,7 @@ describe("session.compaction.prune with disabled config", () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
         await Bun.write(
-          `${dir}/altimate-code.json`,
+          `${dir}/opencode.json`,
           JSON.stringify({ compaction: { prune: false } }),
         )
       },
