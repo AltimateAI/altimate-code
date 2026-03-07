@@ -505,7 +505,7 @@ describe("createObservationMask", () => {
         metadata: {},
         time: { start: 0, end: 1 },
       },
-    } as MessageV2.ToolPart
+    } as unknown as MessageV2.ToolPart
 
     const mask = SessionCompaction.createObservationMask(part)
 
@@ -532,7 +532,7 @@ describe("createObservationMask", () => {
         metadata: {},
         time: { start: 0, end: 1 },
       },
-    } as MessageV2.ToolPart
+    } as unknown as MessageV2.ToolPart
 
     const mask = SessionCompaction.createObservationMask(part)
     expect(mask).toContain("[Tool output cleared")
