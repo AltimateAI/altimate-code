@@ -16,6 +16,7 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -59,6 +60,7 @@ jobs:
     name: Publish to npm
     needs: build
     runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -87,7 +89,7 @@ jobs:
           merge-multiple: true
 
       - name: Configure npm auth
-        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$RUNNER_TEMP/.npmrc"
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -115,6 +117,7 @@ jobs:
           OPENCODE_RELEASE: "1"
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/.npmrc
           GH_REPO: ${{ env.GH_REPO }}
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
@@ -123,6 +126,7 @@ jobs:
   publish-engine:
     name: Publish engine to PyPI
     runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     environment: pypi
     permissions:
       contents: read
@@ -153,6 +157,7 @@ jobs:
     name: Create GitHub Release
     needs: [build, publish-npm]
     runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     permissions:
       contents: write
     steps:
