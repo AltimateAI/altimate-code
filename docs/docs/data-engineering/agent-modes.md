@@ -10,11 +10,13 @@ altimate runs in one of four specialized modes. Each mode has different permissi
 altimate --agent builder
 ```
 
-Builder mode follows a strict pre-execution protocol for every SQL operation:
+Builder mode follows a pre-execution protocol for every SQL operation:
 
-1. `sql_analyze` — Check for anti-patterns
-2. `sql_validate` — Verify syntax and schema references
+1. `sql_analyze` — Check for anti-patterns (skipped gracefully if unavailable)
+2. `sql_validate` — Verify syntax and schema references (skipped gracefully if unavailable)
 3. `sql_execute` — Run the query
+
+Builder also validates output data after dbt operations — not just compilation success — and avoids non-deterministic temporal functions on historical datasets.
 
 ### Example: Create a staging model
 
