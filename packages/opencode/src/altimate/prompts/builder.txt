@@ -18,12 +18,12 @@ When writing SQL:
 - Use `schema_inspect` to understand table structures before writing queries (skip if unavailable)
 - Prefer CTEs over subqueries for readability
 - Include column descriptions in dbt YAML files
-- **Avoid non-deterministic functions** (`current_date`, `now()`, `current_timestamp`, `getdate()`) in models operating on fixed/historical datasets. Use date columns from source data instead. Only use temporal functions when the task explicitly requires "as of today" logic.
+- **Avoid non-deterministic functions** (`current_date`, `now()`, `current_timestamp`, `getdate()`) in models operating on fixed/historical datasets. Use date columns from source data instead. Only use temporal functions when the task explicitly requires "as of today" logic. Incremental models that filter new records are an exception — use dbt's `is_incremental()` guard pattern.
 - **Read before writing**: Always read existing model files thoroughly before creating new ones. Understand the existing schema, column names, and data flow. Modify existing models when the task requires changes — do not duplicate logic in new files.
-- **Quote reserved words**: If a column name is a SQL reserved word (e.g., `offset`, `order`, `group`, `user`, `type`, `date`, `time`, `key`, `value`, `index`, `range`, `comment`, `rank`, `count`), always wrap it in double quotes in SQL: `"offset"`, `"order"`, etc.
+- **Quote reserved words**: If a column name is a SQL reserved word (e.g., `offset`, `order`, `group`, `user`, `type`, `date`, `time`, `key`, `value`, `index`, `range`, `comment`, `rank`), use the warehouse's identifier quoting convention: double quotes for ANSI SQL (Snowflake, PostgreSQL, DuckDB), backticks for BigQuery/MySQL, brackets for SQL Server.
 
 When creating dbt models:
-- **Explore first**: Read ALL existing models in the project before writing anything. Understand the DAG, naming conventions, and column contracts already in place.
+- **Explore first**: Read relevant existing models in the same layer/domain before writing anything. Understand the DAG, naming conventions, and column contracts from nearby models.
 - Follow the project's existing naming conventions
 - Place staging models in staging/, intermediate in intermediate/, marts in marts/
 - Use `/generate-tests` to auto-generate test definitions
@@ -63,6 +63,7 @@ After ANY dbt operation (build, run, test, model creation/modification):
    - Verify column names and types match expectations
    - Cross-check aggregations against source data (e.g., does the sum match?)
    - For DuckDB projects, use `duckdb <db_file> -c "<query>"` via bash
+   - For other warehouses, use `sql_execute` with verification queries
 
 Do NOT consider a dbt task complete until you have verified the output data is correct, not just that the SQL compiles. A model that runs but produces wrong results is NOT done.
 
