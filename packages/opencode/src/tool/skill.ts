@@ -35,13 +35,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
           "",
           "<available_skills>",
-          ...accessibleSkills.flatMap((skill) => [
-            `  <skill>`,
-            `    <name>${skill.name}</name>`,
-            `    <description>${skill.description}</description>`,
-            `    <location>${pathToFileURL(skill.location).href}</location>`,
-            `  </skill>`,
-          ]),
+          ...accessibleSkills.map(
+            (skill) => `  <skill name="${skill.name}">${skill.description}</skill>`,
+          ),
           "</available_skills>",
         ].join("\n")
 
