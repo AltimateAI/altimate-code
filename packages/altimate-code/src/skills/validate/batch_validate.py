@@ -36,11 +36,20 @@ _script_dir = Path(__file__).resolve().parent
 
 
 def _find_altimate_dir():
-    """Find the .altimate-code directory by walking up from script location."""
+    """Find the .altimate-code directory.
+
+    Checks in order:
+    1. Walk up from the script's location (for project-local .altimate-code dirs)
+    2. Fall back to ~/.altimate-code (global user config)
+    """
     current = Path(__file__).resolve()
     for parent in current.parents:
         if parent.name == ".altimate-code" and parent.is_dir():
             return parent
+    # Fallback: global user config at ~/.altimate-code
+    global_dir = Path.home() / ".altimate-code"
+    if global_dir.is_dir():
+        return global_dir
     return None
 
 
@@ -79,10 +88,12 @@ if _altimate_dir:
 # Configuration
 # ---------------------------------------------------------------------------
 API_URL = os.environ.get(
-    "VALIDATE_API_URL", "https://apimi.tryaltimate.com/validate"
+    "VALIDATE_API_URL",
+    os.environ.get("ALTIMATE_VALIDATION_URL", "https://apimi.tryaltimate.com/validate"),
 )
 API_TOKEN = os.environ.get(
-    "VALIDATE_API_TOKEN", ""
+    "VALIDATE_API_TOKEN",
+    os.environ.get("ALTIMATE_VALIDATION_TOKEN", ""),
 )
 
 # Per-project Langfuse configs: VALIDATION (primary) and PRODUCTION (fallback)
