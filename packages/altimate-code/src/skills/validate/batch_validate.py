@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -206,7 +208,13 @@ def fetch_traces_by_session_id(session_id):
 # ---------------------------------------------------------------------------
 
 # Session reuses TCP connection and SSL handshake across all traces.
+# Retry adapter handles stale keep-alive connections being reset mid-batch.
 _SESSION = requests.Session()
+_adapter = HTTPAdapter(
+    max_retries=Retry(total=3, allowed_methods=["POST"], backoff_factor=0.5)
+)
+_SESSION.mount("https://", _adapter)
+_SESSION.mount("http://", _adapter)
 
 
 def validate_trace(trace_id):
