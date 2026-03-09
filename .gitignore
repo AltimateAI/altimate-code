@@ -30,6 +30,10 @@ __pycache__/
 # SQLite databases (feedback store creates these at runtime)
 *.db
 
+# Runtime logs
+*.log
+logs/
+
 # Large intermediate files at repo root (generated during benchmark runs)
 /queries.json
 /queries_1k.json
