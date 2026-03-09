@@ -65,6 +65,7 @@ export const AttachCommand = cmd({
       })()
       await tui({
         url: args.url,
+        config: {},
         args: {
           continue: args.continue,
           sessionID: args.session,

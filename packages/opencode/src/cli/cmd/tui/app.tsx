@@ -38,6 +38,8 @@ import { ArgsProvider, useArgs, type Args } from "./context/args"
 import open from "open"
 import { writeHeapSnapshot } from "v8"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
+import { TuiConfigProvider } from "./context/tui-config"
+import type { TuiConfig } from "@/config/tui"
 
 async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
   // can't set raw mode if not a TTY
@@ -104,6 +106,7 @@ import type { EventSource } from "./context/sdk"
 export function tui(input: {
   url: string
   args: Args
+  config: TuiConfig.Info
   directory?: string
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
@@ -146,8 +149,9 @@ export function tui(input: {
                         events={input.events}
                       >
                         <SyncProvider>
-                          <ThemeProvider mode={mode}>
-                            <LocalProvider>
+                          <TuiConfigProvider config={input.config}>
+                            <ThemeProvider mode={mode}>
+                              <LocalProvider>
                               <KeybindProvider>
                                 <PromptStashProvider>
                                   <DialogProvider>
@@ -163,8 +167,9 @@ export function tui(input: {
                                   </DialogProvider>
                                 </PromptStashProvider>
                               </KeybindProvider>
-                            </LocalProvider>
-                          </ThemeProvider>
+                              </LocalProvider>
+                            </ThemeProvider>
+                          </TuiConfigProvider>
                         </SyncProvider>
                       </SDKProvider>
                     </RouteProvider>

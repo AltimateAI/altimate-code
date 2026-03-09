@@ -12,6 +12,8 @@ import { Filesystem } from "@/util/filesystem"
 import type { Event } from "@opencode-ai/sdk/v2"
 import type { EventSource } from "./context/sdk"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
+import { TuiConfig } from "@/config/tui"
+import { Instance } from "@/project/instance"
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -161,8 +163,14 @@ export const TuiThreadCommand = cmd({
         events = createEventSource(client)
       }
 
+      const config = await Instance.provide({
+        directory: cwd,
+        fn: () => TuiConfig.get(),
+      })
+
       const tuiPromise = tui({
         url,
+        config,
         fetch: customFetch,
         events,
         args: {
