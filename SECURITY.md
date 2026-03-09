@@ -1,45 +1,47 @@
-# Security Policy
+# Security
 
-## Supported Versions
+## IMPORTANT
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+We do not accept AI generated security reports. We receive a large number of
+these and we absolutely do not have the resources to review them all. If you
+submit one that will be an automatic ban from the project.
 
-## Reporting a Vulnerability
+## Threat Model
 
-**Please do not open public GitHub issues for security vulnerabilities.**
+### Overview
 
-Instead, please report them via email to **security@altimate.ai**.
+OpenCode is an AI-powered coding assistant that runs locally on your machine. It provides an agent system with access to powerful tools including shell execution, file operations, and web access.
 
-### What to include
+### No Sandbox
 
-- A description of the vulnerability
-- Steps to reproduce the issue
-- Any relevant logs or screenshots
-- Your assessment of the severity
+OpenCode does **not** sandbox the agent. The permission system exists as a UX feature to help users stay aware of what actions the agent is taking - it prompts for confirmation before executing commands, writing files, etc. However, it is not designed to provide security isolation.
 
-### What to expect
+If you need true isolation, run OpenCode inside a Docker container or VM.
 
-- **Acknowledgment**: Within 48 hours of your report
-- **Initial assessment**: Within 7 business days
-- **Resolution timeline**: Depends on severity, but we aim to resolve critical issues within 30 days
+### Server Mode
 
-### Credit
+Server mode is opt-in only. When enabled, set `OPENCODE_SERVER_PASSWORD` to require HTTP Basic Auth. Without this, the server runs unauthenticated (with a warning). It is the end user's responsibility to secure the server - any functionality it provides is not a vulnerability.
 
-We appreciate the efforts of security researchers. With your consent, we will credit you in the release notes when the vulnerability is fixed.
+### Out of Scope
 
-## Scope
+| Category                        | Rationale                                                               |
+| ------------------------------- | ----------------------------------------------------------------------- |
+| **Server access when opted-in** | If you enable server mode, API access is expected behavior              |
+| **Sandbox escapes**             | The permission system is not a sandbox (see above)                      |
+| **LLM provider data handling**  | Data sent to your configured LLM provider is governed by their policies |
+| **MCP server behavior**         | External MCP servers you configure are outside our trust boundary       |
+| **Malicious config files**      | Users control their own config; modifying it is not an attack vector    |
 
-This policy applies to:
+---
 
-- The `altimate-code` CLI (`@altimateai/altimate-code`)
-- The `altimate-engine` Python package
-- The `@altimateai/altimate-code-sdk` and `@altimateai/altimate-code-plugin` packages
-- Official Docker images
+# Reporting Security Issues
 
-## Best Practices
+We appreciate your efforts to responsibly disclose your findings, and will make every effort to acknowledge your contributions.
 
-- Always use the latest version of altimate-code
-- Do not store credentials in plain text; use environment variables or secure credential stores
-- Review warehouse connection configurations for least-privilege access
+To report a security issue, please use the GitHub Security Advisory ["Report a Vulnerability"](https://github.com/anomalyco/opencode/security/advisories/new) tab.
+
+The team will send a response indicating the next steps in handling your report. After the initial reply to your report, the security team will keep you informed of the progress towards a fix and full announcement, and may ask for additional information or guidance.
+
+## Escalation
+
+If you do not receive an acknowledgement of your report within 6 business days, you may send an email to security@anoma.ly

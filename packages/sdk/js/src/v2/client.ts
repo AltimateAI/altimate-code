@@ -23,7 +23,7 @@ export function createOpencodeClient(config?: Config & { directory?: string }) {
     const encodedDirectory = isNonASCII ? encodeURIComponent(config.directory) : config.directory
     config.headers = {
       ...config.headers,
-      "x-altimate-code-directory": encodedDirectory,
+      "x-opencode-directory": encodedDirectory,
     }
   }
 

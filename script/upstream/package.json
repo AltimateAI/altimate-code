@@ -1,0 +1,8 @@
+{
+  "name": "@altimateai/upstream-merge",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "minimatch": "^10.0.0"
+  }
+}

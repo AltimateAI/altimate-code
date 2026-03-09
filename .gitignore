@@ -1,25 +1,27 @@
-# Dependencies
-node_modules/
-.venv/
-
-# Build artifacts
-.turbo/
-dist/
-*.tsbuildinfo
-
-# OS files
 .DS_Store
-Thumbs.db
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Environment
+node_modules
+.worktrees
+.sst
 .env
-.env.local
+.idea
+.vscode
+.codex
+*~
+playground
+tmp
+dist
+ts-dist
+.turbo
+**/.serena
+.serena/
+/result
+refs
+Session.vim
+opencode.json
+a.out
+target
+.scripts
+.direnv/
 
 # Python
 __pycache__/
@@ -50,3 +52,8 @@ logs/
 /experiments/
 /models/
 /simulation/
+
+# Local dev files
+opencode-dev
+*.bun-build
+tsconfig.tsbuildinfo

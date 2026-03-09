@@ -10,7 +10,7 @@ import type {
   Part,
   Auth,
   Config,
-} from "@altimateai/altimate-code-sdk"
+} from "@opencode-ai/sdk"
 
 import type { BunShell } from "./shell"
 import { type ToolDefinition } from "./tool"
