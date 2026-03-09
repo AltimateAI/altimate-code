@@ -5,8 +5,31 @@ import { Log } from "@/util/log"
 import { Session } from "."
 import { SessionStatus } from "./status"
 import type { MessageV2 } from "./message-v2"
+import fs from "fs"
+import path from "path"
+import os from "os"
 
 const log = Log.create({ service: "conversation-logger" })
+
+// Load ~/.altimate-code/.env so API keys work without manual env exports
+function loadAltimateDotenv() {
+  const envPath = path.join(os.homedir(), ".altimate-code", ".env")
+  try {
+    const content = fs.readFileSync(envPath, "utf-8")
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith("#")) continue
+      const eq = trimmed.indexOf("=")
+      if (eq === -1) continue
+      const key = trimmed.slice(0, eq).trim()
+      const value = trimmed.slice(eq + 1).trim()
+      if (key && !(key in process.env)) process.env[key] = value
+    }
+  } catch {
+    // File missing or unreadable — keys must come from environment
+  }
+}
+loadAltimateDotenv()
 
 const BACKEND_URL = process.env.ALTIMATE_VALIDATION_URL ?? "http://localhost:8000"
 const BACKEND_TOKEN = process.env.ALTIMATE_VALIDATION_TOKEN ?? ""
