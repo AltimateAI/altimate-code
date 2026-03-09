@@ -1,0 +1,43 @@
+{
+  "$comment": "Declarative config for upstream merge tooling",
+  "keepOurs": [
+    "src/altimate/**",
+    "packages/altimate-engine/**",
+    "script/upstream/**",
+    "script/revert-renames.sh",
+    "README.md",
+    ".github/**",
+    "docs/**",
+    "experiments/**",
+    ".opencode/**",
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "RELEASING.md"
+  ],
+  "skipFiles": [
+    "packages/app/**",
+    "packages/console/**",
+    "packages/containers/**",
+    "packages/desktop/**",
+    "packages/desktop-electron/**",
+    "packages/docs/**",
+    "packages/enterprise/**",
+    "packages/extensions/**",
+    "packages/function/**",
+    "packages/identity/**",
+    "packages/slack/**",
+    "packages/storybook/**",
+    "packages/ui/**",
+    "packages/web/**",
+    "infra/**"
+  ],
+  "packageMappings": {
+    "@opencode-ai/opencode": "@altimateai/altimate-code",
+    "@opencode-ai/util": "@altimateai/altimate-code-util",
+    "@opencode-ai/plugin": "@altimateai/altimate-code-plugin",
+    "@opencode-ai/sdk": "@altimateai/altimate-code-sdk"
+  },
+  "changeMarker": "altimate_change",
+  "upstreamRemote": "upstream",
+  "upstreamBranch": "dev"
+}

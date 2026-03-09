@@ -35,8 +35,8 @@ bun run packages/altimate-code/script/bump-version.ts --engine 0.2.0 --dry-run
 
 The CLI version is determined automatically at build time:
 
-- **Explicit**: Set `ALTIMATE_CLI_VERSION=0.2.0` environment variable
-- **Auto-bump**: Set `ALTIMATE_CLI_BUMP=patch` (or `minor` / `major`) — fetches current version from npm and increments
+- **Explicit**: Set `OPENCODE_VERSION=0.2.0` environment variable
+- **Auto-bump**: Set `OPENCODE_BUMP=patch` (or `minor` / `major`) — fetches current version from npm and increments
 - **Preview**: On non-main branches, generates `0.0.0-{branch}-{timestamp}`
 
 The version is injected into the binary via esbuild defines at compile time.

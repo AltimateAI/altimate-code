@@ -15,7 +15,8 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.os }})
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -27,7 +28,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
-          bun-version: "1.3.9"
+          bun-version: "1.3.10"
 
       - name: Cache Bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -41,11 +42,11 @@ jobs:
         run: bun install
 
       - name: Build ${{ matrix.os }} targets
-        run: bun run packages/altimate-code/script/build.ts --targets=${{ matrix.os }}
+        run: bun run packages/opencode/script/build.ts --targets=${{ matrix.os }}
         env:
-          ALTIMATE_CLI_VERSION: ${{ github.ref_name }}
-          ALTIMATE_CLI_CHANNEL: latest
-          ALTIMATE_CLI_RELEASE: "1"
+          OPENCODE_VERSION: ${{ github.ref_name }}
+          OPENCODE_CHANNEL: latest
+          OPENCODE_RELEASE: "1"
           GH_REPO: ${{ env.GH_REPO }}
           MODELS_DEV_API_JSON: test/tool/fixtures/models-api.json
 
@@ -53,12 +54,13 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist-${{ matrix.os }}
-          path: packages/altimate-code/dist/
+          path: packages/opencode/dist/
 
   publish-npm:
     name: Publish to npm
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -66,7 +68,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
-          bun-version: "1.3.9"
+          bun-version: "1.3.10"
 
       - name: Cache Bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -83,11 +85,11 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: dist-*
-          path: packages/altimate-code/dist/
+          path: packages/opencode/dist/
           merge-multiple: true
 
       - name: Configure npm auth
-        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$RUNNER_TEMP/.npmrc"
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -108,13 +110,14 @@ jobs:
       #     AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
       - name: Publish to npm
-        run: bun run packages/altimate-code/script/publish.ts
+        run: bun run packages/opencode/script/publish.ts
         env:
-          ALTIMATE_CLI_VERSION: ${{ github.ref_name }}
-          ALTIMATE_CLI_CHANNEL: latest
-          ALTIMATE_CLI_RELEASE: "1"
+          OPENCODE_VERSION: ${{ github.ref_name }}
+          OPENCODE_CHANNEL: latest
+          OPENCODE_RELEASE: "1"
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/.npmrc
           GH_REPO: ${{ env.GH_REPO }}
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
@@ -122,7 +125,8 @@ jobs:
   # doesn't need CLI binary artifacts. This allows it to run in parallel.
   publish-engine:
     name: Publish engine to PyPI
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     environment: pypi
     permissions:
       contents: read
@@ -152,7 +156,8 @@ jobs:
   github-release:
     name: Create GitHub Release
     needs: [build, publish-npm]
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-altimate-code
+    timeout-minutes: 60
     permissions:
       contents: write
     steps:
@@ -213,7 +218,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: dist-*
-          path: packages/altimate-code/dist/
+          path: packages/opencode/dist/
           merge-multiple: true
 
       - name: Create GitHub Release
@@ -223,7 +228,7 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            packages/altimate-code/dist/*.tar.gz
-            packages/altimate-code/dist/*.zip
+            packages/opencode/dist/*.tar.gz
+            packages/opencode/dist/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
