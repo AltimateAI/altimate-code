@@ -449,7 +449,7 @@ def guard_column_lineage(
     default_database: str = "",
     default_schema: str = "",
 ) -> dict:
-    """Schema-aware column lineage (requires altimate_core.init)."""
+    """Schema-aware column lineage. Works without API keys; logs usage when initialized."""
     if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
@@ -471,7 +471,7 @@ def guard_track_lineage(
     schema_path: str = "",
     schema_context: dict[str, Any] | None = None,
 ) -> dict:
-    """Track lineage across multiple queries (requires altimate_core.init)."""
+    """Track lineage across multiple queries. Works without API keys; logs usage when initialized."""
     if not ALTIMATE_CORE_AVAILABLE:
         return _not_installed_result()
     try:
