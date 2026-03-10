@@ -1,6 +1,12 @@
 ---
 name: medallion-patterns
 description: Apply medallion architecture (bronze/silver/gold) patterns to organize dbt models into clean data layers.
+tags:
+  - dbt
+  - sql
+  - analytics
+  - architecture
+  - databricks
 ---
 
 # Medallion Architecture Patterns

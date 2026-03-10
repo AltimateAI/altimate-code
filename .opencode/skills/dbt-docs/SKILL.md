@@ -1,6 +1,11 @@
 ---
 name: dbt-docs
 description: Generate or improve dbt model documentation — column descriptions, model descriptions, and doc blocks.
+tags:
+  - dbt
+  - documentation
+  - sql
+  - analytics
 ---
 
 # Generate dbt Documentation

@@ -21,6 +21,9 @@ export namespace Skill {
     description: z.string(),
     location: z.string(),
     content: z.string(),
+    // altimate_change start - add tags for environment-aware skill filtering
+    tags: z.array(z.string()).optional(),
+    // altimate_change end
   })
   export type Info = z.infer<typeof Info>
 
@@ -65,7 +68,9 @@ export namespace Skill {
 
       if (!md) return
 
-      const parsed = Info.pick({ name: true, description: true }).safeParse(md.data)
+      // altimate_change start - parse tags from frontmatter
+      const parsed = Info.pick({ name: true, description: true, tags: true }).safeParse(md.data)
+      // altimate_change end
       if (!parsed.success) return
 
       // Warn on duplicate skill names
@@ -84,6 +89,9 @@ export namespace Skill {
         description: parsed.data.description,
         location: match,
         content: md.content,
+        // altimate_change start - include tags in skill info
+        tags: parsed.data.tags,
+        // altimate_change end
       }
     }
 

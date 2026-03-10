@@ -1,6 +1,11 @@
 ---
 name: yaml-config
 description: Generate dbt YAML configuration files — sources.yml, schema.yml, properties.yml — from warehouse schema or existing models.
+tags:
+  - dbt
+  - sql
+  - analytics
+  - configuration
 ---
 
 # Generate dbt YAML Config

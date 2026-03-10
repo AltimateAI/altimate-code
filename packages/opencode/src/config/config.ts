@@ -1172,6 +1172,12 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+          // altimate_change start - dynamic skill loading toggle
+          dynamic_skills: z
+            .boolean()
+            .optional()
+            .describe("Enable dynamic skill filtering by environment fingerprint and per-turn message rescue"),
+          // altimate_change end
         })
         .optional(),
     })

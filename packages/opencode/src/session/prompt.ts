@@ -46,6 +46,11 @@ import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
 import { Telemetry } from "@/telemetry"
+// altimate_change start - import fingerprint for dynamic skill loading
+import { Fingerprint } from "../altimate/fingerprint"
+import { MessageContext } from "../altimate/context/message-context"
+import { Config } from "../config/config"
+// altimate_change end
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -299,8 +304,21 @@ export namespace SessionPrompt {
     let totalCompactions = 0
     let sessionAgentName = ""
     let sessionHadError = false
+    // altimate_change start - re-grounding counter for drift prevention
+    const REGROUND_INTERVAL = 9
+    let toolCallsSinceReground = 0
+    let originalUserRequest = ""
+    // altimate_change end
     const MAX_COMPACTION_ATTEMPTS = 3
     const session = await Session.get(sessionID)
+    // altimate_change start - detect environment fingerprint at session start
+    const altCfg = await Config.get()
+    if (altCfg.experimental?.dynamic_skills) {
+      await Fingerprint.detect(Instance.directory, Instance.worktree).catch((e) => {
+        log.warn("fingerprint detection failed", { error: e })
+      })
+    }
+    // altimate_change end
     await Telemetry.init()
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
     let emergencySessionEndFired = false
@@ -654,6 +672,17 @@ export namespace SessionPrompt {
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
+      // altimate_change start - set message context for per-turn skill rescue
+      if ((await Config.get()).experimental?.dynamic_skills) {
+        const lastUserText =
+          lastUserMsg?.parts
+            .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
+            .map((p) => p.text)
+            .join(" ") ?? ""
+        MessageContext.set(lastUserText)
+      }
+      // altimate_change end
+
       const tools = await resolveTools({
         agent,
         session,
@@ -721,6 +750,28 @@ export namespace SessionPrompt {
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
+      // altimate_change start - inject re-grounding reminder every ~9 tool calls
+      // Capture first substantive user message as the original request
+      if (!originalUserRequest) {
+        const firstUserMsg = msgs.find(
+          (m) => m.info.role === "user" && m.parts.some((p) => p.type === "text" && !p.synthetic),
+        )
+        if (firstUserMsg) {
+          originalUserRequest = firstUserMsg.parts
+            .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text" && !p.synthetic)
+            .map((p) => p.text)
+            .join(" ")
+            .slice(0, 500)
+        }
+      }
+      if (toolCallsSinceReground >= REGROUND_INTERVAL && originalUserRequest.trim()) {
+        system.push(
+          `<system-reminder>Re-grounding: The user's original request was: "${originalUserRequest.trim()}". Stay focused on completing this objective.</system-reminder>`,
+        )
+        toolCallsSinceReground = 0
+        log.info("injected re-grounding reminder", { toolCallCount, sessionID })
+      }
+      // altimate_change end
 
       const result = await processor.process({
         user: lastUser,
@@ -750,6 +801,9 @@ export namespace SessionPrompt {
         (processor.message.tokens?.output ?? 0) +
         (processor.message.tokens?.reasoning ?? 0)
       toolCallCount += processor.toolCallCount
+      // altimate_change start - track tool calls for re-grounding
+      toolCallsSinceReground += processor.toolCallCount
+      // altimate_change end
 
       // If structured output was captured, save it and exit immediately
       // This takes priority because the StructuredOutput tool was called successfully

@@ -1,0 +1,22 @@
+[project]
+name = "analyzing-data-scripts"
+version = "0.0.0"
+description = "Internal scripts for analyzing-data skill (not a published package)"
+requires-python = ">=3.11"
+classifiers = [
+    "Private :: Do Not Upload",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "sqlalchemy", "polars", "pandas", "pyyaml", "python-dotenv"]
+test-integration = [
+    "pytest",
+    "sqlalchemy",
+    "polars",
+    "pandas",
+    "pyyaml",
+    "python-dotenv",
+    "psycopg[binary]",
+    "duckdb",
+    "duckdb-engine",
+]

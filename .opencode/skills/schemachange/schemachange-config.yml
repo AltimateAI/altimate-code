@@ -1,0 +1,82 @@
+# Schemachange Configuration File
+# Reference: https://github.com/Snowflake-Labs/schemachange
+
+config-version: 1
+
+# ============================================================================
+# Core Settings
+# ============================================================================
+
+# The root folder for database change scripts
+# This is where V__, R__, and A__ scripts are located
+root-folder: migrations
+
+# The modules folder for jinja macros and templates to be used across scripts
+# Set to a path like 'modules/' to enable shared Jinja templates
+modules-folder: null
+
+# ============================================================================
+# Connection Settings
+# ============================================================================
+
+# Override the default connections.toml file path
+# Default location is OS-specific (e.g., ~/.snowflake/connections.toml on Unix)
+connections-file-path: null
+
+# Connection name from connections.toml to use
+# This refers to a [connections.<name>] section in your connections.toml
+connection-name: default
+
+# ============================================================================
+# Change History Table
+# ============================================================================
+
+# Custom change history table name
+# Default: <TARGET_DATABASE>.SCHEMACHANGE.CHANGE_HISTORY
+# Use this to override the default location
+change-history-table: null
+
+# Create the change history schema and table if they don't exist
+# Recommended: true for initial setup, false for production (manual control)
+create-change-history-table: true
+
+# ============================================================================
+# Template Variables
+# ============================================================================
+
+# Define values for variables to be replaced in change scripts
+# Access in scripts using {{ var_name }} Jinja syntax
+# Command-line vars (--vars) will be merged with these values
+vars:
+  env: dev
+  database: MY_DATABASE
+  schema: MY_SCHEMA
+  # Example of nested vars (e.g., for secrets):
+  # secrets:
+  #   api_key: 'value'  # Won't be displayed in output
+
+# ============================================================================
+# Execution Options
+# ============================================================================
+
+# Enable autocommit for DML commands
+# Default: false (recommended for most use cases)
+# Set to true if you need each statement to commit immediately
+autocommit: false
+
+# Display verbose debugging details during execution
+# Useful for troubleshooting but can be noisy in production
+verbose: false
+
+# Run schemachange in dry-run mode (preview changes without applying)
+# Always test with this before production deployments
+dry-run: false
+
+# ============================================================================
+# Monitoring & Tagging
+# ============================================================================
+
+# Query tag attached to every SQL statement executed
+# Useful for tracking schemachange operations in Snowflake query history
+# Access via: SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE QUERY_TAG = 'schemachange'
+query-tag: "schemachange"

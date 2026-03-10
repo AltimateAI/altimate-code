@@ -1,0 +1,29 @@
+XML-Specific Options
+
+| Option                    | Type    |
+| ------------------------- | ------- |
+| rowTag                    | String  |
+| samplingRatio             | Double  |
+| excludeAttribute          | Boolean |
+| mode                      | String  |
+| inferSchema               | Boolean |
+| columnNameOfCorruptRecord | String  |
+| attributePrefix           | String  |
+| valueTag                  | String  |
+| encoding                  | String  |
+| ignoreSurroundingSpaces   | Boolean |
+| rowValidationXSDPath      | String  |
+| ignoreNamespace           | Boolean |
+| timestampFormat           | String  |
+| timestampNTZFormat        | String  |
+| dateFormat                | String  |
+| locale                    | String  |
+| rootTag                   | String  |
+| declaration               | String  |
+| arrayElementName          | String  |
+| nullValue                 | String  |
+| compression               | String  |
+| validateName              | Boolean |
+| readerCaseSensitive       | Boolean |
+| rescuedDataColumn         | String  |
+| singleVariantColumn       | String  |

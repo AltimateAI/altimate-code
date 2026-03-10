@@ -1,6 +1,11 @@
 ---
 name: model-scaffold
 description: Scaffold a new dbt model following staging/intermediate/mart patterns with proper naming, materialization, and structure.
+tags:
+  - dbt
+  - sql
+  - analytics
+  - modeling
 ---
 
 # Scaffold dbt Model

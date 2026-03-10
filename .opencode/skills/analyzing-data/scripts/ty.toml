@@ -1,0 +1,11 @@
+# ty type checker configuration
+# https://docs.astral.sh/ty/
+
+[rules]
+# Ignore unresolved imports for third-party libraries
+# ty doesn't install dependencies, so these will always fail
+unresolved-import = "ignore"
+
+# Ignore unresolved references in template files
+# These variables (_conn, pl, pd) are injected at runtime
+unresolved-reference = "ignore"

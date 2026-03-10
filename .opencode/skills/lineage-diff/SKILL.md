@@ -1,6 +1,11 @@
 ---
 name: lineage-diff
 description: Compare column-level lineage between two versions of a SQL query to show added, removed, and changed data flow edges.
+tags:
+  - dbt
+  - lineage
+  - sql
+  - analytics
 ---
 
 # Lineage Diff
