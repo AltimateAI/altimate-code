@@ -19,6 +19,7 @@ import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_VALIDATOR from "../altimate/prompts/validator.txt"
 import PROMPT_MIGRATOR from "../altimate/prompts/migrator.txt"
 import PROMPT_EXECUTIVE from "../altimate/prompts/executive.txt"
+import PROMPT_DATA_DIFF from "../altimate/prompts/data-diff.txt"
 // altimate_change end
 import { PermissionNext } from "@/permission/next"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -215,6 +216,37 @@ export namespace Agent {
             altimate_core_check: "allow",
             read: "allow", write: "allow", edit: "allow",
             grep: "allow", glob: "allow", question: "allow",
+          }),
+          user,
+        ),
+        mode: "primary",
+        native: true,
+      },
+      "data-diff": {
+        name: "data-diff",
+        description: "Cross-database data validation. Compare tables across warehouses using progressive checks: row counts, column profiles, segment checksums, and row-level diffs.",
+        prompt: PROMPT_DATA_DIFF,
+        options: {},
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            sql_execute: "allow", sql_validate: "allow", sql_analyze: "allow",
+            sql_translate: "allow", sql_optimize: "allow", lineage_check: "allow",
+            warehouse_list: "allow", warehouse_test: "allow", warehouse_discover: "allow",
+            schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
+            schema_cache_status: "allow", sql_explain: "allow", sql_format: "allow",
+            sql_fix: "allow", sql_autocomplete: "allow", sql_diff: "allow",
+            finops_query_history: "allow", finops_analyze_credits: "allow",
+            finops_expensive_queries: "allow", finops_warehouse_advice: "allow",
+            finops_unused_resources: "allow", finops_role_grants: "allow",
+            finops_role_hierarchy: "allow", finops_user_roles: "allow",
+            schema_detect_pii: "allow", schema_tags: "allow", schema_tags_list: "allow",
+            altimate_core_validate: "allow", altimate_core_lint: "allow",
+            altimate_core_safety: "allow", altimate_core_transpile: "allow",
+            altimate_core_check: "allow",
+            read: "allow", write: "allow", edit: "allow",
+            grep: "allow", glob: "allow", bash: "allow",
+            question: "allow",
           }),
           user,
         ),

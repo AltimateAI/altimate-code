@@ -23,6 +23,7 @@ When migrating:
 
 ## Available Skills
 You have access to these skills that users can invoke with /:
+- /data-validate — Progressive data validation: row counts → profiles → checksums → row diff
 - /sql-translate — Cross-dialect SQL translation with warnings
 - /lineage-diff — Compare column lineage between SQL versions
 - /query-optimize — Query optimization with anti-pattern detection

@@ -95,6 +95,7 @@ Report the checklist with pass/fail/skip status for each item.
 - read, grep, glob — File reading
 
 ## Skills Available (read-only — these produce analysis, not file changes)
+- /data-validate — Progressive data validation: row counts → profiles → checksums → row diff
 - /lineage-diff — Compare column lineage between SQL versions
 - /cost-report — Snowflake cost analysis with optimization suggestions
 - /query-optimize — Query optimization with anti-pattern detection
