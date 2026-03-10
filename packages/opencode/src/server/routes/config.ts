@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { Config } from "../../config/config"
+import { TuiConfig } from "../../config/tui"
 import { Provider } from "../../provider/provider"
 import { mapValues } from "remeda"
 import { errors } from "../error"
@@ -56,6 +57,27 @@ export const ConfigRoutes = lazy(() =>
         const config = c.req.valid("json")
         await Config.update(config)
         return c.json(config)
+      },
+    )
+    .get(
+      "/tui",
+      describeRoute({
+        summary: "Get TUI configuration",
+        description: "Retrieve the TUI-specific configuration (theme, keybinds, etc).",
+        operationId: "config.tui",
+        responses: {
+          200: {
+            description: "TUI config",
+            content: {
+              "application/json": {
+                schema: resolver(TuiConfig.Info),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        return c.json(await TuiConfig.get())
       },
     )
     .get(

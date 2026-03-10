@@ -35,11 +35,11 @@ import { TuiEvent } from "./event"
 import { KVProvider, useKV } from "./context/kv"
 import { Provider } from "@/provider/provider"
 import { ArgsProvider, useArgs, type Args } from "./context/args"
+import { TuiConfigProvider } from "@tui/context/tui-config"
+import { TuiConfig } from "@/config/tui"
 import open from "open"
 import { writeHeapSnapshot } from "v8"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
-import { TuiConfigProvider } from "./context/tui-config"
-import { TuiConfig } from "@/config/tui"
 
 async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
   // can't set raw mode if not a TTY
@@ -111,6 +111,7 @@ export function tui(input: {
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
   events?: EventSource
+  tuiConfig?: TuiConfig.Info
   onExit?: () => Promise<void>
 }) {
   // promise to prevent immediate exit
@@ -119,6 +120,7 @@ export function tui(input: {
     win32DisableProcessedInput()
 
     const mode = await getTerminalBackgroundColor()
+    const tuiConfig = input.tuiConfig ?? {}
 
     // Re-clear after getTerminalBackgroundColor() — setRawMode(false) restores
     // the original console mode which re-enables ENABLE_PROCESSED_INPUT.
@@ -141,15 +143,15 @@ export function tui(input: {
                 <KVProvider>
                   <ToastProvider>
                     <RouteProvider>
-                      <TuiConfigProvider config={input.config}>
-                        <SDKProvider
-                          url={input.url}
-                          directory={input.directory}
-                          fetch={input.fetch}
-                          headers={input.headers}
-                          events={input.events}
-                        >
-                          <SyncProvider>
+                      <SDKProvider
+                        url={input.url}
+                        directory={input.directory}
+                        fetch={input.fetch}
+                        headers={input.headers}
+                        events={input.events}
+                      >
+                        <SyncProvider>
+                          <TuiConfigProvider config={tuiConfig}>
                             <ThemeProvider mode={mode}>
                               <LocalProvider>
                                 <KeybindProvider>
@@ -169,9 +171,9 @@ export function tui(input: {
                                 </KeybindProvider>
                               </LocalProvider>
                             </ThemeProvider>
-                          </SyncProvider>
-                        </SDKProvider>
-                      </TuiConfigProvider>
+                          </TuiConfigProvider>
+                        </SyncProvider>
+                      </SDKProvider>
                     </RouteProvider>
                   </ToastProvider>
                 </KVProvider>

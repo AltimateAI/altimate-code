@@ -135,6 +135,10 @@ export const rpc = {
       },
     })
   },
+  async tuiConfig() {
+    const response = await Server.App().fetch(new Request("http://altimate-code.internal/config/tui"))
+    return response.json()
+  },
   async reload() {
     Config.global.reset()
     await Instance.disposeAll()

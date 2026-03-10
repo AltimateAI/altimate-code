@@ -24,6 +24,7 @@ import nightowl from "./theme/nightowl.json" with { type: "json" }
 import nord from "./theme/nord.json" with { type: "json" }
 import osakaJade from "./theme/osaka-jade.json" with { type: "json" }
 import onedark from "./theme/one-dark.json" with { type: "json" }
+import altimateCode from "./theme/altimate-code.json" with { type: "json" }
 import opencode from "./theme/opencode.json" with { type: "json" }
 import orng from "./theme/orng.json" with { type: "json" }
 import lucentOrng from "./theme/lucent-orng.json" with { type: "json" }
@@ -160,6 +161,7 @@ export const DEFAULT_THEMES: Record<string, ThemeJson> = {
   nord,
   ["one-dark"]: onedark,
   ["osaka-jade"]: osakaJade,
+  ["altimate-code"]: altimateCode,
   opencode,
   orng,
   ["lucent-orng"]: lucentOrng,
@@ -285,7 +287,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     const [store, setStore] = createStore({
       themes: DEFAULT_THEMES,
       mode: kv.get("theme_mode", props.mode),
-      active: (config.theme ?? kv.get("theme", "opencode")) as string,
+      active: (config.theme ?? kv.get("theme", "altimate-code")) as string,
       ready: false,
     })
 
@@ -305,7 +307,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
           )
         })
         .catch(() => {
-          setStore("active", "opencode")
+          setStore("active", "altimate-code")
         })
         .finally(() => {
           if (store.active !== "system") {
@@ -328,7 +330,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
             if (store.active === "system") {
               setStore(
                 produce((draft) => {
-                  draft.active = "opencode"
+                  draft.active = "altimate-code"
                   draft.ready = true
                 }),
               )
@@ -353,7 +355,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     })
 
     const values = createMemo(() => {
-      return resolveTheme(store.themes[store.active] ?? store.themes.opencode, store.mode)
+      return resolveTheme(store.themes[store.active] ?? store.themes["altimate-code"], store.mode)
     })
 
     const syntax = createMemo(() => generateSyntax(values()))
@@ -397,7 +399,7 @@ async function getCustomThemes() {
     Global.Path.config,
     ...(await Array.fromAsync(
       Filesystem.up({
-        targets: [".opencode"],
+        targets: [".altimate-code"],
         start: process.cwd(),
       }),
     )),

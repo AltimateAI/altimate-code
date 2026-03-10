@@ -167,12 +167,15 @@ export const TuiThreadCommand = cmd({
         events = createEventSource(client)
       }
 
+      const tuiConfig = await client.call("tuiConfig", undefined)
+
       const tuiPromise = tui({
         url,
         config,
         directory: cwd,
         fetch: customFetch,
         events,
+        tuiConfig,
         args: {
           continue: args.continue,
           sessionID: args.session,
