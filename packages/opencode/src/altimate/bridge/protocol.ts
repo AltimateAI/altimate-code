@@ -876,6 +876,31 @@ export interface AltimateCoreIsSafeParams {
   sql: string
 }
 
+// --- data diff (reladiff) ---
+export interface DataDiffRunParams {
+  source_table: string
+  target_table: string
+  source_warehouse: string
+  target_warehouse?: string
+  key_columns: string[]
+  extra_columns?: string[]
+  algorithm?: "auto" | "hashdiff" | "joindiff" | "profile" | "recon" | "cascade"
+  where_clause?: string
+  source_database?: string
+  source_schema?: string
+  target_database?: string
+  target_schema?: string
+}
+
+export interface DataDiffRunResult {
+  success: boolean
+  status?: string
+  error?: string
+  steps?: number
+  outcome?: Record<string, unknown>
+  failed_sql?: string
+}
+
 // --- dbt Lineage ---
 
 export interface DbtLineageParams {
@@ -1032,6 +1057,7 @@ export const BridgeMethods = {
   "altimate_core.introspection_sql": {} as { params: AltimateCoreIntrospectionSqlParams; result: AltimateCoreResult },
   "altimate_core.parse_dbt": {} as { params: AltimateCoreParseDbtParams; result: AltimateCoreResult },
   "altimate_core.is_safe": {} as { params: AltimateCoreIsSafeParams; result: AltimateCoreResult },
+  "data_diff.run": {} as { params: DataDiffRunParams; result: DataDiffRunResult },
   ping: {} as { params: Record<string, never>; result: { status: string } },
 } as const
 

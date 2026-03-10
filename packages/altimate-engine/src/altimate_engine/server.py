@@ -953,6 +953,24 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
                 target_dialect=p.target_dialect,
             )
             result = LocalTestResult(**raw)
+        elif method == "data_diff.run":
+            from altimate_engine.sql.data_diff import run_data_diff
+
+            raw = run_data_diff(
+                source_table=params.get("source_table", ""),
+                target_table=params.get("target_table", ""),
+                source_warehouse=params.get("source_warehouse", ""),
+                target_warehouse=params.get("target_warehouse"),
+                key_columns=params.get("key_columns", []),
+                extra_columns=params.get("extra_columns"),
+                algorithm=params.get("algorithm", "auto"),
+                where_clause=params.get("where_clause"),
+                source_database=params.get("source_database"),
+                source_schema=params.get("source_schema"),
+                target_database=params.get("target_database"),
+                target_schema=params.get("target_schema"),
+            )
+            return JsonRpcResponse(result=raw, id=request.id)
         elif method == "ping":
             return JsonRpcResponse(result={"status": "ok"}, id=request.id)
         else:

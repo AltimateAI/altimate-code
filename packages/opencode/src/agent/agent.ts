@@ -244,6 +244,7 @@ export namespace Agent {
             altimate_core_validate: "allow", altimate_core_lint: "allow",
             altimate_core_safety: "allow", altimate_core_transpile: "allow",
             altimate_core_check: "allow",
+            data_diff: "allow",
             read: "allow", write: "allow", edit: "allow",
             grep: "allow", glob: "allow", bash: "allow",
             question: "allow",

@@ -98,6 +98,7 @@ import { AltimateCoreFingerprintTool } from "../altimate/tools/altimate-core-fin
 import { AltimateCoreIntrospectionSqlTool } from "../altimate/tools/altimate-core-introspection-sql"
 import { AltimateCoreParseDbtTool } from "../altimate/tools/altimate-core-parse-dbt"
 import { AltimateCoreIsSafeTool } from "../altimate/tools/altimate-core-is-safe"
+import { DataDiffRunTool } from "../altimate/tools/data-diff-run"
 import { ProjectScanTool } from "../altimate/tools/project-scan"
 // altimate_change end
 
@@ -260,6 +261,7 @@ export namespace ToolRegistry {
       AltimateCoreIntrospectionSqlTool,
       AltimateCoreParseDbtTool,
       AltimateCoreIsSafeTool,
+      DataDiffRunTool,
       ProjectScanTool,
       // altimate_change end
       ...custom,
