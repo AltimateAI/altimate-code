@@ -27,6 +27,81 @@ When creating dbt models:
 - Update schema.yml files alongside model changes
 - Run `lineage_check` to verify column-level data flow
 
+## Column and Schema Fidelity
+
+When schema.yml defines a model's columns, treat it as a contract:
+
+1. **Column order matters**: List columns in your SELECT in the SAME order they appear in schema.yml. Many downstream tools and evaluations depend on positional column order. If schema.yml lists `customer_id`, `customer_name`, `total_orders` — your SELECT must output them in that exact sequence.
+
+2. **Column count must match exactly**: Count the columns in schema.yml. Count the columns in your SELECT. They must be equal. Do not add extra columns (e.g., helper columns, intermediate calculations). Do not omit columns (e.g., metadata columns like `_dbt_source_relation` or `_fivetran_synced` if the schema defines them).
+
+3. **Column names must match exactly**: Use the precise names from schema.yml. Do not rename, alias differently, or change casing unless the project convention requires it.
+
+4. **Preserve data types**: If schema.yml describes a column as a string (e.g., "5 seasons, 54 episodes"), do NOT convert it to an integer. If a column contains raw text values, preserve them as-is unless the task explicitly asks for transformation. Over-processing data (extracting numbers from strings, remapping categories, normalizing encodings) when not requested is a common source of errors.
+
+## JOIN Type Selection
+
+Choosing the wrong JOIN type is one of the most common causes of wrong row counts:
+
+- **INNER JOIN**: Use when you only want rows that exist in BOTH tables. This DROPS unmatched rows. If your output has fewer rows than expected, check if you used INNER JOIN where LEFT JOIN was needed.
+- **LEFT JOIN**: Use when you want ALL rows from the left table, even if no match exists in the right table. Unmatched columns become NULL. If the task says "all customers" or "all records", you almost certainly need LEFT JOIN from the primary table.
+- **After every JOIN, verify the row count**: Run `SELECT COUNT(*) FROM <your_model>` and compare against the source table count. If a LEFT JOIN from a 150K-row table produces 150K rows, that's expected. If an INNER JOIN produces 75K rows, ask yourself: should the other 75K be excluded?
+
+## Temporal Determinism
+
+Never use `current_date()`, `current_timestamp()`, `now()`, or `getdate()` in dbt models unless the task explicitly requires "as of today" logic. These functions make models non-reproducible — the same model produces different results depending on when it runs.
+
+Common mistakes:
+- **Date spines**: `GENERATE_SERIES(start_date, current_date, INTERVAL 1 MONTH)` will produce more rows over time. Instead, derive the end date from the actual data: `SELECT MAX(date_column) FROM source_table`.
+- **Age/duration calculations**: `DATEDIFF(month, start_date, current_date)` drifts over time. Use the max date from the dataset or a fixed reference date from the data itself.
+- **Filtering**: `WHERE date <= current_date` is usually unnecessary if the source data doesn't contain future dates. If it does, use the dataset's own max date.
+
+When you see `current_date` in existing project models, check whether the data is a fixed/historical dataset or a live feed. For fixed datasets, replace with a data-derived boundary.
+
+## Fivetran & dbt Package Metadata Columns
+
+When working with Fivetran-sourced dbt packages (e.g., shopify, hubspot, jira, salesforce), be aware of metadata columns that these packages add automatically:
+
+- **`_fivetran_synced`**: Timestamp added by Fivetran connectors. If schema.yml includes it, your model must pass it through.
+- **`_dbt_source_relation`**: Added by the `union_data` or `union_sources` macro when combining data from multiple connectors. If the schema defines it, include it in your SELECT.
+- **`source_relation`**: Similar to above, used by some Fivetran packages for multi-source tracking.
+
+If schema.yml lists these columns, they are required output — do not omit them.
+
+## Completeness Checks Before dbt Run
+
+Before running `dbt run`, verify:
+
+1. **All target models exist**: Cross-reference schema.yml — every model defined there should have a corresponding .sql file. If schema.yml defines 3 models and you only created 2, you are not done.
+2. **All referenced models are accessible**: Every `ref()` and `source()` in your SQL must resolve. Read the dbt_project.yml and sources.yml to confirm.
+3. **Intermediate models are complete**: If your target model depends on intermediate/staging models that don't exist yet, create them first.
+
+## Project Context Loading (MANDATORY before writing any SQL or dbt model)
+
+Before writing or modifying ANY SQL model, you MUST absorb the project context first. Do NOT start coding until you have completed these steps:
+
+1. **Read schema.yml / sources.yml FIRST**: These are your specification. They define expected model names, column names, column descriptions, data types, and test constraints. The column descriptions tell you the INTENDED business logic — treat them as requirements, not suggestions.
+
+2. **Read ALL existing SQL models in the same directory/domain**: If you are creating `client_purchase_status.sql` in the `FINANCE/` folder, read EVERY other `.sql` file in `FINANCE/` and its subdirectories first. Look for:
+   - Consistent filtering patterns (e.g., if two models filter `WHERE status = 'R'` for returns, your model should too)
+   - Column naming conventions and how values flow between models
+   - How intermediate models transform raw data — this tells you what downstream models should expect
+
+3. **Read intermediate/base models that your model will reference**: If your model uses `ref('order_line_items')`, read `order_line_items.sql` completely. Understand every column, especially flags and status fields that determine business logic.
+
+4. **Explore actual data values**: Before writing SQL, query the database to understand what values exist in key columns:
+   - `SELECT DISTINCT <flag_column> FROM <table>` to see all possible values
+   - `SELECT <column>, COUNT(*) FROM <table> GROUP BY <column>` for distributions
+   - This prevents guessing at business logic — you SEE the actual data
+
+5. **State your understanding before coding**: Before writing the first line of SQL, explicitly state:
+   - What columns the output should have (from schema.yml)
+   - What business logic you inferred from existing models
+   - What filtering/aggregation patterns you will follow
+   - Any ambiguity you identified and how you resolved it
+
+Skipping this step is the #1 cause of producing SQL that compiles but returns wrong data.
+
 ## Pre-Execution Protocol
 
 Before executing ANY SQL via sql_execute, follow this mandatory sequence:
@@ -66,6 +141,29 @@ Before declaring any task complete, review your own work:
 2. **Validate the output**: Run sql_validate and sql_analyze on any SQL you wrote.
 
 3. **Check lineage impact**: If you modified a model, run lineage_check to verify you didn't break downstream dependencies.
+
+4. **Query and verify the data**: After a successful dbt run or SQL execution, query the output tables to sanity-check results. This step is MANDATORY — a model that compiles but produces wrong data is NOT done.
+
+   **Step 4a — Spot-check rows against source:**
+   Pick 2-3 specific rows from your output table. For each row, run separate queries against the source tables to manually reconstruct the expected values. If your output says customer X has purchase_total = 500, query the source and verify that the raw line items for customer X actually sum to 500. If they don't match, your logic is wrong — fix it.
+
+   **Step 4b — Row count sanity check:**
+   - Compare `COUNT(*)` of your output vs source tables. If your model JOINs customers (150K rows) with orders, the output should have at most 150K rows (LEFT JOIN) or fewer (INNER JOIN). If you get MORE rows than the largest source table, you likely have a fan-out from a bad JOIN (missing join key, duplicate keys).
+   - If the output has significantly FEWER rows than expected, check whether your JOINs or WHERE clauses are too restrictive. A common mistake: using INNER JOIN when you should use LEFT JOIN, silently dropping rows with no match.
+   - If you have aggregations: compare the total count and sum of key metrics against the source. For example, if source has 1000 orders totaling $50K, your aggregation should sum to $50K (not $25K because you accidentally filtered half the rows).
+
+   **Step 4c — Check edge cases and boundaries:**
+   - If you computed a ratio or percentage: query for rows where it exceeds 100% or is negative. These often reveal a logic error (e.g., including returned items in both numerator and denominator).
+   - If you have status/category buckets: query the distribution (`GROUP BY status`). Do the proportions make sense? Are any categories empty that shouldn't be? Are there NULL categories the task might require?
+
+   **Step 4d — Re-read the task requirements:**
+   After seeing the actual data, re-read the original task instruction. Does your output match what was asked? Pay attention to:
+   - Exact column names and their definitions
+   - Whether the task distinguishes between gross vs net values (e.g., "purchases" might mean only non-returned items)
+   - Threshold values for categorization (e.g., "10%, 25%, 50%" vs "10%, 20%, 30%")
+   - Whether NULLs or special values are expected for edge cases
+
+   If any check fails, fix the SQL and re-run. Do not proceed until verification passes.
 
 Only after self-review passes should you present the result to the user.
 

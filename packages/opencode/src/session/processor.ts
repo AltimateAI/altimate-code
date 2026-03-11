@@ -496,6 +496,28 @@ export namespace SessionProcessor {
               }
               retryErrorType = e?.name ?? "UnknownError"
               attempt++
+
+              // Give up after max attempts or total retry time exceeded
+              const totalRetryTime = retryStartTime ? Date.now() - retryStartTime : 0
+              if (
+                attempt > SessionRetry.RETRY_MAX_ATTEMPTS ||
+                totalRetryTime > SessionRetry.RETRY_MAX_TOTAL_TIME_MS
+              ) {
+                log.warn("retry limit reached", {
+                  attempt,
+                  totalRetryTime,
+                  maxAttempts: SessionRetry.RETRY_MAX_ATTEMPTS,
+                  maxTotalTime: SessionRetry.RETRY_MAX_TOTAL_TIME_MS,
+                })
+                input.assistantMessage.error = error
+                Bus.publish(Session.Event.Error, {
+                  sessionID: input.assistantMessage.sessionID,
+                  error: input.assistantMessage.error,
+                })
+                SessionStatus.set(input.sessionID, { type: "idle" })
+                break
+              }
+
               const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
               SessionStatus.set(input.sessionID, {
                 type: "retry",

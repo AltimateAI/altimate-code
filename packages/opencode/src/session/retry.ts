@@ -7,6 +7,8 @@ export namespace SessionRetry {
   export const RETRY_BACKOFF_FACTOR = 2
   export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
   export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
+  export const RETRY_MAX_ATTEMPTS = 10 // give up after this many retries
+  export const RETRY_MAX_TOTAL_TIME_MS = 120_000 // give up after 2 minutes of total retry time
 
   export async function sleep(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
