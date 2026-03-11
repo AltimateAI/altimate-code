@@ -1,0 +1,13 @@
+# Spider2 cloned repo (large, re-cloneable)
+spider2_repo/
+
+# Per-task workspace copies
+workspace/
+
+# Results and reports (generated artifacts)
+results/
+reports/
+
+# Python
+__pycache__/
+*.pyc
