@@ -15,7 +15,7 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.os }})
-    runs-on: arc-runner-altimate-code
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
@@ -59,7 +59,7 @@ jobs:
   publish-npm:
     name: Publish to npm
     needs: build
-    runs-on: arc-runner-altimate-code
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
@@ -125,7 +125,7 @@ jobs:
   # doesn't need CLI binary artifacts. This allows it to run in parallel.
   publish-engine:
     name: Publish engine to PyPI
-    runs-on: arc-runner-altimate-code
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: pypi
     permissions:
@@ -156,7 +156,7 @@ jobs:
   github-release:
     name: Create GitHub Release
     needs: [build, publish-npm]
-    runs-on: arc-runner-altimate-code
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: write

@@ -14,7 +14,7 @@ jobs:
       matrix:
         settings:
           - name: linux
-            host: arc-runner-altimate-code
+            host: ubuntu-latest
           - name: windows
             host: windows-latest
     runs-on: ${{ matrix.settings.host }}
@@ -46,7 +46,7 @@ jobs:
       matrix:
         settings:
           - name: linux
-            host: arc-runner-altimate-code
+            host: ubuntu-latest
             playwright: bunx playwright install --with-deps
           - name: windows
             host: windows-latest
@@ -89,7 +89,7 @@ jobs:
 
   required:
     name: test (linux)
-    runs-on: arc-runner-altimate-code
+    runs-on: ubuntu-latest
     needs:
       - unit
       - e2e
