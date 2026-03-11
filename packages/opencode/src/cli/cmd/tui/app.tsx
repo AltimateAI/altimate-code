@@ -9,6 +9,7 @@ import { Installation } from "@/installation"
 import { Flag } from "@/flag/flag"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderList } from "@tui/component/dialog-provider"
+import { DialogAltimateLogin } from "@tui/component/dialog-altimate-login"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
@@ -512,6 +513,17 @@ function App() {
         dialog.replace(() => <DialogProviderList />)
       },
       category: "Provider",
+    },
+    {
+      title: "Login to Altimate",
+      value: "altimate.login",
+      category: "Provider",
+      slash: {
+        name: "login",
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogAltimateLogin />)
+      },
     },
     {
       title: "View status",

@@ -178,6 +178,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
         }
 
+        // Prefer altimate-backend when configured
+        const altimateProvider = sync.data.provider.find((x) => x.id === "altimate-backend")
+        if (altimateProvider) {
+          const altimateModel = Object.values(altimateProvider.models)[0]
+          if (altimateModel) {
+            return {
+              providerID: "altimate-backend",
+              modelID: altimateModel.id,
+            }
+          }
+        }
+
         const provider = sync.data.provider[0]
         if (!provider) return undefined
         const defaultModel = sync.data.provider_default[provider.id]
