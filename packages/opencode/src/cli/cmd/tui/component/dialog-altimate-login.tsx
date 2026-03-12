@@ -37,11 +37,11 @@ export function DialogAltimateLogin() {
     <>
       {step() === "url" && (
         <DialogPrompt
-          title="Altimate Backend URL"
+          title="Altimate URL"
           placeholder="https://api.myaltimate.com"
           value="https://api.myaltimate.com"
           description={() => (
-            <text fg={theme.textMuted}>Enter the URL of your Altimate backend server</text>
+            <text fg={theme.textMuted}>Enter your Altimate server URL</text>
           )}
           onConfirm={(value) => {
             if (value) setUrl(value)

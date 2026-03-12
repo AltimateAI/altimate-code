@@ -847,7 +847,7 @@ export namespace Provider {
       }
       database["altimate-backend"] = {
         id: "altimate-backend",
-        name: "Altimate Backend",
+        name: "Altimate",
         source: "custom",
         env: [],
         options: {},
