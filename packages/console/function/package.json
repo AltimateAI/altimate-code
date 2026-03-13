@@ -17,7 +17,7 @@
     "@typescript/native-preview": "catalog:"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "2.0.0",
+    "@ai-sdk/anthropic": "3.0.58",
     "@ai-sdk/openai": "2.0.2",
     "@ai-sdk/openai-compatible": "1.0.1",
     "@hono/zod-validator": "catalog:",
