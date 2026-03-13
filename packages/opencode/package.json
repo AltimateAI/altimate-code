@@ -40,7 +40,7 @@
     "@types/yargs": "17.0.33",
     "@types/which": "3.0.4",
     "@typescript/native-preview": "catalog:",
-    "drizzle-kit": "1.0.0-beta.12-a5629fb",
+    "drizzle-kit": "1.0.0-beta.18-5ffac6d",
     "drizzle-orm": "1.0.0-beta.12-a5629fb",
     "typescript": "catalog:",
     "vscode-languageserver-types": "3.17.5",
