@@ -11,7 +11,7 @@
     "start": "vite start"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "1.15.2",
+    "@cloudflare/vite-plugin": "1.28.0",
     "@ibm/plex": "6.4.1",
     "@jsx-email/render": "1.1.1",
     "@kobalte/core": "catalog:",
