@@ -27,6 +27,7 @@ import { SkillTool } from "../../tool/skill"
 import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
+import { LangfuseTracer } from "../../altimate/observability/langfuse"
 
 type ToolProps<T extends Tool.Info> = {
   input: Tool.InferParameters<T>
@@ -516,6 +517,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const events = await sdk.event.subscribe()
       let error: string | undefined
 
+      // Langfuse tracing — initialized lazily after sessionID is available
+      const tracer = LangfuseTracer.fromEnv()
+
       async function loop() {
         const toggles = new Map<string, boolean>()
 
@@ -537,6 +541,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.sessionID !== sessionID) continue
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
+              tracer?.logToolCall(part as Parameters<LangfuseTracer["logToolCall"]>[0])
               if (emit("tool_use", { part })) continue
               if (part.state.status === "completed") {
                 tool(part)
@@ -561,14 +566,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "step-start") {
+              tracer?.logStepStart(part)
               if (emit("step_start", { part })) continue
             }
 
             if (part.type === "step-finish") {
+              tracer?.logStepFinish(part)
               if (emit("step_finish", { part })) continue
             }
 
             if (part.type === "text" && part.time?.end) {
+              tracer?.logText(part)
               if (emit("text", { part })) continue
               const text = part.text.trim()
               if (!text) continue
@@ -668,6 +676,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       await share(sdk, sessionID)
 
+      // Start Langfuse trace now that sessionID is available
+      if (tracer) {
+        tracer.startTrace(sessionID, {
+          model: args.model,
+          agent,
+          prompt: message,
+        })
+      }
+
       // Start event listener before sending the prompt so no events are missed
       const loopPromise = loop().catch((e) => {
         console.error(e)
@@ -697,6 +714,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
+
+      // Finalize Langfuse trace and emit URL
+      if (tracer) {
+        const traceUrl = await tracer.endTrace(error)
+        if (traceUrl) emit("langfuse_trace", { url: traceUrl })
+      }
 
       // Write accumulated text output to file if --output was specified
       if (args.output) {
