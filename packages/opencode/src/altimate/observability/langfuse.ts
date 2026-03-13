@@ -17,6 +17,9 @@ export class LangfuseTracer {
     | ReturnType<NonNullable<LangfuseTracer["trace"]>["generation"]>
     | undefined
   private generationText: string[] = []
+  private generationToolCalls: string[] = []
+  // Tool results collected between generations — becomes input for the next generation
+  private pendingToolResults: Array<{ tool: string; summary: string }> = []
 
   // Cumulative metrics
   private totalTokens = 0
@@ -85,9 +88,17 @@ export class LangfuseTracer {
   logStepStart(part: { id: string }) {
     if (!this.trace) return
     try {
+      // Build input from tool results collected since the last generation
+      const input =
+        this.pendingToolResults.length > 0
+          ? this.pendingToolResults.map((r) => `[${r.tool}] ${r.summary}`).join("\n")
+          : undefined
+      this.pendingToolResults = []
       this.generationText = []
+      this.generationToolCalls = []
       this.currentGeneration = this.trace.generation({
         name: `generation-${part.id}`,
+        input,
         startTime: new Date(),
       })
     } catch {
@@ -125,9 +136,17 @@ export class LangfuseTracer {
       this.totalTokens += usage.total
       this.totalCost += part.cost
 
+      // Use text if available, otherwise summarize which tool calls were made
+      const textOutput = this.generationText.join("")
+      const output =
+        textOutput ||
+        (this.generationToolCalls.length > 0
+          ? `[tool calls: ${this.generationToolCalls.join(", ")}]`
+          : undefined)
+
       this.currentGeneration.update({
         endTime: new Date(),
-        output: this.generationText.join(""),
+        output,
         usage,
         metadata: {
           reason: part.reason,
@@ -171,6 +190,15 @@ export class LangfuseTracer {
       const endTime = new Date(part.state.time.end)
       const state = part.state
       const isError = state.status === "error"
+
+      // Track tool call name for current generation output
+      this.generationToolCalls.push(part.tool)
+
+      // Collect a summary for the next generation's input context
+      const outputSummary = isError
+        ? `error: ${state.error.slice(0, 200)}`
+        : state.output.slice(0, 500)
+      this.pendingToolResults.push({ tool: part.tool, summary: outputSummary })
 
       this.trace.span({
         name: part.tool,
