@@ -86,7 +86,8 @@ function prepareBinDirectory(binaryName) {
 }
 
 function printWelcome(version) {
-  const v = `altimate-code v${version} installed`
+  const cleanVersion = version.replace(/^v/, "")
+  const v = `altimate-code v${cleanVersion} installed`
   const lines = [
     "",
     "  Get started:",
@@ -112,6 +113,21 @@ function printWelcome(version) {
   console.log(bot)
 }
 
+/**
+ * Write a marker file so the CLI can show a welcome/upgrade banner on first run.
+ * npm v7+ silences postinstall stdout, so the CLI reads this marker at startup instead.
+ */
+function writeUpgradeMarker(version) {
+  try {
+    const xdgData = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share")
+    const dataDir = path.join(xdgData, "altimate-code")
+    fs.mkdirSync(dataDir, { recursive: true })
+    fs.writeFileSync(path.join(dataDir, ".installed-version"), version.replace(/^v/, ""))
+  } catch {
+    // Non-fatal — the CLI just won't show a welcome banner
+  }
+}
+
 async function main() {
   let version
   try {
@@ -126,7 +142,10 @@ async function main() {
       // On Windows, the .exe is already included in the package and bin field points to it
       // No postinstall setup needed
       console.log("Windows detected: binary setup not needed (using packaged .exe)")
-      if (version) printWelcome(version)
+      if (version) {
+        writeUpgradeMarker(version)
+        printWelcome(version)
+      }
       return
     }
 
@@ -141,7 +160,10 @@ async function main() {
       fs.copyFileSync(binaryPath, target)
     }
     fs.chmodSync(target, 0o755)
-    if (version) printWelcome(version)
+    if (version) {
+      writeUpgradeMarker(version)
+      printWelcome(version)
+    }
   } catch (error) {
     console.error("Failed to setup altimate-code binary:", error.message)
     process.exit(1)

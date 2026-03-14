@@ -80,11 +80,12 @@ export function createDummyBinary(dir: string, name?: string): string {
   return binaryPath
 }
 
-export function runPostinstall(cwd: string) {
+export function runPostinstall(cwd: string, env?: Record<string, string>) {
   const result = spawnSync("node", ["postinstall.mjs"], {
     cwd,
     encoding: "utf-8",
     timeout: 10_000,
+    env: { ...process.env, ...env },
   })
   return {
     exitCode: result.status ?? -1,

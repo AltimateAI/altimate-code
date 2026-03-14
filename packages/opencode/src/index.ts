@@ -36,6 +36,9 @@ import { Database } from "./storage/db"
 // altimate_change start - telemetry import
 import { Telemetry } from "./telemetry"
 // altimate_change end
+// altimate_change start - welcome banner
+import { showWelcomeBannerIfNeeded } from "./cli/welcome"
+// altimate_change end
 
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {
@@ -95,6 +98,10 @@ let cli = yargs(hideBin(process.argv))
     // Initialize telemetry early so events from MCP, engine, auth are captured.
     // init() is idempotent — safe to call again later in session prompt.
     Telemetry.init().catch(() => {})
+    // altimate_change end
+
+    // altimate_change start - welcome banner on first run after install/upgrade
+    showWelcomeBannerIfNeeded()
     // altimate_change end
 
     // altimate_change start - app name in logs

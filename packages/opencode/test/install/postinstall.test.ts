@@ -7,6 +7,7 @@ import {
   createBinaryPackage,
   runPostinstall,
   CURRENT_PLATFORM,
+  POSTINSTALL_SCRIPT,
 } from "./fixture"
 
 // On Windows, postinstall.mjs takes a different early-exit path that skips
@@ -84,9 +85,76 @@ describe("postinstall.mjs", () => {
     createMainPackageDir(dir, { version: "2.5.0" })
     createBinaryPackage(dir)
 
-    const result = runPostinstall(dir)
+    const dataDir = path.join(dir, "xdg-data")
+    const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain("altimate-code v2.5.0 installed")
+  })
+
+  test("does not produce double-v when version already has v prefix", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+
+    createMainPackageDir(dir, { version: "v2.5.0" })
+    createBinaryPackage(dir)
+
+    const dataDir = path.join(dir, "xdg-data")
+    const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("altimate-code v2.5.0 installed")
+    expect(result.stdout).not.toContain("vv2.5.0")
+  })
+
+  test("writes upgrade marker file to XDG_DATA_HOME", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+
+    createMainPackageDir(dir, { version: "2.5.0" })
+    createBinaryPackage(dir)
+
+    const dataDir = path.join(dir, "xdg-data")
+    const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
+    expect(result.exitCode).toBe(0)
+
+    const markerPath = path.join(dataDir, "altimate-code", ".installed-version")
+    expect(fs.existsSync(markerPath)).toBe(true)
+    expect(fs.readFileSync(markerPath, "utf-8")).toBe("2.5.0")
+  })
+
+  test("upgrade marker strips v prefix from version", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+
+    createMainPackageDir(dir, { version: "v1.0.0" })
+    createBinaryPackage(dir)
+
+    const dataDir = path.join(dir, "xdg-data")
+    const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
+    expect(result.exitCode).toBe(0)
+
+    const markerPath = path.join(dataDir, "altimate-code", ".installed-version")
+    expect(fs.readFileSync(markerPath, "utf-8")).toBe("1.0.0")
+  })
+
+  test("does not write marker when version is missing", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+
+    // Create package.json without version field
+    fs.copyFileSync(POSTINSTALL_SCRIPT, path.join(dir, "postinstall.mjs"))
+    fs.writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ name: "@altimateai/altimate-code" }, null, 2),
+    )
+    fs.mkdirSync(path.join(dir, "bin"), { recursive: true })
+    createBinaryPackage(dir)
+
+    const dataDir = path.join(dir, "xdg-data")
+    const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
+    expect(result.exitCode).toBe(0)
+
+    const markerPath = path.join(dataDir, "altimate-code", ".installed-version")
+    expect(fs.existsSync(markerPath)).toBe(false)
   })
 
   unixtest("exits 1 when platform binary package is missing", () => {
