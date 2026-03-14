@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach } from "bun:test"
+import { describe, expect, test, beforeEach, afterAll } from "bun:test"
 import Bun from "bun"
 
 // ---------------------------------------------------------------------------
@@ -32,6 +32,11 @@ function pushShellThrow() {
 // The tool does `import Bun from "bun"` — since Bun.$ is writable,
 // replacing it here means dynamically imported modules will pick up our mock.
 // ---------------------------------------------------------------------------
+
+const originalBunShell = Bun.$
+afterAll(() => {
+  Bun.$ = originalBunShell
+})
 
 Bun.$ = function mockedShell(strings: TemplateStringsArray, ...values: any[]) {
   const parts: string[] = []
@@ -155,6 +160,46 @@ describe("tool.feedback_submit", () => {
       }
     })
 
+    test("rejects empty title", async () => {
+      const tool = await FeedbackSubmitTool.init()
+      const result = tool.parameters.safeParse({
+        title: "",
+        category: "bug",
+        description: "test",
+      })
+      expect(result.success).toBe(false)
+    })
+
+    test("rejects whitespace-only title", async () => {
+      const tool = await FeedbackSubmitTool.init()
+      const result = tool.parameters.safeParse({
+        title: "   ",
+        category: "bug",
+        description: "test",
+      })
+      expect(result.success).toBe(false)
+    })
+
+    test("rejects empty description", async () => {
+      const tool = await FeedbackSubmitTool.init()
+      const result = tool.parameters.safeParse({
+        title: "Test",
+        category: "bug",
+        description: "",
+      })
+      expect(result.success).toBe(false)
+    })
+
+    test("rejects whitespace-only description", async () => {
+      const tool = await FeedbackSubmitTool.init()
+      const result = tool.parameters.safeParse({
+        title: "Test",
+        category: "bug",
+        description: "   ",
+      })
+      expect(result.success).toBe(false)
+    })
+
     test("rejects missing title", async () => {
       const tool = await FeedbackSubmitTool.init()
       const result = tool.parameters.safeParse({
@@ -240,7 +285,7 @@ describe("tool.feedback_submit", () => {
       expect(result.output).toContain("gh auth login")
     })
 
-    test("returns error when gh --version output contains 'not found'", async () => {
+    test("returns error when gh --version output does not start with 'gh version'", async () => {
       const tool = await FeedbackSubmitTool.init()
 
       pushShellResult("command not found: gh")
@@ -277,6 +322,35 @@ describe("tool.feedback_submit", () => {
 
       expect(result.title).toBe("Feedback submission failed")
       expect(result.metadata.error).toBe("gh_not_installed")
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // gh auth status throws
+  // -------------------------------------------------------------------------
+
+  describe("gh auth status throws", () => {
+    test("returns gh_auth_check_failed (not gh_not_installed) when auth check throws", async () => {
+      const tool = await FeedbackSubmitTool.init()
+
+      // gh --version succeeds
+      pushShellResult("gh version 2.40.0")
+      // gh auth status throws
+      pushShellThrow()
+
+      const result = await tool.execute(
+        {
+          title: "Test",
+          category: "bug" as const,
+          description: "test",
+          include_context: false,
+        },
+        ctx,
+      )
+
+      expect(result.title).toBe("Feedback submission failed")
+      expect(result.metadata.error).toBe("gh_auth_check_failed")
+      expect(result.output).toContain("gh auth status")
     })
   })
 
@@ -377,6 +451,28 @@ describe("tool.feedback_submit", () => {
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
       pushShellResult("")
+
+      const result = await tool.execute(
+        {
+          title: "Test",
+          category: "bug" as const,
+          description: "test",
+          include_context: false,
+        },
+        ctx,
+      )
+
+      expect(result.title).toBe("Feedback submission failed")
+      expect(result.metadata.error).toBe("issue_creation_failed")
+    })
+
+    test("returns failure when issue creation has non-zero exitCode even with stdout", async () => {
+      const tool = await FeedbackSubmitTool.init()
+
+      pushShellResult("gh version 2.40.0")
+      pushShellResult("Logged in", 0)
+      // gh issue create exits non-zero (e.g. label doesn't exist) with partial output
+      shellResults.push({ text: "https://github.com/AltimateAI/altimate-code/issues/1", exitCode: 1 })
 
       const result = await tool.execute(
         {

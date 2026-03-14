@@ -40,5 +40,3 @@ Ask the user to confirm. If they confirm, call the `feedback_submit` tool with:
 Step 4 — Show result:
 
 After submission, display the created GitHub issue URL to the user so they can track it. Thank them for the feedback.
-
-$ARGUMENTS

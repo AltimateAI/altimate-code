@@ -19,11 +19,11 @@ export const FeedbackSubmitTool = Tool.define("feedback_submit", {
     "Creates an issue with appropriate labels and metadata. " +
     "Requires the `gh` CLI to be installed and authenticated.",
   parameters: z.object({
-    title: z.string().describe("A concise title for the feedback issue"),
+    title: z.string().trim().min(1).describe("A concise title for the feedback issue"),
     category: z
       .enum(["bug", "feature", "improvement", "ux"])
       .describe("The category of feedback: bug, feature, improvement, or ux"),
-    description: z.string().describe("Detailed description of the feedback"),
+    description: z.string().trim().min(1).describe("Detailed description of the feedback"),
     include_context: z
       .boolean()
       .optional()
@@ -50,7 +50,7 @@ export const FeedbackSubmitTool = Tool.define("feedback_submit", {
       // ENOENT — gh binary not found on PATH
       return ghNotInstalled
     }
-    if (!ghVersion || ghVersion.includes("not found")) {
+    if (!ghVersion.trim().startsWith("gh version")) {
       return ghNotInstalled
     }
 
@@ -59,7 +59,13 @@ export const FeedbackSubmitTool = Tool.define("feedback_submit", {
     try {
       authStatus = await Bun.$`gh auth status`.quiet().nothrow()
     } catch {
-      return ghNotInstalled
+      return {
+        title: "Feedback submission failed",
+        metadata: { error: "gh_auth_check_failed", issueUrl: "" },
+        output:
+          "Failed to verify `gh` authentication status. Please check your installation with:\n" +
+          "  `gh auth status`",
+      }
     }
     if (authStatus.exitCode !== 0) {
       return {
@@ -114,7 +120,7 @@ export const FeedbackSubmitTool = Tool.define("feedback_submit", {
     const stdout = issueResult.stdout.toString().trim()
     const stderr = issueResult.stderr.toString().trim()
 
-    if (!stdout || !stdout.includes("github.com")) {
+    if (issueResult.exitCode !== 0 || !stdout || !stdout.includes("github.com")) {
       const errorDetail = stderr || stdout || "No output from gh CLI"
       return {
         title: "Feedback submission failed",
