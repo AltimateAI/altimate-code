@@ -140,9 +140,10 @@ describe("Bridge.start integration", () => {
   test("ensureEngine is called when bridge starts", async () => {
     const { Bridge } = await import("../../src/altimate/bridge/client")
 
-    // /bin/echo exists and will spawn successfully but won't respond to
-    // the JSON-RPC ping, so start() will eventually fail on verification.
-    process.env.OPENCODE_PYTHON = "/bin/echo"
+    // process.execPath (the current Bun/Node binary) exists on all platforms.
+    // When spawned as a Python replacement it exits quickly without speaking
+    // JSON-RPC, so start() fails on the ping verification as expected.
+    process.env.OPENCODE_PYTHON = process.execPath
 
     try {
       await Bridge.call("ping", {} as any)

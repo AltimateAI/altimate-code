@@ -11,6 +11,11 @@ import {
   CURRENT_PLATFORM,
 } from "./fixture"
 
+// These integration tests combine postinstall (Unix hard-link path) with
+// bin-wrapper execution of a Unix shell-script dummy binary. Skip on Windows
+// where both behave differently.
+const unixtest = process.platform !== "win32" ? test : test.skip
+
 let cleanup: (() => void) | undefined
 
 afterEach(() => {
@@ -19,7 +24,7 @@ afterEach(() => {
 })
 
 describe("install pipeline integration", () => {
-  test("full flow: layout -> postinstall -> bin wrapper executes dummy binary", () => {
+  unixtest("full flow: layout -> postinstall -> bin wrapper executes dummy binary", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -44,7 +49,7 @@ describe("install pipeline integration", () => {
     expect(wrapperResult.stdout).toContain("altimate-code-test-ok")
   })
 
-  test("missing optional dep: postinstall fails, bin wrapper also fails gracefully", () => {
+  unixtest("missing optional dep: postinstall fails, bin wrapper also fails gracefully", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -70,7 +75,7 @@ describe("install pipeline integration", () => {
     expect(wrapperResult.stderr).toContain("package manager failed to install")
   })
 
-  test("wrong-platform-only install: both scripts fail with clear errors", () => {
+  unixtest("wrong-platform-only install: both scripts fail with clear errors", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 

@@ -9,6 +9,11 @@ import {
   CURRENT_PLATFORM,
 } from "./fixture"
 
+// On Windows, postinstall.mjs takes a different early-exit path that skips
+// binary setup entirely (the .exe is packaged separately). Skip all tests that
+// depend on the Unix hard-link / error-path behavior.
+const unixtest = process.platform !== "win32" ? test : test.skip
+
 let cleanup: (() => void) | undefined
 
 afterEach(() => {
@@ -17,7 +22,7 @@ afterEach(() => {
 })
 
 describe("postinstall.mjs", () => {
-  test("finds binary and creates hard link in bin/", () => {
+  unixtest("finds binary and creates hard link in bin/", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -34,7 +39,7 @@ describe("postinstall.mjs", () => {
     expect(stat.mode & 0o111).toBeGreaterThan(0)
   })
 
-  test("replaces existing stale binary", () => {
+  unixtest("replaces existing stale binary", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -54,7 +59,7 @@ describe("postinstall.mjs", () => {
     expect(content).toContain("altimate-code-test-ok")
   })
 
-  test("creates bin/ dir if missing", () => {
+  unixtest("creates bin/ dir if missing", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -84,7 +89,7 @@ describe("postinstall.mjs", () => {
     expect(result.stdout).toContain("altimate-code v2.5.0 installed")
   })
 
-  test("exits 1 when platform binary package is missing", () => {
+  unixtest("exits 1 when platform binary package is missing", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -96,7 +101,7 @@ describe("postinstall.mjs", () => {
     expect(result.stderr).toContain("Failed to setup altimate-code binary")
   })
 
-  test("exits 1 when package exists but binary file is missing", () => {
+  unixtest("exits 1 when package exists but binary file is missing", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -108,7 +113,7 @@ describe("postinstall.mjs", () => {
     expect(result.stderr).toContain("Failed to setup altimate-code binary")
   })
 
-  test("exits 1 when only wrong-platform package is present", () => {
+  unixtest("exits 1 when only wrong-platform package is present", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 

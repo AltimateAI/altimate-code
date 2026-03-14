@@ -11,6 +11,10 @@ import {
   CURRENT_ARCH,
 } from "./fixture"
 
+// Dummy binaries created by the fixture are Unix shell scripts (#!/bin/sh).
+// Tests that run these binaries can only pass on Unix platforms.
+const unixtest = process.platform !== "win32" ? test : test.skip
+
 let cleanup: (() => void) | undefined
 
 afterEach(() => {
@@ -27,7 +31,7 @@ function copyBinWrapper(destDir: string): string {
 }
 
 describe("bin/altimate-code wrapper", () => {
-  test("uses ALTIMATE_CODE_BIN_PATH env var when set", () => {
+  unixtest("uses ALTIMATE_CODE_BIN_PATH env var when set", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -41,7 +45,7 @@ describe("bin/altimate-code wrapper", () => {
     expect(result.stdout).toContain("altimate-code-test-ok")
   })
 
-  test("uses cached .opencode when present", () => {
+  unixtest("uses cached .opencode when present", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -54,7 +58,7 @@ describe("bin/altimate-code wrapper", () => {
     expect(result.stdout).toContain("altimate-code-test-ok")
   })
 
-  test("finds binary in sibling node_modules package", () => {
+  unixtest("finds binary in sibling node_modules package", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -73,7 +77,7 @@ describe("bin/altimate-code wrapper", () => {
     expect(result.stdout).toContain("altimate-code-test-ok")
   })
 
-  test("finds binary in parent node_modules (hoisted)", () => {
+  unixtest("finds binary in parent node_modules (hoisted)", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
