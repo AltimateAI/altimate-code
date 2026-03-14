@@ -64,7 +64,7 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
     ---
 
-    Model-agnostic — bring your own provider, use your existing subscription, or run locally. Swap models without swapping your harness. Supports :material-cloud: Anthropic, :material-creation: OpenAI, :material-google: Google Gemini, :material-aws: AWS Bedrock, :material-microsoft-azure: Azure OpenAI, :material-server: Ollama, :material-router-wireless: OpenRouter, :material-cog: Mistral, and :material-lightning-bolt: Groq.
+    Model-agnostic — bring your own provider, use your existing subscription, or run locally. Swap models without swapping your harness. Supports :material-cloud: Anthropic, :material-creation: OpenAI, :material-google: Google Gemini, :material-google: Google Vertex AI, :material-aws: AWS Bedrock, :material-microsoft-azure: Azure OpenAI, :material-server: Ollama, :material-router-wireless: OpenRouter, :material-cog: Mistral, :material-lightning-bolt: Groq, :material-head-snowflake-outline: DeepInfra, :material-brain: Cerebras, :material-message-text: Cohere, :material-group: Together AI, :material-compass: Perplexity, :material-alpha-x-circle: xAI, and :material-github: GitHub Copilot.
 
 -   :material-puzzle:{ .lg .middle } **Customizable to your workflow**
 
@@ -124,6 +124,34 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
     Manifest parsing, test generation, model scaffolding, incremental model detection, and lineage-aware refactoring. Builds models that fit your project conventions.
 
 </div>
+
+---
+
+<h2 class="section-heading">What you can do today</h2>
+<p class="section-sub">A few prompts to try in your first five minutes.</p>
+
+```bash
+# Auto-detect your data stack (dbt projects, warehouse connections, installed tools)
+> /discover
+
+# Analyze a query for anti-patterns and optimization opportunities
+> Analyze this query for issues: SELECT * FROM orders JOIN customers ON orders.id = customers.order_id
+
+# Translate SQL across dialects
+> /sql-translate this Snowflake query to BigQuery: SELECT DATEADD(day, 7, current_date())
+
+# Generate dbt tests for a model
+> /generate-tests for models/staging/stg_orders.sql
+
+# Get a cost report for your Snowflake account
+> /cost-report
+
+# Scaffold a new dbt model following your project patterns
+> /model-scaffold fct_revenue from stg_orders and stg_payments
+
+# Check column-level lineage for a query
+> Trace the lineage for SELECT revenue, region FROM marts.fct_revenue
+```
 
 ---
 
