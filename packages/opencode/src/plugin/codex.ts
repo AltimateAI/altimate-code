@@ -128,19 +128,36 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
 }
 
 async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-  const response = await fetch(`${ISSUER}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-    }).toString(),
-  })
-  if (!response.ok) {
-    throw new Error(`Token refresh failed: ${response.status}`)
+  let lastError: Error | undefined
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(`${ISSUER}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+          client_id: CLIENT_ID,
+        }).toString(),
+      })
+      if (!response.ok) {
+        const body = await response.text().catch(() => "")
+        throw new Error(
+          `Codex OAuth token refresh failed (HTTP ${response.status}). ` +
+            `Try re-authenticating: altimate-code auth login openai` +
+            (body ? ` — ${body.slice(0, 200)}` : ""),
+        )
+      }
+      return response.json()
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e))
+      // Don't retry on 4xx (permanent auth failures) — only retry on network errors / 5xx
+      const is4xx = lastError.message.includes("HTTP 4")
+      if (is4xx || attempt >= 2) break
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+    }
   }
-  return response.json()
+  throw lastError ?? new Error("Token refresh failed after retries")
 }
 
 const HTML_SUCCESS = `<!doctype html>
@@ -436,8 +453,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             // Cast to include accountId field
             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
 
-            // Check if token needs refresh
-            if (!currentAuth.access || currentAuth.expires < Date.now()) {
+            // Check if token needs refresh (30s buffer to avoid edge-case expiry during request)
+            if (!currentAuth.access || currentAuth.expires < Date.now() + 30_000) {
               log.info("refreshing codex access token")
               const tokens = await refreshAccessToken(currentAuth.refresh)
               const newAccountId = extractAccountId(tokens) || authWithAccount.accountId

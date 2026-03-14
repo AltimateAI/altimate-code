@@ -122,6 +122,29 @@ describe("session.retry.retryable", () => {
 
     expect(SessionRetry.retryable(error)).toBeUndefined()
   })
+
+  test("retries auth errors with recovery message", () => {
+    const error = new MessageV2.AuthError({
+      providerID: "anthropic",
+      message: "Anthropic OAuth token refresh failed (HTTP 401)",
+    }).toObject() as ReturnType<NamedError["toObject"]>
+
+    const result = SessionRetry.retryable(error)
+    expect(result).toBeDefined()
+    expect(result).toContain("Authentication failed")
+    expect(result).toContain("altimate-code auth login anthropic")
+  })
+
+  test("retries auth errors for other providers", () => {
+    const error = new MessageV2.AuthError({
+      providerID: "openai",
+      message: "Codex OAuth token refresh failed (HTTP 403)",
+    }).toObject() as ReturnType<NamedError["toObject"]>
+
+    const result = SessionRetry.retryable(error)
+    expect(result).toBeDefined()
+    expect(result).toContain("altimate-code auth login openai")
+  })
 })
 
 describe("session.message-v2.fromError", () => {
@@ -171,6 +194,41 @@ describe("session.message-v2.fromError", () => {
     const retryable = SessionRetry.retryable(error)
     expect(retryable).toBeDefined()
     expect(retryable).toBe("Connection reset by server")
+  })
+
+  test("converts token refresh failure to ProviderAuthError", () => {
+    const error = new Error("Anthropic OAuth token refresh failed (HTTP 401). Try re-authenticating: altimate-code auth login anthropic")
+    const result = MessageV2.fromError(error, { providerID: "anthropic" })
+
+    expect(result.name).toBe("ProviderAuthError")
+    expect((result as any).data.providerID).toBe("anthropic")
+    expect((result as any).data.message).toContain("token refresh failed")
+  })
+
+  test("converts codex token refresh failure to ProviderAuthError", () => {
+    const error = new Error("Codex OAuth token refresh failed (HTTP 403). Try re-authenticating: altimate-code auth login openai")
+    const result = MessageV2.fromError(error, { providerID: "openai" })
+
+    expect(result.name).toBe("ProviderAuthError")
+    expect((result as any).data.providerID).toBe("openai")
+  })
+
+  test("provides descriptive message for generic Error with no message", () => {
+    const error = new Error()
+    const result = MessageV2.fromError(error, { providerID: "test" })
+
+    expect(result.name).toBe("UnknownError")
+    // Should not be just "Error" — should include stack or context
+    expect((result as any).data.message).not.toBe("Error")
+    expect((result as any).data.message.length).toBeGreaterThan(5)
+  })
+
+  test("provides descriptive message for TypeError with no message", () => {
+    const error = new TypeError()
+    const result = MessageV2.fromError(error, { providerID: "test" })
+
+    expect(result.name).toBe("UnknownError")
+    expect((result as any).data.message).toContain("TypeError")
   })
 
   test("marks OpenAI 404 status codes as retryable", () => {

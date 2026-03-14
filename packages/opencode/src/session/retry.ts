@@ -61,6 +61,10 @@ export namespace SessionRetry {
   export function retryable(error: ReturnType<NamedError["toObject"]>) {
     // context overflow errors should not be retried
     if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
+    // auth errors (token refresh failures) should be retried — the token may refresh on next attempt
+    if (MessageV2.AuthError.isInstance(error)) {
+      return `Authentication failed — retrying. If this persists, run: altimate-code auth login ${error.data.providerID}`
+    }
     if (MessageV2.APIError.isInstance(error)) {
       if (!error.data.isRetryable) return undefined
       if (error.data.responseBody?.includes("FreeUsageLimitError"))

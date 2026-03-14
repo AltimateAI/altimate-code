@@ -882,8 +882,22 @@ export namespace MessageV2 {
           },
           { cause: e },
         ).toObject()
-      case e instanceof Error:
-        return new NamedError.Unknown({ message: e.toString() }, { cause: e }).toObject()
+      case e instanceof Error: {
+        const msg = e.message || e.name || "Unknown error"
+        // Token refresh failures should surface as auth errors with recovery instructions
+        if (/OAuth token refresh failed/i.test(msg)) {
+          return new MessageV2.AuthError(
+            {
+              providerID: ctx.providerID,
+              message: msg,
+            },
+            { cause: e },
+          ).toObject()
+        }
+        // Include error class name for better diagnostics when message is generic
+        const displayMsg = msg === "Error" || msg === e.name ? `${e.name}: ${e.stack?.split("\n")[0] || "unknown error"}` : msg
+        return new NamedError.Unknown({ message: displayMsg }, { cause: e }).toObject()
+      }
       default:
         try {
           const parsed = ProviderError.parseStreamError(e)

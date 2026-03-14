@@ -76,29 +76,51 @@ export async function AnthropicAuthPlugin(input: PluginInput): Promise<Hooks> {
             const currentAuth = await getAuth()
             if (currentAuth.type !== "oauth") return fetch(requestInput, init)
 
-            // Refresh token if expired
-            if (!currentAuth.access || currentAuth.expires < Date.now()) {
-              const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  grant_type: "refresh_token",
-                  refresh_token: currentAuth.refresh,
-                  client_id: CLIENT_ID,
-                }),
-              })
-              if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`)
-              const json: TokenResponse = await response.json()
-              await input.client.auth.set({
-                path: { id: "anthropic" },
-                body: {
-                  type: "oauth",
-                  refresh: json.refresh_token,
-                  access: json.access_token,
-                  expires: Date.now() + json.expires_in * 1000,
-                },
-              })
-              currentAuth.access = json.access_token
+            // Refresh token if expired or about to expire (30s buffer)
+            if (!currentAuth.access || currentAuth.expires < Date.now() + 30_000) {
+              let lastError: Error | undefined
+              for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                  const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      grant_type: "refresh_token",
+                      refresh_token: currentAuth.refresh,
+                      client_id: CLIENT_ID,
+                    }),
+                  })
+                  if (!response.ok) {
+                    const body = await response.text().catch(() => "")
+                    throw new Error(
+                      `Anthropic OAuth token refresh failed (HTTP ${response.status}). ` +
+                        `Try re-authenticating: altimate-code auth login anthropic` +
+                        (body ? ` — ${body.slice(0, 200)}` : ""),
+                    )
+                  }
+                  const json: TokenResponse = await response.json()
+                  await input.client.auth.set({
+                    path: { id: "anthropic" },
+                    body: {
+                      type: "oauth",
+                      refresh: json.refresh_token,
+                      access: json.access_token,
+                      expires: Date.now() + json.expires_in * 1000,
+                    },
+                  })
+                  currentAuth.access = json.access_token
+                  currentAuth.expires = Date.now() + json.expires_in * 1000
+                  lastError = undefined
+                  break
+                } catch (e) {
+                  lastError = e instanceof Error ? e : new Error(String(e))
+                  // Don't retry on 4xx (permanent auth failures) — only retry on network errors / 5xx
+                  const is4xx = lastError.message.includes("HTTP 4")
+                  if (is4xx || attempt >= 2) break
+                  await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+                }
+              }
+              if (lastError) throw lastError
             }
 
             // Build headers from incoming request
