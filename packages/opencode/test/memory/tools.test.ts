@@ -3,30 +3,40 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 
-// Test tool parameter validation and output formatting
-// These tests verify the Zod schemas and tool response structures
+// Test tool parameter validation, output formatting, and integration
+// These tests verify Zod schemas and tool response structures
 // without requiring the full OpenCode runtime.
 
 import z from "zod"
 
 const MEMORY_MAX_BLOCK_SIZE = 2048
 
-// Reproduce the Zod schemas from the tool definitions
+// --- Schemas matching the actual tool definitions ---
+
+const CitationSchema = z.object({
+  file: z.string().min(1).max(512),
+  line: z.number().int().positive().optional(),
+  note: z.string().max(256).optional(),
+})
+
 const MemoryReadParams = z.object({
   scope: z.enum(["global", "project", "all"]).optional().default("all"),
   tags: z.array(z.string()).optional().default([]),
   id: z.string().optional(),
+  include_expired: z.boolean().optional().default(false),
 })
 
 const MemoryWriteParams = z.object({
   id: z
     .string()
     .min(1)
-    .max(128)
-    .regex(/^[a-z0-9][a-z0-9_-]*$/),
+    .max(256)
+    .regex(/^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/),
   scope: z.enum(["global", "project"]),
   content: z.string().min(1).max(MEMORY_MAX_BLOCK_SIZE),
   tags: z.array(z.string().max(64)).max(10).optional().default([]),
+  expires: z.string().datetime().optional(),
+  citations: z.array(CitationSchema).max(10).optional(),
 })
 
 const MemoryDeleteParams = z.object({
@@ -34,7 +44,37 @@ const MemoryDeleteParams = z.object({
   scope: z.enum(["global", "project"]),
 })
 
-const MemoryBlockIdRegex = /^[a-z0-9][a-z0-9_-]*$/
+const MemoryAuditParams = z.object({
+  scope: z.enum(["global", "project", "all"]).optional().default("all"),
+  limit: z.number().int().positive().max(200).optional().default(50),
+})
+
+const MemoryExtractParams = z.object({
+  facts: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(256).regex(/^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/),
+        scope: z.enum(["global", "project"]),
+        content: z.string().min(1).max(2048),
+        tags: z.array(z.string().max(64)).max(10).optional().default([]),
+        citations: z
+          .array(
+            z.object({
+              file: z.string().min(1).max(512),
+              line: z.number().int().positive().optional(),
+              note: z.string().max(256).optional(),
+            }),
+          )
+          .max(10)
+          .optional(),
+      }),
+    )
+    .min(1)
+    .max(10),
+})
+
+// Updated ID regex to match hierarchical IDs
+const MemoryBlockIdRegex = /^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/
 
 describe("Memory Tool Schemas", () => {
   describe("MemoryReadParams", () => {
@@ -43,6 +83,7 @@ describe("Memory Tool Schemas", () => {
       expect(result.scope).toBe("all")
       expect(result.tags).toEqual([])
       expect(result.id).toBeUndefined()
+      expect(result.include_expired).toBe(false)
     })
 
     test("accepts scope filter", () => {
@@ -60,8 +101,18 @@ describe("Memory Tool Schemas", () => {
       expect(result.id).toBe("warehouse-config")
     })
 
+    test("accepts include_expired=true", () => {
+      const result = MemoryReadParams.parse({ include_expired: true })
+      expect(result.include_expired).toBe(true)
+    })
+
     test("rejects invalid scope", () => {
       expect(() => MemoryReadParams.parse({ scope: "invalid" })).toThrow()
+    })
+
+    test("accepts hierarchical id in lookup", () => {
+      const result = MemoryReadParams.parse({ id: "warehouse/snowflake" })
+      expect(result.id).toBe("warehouse/snowflake")
     })
   })
 
@@ -76,6 +127,8 @@ describe("Memory Tool Schemas", () => {
       expect(result.scope).toBe("project")
       expect(result.content).toBe("Snowflake warehouse")
       expect(result.tags).toEqual([])
+      expect(result.expires).toBeUndefined()
+      expect(result.citations).toBeUndefined()
     })
 
     test("accepts params with tags", () => {
@@ -86,6 +139,68 @@ describe("Memory Tool Schemas", () => {
         tags: ["dbt", "conventions"],
       })
       expect(result.tags).toEqual(["dbt", "conventions"])
+    })
+
+    test("accepts params with expires", () => {
+      const result = MemoryWriteParams.parse({
+        id: "temp-note",
+        scope: "project",
+        content: "Temporary note",
+        expires: "2027-06-01T00:00:00.000Z",
+      })
+      expect(result.expires).toBe("2027-06-01T00:00:00.000Z")
+    })
+
+    test("rejects invalid expires datetime", () => {
+      expect(() =>
+        MemoryWriteParams.parse({
+          id: "bad-expires",
+          scope: "project",
+          content: "test",
+          expires: "not-a-date",
+        }),
+      ).toThrow()
+    })
+
+    test("accepts params with citations", () => {
+      const result = MemoryWriteParams.parse({
+        id: "cited-block",
+        scope: "project",
+        content: "Config from code",
+        citations: [{ file: "src/config.ts", line: 42, note: "Constant definition" }],
+      })
+      expect(result.citations).toHaveLength(1)
+      expect(result.citations![0].file).toBe("src/config.ts")
+    })
+
+    test("rejects more than 10 citations", () => {
+      const citations = Array.from({ length: 11 }, (_, i) => ({ file: `file${i}.ts` }))
+      expect(() =>
+        MemoryWriteParams.parse({
+          id: "too-many-citations",
+          scope: "project",
+          content: "test",
+          citations,
+        }),
+      ).toThrow()
+    })
+
+    test("accepts hierarchical id with slashes", () => {
+      const result = MemoryWriteParams.parse({
+        id: "warehouse/snowflake-config",
+        scope: "project",
+        content: "Snowflake setup",
+      })
+      expect(result.id).toBe("warehouse/snowflake-config")
+    })
+
+    test("accepts hierarchical id with dots", () => {
+      const result = MemoryWriteParams.parse({
+        id: "v1.0/config",
+        scope: "project",
+        content: "Versioned config",
+      })
+      expect(result.id).toBe("v1.0/config")
     })
 
     test("rejects empty id", () => {
@@ -109,6 +224,12 @@ describe("Memory Tool Schemas", () => {
     test("rejects id starting with hyphen", () => {
       expect(() =>
         MemoryWriteParams.parse({ id: "-invalid", scope: "project", content: "test" }),
+      ).toThrow()
+    })
+
+    test("rejects id ending with slash", () => {
+      expect(() =>
+        MemoryWriteParams.parse({ id: "warehouse/", scope: "project", content: "test" }),
       ).toThrow()
     })
 
@@ -159,14 +280,19 @@ describe("Memory Tool Schemas", () => {
       ).toThrow()
     })
 
-    test("rejects id longer than 128 chars", () => {
+    test("rejects id longer than 256 chars", () => {
       expect(() =>
         MemoryWriteParams.parse({
-          id: "a".repeat(129),
+          id: "a".repeat(257),
           scope: "project",
           content: "test",
         }),
       ).toThrow()
+    })
+
+    test("accepts single-char id", () => {
+      const result = MemoryWriteParams.parse({ id: "a", scope: "project", content: "test" })
+      expect(result.id).toBe("a")
     })
   })
 
@@ -185,9 +311,121 @@ describe("Memory Tool Schemas", () => {
       expect(() => MemoryDeleteParams.parse({ id: "block", scope: "all" })).toThrow()
     })
   })
+
+  describe("MemoryAuditParams", () => {
+    test("accepts minimal params with defaults", () => {
+      const result = MemoryAuditParams.parse({})
+      expect(result.scope).toBe("all")
+      expect(result.limit).toBe(50)
+    })
+
+    test("accepts specific scope", () => {
+      const result = MemoryAuditParams.parse({ scope: "project" })
+      expect(result.scope).toBe("project")
+    })
+
+    test("accepts custom limit", () => {
+      const result = MemoryAuditParams.parse({ limit: 100 })
+      expect(result.limit).toBe(100)
+    })
+
+    test("rejects limit over 200", () => {
+      expect(() => MemoryAuditParams.parse({ limit: 201 })).toThrow()
+    })
+
+    test("rejects non-positive limit", () => {
+      expect(() => MemoryAuditParams.parse({ limit: 0 })).toThrow()
+      expect(() => MemoryAuditParams.parse({ limit: -1 })).toThrow()
+    })
+
+    test("rejects non-integer limit", () => {
+      expect(() => MemoryAuditParams.parse({ limit: 10.5 })).toThrow()
+    })
+
+    test("accepts scope 'all'", () => {
+      const result = MemoryAuditParams.parse({ scope: "all" })
+      expect(result.scope).toBe("all")
+    })
+
+    test("rejects invalid scope", () => {
+      expect(() => MemoryAuditParams.parse({ scope: "invalid" })).toThrow()
+    })
+  })
+
+  describe("MemoryExtractParams", () => {
+    test("accepts valid facts array", () => {
+      const result = MemoryExtractParams.parse({
+        facts: [
+          { id: "warehouse-config", scope: "project", content: "Snowflake ANALYTICS_WH" },
+          { id: "sql-style", scope: "global", content: "Use CTEs over subqueries" },
+        ],
+      })
+      expect(result.facts).toHaveLength(2)
+    })
+
+    test("accepts facts with all optional fields", () => {
+      const result = MemoryExtractParams.parse({
+        facts: [
+          {
+            id: "warehouse/config",
+            scope: "project",
+            content: "Snowflake setup",
+            tags: ["snowflake", "warehouse"],
+            citations: [{ file: "profiles.yml", line: 3, note: "Connection config" }],
+          },
+        ],
+      })
+      expect(result.facts[0].tags).toEqual(["snowflake", "warehouse"])
+      expect(result.facts[0].citations).toHaveLength(1)
+    })
+
+    test("rejects empty facts array", () => {
+      expect(() => MemoryExtractParams.parse({ facts: [] })).toThrow()
+    })
+
+    test("rejects more than 10 facts", () => {
+      const facts = Array.from({ length: 11 }, (_, i) => ({
+        id: `fact-${i}`,
+        scope: "project" as const,
+        content: `Fact ${i}`,
+      }))
+      expect(() => MemoryExtractParams.parse({ facts })).toThrow()
+    })
+
+    test("rejects fact with invalid id", () => {
+      expect(() =>
+        MemoryExtractParams.parse({
+          facts: [{ id: "INVALID", scope: "project", content: "test" }],
+        }),
+      ).toThrow()
+    })
+
+    test("rejects fact with empty content", () => {
+      expect(() =>
+        MemoryExtractParams.parse({
+          facts: [{ id: "valid", scope: "project", content: "" }],
+        }),
+      ).toThrow()
+    })
+
+    test("rejects fact with content over 2048 chars", () => {
+      expect(() =>
+        MemoryExtractParams.parse({
+          facts: [{ id: "big", scope: "project", content: "x".repeat(2049) }],
+        }),
+      ).toThrow()
+    })
+
+    test("accepts hierarchical IDs in facts", () => {
+      const result = MemoryExtractParams.parse({
+        facts: [{ id: "warehouse/snowflake/config", scope: "project", content: "test" }],
+      })
+      expect(result.facts[0].id).toBe("warehouse/snowflake/config")
+    })
+  })
 })
 
-describe("Memory Block ID validation", () => {
+describe("Memory Block ID validation (hierarchical)", () => {
   const validIds = [
     "warehouse-config",
     "naming-conventions",
@@ -196,6 +434,12 @@ describe("Memory Block ID validation", () => {
     "block123",
     "a",
     "0-config",
+    // New hierarchical IDs
+    "warehouse/snowflake",
+    "warehouse/bigquery-config",
+    "team/data/warehouse/snowflake",
+    "v1.0/config",
+    "conventions.dbt",
   ]
 
   const invalidIds = [
@@ -204,9 +448,12 @@ describe("Memory Block ID validation", () => {
     "Invalid",
     "UPPER",
     "has space",
-    "has.dot",
-    "has/slash",
     "",
+    "warehouse/",   // ends with slash
+    "warehouse.",    // ends with dot
+    "/warehouse",    // starts with slash
+    ".warehouse",    // starts with dot
+    "warehouse-",    // ends with hyphen
   ]
 
   for (const id of validIds) {
@@ -233,12 +480,10 @@ describe("Memory Tool Integration", () => {
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
-  // Simulate the full write → read → delete flow using filesystem operations
   test("full lifecycle: write, read, update, delete", async () => {
     const memDir = path.join(tmpDir, "memory")
     await fs.mkdir(memDir, { recursive: true })
 
-    // 1. Write a block
     const block = {
       id: "warehouse-config",
       scope: "project" as const,
@@ -252,18 +497,15 @@ describe("Memory Tool Integration", () => {
       `---\nid: ${block.id}\nscope: ${block.scope}\ncreated: ${block.created}\nupdated: ${block.updated}\ntags: ${JSON.stringify(block.tags)}\n---\n\n${block.content}\n`
     await fs.writeFile(path.join(memDir, `${block.id}.md`), serialized)
 
-    // 2. Verify it exists
     const files = await fs.readdir(memDir)
     expect(files).toContain("warehouse-config.md")
 
-    // 3. Read and verify content
     const raw = await fs.readFile(path.join(memDir, "warehouse-config.md"), "utf-8")
     expect(raw).toContain("id: warehouse-config")
     expect(raw).toContain("scope: project")
     expect(raw).toContain('tags: ["snowflake","warehouse"]')
     expect(raw).toContain("Provider: Snowflake")
 
-    // 4. Update the block
     const updated = serialized.replace("ANALYTICS_WH", "COMPUTE_WH").replace(
       "2026-03-14T10:00:00.000Z\ntags",
       "2026-03-14T12:00:00.000Z\ntags",
@@ -273,17 +515,56 @@ describe("Memory Tool Integration", () => {
     const rawUpdated = await fs.readFile(path.join(memDir, "warehouse-config.md"), "utf-8")
     expect(rawUpdated).toContain("COMPUTE_WH")
 
-    // 5. Delete
     await fs.unlink(path.join(memDir, "warehouse-config.md"))
     const filesAfterDelete = await fs.readdir(memDir)
     expect(filesAfterDelete).not.toContain("warehouse-config.md")
+  })
+
+  test("hierarchical block lifecycle with subdirectories", async () => {
+    const memDir = path.join(tmpDir, "memory")
+    const subDir = path.join(memDir, "warehouse")
+    await fs.mkdir(subDir, { recursive: true })
+
+    const content = `---\nid: warehouse/snowflake\nscope: project\ncreated: 2026-01-01T00:00:00.000Z\nupdated: 2026-01-01T00:00:00.000Z\ntags: ["snowflake"]\n---\n\nSnowflake config\n`
+    await fs.writeFile(path.join(subDir, "snowflake.md"), content)
+
+    const exists = await fs.stat(path.join(subDir, "snowflake.md")).then(() => true).catch(() => false)
+    expect(exists).toBe(true)
+
+    const raw = await fs.readFile(path.join(subDir, "snowflake.md"), "utf-8")
+    expect(raw).toContain("warehouse/snowflake")
+  })
+
+  test("block with expires and citations serialized correctly", async () => {
+    const memDir = path.join(tmpDir, "memory")
+    await fs.mkdir(memDir, { recursive: true })
+
+    const content = [
+      "---",
+      "id: temp-config",
+      "scope: project",
+      "created: 2026-01-01T00:00:00.000Z",
+      "updated: 2026-01-01T00:00:00.000Z",
+      'tags: ["temporary"]',
+      "expires: 2027-06-01T00:00:00.000Z",
+      'citations: [{"file":"config.ts","line":10,"note":"Main config"}]',
+      "---",
+      "",
+      "Temporary configuration",
+      "",
+    ].join("\n")
+
+    await fs.writeFile(path.join(memDir, "temp-config.md"), content)
+    const raw = await fs.readFile(path.join(memDir, "temp-config.md"), "utf-8")
+    expect(raw).toContain("expires: 2027-06-01T00:00:00.000Z")
+    expect(raw).toContain("citations:")
+    expect(raw).toContain("config.ts")
   })
 
   test("concurrent writes to different blocks", async () => {
     const memDir = path.join(tmpDir, "memory")
     await fs.mkdir(memDir, { recursive: true })
 
-    // Write multiple blocks concurrently
     const writes = Array.from({ length: 10 }, (_, i) => {
       const content = `---\nid: block-${i}\nscope: project\ncreated: 2026-01-01T00:00:00.000Z\nupdated: 2026-01-01T00:00:00.000Z\n---\n\nContent ${i}\n`
       return fs.writeFile(path.join(memDir, `block-${i}.md`), content)
@@ -306,5 +587,33 @@ describe("Memory Tool Integration", () => {
     const raw = await fs.readFile(path.join(memDir, "sql-notes.md"), "utf-8")
     expect(raw).toContain("SELECT * FROM")
     expect(raw).toContain("$100")
+  })
+})
+
+describe("Global opt-out (ALTIMATE_DISABLE_MEMORY)", () => {
+  test("Flag pattern: truthy values enable opt-out", () => {
+    // Verify the flag pattern matches what's in flag.ts
+    const truthy = (value: string | undefined) => {
+      const v = value?.toLowerCase()
+      return v === "true" || v === "1"
+    }
+
+    expect(truthy("true")).toBe(true)
+    expect(truthy("TRUE")).toBe(true)
+    expect(truthy("1")).toBe(true)
+    expect(truthy("false")).toBe(false)
+    expect(truthy("0")).toBe(false)
+    expect(truthy(undefined)).toBe(false)
+    expect(truthy("")).toBe(false)
+  })
+
+  test("Flag pattern: altTruthy checks both env var names", () => {
+    const truthy = (key: string) => {
+      const value = { ALTIMATE_DISABLE_MEMORY: "true" }[key]?.toLowerCase()
+      return value === "true" || value === "1"
+    }
+    const altTruthy = (altKey: string, openKey: string) => truthy(altKey) || truthy(openKey)
+
+    expect(altTruthy("ALTIMATE_DISABLE_MEMORY", "OPENCODE_DISABLE_MEMORY")).toBe(true)
   })
 })

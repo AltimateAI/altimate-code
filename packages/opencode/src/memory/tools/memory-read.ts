@@ -5,7 +5,7 @@ import { MemoryPrompt } from "../prompt"
 
 export const MemoryReadTool = Tool.define("altimate_memory_read", {
   description:
-    "Read Altimate Memory blocks from previous sessions. Use this to recall warehouse configurations, naming conventions, team preferences, and past analysis decisions. Supports filtering by scope (global/project) and tags.",
+    "Read Altimate Memory blocks from previous sessions. Use this to recall warehouse configurations, naming conventions, team preferences, and past analysis decisions. Supports filtering by scope (global/project) and tags. Expired blocks are hidden by default.",
   parameters: z.object({
     scope: z
       .enum(["global", "project", "all"])
@@ -17,7 +17,8 @@ export const MemoryReadTool = Tool.define("altimate_memory_read", {
       .optional()
       .default([])
       .describe("Filter blocks to only those containing all specified tags"),
-    id: z.string().optional().describe("Read a specific block by ID"),
+    id: z.string().optional().describe("Read a specific block by ID (supports hierarchical IDs like 'warehouse/snowflake')"),
+    include_expired: z.boolean().optional().default(false).describe("Include expired memory blocks in results"),
   }),
   async execute(args, ctx) {
     try {
@@ -42,10 +43,11 @@ export const MemoryReadTool = Tool.define("altimate_memory_read", {
         }
       }
 
+      const listOpts = { includeExpired: args.include_expired }
       let blocks =
         args.scope === "all"
-          ? await MemoryStore.listAll()
-          : await MemoryStore.list(args.scope as "global" | "project")
+          ? await MemoryStore.listAll(listOpts)
+          : await MemoryStore.list(args.scope as "global" | "project", listOpts)
 
       if (args.tags && args.tags.length > 0) {
         blocks = blocks.filter((b) => args.tags!.every((tag) => b.tags.includes(tag)))

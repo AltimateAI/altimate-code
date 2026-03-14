@@ -3,11 +3,9 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 
-// We test the store logic directly by importing the module and
-// controlling the directories via environment variables and mocking.
-// Since MemoryStore uses Global.Path.data and Instance.directory,
-// we create a self-contained test harness that exercises the same
-// serialization/parsing/CRUD logic.
+// Standalone test harness that mirrors src/memory/store.ts logic
+// Tests the serialization, parsing, CRUD, hierarchical IDs, TTL,
+// deduplication, audit logging, and citations without Instance context.
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 
@@ -35,23 +33,33 @@ function parseFrontmatter(raw: string): { meta: Record<string, unknown>; content
   return { meta, content: match[2].trim() }
 }
 
+interface Citation {
+  file: string
+  line?: number
+  note?: string
+}
+
 interface MemoryBlock {
   id: string
   scope: "global" | "project"
   tags: string[]
   created: string
   updated: string
+  expires?: string
+  citations?: Citation[]
   content: string
 }
 
 function serializeBlock(block: MemoryBlock): string {
   const tags = block.tags.length > 0 ? `\ntags: ${JSON.stringify(block.tags)}` : ""
+  const expires = block.expires ? `\nexpires: ${block.expires}` : ""
+  const citations = block.citations && block.citations.length > 0 ? `\ncitations: ${JSON.stringify(block.citations)}` : ""
   return [
     "---",
     `id: ${block.id}`,
     `scope: ${block.scope}`,
     `created: ${block.created}`,
-    `updated: ${block.updated}${tags}`,
+    `updated: ${block.updated}${tags}${expires}${citations}`,
     "---",
     "",
     block.content,
@@ -59,13 +67,39 @@ function serializeBlock(block: MemoryBlock): string {
   ].join("\n")
 }
 
+function isExpired(block: MemoryBlock): boolean {
+  if (!block.expires) return false
+  return new Date(block.expires) <= new Date()
+}
+
 const MEMORY_MAX_BLOCK_SIZE = 2048
 const MEMORY_MAX_BLOCKS_PER_SCOPE = 50
 
-// Standalone store implementation for testing (same logic as src/memory/store.ts)
+// Standalone store with hierarchical ID support, TTL, deduplication, audit logging
 function createTestStore(baseDir: string) {
   function blockPath(id: string): string {
-    return path.join(baseDir, `${id}.md`)
+    const parts = id.split("/")
+    return path.join(baseDir, ...parts.slice(0, -1), `${parts[parts.length - 1]}.md`)
+  }
+
+  function auditLogPath(): string {
+    return path.join(baseDir, ".log")
+  }
+
+  async function appendAuditLog(entry: string): Promise<void> {
+    const logPath = auditLogPath()
+    try {
+      await fs.mkdir(path.dirname(logPath), { recursive: true })
+      await fs.appendFile(logPath, entry + "\n", "utf-8")
+    } catch {
+      // best-effort
+    }
+  }
+
+  function auditEntry(action: string, id: string, extra?: string): string {
+    const ts = new Date().toISOString()
+    const suffix = extra ? ` ${extra}` : ""
+    return `[${ts}] ${action} project/${id}${suffix}`
   }
 
   return {
@@ -80,63 +114,118 @@ function createTestStore(baseDir: string) {
       }
       const parsed = parseFrontmatter(raw)
       if (!parsed) return undefined
+
+      const citations = (() => {
+        if (!parsed.meta.citations) return undefined
+        if (Array.isArray(parsed.meta.citations)) return parsed.meta.citations as Citation[]
+        return undefined
+      })()
+
       return {
         id: String(parsed.meta.id ?? id),
-        scope: (parsed.meta.scope as "global" | "project") ?? "global",
+        scope: (parsed.meta.scope as "global" | "project") ?? "project",
         tags: Array.isArray(parsed.meta.tags) ? (parsed.meta.tags as string[]) : [],
         created: String(parsed.meta.created ?? new Date().toISOString()),
         updated: String(parsed.meta.updated ?? new Date().toISOString()),
+        expires: parsed.meta.expires ? String(parsed.meta.expires) : undefined,
+        citations,
         content: parsed.content,
       }
     },
 
-    async list(): Promise<MemoryBlock[]> {
-      let entries: string[]
-      try {
-        entries = await fs.readdir(baseDir)
-      } catch (e: any) {
-        if (e.code === "ENOENT") return []
-        throw e
-      }
+    async list(opts?: { includeExpired?: boolean }): Promise<MemoryBlock[]> {
       const blocks: MemoryBlock[] = []
-      for (const entry of entries) {
-        if (!entry.endsWith(".md")) continue
-        const id = entry.slice(0, -3)
-        const block = await this.read(id)
-        if (block) blocks.push(block)
+
+      const scanDir = async (currentDir: string, prefix: string) => {
+        let entries: { name: string; isDirectory: () => boolean }[]
+        try {
+          entries = await fs.readdir(currentDir, { withFileTypes: true })
+        } catch (e: any) {
+          if (e.code === "ENOENT") return
+          throw e
+        }
+
+        for (const entry of entries) {
+          if (entry.name.startsWith(".")) continue
+          if (entry.isDirectory()) {
+            await scanDir(path.join(currentDir, entry.name), prefix ? `${prefix}/${entry.name}` : entry.name)
+          } else if (entry.name.endsWith(".md")) {
+            const baseName = entry.name.slice(0, -3)
+            const id = prefix ? `${prefix}/${baseName}` : baseName
+            const block = await this.read(id)
+            if (block) {
+              if (!opts?.includeExpired && isExpired(block)) continue
+              blocks.push(block)
+            }
+          }
+        }
       }
+
+      await scanDir(baseDir, "")
       blocks.sort((a, b) => b.updated.localeCompare(a.updated))
       return blocks
     },
 
-    async write(block: MemoryBlock): Promise<void> {
+    async findDuplicates(block: { id: string; tags: string[] }): Promise<MemoryBlock[]> {
+      const existing = await this.list()
+      return existing.filter((b) => {
+        if (b.id === block.id) return false
+        if (block.tags.length === 0) return false
+        const overlap = block.tags.filter((t) => b.tags.includes(t))
+        return overlap.length >= Math.ceil(block.tags.length / 2)
+      })
+    },
+
+    async write(block: MemoryBlock): Promise<{ duplicates: MemoryBlock[] }> {
       if (block.content.length > MEMORY_MAX_BLOCK_SIZE) {
         throw new Error(
           `Memory block "${block.id}" content exceeds maximum size of ${MEMORY_MAX_BLOCK_SIZE} characters (got ${block.content.length})`,
         )
       }
-      const existing = await this.list()
+      const existing = await this.list({ includeExpired: true })
       const isUpdate = existing.some((b) => b.id === block.id)
       if (!isUpdate && existing.length >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
         throw new Error(
           `Cannot create memory block "${block.id}": scope "${block.scope}" already has ${MEMORY_MAX_BLOCKS_PER_SCOPE} blocks (maximum). Delete an existing block first.`,
         )
       }
-      await fs.mkdir(baseDir, { recursive: true })
+
+      const duplicates = await this.findDuplicates(block)
+
       const filepath = blockPath(block.id)
+      const dir = path.dirname(filepath)
+      await fs.mkdir(dir, { recursive: true })
       const tmpPath = filepath + ".tmp"
       const serialized = serializeBlock(block)
       await fs.writeFile(tmpPath, serialized, "utf-8")
       await fs.rename(tmpPath, filepath)
+
+      const action = isUpdate ? "UPDATE" : "CREATE"
+      await appendAuditLog(auditEntry(action, block.id))
+
+      return { duplicates }
     },
 
     async remove(id: string): Promise<boolean> {
       const filepath = blockPath(id)
       try {
         await fs.unlink(filepath)
+        await appendAuditLog(auditEntry("DELETE", id))
         return true
       } catch (e: any) {
         if (e.code === "ENOENT") return false
+        throw e
+      }
+    },
+
+    async readAuditLog(limit: number = 50): Promise<string[]> {
+      const logPath = auditLogPath()
+      try {
+        const raw = await fs.readFile(logPath, "utf-8")
+        const lines = raw.trim().split("\n").filter(Boolean)
+        return lines.slice(-limit)
+      } catch (e: any) {
+        if (e.code === "ENOENT") return []
         throw e
       }
     },
@@ -217,6 +306,245 @@ describe("MemoryStore", () => {
       const result = await store.read("nonexistent")
       expect(result).toBeUndefined()
     })
+
+    test("write returns duplicates object", async () => {
+      const result = await store.write(makeBlock())
+      expect(result).toHaveProperty("duplicates")
+      expect(Array.isArray(result.duplicates)).toBe(true)
+    })
+  })
+
+  describe("TTL / expires", () => {
+    test("serializes and reads back expires field", async () => {
+      const block = makeBlock({ expires: "2026-12-31T23:59:59.000Z" })
+      await store.write(block)
+      const result = await store.read("test-block")
+      expect(result!.expires).toBe("2026-12-31T23:59:59.000Z")
+    })
+
+    test("omits expires when not set", async () => {
+      const block = makeBlock()
+      await store.write(block)
+      const result = await store.read("test-block")
+      expect(result!.expires).toBeUndefined()
+    })
+
+    test("isExpired returns true for past date", () => {
+      const block = makeBlock({ expires: "2020-01-01T00:00:00.000Z" })
+      expect(isExpired(block)).toBe(true)
+    })
+
+    test("isExpired returns false for future date", () => {
+      const block = makeBlock({ expires: "2099-12-31T23:59:59.000Z" })
+      expect(isExpired(block)).toBe(false)
+    })
+
+    test("isExpired returns false when no expires set", () => {
+      const block = makeBlock()
+      expect(isExpired(block)).toBe(false)
+    })
+
+    test("list() excludes expired blocks by default", async () => {
+      await store.write(makeBlock({ id: "active", expires: "2099-01-01T00:00:00.000Z" }))
+      await store.write(makeBlock({ id: "expired", expires: "2020-01-01T00:00:00.000Z" }))
+      await store.write(makeBlock({ id: "permanent" }))
+
+      const blocks = await store.list()
+      const ids = blocks.map((b) => b.id)
+      expect(ids).toContain("active")
+      expect(ids).toContain("permanent")
+      expect(ids).not.toContain("expired")
+    })
+
+    test("list() includes expired blocks when includeExpired=true", async () => {
+      await store.write(makeBlock({ id: "active" }))
+      await store.write(makeBlock({ id: "expired", expires: "2020-01-01T00:00:00.000Z" }))
+
+      const blocks = await store.list({ includeExpired: true })
+      const ids = blocks.map((b) => b.id)
+      expect(ids).toContain("active")
+      expect(ids).toContain("expired")
+    })
+  })
+
+  describe("citations", () => {
+    test("serializes and reads back citations", async () => {
+      const citations: Citation[] = [
+        { file: "src/config.ts", line: 42, note: "Warehouse constant" },
+        { file: "dbt_project.yml" },
+      ]
+      const block = makeBlock({ citations })
+      await store.write(block)
+      const result = await store.read("test-block")
+      expect(result!.citations).toHaveLength(2)
+      expect(result!.citations![0].file).toBe("src/config.ts")
+      expect(result!.citations![0].line).toBe(42)
+      expect(result!.citations![0].note).toBe("Warehouse constant")
+      expect(result!.citations![1].file).toBe("dbt_project.yml")
+    })
+
+    test("omits citations when not set", async () => {
+      const block = makeBlock()
+      await store.write(block)
+      const result = await store.read("test-block")
+      expect(result!.citations).toBeUndefined()
+    })
+
+    test("roundtrips citations through serialization", async () => {
+      const citations: Citation[] = [{ file: "models/staging/stg_orders.sql", line: 1, note: "Model definition" }]
+      const block = makeBlock({ id: "cited-block", citations })
+      await store.write(block)
+
+      // Read raw file to verify serialization format
+      const raw = await fs.readFile(path.join(tmpDir, "cited-block.md"), "utf-8")
+      expect(raw).toContain("citations:")
+      expect(raw).toContain("stg_orders.sql")
+
+      const result = await store.read("cited-block")
+      expect(result!.citations).toEqual(citations)
+    })
+  })
+
+  describe("hierarchical IDs (namespaces)", () => {
+    test("writes block with slash-based ID into subdirectory", async () => {
+      const block = makeBlock({ id: "warehouse/snowflake" })
+      await store.write(block)
+
+      // Verify file is in subdirectory
+      const exists = await fs.stat(path.join(tmpDir, "warehouse", "snowflake.md")).then(() => true).catch(() => false)
+      expect(exists).toBe(true)
+    })
+
+    test("reads block with hierarchical ID", async () => {
+      const block = makeBlock({ id: "warehouse/snowflake", content: "Snowflake config" })
+      await store.write(block)
+      const result = await store.read("warehouse/snowflake")
+      expect(result).toBeDefined()
+      expect(result!.id).toBe("warehouse/snowflake")
+      expect(result!.content).toBe("Snowflake config")
+    })
+
+    test("lists blocks from subdirectories", async () => {
+      await store.write(makeBlock({ id: "top-level", updated: "2026-01-01T00:00:00.000Z" }))
+      await store.write(makeBlock({ id: "warehouse/snowflake", updated: "2026-02-01T00:00:00.000Z" }))
+      await store.write(makeBlock({ id: "warehouse/bigquery", updated: "2026-03-01T00:00:00.000Z" }))
+      await store.write(makeBlock({ id: "conventions/dbt/naming", updated: "2026-04-01T00:00:00.000Z" }))
+
+      const blocks = await store.list()
+      const ids = blocks.map((b) => b.id)
+      expect(ids).toContain("top-level")
+      expect(ids).toContain("warehouse/snowflake")
+      expect(ids).toContain("warehouse/bigquery")
+      expect(ids).toContain("conventions/dbt/naming")
+      expect(blocks).toHaveLength(4)
+    })
+
+    test("deletes block with hierarchical ID", async () => {
+      await store.write(makeBlock({ id: "warehouse/snowflake" }))
+      const removed = await store.remove("warehouse/snowflake")
+      expect(removed).toBe(true)
+      const result = await store.read("warehouse/snowflake")
+      expect(result).toBeUndefined()
+    })
+
+    test("deeply nested IDs create proper directory structure", async () => {
+      await store.write(makeBlock({ id: "a/b/c/d" }))
+      const exists = await fs.stat(path.join(tmpDir, "a", "b", "c", "d.md")).then(() => true).catch(() => false)
+      expect(exists).toBe(true)
+    })
+  })
+
+  describe("deduplication", () => {
+    test("findDuplicates returns blocks with overlapping tags", async () => {
+      await store.write(makeBlock({ id: "existing-1", tags: ["snowflake", "warehouse", "config"] }))
+      await store.write(makeBlock({ id: "existing-2", tags: ["dbt", "conventions"] }))
+
+      const newBlock = { id: "new-block", tags: ["snowflake", "warehouse"] }
+      const dupes = await store.findDuplicates(newBlock)
+      expect(dupes).toHaveLength(1)
+      expect(dupes[0].id).toBe("existing-1")
+    })
+
+    test("findDuplicates excludes the same block (update case)", async () => {
+      await store.write(makeBlock({ id: "same-block", tags: ["snowflake", "warehouse"] }))
+
+      const dupes = await store.findDuplicates({ id: "same-block", tags: ["snowflake", "warehouse"] })
+      expect(dupes).toHaveLength(0)
+    })
+
+    test("findDuplicates returns empty for blocks with no tags", async () => {
+      await store.write(makeBlock({ id: "existing", tags: ["snowflake"] }))
+
+      const dupes = await store.findDuplicates({ id: "new-block", tags: [] })
+      expect(dupes).toHaveLength(0)
+    })
+
+    test("findDuplicates requires >= 50% tag overlap", async () => {
+      await store.write(makeBlock({ id: "existing", tags: ["a", "b", "c", "d"] }))
+
+      // 1/4 overlap — not enough
+      const dupes1 = await store.findDuplicates({ id: "new", tags: ["a", "x", "y", "z"] })
+      expect(dupes1).toHaveLength(0)
+
+      // 2/4 overlap — exactly 50% = ceil(4/2) = 2 — matches
+      const dupes2 = await store.findDuplicates({ id: "new", tags: ["a", "b", "y", "z"] })
+      expect(dupes2).toHaveLength(1)
+    })
+
+    test("write() returns detected duplicates", async () => {
+      await store.write(makeBlock({ id: "existing", tags: ["snowflake", "warehouse"] }))
+
+      const { duplicates } = await store.write(makeBlock({ id: "new-block", tags: ["snowflake", "warehouse", "config"] }))
+      expect(duplicates).toHaveLength(1)
+      expect(duplicates[0].id).toBe("existing")
+    })
+  })
+
+  describe("audit logging", () => {
+    test("records CREATE entries", async () => {
+      await store.write(makeBlock({ id: "first-block" }))
+      const log = await store.readAuditLog()
+      expect(log).toHaveLength(1)
+      expect(log[0]).toContain("CREATE")
+      expect(log[0]).toContain("first-block")
+    })
+
+    test("records UPDATE entries", async () => {
+      await store.write(makeBlock({ id: "my-block" }))
+      await store.write(makeBlock({ id: "my-block", content: "Updated" }))
+      const log = await store.readAuditLog()
+      expect(log).toHaveLength(2)
+      expect(log[0]).toContain("CREATE")
+      expect(log[1]).toContain("UPDATE")
+    })
+
+    test("records DELETE entries", async () => {
+      await store.write(makeBlock({ id: "to-delete" }))
+      await store.remove("to-delete")
+      const log = await store.readAuditLog()
+      expect(log).toHaveLength(2)
+      expect(log[1]).toContain("DELETE")
+      expect(log[1]).toContain("to-delete")
+    })
+
+    test("respects limit parameter", async () => {
+      for (let i = 0; i < 10; i++) {
+        await store.write(makeBlock({ id: `block-${i}` }))
+      }
+      const log = await store.readAuditLog(3)
+      expect(log).toHaveLength(3)
+    })
+
+    test("returns empty array for nonexistent log", async () => {
+      const log = await store.readAuditLog()
+      expect(log).toEqual([])
+    })
+
+    test("audit entries contain ISO timestamps", async () => {
+      await store.write(makeBlock({ id: "timestamped" }))
+      const log = await store.readAuditLog()
+      expect(log[0]).toMatch(/^\[\d{4}-\d{2}-\d{2}T/)
+    })
   })
 
   describe("list", () => {
@@ -239,12 +567,19 @@ describe("MemoryStore", () => {
       expect(blocks.map((b) => b.id)).toEqual(["newer", "middle", "older"])
     })
 
-    test("ignores non-.md files", async () => {
+    test("ignores non-.md files and dotfiles", async () => {
       await store.write(makeBlock())
       await fs.writeFile(path.join(tmpDir, "notes.txt"), "not a memory block")
       await fs.writeFile(path.join(tmpDir, ".DS_Store"), "")
       const blocks = await store.list()
       expect(blocks).toHaveLength(1)
+    })
+
+    test("ignores .log audit file", async () => {
+      await store.write(makeBlock({ id: "real-block" }))
+      // The .log file is created by audit logging
+      const blocks = await store.list()
+      expect(blocks.every((b) => !b.id.includes("log"))).toBe(true)
     })
   })
 
@@ -290,7 +625,6 @@ describe("MemoryStore", () => {
       for (let i = 0; i < MEMORY_MAX_BLOCKS_PER_SCOPE; i++) {
         await store.write(makeBlock({ id: `block-${String(i).padStart(3, "0")}` }))
       }
-      // Updating an existing block should succeed
       await store.write(makeBlock({ id: "block-000", content: "Updated content" }))
       const result = await store.read("block-000")
       expect(result!.content).toBe("Updated content")
@@ -344,6 +678,11 @@ describe("MemoryStore", () => {
         tags: ["dbt", "snowflake", "conventions"],
         created: "2026-01-15T10:30:00.000Z",
         updated: "2026-03-14T08:00:00.000Z",
+        expires: "2027-01-01T00:00:00.000Z",
+        citations: [
+          { file: "src/config.ts", line: 42, note: "Config definition" },
+          { file: "dbt_project.yml" },
+        ],
         content: "## Naming Conventions\n\n- staging: `stg_`\n- intermediate: `int_`\n- marts: `fct_` / `dim_`",
       })
       await store.write(block)
@@ -352,6 +691,8 @@ describe("MemoryStore", () => {
       expect(result!.tags).toEqual(block.tags)
       expect(result!.created).toBe(block.created)
       expect(result!.updated).toBe(block.updated)
+      expect(result!.expires).toBe(block.expires)
+      expect(result!.citations).toEqual(block.citations)
       expect(result!.content).toBe(block.content)
     })
 
@@ -360,6 +701,21 @@ describe("MemoryStore", () => {
       await store.write(block)
       const result = await store.read("test-block")
       expect(result!.tags).toEqual([])
+    })
+
+    test("roundtrips a hierarchical block with citations and TTL", async () => {
+      const block = makeBlock({
+        id: "warehouse/snowflake-config",
+        tags: ["snowflake"],
+        expires: "2027-06-01T00:00:00.000Z",
+        citations: [{ file: "profiles.yml", line: 5 }],
+        content: "Warehouse: ANALYTICS_WH",
+      })
+      await store.write(block)
+      const result = await store.read("warehouse/snowflake-config")
+      expect(result!.id).toBe("warehouse/snowflake-config")
+      expect(result!.expires).toBe("2027-06-01T00:00:00.000Z")
+      expect(result!.citations).toEqual([{ file: "profiles.yml", line: 5 }])
     })
   })
 })

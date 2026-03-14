@@ -107,6 +107,8 @@ import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
 import { MemoryReadTool } from "../memory/tools/memory-read"
 import { MemoryWriteTool } from "../memory/tools/memory-write"
 import { MemoryDeleteTool } from "../memory/tools/memory-delete"
+import { MemoryAuditTool } from "../memory/tools/memory-audit"
+import { MemoryExtractTool } from "../memory/tools/memory-extract"
 // altimate_change end
 
 export namespace ToolRegistry {
@@ -273,9 +275,7 @@ export namespace ToolRegistry {
       FeedbackSubmitTool,
       // altimate_change end
       // altimate_change start - register altimate persistent memory tools
-      MemoryReadTool,
-      MemoryWriteTool,
-      MemoryDeleteTool,
+      ...(!Flag.ALTIMATE_DISABLE_MEMORY ? [MemoryReadTool, MemoryWriteTool, MemoryDeleteTool, MemoryAuditTool, ...(Flag.ALTIMATE_MEMORY_AUTO_EXTRACT ? [MemoryExtractTool] : [])] : []),
       // altimate_change end
       ...custom,
     ]
