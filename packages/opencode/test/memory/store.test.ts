@@ -195,7 +195,7 @@ function createTestStore(baseDir: string) {
       const filepath = blockPath(block.id)
       const dir = path.dirname(filepath)
       await fs.mkdir(dir, { recursive: true })
-      const tmpPath = filepath + ".tmp"
+      const tmpPath = filepath + `.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
       const serialized = serializeBlock(block)
       await fs.writeFile(tmpPath, serialized, "utf-8")
       await fs.rename(tmpPath, filepath)

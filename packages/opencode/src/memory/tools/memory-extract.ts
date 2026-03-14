@@ -1,6 +1,9 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { MemoryStore } from "../store"
+import { MemoryBlockSchema } from "../types"
+
+const idSchema = MemoryBlockSchema.shape.id
 
 export const MemoryExtractTool = Tool.define("altimate_memory_extract", {
   description:
@@ -9,11 +12,7 @@ export const MemoryExtractTool = Tool.define("altimate_memory_extract", {
     facts: z
       .array(
         z.object({
-          id: z
-            .string()
-            .min(1)
-            .max(256)
-            .regex(/^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/),
+          id: idSchema,
           scope: z.enum(["global", "project"]),
           content: z.string().min(1).max(2048),
           tags: z.array(z.string().max(64)).max(10).optional().default([]),

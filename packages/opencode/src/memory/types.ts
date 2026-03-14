@@ -8,9 +8,17 @@ export const CitationSchema = z.object({
 
 export type Citation = z.infer<typeof CitationSchema>
 
+// Each path segment must start and end with alphanumeric.
+// Segments are separated by '/'. No '..' or '.' as standalone segments (prevents path traversal).
+// No double slashes, no leading/trailing slashes.
+const MEMORY_ID_SEGMENT = /[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?/
+const MEMORY_ID_REGEX = new RegExp(
+  `^${MEMORY_ID_SEGMENT.source}(?:\\.${MEMORY_ID_SEGMENT.source})*(?:/${MEMORY_ID_SEGMENT.source}(?:\\.${MEMORY_ID_SEGMENT.source})*)*$`,
+)
+
 export const MemoryBlockSchema = z.object({
-  id: z.string().min(1).max(256).regex(/^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/, {
-    message: "ID must be lowercase alphanumeric with hyphens/underscores/slashes/dots, starting and ending with alphanumeric",
+  id: z.string().min(1).max(256).regex(MEMORY_ID_REGEX, {
+    message: "ID must be lowercase alphanumeric segments separated by '/' or '.', each starting/ending with alphanumeric. No '..' or empty segments allowed.",
   }),
   scope: z.enum(["global", "project"]),
   tags: z.array(z.string().max(64)).max(10).default([]),

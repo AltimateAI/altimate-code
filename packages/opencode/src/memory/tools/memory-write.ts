@@ -1,16 +1,14 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { MemoryStore } from "../store"
-import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, CitationSchema } from "../types"
+import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, CitationSchema, MemoryBlockSchema } from "../types"
+
+const idSchema = MemoryBlockSchema.shape.id
 
 export const MemoryWriteTool = Tool.define("altimate_memory_write", {
   description: `Save an Altimate Memory block for cross-session persistence. Use this to store information worth remembering across sessions — warehouse configurations, naming conventions, team preferences, data model notes, or past analysis decisions. Each block is a Markdown file persisted to disk. Max ${MEMORY_MAX_BLOCK_SIZE} chars per block, ${MEMORY_MAX_BLOCKS_PER_SCOPE} blocks per scope. Supports hierarchical IDs with slashes (e.g., 'warehouse/snowflake-config'), optional TTL expiration, and citation-backed memories.`,
   parameters: z.object({
-    id: z
-      .string()
-      .min(1)
-      .max(256)
-      .regex(/^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/)
+    id: idSchema
       .describe(
         "Unique identifier for this memory block (lowercase, hyphens/underscores/slashes for namespaces). Examples: 'warehouse-config', 'warehouse/snowflake', 'conventions/dbt-naming'",
       ),

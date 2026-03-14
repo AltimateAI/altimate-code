@@ -11,6 +11,12 @@ import z from "zod"
 
 const MEMORY_MAX_BLOCK_SIZE = 2048
 
+// Safe ID regex: segments separated by '/' or '.', no '..' or empty segments (prevents path traversal)
+const MEMORY_ID_SEGMENT = /[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?/
+const SAFE_ID_REGEX = new RegExp(
+  `^${MEMORY_ID_SEGMENT.source}(?:\\.${MEMORY_ID_SEGMENT.source})*(?:/${MEMORY_ID_SEGMENT.source}(?:\\.${MEMORY_ID_SEGMENT.source})*)*$`,
+)
+
 // --- Schemas matching the actual tool definitions ---
 
 const CitationSchema = z.object({
@@ -31,7 +37,7 @@ const MemoryWriteParams = z.object({
     .string()
     .min(1)
     .max(256)
-    .regex(/^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/),
+    .regex(SAFE_ID_REGEX),
   scope: z.enum(["global", "project"]),
   content: z.string().min(1).max(MEMORY_MAX_BLOCK_SIZE),
   tags: z.array(z.string().max(64)).max(10).optional().default([]),
@@ -53,7 +59,7 @@ const MemoryExtractParams = z.object({
   facts: z
     .array(
       z.object({
-        id: z.string().min(1).max(256).regex(/^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/),
+        id: z.string().min(1).max(256).regex(SAFE_ID_REGEX),
         scope: z.enum(["global", "project"]),
         content: z.string().min(1).max(2048),
         tags: z.array(z.string().max(64)).max(10).optional().default([]),
@@ -73,8 +79,8 @@ const MemoryExtractParams = z.object({
     .max(10),
 })
 
-// Updated ID regex to match hierarchical IDs
-const MemoryBlockIdRegex = /^[a-z0-9][a-z0-9_/.-]*[a-z0-9]$|^[a-z0-9]$/
+// Alias for use in ID validation tests
+const MemoryBlockIdRegex = SAFE_ID_REGEX
 
 describe("Memory Tool Schemas", () => {
   describe("MemoryReadParams", () => {
