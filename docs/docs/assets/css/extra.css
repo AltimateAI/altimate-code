@@ -59,16 +59,22 @@
 
 /* Install snippet */
 .hero-install {
-  max-width: 460px;
+  max-width: 680px;
   margin: 1.25rem auto 0;
 }
 
 .hero-install pre {
   margin: 0;
+  overflow-x: visible;
+  white-space: pre;
 }
 
 .hero-install code {
-  font-size: 0.78rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.01em;
+  white-space: pre;
+  word-break: keep-all;
+  overflow-wrap: normal;
 }
 
 /* --- Section headings --- */
@@ -112,13 +118,13 @@
 
 /* --- Pill grid (LLM providers, warehouses) --- */
 .pill-grid {
-  max-width: 600px;
+  max-width: 100%;
   margin: 0 auto;
 }
 
 .pill-grid ul {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: center;
   gap: 0.45rem;
   list-style: none;

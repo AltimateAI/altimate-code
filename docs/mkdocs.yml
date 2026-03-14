@@ -53,9 +53,25 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
-  - Data Engineering:
+  - Setup:
+      - Getting Started: getting-started.md
+      - TUI: usage/tui.md
+      - CLI: usage/cli.md
+      - Web: usage/web.md
+      - IDE: usage/ide.md
+      - GitHub: usage/github.md
+      - GitLab: usage/gitlab.md
+  - Examples:
+      - Overview: examples/index.md
+      - Build, Test & Document dbt Models: examples/build-test-docs.md
+      - Find Broken Views in Snowflake: examples/find-broken-views.md
+      - Optimize Cost & Performance: examples/optimize-cost-performance.md
+      - Migrate PySpark to dbt: examples/migrate-pyspark-dbt.md
+      - Debug an Airflow DAG: examples/debug-airflow-dag.md
+      - Write Snowflake UDFs: examples/write-snowflake-udfs.md
+  - Components:
       - Agent Modes: data-engineering/agent-modes.md
+      - Skills: configure/skills.md
       - Tools:
           - Overview: data-engineering/tools/index.md
           - SQL Tools: data-engineering/tools/sql-tools.md
@@ -64,19 +80,6 @@ nav:
           - Lineage Tools: data-engineering/tools/lineage-tools.md
           - dbt Tools: data-engineering/tools/dbt-tools.md
           - Warehouse Tools: data-engineering/tools/warehouse-tools.md
-      - Guides:
-          - Overview: data-engineering/guides/index.md
-          - Cost Optimization: data-engineering/guides/cost-optimization.md
-          - Migration: data-engineering/guides/migration.md
-          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
-          - Using with Codex: data-engineering/guides/using-with-codex.md
-  - Usage:
-      - TUI: usage/tui.md
-      - CLI: usage/cli.md
-      - Web: usage/web.md
-      - IDE: usage/ide.md
-      - GitHub: usage/github.md
-      - GitLab: usage/gitlab.md
   - Configure:
       - Overview: configure/config.md
       - Providers & Models:
@@ -85,7 +88,6 @@ nav:
       - Agents & Tools:
           - Agents: configure/agents.md
           - Tools: configure/tools.md
-          - Agent Skills: configure/skills.md
           - Custom Tools: configure/custom-tools.md
           - Commands: configure/commands.md
       - Behavior:
@@ -101,13 +103,13 @@ nav:
           - LSP Servers: configure/lsp.md
           - MCP Servers: configure/mcp-servers.md
           - ACP Support: configure/acp.md
-  - Develop:
-      - SDK: develop/sdk.md
-      - Server: develop/server.md
-      - Plugins: develop/plugins.md
-      - Ecosystem: develop/ecosystem.md
   - Reference:
       - Security FAQ: security-faq.md
       - Network: network.md
       - Troubleshooting: troubleshooting.md
       - Windows / WSL: windows-wsl.md
+      - Guides:
+          - Cost Optimization: data-engineering/guides/cost-optimization.md
+          - Migration: data-engineering/guides/migration.md
+          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
+          - Using with Codex: data-engineering/guides/using-with-codex.md
