@@ -103,7 +103,7 @@ import { DatamateManagerTool } from "../altimate/tools/datamate"
 import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
 // altimate_change end
 
-// altimate_change start - import persistent memory tools
+// altimate_change start - import altimate persistent memory tools
 import { MemoryReadTool } from "../memory/tools/memory-read"
 import { MemoryWriteTool } from "../memory/tools/memory-write"
 import { MemoryDeleteTool } from "../memory/tools/memory-delete"
@@ -272,7 +272,7 @@ export namespace ToolRegistry {
       DatamateManagerTool,
       FeedbackSubmitTool,
       // altimate_change end
-      // altimate_change start - register persistent memory tools
+      // altimate_change start - register altimate persistent memory tools
       MemoryReadTool,
       MemoryWriteTool,
       MemoryDeleteTool,

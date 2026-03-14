@@ -3,9 +3,9 @@ import { Tool } from "../../tool/tool"
 import { MemoryStore } from "../store"
 import { MemoryPrompt } from "../prompt"
 
-export const MemoryReadTool = Tool.define("memory_read", {
+export const MemoryReadTool = Tool.define("altimate_memory_read", {
   description:
-    "Read persistent memory blocks from previous sessions. Use this to recall warehouse configurations, naming conventions, team preferences, and past analysis decisions. Supports filtering by scope (global/project) and tags.",
+    "Read Altimate Memory blocks from previous sessions. Use this to recall warehouse configurations, naming conventions, team preferences, and past analysis decisions. Supports filtering by scope (global/project) and tags.",
   parameters: z.object({
     scope: z
       .enum(["global", "project", "all"])
@@ -55,7 +55,7 @@ export const MemoryReadTool = Tool.define("memory_read", {
         return {
           title: "Memory: empty",
           metadata: { count: 0 },
-          output: "No memory blocks found. Use memory_write to save information for future sessions.",
+          output: "No memory blocks found. Use altimate_memory_write to save information for future sessions.",
         }
       }
 

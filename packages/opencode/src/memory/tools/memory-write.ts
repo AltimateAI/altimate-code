@@ -3,8 +3,8 @@ import { Tool } from "../../tool/tool"
 import { MemoryStore } from "../store"
 import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE } from "../types"
 
-export const MemoryWriteTool = Tool.define("memory_write", {
-  description: `Create or update a persistent memory block. Use this to save information worth remembering across sessions — warehouse configurations, naming conventions, team preferences, data model notes, or past analysis decisions. Each block is a Markdown file persisted to disk. Max ${MEMORY_MAX_BLOCK_SIZE} chars per block, ${MEMORY_MAX_BLOCKS_PER_SCOPE} blocks per scope.`,
+export const MemoryWriteTool = Tool.define("altimate_memory_write", {
+  description: `Save an Altimate Memory block for cross-session persistence. Use this to store information worth remembering across sessions — warehouse configurations, naming conventions, team preferences, data model notes, or past analysis decisions. Each block is a Markdown file persisted to disk. Max ${MEMORY_MAX_BLOCK_SIZE} chars per block, ${MEMORY_MAX_BLOCKS_PER_SCOPE} blocks per scope.`,
   parameters: z.object({
     id: z
       .string()

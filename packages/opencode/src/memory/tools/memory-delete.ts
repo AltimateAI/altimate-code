@@ -2,9 +2,9 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { MemoryStore } from "../store"
 
-export const MemoryDeleteTool = Tool.define("memory_delete", {
+export const MemoryDeleteTool = Tool.define("altimate_memory_delete", {
   description:
-    "Delete a persistent memory block that is outdated, incorrect, or no longer needed. Use this to keep memory clean and relevant.",
+    "Delete an Altimate Memory block that is outdated, incorrect, or no longer needed. Use this to keep Altimate Memory clean and relevant.",
   parameters: z.object({
     id: z.string().min(1).describe("The ID of the memory block to delete"),
     scope: z
@@ -24,7 +24,7 @@ export const MemoryDeleteTool = Tool.define("memory_delete", {
       return {
         title: `Memory: Not found "${args.id}"`,
         metadata: { deleted: false, id: args.id, scope: args.scope },
-        output: `No memory block found with ID "${args.id}" in ${args.scope} scope. Use memory_read to list existing blocks.`,
+        output: `No memory block found with ID "${args.id}" in ${args.scope} scope. Use altimate_memory_read to list existing blocks.`,
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

@@ -10,5 +10,6 @@ altimate has 55+ specialized tools organized by function.
 | [Lineage Tools](lineage-tools.md) | 1 tool | Column-level lineage tracing with confidence scoring |
 | [dbt Tools](dbt-tools.md) | 2 tools + 6 skills | Run, manifest parsing, test generation, scaffolding |
 | [Warehouse Tools](warehouse-tools.md) | 6 tools | Environment scanning, connection management, discovery, testing |
+| [Altimate Memory](memory-tools.md) | 3 tools | Persistent cross-session memory for warehouse config, conventions, and preferences |
 
 All tools are available in the interactive TUI. The agent automatically selects the right tools based on your request.
