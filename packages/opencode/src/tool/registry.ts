@@ -103,6 +103,12 @@ import { DatamateManagerTool } from "../altimate/tools/datamate"
 import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
 // altimate_change end
 
+// altimate_change start - import persistent memory tools
+import { MemoryReadTool } from "../memory/tools/memory-read"
+import { MemoryWriteTool } from "../memory/tools/memory-write"
+import { MemoryDeleteTool } from "../memory/tools/memory-delete"
+// altimate_change end
+
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
 
@@ -265,6 +271,11 @@ export namespace ToolRegistry {
       ProjectScanTool,
       DatamateManagerTool,
       FeedbackSubmitTool,
+      // altimate_change end
+      // altimate_change start - register persistent memory tools
+      MemoryReadTool,
+      MemoryWriteTool,
+      MemoryDeleteTool,
       // altimate_change end
       ...custom,
     ]

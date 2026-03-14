@@ -76,3 +76,6 @@ export * from "./tools/warehouse-discover"
 export * from "./tools/warehouse-list"
 export * from "./tools/warehouse-remove"
 export * from "./tools/warehouse-test"
+
+// Memory
+export * from "../memory"
