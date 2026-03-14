@@ -1,4 +1,4 @@
-# Getting Started
+# Quickstart
 
 ## Installation
 
@@ -36,7 +36,7 @@ To set up your LLM provider, use the `/connect` command.
 
 ## Configuration
 
-altimate uses a JSON config file. Create `altimate-code.json` in your project root or `~/.config/altimate-code/altimate-code.json` globally.
+Altimate Code uses a JSON config file. Create `altimate-code.json` in your project root or `~/.config/altimate-code/altimate-code.json` globally.
 
 ### Warehouse connections
 
@@ -60,74 +60,7 @@ altimate uses a JSON config file. Create `altimate-code.json` in your project ro
 }
 ```
 
-### Snowflake (key-pair auth)
-
-```json
-{
-  "warehouses": {
-    "snowflake-prod": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "svc_altimate",
-      "private_key_path": "~/.ssh/snowflake_rsa_key.p8",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS",
-      "role": "SYSADMIN"
-    }
-  }
-}
-```
-
-### BigQuery
-
-```json
-{
-  "warehouses": {
-    "bigquery-prod": {
-      "type": "bigquery",
-      "project": "my-gcp-project",
-      "dataset": "analytics",
-      "service_account": "/path/to/service-account.json"
-    }
-  }
-}
-```
-
-Or use Application Default Credentials (ADC) — just omit `service_account` and run `gcloud auth application-default login`.
-
-### Databricks
-
-```json
-{
-  "warehouses": {
-    "databricks-prod": {
-      "type": "databricks",
-      "host": "dbc-abc123.cloud.databricks.com",
-      "token": "${DATABRICKS_TOKEN}",
-      "warehouse_id": "abcdef1234567890",
-      "catalog": "main",
-      "schema": "default"
-    }
-  }
-}
-```
-
-### PostgreSQL / Redshift
-
-```json
-{
-  "warehouses": {
-    "postgres-dev": {
-      "type": "postgres",
-      "host": "localhost",
-      "port": 5432,
-      "database": "analytics",
-      "user": "analyst",
-      "password": "${PG_PASSWORD}"
-    }
-  }
-}
-```
+Altimate Code supports Snowflake, BigQuery, Databricks, PostgreSQL, Redshift, DuckDB, MySQL, and SQL Server. For connection examples for each warehouse (including key-pair auth, ADC, and service accounts), see the [full config reference](configure/config.md).
 
 ### LLM providers
 
@@ -138,8 +71,6 @@ The easiest way to configure your LLM is with the `/connect` command inside the 
 ```
 
 This walks you through selecting a provider and authenticating. You can also configure providers manually in your config file:
-
-#### Anthropic
 
 ```json
 {
@@ -152,38 +83,10 @@ This walks you through selecting a provider and authenticating. You can also con
 }
 ```
 
-#### OpenAI
-
-```json
-{
-  "provider": {
-    "openai": {
-      "apiKey": "{env:OPENAI_API_KEY}"
-    }
-  },
-  "model": "openai/gpt-4o"
-}
-```
-
-#### AWS Bedrock
-
-```json
-{
-  "provider": {
-    "bedrock": {
-      "region": "us-east-1"
-    }
-  },
-  "model": "bedrock/anthropic.claude-sonnet-4-6-v1"
-}
-```
-
-Uses the standard AWS credential chain — if you have AWS SSO or IAM roles configured, no explicit keys are needed.
-
 !!! tip
     Use `{env:...}` substitution for API keys so you never commit secrets to version control.
 
-For the full list of 35+ supported providers and advanced configuration options, see [Providers](configure/providers.md) and [Models](configure/models.md).
+Altimate Code supports 35+ providers including Anthropic, OpenAI, AWS Bedrock, Azure OpenAI, Google Vertex AI, Ollama, and more. For the full list and configuration examples, see [Providers](configure/providers.md) and [Models](configure/models.md).
 
 ## Project-level config
 
@@ -230,4 +133,4 @@ my-dbt-project/
 - [Configuration](configure/config.md) — Full config file reference
 - [Providers](configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
 - [Agent Modes](data-engineering/agent-modes.md) — Builder, Analyst, Validator, Migrator
-- [Data Engineering Tools](data-engineering/tools/index.md) — 99+ specialized tools for SQL, dbt, and warehouses
+- [Data Engineering Tools](data-engineering/tools/index.md) — 55+ specialized tools for SQL, dbt, and warehouses

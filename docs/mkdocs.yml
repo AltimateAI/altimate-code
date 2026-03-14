@@ -57,11 +57,18 @@ nav:
       - Quickstart: getting-started.md
   - Examples:
       - Showcase: examples/index.md
+      - Guides:
+          - Cost Optimization: data-engineering/guides/cost-optimization.md
+          - Migration: data-engineering/guides/migration.md
   - Configure:
       - Overview: configure/index.md
-      - Agent Modes: data-engineering/agent-modes.md
-      - Skills: configure/skills.md
+      - Config File Reference: configure/config.md
+      - Agents:
+          - Agent Modes: data-engineering/agent-modes.md
+          - Agent Config: configure/agents.md
       - Tools:
+          - Tool Config: configure/tools.md
+          - Custom Tools: configure/custom-tools.md
           - Overview: data-engineering/tools/index.md
           - SQL Tools: data-engineering/tools/sql-tools.md
           - Schema Tools: data-engineering/tools/schema-tools.md
@@ -69,15 +76,12 @@ nav:
           - Lineage Tools: data-engineering/tools/lineage-tools.md
           - dbt Tools: data-engineering/tools/dbt-tools.md
           - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+      - Skills: configure/skills.md
+      - Commands: configure/commands.md
       - Providers & Models:
           - Providers: configure/providers.md
           - Models: configure/models.md
-      - Agents & Tools:
-          - Agents: configure/agents.md
-          - Tools: configure/tools.md
-          - Custom Tools: configure/custom-tools.md
-          - Commands: configure/commands.md
-      - Behavior:
+      - Governance:
           - Rules: configure/rules.md
           - Permissions: configure/permissions.md
           - Context Management: configure/context-management.md
@@ -85,7 +89,6 @@ nav:
       - Appearance:
           - Themes: configure/themes.md
           - Keybinds: configure/keybinds.md
-      - Telemetry: configure/telemetry.md
       - Integrations:
           - LSP Servers: configure/lsp.md
           - MCP Servers: configure/mcp-servers.md
@@ -97,10 +100,9 @@ nav:
       - GitHub: usage/github.md
       - GitLab: usage/gitlab.md
   - Reference:
+      - What's New: changelog.md
       - Security FAQ: security-faq.md
       - Network: network.md
       - Troubleshooting: troubleshooting.md
       - Windows / WSL: windows-wsl.md
-      - Guides:
-          - Cost Optimization: data-engineering/guides/cost-optimization.md
-          - Migration: data-engineering/guides/migration.md
+      - Telemetry: configure/telemetry.md

@@ -1,4 +1,4 @@
-# Examples
+# Showcase
 
 Real-world examples showing what altimate can do across data engineering workflows. Each example demonstrates end-to-end automation — from discovery to implementation.
 

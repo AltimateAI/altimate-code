@@ -27,58 +27,11 @@ Altimate Code can read files, write files, and run shell commands — but only w
 | `"ask"` | Prompts you before each use |
 | `"deny"` | Blocked entirely |
 
-By default, destructive operations like `bash`, `write`, and `edit` require confirmation. You can further restrict specific commands:
-
-```json
-{
-  "permission": {
-    "bash": {
-      "dbt *": "allow",
-      "git status": "allow",
-      "DROP *": "deny",
-      "rm *": "deny",
-      "*": "ask"
-    }
-  }
-}
-```
+By default, destructive operations like `bash`, `write`, and `edit` require confirmation. You can restrict specific commands, deny destructive SQL (DROP, DELETE, TRUNCATE), and configure per-agent permissions. See the [Permissions reference](configure/permissions.md) for full examples.
 
 ## Can I prevent the agent from modifying production databases?
 
-Yes. Use pattern-based permissions to deny destructive SQL:
-
-```json
-{
-  "permission": {
-    "bash": {
-      "DROP *": "deny",
-      "DELETE *": "deny",
-      "TRUNCATE *": "deny",
-      "ALTER *": "deny",
-      "*": "ask"
-    }
-  }
-}
-```
-
-You can also configure per-agent permissions. For example, restrict the `analyst` agent to read-only:
-
-```json
-{
-  "agent": {
-    "analyst": {
-      "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "bash": {
-          "SELECT *": "allow",
-          "*": "deny"
-        }
-      }
-    }
-  }
-}
-```
+Yes. Use pattern-based permissions to deny destructive SQL, or configure per-agent permissions to make specific agents read-only. See the [Permissions reference](configure/permissions.md) for detailed configuration examples.
 
 ## What network endpoints does Altimate Code contact?
 

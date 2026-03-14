@@ -1,6 +1,6 @@
 # Configure
 
-altimate is built from a small set of composable pieces. This section covers what they are and how to configure them.
+Altimate Code is built from a small set of composable pieces. This section covers what they are and how to configure them.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ altimate is built from a small set of composable pieces. This section covers wha
 │   (high-level workflows you can invoke)      │
 ├─────────────────────────────────────────────┤
 │                   Tools                      │
-│  (99+ specialized tools for SQL, dbt,        │
+│  (55+ specialized tools for SQL, dbt,        │
 │   lineage, cost, schema, warehouses)         │
 ├─────────────────────────────────────────────┤
 │            Providers & Models                │
@@ -23,7 +23,7 @@ altimate is built from a small set of composable pieces. This section covers wha
 └─────────────────────────────────────────────┘
 ```
 
-**Agent Modes** define *how* altimate behaves — permissions, guardrails, and tool access. **Skills** are high-level workflows (e.g. `/data`, `/migrate`). **Tools** are the 99+ low-level capabilities that skills orchestrate. **Providers & Models** connect altimate to your LLM of choice.
+**[Agent Modes](../data-engineering/agent-modes.md)** define *how* Altimate Code behaves — permissions, guardrails, and tool access. **[Skills](skills.md)** are high-level workflows (e.g. `/data`, `/migrate`). **[Tools](../data-engineering/tools/index.md)** are the 55+ low-level capabilities that skills orchestrate. **[Providers & Models](providers.md)** connect Altimate Code to your LLM of choice.
 
 ## What's in this section
 
@@ -49,7 +49,7 @@ altimate is built from a small set of composable pieces. This section covers wha
 
     ---
 
-    99+ specialized tools for SQL analysis, schema inspection, lineage, cost prediction, dbt, and warehouse operations.
+    55+ specialized tools for SQL analysis, schema inspection, lineage, cost prediction, dbt, and warehouse operations.
 
     [:octicons-arrow-right-24: Tools](../data-engineering/tools/index.md)
 
@@ -69,11 +69,11 @@ altimate is built from a small set of composable pieces. This section covers wha
 
     [:octicons-arrow-right-24: Agents](agents.md) · [:octicons-arrow-right-24: Custom Tools](custom-tools.md)
 
--   :material-shield-check:{ .lg .middle } **Behavior**
+-   :material-shield-check:{ .lg .middle } **Governance**
 
     ---
 
-    Rules, permissions, context management, and formatters that control how altimate operates.
+    Rules, permissions, context management, and formatters that control how Altimate Code operates.
 
     [:octicons-arrow-right-24: Rules](rules.md) · [:octicons-arrow-right-24: Permissions](permissions.md)
 
@@ -97,4 +97,4 @@ altimate is built from a small set of composable pieces. This section covers wha
 
 ## Config file
 
-altimate uses JSON configuration files (`altimate-code.json`). For the full config file reference, see the [config file documentation](config.md).
+Altimate Code uses JSON configuration files (`altimate-code.json`). For the full config file reference, see the [config file documentation](config.md).

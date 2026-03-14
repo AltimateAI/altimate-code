@@ -90,28 +90,12 @@ You are a Snowflake cost optimization expert. For every query:
 
 ## Agent Permissions
 
-Each agent can have its own permission overrides that restrict or expand the default permissions:
-
-```json
-{
-  "agent": {
-    "analyst": {
-      "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "bash": {
-          "dbt show *": "allow",
-          "dbt list *": "allow",
-          "*": "deny"
-        }
-      }
-    }
-  }
-}
-```
+Each agent can have its own permission overrides that restrict or expand the default permissions. For example, you can make the `analyst` agent fully read-only by denying `write`, `edit`, and most `bash` commands.
 
 !!! warning
     Agent-specific permissions override global permissions. A `"deny"` at the agent level cannot be overridden by a global `"allow"`.
+
+For full details and examples, see the [Permissions reference](permissions.md).
 
 ## Switching Agents
 

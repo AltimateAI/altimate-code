@@ -1,6 +1,6 @@
 # Agent Modes
 
-altimate runs in one of four specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
+Altimate Code runs in one of four specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
 
 ## Builder
 

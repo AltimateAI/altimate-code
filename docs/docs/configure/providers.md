@@ -1,6 +1,6 @@
 # Providers
 
-altimate supports 35+ LLM providers. Configure them in the `provider` section of your config file.
+Altimate Code supports 35+ LLM providers. Configure them in the `provider` section of your config file.
 
 ## Provider Configuration
 

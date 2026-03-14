@@ -28,48 +28,9 @@ In addition to built-in tools, altimate provides 55+ specialized data engineerin
 
 ## Tool Permissions
 
-Control which tools agents can use via the [permission system](permissions.md):
+Control which tools agents can use via the [permission system](permissions.md). Permission values can be `"allow"`, `"deny"`, or `"ask"` (prompts the user for confirmation). You can set permissions globally or per-agent to disable specific tools or restrict destructive operations.
 
-```json
-{
-  "permission": {
-    "bash": {
-      "dbt *": "allow",
-      "rm *": "deny",
-      "*": "ask"
-    },
-    "write": "ask",
-    "read": "allow"
-  }
-}
-```
-
-!!! info
-    Permission values can be `"allow"`, `"deny"`, or `"ask"`. The `"ask"` permission prompts the user for confirmation before executing.
-
-## Disabling Tools
-
-Disable a tool for a specific agent by setting its permission to `"deny"`:
-
-```json
-{
-  "agent": {
-    "analyst": {
-      "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "bash": {
-          "dbt run *": "deny",
-          "*": "ask"
-        }
-      }
-    }
-  }
-}
-```
-
-!!! example "Read-only analyst"
-    The configuration above creates an analyst agent that cannot modify files. It can only read and explore the codebase, and must ask before running shell commands (except `dbt run`, which is blocked entirely).
+For full details and examples, see the [Permissions reference](permissions.md).
 
 ## Tool Behavior
 
