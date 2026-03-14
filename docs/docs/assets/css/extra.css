@@ -1,3 +1,11 @@
+/* Site title highlight */
+.md-header__topic .md-ellipsis {
+  font-weight: 800;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  text-transform: none !important;
+}
+
 /* Make nav section headers more prominent */
 .md-nav--primary > .md-nav__list > .md-nav__item--section > .md-nav__link {
   font-weight: 700;

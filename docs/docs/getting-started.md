@@ -1,19 +1,5 @@
 # Getting Started
 
-## Why altimate?
-
-Unlike general-purpose coding agents, altimate is built for data teams:
-
-| Capability | General coding agents | altimate |
-|---|---|---|
-| SQL anti-pattern detection | None | 19 rules with confidence scoring |
-| Column-level lineage | None | Automatic from SQL |
-| Schema-aware autocomplete | None | Indexes your warehouse metadata |
-| Cross-dialect translation | None | Snowflake, BigQuery, Databricks, Redshift |
-| FinOps analysis | None | Credit analysis, expensive queries, warehouse sizing |
-| PII detection | None | Automatic column scanning |
-| dbt integration | Basic file editing | Manifest parsing, test generation, model scaffolding |
-
 ## Installation
 
 ```bash
@@ -143,6 +129,62 @@ Or use Application Default Credentials (ADC) — just omit `service_account` and
 }
 ```
 
+### LLM providers
+
+The easiest way to configure your LLM is with the `/connect` command inside the TUI:
+
+```
+/connect
+```
+
+This walks you through selecting a provider and authenticating. You can also configure providers manually in your config file:
+
+#### Anthropic
+
+```json
+{
+  "provider": {
+    "anthropic": {
+      "apiKey": "{env:ANTHROPIC_API_KEY}"
+    }
+  },
+  "model": "anthropic/claude-sonnet-4-6"
+}
+```
+
+#### OpenAI
+
+```json
+{
+  "provider": {
+    "openai": {
+      "apiKey": "{env:OPENAI_API_KEY}"
+    }
+  },
+  "model": "openai/gpt-4o"
+}
+```
+
+#### AWS Bedrock
+
+```json
+{
+  "provider": {
+    "bedrock": {
+      "region": "us-east-1"
+    }
+  },
+  "model": "bedrock/anthropic.claude-sonnet-4-6-v1"
+}
+```
+
+Uses the standard AWS credential chain — if you have AWS SSO or IAM roles configured, no explicit keys are needed.
+
+!!! tip
+    Use `{env:...}` substitution for API keys so you never commit secrets to version control.
+
+For the full list of 35+ supported providers and advanced configuration options, see [Providers](configure/providers.md) and [Models](configure/models.md).
+
 ## Project-level config
 
 Place `.altimate-code/altimate-code.json` in your dbt project root for project-specific settings:
@@ -166,24 +208,6 @@ my-dbt-project/
 | `DATABRICKS_TOKEN` | Databricks PAT |
 | `ALTIMATE_CLI_CONFIG` | Custom config file path |
 
-## Using with Claude Code
-
-altimate works as a standalone agent, but you can also invoke it from within Claude Code sessions. Claude Code can call altimate's tools when working on data projects:
-
-```bash
-# In Claude Code, use the /data skill to route to altimate
-/data "analyze the cost of our top 10 most expensive queries"
-```
-
-## Using with Codex
-
-If you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backend at no additional API cost:
-
-1. Run `/connect` in the TUI
-2. Select **Codex** as your provider
-3. Authenticate via browser OAuth
-4. Your subscription covers all usage — no API keys needed
-
 ## Verify your setup
 
 ```
@@ -206,4 +230,4 @@ If you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backe
 - [Configuration](configure/config.md) — Full config file reference
 - [Providers](configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
 - [Agent Modes](data-engineering/agent-modes.md) — Builder, Analyst, Validator, Migrator
-- [Data Engineering Tools](data-engineering/tools/index.md) — 55+ specialized tools for SQL, dbt, and warehouses
+- [Data Engineering Tools](data-engineering/tools/index.md) — 99+ specialized tools for SQL, dbt, and warehouses

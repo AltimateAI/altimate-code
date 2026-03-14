@@ -1,4 +1,4 @@
-site_name: altimate-code
+site_name: Altimate Code
 site_description: The data engineering agent for dbt, SQL, and cloud warehouses
 site_url: https://altimateai.github.io/altimate-code
 repo_url: https://github.com/AltimateAI/altimate-code
@@ -52,24 +52,13 @@ markdown_extensions:
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 nav:
-  - Home: index.md
-  - Setup:
-      - Getting Started: getting-started.md
-      - TUI: usage/tui.md
-      - CLI: usage/cli.md
-      - Web: usage/web.md
-      - IDE: usage/ide.md
-      - GitHub: usage/github.md
-      - GitLab: usage/gitlab.md
+  - Getting Started:
+      - Overview: index.md
+      - Quickstart: getting-started.md
   - Examples:
-      - Overview: examples/index.md
-      - Build, Test & Document dbt Models: examples/build-test-docs.md
-      - Find Broken Views in Snowflake: examples/find-broken-views.md
-      - Optimize Cost & Performance: examples/optimize-cost-performance.md
-      - Migrate PySpark to dbt: examples/migrate-pyspark-dbt.md
-      - Debug an Airflow DAG: examples/debug-airflow-dag.md
-      - Write Snowflake UDFs: examples/write-snowflake-udfs.md
-  - Components:
+      - Showcase: examples/index.md
+  - Configure:
+      - Overview: configure/index.md
       - Agent Modes: data-engineering/agent-modes.md
       - Skills: configure/skills.md
       - Tools:
@@ -80,8 +69,6 @@ nav:
           - Lineage Tools: data-engineering/tools/lineage-tools.md
           - dbt Tools: data-engineering/tools/dbt-tools.md
           - Warehouse Tools: data-engineering/tools/warehouse-tools.md
-  - Configure:
-      - Overview: configure/config.md
       - Providers & Models:
           - Providers: configure/providers.md
           - Models: configure/models.md
@@ -103,6 +90,12 @@ nav:
           - LSP Servers: configure/lsp.md
           - MCP Servers: configure/mcp-servers.md
           - ACP Support: configure/acp.md
+  - Interfaces:
+      - TUI: usage/tui.md
+      - CLI: usage/cli.md
+      - IDE: usage/ide.md
+      - GitHub: usage/github.md
+      - GitLab: usage/gitlab.md
   - Reference:
       - Security FAQ: security-faq.md
       - Network: network.md
@@ -111,5 +104,3 @@ nav:
       - Guides:
           - Cost Optimization: data-engineering/guides/cost-optimization.md
           - Migration: data-engineering/guides/migration.md
-          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
-          - Using with Codex: data-engineering/guides/using-with-codex.md

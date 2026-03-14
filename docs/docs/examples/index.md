@@ -10,7 +10,7 @@ Real-world examples showing what altimate can do across data engineering workflo
 
     Pull context from your Knowledge Hub, grab requirements from a Jira ticket, and build fully tested dbt models — all from your IDE.
 
-    [:octicons-arrow-right-24: View example](build-test-docs.md)
+    [:octicons-arrow-right-24: View example](https://datamates-docs.myaltimate.com/examples/build-test-document-dbt-model/)
 
 -   :material-snowflake:{ .lg .middle } **Find Broken Views in Snowflake**
 
@@ -18,7 +18,7 @@ Real-world examples showing what altimate can do across data engineering workflo
 
     Create a "Sprint Work Agent" that queries Snowflake, finds empty views, traces root causes through dbt models, and files Jira tickets.
 
-    [:octicons-arrow-right-24: View example](find-broken-views.md)
+    [:octicons-arrow-right-24: View example](https://datamates-docs.myaltimate.com/examples/find-broken-views-snowflake/)
 
 -   :material-cash-multiple:{ .lg .middle } **Optimize Cost & Performance**
 
@@ -26,7 +26,7 @@ Real-world examples showing what altimate can do across data engineering workflo
 
     Automate discovery and implementation of optimization opportunities across Snowflake, Databricks, and BigQuery.
 
-    [:octicons-arrow-right-24: View example](optimize-cost-performance.md)
+    [:octicons-arrow-right-24: View example](https://datamates-docs.myaltimate.com/examples/optimize-costs-and-performance/)
 
 -   :material-swap-horizontal:{ .lg .middle } **Migrate PySpark to dbt**
 
@@ -34,7 +34,7 @@ Real-world examples showing what altimate can do across data engineering workflo
 
     Convert a PySpark-based reporting project in Databricks to dbt with automated code conversion, testing, and validation.
 
-    [:octicons-arrow-right-24: View example](migrate-pyspark-dbt.md)
+    [:octicons-arrow-right-24: View example](https://datamates-docs.myaltimate.com/examples/migrate-pyspark-dbt/)
 
 -   :material-bug:{ .lg .middle } **Debug an Airflow DAG**
 
@@ -42,7 +42,7 @@ Real-world examples showing what altimate can do across data engineering workflo
 
     Use AI to debug Airflow DAGs by combining platform integrations, best-practice templates, and automated fix suggestions.
 
-    [:octicons-arrow-right-24: View example](debug-airflow-dag.md)
+    [:octicons-arrow-right-24: View example](https://datamates-docs.myaltimate.com/examples/debug-airflow-dag/)
 
 -   :material-function:{ .lg .middle } **Write Snowflake UDFs**
 
@@ -50,7 +50,7 @@ Real-world examples showing what altimate can do across data engineering workflo
 
     Use the Knowledge Hub to guide LLMs in building Snowflake UDFs with best practices, examples, and auto-generated documentation.
 
-    [:octicons-arrow-right-24: View example](write-snowflake-udfs.md)
+    [:octicons-arrow-right-24: View example](https://datamates-docs.myaltimate.com/examples/write-snowflake-udfs/)
 
 </div>
 
