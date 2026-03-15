@@ -30,7 +30,7 @@ export const TrainingSaveTool = Tool.define("training_save", {
       .string()
       .min(1)
       .max(64)
-      .transform((s) => s.toLowerCase().replace(/\s+/g, "-"))
+      .transform((s) => s.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, ""))
       .pipe(
         z.string().regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/, {
           message:

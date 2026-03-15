@@ -1,27 +1,10 @@
-fix: address Sentry review findings — 7 bugs fixed
+fix: CI failure + new Sentry finding — orphaned headers and agent test
 
-1. stripTrainingMeta/parseTrainingMeta regex: remove multiline `m` flag
-   that could match user content starting with `<!-- training` mid-string
-   (types.ts, store.ts)
+1. Agent test: add researcher + trainer to "all disabled" test so it
+   correctly expects "no primary visible agent" when ALL agents are off
 
-2. training_save content limit: reduce from 2500 to 1800 chars to account
-   for ~200 char metadata overhead against MemoryStore's 2048 char limit
-   (training-save.ts)
-
-3. injectTrainingOnly: change `break` to `continue` so budget-exceeding
-   section headers skip to next kind instead of stopping all injection
-   (memory/prompt.ts)
-
-4. injectTrainingOnly: track itemCount and return empty string when no
-   items injected (was returning header-only string, inflating budget
-   reports) (memory/prompt.ts)
-
-5. projectDir cache: replace module-level singleton with Map keyed by
-   Instance.directory to prevent stale paths when AsyncLocalStorage
-   context changes across concurrent requests (memory/store.ts)
-
-6. budgetUsage side effect: already fixed — delegates to injectTrainingOnly
-   which is read-only (no applied count increment). Sentry comments were
-   against pre-refactor code.
+2. Orphaned section headers: add pre-check that at least one entry fits
+   before adding section header in both injectTrainingOnly and inject
+   memory section (prevents header-only output inflating budget reports)
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

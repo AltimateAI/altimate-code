@@ -1,4 +1,5 @@
 // altimate_change - Unified context-aware injection for memory + training
+import { Log } from "@/util/log"
 import { MemoryStore, isExpired } from "./store"
 import {
   MEMORY_DEFAULT_INJECTION_BUDGET,
@@ -223,7 +224,9 @@ export namespace MemoryPrompt {
         const kind = trainingKind(block)
         if (kind) {
           const name = block.id.split("/").slice(2).join("/")
-          TrainingStore.incrementApplied(block.scope as "global" | "project", kind, name).catch(() => {})
+          TrainingStore.incrementApplied(block.scope as "global" | "project", kind, name).catch((e) => {
+            Log.create({ service: "memory.prompt" }).warn("failed to increment applied count", { id: block.id, error: String(e) })
+          })
         }
       }
     }

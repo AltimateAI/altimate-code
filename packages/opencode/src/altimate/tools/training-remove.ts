@@ -12,7 +12,14 @@ export const TrainingRemoveTool = Tool.define("training_remove", {
     "Remove a learned training entry (pattern, rule, glossary term, or standard). Use this when a training entry is outdated, incorrect, or no longer relevant.",
   parameters: z.object({
     kind: TrainingKind.describe("Kind of training entry to remove"),
-    name: z.string().min(1).describe("Name of the training entry to remove"),
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/, {
+        message: "Name must be lowercase alphanumeric with hyphens/underscores",
+      })
+      .describe("Name of the training entry to remove"),
     scope: z
       .enum(["global", "project"])
       .default("project")
