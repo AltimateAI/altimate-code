@@ -21,29 +21,41 @@ altimate --agent analyst
 
 | Command | Description |
 |---------|------------|
-| `run` | Run a prompt non-interactively |
-| `serve` | Start the HTTP API server |
-| `web` | Start the web UI |
-| `agent` | Agent management |
-| `auth` | Authentication |
-| `mcp` | Model Context Protocol tools |
-| `acp` | Agent Communication Protocol |
-| `models` | List available models |
-| `stats` | Usage statistics |
-| `export` | Export session data |
-| `import` | Import session data |
-| `session` | Session management |
-| `github` | GitHub integration |
-| `pr` | Pull request tools |
-| `upgrade` | Upgrade to latest version |
-| `uninstall` | Uninstall altimate |
+| `run [message]` | Run a prompt non-interactively |
+| `serve` | Start a headless server |
+| `web` | Start server and open web interface |
+| `attach <url>` | Attach to a running server |
+| `agent` | Manage agents (`create`, `list`) |
+| `auth` | Manage credentials (`login`, `logout`, `list`) |
+| `mcp` | Manage MCP servers (`add`, `list`, `auth`, `logout`, `debug`) |
+| `acp` | Start ACP server for editor integration |
+| `models [provider]` | List available models |
+| `stats` | Show token usage and cost statistics |
+| `export [sessionID]` | Export session data as JSON |
+| `import <file>` | Import session data from JSON file or URL |
+| `session` | Manage sessions (`list`, `delete`) |
+| `github` | Manage GitHub agent (`install`, `run`) |
+| `pr <number>` | Fetch and checkout a GitHub PR branch, then run altimate |
+| `db` | Database tools — SQLite shell, path, and migration |
+| `debug` | Debugging tools — config, LSP, skills, agents, paths |
+| `completion` | Generate shell completion script |
+| `upgrade [target]` | Upgrade to latest or specific version |
+| `uninstall` | Uninstall altimate and remove all related files |
 
 ## Global Flags
 
 | Flag | Description |
 |------|------------|
-| `--model <provider/model>` | Override the default model |
+| `--model`, `-m <provider/model>` | Override the default model |
 | `--agent <name>` | Start with a specific agent |
+| `--continue`, `-c` | Continue the last session |
+| `--session`, `-s <id>` | Continue a specific session by ID |
+| `--fork` | Fork the session when continuing (use with `--continue` or `--session`) |
+| `--prompt <text>` | Prompt to use |
+| `--port <number>` | Port to listen on (default: `0`) |
+| `--hostname <host>` | Hostname to listen on (default: `127.0.0.1`) |
+| `--mdns` | Enable mDNS service discovery (defaults hostname to `0.0.0.0`) |
+| `--cors <domains>` | Additional domains to allow for CORS |
 | `--print-logs` | Print logs to stderr |
 | `--log-level <level>` | Set log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `--help`, `-h` | Show help |
@@ -103,6 +115,12 @@ echo "explain this SQL" | altimate run
 
 # With a specific model
 altimate run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
+
+# Continue the last session
+altimate --continue
+
+# Fork and continue a specific session
+altimate --session abc123 --fork
 
 # Print logs for debugging
 altimate --print-logs --log-level DEBUG run "test query"
