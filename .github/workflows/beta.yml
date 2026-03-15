@@ -1,9 +1,11 @@
 name: beta
 
+# Disabled — upstream beta branch syncing workflow, not needed for our fork.
+# To re-enable, uncomment the triggers below.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"
+  # schedule:
+  #   - cron: "0 * * * *"
 
 jobs:
   sync:
