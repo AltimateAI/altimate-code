@@ -4,6 +4,7 @@ Altimate Code has 55+ specialized tools organized by function.
 
 | Category | Tools | Purpose |
 |---|---|---|
+| [Built-in Tools](config.md) | — | File operations, search, shell, subagents, and other core agent tools |
 | [SQL Tools](sql-tools.md) | 12 tools | Analysis, optimization, translation, formatting, cost prediction |
 | [Schema Tools](schema-tools.md) | 7 tools | Inspection, search, PII detection, tagging, diffing |
 | [FinOps Tools](finops-tools.md) | 8 tools | Cost analysis, warehouse sizing, unused resources, RBAC |

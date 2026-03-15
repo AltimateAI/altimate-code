@@ -67,15 +67,15 @@ nav:
           - Agent Modes: configure/agent-modes.md
           - Agent Config: configure/agents.md
       - Tools:
-          - Tool Config: configure/tools/config.md
-          - Custom Tools: configure/tools/custom.md
           - Overview: configure/tools/index.md
+          - Built-in Tools: configure/tools/config.md
           - SQL Tools: configure/tools/sql-tools.md
           - Schema Tools: configure/tools/schema-tools.md
           - FinOps Tools: configure/tools/finops-tools.md
           - Lineage Tools: configure/tools/lineage-tools.md
           - dbt Tools: configure/tools/dbt-tools.md
           - Warehouse Tools: configure/tools/warehouse-tools.md
+          - Custom Tools: configure/tools/custom.md
       - Skills: configure/skills.md
       - Commands: configure/commands.md
       - Providers & Models:
