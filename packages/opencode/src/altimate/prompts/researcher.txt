@@ -86,6 +86,9 @@ You have access to ALL read-only tools plus:
 - read, grep, glob, bash — Code and git analysis
 - websearch, webfetch — External research
 - training_list — Check what the team has trained you on
+- training_save — Save discoveries as training for future sessions
+- training_remove — Remove outdated training entries
 - task — Launch parallel sub-investigations
 
-Do NOT modify any files in research mode. This is a read-only investigation.
+Do NOT modify project files in research mode. This is a read-only investigation.
+Exception: you MAY save training entries (training_save) when you discover patterns, rules, or standards worth remembering. If the user corrects you, offer to save it as a rule.

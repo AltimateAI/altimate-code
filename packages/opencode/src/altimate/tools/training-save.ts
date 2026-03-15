@@ -33,7 +33,7 @@ export const TrainingSaveTool = Tool.define("training_save", {
         }),
       )
       .describe(
-        "Short identifier for this training entry (e.g., 'staging-model', 'no-float', 'ARR'). Auto-lowercased.",
+        "Short identifier (e.g., 'staging-model', 'no-float', 'arr'). Auto-lowercased, spaces become hyphens.",
       ),
     content: z
       .string()
@@ -67,10 +67,21 @@ export const TrainingSaveTool = Tool.define("training_save", {
       if (!isUpdate) {
         const existing = await TrainingStore.count({ kind: args.kind, scope: scopeForCount })
         if (existing[args.kind] >= TRAINING_MAX_PATTERNS_PER_KIND) {
+          // List existing entries with applied counts to help user decide what to remove
+          const entries = await TrainingStore.list({ kind: args.kind, scope: scopeForCount })
+          const sorted = [...entries].sort((a, b) => a.meta.applied - b.meta.applied)
+          const entryList = sorted
+            .slice(0, 5)
+            .map((e) => `  - \`${e.name}\` (applied ${e.meta.applied}x)`)
+            .join("\n")
+          const suggestion = sorted[0]?.meta.applied === 0
+            ? `\nSuggestion: \`${sorted[0].name}\` has never been applied — consider removing it.`
+            : ""
+
           return {
             title: "Training: limit reached",
             metadata: { action: "error" as string, kind: args.kind, name: args.name, scope: args.scope },
-            output: `Cannot save: already at ${TRAINING_MAX_PATTERNS_PER_KIND} ${args.kind} entries. Remove an existing one first with training_remove.`,
+            output: `Cannot save: already at ${TRAINING_MAX_PATTERNS_PER_KIND} ${args.kind} entries. Remove one first with training_remove.\n\nExisting ${args.kind} entries (least applied first):\n${entryList}${suggestion}`,
           }
         }
       }
@@ -89,8 +100,18 @@ export const TrainingSaveTool = Tool.define("training_save", {
       if (isUpdate) {
         const appliedNote = existingEntry.meta.applied > 0 ? ` (preserving ${existingEntry.meta.applied} prior applications)` : ""
         output = `Updated ${args.kind} "${args.name}" in ${args.scope} training${appliedNote}.`
+        // Show what changed
+        const oldPreview = existingEntry.content.slice(0, 150)
+        const newPreview = args.content.slice(0, 150)
+        if (oldPreview !== newPreview) {
+          output += `\n\nPrevious: ${oldPreview}${existingEntry.content.length > 150 ? "..." : ""}`
+          output += `\nNow:      ${newPreview}${args.content.length > 150 ? "..." : ""}`
+        }
       } else {
         output = `Saved ${args.kind} "${args.name}" to ${args.scope} training.`
+        // Echo back what was saved so user can verify
+        const preview = args.content.length > 200 ? args.content.slice(0, 200) + "..." : args.content
+        output += `\n\nContent: ${preview}`
       }
 
       if (args.scope === "project") {
@@ -101,7 +122,7 @@ export const TrainingSaveTool = Tool.define("training_save", {
       const budgetUsed = await TrainingPrompt.budgetUsage()
       output += `\nTraining usage: ${budgetUsed.used}/${budgetUsed.budget} chars (${budgetUsed.percent}% full).`
       if (budgetUsed.percent >= 80) {
-        output += "\n⚠ Training is getting full. Oldest entries may not fit in context. Consider consolidating."
+        output += "\nTraining is getting full. Least-applied entries may not fit in context. Consider consolidating."
       }
 
       // Show duplicate details
