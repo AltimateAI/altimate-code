@@ -36,6 +36,7 @@ import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
 // altimate_change start - import prompt enhancement
 import { enhancePrompt, isAutoEnhanceEnabled } from "@/altimate/enhance-prompt"
+let enhancingInProgress = false
 // altimate_change end
 
 export type PromptProps = {
@@ -613,10 +614,12 @@ export function Prompt(props: PromptProps) {
 
     // altimate_change start - auto-enhance prompt before expanding paste text
     // Only enhance the raw user text, not shell commands or slash commands
-    if (store.mode === "normal" && !inputText.startsWith("/")) {
+    // Guard prevents concurrent enhancement calls from rapid submissions
+    if (store.mode === "normal" && !inputText.startsWith("/") && !enhancingInProgress) {
       try {
         const autoEnhance = await isAutoEnhanceEnabled()
         if (autoEnhance) {
+          enhancingInProgress = true
           toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
           const enhanced = await enhancePrompt(inputText)
           if (enhanced !== inputText) {
@@ -627,6 +630,8 @@ export function Prompt(props: PromptProps) {
       } catch (err) {
         // Enhancement failure should never block prompt submission
         console.error("auto-enhance failed, using original prompt", err)
+      } finally {
+        enhancingInProgress = false
       }
     }
     // altimate_change end
@@ -720,6 +725,7 @@ export function Prompt(props: PromptProps) {
     }
     history.append({
       ...store.prompt,
+      input: inputText,
       mode: currentMode,
     })
     input.extmarks.clear()

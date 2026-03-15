@@ -6,11 +6,13 @@ import { Config } from "@/config/config"
 import { Log } from "@/util/log"
 import { MessageV2 } from "@/session/message-v2"
 
-const log = Log.create({ service: "enhance-prompt" })
-
+const ENHANCE_NAME = "enhance-prompt"
 const ENHANCE_TIMEOUT_MS = 15_000
-// Synthetic ID for enhancement requests — not a real session/message
-const ENHANCE_ID = "enhance-prompt" as any
+// MessageV2.User requires branded MessageID/SessionID types, but this is a
+// synthetic message that never enters the session store — cast is safe here.
+const ENHANCE_ID = ENHANCE_NAME as any
+
+const log = Log.create({ service: ENHANCE_NAME })
 
 // Research-backed enhancement prompt based on:
 // - AutoPrompter (arxiv 2504.20196): 5 missing info categories that cause 27% lower edit correctness
@@ -93,7 +95,7 @@ export async function enhancePrompt(text: string): Promise<string> {
       (await Provider.getModel(defaultModel.providerID, defaultModel.modelID))
 
     const agent: Agent.Info = {
-      name: "enhance-prompt",
+      name: ENHANCE_NAME,
       mode: "primary",
       hidden: true,
       options: {},
@@ -107,7 +109,7 @@ export async function enhancePrompt(text: string): Promise<string> {
       sessionID: ENHANCE_ID,
       role: "user",
       time: { created: Date.now() },
-      agent: "enhance-prompt",
+      agent: ENHANCE_NAME,
       model: {
         providerID: model.providerID,
         modelID: model.id,

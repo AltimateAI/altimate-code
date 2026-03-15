@@ -1,5 +1,61 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test, mock, beforeEach } from "bun:test"
 import { clean, stripThinkTags } from "../../src/altimate/enhance-prompt"
+
+// Mock Config for isAutoEnhanceEnabled tests
+let mockConfig: any = {}
+mock.module("@/config/config", () => ({
+  Config: {
+    get: () => Promise.resolve(mockConfig),
+  },
+}))
+
+// Mock Provider and LLM for enhancePrompt tests
+let mockStreamResult: string | undefined = "enhanced result"
+let mockStreamShouldThrow = false
+mock.module("@/provider/provider", () => ({
+  Provider: {
+    defaultModel: () =>
+      Promise.resolve({ providerID: "test-provider", modelID: "test-model" }),
+    getSmallModel: () =>
+      Promise.resolve({ providerID: "test-provider", id: "test-small", modelID: "test-small" }),
+    getModel: () =>
+      Promise.resolve({ providerID: "test-provider", id: "test-model", modelID: "test-model" }),
+  },
+}))
+
+mock.module("@/session/llm", () => ({
+  LLM: {
+    stream: () => {
+      if (mockStreamShouldThrow) return Promise.reject(new Error("stream init failed"))
+      return Promise.resolve({
+        text: mockStreamResult !== undefined
+          ? Promise.resolve(mockStreamResult)
+          : Promise.reject(new Error("stream text failed")),
+      })
+    },
+  },
+}))
+
+mock.module("@/util/log", () => ({
+  Log: {
+    create: () => ({
+      info: () => {},
+      error: () => {},
+      debug: () => {},
+    }),
+  },
+}))
+
+mock.module("@/agent/agent", () => ({
+  Agent: {},
+}))
+
+mock.module("@/session/message-v2", () => ({
+  MessageV2: {},
+}))
+
+// Import after mocking
+const { enhancePrompt, isAutoEnhanceEnabled } = await import("../../src/altimate/enhance-prompt")
 
 describe("enhance-prompt clean()", () => {
   test("strips markdown code fences", () => {
@@ -147,5 +203,105 @@ describe("enhance-prompt combined pipeline", () => {
     const input = "Add a created_at timestamp column to the users dbt model."
     const result = clean(stripThinkTags(input).trim())
     expect(result).toBe("Add a created_at timestamp column to the users dbt model.")
+  })
+})
+
+describe("isAutoEnhanceEnabled()", () => {
+  beforeEach(() => {
+    mockConfig = {}
+  })
+
+  test("returns false when experimental config is absent", async () => {
+    mockConfig = {}
+    expect(await isAutoEnhanceEnabled()).toBe(false)
+  })
+
+  test("returns false when experimental exists but auto_enhance_prompt is missing", async () => {
+    mockConfig = { experimental: {} }
+    expect(await isAutoEnhanceEnabled()).toBe(false)
+  })
+
+  test("returns false when auto_enhance_prompt is false", async () => {
+    mockConfig = { experimental: { auto_enhance_prompt: false } }
+    expect(await isAutoEnhanceEnabled()).toBe(false)
+  })
+
+  test("returns true when auto_enhance_prompt is true", async () => {
+    mockConfig = { experimental: { auto_enhance_prompt: true } }
+    expect(await isAutoEnhanceEnabled()).toBe(true)
+  })
+
+  test("returns false when auto_enhance_prompt is undefined", async () => {
+    mockConfig = { experimental: { auto_enhance_prompt: undefined } }
+    expect(await isAutoEnhanceEnabled()).toBe(false)
+  })
+})
+
+describe("enhancePrompt()", () => {
+  beforeEach(() => {
+    mockStreamResult = "enhanced result"
+    mockStreamShouldThrow = false
+  })
+
+  test("returns original text for empty input", async () => {
+    expect(await enhancePrompt("")).toBe("")
+  })
+
+  test("returns original text for whitespace-only input", async () => {
+    expect(await enhancePrompt("   ")).toBe("   ")
+  })
+
+  test("returns enhanced text from LLM", async () => {
+    mockStreamResult = "Investigate the failing test and fix it."
+    const result = await enhancePrompt("fix the test")
+    expect(result).toBe("Investigate the failing test and fix it.")
+  })
+
+  test("strips think tags from LLM response", async () => {
+    mockStreamResult = "<think>let me reason</think>Enhanced prompt here"
+    const result = await enhancePrompt("do something")
+    expect(result).toBe("Enhanced prompt here")
+  })
+
+  test("strips code fences from LLM response", async () => {
+    mockStreamResult = '```\nEnhanced prompt here\n```'
+    const result = await enhancePrompt("do something")
+    expect(result).toBe("Enhanced prompt here")
+  })
+
+  test("returns original text when LLM stream.text fails", async () => {
+    mockStreamResult = undefined // causes stream.text to reject
+    const result = await enhancePrompt("fix the bug")
+    expect(result).toBe("fix the bug")
+  })
+
+  test("returns original text when LLM stream init fails", async () => {
+    mockStreamShouldThrow = true
+    const result = await enhancePrompt("fix the bug")
+    expect(result).toBe("fix the bug")
+  })
+
+  test("returns original text when LLM returns empty string", async () => {
+    mockStreamResult = ""
+    const result = await enhancePrompt("fix the bug")
+    expect(result).toBe("fix the bug")
+  })
+
+  test("handles LLM response with only think tags (no content)", async () => {
+    mockStreamResult = "<think>I should enhance this</think>"
+    const result = await enhancePrompt("fix the bug")
+    expect(result).toBe("fix the bug")
+  })
+
+  test("handles unclosed think tag in LLM response", async () => {
+    mockStreamResult = "<think>reasoning cut off by token limit"
+    const result = await enhancePrompt("fix the bug")
+    expect(result).toBe("fix the bug")
+  })
+
+  test("handles combined think tags + code fences + quotes", async () => {
+    mockStreamResult = '<think>reasoning</think>```\n"Investigate the failing test."\n```'
+    const result = await enhancePrompt("fix test")
+    expect(result).toBe("Investigate the failing test.")
   })
 })
