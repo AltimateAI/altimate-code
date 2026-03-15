@@ -38,11 +38,11 @@ describe("Installation script branding", () => {
     // Should not contain the upstream npm package name in install commands
     // (note: @opencode-ai/ as internal scope is allowed, but `opencode-ai@` as
     // an npm install target is not)
-    const installLines = installSrc.split("\n").filter(
-      (line) =>
-        (line.includes("npm") || line.includes("pnpm") || line.includes("bun")) &&
-        line.includes("install"),
-    )
+    const installLines = installSrc
+      .split("\n")
+      .filter(
+        (line) => (line.includes("npm") || line.includes("pnpm") || line.includes("bun")) && line.includes("install"),
+      )
     for (const line of installLines) {
       expect(line).not.toMatch(/["'`]opencode-ai["'`@]/)
     }
@@ -206,13 +206,13 @@ describe("OAuth/MCP branding", () => {
   const oauthProviderPath = join(srcDir, "mcp", "oauth-provider.ts")
   const oauthCallbackPath = join(srcDir, "mcp", "oauth-callback.ts")
 
-  test("oauth-provider.ts has client_name: \"Altimate Code\" not \"OpenCode\"", () => {
+  test('oauth-provider.ts has client_name: "Altimate Code" not "OpenCode"', () => {
     const content = readText(oauthProviderPath)
     expect(content).toContain('client_name: "Altimate Code"')
     expect(content).not.toMatch(/client_name:\s*"OpenCode"/)
   })
 
-  test("oauth-callback.ts HTML titles contain \"Altimate Code\" not \"OpenCode\"", () => {
+  test('oauth-callback.ts HTML titles contain "Altimate Code" not "OpenCode"', () => {
     const content = readText(oauthCallbackPath)
     // All <title> tags should reference Altimate Code
     const titleMatches = content.match(/<title>[^<]+<\/title>/g) ?? []
@@ -297,6 +297,25 @@ describe("No opencode.ai domain leaks in src/", () => {
       }
     }
     expect(violations).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5b. TUI Branding (sidebar, headers, etc.)
+// ---------------------------------------------------------------------------
+describe("TUI branding", () => {
+  const sidebarPath = join(srcDir, "cli", "cmd", "tui", "routes", "session", "sidebar.tsx")
+  const sidebarContent = readText(sidebarPath)
+
+  test("sidebar shows 'Altimate' not 'Open' as branded name", () => {
+    // The sidebar footer must say "Altimate Code", not "OpenCode"
+    expect(sidebarContent).toContain("<b>Altimate</b>")
+    expect(sidebarContent).not.toMatch(/<b>Open<\/b>\s*\n\s*<span[^>]*>\s*<b>Code<\/b>/)
+  })
+
+  test("sidebar has altimate_change marker to protect branding", () => {
+    expect(sidebarContent).toContain("altimate_change start")
+    expect(sidebarContent).toContain("altimate_change end")
   })
 })
 

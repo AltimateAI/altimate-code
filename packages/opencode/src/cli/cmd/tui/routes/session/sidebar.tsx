@@ -307,13 +307,15 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
             <span style={{ fg: theme.textMuted }}>{directory().split("/").slice(0, -1).join("/")}/</span>
             <span style={{ fg: theme.text }}>{directory().split("/").at(-1)}</span>
           </text>
+          {/* altimate_change start — sidebar branding */}
           <text fg={theme.textMuted}>
-            <span style={{ fg: theme.success }}>•</span> <b>Open</b>
+            <span style={{ fg: theme.success }}>•</span> <b>Altimate</b>
             <span style={{ fg: theme.text }}>
-              <b>Code</b>
+              <b> Code</b>
             </span>{" "}
             <span>{Installation.VERSION}</span>
           </text>
+          {/* altimate_change end */}
         </box>
       </box>
     </Show>
