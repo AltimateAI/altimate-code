@@ -21,10 +21,18 @@ const KIND_HEADERS: Record<TrainingKind, { header: string; instruction: string }
   },
 }
 
+// Track which entries have been applied this session to avoid double-counting
+const appliedThisSession = new Set<string>()
+
 export namespace TrainingPrompt {
   export function formatEntry(entry: TrainingEntry): string {
     const meta = entry.meta.applied > 0 ? ` (applied ${entry.meta.applied}x)` : ""
     return `#### ${entry.name}${meta}\n${entry.content}`
+  }
+
+  /** Reset session tracking (call at session start) */
+  export function resetSession(): void {
+    appliedThisSession.clear()
   }
 
   export async function inject(budget: number = TRAINING_BUDGET): Promise<string> {
@@ -42,6 +50,7 @@ export namespace TrainingPrompt {
       "## Teammate Training\n\nYou have been trained on the following knowledge by your team. Apply it consistently.\n"
     let result = header
     let used = header.length
+    const injected: TrainingEntry[] = []
 
     for (const kind of ["rule", "pattern", "standard", "glossary"] as TrainingKind[]) {
       const items = grouped.get(kind)
@@ -61,6 +70,15 @@ export namespace TrainingPrompt {
         if (used + needed > budget) break
         result += "\n" + formatted + "\n"
         used += needed
+        injected.push(entry)
+      }
+    }
+
+    // Increment applied count once per session per entry (fire-and-forget)
+    for (const entry of injected) {
+      if (!appliedThisSession.has(entry.id)) {
+        appliedThisSession.add(entry.id)
+        TrainingStore.incrementApplied(entry.scope, entry.kind, entry.name).catch(() => {})
       }
     }
 

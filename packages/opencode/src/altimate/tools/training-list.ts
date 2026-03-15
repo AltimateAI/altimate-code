@@ -1,7 +1,7 @@
 // altimate_change - Training list tool for AI Teammate learned knowledge
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { TrainingStore, TrainingPrompt } from "../training"
+import { TrainingStore, TrainingPrompt, TrainingInsights } from "../training"
 import { TrainingKind } from "../training/types"
 
 export const TrainingListTool = Tool.define("training_list", {
@@ -87,10 +87,14 @@ export const TrainingListTool = Tool.define("training_list", {
         sections.push("")
       }
 
+      // Self-improvement insights
+      const insights = await TrainingInsights.analyze()
+      const insightText = TrainingInsights.format(insights)
+
       return {
         title: `Training: ${entries.length} entries`,
         metadata: { count: entries.length, budgetPercent: budget.percent },
-        output: summary + highlights + sections.join("\n"),
+        output: summary + highlights + sections.join("\n") + insightText,
       }
     } catch (e) {
       return {

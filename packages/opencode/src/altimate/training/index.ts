@@ -1,6 +1,7 @@
 // altimate_change - Training module exports
 export { TrainingStore, type TrainingEntry } from "./store"
 export { TrainingPrompt } from "./prompt"
+export { TrainingInsights, type TrainingInsight } from "./insights"
 export {
   TrainingKind,
   TRAINING_TAG,
