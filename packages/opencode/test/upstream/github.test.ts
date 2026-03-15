@@ -143,6 +143,23 @@ describe("fetchReleases()", () => {
     await fetchReleases("anomalyco/opencode", { limit: 5 })
     expect(lastExecCmd).toContain(".[0:5]")
   })
+
+  test("uses --slurp to handle paginated output correctly", async () => {
+    mockExecOutput = "[]"
+
+    await fetchReleases("anomalyco/opencode")
+    expect(lastExecCmd).toContain("--slurp")
+    expect(lastExecCmd).toContain("flatten")
+  })
+
+  test("filters before slicing (filter then limit)", async () => {
+    mockExecOutput = "[]"
+
+    await fetchReleases("anomalyco/opencode", { limit: 10 })
+    // Filter should come before the limit slice
+    expect(lastExecCmd).toContain("flatten | [.[] | select(")
+    expect(lastExecCmd).toMatch(/select\(.*\)\] \| \.\[0:10\]/)
+  })
 })
 
 // ---------------------------------------------------------------------------

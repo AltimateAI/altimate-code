@@ -131,6 +131,11 @@ describe("utils/github.ts module structure", () => {
     expect(githubModule).toContain("gh api")
   })
 
+  test("uses --slurp for paginated output handling", () => {
+    expect(githubModule).toContain("--slurp")
+    expect(githubModule).toContain("flatten")
+  })
+
   test("getRelease returns null for draft releases", () => {
     expect(githubModule).toContain("if (release.draft) return null")
   })
