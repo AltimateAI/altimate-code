@@ -297,6 +297,11 @@ export const defaultConfig: MergeConfig = {
     "specs/**",
     // Translated READMEs
     "README.*.md",
+    // Translation glossaries (we don't ship translations)
+    ".opencode/glossary/**",
+    ".opencode/agent/translator.md",
+    // Storybook CI (packages/storybook and packages/ui are deleted)
+    ".github/workflows/storybook.yml",
   ],
 
   brandingRules: [
