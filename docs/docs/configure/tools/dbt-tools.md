@@ -72,6 +72,44 @@ Source Freshness:
 
 ---
 
+## dbt_lineage
+
+Compute column-level lineage for a dbt model. Takes a manifest.json path and model name, extracts compiled SQL and upstream schemas, and traces column flow.
+
+```
+> dbt_lineage --manifest_path ./target/manifest.json --model fct_revenue
+
+Column Lineage for fct_revenue:
+  revenue_month ← stg_orders.order_date (DATE_TRUNC)
+  product_category ← dim_products.category (direct)
+  total_revenue ← stg_orders.order_amount (SUM)
+  order_count ← stg_orders.order_id (COUNT DISTINCT)
+```
+
+**Parameters:**
+- `manifest_path` (required) — Path to dbt manifest.json
+- `model` (required) — Model name to trace
+- `dialect` (optional) — SQL dialect
+
+---
+
+## dbt_profiles
+
+Discover dbt profiles from `profiles.yml` and map them to warehouse connections. Auto-detects Snowflake, BigQuery, Databricks, Postgres, Redshift, MySQL, and DuckDB configurations.
+
+```
+> dbt_profiles
+
+Discovered profiles:
+  snowflake_prod (snowflake) — account: xy12345.us-east-1, database: ANALYTICS
+  dev_duckdb (duckdb) — path: ./dev.duckdb
+```
+
+**Parameters:**
+- `path` (optional) — Custom path to profiles.yml (defaults to `~/.dbt/profiles.yml`)
+
+---
+
 ## dbt Skills
 
 ### /generate-tests

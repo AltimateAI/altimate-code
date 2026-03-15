@@ -130,7 +130,7 @@ my-dbt-project/
 
 - [Examples](../examples/index.md) — See real workflows in action
 - [TUI Guide](../interfaces/tui.md) — Learn the terminal interface, keybinds, and slash commands
-- [Tools](../configure/tools/index.md) — Browse the 55+ specialized data engineering tools
+- [Tools](../configure/tools/index.md) — Browse the 70+ specialized data engineering tools
 - [Configuration](../configure/config.md) — Full config file reference
 - [Providers](../configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
 - [Agent Modes](../configure/agent-modes.md) — Understand the 5 governed modes

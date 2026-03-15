@@ -1,6 +1,6 @@
 # Agent Skills
 
-Skills are reusable prompt templates that extend agent capabilities.
+Skills are reusable prompt templates that extend agent capabilities. Invoke them as slash commands in the TUI.
 
 ## Skill Format
 
@@ -64,15 +64,30 @@ Skills are loaded from these locations (in priority order):
     }
     ```
 
-## Built-in Data Engineering Skills
+## Built-in Skills
 
-altimate includes skills for common data engineering tasks:
+Altimate Code ships with 11 built-in skills for data engineering workflows.
 
-- SQL analysis and optimization
-- dbt model generation
-- Schema exploration
-- Cost estimation
-- Migration planning
+### SQL & Analysis
+
+| Skill | Description | Usage |
+|-------|-------------|-------|
+| `/cost-report` | Analyze Snowflake query costs, credit consumption by user/warehouse, and identify optimization opportunities | `/cost-report` |
+| `/query-optimize` | Analyze and optimize SQL queries for better performance using `sql_optimize` and `sql_analyze` | `/query-optimize SELECT * FROM users ORDER BY name` |
+| `/sql-translate` | Translate SQL between database dialects (Snowflake, BigQuery, PostgreSQL, Databricks, etc.) | `/sql-translate snowflake bigquery SELECT DATEADD(...)` |
+| `/impact-analysis` | Analyze downstream impact of changes to a dbt model by combining column-level lineage with the dbt dependency graph | `/impact-analysis stg_orders` |
+| `/lineage-diff` | Compare column-level lineage between two versions of a SQL query to show added, removed, and changed data flow edges | `/lineage-diff models/marts/dim_customers.sql` |
+
+### dbt
+
+| Skill | Description | Usage |
+|-------|-------------|-------|
+| `/generate-tests` | Generate dbt test definitions from table metadata — unique, not_null, relationships, accepted_values | `/generate-tests models/staging/stg_orders.sql` |
+| `/model-scaffold` | Scaffold a new dbt model following staging/intermediate/mart patterns with proper naming and structure | `/model-scaffold staging orders from raw.public.orders` |
+| `/dbt-docs` | Generate or improve dbt model documentation — column descriptions, model descriptions, and doc blocks | `/dbt-docs models/marts/fct_revenue.sql` |
+| `/yaml-config` | Generate dbt YAML configuration — sources.yml, schema.yml, or properties.yml — from warehouse schema | `/yaml-config sources raw.stripe` |
+| `/incremental-logic` | Add or fix incremental materialization logic — is_incremental(), unique keys, merge strategies | `/incremental-logic models/marts/fct_orders.sql` |
+| `/medallion-patterns` | Apply medallion architecture (bronze/silver/gold) patterns to organize dbt models into clean data layers | `/medallion-patterns audit` |
 
 ## Disabling External Skills
 

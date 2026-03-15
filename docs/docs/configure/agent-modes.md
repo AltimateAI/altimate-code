@@ -1,6 +1,6 @@
 # Agent Modes
 
-Altimate Code runs in one of four specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
+Altimate Code runs in one of five specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
 
 ## Builder
 
@@ -210,3 +210,46 @@ Migrator:
 | PostgreSQL | Snowflake, BigQuery, Databricks |
 | MySQL | PostgreSQL, Snowflake |
 | SQL Server | PostgreSQL, Snowflake |
+
+---
+
+## Executive
+
+**Read-only exploration with output calibrated for non-technical audiences.**
+
+```bash
+altimate --agent executive
+```
+
+Executive mode shares the same tool access as Analyst (read-only, SELECT only) but communicates findings in business terms — no SQL, column names, or engineering jargon. All findings are expressed as business impact: revenue, cost, time, compliance, or operational risk.
+
+### Example: Cost review for leadership
+
+```
+You: What's the state of our data warehouse costs?
+
+Executive:
+> finops_analyze_credits prod-snowflake --days 30
+
+Key findings:
+
+1. Monthly warehouse spend is $2,541, up 15% from last month
+2. One recurring report accounts for 62% of total cost — it runs
+   47 times daily but could be optimized to run once with caching
+3. Three data tables (551GB) haven't been accessed in 90+ days
+   and cost $23/month in storage
+
+Recommendations:
+- Optimizing the top report would save ~$1,600/month (63% reduction)
+- Archiving unused tables saves $276/year
+- Right-sizing the main compute cluster saves ~$630/month
+
+Total addressable savings: ~$2,230/month (88% of current spend)
+```
+
+### What executive can do
+
+- Everything Analyst can do (read-only)
+- Translates technical findings to business impact
+- Formats output for executive presentations
+- No SQL or engineering jargon in responses

@@ -67,6 +67,7 @@ nav:
       - Tools:
           - Overview: configure/tools/index.md
           - Built-in Tools: configure/tools/config.md
+          - Core Tools: configure/tools/core-tools.md
           - SQL Tools: configure/tools/sql-tools.md
           - Schema Tools: configure/tools/schema-tools.md
           - FinOps Tools: configure/tools/finops-tools.md

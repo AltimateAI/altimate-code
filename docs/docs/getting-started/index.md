@@ -17,7 +17,7 @@ hide:
 
 <p class="hero-tagline">The open-source data engineering harness.</p>
 
-<p class="hero-description">55+ specialized data engineering tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across platforms, independent of any single warehouse provider.</p>
+<p class="hero-description">70+ specialized data engineering tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across platforms, independent of any single warehouse provider.</p>
 
 <p class="hero-actions" markdown>
 
@@ -89,7 +89,7 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
 ---
 
-<h2 class="section-heading">55+ specialized tools</h2>
+<h2 class="section-heading">70+ specialized tools</h2>
 <p class="section-sub">Unlike general-purpose coding agents, every tool is purpose-built for data engineering workflows.</p>
 
 <div class="grid cards" markdown>

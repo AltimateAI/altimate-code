@@ -24,7 +24,7 @@ altimate includes built-in tools that agents use to interact with your codebase 
 
 ## Data Engineering Tools
 
-In addition to built-in tools, altimate provides 55+ specialized data engineering tools. See the [Data Engineering Tools](index.md) section for details.
+In addition to built-in tools, altimate provides 70+ specialized data engineering tools. See the [Data Engineering Tools](index.md) section for details.
 
 ## Tool Permissions
 

@@ -1,15 +1,17 @@
 # Tools Reference
 
-Altimate Code has 55+ specialized tools organized by function.
+Altimate Code has 70+ specialized tools organized by function.
 
 | Category | Tools | Purpose |
 |---|---|---|
-| [Built-in Tools](config.md) | — | File operations, search, shell, subagents, and other core agent tools |
-| [SQL Tools](sql-tools.md) | 12 tools | Analysis, optimization, translation, formatting, cost prediction |
+| [Built-in Tools](config.md) | 14 tools | File operations, search, shell, subagents, and other core agent tools |
+| [Core Tools](core-tools.md) | 28 tools | Rust-based SQL engine — validation, linting, safety, lineage, formatting, PII, governance |
+| [SQL Tools](sql-tools.md) | 10 tools | Analysis, optimization, translation, formatting, cost prediction |
 | [Schema Tools](schema-tools.md) | 7 tools | Inspection, search, PII detection, tagging, diffing |
 | [FinOps Tools](finops-tools.md) | 8 tools | Cost analysis, warehouse sizing, unused resources, RBAC |
 | [Lineage Tools](lineage-tools.md) | 1 tool | Column-level lineage tracing with confidence scoring |
-| [dbt Tools](dbt-tools.md) | 2 tools + 6 skills | Run, manifest parsing, test generation, scaffolding |
+| [dbt Tools](dbt-tools.md) | 4 tools + 11 skills | Run, manifest, lineage, profiles, test generation, scaffolding |
 | [Warehouse Tools](warehouse-tools.md) | 6 tools | Environment scanning, connection management, discovery, testing |
+| [Custom Tools](custom.md) | — | Build your own tools with TypeScript plugins |
 
 All tools are available in the interactive TUI. The agent automatically selects the right tools based on your request.
