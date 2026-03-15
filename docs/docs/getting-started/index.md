@@ -179,6 +179,6 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
 <div class="doc-links" markdown>
 
-**Learn More** — [Quickstart](quickstart.md) | [Examples](../examples/index.md) | [Configure](../configure/index.md) | [Interfaces](../interfaces/tui.md) | [Reference](../reference/security-faq.md)
+**Learn More** — [Quickstart](quickstart.md) | [Examples](../examples/index.md) | [Use](../configure/agent-modes.md) | [Configure](../configure/index.md) | [Interfaces](../interfaces/tui.md) | [Reference](../reference/security-faq.md)
 
 </div>

@@ -19,7 +19,7 @@ Altimate Code needs database credentials to connect to your warehouse. Credentia
 
 ## What can the agent actually execute?
 
-Altimate Code can read files, write files, and run shell commands — but only with your permission. The [permission system](configure/permissions.md) lets you control every tool:
+Altimate Code can read files, write files, and run shell commands — but only with your permission. The [permission system](../configure/permissions.md) lets you control every tool:
 
 | Level | Behavior |
 |-------|----------|
@@ -27,11 +27,11 @@ Altimate Code can read files, write files, and run shell commands — but only w
 | `"ask"` | Prompts you before each use |
 | `"deny"` | Blocked entirely |
 
-By default, destructive operations like `bash`, `write`, and `edit` require confirmation. You can restrict specific commands, deny destructive SQL (DROP, DELETE, TRUNCATE), and configure per-agent permissions. See the [Permissions reference](configure/permissions.md) for full examples.
+By default, destructive operations like `bash`, `write`, and `edit` require confirmation. You can restrict specific commands, deny destructive SQL (DROP, DELETE, TRUNCATE), and configure per-agent permissions. See the [Permissions reference](../configure/permissions.md) for full examples.
 
 ## Can I prevent the agent from modifying production databases?
 
-Yes. Use pattern-based permissions to deny destructive SQL, or configure per-agent permissions to make specific agents read-only. See the [Permissions reference](configure/permissions.md) for detailed configuration examples.
+Yes. Use pattern-based permissions to deny destructive SQL, or configure per-agent permissions to make specific agents read-only. See the [Permissions reference](../configure/permissions.md) for detailed configuration examples.
 
 ## What network endpoints does Altimate Code contact?
 

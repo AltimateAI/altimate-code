@@ -45,6 +45,7 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 | `logLevel` | `string` | Log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `share` | `string` | Session sharing: `"manual"`, `"auto"`, `"disabled"` |
 | `autoupdate` | `boolean \| "notify"` | Auto-update behavior |
+| `warehouses` | `object` | Warehouse connections (see [Warehouses](warehouses.md)) |
 | `provider` | `object` | Provider configurations (see [Providers](providers.md)) |
 | `mcp` | `object` | MCP server configurations (see [MCP Servers](mcp-servers.md)) |
 | `formatter` | `object \| false` | Formatter settings (see [Formatters](formatters.md)) |
@@ -57,7 +58,7 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 | `skills` | `object` | Skill paths and URLs |
 | `plugin` | `string[]` | Plugin specifiers |
 | `instructions` | `string[]` | Glob patterns for instruction files |
-| `telemetry` | `object` | Telemetry settings (see [Telemetry](telemetry.md)) |
+| `telemetry` | `object` | Telemetry settings (see [Telemetry](../reference/telemetry.md)) |
 | `compaction` | `object` | Context compaction settings (see [Context Management](context-management.md)) |
 | `experimental` | `object` | Experimental feature flags |
 

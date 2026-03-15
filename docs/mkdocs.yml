@@ -60,9 +60,7 @@ nav:
       - Guides:
           - Cost Optimization: examples/guides/cost-optimization.md
           - Migration: examples/guides/migration.md
-  - Configure:
-      - Overview: configure/index.md
-      - Config File Reference: configure/config.md
+  - Use:
       - Agents:
           - Agent Modes: configure/agent-modes.md
           - Agent Config: configure/agents.md
@@ -78,31 +76,36 @@ nav:
           - Custom Tools: configure/tools/custom.md
       - Skills: configure/skills.md
       - Commands: configure/commands.md
-      - Providers & Models:
+      - Interfaces:
+          - TUI: interfaces/tui.md
+          - CLI: interfaces/cli.md
+          - IDE: interfaces/ide.md
+          - GitHub: interfaces/github.md
+          - GitLab: interfaces/gitlab.md
+  - Configure:
+      - Overview: configure/index.md
+      - Config File Reference: configure/config.md
+      - Warehouses: configure/warehouses.md
+      - LLMs:
           - Providers: configure/providers.md
           - Models: configure/models.md
-      - Governance:
-          - Rules: configure/rules.md
-          - Permissions: configure/permissions.md
-          - Context Management: configure/context-management.md
-          - Formatters: configure/formatters.md
+      - MCPs & ACPs:
+          - MCP Servers: configure/mcp-servers.md
+          - ACP Support: configure/acp.md
       - Appearance:
           - Themes: configure/themes.md
           - Keybinds: configure/keybinds.md
-      - Integrations:
+      - Additional Config:
           - LSP Servers: configure/lsp.md
-          - MCP Servers: configure/mcp-servers.md
-          - ACP Support: configure/acp.md
-  - Interfaces:
-      - TUI: interfaces/tui.md
-      - CLI: interfaces/cli.md
-      - IDE: interfaces/ide.md
-      - GitHub: interfaces/github.md
-      - GitLab: interfaces/gitlab.md
+          - Network: reference/network.md
+          - Windows / WSL: reference/windows-wsl.md
+  - Governance:
+      - Rules: configure/rules.md
+      - Permissions: configure/permissions.md
+      - Context Management: configure/context-management.md
+      - Formatters: configure/formatters.md
   - Reference:
       - What's New: reference/changelog.md
       - Security FAQ: reference/security-faq.md
-      - Network: reference/network.md
       - Troubleshooting: reference/troubleshooting.md
-      - Windows / WSL: reference/windows-wsl.md
       - Telemetry: reference/telemetry.md

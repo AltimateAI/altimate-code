@@ -50,4 +50,4 @@ The web UI provides the same conversational interface as the TUI:
 - Session management
 
 !!! note
-    The web UI is the general-purpose agent interface. For data-engineering-specific UIs, see the [Data Engineering guides](../examples/guides/index.md).
+    The web UI is the general-purpose agent interface. For data-engineering-specific UIs, see the [Data Engineering guides](../examples/index.md).

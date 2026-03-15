@@ -1,36 +1,28 @@
 # Configure
 
-Altimate Code is built from a small set of composable pieces. This section covers what they are and how to configure them.
+Set up your warehouses, LLM providers, and preferences. For agents, tools, skills, and commands, see the [Use](agent-modes.md) section. For rules, permissions, and context management, see [Governance](rules.md).
 
 ## What's in this section
 
 <div class="grid cards" markdown>
 
--   :material-robot-outline:{ .lg .middle } **Agent Modes**
+-   :material-cog:{ .lg .middle } **Config File Reference**
 
     ---
 
-    Five governed modes — Builder, Analyst, Validator, Migrator, Documenter — each with different permissions and tool access.
+    JSON configuration file locations, schema, value substitution, and project structure.
 
-    [:octicons-arrow-right-24: Agent Modes](agent-modes.md)
+    [:octicons-arrow-right-24: Config File](config.md)
 
--   :material-lightning-bolt:{ .lg .middle } **Skills**
-
-    ---
-
-    High-level workflows you invoke with slash commands. Skills chain tools together to complete complex tasks.
-
-    [:octicons-arrow-right-24: Skills](skills.md)
-
--   :material-wrench:{ .lg .middle } **Tools**
+-   :material-database:{ .lg .middle } **Warehouses**
 
     ---
 
-    55+ specialized tools for SQL analysis, schema inspection, lineage, cost prediction, dbt, and warehouse operations.
+    Connect to Snowflake, BigQuery, Databricks, PostgreSQL, Redshift, DuckDB, MySQL, and SQL Server. Includes key-pair auth, IAM, ADC, and SSH tunneling.
 
-    [:octicons-arrow-right-24: Tools](tools/index.md)
+    [:octicons-arrow-right-24: Warehouses](warehouses.md)
 
--   :material-cloud-outline:{ .lg .middle } **Providers & Models**
+-   :material-cloud-outline:{ .lg .middle } **LLMs**
 
     ---
 
@@ -38,25 +30,13 @@ Altimate Code is built from a small set of composable pieces. This section cover
 
     [:octicons-arrow-right-24: Providers](providers.md) · [:octicons-arrow-right-24: Models](models.md)
 
--   :material-cog:{ .lg .middle } **Agents & Tools**
+-   :material-puzzle:{ .lg .middle } **MCPs & ACPs**
 
     ---
 
-    Fine-tune agent prompts, tool permissions, custom tools, and slash commands.
+    Extend Altimate Code with MCP servers (local and remote) and ACP-compatible editor integrations.
 
-    [:octicons-arrow-right-24: Agents](agents.md) · [:octicons-arrow-right-24: Custom Tools](tools/custom.md)
-
--   :material-shield-check:{ .lg .middle } **Governance**
-
-    ---
-
-    **Rules** — Guide agent behavior with instruction files (`AGENTS.md`) that provide project context, coding conventions, and workflow guidance, merged automatically into the system prompt.
-
-    **Permissions** — Control which tools agents can use with `allow`, `ask`, or `deny` levels. Supports pattern-based matching and per-agent overrides.
-
-    **Context Management** — Automatic conversation compaction, observation pruning, and overflow recovery so long sessions never lose important context.
-
-    [:octicons-arrow-right-24: Rules](rules.md) · [:octicons-arrow-right-24: Permissions](permissions.md) · [:octicons-arrow-right-24: Context](context-management.md) · [:octicons-arrow-right-24: Formatters](formatters.md)
+    [:octicons-arrow-right-24: MCP Servers](mcp-servers.md) · [:octicons-arrow-right-24: ACP Support](acp.md)
 
 -   :material-palette:{ .lg .middle } **Appearance**
 
@@ -66,16 +46,12 @@ Altimate Code is built from a small set of composable pieces. This section cover
 
     [:octicons-arrow-right-24: Themes](themes.md) · [:octicons-arrow-right-24: Keybinds](keybinds.md)
 
--   :material-puzzle:{ .lg .middle } **Integrations**
+-   :material-dots-horizontal:{ .lg .middle } **Additional Config**
 
     ---
 
-    Connect to LSP servers, MCP servers, and ACP-compatible tools.
+    LSP servers, network/proxy settings, and Windows/WSL setup.
 
-    [:octicons-arrow-right-24: Integrations](lsp.md)
+    [:octicons-arrow-right-24: LSP Servers](lsp.md) · [:octicons-arrow-right-24: Network](../reference/network.md) · [:octicons-arrow-right-24: Windows / WSL](../reference/windows-wsl.md)
 
 </div>
-
-## Config file
-
-Altimate Code uses JSON configuration files (`altimate-code.json`). For the full config file reference, see the [config file documentation](config.md).

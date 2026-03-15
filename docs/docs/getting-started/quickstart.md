@@ -60,7 +60,7 @@ Altimate Code uses a JSON config file. Create `altimate-code.json` in your proje
 }
 ```
 
-Altimate Code supports Snowflake, BigQuery, Databricks, PostgreSQL, Redshift, DuckDB, MySQL, and SQL Server. For connection examples for each warehouse (including key-pair auth, ADC, and service accounts), see the [full config reference](configure/config.md).
+Altimate Code supports Snowflake, BigQuery, Databricks, PostgreSQL, Redshift, DuckDB, MySQL, and SQL Server. For connection examples for each warehouse (including key-pair auth, ADC, and service accounts), see the [Warehouses](../configure/warehouses.md) page.
 
 ### LLM providers
 
@@ -86,7 +86,7 @@ This walks you through selecting a provider and authenticating. You can also con
 !!! tip
     Use `{env:...}` substitution for API keys so you never commit secrets to version control.
 
-Altimate Code supports 35+ providers including Anthropic, OpenAI, AWS Bedrock, Azure OpenAI, Google Vertex AI, Ollama, and more. For the full list and configuration examples, see [Providers](configure/providers.md) and [Models](configure/models.md).
+Altimate Code supports 35+ providers including Anthropic, OpenAI, AWS Bedrock, Azure OpenAI, Google Vertex AI, Ollama, and more. For the full list and configuration examples, see [Providers](../configure/providers.md) and [Models](../configure/models.md).
 
 ## Project-level config
 
@@ -128,9 +128,9 @@ my-dbt-project/
 
 ## Next steps
 
+- [Examples](../examples/index.md) — See real workflows in action
 - [TUI Guide](../interfaces/tui.md) — Learn the terminal interface, keybinds, and slash commands
-- [CLI Reference](../interfaces/cli.md) — Subcommands, flags, and environment variables
+- [Tools](../configure/tools/index.md) — Browse the 55+ specialized data engineering tools
 - [Configuration](../configure/config.md) — Full config file reference
 - [Providers](../configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
-- [Agent Modes](../configure/agent-modes.md) — Builder, Analyst, Validator, Migrator
-- [Data Engineering Tools](../configure/tools/index.md) — 55+ specialized tools for SQL, dbt, and warehouses
+- [Agent Modes](../configure/agent-modes.md) — Understand the 5 governed modes

@@ -28,9 +28,9 @@ In addition to built-in tools, altimate provides 55+ specialized data engineerin
 
 ## Tool Permissions
 
-Control which tools agents can use via the [permission system](permissions.md). Permission values can be `"allow"`, `"deny"`, or `"ask"` (prompts the user for confirmation). You can set permissions globally or per-agent to disable specific tools or restrict destructive operations.
+Control which tools agents can use via the [permission system](../permissions.md). Permission values can be `"allow"`, `"deny"`, or `"ask"` (prompts the user for confirmation). You can set permissions globally or per-agent to disable specific tools or restrict destructive operations.
 
-For full details and examples, see the [Permissions reference](permissions.md).
+For full details and examples, see the [Permissions reference](../permissions.md).
 
 ## Tool Behavior
 
@@ -65,7 +65,7 @@ File tools respect the project boundaries and permission settings:
 
 ### LSP Tool
 
-When [LSP servers](lsp.md) are configured, the `lsp` tool provides:
+When [LSP servers](../lsp.md) are configured, the `lsp` tool provides:
 
 - Diagnostics (errors, warnings)
 - Go-to-definition
