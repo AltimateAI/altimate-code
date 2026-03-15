@@ -53,7 +53,9 @@ export namespace TrainingPrompt {
       result += sectionHeader
       used += sectionHeader.length
 
-      for (const entry of items) {
+      // Sort by applied count descending so most-used entries get priority in budget
+      const sorted = [...items].sort((a, b) => b.meta.applied - a.meta.applied)
+      for (const entry of sorted) {
         const formatted = formatEntry(entry)
         const needed = formatted.length + 2
         if (used + needed > budget) break
