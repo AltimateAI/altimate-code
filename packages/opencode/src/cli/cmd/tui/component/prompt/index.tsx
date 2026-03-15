@@ -35,7 +35,7 @@ import { useKV } from "../../context/kv"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
 // altimate_change start - import prompt enhancement
-import { enhancePrompt } from "@/altimate/enhance-prompt"
+import { enhancePrompt, isAutoEnhanceEnabled } from "@/altimate/enhance-prompt"
 // altimate_change end
 
 export type PromptProps = {
@@ -629,6 +629,20 @@ export function Prompt(props: PromptProps) {
 
     // Filter out text parts (pasted content) since they're now expanded inline
     const nonTextParts = store.prompt.parts.filter((part) => part.type !== "text")
+
+    // altimate_change start - auto-enhance prompt before sending (if enabled)
+    // Only enhance normal prompts, not shell commands or slash commands
+    if (store.mode === "normal" && !inputText.startsWith("/")) {
+      try {
+        const autoEnhance = await isAutoEnhanceEnabled()
+        if (autoEnhance) {
+          inputText = await enhancePrompt(inputText)
+        }
+      } catch {
+        // Enhancement failure should never block prompt submission
+      }
+    }
+    // altimate_change end
 
     // Capture mode before it gets reset
     const currentMode = store.mode

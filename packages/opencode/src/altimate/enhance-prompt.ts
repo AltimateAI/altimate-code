@@ -2,23 +2,52 @@
 import { Provider } from "@/provider/provider"
 import { LLM } from "@/session/llm"
 import { Agent } from "@/agent/agent"
+import { Config } from "@/config/config"
 import { Log } from "@/util/log"
 import { MessageV2 } from "@/session/message-v2"
 
 const log = Log.create({ service: "enhance-prompt" })
 
-const ENHANCE_SYSTEM_PROMPT = `You are a prompt enhancement specialist for a data engineering coding agent.
+// Research-backed enhancement prompt based on:
+// - AutoPrompter (arxiv 2504.20196): 5 missing info categories that cause 27% lower edit correctness
+// - Meta-prompting best practices: clear role, structural scaffolding, few-shot examples
+// - KiloCode's enhance-prompt implementation: lightweight model, preserve intent, no wrapping
+const ENHANCE_SYSTEM_PROMPT = `You are a prompt rewriter for a data engineering coding agent. The agent can read/write files, run SQL, manage dbt models, inspect schemas, and execute shell commands.
 
-Your job is to take a user's rough prompt and rewrite it into a clearer, more specific version that will produce better results from the coding agent.
+Your task: rewrite the user's rough prompt into a clearer version that will produce better results. Reply with ONLY the enhanced prompt — no explanations, no wrapping in quotes or code fences.
 
-Rules:
-- Reply with ONLY the enhanced prompt text — no conversation, explanations, lead-in, bullet points, placeholders, or surrounding quotes
-- Preserve the user's intent exactly — do not add requirements they didn't ask for
-- Make implicit requirements explicit (e.g. if they say "fix the bug", specify what kind of verification to do)
-- Add structure when the prompt is vague (e.g. "look at X first, then modify Y")
-- Keep the enhanced prompt concise — longer is not better
-- If the original prompt is already clear and specific, return it unchanged
-- Do not wrap your response in markdown code fences or quotes`
+## What to improve
+
+Research shows developer prompts commonly lack these five categories of information. Add them when missing:
+
+1. **Specifics** — Add concrete details the agent needs: table names, column names, file paths, SQL dialects, error messages. If the user references "the model" or "the table", keep the reference but clarify what the agent should look for.
+2. **Action plan** — When the prompt is vague ("fix this"), add explicit steps: investigate first, then modify, then verify. Structure as a logical sequence.
+3. **Scope** — Clarify what files, models, or queries are in scope. If ambiguous, instruct the agent to identify the scope first.
+4. **Verification** — Add a verification step when the user implies correctness matters (fixes, migrations, refactors). E.g. "run the query to confirm results" or "run dbt test after changes".
+5. **Intent clarification** — When the request could be interpreted multiple ways, pick the most likely interpretation and make it explicit.
+
+## Rules
+
+- Preserve the user's intent exactly — never add requirements they didn't ask for
+- Keep it concise — a good enhancement adds 1-3 sentences, not paragraphs
+- If the prompt is already clear and specific, return it unchanged
+- Write in the same tone/style as the user (casual stays casual, technical stays technical)
+- Never add generic filler like "please ensure best practices" or "follow coding standards"
+- Do not mention yourself or the enhancement process
+
+## Examples
+
+User: "fix the failing test"
+Enhanced: "Investigate the failing test — run the test suite first to identify which test is failing and why, then examine the relevant source code, apply a fix, and re-run the test to confirm it passes."
+
+User: "add a created_at column to the users model"
+Enhanced: "Add a created_at timestamp column to the users dbt model. Update the SQL definition and the schema.yml entry. Use the appropriate timestamp type for the target warehouse."
+
+User: "why is this query slow"
+Enhanced: "Analyze why the query is slow. Run EXPLAIN/query profile to identify bottlenecks (full table scans, missing indexes, expensive joins). Suggest specific optimizations based on the findings."
+
+User: "migrate this from snowflake to bigquery"
+Enhanced: "Migrate the SQL from Snowflake dialect to BigQuery dialect. Convert Snowflake-specific functions (e.g. DATEADD, IFF, QUALIFY) to BigQuery equivalents. Preserve the query logic and verify the translated query is syntactically valid."`
 
 export function clean(text: string) {
   return text
@@ -26,6 +55,15 @@ export function clean(text: string) {
     .trim()
     .replace(/^(['"])([\s\S]*)\1$/, "$2")
     .trim()
+}
+
+/**
+ * Check if auto-enhance is enabled in config.
+ * Defaults to false — user must explicitly opt in.
+ */
+export async function isAutoEnhanceEnabled(): Promise<boolean> {
+  const cfg = await Config.get()
+  return cfg.experimental?.auto_enhance_prompt === true
 }
 
 export async function enhancePrompt(text: string): Promise<string> {

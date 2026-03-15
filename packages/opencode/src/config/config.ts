@@ -1229,6 +1229,14 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+          // altimate_change start - auto-enhance prompt config
+          auto_enhance_prompt: z
+            .boolean()
+            .optional()
+            .describe(
+              "Automatically enhance prompts with AI before sending (default: false). Uses a small model to rewrite rough prompts into clearer versions.",
+            ),
+          // altimate_change end
         })
         .optional(),
     })
