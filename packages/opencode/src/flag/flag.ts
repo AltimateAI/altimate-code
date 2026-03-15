@@ -30,6 +30,12 @@ export namespace Flag {
   export const OPENCODE_CONFIG_CONTENT = process.env["OPENCODE_CONFIG_CONTENT"]
   export const OPENCODE_DISABLE_AUTOUPDATE = truthy("OPENCODE_DISABLE_AUTOUPDATE")
   export const OPENCODE_DISABLE_PRUNE = truthy("OPENCODE_DISABLE_PRUNE")
+  // altimate_change start - global opt-out for Altimate Memory
+  export const ALTIMATE_DISABLE_MEMORY = altTruthy("ALTIMATE_DISABLE_MEMORY", "OPENCODE_DISABLE_MEMORY")
+  // altimate_change end
+  // altimate_change start - opt-in for session-end auto-extraction
+  export const ALTIMATE_MEMORY_AUTO_EXTRACT = altTruthy("ALTIMATE_MEMORY_AUTO_EXTRACT", "OPENCODE_MEMORY_AUTO_EXTRACT")
+  // altimate_change end
   export const OPENCODE_DISABLE_TERMINAL_TITLE = truthy("OPENCODE_DISABLE_TERMINAL_TITLE")
   export const OPENCODE_PERMISSION = process.env["OPENCODE_PERMISSION"]
   export const OPENCODE_DISABLE_DEFAULT_PLUGINS = truthy("OPENCODE_DISABLE_DEFAULT_PLUGINS")

@@ -1319,3 +1319,123 @@ describe("telemetry.init with enabled telemetry", () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// 8. Memory telemetry events
+// ---------------------------------------------------------------------------
+describe("telemetry.memory", () => {
+  test("categorizes memory tools correctly", () => {
+    expect(Telemetry.categorizeToolName("altimate_memory_read", "standard")).toBe("memory")
+    expect(Telemetry.categorizeToolName("altimate_memory_write", "standard")).toBe("memory")
+    expect(Telemetry.categorizeToolName("altimate_memory_delete", "standard")).toBe("memory")
+    expect(Telemetry.categorizeToolName("altimate_memory_audit", "standard")).toBe("memory")
+  })
+
+  test("memory_operation event has correct shape for write", () => {
+    const event: Telemetry.Event = {
+      type: "memory_operation",
+      timestamp: Date.now(),
+      session_id: "test-session",
+      operation: "write",
+      scope: "project",
+      block_id: "warehouse-config",
+      is_update: false,
+      duplicate_count: 0,
+      tags_count: 2,
+    }
+    expect(event.type).toBe("memory_operation")
+    expect(event.operation).toBe("write")
+    expect(event.scope).toBe("project")
+    expect(event.is_update).toBe(false)
+  })
+
+  test("memory_operation event has correct shape for delete", () => {
+    const event: Telemetry.Event = {
+      type: "memory_operation",
+      timestamp: Date.now(),
+      session_id: "test-session",
+      operation: "delete",
+      scope: "global",
+      block_id: "old-config",
+      is_update: false,
+      duplicate_count: 0,
+      tags_count: 0,
+    }
+    expect(event.type).toBe("memory_operation")
+    expect(event.operation).toBe("delete")
+  })
+
+  test("memory_operation event supports update flag", () => {
+    const event: Telemetry.Event = {
+      type: "memory_operation",
+      timestamp: Date.now(),
+      session_id: "test-session",
+      operation: "write",
+      scope: "project",
+      block_id: "naming-conventions",
+      is_update: true,
+      duplicate_count: 1,
+      tags_count: 3,
+    }
+    expect(event.is_update).toBe(true)
+    expect(event.duplicate_count).toBe(1)
+  })
+
+  test("memory_injection event has correct shape", () => {
+    const event: Telemetry.Event = {
+      type: "memory_injection",
+      timestamp: Date.now(),
+      session_id: "test-session",
+      block_count: 5,
+      total_chars: 2400,
+      budget: 8000,
+      scopes_used: ["project", "global"],
+    }
+    expect(event.type).toBe("memory_injection")
+    expect(event.block_count).toBe(5)
+    expect(event.scopes_used).toEqual(["project", "global"])
+  })
+
+  test("memory_injection event with single scope", () => {
+    const event: Telemetry.Event = {
+      type: "memory_injection",
+      timestamp: Date.now(),
+      session_id: "test-session",
+      block_count: 1,
+      total_chars: 200,
+      budget: 8000,
+      scopes_used: ["project"],
+    }
+    expect(event.scopes_used).toHaveLength(1)
+  })
+
+  test("track accepts memory_operation event without throwing", () => {
+    expect(() => {
+      Telemetry.track({
+        type: "memory_operation",
+        timestamp: Date.now(),
+        session_id: "test",
+        operation: "write",
+        scope: "project",
+        block_id: "test-block",
+        is_update: false,
+        duplicate_count: 0,
+        tags_count: 0,
+      })
+    }).not.toThrow()
+  })
+
+  test("track accepts memory_injection event without throwing", () => {
+    expect(() => {
+      Telemetry.track({
+        type: "memory_injection",
+        timestamp: Date.now(),
+        session_id: "test",
+        block_count: 3,
+        total_chars: 1500,
+        budget: 8000,
+        scopes_used: ["project", "global"],
+      })
+    }).not.toThrow()
+  })
+})
