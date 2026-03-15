@@ -7,6 +7,9 @@ import { iife } from "@/util/iife"
 import { Flag } from "../flag/flag"
 import { Process } from "@/util/process"
 import { buffer } from "node:stream/consumers"
+// altimate_change start — telemetry import
+import { Telemetry } from "../telemetry"
+// altimate_change end
 
 declare global {
   const OPENCODE_VERSION: string
@@ -218,6 +221,19 @@ export namespace Installation {
     if (!result || result.code !== 0) {
       const stderr =
         method === "choco" ? "not running from an elevated command shell" : result?.stderr.toString("utf8") || ""
+      // altimate_change start — telemetry for upgrade failure
+      const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
+      Telemetry.track({
+        type: "upgrade_attempted",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId || "cli",
+        from_version: VERSION,
+        to_version: target,
+        method: telemetryMethod,
+        status: "error",
+        error: stderr.slice(0, 500),
+      })
+      // altimate_change end
       throw new UpgradeFailedError({
         stderr: stderr,
       })
@@ -228,6 +244,18 @@ export namespace Installation {
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
     })
+    // altimate_change start — telemetry for upgrade success
+    const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
+    Telemetry.track({
+      type: "upgrade_attempted",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId || "cli",
+      from_version: VERSION,
+      to_version: target,
+      method: telemetryMethod,
+      status: "success",
+    })
+    // altimate_change end
     await Process.text([process.execPath, "--version"], { nothrow: true })
   }
 

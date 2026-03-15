@@ -49,6 +49,7 @@ import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
 import { decodeDataUrl } from "@/util/data-url"
+import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -295,6 +296,32 @@ export namespace SessionPrompt {
 
     let step = 0
     const session = await Session.get(sessionID)
+    // altimate_change start — session telemetry tracking
+    await Telemetry.init()
+    Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
+    const sessionStartTime = Date.now()
+    let sessionTotalCost = 0
+    let sessionTotalTokens = 0
+    let toolCallCount = 0
+    let sessionAgentName = ""
+    let sessionHadError = false
+    let emergencySessionEndFired = false
+    const emergencySessionEnd = () => {
+      if (emergencySessionEndFired) return
+      emergencySessionEndFired = true
+      Telemetry.track({
+        type: "session_end",
+        timestamp: Date.now(),
+        session_id: sessionID,
+        total_cost: sessionTotalCost,
+        total_tokens: sessionTotalTokens,
+        tool_call_count: toolCallCount,
+        duration_ms: Date.now() - sessionStartTime,
+      })
+    }
+    process.once("beforeExit", emergencySessionEnd)
+    process.once("exit", emergencySessionEnd)
+    // altimate_change end
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
@@ -629,6 +656,18 @@ export namespace SessionPrompt {
           sessionID: sessionID,
           messageID: lastUser.id,
         })
+        // altimate_change start — session start telemetry
+        sessionAgentName = lastUser.agent
+        Telemetry.track({
+          type: "session_start",
+          timestamp: Date.now(),
+          session_id: sessionID,
+          model_id: model.id,
+          provider_id: model.providerID,
+          agent: lastUser.agent,
+          project_id: Instance.project?.id ?? "",
+        })
+        // altimate_change end
       }
 
       // Ephemerally wrap queued user messages with a reminder to stay on track
@@ -713,6 +752,13 @@ export namespace SessionPrompt {
         }
       }
 
+      // altimate_change start — accumulate session metrics
+      sessionTotalCost += processor.message.cost ?? 0
+      const t = processor.message.tokens
+      sessionTotalTokens += (t.input + t.output + t.reasoning + t.cache.read + t.cache.write)
+      if (processor.message.error) sessionHadError = true
+      // altimate_change end
+
       if (result === "stop") break
       if (result === "compact") {
         await SessionCompaction.create({
@@ -726,6 +772,38 @@ export namespace SessionPrompt {
       continue
     }
     SessionCompaction.prune({ sessionID })
+    // altimate_change start — session end telemetry
+    const outcome = abort.aborted
+      ? "aborted"
+      : sessionHadError
+        ? "error"
+        : sessionTotalCost === 0 && toolCallCount === 0
+          ? "abandoned"
+          : "completed"
+    Telemetry.track({
+      type: "agent_outcome",
+      timestamp: Date.now(),
+      session_id: sessionID,
+      agent: sessionAgentName,
+      tool_calls: toolCallCount,
+      generations: step,
+      duration_ms: Date.now() - sessionStartTime,
+      cost: sessionTotalCost,
+      outcome,
+    })
+    if (!emergencySessionEndFired) {
+      Telemetry.track({
+        type: "session_end",
+        timestamp: Date.now(),
+        session_id: sessionID,
+        total_cost: sessionTotalCost,
+        total_tokens: sessionTotalTokens,
+        tool_call_count: toolCallCount,
+        duration_ms: Date.now() - sessionStartTime,
+      })
+    }
+    await Telemetry.shutdown()
+    // altimate_change end
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
       const queued = state()[sessionID]?.callbacks ?? []
