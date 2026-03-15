@@ -54,7 +54,9 @@ User: "migrate this from snowflake to bigquery"
 Enhanced: "Migrate the SQL from Snowflake dialect to BigQuery dialect. Convert Snowflake-specific functions (e.g. DATEADD, IFF, QUALIFY) to BigQuery equivalents. Preserve the query logic and verify the translated query is syntactically valid."`
 
 export function stripThinkTags(text: string) {
-  return text.replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+  // Match closed <think>...</think> blocks, and also unclosed <think>... to end of string
+  // (unclosed tags happen when the model hits token limit mid-generation)
+  return text.replace(/<think>[\s\S]*?(?:<\/think>\s*|$)/g, "")
 }
 
 export function clean(text: string) {

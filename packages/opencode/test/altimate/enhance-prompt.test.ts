@@ -108,6 +108,14 @@ describe("enhance-prompt stripThinkTags()", () => {
   test("handles nested angle brackets inside think tags", () => {
     expect(stripThinkTags("<think>check if x < 5 and y > 3</think>result")).toBe("result")
   })
+
+  test("strips unclosed think tag (model hit token limit)", () => {
+    expect(stripThinkTags("<think>reasoning that got cut off")).toBe("")
+  })
+
+  test("strips unclosed think tag with content before it", () => {
+    expect(stripThinkTags("good content <think>trailing reasoning")).toBe("good content ")
+  })
 })
 
 describe("enhance-prompt combined pipeline", () => {
