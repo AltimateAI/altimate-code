@@ -291,8 +291,10 @@ describe("Build and package branding", () => {
   })
 
   test("build.ts creates altimate-code backward-compat symlink", () => {
-    expect(buildTs).toContain("altimate-code")
-    expect(buildTs).toMatch(/ln -sf altimate|altimate-code\.exe/)
+    // Unix: symlink
+    expect(buildTs).toContain("ln -sf altimate")
+    // Windows: copy
+    expect(buildTs).toContain("altimate-code.exe")
   })
 
   test("build.ts has sourcemap: 'external'", () => {
