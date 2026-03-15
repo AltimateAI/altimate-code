@@ -1,76 +1,57 @@
-import { describe, expect, test, mock, beforeEach } from "bun:test"
+import { describe, expect, test, spyOn, beforeEach, afterAll } from "bun:test"
 import { clean, stripThinkTags } from "../../src/altimate/enhance-prompt"
+import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
+import { LLM } from "@/session/llm"
 
-// Mock Config for isAutoEnhanceEnabled tests
+// ---------------------------------------------------------------------------
+// Spy-based mocking — scoped to this file and cleaned up in afterAll.
+// NEVER use mock.module() for shared infrastructure modules (@/util/log,
+// @/config/config, @/session/llm, etc.) because bun's mock.module() replaces
+// the module globally for the entire process with no restore mechanism,
+// breaking every other test file that imports the real module.
+// ---------------------------------------------------------------------------
+
 let mockConfig: any = {}
-mock.module("@/config/config", () => ({
-  Config: {
-    get: () => Promise.resolve(mockConfig),
-  },
-}))
-
-// Mock Provider and LLM for enhancePrompt tests
 let mockStreamResult: string | undefined = "enhanced result"
 let mockStreamShouldThrow = false
-mock.module("@/provider/provider", () => ({
-  Provider: {
-    defaultModel: () =>
-      Promise.resolve({ providerID: "test-provider", modelID: "test-model" }),
-    getSmallModel: () =>
-      Promise.resolve({ providerID: "test-provider", id: "test-small", modelID: "test-small" }),
-    getModel: () =>
-      Promise.resolve({ providerID: "test-provider", id: "test-model", modelID: "test-model" }),
-  },
-}))
 
-mock.module("@/session/llm", () => ({
-  LLM: {
-    stream: () => {
-      if (mockStreamShouldThrow) return Promise.reject(new Error("stream init failed"))
-      return Promise.resolve({
-        // fullStream must be an async iterable (consumed by for-await in enhancePrompt)
-        fullStream: {
-          [Symbol.asyncIterator]: () => ({
-            next: () => Promise.resolve({ done: true, value: undefined }),
-          }),
-        },
-        text: mockStreamResult !== undefined
-          ? Promise.resolve(mockStreamResult)
-          : Promise.reject(new Error("stream text failed")),
-      })
+const configSpy = spyOn(Config as any, "get").mockImplementation(() => Promise.resolve(mockConfig))
+
+const defaultModelSpy = spyOn(Provider as any, "defaultModel").mockImplementation(() =>
+  Promise.resolve({ providerID: "test-provider", modelID: "test-model" }),
+)
+const getSmallModelSpy = spyOn(Provider as any, "getSmallModel").mockImplementation(() =>
+  Promise.resolve({ providerID: "test-provider", id: "test-small", modelID: "test-small" }),
+)
+const getModelSpy = spyOn(Provider as any, "getModel").mockImplementation(() =>
+  Promise.resolve({ providerID: "test-provider", id: "test-model", modelID: "test-model" }),
+)
+
+const streamSpy = spyOn(LLM as any, "stream").mockImplementation(() => {
+  if (mockStreamShouldThrow) return Promise.reject(new Error("stream init failed"))
+  return Promise.resolve({
+    fullStream: {
+      [Symbol.asyncIterator]: () => ({
+        next: () => Promise.resolve({ done: true, value: undefined }),
+      }),
     },
-  },
-}))
+    text:
+      mockStreamResult !== undefined
+        ? Promise.resolve(mockStreamResult)
+        : Promise.reject(new Error("stream text failed")),
+  })
+})
 
-mock.module("@/util/log", () => ({
-  Log: {
-    create: () => ({
-      info: () => {},
-      error: () => {},
-      debug: () => {},
-    }),
-  },
-}))
+afterAll(() => {
+  configSpy.mockRestore()
+  defaultModelSpy.mockRestore()
+  getSmallModelSpy.mockRestore()
+  getModelSpy.mockRestore()
+  streamSpy.mockRestore()
+})
 
-mock.module("@/agent/agent", () => ({
-  Agent: {},
-}))
-
-mock.module("@/session/message-v2", () => ({
-  MessageV2: {},
-}))
-
-let idCounter = 0
-mock.module("@/session/schema", () => ({
-  MessageID: {
-    ascending: () => `msg-${++idCounter}`,
-  },
-  SessionID: {
-    descending: () => `session-${++idCounter}`,
-  },
-}))
-
-// Import after mocking
+// Import enhancePrompt/isAutoEnhanceEnabled after spies are in place
 const { enhancePrompt, isAutoEnhanceEnabled } = await import("../../src/altimate/enhance-prompt")
 
 describe("enhance-prompt clean()", () => {
@@ -141,7 +122,6 @@ describe("enhance-prompt clean()", () => {
   })
 
   test("handles nested quotes inside code fences", () => {
-    // After fence stripping, quote stripping also triggers on surrounding quotes
     expect(clean('```\n\'inner quoted\'\n```')).toBe("inner quoted")
   })
 })
