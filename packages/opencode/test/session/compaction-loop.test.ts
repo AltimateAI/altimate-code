@@ -382,7 +382,7 @@ function createModel(opts: {
 }): Provider.Model {
   return {
     id: "test-model",
-    providerID: "test",
+    providerID: "test" as any,
     name: "Test",
     limit: {
       context: opts.context,
@@ -596,7 +596,7 @@ describe("session.compaction.prune with disabled config", () => {
       directory: tmp.path,
       fn: async () => {
         // Should return early without error
-        await SessionCompaction.prune({ sessionID: "nonexistent" })
+        await SessionCompaction.prune({ sessionID: "nonexistent" as any })
       },
     })
   })

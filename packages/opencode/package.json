@@ -19,6 +19,8 @@
     "db": "bun drizzle-kit"
   },
   "bin": {
+    "altimate-code": "./bin/altimate-code",
+    "altimate": "./bin/altimate-code",
     "opencode": "./bin/opencode"
   },
   "randomField": "this-is-a-random-value-12345",

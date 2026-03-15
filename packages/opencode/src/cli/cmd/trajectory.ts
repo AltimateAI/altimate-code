@@ -1,6 +1,7 @@
 import type { Argv } from "yargs"
 import { cmd } from "./cmd"
 import { Session } from "../../session"
+import { SessionID } from "../../session/schema"
 import { bootstrap } from "../bootstrap"
 import { UI } from "../ui"
 import { Locale } from "../../util/locale"
@@ -76,15 +77,16 @@ const TrajectoryShowCommand = cmd({
   },
   handler: async (args) => {
     await bootstrap(process.cwd(), async () => {
+      const sid = SessionID.make(args.sessionID)
       let session: Session.Info
       try {
-        session = await Session.get(args.sessionID)
+        session = await Session.get(sid)
       } catch {
         UI.error(`Session not found: ${args.sessionID}`)
         process.exit(1)
       }
 
-      const messages = await Session.messages({ sessionID: args.sessionID })
+      const messages = await Session.messages({ sessionID: sid })
       printTrajectoryDetail(session, messages, args.verbose)
     })
   },
@@ -102,15 +104,16 @@ const TrajectoryExportCommand = cmd({
   },
   handler: async (args) => {
     await bootstrap(process.cwd(), async () => {
+      const sid = SessionID.make(args.sessionID)
       let session: Session.Info
       try {
-        session = await Session.get(args.sessionID)
+        session = await Session.get(sid)
       } catch {
         UI.error(`Session not found: ${args.sessionID}`)
         process.exit(1)
       }
 
-      const messages = await Session.messages({ sessionID: args.sessionID })
+      const messages = await Session.messages({ sessionID: sid })
       const trajectory = buildTrajectoryExport(session, messages)
       process.stdout.write(JSON.stringify(trajectory, null, 2))
       process.stdout.write(EOL)

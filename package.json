@@ -18,10 +18,11 @@
   },
   "workspaces": {
     "packages": [
-      "packages/*",
-      "packages/console/*",
-      "packages/sdk/js",
-      "packages/slack"
+      "packages/opencode",
+      "packages/plugin",
+      "packages/script",
+      "packages/util",
+      "packages/sdk/js"
     ],
     "catalog": {
       "@types/bun": "1.3.9",
@@ -69,19 +70,14 @@
     }
   },
   "devDependencies": {
-    "@actions/artifact": "5.0.1",
     "@tsconfig/bun": "catalog:",
-    "@types/mime-types": "3.0.1",
     "@typescript/native-preview": "catalog:",
-    "glob": "13.0.5",
     "husky": "9.1.7",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
-    "sst": "3.18.10",
     "turbo": "2.8.13"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.933.0",
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/script": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",
@@ -101,8 +97,7 @@
     "protobufjs",
     "tree-sitter",
     "tree-sitter-bash",
-    "web-tree-sitter",
-    "electron"
+    "web-tree-sitter"
   ],
   "overrides": {
     "@types/bun": "catalog:",

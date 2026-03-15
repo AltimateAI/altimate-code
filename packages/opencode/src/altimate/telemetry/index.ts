@@ -1,4 +1,4 @@
-import { Control } from "@/control"
+import { Account } from "@/account"
 import { Config } from "@/config/config"
 import { Installation } from "@/installation"
 import { Log } from "@/util/log"
@@ -405,7 +405,7 @@ export namespace Telemetry {
       }
       appInsights = cfg
       try {
-        const account = Control.account()
+        const account = Account.active()
         if (account) {
           userEmail = createHash("sha256").update(account.email.toLowerCase().trim()).digest("hex")
         }

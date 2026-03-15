@@ -201,7 +201,7 @@ describe("session.message-v2.fromError", () => {
 
   test("converts token refresh failure to ProviderAuthError", () => {
     const error = new Error("Anthropic OAuth token refresh failed (HTTP 401). Try re-authenticating: altimate-code auth login anthropic")
-    const result = MessageV2.fromError(error, { providerID: "anthropic" })
+    const result = MessageV2.fromError(error, { providerID: "anthropic" as any })
 
     expect(result.name).toBe("ProviderAuthError")
     expect((result as any).data.providerID).toBe("anthropic")
@@ -210,7 +210,7 @@ describe("session.message-v2.fromError", () => {
 
   test("converts codex token refresh failure to ProviderAuthError", () => {
     const error = new Error("Codex OAuth token refresh failed (HTTP 403). Try re-authenticating: altimate-code auth login openai")
-    const result = MessageV2.fromError(error, { providerID: "openai" })
+    const result = MessageV2.fromError(error, { providerID: "openai" as any })
 
     expect(result.name).toBe("ProviderAuthError")
     expect((result as any).data.providerID).toBe("openai")
@@ -218,7 +218,7 @@ describe("session.message-v2.fromError", () => {
 
   test("provides descriptive message for generic Error with no message", () => {
     const error = new Error()
-    const result = MessageV2.fromError(error, { providerID: "test" })
+    const result = MessageV2.fromError(error, { providerID: "test" as any })
 
     expect(result.name).toBe("UnknownError")
     // Should not be just "Error" — should include stack or context
@@ -228,7 +228,7 @@ describe("session.message-v2.fromError", () => {
 
   test("provides descriptive message for TypeError with no message", () => {
     const error = new TypeError()
-    const result = MessageV2.fromError(error, { providerID: "test" })
+    const result = MessageV2.fromError(error, { providerID: "test" as any })
 
     expect(result.name).toBe("UnknownError")
     expect((result as any).data.message).toContain("TypeError")

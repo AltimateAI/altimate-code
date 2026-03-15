@@ -103,11 +103,11 @@ describe("Installation Script", () => {
     expect(installContent).toContain(".altimate-code/bin")
   })
 
-  test("no references to altimate.ai domain", () => {
-    // Should reference altimate.ai, not altimate.ai
+  test("no references to opencode.ai domain", () => {
+    // Should reference altimate.ai, not opencode.ai
     const lines = installContent.split("\n")
     for (const line of lines) {
-      expect(line).not.toContain("altimate.ai")
+      expect(line).not.toContain("opencode.ai")
     }
   })
 

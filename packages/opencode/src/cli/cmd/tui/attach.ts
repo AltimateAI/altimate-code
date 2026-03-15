@@ -70,6 +70,7 @@ export const AttachCommand = cmd({
           sessionID: args.session,
           fork: args.fork,
         },
+        config: {},
         directory,
         headers,
       })
