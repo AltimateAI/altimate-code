@@ -20,7 +20,14 @@ function dirForScope(scope: "global" | "project"): string {
 }
 
 function blockPath(scope: "global" | "project", id: string): string {
-  return path.join(dirForScope(scope), ...id.split("/").slice(0, -1), `${id.split("/").pop()}.md`)
+  const base = dirForScope(scope)
+  const result = path.join(base, ...id.split("/").slice(0, -1), `${id.split("/").pop()}.md`)
+  // Defense-in-depth: verify the resolved path stays within the memory directory
+  const resolved = path.resolve(result)
+  if (!resolved.startsWith(path.resolve(base) + path.sep) && resolved !== path.resolve(base)) {
+    throw new Error(`Memory block ID "${id}" resolves outside the memory directory`)
+  }
+  return result
 }
 
 function auditLogPath(scope: "global" | "project"): string {
@@ -184,12 +191,24 @@ export namespace MemoryStore {
       )
     }
 
-    const existing = await list(block.scope, { includeExpired: true })
-    const isUpdate = existing.some((b) => b.id === block.id)
-    if (!isUpdate && existing.length >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
-      throw new Error(
-        `Cannot create memory block "${block.id}": scope "${block.scope}" already has ${MEMORY_MAX_BLOCKS_PER_SCOPE} blocks (maximum). Delete an existing block first.`,
-      )
+    const allBlocks = await list(block.scope, { includeExpired: true })
+    const isUpdate = allBlocks.some((b) => b.id === block.id)
+    if (!isUpdate) {
+      // Count only non-expired blocks against the capacity limit.
+      // Expired blocks should not prevent new writes.
+      const activeCount = allBlocks.filter((b) => !isExpired(b)).length
+      if (activeCount >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
+        throw new Error(
+          `Cannot create memory block "${block.id}": scope "${block.scope}" already has ${MEMORY_MAX_BLOCKS_PER_SCOPE} active blocks (maximum). Delete an existing block first.`,
+        )
+      }
+      // Auto-clean expired blocks when approaching capacity to reclaim disk space
+      if (allBlocks.length >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
+        const expiredBlocks = allBlocks.filter((b) => isExpired(b))
+        for (const expired of expiredBlocks) {
+          await remove(block.scope, expired.id)
+        }
+      }
     }
 
     const duplicates = await findDuplicates(block.scope, block)

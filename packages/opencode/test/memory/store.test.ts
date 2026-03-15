@@ -182,12 +182,22 @@ function createTestStore(baseDir: string) {
           `Memory block "${block.id}" content exceeds maximum size of ${MEMORY_MAX_BLOCK_SIZE} characters (got ${block.content.length})`,
         )
       }
-      const existing = await this.list({ includeExpired: true })
-      const isUpdate = existing.some((b) => b.id === block.id)
-      if (!isUpdate && existing.length >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
-        throw new Error(
-          `Cannot create memory block "${block.id}": scope "${block.scope}" already has ${MEMORY_MAX_BLOCKS_PER_SCOPE} blocks (maximum). Delete an existing block first.`,
-        )
+      const allBlocks = await this.list({ includeExpired: true })
+      const isUpdate = allBlocks.some((b) => b.id === block.id)
+      if (!isUpdate) {
+        const activeCount = allBlocks.filter((b) => !isExpired(b)).length
+        if (activeCount >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
+          throw new Error(
+            `Cannot create memory block "${block.id}": scope "${block.scope}" already has ${MEMORY_MAX_BLOCKS_PER_SCOPE} active blocks (maximum). Delete an existing block first.`,
+          )
+        }
+        // Auto-clean expired blocks when at disk capacity
+        if (allBlocks.length >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
+          const expiredBlocks = allBlocks.filter((b) => isExpired(b))
+          for (const expired of expiredBlocks) {
+            await this.remove(expired.id)
+          }
+        }
       }
 
       const duplicates = await this.findDuplicates(block)
@@ -618,7 +628,7 @@ describe("MemoryStore", () => {
         await store.write(makeBlock({ id: `block-${String(i).padStart(3, "0")}` }))
       }
       const extraBlock = makeBlock({ id: "one-too-many" })
-      await expect(store.write(extraBlock)).rejects.toThrow(/already has 50 blocks/)
+      await expect(store.write(extraBlock)).rejects.toThrow(/already has 50 active blocks/)
     })
 
     test("allows updating when scope is at capacity", async () => {
@@ -628,6 +638,44 @@ describe("MemoryStore", () => {
       await store.write(makeBlock({ id: "block-000", content: "Updated content" }))
       const result = await store.read("block-000")
       expect(result!.content).toBe("Updated content")
+    })
+
+    test("expired blocks do not count against capacity limit", async () => {
+      // Fill scope with 49 active + 1 expired = 50 total on disk
+      for (let i = 0; i < MEMORY_MAX_BLOCKS_PER_SCOPE - 1; i++) {
+        await store.write(makeBlock({ id: `block-${String(i).padStart(3, "0")}` }))
+      }
+      await store.write(makeBlock({
+        id: "expired-block",
+        expires: "2020-01-01T00:00:00.000Z",
+      }))
+
+      // Should succeed because only 49 blocks are active
+      await store.write(makeBlock({ id: "new-block", content: "I fit!" }))
+      const result = await store.read("new-block")
+      expect(result!.content).toBe("I fit!")
+    })
+
+    test("auto-cleans expired blocks when at disk capacity", async () => {
+      // Fill scope with 48 active + 2 expired = 50 total on disk
+      for (let i = 0; i < MEMORY_MAX_BLOCKS_PER_SCOPE - 2; i++) {
+        await store.write(makeBlock({ id: `block-${String(i).padStart(3, "0")}` }))
+      }
+      await store.write(makeBlock({ id: "expired-1", expires: "2020-01-01T00:00:00.000Z" }))
+      await store.write(makeBlock({ id: "expired-2", expires: "2020-06-01T00:00:00.000Z" }))
+
+      // Writing a new block should auto-clean expired blocks
+      await store.write(makeBlock({ id: "fresh-block" }))
+
+      // Expired blocks should have been removed from disk
+      const expiredResult1 = await store.read("expired-1")
+      const expiredResult2 = await store.read("expired-2")
+      expect(expiredResult1).toBeUndefined()
+      expect(expiredResult2).toBeUndefined()
+
+      // New block should exist
+      const freshResult = await store.read("fresh-block")
+      expect(freshResult).toBeDefined()
     })
   })
 
