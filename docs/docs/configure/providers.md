@@ -98,6 +98,38 @@ Uses the standard AWS credential chain. Set `AWS_PROFILE` or provide credentials
 }
 ```
 
+## Google Vertex AI
+
+```json
+{
+  "provider": {
+    "google-vertex": {
+      "project": "my-gcp-project",
+      "location": "us-central1"
+    }
+  },
+  "model": "google-vertex/gemini-2.5-pro"
+}
+```
+
+Uses Google Cloud Application Default Credentials. Authenticate with:
+
+```bash
+gcloud auth application-default login
+```
+
+The `project` and `location` fields can also be set via environment variables:
+
+| Field | Environment Variables (checked in order) |
+|-------|----------------------------------------|
+| `project` | `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, `GCLOUD_PROJECT` |
+| `location` | `GOOGLE_VERTEX_LOCATION`, `GOOGLE_CLOUD_LOCATION`, `VERTEX_LOCATION` |
+
+If `location` is not set, it defaults to `us-central1`.
+
+!!! tip
+    You can also access Anthropic models through Vertex AI using the `google-vertex` provider (e.g., `google-vertex/claude-sonnet-4-6`).
+
 ## Ollama (Local)
 
 ```json
@@ -188,3 +220,5 @@ The `small_model` is used for lightweight tasks like summarization and context c
 | `region` | `string` | AWS region (Bedrock only) |
 | `accessKeyId` | `string` | AWS access key (Bedrock only) |
 | `secretAccessKey` | `string` | AWS secret key (Bedrock only) |
+| `project` | `string` | GCP project ID (Google Vertex AI only) |
+| `location` | `string` | GCP region (Google Vertex AI only, default: `us-central1`) |
