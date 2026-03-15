@@ -17,7 +17,26 @@ The "AI teammate" framing creates a different mental model entirely:
 
 ### Inspiration: OpenClaw & the "Trainable Agent" Pattern
 
-OpenClaw and similar projects (SWE-agent, Devon, etc.) demonstrate that the most powerful AI agents aren't the ones with the most tools — they're the ones that **learn from their environment**. The key insight:
+**OpenClaw** (247K+ GitHub stars, fastest-growing open-source project ever) proved the "teammate" framing works when backed by real architecture. Key lessons:
+
+1. **Meet users where they are.** OpenClaw's UX *is* your existing messaging apps (WhatsApp, Telegram, Slack, Signal). Zero learning curve. For altimate, the equivalent: meet data engineers in their terminal, their dbt workflow, their Slack — don't force them into a separate app.
+
+2. **Self-improving memory.** OpenClaw captures learnings, errors, and corrections in structured files (`LEARNINGS.md`, `ERRORS.md`). When patterns recur 3+ times across 2+ tasks within 30 days, they auto-promote into permanent system prompt files (`CLAUDE.md`, `SOUL.md`). This is the model for altimate's training system — learning should be automatic, not manual.
+
+3. **Proactive heartbeat.** A scheduler wakes the agent at intervals so it can act without being prompted — checking email, running tasks, flagging issues. For altimate: imagine the teammate running nightly cost checks, freshness monitors, or schema drift detection without being asked.
+
+4. **Persistent identity.** One agent instance across all channels with shared memory and context. For altimate: the same teammate across TUI, web, CI/CD, and Slack — always knowing your project, your standards, your history.
+
+**Devin** ($10.2B valuation, $73M ARR) proved the market appetite: they market as "a collaborative AI teammate" and "the first AI software engineer," but candidly advise treating it as "a junior coding partner." The honesty works — users understand the capability boundary.
+
+**Factory AI** positions autonomous "Droids" that embed into existing workflows (VS Code, JetBrains, Slack, Linear). Their insight: "delegate complete tasks like refactors, incident response, and migrations without changing your tools."
+
+The **World Economic Forum** outlines the industry evolution:
+1. **Copilots** (assisted intelligence) — suggestions, human controls
+2. **Agents** (autonomous task execution) — limited decisions, task-oriented
+3. **AI Teammates** (collaborative intelligence) — adapt, learn, achieve shared objectives
+
+altimate should skip straight to level 3 for data engineering.
 
 > The best AI teammate is one that adapts to YOUR team, not one that forces your team to adapt to IT.
 
@@ -100,7 +119,7 @@ patterns:
   - naming: snake_case
 ```
 
-#### b) Learn-by-Correction (`/feedback`)
+#### b) Learn-by-Correction (Implicit + `/feedback`)
 
 When the teammate does something wrong, instead of just fixing it, you teach it:
 
@@ -124,6 +143,18 @@ applies_to:
   column_patterns: ["*_amount", "*_price", "*_cost", "*_revenue", "*_total"]
 severity: high
 ```
+
+**Auto-promotion (inspired by OpenClaw's self-improving agent):**
+
+When a correction pattern recurs 3+ times across 2+ sessions within 30 days, it auto-promotes from a "soft preference" to a "hard rule" in the system prompt. The teammate proactively tells you:
+
+```
+Teammate: I've noticed you've corrected my use of LEFT JOIN → INNER JOIN
+          in staging models 4 times now. Should I make this a permanent rule?
+          [Yes, always use INNER JOIN in staging] [No, keep case-by-case]
+```
+
+This mirrors OpenClaw's `LEARNINGS.md` → `CLAUDE.md` promotion pipeline, but adapted for structured data engineering rules rather than free-form text.
 
 #### c) Learn-by-Document (`/train`)
 
@@ -315,7 +346,54 @@ Teammate: Learned! This pattern is saved to .altimate/learned/patterns/staging-m
          Commit this file so your teammates' altimate instances learn it too.
 ```
 
-### 6. The Training Dashboard (`/training-status`)
+### 6. Proactive Behaviors (inspired by OpenClaw's Heartbeat)
+
+A real teammate doesn't wait to be asked. OpenClaw proved this with its heartbeat scheduler — a background process that wakes the agent at intervals to act autonomously.
+
+For altimate, proactive behaviors are domain-specific and high-value:
+
+#### Background Monitors (opt-in)
+
+```yaml
+# .altimate/monitors.yml
+cost_alert:
+  schedule: daily
+  threshold: 120%  # Alert if costs >120% of 30-day average
+  action: slack_notify  # or: session_note, email, github_issue
+
+freshness_check:
+  schedule: hourly
+  models: ["fct_orders", "fct_revenue", "dim_customers"]
+  stale_after: 4h
+  action: slack_notify
+
+schema_drift:
+  schedule: daily
+  watch: ["raw.*"]  # Watch raw layer for upstream changes
+  action: session_note  # Note it in next session
+
+pii_scan:
+  schedule: weekly
+  scope: all_indexed_schemas
+  action: github_issue
+```
+
+#### In-Session Proactive Behaviors
+
+```
+You: Can you build a staging model for the new payments table?
+
+Teammate: Sure! Before I start — I noticed something while looking at the
+          payments table:
+          - Column `card_number` matches PII pattern (credit card)
+          - Column `email` matches PII pattern (email address)
+          These should probably be masked or excluded in staging.
+          Want me to add masking, or exclude them?
+```
+
+The teammate doesn't wait to be asked about PII — it checks proactively because that's what a good data engineering teammate does.
+
+### 7. The Training Dashboard (`/training-status`)
 
 Show users what their teammate has learned:
 
@@ -444,17 +522,35 @@ Want to review or modify any learned patterns? Use /teach --list
 
 ## Competitive Differentiation
 
-| Product | Framing | Training? | Data-Aware? |
-|---|---|---|---|
-| Claude Code | AI coding assistant | No (just prompts) | No |
-| Cursor | AI-powered IDE | Cursor Rules files | No |
-| Devin | AI software engineer | No | No |
-| OpenClaw | Trainable AI agent | RL from feedback | No |
-| **altimate** | **AI data teammate** | **Yes (/teach, /train)** | **Yes (55+ tools, warehouse)** |
+| Product | Framing | Training? | Data-Aware? | Proactive? |
+|---|---|---|---|---|
+| Claude Code | AI coding assistant | CLAUDE.md only | No | No |
+| Cursor | AI-powered IDE | Cursor Rules files | No | No |
+| Devin ($10.2B) | AI software engineer | No | No | Yes (async tasks) |
+| Factory AI | Autonomous Droids | No | No | Yes (workflow triggers) |
+| OpenClaw (247K stars) | Trainable AI agent | Self-improving memory + RL | No | Yes (heartbeat scheduler) |
+| **altimate** | **AI data teammate** | **Structured learning (/teach, /train, auto-promote)** | **Yes (55+ tools, warehouse)** | **Yes (cost alerts, schema drift)** |
 
-The unique combination: **trainable + data-domain-specific + warehouse-connected**.
+### What altimate takes from each:
 
-No other product lets you teach an AI your team's SQL standards and then have it enforce those standards with direct access to your warehouse metadata, lineage, and cost data.
+| From | What we borrow | How we adapt it |
+|---|---|---|
+| **OpenClaw** | Self-improving memory, auto-promotion of learnings | Structured YAML rules instead of free-form markdown; domain-specific (SQL patterns, not general tasks) |
+| **OpenClaw** | Heartbeat scheduler for proactive behavior | Nightly cost checks, freshness monitors, schema drift detection |
+| **OpenClaw** | Meet-users-where-they-are UX | TUI + Web + Slack + CI/CD — same teammate everywhere |
+| **Devin** | "Collaborative AI teammate" positioning | Same framing, but specialized: "data engineering teammate" not "software engineer" |
+| **Devin** | Honest capability framing ("junior partner") | "Trained on your standards, but you're still the senior engineer" |
+| **Factory AI** | Embed into existing workflows, don't replace them | Works inside your dbt workflow, not beside it |
+
+### The unique combination
+
+**Trainable + data-domain-specific + warehouse-connected + proactive.**
+
+No other product lets you:
+1. Teach an AI your team's SQL standards (`/teach`)
+2. Have it enforce those standards against your actual warehouse metadata and lineage
+3. Watch it auto-improve from your corrections over time
+4. Wake up to find it already flagged a cost anomaly or schema drift overnight
 
 ---
 
