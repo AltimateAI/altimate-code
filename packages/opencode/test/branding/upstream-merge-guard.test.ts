@@ -332,3 +332,50 @@ describe("Config consistency", () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// 8. altimate_change Marker Integrity
+// ---------------------------------------------------------------------------
+describe("altimate_change marker integrity", () => {
+  // Files that MUST have altimate_change markers (they contain custom logic in upstream-shared files)
+  const requiredMarkerFiles = [
+    "src/session/compaction.ts",
+    "src/session/prompt.ts",
+    "src/installation/index.ts",
+    "src/flag/flag.ts",
+    "src/config/config.ts",
+    "src/config/paths.ts",
+    "src/index.ts",
+    "src/agent/agent.ts",
+    "src/tool/registry.ts",
+    "src/telemetry/index.ts",
+    "src/global/index.ts",
+    "src/util/token.ts",
+  ]
+
+  for (const relPath of requiredMarkerFiles) {
+    const fullPath = join(pkgDir, relPath)
+    test(`${relPath} has altimate_change markers`, () => {
+      expect(existsSync(fullPath)).toBe(true)
+      const content = readText(fullPath)
+      expect(content).toContain("altimate_change")
+    })
+  }
+
+  test("all altimate_change start blocks have matching end blocks", () => {
+    const glob = new Glob("**/*.ts")
+    const mismatched: string[] = []
+
+    for (const file of glob.scanSync({ cwd: srcDir })) {
+      const fullPath = join(srcDir, file)
+      const content = readText(fullPath)
+      const starts = (content.match(/altimate_change start/g) || []).length
+      const ends = (content.match(/altimate_change end/g) || []).length
+      if (starts !== ends) {
+        mismatched.push(`${file}: ${starts} starts vs ${ends} ends`)
+      }
+    }
+
+    expect(mismatched).toEqual([])
+  })
+})

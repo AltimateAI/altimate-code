@@ -789,6 +789,7 @@ export namespace SessionPrompt {
       generations: step,
       duration_ms: Date.now() - sessionStartTime,
       cost: sessionTotalCost,
+      compactions: 0,
       outcome,
     })
     if (!emergencySessionEndFired) {

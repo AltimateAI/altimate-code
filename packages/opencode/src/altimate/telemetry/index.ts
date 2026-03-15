@@ -233,7 +233,7 @@ export namespace Telemetry {
         duration_ms: number
         cost: number
         compactions: number
-        outcome: "completed" | "abandoned" | "error"
+        outcome: "completed" | "abandoned" | "aborted" | "error"
       }
     | {
         type: "error_recovered"

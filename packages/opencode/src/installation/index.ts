@@ -7,8 +7,11 @@ import { iife } from "@/util/iife"
 import { Flag } from "../flag/flag"
 import { Process } from "@/util/process"
 import { buffer } from "node:stream/consumers"
-// altimate_change start — telemetry import
-import { Telemetry } from "../telemetry"
+// altimate_change start — telemetry (lazy import to avoid circular dep with Telemetry → Installation)
+async function getTelemetry() {
+  const { Telemetry } = await import("../telemetry")
+  return Telemetry
+}
 // altimate_change end
 
 declare global {
@@ -223,10 +226,11 @@ export namespace Installation {
         method === "choco" ? "not running from an elevated command shell" : result?.stderr.toString("utf8") || ""
       // altimate_change start — telemetry for upgrade failure
       const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
-      Telemetry.track({
+      const T = await getTelemetry()
+      T.track({
         type: "upgrade_attempted",
         timestamp: Date.now(),
-        session_id: Telemetry.getContext().sessionId || "cli",
+        session_id: T.getContext().sessionId || "cli",
         from_version: VERSION,
         to_version: target,
         method: telemetryMethod,
@@ -246,10 +250,11 @@ export namespace Installation {
     })
     // altimate_change start — telemetry for upgrade success
     const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
-    Telemetry.track({
+    const T2 = await getTelemetry()
+    T2.track({
       type: "upgrade_attempted",
       timestamp: Date.now(),
-      session_id: Telemetry.getContext().sessionId || "cli",
+      session_id: T2.getContext().sessionId || "cli",
       from_version: VERSION,
       to_version: target,
       method: telemetryMethod,
