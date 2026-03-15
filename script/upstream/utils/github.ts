@@ -25,15 +25,16 @@ export async function fetchReleases(
 ): Promise<GitHubRelease[]> {
   const { limit = 100, includePrerelease = false } = options
 
-  // --slurp combines all paginated pages into a single array-of-arrays,
-  // then `flatten` merges them before filtering. Without --slurp, paginated
-  // output is concatenated JSON (`[...][...]`) which JSON.parse can't handle.
+  // `gh api --paginate` with `--jq '.[]'` unpacks each page's array into
+  // individual JSON objects (one per line). We then pipe to external `jq -s`
+  // to slurp them into a single array for filtering and slicing.
+  // Note: `gh api` does not support `--slurp` — that's a jq-only flag.
   const condition = includePrerelease
     ? "select(.draft == false)"
     : "select(.draft == false and .prerelease == false)"
-  const jqFilter = `flatten | [.[] | ${condition}] | .[0:${limit}]`
+  const jqFilter = `[.[] | ${condition}] | .[0:${limit}]`
 
-  const cmd = `gh api repos/${repo}/releases --paginate --slurp --jq '${jqFilter}'`
+  const cmd = `gh api repos/${repo}/releases --paginate --jq '.[]' | jq -s '${jqFilter}'`
 
   try {
     const output = execSync(cmd, {

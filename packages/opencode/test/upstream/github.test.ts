@@ -144,20 +144,20 @@ describe("fetchReleases()", () => {
     expect(lastExecCmd).toContain(".[0:5]")
   })
 
-  test("uses --slurp to handle paginated output correctly", async () => {
+  test("pipes paginated output to external jq for slurping", async () => {
     mockExecOutput = "[]"
 
     await fetchReleases("anomalyco/opencode")
-    expect(lastExecCmd).toContain("--slurp")
-    expect(lastExecCmd).toContain("flatten")
+    // Uses --jq '.[]' to unpack pages, then pipes to jq -s for slurping
+    expect(lastExecCmd).toContain("--jq '.[]'")
+    expect(lastExecCmd).toContain("| jq -s")
   })
 
   test("filters before slicing (filter then limit)", async () => {
     mockExecOutput = "[]"
 
     await fetchReleases("anomalyco/opencode", { limit: 10 })
-    // Filter should come before the limit slice
-    expect(lastExecCmd).toContain("flatten | [.[] | select(")
+    expect(lastExecCmd).toContain("[.[] | select(")
     expect(lastExecCmd).toMatch(/select\(.*\)\] \| \.\[0:10\]/)
   })
 })
