@@ -301,26 +301,13 @@ describe("Repository hygiene", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 7. Config Consistency
+// 7. Config Integrity
 // ---------------------------------------------------------------------------
-describe("Config consistency", () => {
+describe("Config integrity", () => {
   const configTsPath = join(repoRoot, "script", "upstream", "utils", "config.ts")
   const configTs = readText(configTsPath)
-  const mergeConfigPath = join(repoRoot, "script", "upstream", "merge-config.json")
-  const mergeConfig = JSON.parse(readText(mergeConfigPath))
 
-  test("merge-config.json skipFiles matches config.ts skipFiles", () => {
-    // Extract skipFiles patterns from config.ts
-    const skipMatch = configTs.match(/skipFiles:\s*\[([\s\S]*?)\],/m)
-    expect(skipMatch).not.toBeNull()
-
-    // Every entry in merge-config.json should appear in config.ts
-    for (const pattern of mergeConfig.skipFiles) {
-      expect(configTs).toContain(`"${pattern}"`)
-    }
-  })
-
-  test("merge-config.json keepOurs critical patterns appear in config.ts", () => {
+  test("config.ts contains critical keepOurs patterns", () => {
     const criticalKeepOurs = [
       "packages/altimate-engine/**",
       "script/upstream/**",
@@ -330,6 +317,29 @@ describe("Config consistency", () => {
     for (const pattern of criticalKeepOurs) {
       expect(configTs).toContain(`"${pattern}"`)
     }
+  })
+
+  test("no pattern appears in both keepOurs and skipFiles", () => {
+    // Extract keepOurs array
+    const keepOursMatch = configTs.match(/keepOurs:\s*\[([\s\S]*?)\],/m)
+    expect(keepOursMatch).not.toBeNull()
+    const keepOursPatterns = (keepOursMatch![1].match(/"([^"]+)"/g) || []).map((s: string) => s.replace(/"/g, ""))
+
+    // Extract skipFiles array
+    const skipFilesMatch = configTs.match(/skipFiles:\s*\[([\s\S]*?)\],/m)
+    expect(skipFilesMatch).not.toBeNull()
+    const skipFilesPatterns = (skipFilesMatch![1].match(/"([^"]+)"/g) || []).map((s: string) => s.replace(/"/g, ""))
+
+    const overlaps = keepOursPatterns.filter((p: string) => skipFilesPatterns.includes(p))
+    expect(overlaps).toEqual([])
+  })
+
+  test("legacy merge-config.json does not exist (superseded by config.ts)", () => {
+    expect(existsSync(join(repoRoot, "script", "upstream", "merge-config.json"))).toBe(false)
+  })
+
+  test("transforms/ directory does not exist (logic is in merge.ts)", () => {
+    expect(existsSync(join(repoRoot, "script", "upstream", "transforms"))).toBe(false)
   })
 })
 

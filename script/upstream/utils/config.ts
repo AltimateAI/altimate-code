@@ -245,7 +245,6 @@ export const defaultConfig: MergeConfig = {
 
   keepOurs: [
     "README.md",
-    "README.*.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "CODE_OF_CONDUCT.md",
@@ -258,7 +257,6 @@ export const defaultConfig: MergeConfig = {
     "github/README.md",
     "github/index.ts",
     "install",
-    "infra/**",
     "packages/altimate-engine/**",
     "packages/opencode/src/altimate/**",
     "packages/opencode/src/bridge/**",

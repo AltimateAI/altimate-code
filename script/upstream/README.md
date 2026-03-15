@@ -124,6 +124,8 @@ The merge script prints a `gh pr create` command at the end. Review the diff, th
 | `bun run script/upstream/analyze.ts --branding` | Audit for branding leaks |
 | `bun run script/upstream/analyze.ts --branding --json` | Branding audit (CI-friendly) |
 | `bun run script/upstream/analyze.ts` | Check `altimate_change` marker integrity |
+| `bun run script/upstream/analyze.ts --markers --base main` | Check PR for missing markers |
+| `bun run script/upstream/analyze.ts --markers --base main --strict` | Same, but fail CI on warnings |
 | `bun run script/upstream/verify-restructure.ts` | Verify branch restructure |
 
 ## Configuration
@@ -226,22 +228,33 @@ These help during conflict resolution — you can see exactly what we changed vs
 script/upstream/
 ├── README.md                 # This runbook
 ├── merge.ts                  # Main merge orchestrator
-├── analyze.ts                # Branding audit & marker analysis
+├── analyze.ts                # Branding audit, marker analysis, and CI marker guard
 ├── list-versions.ts          # List upstream tags with status
 ├── verify-restructure.ts     # Branch comparison verification
-├── merge-config.json         # Legacy declarative config
 ├── package.json              # Dependencies (minimatch)
 ├── tsconfig.json             # TypeScript config
-├── utils/
-│   ├── config.ts             # All branding rules and merge config
-│   ├── git.ts                # Git command wrappers (sync + async)
-│   ├── logger.ts             # Colored terminal logging
-│   └── report.ts             # Merge report types and output
-└── transforms/
-    ├── keep-ours.ts           # Resolve conflicts: keep our version
-    ├── skip-files.ts          # Resolve conflicts: accept upstream
-    ├── lock-files.ts          # Lock file regeneration
-    └── branding.ts            # Apply branding replacements
+└── utils/
+    ├── config.ts             # All branding rules and merge config
+    ├── git.ts                # Git command wrappers (sync + async)
+    ├── logger.ts             # Colored terminal logging and ANSI formatting
+    └── report.ts             # Merge report types and output
+```
+
+## CI Integration
+
+The **Marker Guard** CI job (in `.github/workflows/ci.yml`) runs automatically on every PR. It checks whether any upstream-shared files (`packages/opencode/src/`) have new code without `altimate_change` markers. This prevents accidental overwrites during future upstream merges.
+
+```bash
+# What CI runs:
+bun run script/upstream/analyze.ts --markers --base origin/main --strict
+```
+
+If the job fails, wrap your custom code with markers:
+
+```typescript
+// altimate_change start — description of your change
+... your modifications ...
+// altimate_change end
 ```
 
 ## Troubleshooting

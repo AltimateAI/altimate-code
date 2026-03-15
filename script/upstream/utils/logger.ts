@@ -1,17 +1,17 @@
 // Colored logging utility using ANSI escape codes.
 // No external dependencies — works directly with stdout/stderr.
 
-const RESET = "\x1b[0m"
-const BOLD = "\x1b[1m"
-const DIM = "\x1b[2m"
+export const RESET = "\x1b[0m"
+export const BOLD = "\x1b[1m"
+export const DIM = "\x1b[2m"
 
-const BLUE = "\x1b[34m"
-const YELLOW = "\x1b[33m"
-const RED = "\x1b[31m"
-const GREEN = "\x1b[32m"
-const GRAY = "\x1b[90m"
-const CYAN = "\x1b[36m"
-const MAGENTA = "\x1b[35m"
+export const BLUE = "\x1b[34m"
+export const YELLOW = "\x1b[33m"
+export const RED = "\x1b[31m"
+export const GREEN = "\x1b[32m"
+export const GRAY = "\x1b[90m"
+export const CYAN = "\x1b[36m"
+export const MAGENTA = "\x1b[35m"
 
 const MAX_LINE_WIDTH = 80
 
@@ -20,6 +20,24 @@ function truncate(str: string, maxLen: number = MAX_LINE_WIDTH): string {
   if (str.length <= maxLen) return str
   return str.slice(0, maxLen - 1) + "\u2026"
 }
+
+// ── Formatting helpers ──────────────────────────────────────────────────────
+
+export function bold(s: string): string { return `${BOLD}${s}${RESET}` }
+export function dim(s: string): string { return `${DIM}${s}${RESET}` }
+export function cyan(s: string): string { return `${CYAN}${s}${RESET}` }
+export function green(s: string): string { return `${GREEN}${s}${RESET}` }
+export function red(s: string): string { return `${RED}${s}${RESET}` }
+export function yellow(s: string): string { return `${YELLOW}${s}${RESET}` }
+
+export function banner(text: string): void {
+  const line = "═".repeat(60)
+  console.log(`\n${CYAN}${line}${RESET}`)
+  console.log(`${CYAN}  ${BOLD}${text}${RESET}`)
+  console.log(`${CYAN}${line}${RESET}\n`)
+}
+
+// ── Logging functions ───────────────────────────────────────────────────────
 
 /** Log an informational message. */
 export function info(msg: string): void {

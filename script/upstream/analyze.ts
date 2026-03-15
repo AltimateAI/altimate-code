@@ -23,6 +23,7 @@ import fs from "fs"
 import path from "path"
 import * as git from "./utils/git"
 import * as logger from "./utils/logger"
+import { RESET, BOLD, DIM, CYAN, GREEN, RED, YELLOW, MAGENTA, bold, dim, cyan, banner } from "./utils/logger"
 import { loadConfig, repoRoot, type MergeConfig } from "./utils/config"
 
 // ---------------------------------------------------------------------------
@@ -33,36 +34,15 @@ const { values: args } = parseArgs({
   options: {
     version: { type: "string", short: "v" },
     branding: { type: "boolean", default: false },
+    markers: { type: "boolean", default: false },
+    strict: { type: "boolean", default: false },
+    base: { type: "string" },
     verbose: { type: "boolean", default: false },
     json: { type: "boolean", default: false },
     help: { type: "boolean", short: "h", default: false },
   },
   strict: false,
 }) as any
-
-// ---------------------------------------------------------------------------
-// ANSI helpers
-// ---------------------------------------------------------------------------
-
-const RESET = "\x1b[0m"
-const BOLD = "\x1b[1m"
-const DIM = "\x1b[2m"
-const CYAN = "\x1b[36m"
-const GREEN = "\x1b[32m"
-const RED = "\x1b[31m"
-const YELLOW = "\x1b[33m"
-const MAGENTA = "\x1b[35m"
-
-function bold(s: string): string { return `${BOLD}${s}${RESET}` }
-function dim(s: string): string { return `${DIM}${s}${RESET}` }
-function cyan(s: string): string { return `${CYAN}${s}${RESET}` }
-
-function banner(text: string): void {
-  const line = "═".repeat(60)
-  console.log(`\n${CYAN}${line}${RESET}`)
-  console.log(`${CYAN}  ${BOLD}${text}${RESET}`)
-  console.log(`${CYAN}${line}${RESET}\n`)
-}
 
 // ---------------------------------------------------------------------------
 // Branding leak detection
@@ -509,6 +489,9 @@ function printUsage(): void {
   ${bold("OPTIONS")}
     --version, -v <tag>   Upstream version to analyze
     --branding            Scan codebase for upstream branding leaks
+    --markers             Check changed files for missing altimate_change markers
+    --base <branch>       Base branch for --markers comparison (default: HEAD)
+    --strict              Exit with code 1 on warnings (for CI)
     --verbose             Show all results (not just top 20)
     --json                Output results as JSON
     --help, -h            Show this help message
@@ -523,10 +506,168 @@ function printUsage(): void {
     ${dim("# Full branding audit with all details")}
     bun run script/upstream/analyze.ts --branding --verbose
 
+    ${dim("# Check PR for missing markers (CI)")}
+    bun run script/upstream/analyze.ts --markers --base main --strict
+
     ${dim("# Machine-readable output for CI")}
     bun run script/upstream/analyze.ts --branding --json
 `)
 }
+
+// ---------------------------------------------------------------------------
+// CI marker guard (--markers mode, formerly check-markers.ts)
+// ---------------------------------------------------------------------------
+
+interface MarkerWarning {
+  file: string
+  line: number
+  context: string
+  reason: string
+}
+
+function getChangedFiles(base?: string): string[] {
+  const { execSync } = require("child_process")
+  const root = repoRoot()
+  const cmd = base
+    ? `git diff --name-only --diff-filter=AM ${base}...HEAD`
+    : `git diff --name-only --diff-filter=AM HEAD`
+  try {
+    return execSync(cmd, { cwd: root, encoding: "utf-8" })
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function isUpstreamShared(file: string, config: MergeConfig): boolean {
+  const { minimatch } = require("minimatch")
+  if (config.keepOurs.some((p: string) => minimatch(file, p))) return false
+  if (config.skipFiles.some((p: string) => minimatch(file, p))) return false
+  const ext = path.extname(file)
+  if (!config.transformableExtensions.includes(ext)) return false
+  if (!file.startsWith("packages/opencode/src/")) return false
+  return true
+}
+
+function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
+  const { execSync } = require("child_process")
+  const root = repoRoot()
+  const warnings: MarkerWarning[] = []
+
+  const diffCmd = base
+    ? `git diff -U5 ${base}...HEAD -- "${file}"`
+    : `git diff -U5 HEAD -- "${file}"`
+
+  let diffOutput: string
+  try {
+    diffOutput = execSync(diffCmd, { cwd: root, encoding: "utf-8" })
+  } catch {
+    return warnings
+  }
+
+  if (!diffOutput.trim()) return warnings
+
+  const lines = diffOutput.split("\n")
+  let inMarkerBlock = false
+  let currentLine = 0
+  let hasNewCode = false
+  let newCodeStart = 0
+  let newCodeContext = ""
+
+  for (const line of lines) {
+    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/)
+    if (hunkMatch) {
+      currentLine = parseInt(hunkMatch[1]) - 1
+      continue
+    }
+
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      currentLine++
+      const content = line.slice(1).trim()
+
+      if (content.includes("altimate_change start")) { inMarkerBlock = true; continue }
+      if (content.includes("altimate_change end")) { inMarkerBlock = false; continue }
+      if (content.includes("altimate_change")) continue
+
+      if (!content) continue
+      if (content.startsWith("//") && !content.includes("TODO")) continue
+      if (content.startsWith("import ")) continue
+      if (content.startsWith("export ")) continue
+
+      if (!inMarkerBlock) {
+        if (!hasNewCode) {
+          hasNewCode = true
+          newCodeStart = currentLine
+          newCodeContext = content
+        }
+      }
+    } else if (line.startsWith("-")) {
+      // deleted line, don't increment
+    } else {
+      currentLine++
+    }
+  }
+
+  if (hasNewCode) {
+    warnings.push({
+      file,
+      line: newCodeStart,
+      context: newCodeContext.slice(0, 80),
+      reason: "New code added to upstream-shared file without altimate_change markers",
+    })
+  }
+
+  return warnings
+}
+
+function runMarkerCheck(config: MergeConfig, base?: string, strict?: boolean): number {
+  const changedFiles = getChangedFiles(base)
+  const sharedFiles = changedFiles.filter((f) => isUpstreamShared(f, config))
+
+  if (sharedFiles.length === 0) {
+    logger.success("No upstream-shared files modified — no markers needed")
+    return 0
+  }
+
+  console.log(`Checking ${sharedFiles.length} upstream-shared file(s) for altimate_change markers...\n`)
+
+  const allWarnings: MarkerWarning[] = []
+  for (const file of sharedFiles) {
+    const warnings = checkFileForMarkers(file, base)
+    allWarnings.push(...warnings)
+  }
+
+  if (allWarnings.length === 0) {
+    logger.success("All custom code in upstream-shared files is properly marked")
+    return 0
+  }
+
+  console.log(`\n${YELLOW}⚠ Found ${allWarnings.length} file(s) with unmarked custom code:${RESET}\n`)
+  for (const w of allWarnings) {
+    console.log(`  ${w.file}:${w.line}`)
+    console.log(`    ${w.reason}`)
+    console.log(`    Context: ${DIM}${w.context}${RESET}`)
+    console.log()
+  }
+  console.log("Wrap custom code with markers to protect from upstream overwrites:")
+  console.log(`  ${DIM}// altimate_change start — description${RESET}`)
+  console.log(`  ${DIM}... your code ...${RESET}`)
+  console.log(`  ${DIM}// altimate_change end${RESET}`)
+  console.log()
+
+  if (strict) {
+    logger.error("--strict mode — failing CI")
+    return 1
+  }
+  logger.warn("Run with --strict to enforce in CI")
+  return 0
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   if (args.help) {
@@ -536,17 +677,18 @@ async function main(): Promise<void> {
 
   const config = loadConfig()
 
-  // Both --version and --branding can run together
   const hasVersion = Boolean(args.version)
   const hasBranding = Boolean(args.branding)
+  const hasMarkers = Boolean(args.markers)
 
-  if (!hasVersion && !hasBranding) {
+  if (!hasVersion && !hasBranding && !hasMarkers) {
     // Default: run marker analysis
     printMarkerAnalysis(config)
 
     console.log()
     logger.info("Use --version <tag> to analyze an upstream version")
     logger.info("Use --branding to audit for branding leaks")
+    logger.info("Use --markers --base main to check for missing markers")
     return
   }
 
@@ -582,6 +724,15 @@ async function main(): Promise<void> {
     // Exit with code 1 if leaks found (useful for CI)
     if (report.leaks.length > 0) {
       process.exit(1)
+    }
+  }
+
+  // ─── Marker guard (CI mode) ───────────────────────────────────────────────
+
+  if (hasMarkers) {
+    const exitCode = runMarkerCheck(config, args.base, Boolean(args.strict))
+    if (exitCode !== 0) {
+      process.exit(exitCode)
     }
   }
 }

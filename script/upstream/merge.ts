@@ -21,6 +21,7 @@ import fs from "fs"
 import path from "path"
 import * as git from "./utils/git"
 import * as logger from "./utils/logger"
+import { RESET, BOLD, DIM, CYAN, GREEN, RED, YELLOW, MAGENTA, bold, dim, cyan, green, red, yellow, banner } from "./utils/logger"
 import { loadConfig, repoRoot, type MergeConfig, type StringReplacement } from "./utils/config"
 import { createReport, addFileReport, printSummary, writeReport, type MergeReport, type FileReport, type Change } from "./utils/report"
 
@@ -93,29 +94,6 @@ function printUsage(): void {
     ${dim("# Resume after resolving conflicts")}
     bun run script/upstream/merge.ts --continue
 `)
-}
-
-const RESET = "\x1b[0m"
-const BOLD = "\x1b[1m"
-const DIM = "\x1b[2m"
-const CYAN = "\x1b[36m"
-const GREEN = "\x1b[32m"
-const RED = "\x1b[31m"
-const YELLOW = "\x1b[33m"
-const MAGENTA = "\x1b[35m"
-
-function bold(s: string): string { return `${BOLD}${s}${RESET}` }
-function dim(s: string): string { return `${DIM}${s}${RESET}` }
-function cyan(s: string): string { return `${CYAN}${s}${RESET}` }
-function green(s: string): string { return `${GREEN}${s}${RESET}` }
-function red(s: string): string { return `${RED}${s}${RESET}` }
-function yellow(s: string): string { return `${YELLOW}${s}${RESET}` }
-
-function banner(text: string): void {
-  const line = "═".repeat(60)
-  console.log(`\n${CYAN}${line}${RESET}`)
-  console.log(`${CYAN}  ${BOLD}${text}${RESET}`)
-  console.log(`${CYAN}${line}${RESET}\n`)
 }
 
 function saveState(state: MergeState): void {
