@@ -1,5 +1,5 @@
 ---
-name: ai-dataviz
+name: data-viz
 description: >
   Build modern, AI-first data visualizations and data storytelling interfaces
   using code-based component libraries (shadcn/ui, Recharts, Tremor, Nivo, D3,
