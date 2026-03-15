@@ -80,7 +80,7 @@ describe("Project.fromDirectory", () => {
     expect(project.vcs).toBe("git")
     expect(project.worktree).toBe(tmp.path)
 
-    const opencodeFile = path.join(tmp.path, ".git", "altimate")
+    const opencodeFile = path.join(tmp.path, ".git", "opencode")
     const fileExists = await Filesystem.exists(opencodeFile)
     expect(fileExists).toBe(false)
   })
@@ -96,7 +96,7 @@ describe("Project.fromDirectory", () => {
     expect(project.vcs).toBe("git")
     expect(project.worktree).toBe(tmp.path)
 
-    const opencodeFile = path.join(tmp.path, ".git", "altimate")
+    const opencodeFile = path.join(tmp.path, ".git", "opencode")
     const fileExists = await Filesystem.exists(opencodeFile)
     expect(fileExists).toBe(true)
   })
@@ -105,11 +105,11 @@ describe("Project.fromDirectory", () => {
     const p = await loadProject()
     await using tmp = await tmpdir({ git: true })
 
-    // First call creates .git/altimate with the project id
+    // First call creates .git/opencode with the project id
     const { project: first } = await p.fromDirectory(tmp.path)
     expect(first.id).not.toBe("global")
 
-    const newFile = path.join(tmp.path, ".git", "altimate")
+    const newFile = path.join(tmp.path, ".git", "opencode")
     const legacyFile = path.join(tmp.path, ".git", "altimate-code")
 
     // Move the new file to the legacy location to simulate an old installation

@@ -42,7 +42,7 @@ describe("publish package validation", () => {
   test("bin entries are correct", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(REPO_PKG_DIR, "package.json"), "utf-8"))
     expect(pkg.bin).toBeDefined()
-    expect(pkg.bin["altimate"]).toBe("./bin/altimate")
+    expect(pkg.bin["altimate"]).toBe("./bin/altimate-code")
     expect(pkg.bin["altimate-code"]).toBe("./bin/altimate-code")
   })
 
