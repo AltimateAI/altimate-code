@@ -92,9 +92,9 @@ Memory blocks live in two scopes:
 | Scope | Storage location | Use case |
 |---|---|---|
 | **global** | `~/.local/share/altimate-code/memory/` | User-wide preferences: SQL style, preferred models, general conventions |
-| **project** | `.opencode/memory/` (in project root) | Project-specific: warehouse config, naming conventions, data model notes, past analyses |
+| **project** | `.altimate-code/memory/` (in project root) | Project-specific: warehouse config, naming conventions, data model notes, past analyses |
 
-Project memory travels with your repo. Add `.opencode/memory/` to `.gitignore` if it contains sensitive information, or commit it to share team conventions.
+Project memory travels with your repo. Add `.altimate-code/memory/` to `.gitignore` if it contains sensitive information, or commit it to share team conventions.
 
 ## File format
 
@@ -185,14 +185,14 @@ The agent decides what to save based on conversation context. It may occasionall
 
 - After a session where the agent saved memory, review what was written:
   ```bash
-  ls .opencode/memory/          # project memory
-  cat .opencode/memory/*.md     # inspect all blocks
+  ls .altimate-code/memory/          # project memory
+  cat .altimate-code/memory/*.md     # inspect all blocks
   ```
 - The agent always reports when it creates or updates a memory block, so watch for `Memory: Created "..."` or `Memory: Updated "..."` messages in the session output
 
 **How to fix:**
 
-- Delete the bad block: ask the agent or run `rm .opencode/memory/bad-block.md`
+- Delete the bad block: ask the agent or run `rm .altimate-code/memory/bad-block.md`
 - Edit the file directly — it's just Markdown
 - Ask the agent to rewrite it: "Update the warehouse-config memory with the correct warehouse name"
 
@@ -218,7 +218,7 @@ Memory blocks are stored as plaintext files on disk. Be mindful of what gets sav
 
 - **Do not** save credentials, API keys, or connection strings in memory blocks
 - **Do** save structural information (warehouse names, naming conventions, schema patterns)
-- If using project-scoped memory in a shared repo, add `.opencode/memory/` to `.gitignore` to avoid committing sensitive context
+- If using project-scoped memory in a shared repo, add `.altimate-code/memory/` to `.gitignore` to avoid committing sensitive context
 - Memory blocks are scoped per-user (global) and per-project — there is no cross-user or cross-project leakage
 
 !!! warning
