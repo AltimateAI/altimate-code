@@ -35,9 +35,9 @@ jobs:
         if: steps.team-check.outputs.is_team != 'true'
         run: bun install
 
-      - name: Install opencode
+      - name: Install altimate-code
         if: steps.team-check.outputs.is_team != 'true'
-        run: curl -fsSL https://altimate.ai/install | bash
+        run: npm install -g @altimateai/altimate-code
 
       - name: Build prompt
         if: steps.team-check.outputs.is_team != 'true'
