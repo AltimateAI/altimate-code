@@ -1,96 +1,24 @@
-// altimate_change - Training prompt injection for AI Teammate learned knowledge
-import { TrainingStore, type TrainingEntry } from "./store"
-import { TRAINING_BUDGET, type TrainingKind } from "./types"
-
-const KIND_HEADERS: Record<TrainingKind, { header: string; instruction: string }> = {
-  pattern: {
-    header: "Learned Patterns",
-    instruction: "Follow these patterns when creating similar artifacts. They were learned from the user's codebase.",
-  },
-  rule: {
-    header: "Learned Rules",
-    instruction: "Always follow these rules. They were taught by the user through corrections and explicit instruction.",
-  },
-  glossary: {
-    header: "Domain Glossary",
-    instruction: "Use these definitions when discussing business concepts. They are specific to the user's domain.",
-  },
-  standard: {
-    header: "Team Standards",
-    instruction: "Enforce these standards in code reviews and when writing new code. They were loaded from team documentation.",
-  },
-  context: {
-    header: "Domain Context",
-    instruction: "Use this background knowledge to inform your reasoning. Not directly enforceable, but critical for understanding 'why'.",
-  },
-  playbook: {
-    header: "Playbooks",
-    instruction: "Follow these step-by-step procedures when handling the described scenarios.",
-  },
-}
-
-// Track which entries have been applied this session to avoid double-counting
-const appliedThisSession = new Set<string>()
+// altimate_change - Training prompt (deprecated — delegates to unified MemoryPrompt.inject)
+// Kept for backward compatibility with training tools (budgetUsage) and tests.
+import { MemoryPrompt } from "../../memory/prompt"
+import { TRAINING_BUDGET } from "./types"
+import type { TrainingEntry } from "./store"
 
 export namespace TrainingPrompt {
+  /** Format a training entry for display. */
   export function formatEntry(entry: TrainingEntry): string {
     const meta = entry.meta.applied > 0 ? ` (applied ${entry.meta.applied}x)` : ""
     return `#### ${entry.name}${meta}\n${entry.content}`
   }
 
-  /** Reset session tracking (call at session start) */
+  /** @deprecated — Use MemoryPrompt.resetSession(). Kept for backward compat. */
   export function resetSession(): void {
-    appliedThisSession.clear()
+    MemoryPrompt.resetSession()
   }
 
+  /** @deprecated — Use MemoryPrompt.inject() with context. Kept for training tool compat. */
   export async function inject(budget: number = TRAINING_BUDGET): Promise<string> {
-    const entries = await TrainingStore.list()
-    if (entries.length === 0) return ""
-
-    const grouped = new Map<TrainingKind, TrainingEntry[]>()
-    for (const entry of entries) {
-      const list = grouped.get(entry.kind) ?? []
-      list.push(entry)
-      grouped.set(entry.kind, list)
-    }
-
-    const header =
-      "## Teammate Training\n\nYou have been trained on the following knowledge by your team. Apply it consistently.\n"
-    let result = header
-    let used = header.length
-    const injected: TrainingEntry[] = []
-
-    for (const kind of ["rule", "pattern", "standard", "glossary", "context", "playbook"] as TrainingKind[]) {
-      const items = grouped.get(kind)
-      if (!items || items.length === 0) continue
-
-      const section = KIND_HEADERS[kind]
-      const sectionHeader = `\n### ${section.header}\n_${section.instruction}_\n`
-      if (used + sectionHeader.length > budget) break
-      result += sectionHeader
-      used += sectionHeader.length
-
-      // Sort by applied count descending so most-used entries get priority in budget
-      const sorted = [...items].sort((a, b) => b.meta.applied - a.meta.applied)
-      for (const entry of sorted) {
-        const formatted = formatEntry(entry)
-        const needed = formatted.length + 2
-        if (used + needed > budget) break
-        result += "\n" + formatted + "\n"
-        used += needed
-        injected.push(entry)
-      }
-    }
-
-    // Increment applied count once per session per entry (fire-and-forget)
-    for (const entry of injected) {
-      if (!appliedThisSession.has(entry.id)) {
-        appliedThisSession.add(entry.id)
-        TrainingStore.incrementApplied(entry.scope, entry.kind, entry.name).catch(() => {})
-      }
-    }
-
-    return result
+    return MemoryPrompt.injectTrainingOnly(budget)
   }
 
   export async function budgetUsage(budget: number = TRAINING_BUDGET): Promise<{

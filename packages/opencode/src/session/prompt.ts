@@ -19,7 +19,7 @@ import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { MemoryPrompt } from "../memory/prompt"
-import { TrainingPrompt } from "../altimate/training/prompt"
+import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -655,7 +655,7 @@ export namespace SessionPrompt {
 
       if (step === 1) {
         // altimate_change start - reset training session tracking to avoid stale applied counts
-        TrainingPrompt.resetSession()
+        MemoryPrompt.resetSession()
         // altimate_change end
         SessionSummary.summarize({
           sessionID: sessionID,
@@ -698,18 +698,16 @@ export namespace SessionPrompt {
 
       // Build system prompt, adding structured output instruction if needed
       const skills = await SystemPrompt.skills(agent)
-      // Inject persistent memory blocks from previous sessions (gated by feature flag)
-      const memoryInjection = Flag.ALTIMATE_DISABLE_MEMORY ? "" : await MemoryPrompt.inject()
-      // altimate_change start - inject training knowledge from AI teammate learning
-      const trainingInjection = Flag.ALTIMATE_DISABLE_TRAINING ? "" : await TrainingPrompt.inject()
+      // altimate_change start - unified context-aware injection for memory + training
+      const knowledgeInjection = Flag.ALTIMATE_DISABLE_MEMORY ? "" : await MemoryPrompt.inject(
+        UNIFIED_INJECTION_BUDGET,
+        { agent: agent.name, disableTraining: Flag.ALTIMATE_DISABLE_TRAINING },
+      )
       // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),
         ...(skills ? [skills] : []),
-        ...(memoryInjection ? [memoryInjection] : []),
-        // altimate_change start - training knowledge injected after memory
-        ...(trainingInjection ? [trainingInjection] : []),
-        // altimate_change end
+        ...(knowledgeInjection ? [knowledgeInjection] : []),
         ...(await InstructionPrompt.system()),
       ]
       const format = lastUser.format ?? { type: "text" }
