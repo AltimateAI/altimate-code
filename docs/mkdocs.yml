@@ -85,7 +85,6 @@ nav:
           - GitLab: interfaces/gitlab.md
   - Configure:
       - Overview: configure/index.md
-      - Config File Reference: configure/config.md
       - Warehouses: configure/warehouses.md
       - LLMs:
           - Providers: configure/providers.md
@@ -100,7 +99,9 @@ nav:
           - LSP Servers: configure/lsp.md
           - Network: reference/network.md
           - Windows / WSL: reference/windows-wsl.md
+      - Config File Reference: configure/config.md
   - Governance:
+      - Overview: configure/governance.md
       - Rules: configure/rules.md
       - Permissions: configure/permissions.md
       - Context Management: configure/context-management.md
