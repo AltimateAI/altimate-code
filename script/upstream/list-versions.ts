@@ -2,7 +2,9 @@
 /**
  * List Upstream Versions
  *
- * Shows available upstream OpenCode versions with merge status indicators.
+ * Shows available upstream OpenCode releases (from GitHub Releases API)
+ * with merge status indicators. Only published releases are shown —
+ * arbitrary tags and commits are excluded.
  *
  * Usage:
  *   bun run script/upstream/list-versions.ts
@@ -16,6 +18,7 @@ import { $ } from "bun"
 import * as git from "./utils/git"
 import * as logger from "./utils/logger"
 import { loadConfig, repoRoot } from "./utils/config"
+import { fetchReleases, type GitHubRelease } from "./utils/github"
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -25,6 +28,7 @@ const { values: args } = parseArgs({
   options: {
     limit: { type: "string", default: "30" },
     all: { type: "boolean", default: false },
+    "include-prerelease": { type: "boolean", default: false },
     json: { type: "boolean", default: false },
     help: { type: "boolean", short: "h", default: false },
   },
@@ -144,10 +148,15 @@ function printUsage(): void {
     bun run script/upstream/list-versions.ts --all --json
 
   ${bold("OPTIONS")}
-    --limit <n>   Number of versions to show (default: 30)
-    --all         Show all versions (no limit)
-    --json        Output as JSON
-    --help, -h    Show this help message
+    --limit <n>            Number of versions to show (default: 30)
+    --all                  Show all versions (no limit)
+    --include-prerelease   Include pre-release versions
+    --json                 Output as JSON
+    --help, -h             Show this help message
+
+  ${bold("NOTE")}
+    Only published GitHub releases are shown. Arbitrary tags and
+    commits are not listed. This ensures you only merge stable releases.
 
   ${bold("LEGEND")}
     ${GREEN}merged${RESET}     Already merged into current branch
@@ -166,7 +175,7 @@ async function main(): Promise<void> {
   const root = repoRoot()
   const limit = args.all ? Infinity : parseInt(args.limit || "30", 10)
 
-  // Ensure upstream remote exists
+  // Ensure upstream remote exists (for merge-base checks)
   const hasUpstream = await git.hasRemote(config.upstreamRemote)
   if (!hasUpstream) {
     logger.info(`Adding upstream remote: ${config.upstreamRepo}`)
@@ -176,26 +185,29 @@ async function main(): Promise<void> {
     )
   }
 
-  // Fetch upstream tags
+  // Fetch upstream tags so merge-base checks work
   logger.info(`Fetching tags from ${config.upstreamRemote}...`)
   await git.fetchRemote(config.upstreamRemote)
 
-  // Get all tags
-  const allTags = await git.getTags(config.upstreamRemote)
+  // Get published releases from GitHub API (not raw git tags)
+  logger.info(`Fetching releases from GitHub (${config.upstreamRepo})...`)
+  const releases = await fetchReleases(config.upstreamRepo, {
+    includePrerelease: Boolean(args["include-prerelease"]),
+  })
 
-  // Filter to version tags (v*.*.* or *.*.*)
-  const versionTags = allTags
-    .filter((tag) => /^v?\d+\.\d+\.\d+/.test(tag))
+  // Extract tags and sort by version
+  const versionTags = releases
+    .map((r) => r.tag_name)
     .sort(compareVersions)
 
   if (versionTags.length === 0) {
-    logger.warn("No version tags found on upstream")
+    logger.warn("No published releases found on upstream")
     process.exit(0)
   }
 
   const tagsToShow = versionTags.slice(0, Math.min(limit, versionTags.length))
 
-  logger.info(`Found ${versionTags.length} version tags, showing ${tagsToShow.length}`)
+  logger.info(`Found ${versionTags.length} published releases, showing ${tagsToShow.length}`)
   console.log()
 
   // Gather info for each tag (batch lookups for performance)
@@ -256,7 +268,7 @@ async function main(): Promise<void> {
   // Header
   const line = "═".repeat(60)
   console.log(`${CYAN}${line}${RESET}`)
-  console.log(`${CYAN}  ${BOLD}Upstream OpenCode Versions${RESET}`)
+  console.log(`${CYAN}  ${BOLD}Upstream OpenCode Releases${RESET}`)
   console.log(`${CYAN}${line}${RESET}`)
   console.log()
   console.log(`  Remote:   ${config.upstreamRemote} (${config.upstreamRepo})`)

@@ -5,6 +5,10 @@
  * Merges upstream OpenCode releases into the Altimate Code fork with
  * automatic conflict resolution and branding transforms.
  *
+ * Only published GitHub releases can be merged — arbitrary commits or
+ * non-release tags are rejected. This ensures we only pick up stable,
+ * released changes from upstream.
+ *
  * Usage:
  *   bun run script/upstream/merge.ts --version v1.2.21
  *   bun run script/upstream/merge.ts --version v1.2.21 --dry-run
@@ -24,6 +28,7 @@ import * as logger from "./utils/logger"
 import { RESET, BOLD, DIM, CYAN, GREEN, RED, YELLOW, MAGENTA, bold, dim, cyan, green, red, yellow, banner } from "./utils/logger"
 import { loadConfig, repoRoot, type MergeConfig, type StringReplacement } from "./utils/config"
 import { createReport, addFileReport, printSummary, writeReport, type MergeReport, type FileReport, type Change } from "./utils/report"
+import { validateRelease, getReleaseTags } from "./utils/github"
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -32,7 +37,7 @@ import { createReport, addFileReport, printSummary, writeReport, type MergeRepor
 const { values: args } = parseArgs({
   options: {
     version: { type: "string", short: "v" },
-    commit: { type: "string", short: "c" },
+    "include-prerelease": { type: "boolean", default: false },
     "base-branch": { type: "string", default: "main" },
     "dry-run": { type: "boolean", default: false },
     "no-push": { type: "boolean", default: false },
@@ -72,14 +77,18 @@ function printUsage(): void {
     bun run script/upstream/merge.ts --continue        Resume after conflict resolution
 
   ${bold("OPTIONS")}
-    --version, -v <tag>   Upstream version tag to merge (e.g., v1.2.21)
-    --commit, -c <sha>    Merge a specific commit instead of a tag
-    --base-branch <name>  Branch to merge into (default: main)
-    --dry-run             Analyze changes without modifying the repo
-    --no-push             Skip pushing the merge branch to origin
-    --continue            Resume after manual conflict resolution
-    --author <name>       Override the merge commit author
-    --help, -h            Show this help message
+    --version, -v <tag>      Upstream release tag to merge (e.g., v1.2.21)
+    --include-prerelease     Allow merging pre-release versions
+    --base-branch <name>     Branch to merge into (default: main)
+    --dry-run                Analyze changes without modifying the repo
+    --no-push                Skip pushing the merge branch to origin
+    --continue               Resume after manual conflict resolution
+    --author <name>          Override the merge commit author
+    --help, -h               Show this help message
+
+  ${bold("NOTE")}
+    Only published GitHub releases can be merged. Arbitrary commits or
+    non-release tags are rejected to ensure stability.
 
   ${bold("EXAMPLES")}
     ${dim("# Standard merge")}
@@ -511,17 +520,19 @@ async function main(): Promise<void> {
     return
   }
 
-  // Determine merge target
+  // Determine merge target — only published releases are allowed
   const version = args.version
-  const commitRef = args.commit
-  const mergeRef = version || commitRef
 
-  if (!mergeRef) {
-    logger.error("--version or --commit is required")
+  if (!version) {
+    logger.error("--version is required")
     logger.info("Usage: bun run script/upstream/merge.ts --version v1.2.21")
-    logger.info("       bun run script/upstream/merge.ts --commit abc123")
+    logger.info("")
+    logger.info("List available releases:")
+    logger.info("  bun run script/upstream/list-versions.ts")
     process.exit(1)
   }
+
+  const mergeRef = version
 
   const baseBranch = args["base-branch"] || config.baseBranch
 
@@ -556,24 +567,34 @@ async function main(): Promise<void> {
   await git.fetchRemote(config.upstreamRemote)
   logger.success("Upstream fetched")
 
-  // Validate version tag exists (if using --version)
-  if (version) {
-    const tags = await git.getTags(config.upstreamRemote)
-    if (!tags.includes(version)) {
-      logger.error(`Tag '${version}' not found on ${config.upstreamRemote}`)
-      // Show recent tags
-      const recent = tags
-        .filter((t) => t.startsWith("v"))
-        .sort()
-        .reverse()
-        .slice(0, 10)
-      if (recent.length > 0) {
-        logger.info(`Recent tags: ${recent.join(", ")}`)
-      }
-      process.exit(1)
+  // Validate version is a published GitHub release (not just a tag)
+  logger.info(`Validating '${version}' is a published release on ${config.upstreamRepo}...`)
+  const validation = await validateRelease(config.upstreamRepo, version, {
+    includePrerelease: Boolean(args["include-prerelease"]),
+  })
+
+  if (!validation.valid) {
+    logger.error(validation.reason!)
+
+    if (validation.reason?.includes("pre-release") && !args["include-prerelease"]) {
+      logger.info("Pass --include-prerelease to allow merging pre-release versions")
     }
-    logger.success(`Tag '${version}' exists`)
+
+    // Show recent releases for reference
+    try {
+      const recentTags = await getReleaseTags(config.upstreamRepo)
+      const recent = recentTags.slice(0, 10)
+      if (recent.length > 0) {
+        logger.info(`Recent releases: ${recent.join(", ")}`)
+      }
+    } catch {
+      // Best effort
+    }
+
+    process.exit(1)
   }
+
+  logger.success(`'${version}' is a published release (${validation.release!.published_at.split("T")[0]})`)
 
   const currentBranchName = await git.getCurrentBranch()
   logger.info(`Current branch: ${cyan(currentBranchName)}`)
@@ -600,7 +621,7 @@ async function main(): Promise<void> {
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)
   const backupBranch = `backup/${currentBranchName}-${timestamp}`
-  const versionSlug = (version || commitRef!).replace(/[^a-zA-Z0-9.-]/g, "-")
+  const versionSlug = version.replace(/[^a-zA-Z0-9.-]/g, "-")
   const mergeBranch = `upstream/merge-${versionSlug}`
 
   // Create backup branch at current position
@@ -635,12 +656,8 @@ async function main(): Promise<void> {
 
   logger.step(4, TOTAL_STEPS, `Merging ${mergeRef}`)
 
-  const upstreamRef = version
-    ? `${config.upstreamRemote}/${version.replace(/^v/, "")}`
-    : commitRef!
-
-  // Try the tag directly first, fall back to the ref
-  const mergeTarget = version || commitRef!
+  // Merge the release tag directly
+  const mergeTarget = version
   const mergeResult = await git.merge(mergeTarget)
 
   if (mergeResult.success) {
