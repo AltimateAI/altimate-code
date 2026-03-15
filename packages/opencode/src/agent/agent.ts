@@ -252,7 +252,7 @@ export namespace Agent {
             altimate_core_check: "allow",
             read: "allow", grep: "allow", glob: "allow", bash: "allow",
             question: "allow", webfetch: "allow", websearch: "allow",
-            task: "allow", training_list: "allow",
+            task: "allow", training_save: "allow", training_list: "allow", training_remove: "allow",
           }),
           user,
         ),

@@ -153,13 +153,13 @@ describe("TRAINING_MAX_PATTERNS_PER_KIND", () => {
 })
 
 describe("content length validation", () => {
-  test("content within 1800 chars is acceptable", () => {
-    const content = "x".repeat(1800)
-    expect(content.length).toBeLessThanOrEqual(1800)
+  test("content within 2500 chars is acceptable", () => {
+    const content = "x".repeat(2500)
+    expect(content.length).toBeLessThanOrEqual(2500)
   })
 
-  test("content over 1800 chars should be rejected by tool", () => {
-    const content = "x".repeat(1801)
-    expect(content.length).toBeGreaterThan(1800)
+  test("content over 2500 chars should be rejected by tool", () => {
+    const content = "x".repeat(2501)
+    expect(content.length).toBeGreaterThan(2500)
   })
 })

@@ -6,6 +6,7 @@ export {
   TRAINING_TAG,
   TRAINING_ID_PREFIX,
   TRAINING_MAX_PATTERNS_PER_KIND,
+  TRAINING_BUDGET,
   trainingId,
   trainingTags,
   isTrainingBlock,

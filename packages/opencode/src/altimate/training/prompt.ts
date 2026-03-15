@@ -1,8 +1,6 @@
 // altimate_change - Training prompt injection for AI Teammate learned knowledge
 import { TrainingStore, type TrainingEntry } from "./store"
-import type { TrainingKind } from "./types"
-
-const TRAINING_BUDGET = 6000
+import { TRAINING_BUDGET, type TrainingKind } from "./types"
 
 const KIND_HEADERS: Record<TrainingKind, { header: string; instruction: string }> = {
   pattern: {
@@ -65,5 +63,19 @@ export namespace TrainingPrompt {
     }
 
     return result
+  }
+
+  export async function budgetUsage(budget: number = TRAINING_BUDGET): Promise<{
+    used: number
+    budget: number
+    percent: number
+  }> {
+    const injected = await inject(budget)
+    const used = injected.length
+    return {
+      used,
+      budget,
+      percent: budget > 0 ? Math.round((used / budget) * 100) : 0,
+    }
   }
 }

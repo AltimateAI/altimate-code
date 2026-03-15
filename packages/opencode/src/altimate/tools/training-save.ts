@@ -1,8 +1,8 @@
 // altimate_change - Training save tool for AI Teammate learning
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { TrainingStore } from "../training"
-import { TrainingKind, TRAINING_MAX_PATTERNS_PER_KIND } from "../training/types"
+import { TrainingStore, TrainingPrompt } from "../training"
+import { TrainingKind, TRAINING_MAX_PATTERNS_PER_KIND, TRAINING_BUDGET } from "../training/types"
 import { CitationSchema } from "../../memory/types"
 
 export const TrainingSaveTool = Tool.define("training_save", {
@@ -25,15 +25,21 @@ export const TrainingSaveTool = Tool.define("training_save", {
       .string()
       .min(1)
       .max(64)
-      .regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/, {
-        message: "Name must be lowercase alphanumeric with hyphens/underscores",
-      })
-      .describe("Short identifier for this training entry (e.g., 'staging-model', 'no-float', 'arr-definition')"),
+      .transform((s) => s.toLowerCase().replace(/\s+/g, "-"))
+      .pipe(
+        z.string().regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/, {
+          message:
+            "Name must be lowercase alphanumeric with hyphens/underscores (e.g., 'staging-model', 'no-float', 'arr')",
+        }),
+      )
+      .describe(
+        "Short identifier for this training entry (e.g., 'staging-model', 'no-float', 'ARR'). Auto-lowercased.",
+      ),
     content: z
       .string()
       .min(1)
-      .max(1800)
-      .describe("The knowledge to save. Be specific and actionable. Use markdown for structure."),
+      .max(2500)
+      .describe("The knowledge to save. Be specific and actionable. Use markdown for structure. Max 2500 chars."),
     scope: z
       .enum(["global", "project"])
       .default("project")
@@ -51,12 +57,21 @@ export const TrainingSaveTool = Tool.define("training_save", {
   }),
   async execute(args, ctx) {
     try {
-      const existing = await TrainingStore.count({ kind: args.kind, scope: args.scope === "global" ? "global" : "project" })
-      if (existing[args.kind] >= TRAINING_MAX_PATTERNS_PER_KIND) {
-        return {
-          title: "Training: limit reached",
-          metadata: { action: "error" as string, kind: args.kind, name: args.name, scope: args.scope },
-          output: `Cannot save: already at ${TRAINING_MAX_PATTERNS_PER_KIND} ${args.kind} entries. Remove an existing one first with training_remove.`,
+      const scopeForCount = args.scope === "global" ? "global" : "project"
+
+      // Check if this is an update to an existing entry
+      const existingEntry = await TrainingStore.get(scopeForCount, args.kind, args.name)
+      const isUpdate = !!existingEntry
+
+      // Only check limit for new entries (not updates)
+      if (!isUpdate) {
+        const existing = await TrainingStore.count({ kind: args.kind, scope: scopeForCount })
+        if (existing[args.kind] >= TRAINING_MAX_PATTERNS_PER_KIND) {
+          return {
+            title: "Training: limit reached",
+            metadata: { action: "error" as string, kind: args.kind, name: args.name, scope: args.scope },
+            output: `Cannot save: already at ${TRAINING_MAX_PATTERNS_PER_KIND} ${args.kind} entries. Remove an existing one first with training_remove.`,
+          }
         }
       }
 
@@ -69,17 +84,40 @@ export const TrainingSaveTool = Tool.define("training_save", {
         citations: args.citations,
       })
 
-      let output = `Saved ${args.kind} "${args.name}" to ${args.scope} training.`
+      // Build response with context
+      let output: string
+      if (isUpdate) {
+        const appliedNote = existingEntry.meta.applied > 0 ? ` (preserving ${existingEntry.meta.applied} prior applications)` : ""
+        output = `Updated ${args.kind} "${args.name}" in ${args.scope} training${appliedNote}.`
+      } else {
+        output = `Saved ${args.kind} "${args.name}" to ${args.scope} training.`
+      }
+
       if (args.scope === "project") {
         output += "\nThis will be shared with your team when committed to git."
       }
+
+      // Show budget usage
+      const budgetUsed = await TrainingPrompt.budgetUsage()
+      output += `\nTraining usage: ${budgetUsed.used}/${budgetUsed.budget} chars (${budgetUsed.percent}% full).`
+      if (budgetUsed.percent >= 80) {
+        output += "\n⚠ Training is getting full. Oldest entries may not fit in context. Consider consolidating."
+      }
+
+      // Show duplicate details
       if (duplicates.length > 0) {
-        output += `\n\nNote: Found ${duplicates.length} similar training block(s). Consider consolidating.`
+        const dupNames = duplicates
+          .map((d) => {
+            const parts = d.id.split("/")
+            return `\`${parts.slice(1).join("/")}\``
+          })
+          .join(", ")
+        output += `\n\nSimilar entries found: ${dupNames}. Run training_remove to consolidate if these are duplicates.`
       }
 
       return {
-        title: `Training: saved "${args.name}" (${args.kind})`,
-        metadata: { action: "saved" as string, kind: args.kind, name: args.name, scope: args.scope },
+        title: `Training: ${isUpdate ? "updated" : "saved"} "${args.name}" (${args.kind})`,
+        metadata: { action: isUpdate ? "updated" : "saved", kind: args.kind, name: args.name, scope: args.scope },
         output,
       }
     } catch (e) {
