@@ -39,13 +39,6 @@ npm i -g @altimateai/altimate-code && altimate
 
 ---
 
-<h2 class="section-heading">See it in action</h2>
-<p class="section-sub">Build dbt models from Jira tickets, find broken Snowflake views, optimize warehouse costs, migrate PySpark to dbt, debug Airflow DAGs, and more — all from your terminal.</p>
-
-<p class="section-sub" markdown>[:octicons-arrow-right-24: Browse examples](../examples/index.md)</p>
-
----
-
 <h2 class="section-heading">Why Altimate Code?</h2>
 <p class="section-sub">Every major data platform is building AI agents — but they're all locked to one ecosystem. Your data stack isn't.</p>
 
@@ -134,31 +127,34 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
 ---
 
-<h2 class="section-heading">What you can do today</h2>
-<p class="section-sub">A few prompts to try in your first five minutes.</p>
+<h2 class="section-heading">See it in action</h2>
+<p class="section-sub">Build dbt models from Jira tickets, find broken Snowflake views, optimize warehouse costs, migrate PySpark to dbt, debug Airflow DAGs, and more — all from your terminal.</p>
 
 ```bash
-# Auto-detect your data stack (dbt projects, warehouse connections, installed tools)
-> /discover
 
 # Analyze a query for anti-patterns and optimization opportunities
-> Analyze this query for issues: SELECT * FROM orders JOIN customers ON orders.id = customers.order_id
+> Analyze this query for issues: <query code> or <query id from warehouse>
 
 # Translate SQL across dialects
 > /sql-translate this Snowflake query to BigQuery: SELECT DATEADD(day, 7, current_date())
 
-# Generate dbt tests for a model
-> /generate-tests for models/staging/stg_orders.sql
-
-# Get a cost report for your Snowflake account
+# Get a cost report for your Snowflake or Databricks account
 > /cost-report
 
 # Scaffold a new dbt model following your project patterns
 > /model-scaffold fct_revenue from stg_orders and stg_payments
 
-# Check column-level lineage for a query
-> Trace the lineage for SELECT revenue, region FROM marts.fct_revenue
+# Generate column level lineage report for sensitive columns from a particular table and identify owners
+> Trace the lineage for email_id and name columns from customer_data.customer_info table and generate a report of where sensitive data is replicated with table owners info
+
+# Migrate PySpark jobs to dbt models
+> Migrate this PySpark ETL to a dbt model: <path to PySpark file>
+
+# Debug a failing Airflow DAG
+> Debug this Airflow DAG failure: <DAG id or error log>
 ```
+
+<p class="section-sub" markdown>[:octicons-arrow-right-24: Browse more examples](../examples/index.md)</p>
 
 ---
 
