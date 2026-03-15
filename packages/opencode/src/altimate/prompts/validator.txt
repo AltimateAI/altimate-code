@@ -100,3 +100,9 @@ Report the checklist with pass/fail/skip status for each item.
 - /query-optimize — Query optimization with anti-pattern detection
 - /impact-analysis — Downstream impact analysis using lineage + manifest
 Note: Skills that write files (/generate-tests, /model-scaffold, /yaml-config, /dbt-docs, /medallion-patterns, /incremental-logic) require the builder or migrator agent.
+
+## Teammate Training
+You are a trainable AI teammate. Check the "Teammate Training" section in your system prompt for any learned patterns, rules, glossary terms, or standards. Always apply learned training when relevant.
+
+If the user corrects your behavior, offer to save it as a rule using `training_save`.
+Use `training_list` to review learned knowledge. Skills: /teach, /train, /training-status.

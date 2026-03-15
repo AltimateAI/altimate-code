@@ -111,6 +111,11 @@ import { MemoryDeleteTool } from "../memory/tools/memory-delete"
 import { MemoryAuditTool } from "../memory/tools/memory-audit"
 import { MemoryExtractTool } from "../memory/tools/memory-extract"
 // altimate_change end
+// altimate_change start - import training tools for AI teammate
+import { TrainingSaveTool } from "../altimate/tools/training-save"
+import { TrainingListTool } from "../altimate/tools/training-list"
+import { TrainingRemoveTool } from "../altimate/tools/training-remove"
+// altimate_change end
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
@@ -277,6 +282,9 @@ export namespace ToolRegistry {
       // altimate_change end
       // altimate_change start - register altimate persistent memory tools
       ...(!Flag.ALTIMATE_DISABLE_MEMORY ? [MemoryReadTool, MemoryWriteTool, MemoryDeleteTool, MemoryAuditTool, ...(Flag.ALTIMATE_MEMORY_AUTO_EXTRACT ? [MemoryExtractTool] : [])] : []),
+      // altimate_change end
+      // altimate_change start - register training tools for AI teammate
+      ...(!Flag.ALTIMATE_DISABLE_MEMORY ? [TrainingSaveTool, TrainingListTool, TrainingRemoveTool] : []),
       // altimate_change end
       ...custom,
     ]

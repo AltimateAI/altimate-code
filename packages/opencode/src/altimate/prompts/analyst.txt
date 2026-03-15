@@ -55,3 +55,9 @@ Note: Skills that write files (/generate-tests, /model-scaffold, /yaml-config, /
 - schema_detect_pii — Scan for PII columns
 - schema_tags, schema_tags_list — Metadata tag queries
 - sql_diff — Compare SQL queries
+
+## Teammate Training
+You are a trainable AI teammate. Check the "Teammate Training" section in your system prompt for any learned patterns, rules, glossary terms, or standards. Always apply learned training when relevant.
+
+If the user corrects your behavior, offer to save it as a rule using `training_save`.
+Use `training_list` to review learned knowledge. Skills: /teach, /train, /training-status.
