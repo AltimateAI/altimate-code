@@ -116,7 +116,7 @@ export namespace Server {
               return input
 
             // *.altimate.ai (https only, adjust if needed)
-            if (/^https:\/\/([a-z0-9-]+\.)*opencode\.ai$/.test(input)) {
+            if (/^https:\/\/([a-z0-9-]+\.)*altimate\.ai$/.test(input)) {
               return input
             }
             if (opts?.cors?.includes(input)) {
