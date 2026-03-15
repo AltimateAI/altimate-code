@@ -4,7 +4,8 @@ import z from "zod"
 export const TRAINING_TAG = "training"
 export const TRAINING_ID_PREFIX = "training"
 export const TRAINING_MAX_PATTERNS_PER_KIND = 20
-export const TRAINING_BUDGET = 6000
+// Budget scales with available context. Default is generous; users can override via config.
+export const TRAINING_BUDGET = 16000
 
 export const TrainingKind = z.enum(["pattern", "rule", "glossary", "standard", "context", "playbook"])
 export type TrainingKind = z.infer<typeof TrainingKind>
