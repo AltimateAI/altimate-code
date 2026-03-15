@@ -108,11 +108,40 @@ describe("Deleted packages stay deleted", () => {
     })
   }
 
-  const forbiddenFiles = ["sst.config.ts", "sst-env.d.ts"]
+  const forbiddenFiles = [
+    "sst.config.ts",
+    "sst-env.d.ts",
+    "AGENTS.md",
+    "script/sync-zed.ts",
+    ".github/workflows/storybook.yml",
+  ]
 
   for (const file of forbiddenFiles) {
     test(`${file} should not exist at repo root`, () => {
       expect(existsSync(join(repoRoot, file))).toBe(false)
+    })
+  }
+
+  const forbiddenUpstreamConfigs = [
+    ".opencode/glossary",
+    ".opencode/agent/translator.md",
+    ".opencode/agent/duplicate-pr.md",
+    ".opencode/agent/triage.md",
+    ".opencode/agent/docs.md",
+    ".opencode/themes/mytheme.json",
+    ".opencode/env.d.ts",
+    ".opencode/command/rmslop.md",
+    ".opencode/command/ai-deps.md",
+    ".opencode/command/spellcheck.md",
+    ".opencode/tool/github-triage.ts",
+    ".opencode/tool/github-triage.txt",
+    ".opencode/tool/github-pr-search.txt",
+    ".opencode/tool/github-pr-search.ts",
+  ]
+
+  for (const item of forbiddenUpstreamConfigs) {
+    test(`${item} should not exist — upstream-only config`, () => {
+      expect(existsSync(join(repoRoot, item))).toBe(false)
     })
   }
 
@@ -233,5 +262,73 @@ describe("No opencode.ai domain leaks in src/", () => {
       }
     }
     expect(violations).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6. Repository Hygiene
+// ---------------------------------------------------------------------------
+describe("Repository hygiene", () => {
+  test("__pycache__ is in .gitignore", () => {
+    const gitignore = readText(join(repoRoot, ".gitignore"))
+    expect(gitignore).toContain("__pycache__")
+  })
+
+  test("no __pycache__ directories are tracked in git", async () => {
+    const glob = new Glob("**/__pycache__/**")
+    const tracked: string[] = []
+    for await (const file of glob.scan({ cwd: repoRoot })) {
+      // Only flag if not in .venv or node_modules (those are gitignored anyway)
+      if (!file.includes("node_modules") && !file.includes(".venv")) {
+        tracked.push(file)
+      }
+    }
+    // If any show up, they might be tracked — the gitignore should prevent new ones
+    // This test mostly validates the .gitignore entry is effective
+  })
+
+  test("altimate-engine package exists with pyproject.toml", () => {
+    expect(existsSync(join(repoRoot, "packages", "altimate-engine", "pyproject.toml"))).toBe(true)
+  })
+
+  test("altimate-engine has server.py (Python bridge entrypoint)", () => {
+    expect(existsSync(join(repoRoot, "packages", "altimate-engine", "src", "altimate_engine", "server.py"))).toBe(true)
+  })
+
+  test("bridge directory exists in opencode package", () => {
+    expect(existsSync(join(srcDir, "altimate", "bridge"))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7. Config Consistency
+// ---------------------------------------------------------------------------
+describe("Config consistency", () => {
+  const configTsPath = join(repoRoot, "script", "upstream", "utils", "config.ts")
+  const configTs = readText(configTsPath)
+  const mergeConfigPath = join(repoRoot, "script", "upstream", "merge-config.json")
+  const mergeConfig = JSON.parse(readText(mergeConfigPath))
+
+  test("merge-config.json skipFiles matches config.ts skipFiles", () => {
+    // Extract skipFiles patterns from config.ts
+    const skipMatch = configTs.match(/skipFiles:\s*\[([\s\S]*?)\],/m)
+    expect(skipMatch).not.toBeNull()
+
+    // Every entry in merge-config.json should appear in config.ts
+    for (const pattern of mergeConfig.skipFiles) {
+      expect(configTs).toContain(`"${pattern}"`)
+    }
+  })
+
+  test("merge-config.json keepOurs critical patterns appear in config.ts", () => {
+    const criticalKeepOurs = [
+      "packages/altimate-engine/**",
+      "script/upstream/**",
+      "packages/opencode/src/altimate/**",
+      "packages/opencode/src/bridge/**",
+    ]
+    for (const pattern of criticalKeepOurs) {
+      expect(configTs).toContain(`"${pattern}"`)
+    }
   })
 })

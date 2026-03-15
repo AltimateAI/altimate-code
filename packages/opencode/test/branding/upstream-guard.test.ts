@@ -38,6 +38,24 @@ describe("upstream merge guards", () => {
       "sst-env.d.ts",
       "specs/**",
       "README.*.md",
+      // Upstream project-specific configs
+      ".opencode/glossary/**",
+      ".opencode/agent/translator.md",
+      ".opencode/tool/github-triage.ts",
+      ".opencode/tool/github-triage.txt",
+      ".opencode/tool/github-pr-search.txt",
+      ".opencode/tool/github-pr-search.ts",
+      ".opencode/agent/duplicate-pr.md",
+      ".opencode/agent/triage.md",
+      ".opencode/agent/docs.md",
+      ".opencode/themes/mytheme.json",
+      ".opencode/env.d.ts",
+      ".opencode/command/rmslop.md",
+      ".opencode/command/ai-deps.md",
+      ".opencode/command/spellcheck.md",
+      ".github/workflows/storybook.yml",
+      "script/sync-zed.ts",
+      "AGENTS.md",
     ]
 
     for (const pattern of expectedSkipPatterns) {
@@ -166,9 +184,25 @@ describe("upstream merge guards", () => {
       "flake.lock",
       "sst.config.ts",
       "sst-env.d.ts",
+      "AGENTS.md",
+      "script/sync-zed.ts",
+      ".github/workflows/storybook.yml",
+      ".opencode/agent/translator.md",
+      ".opencode/agent/duplicate-pr.md",
+      ".opencode/agent/triage.md",
+      ".opencode/agent/docs.md",
+      ".opencode/themes/mytheme.json",
+      ".opencode/env.d.ts",
+      ".opencode/command/rmslop.md",
+      ".opencode/command/ai-deps.md",
+      ".opencode/command/spellcheck.md",
+      ".opencode/tool/github-triage.ts",
+      ".opencode/tool/github-triage.txt",
+      ".opencode/tool/github-pr-search.txt",
+      ".opencode/tool/github-pr-search.ts",
     ]
 
-    const forbiddenDirs = ["nix", "specs", "infra", ".signpath"]
+    const forbiddenDirs = ["nix", "specs", "infra", ".signpath", ".opencode/glossary"]
 
     for (const file of forbiddenFiles) {
       test(`${file} should not exist at repo root`, () => {
