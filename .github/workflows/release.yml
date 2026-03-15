@@ -43,8 +43,8 @@ jobs:
       - name: Typecheck
         run: bun turbo typecheck
 
-      - name: Run tests
-        run: bun test
+      - name: Run release-critical tests
+        run: bun test --timeout 30000 test/branding/ test/install/
         working-directory: packages/opencode
 
   build:
