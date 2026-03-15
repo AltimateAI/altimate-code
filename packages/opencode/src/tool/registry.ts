@@ -115,8 +115,6 @@ import { MemoryExtractTool } from "../memory/tools/memory-extract"
 import { TrainingSaveTool } from "../altimate/tools/training-save"
 import { TrainingListTool } from "../altimate/tools/training-list"
 import { TrainingRemoveTool } from "../altimate/tools/training-remove"
-import { TrainingScanTool } from "../altimate/tools/training-scan"
-import { TrainingValidateTool } from "../altimate/tools/training-validate"
 // altimate_change end
 
 export namespace ToolRegistry {
@@ -286,7 +284,7 @@ export namespace ToolRegistry {
       ...(!Flag.ALTIMATE_DISABLE_MEMORY ? [MemoryReadTool, MemoryWriteTool, MemoryDeleteTool, MemoryAuditTool, ...(Flag.ALTIMATE_MEMORY_AUTO_EXTRACT ? [MemoryExtractTool] : [])] : []),
       // altimate_change end
       // altimate_change start - register training tools for AI teammate
-      ...(!Flag.ALTIMATE_DISABLE_TRAINING ? [TrainingSaveTool, TrainingListTool, TrainingRemoveTool, TrainingScanTool, TrainingValidateTool] : []),
+      ...(!Flag.ALTIMATE_DISABLE_TRAINING ? [TrainingSaveTool, TrainingListTool, TrainingRemoveTool] : []),
       // altimate_change end
       ...custom,
     ]

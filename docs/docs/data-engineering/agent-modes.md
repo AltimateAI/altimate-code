@@ -306,49 +306,45 @@ Researcher: Let me plan the investigation.
 altimate --agent trainer
 ```
 
-Trainer mode is dedicated to building your AI's knowledge base. It cannot modify project files — it can only read, scan, validate, and manage training entries.
+Trainer mode helps you systematically teach the agent about your project. It cannot modify files — it only reads, explores, and manages training.
 
-### Example: Scan for patterns and teach
+### Example: Teach from a correction
 
 ```
-You: Scan my project for patterns I should teach you
+You: I want you to know that we never use FLOAT for money columns
 
-Trainer:
-> training_scan target:models
-  Scanned 24 files in models/
+Trainer: Good rule. Let me save this properly:
 
-  Discovered Patterns:
-  - Naming: `stg_*` (12 files), `fct_*` (6 files), `dim_*` (4 files)
-  - Common: CTEs in 92%, {{ source() }} in 50%, incremental in 25%
+  Kind: rule
+  Name: no-float-financial
+  Content: "Use DECIMAL(18,2) for financial columns (*_amount, *_price, *_cost).
+  FLOAT causes rounding errors that compound across aggregations."
 
-  Suggested Next Steps:
-  Review the patterns above and tell me which ones to save.
+  Scope: project (shared with team via git)
+  Save this?
 
-You: Save the naming convention
+You: Yes
 
-Trainer: Saved pattern "dbt-model-naming" to project training.
-  Content: "stg_{source}__{entity}, int_{entity}__{verb}, fct_{entity}, dim_{entity}"
-  Training usage: 180/6000 chars (3% full).
-  This will be shared with your team when committed to git.
+Trainer: Saved. Every agent mode will apply this from now on.
+  Your teammates get it when they pull.
 ```
 
 ### What trainer can do
 
-- Scan codebases for patterns (`training_scan`)
-- Validate training against actual code (`training_validate`)
+- Guide users through teaching interactively
+- Read codebase files to understand existing patterns
 - Save, list, and remove training entries
-- Guide users through systematic knowledge capture
 - Analyze training gaps and suggest what to teach next
+- Review and curate training quality (stale detection, consolidation)
 
 ### When to use trainer mode
 
 | Scenario | Why trainer mode |
 |---|---|
-| New project setup | Systematically scan and extract conventions |
-| Team onboarding | Walk through existing training with explanations |
-| Post-incident review | Save lessons learned as rules |
-| Quarterly audit | Validate training, remove stale entries, consolidate |
+| New project setup | Teach conventions before anyone starts building |
+| New hire onboarding | Walk through what the team has taught |
+| Post-incident review | Save lessons learned as permanent rules |
 | Loading a style guide | Extract rules and standards from documentation |
-| Pre-migration prep | Document current patterns as context |
+| Quarterly audit | Remove stale entries, consolidate, fill gaps |
 
-For a comprehensive guide with scenarios and examples, see [Training Your AI Teammate](training/index.md).
+For the full guide, see [Training: Corrections That Stick](training/index.md).

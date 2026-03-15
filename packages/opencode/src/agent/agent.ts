@@ -272,7 +272,6 @@ export namespace Agent {
             read: "allow", grep: "allow", glob: "allow", bash: "allow",
             question: "allow",
             training_save: "allow", training_list: "allow", training_remove: "allow",
-            training_scan: "allow", training_validate: "allow",
             schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
             schema_cache_status: "allow",
             warehouse_list: "allow", warehouse_discover: "allow",
