@@ -115,7 +115,7 @@ export namespace Server {
             )
               return input
 
-            // *.opencode.ai (https only, adjust if needed)
+            // *.altimate.ai (https only, adjust if needed)
             if (/^https:\/\/([a-z0-9-]+\.)*opencode\.ai$/.test(input)) {
               return input
             }
@@ -255,7 +255,7 @@ export namespace Server {
         "/instance/dispose",
         describeRoute({
           summary: "Dispose instance",
-          description: "Clean up and dispose the current OpenCode instance, releasing all resources.",
+          description: "Clean up and dispose the current Altimate Code instance, releasing all resources.",
           operationId: "instance.dispose",
           responses: {
             200: {
@@ -277,7 +277,7 @@ export namespace Server {
         "/path",
         describeRoute({
           summary: "Get paths",
-          description: "Retrieve the current working directory and related path information for the OpenCode instance.",
+          description: "Retrieve the current working directory and related path information for the Altimate Code instance.",
           operationId: "path.get",
           responses: {
             200: {
@@ -340,7 +340,7 @@ export namespace Server {
         "/command",
         describeRoute({
           summary: "List commands",
-          description: "Get a list of all available commands in the OpenCode system.",
+          description: "Get a list of all available commands in the Altimate Code system.",
           operationId: "command.list",
           responses: {
             200: {
@@ -414,7 +414,7 @@ export namespace Server {
         "/agent",
         describeRoute({
           summary: "List agents",
-          description: "Get a list of all available AI agents in the OpenCode system.",
+          description: "Get a list of all available AI agents in the Altimate Code system.",
           operationId: "app.agents",
           responses: {
             200: {
@@ -436,7 +436,7 @@ export namespace Server {
         "/skill",
         describeRoute({
           summary: "List skills",
-          description: "Get a list of all available skills in the OpenCode system.",
+          description: "Get a list of all available skills in the Altimate Code system.",
           operationId: "app.skills",
           responses: {
             200: {
@@ -557,11 +557,11 @@ export namespace Server {
       .all("/*", async (c) => {
         const path = c.req.path
 
-        const response = await proxy(`https://app.opencode.ai${path}`, {
+        const response = await proxy(`https://app.altimate.ai${path}`, {
           ...c.req,
           headers: {
             ...c.req.raw.headers,
-            host: "app.opencode.ai",
+            host: "app.altimate.ai",
           },
         })
         response.headers.set(

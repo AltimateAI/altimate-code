@@ -1,0 +1,21 @@
+feat: improve tool utilization across all agent modes
+
+- Remove 10 tools from registry: 2 duplicates (`altimate_core_format`,
+  `altimate_core_transpile`) and 8 infrastructure tools not meant for
+  direct LLM invocation (`optimize_context`, `prune_schema`,
+  `fingerprint`, `introspection_sql`, `import_ddl`, `export_ddl`,
+  `complete`, `schema_cache_status`)
+- Expand builder prompt with 18 newly-documented tools across 5
+  categories (quality, lineage, migration, governance, finops)
+- Add 7 analysis tools to analyst prompt with usage guidance
+- Add `altimate_core_grade`, `policy`, and PII tools to validator
+  prompt with restructured categories
+- Add `altimate_core_equivalence` and `migration` to migrator prompt
+  with 5-step migration verification protocol
+- Add 18 tool docs to executive prompt (previously had zero), with
+  business-language translation examples
+- Grant corresponding permissions in `agent.ts` for all newly-wired
+  tools per agent
+- Remove 2-hour auto-close threat from `pr-standards.yml`
+
+Tool prompt coverage: 37% -> 77% (46/60 tools now have prompt guidance)

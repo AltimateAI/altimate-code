@@ -1,0 +1,10 @@
+packages:
+  - package: calogica/dbt_expectations
+    version: 0.8.2
+  - package: dbt-labs/dbt_utils
+    version: 1.0.0
+  - package: calogica/dbt_date
+    version: 0.7.2
+  - git: https://github.com/sdebruyn/dbt-duckdb-utils.git
+    revision: d6e251245dc0a63cb7934b9f5c12a5b814b414e9
+sha1_hash: 2eebbc70313192e03bffa9d9aa02c29d9e5bd036

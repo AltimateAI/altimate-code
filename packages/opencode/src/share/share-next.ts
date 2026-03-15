@@ -47,7 +47,7 @@ export namespace ShareNext {
 
     const active = Account.active()
     if (!active?.active_org_id) {
-      const baseUrl = await Config.get().then((x) => x.enterprise?.url ?? "https://opncd.ai")
+      const baseUrl = await Config.get().then((x) => x.enterprise?.url ?? "https://altimate.ai")
       return { headers, api: legacyApi, baseUrl }
     }
 

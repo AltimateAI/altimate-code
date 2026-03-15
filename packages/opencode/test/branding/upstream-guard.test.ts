@@ -103,7 +103,7 @@ describe("upstream merge guards", () => {
   })
 
   describe("branding rules completeness", () => {
-    test('contains "opencode.ai" domain replacement rule', () => {
+    test('contains "altimate.ai" domain replacement rule', () => {
       // In regex patterns, dots are escaped as \. so check for the regex form
       expect(brandingConfigText).toMatch(/opencode\\?\.ai/)
     })
@@ -112,8 +112,8 @@ describe("upstream merge guards", () => {
       expect(brandingConfigText).toContain("anomalyco")
     })
 
-    test('contains "OpenCode" product name replacement rule', () => {
-      expect(brandingConfigText).toContain("OpenCode")
+    test('contains "Altimate Code" product name replacement rule', () => {
+      expect(brandingConfigText).toContain("Altimate Code")
     })
 
     test('contains "altimate.ai" as replacement target', () => {

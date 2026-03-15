@@ -1,6 +1,6 @@
 {
-  "$schema": "https://opencode.ai/desktop-theme.json",
-  "name": "OpenCode",
+  "$schema": "https://altimate.ai/desktop-theme.json",
+  "name": "Altimate Code",
   "id": "opencode",
   "light": {
     "palette": {

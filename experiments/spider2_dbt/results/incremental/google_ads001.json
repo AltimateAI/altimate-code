@@ -1,0 +1,13 @@
+{
+  "instance_id": "google_ads001",
+  "domain": "google_ads",
+  "instruction": "Generate reports for Google Ads campaigns and keywords, including spend, clicks, impressions, conversions, and related metrics, with data grouped by account, campaign, and ad group details.",
+  "exit_code": -1,
+  "timed_out": true,
+  "dbt_success": false,
+  "elapsed_s": 540.01,
+  "agent_output": "",
+  "event_count": 0,
+  "stderr_tail": "Task timed out after 540s",
+  "attempt": 1
+}

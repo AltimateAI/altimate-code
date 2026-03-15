@@ -748,10 +748,14 @@ async function continueAfterConflicts(config: MergeConfig): Promise<void> {
 
   logger.success("All conflicts resolved")
 
-  // Commit the merge
+  // Commit the merge (skip if already committed)
   logger.info("Committing merge...")
-  await $`git commit --no-edit`.cwd(root).quiet()
-  logger.success("Merge committed")
+  try {
+    await $`git commit --no-edit`.cwd(root).quiet()
+    logger.success("Merge committed")
+  } catch {
+    logger.info("Merge already committed, continuing...")
+  }
 
   // Use pre-merge version snapshot from saved state, fall back to current if not available
   const versionSnapshot = state.versionSnapshot ?? snapshotVersions()

@@ -1,0 +1,74 @@
+{
+  "timestamp": "20260309_074234",
+  "source_results": "/Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/results/spider2_benchmark_20260309_074224.json",
+  "model": "anthropic/claude-sonnet-4-6",
+  "total": 5,
+  "passed": 2,
+  "failed": 3,
+  "errors": 0,
+  "pass_rate": 40.0,
+  "domain_stats": {
+    "synthea": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "errors": 0
+    },
+    "tpch": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "errors": 0
+    },
+    "shopify": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0
+    },
+    "f": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0
+    },
+    "nba": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "errors": 0
+    }
+  },
+  "evaluations": [
+    {
+      "instance_id": "synthea001",
+      "passed": false,
+      "error": null,
+      "method": "spider2_duckdb_match"
+    },
+    {
+      "instance_id": "tpch001",
+      "passed": false,
+      "error": null,
+      "method": "spider2_duckdb_match"
+    },
+    {
+      "instance_id": "shopify002",
+      "passed": true,
+      "error": null,
+      "method": "spider2_duckdb_match"
+    },
+    {
+      "instance_id": "f1003",
+      "passed": true,
+      "error": null,
+      "method": "spider2_duckdb_match"
+    },
+    {
+      "instance_id": "nba001",
+      "passed": false,
+      "error": null,
+      "method": "spider2_duckdb_match"
+    }
+  ]
+}

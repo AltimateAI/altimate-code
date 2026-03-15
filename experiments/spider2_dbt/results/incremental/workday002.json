@@ -1,0 +1,13 @@
+{
+  "instance_id": "workday002",
+  "domain": "workday",
+  "instruction": "Create a table that aggregates job profile information along with job family and job family group details",
+  "exit_code": -1,
+  "timed_out": true,
+  "dbt_success": false,
+  "elapsed_s": 540.0,
+  "agent_output": "",
+  "event_count": 0,
+  "stderr_tail": "Task timed out after 540s",
+  "attempt": 1
+}

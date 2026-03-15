@@ -17,7 +17,7 @@ export const ConfigRoutes = lazy(() =>
       "/",
       describeRoute({
         summary: "Get configuration",
-        description: "Retrieve the current OpenCode configuration settings and preferences.",
+        description: "Retrieve the current Altimate Code configuration settings and preferences.",
         operationId: "config.get",
         responses: {
           200: {
@@ -38,7 +38,7 @@ export const ConfigRoutes = lazy(() =>
       "/",
       describeRoute({
         summary: "Update configuration",
-        description: "Update OpenCode configuration settings and preferences.",
+        description: "Update Altimate Code configuration settings and preferences.",
         operationId: "config.update",
         responses: {
           200: {

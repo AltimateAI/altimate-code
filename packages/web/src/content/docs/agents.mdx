@@ -15,7 +15,7 @@ You can switch between agents during a session or invoke them with the `@` menti
 
 ## Types
 
-There are two types of agents in OpenCode; primary agents and subagents.
+There are two types of agents in Altimate Code; primary agents and subagents.
 
 ---
 
@@ -27,7 +27,7 @@ Primary agents are the main assistants you interact with directly. You can cycle
 You can use the **Tab** key to switch between primary agents during a session.
 :::
 
-OpenCode comes with two built-in primary agents, **Build** and **Plan**. We'll
+Altimate Code comes with two built-in primary agents, **Build** and **Plan**. We'll
 look at these below.
 
 ---
@@ -36,13 +36,13 @@ look at these below.
 
 Subagents are specialized assistants that primary agents can invoke for specific tasks. You can also manually invoke them by **@ mentioning** them in your messages.
 
-OpenCode comes with two built-in subagents, **General** and **Explore**. We'll look at this below.
+Altimate Code comes with two built-in subagents, **General** and **Explore**. We'll look at this below.
 
 ---
 
 ## Built-in
 
-OpenCode comes with two built-in primary agents and two built-in subagents.
+Altimate Code comes with two built-in primary agents and two built-in subagents.
 
 ---
 
@@ -143,7 +143,7 @@ Configure agents in your `opencode.json` config file:
 
 ```json title="opencode.json"
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "agent": {
     "build": {
       "mode": "primary",
@@ -280,7 +280,7 @@ Temperature values typically range from 0.0 to 1.0:
 }
 ```
 
-If no temperature is specified, OpenCode uses model-specific defaults; typically 0 for most models, 0.55 for Qwen models.
+If no temperature is specified, Altimate Code uses model-specific defaults; typically 0 for most models, 0.55 for Qwen models.
 
 ---
 
@@ -340,7 +340,7 @@ Specify a custom system prompt file for this agent with the `prompt` config. The
 }
 ```
 
-This path is relative to where the config file is located. So this works for both the global OpenCode config and the project specific config.
+This path is relative to where the config file is located. So this works for both the global Altimate Code config and the project specific config.
 
 ---
 
@@ -362,7 +362,7 @@ If you don’t specify a model, primary agents use the [model globally configure
 }
 ```
 
-The model ID in your OpenCode config uses the format `provider/model-id`. For example, if you're using [OpenCode Zen](/docs/zen), you would use `opencode/gpt-5.1-codex` for GPT 5.1 Codex.
+The model ID in your Altimate Code config uses the format `provider/model-id`. For example, if you're using [Altimate Code Zen](/docs/zen), you would use `opencode/gpt-5.1-codex` for GPT 5.1 Codex.
 
 ---
 
@@ -372,7 +372,7 @@ Control which tools are available in this agent with the `tools` config. You can
 
 ```json title="opencode.json" {3-6,9-12}
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "tools": {
     "write": true,
     "bash": true
@@ -396,7 +396,7 @@ You can also use wildcards to control multiple tools at once. For example, to di
 
 ```json title="opencode.json"
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "agent": {
     "readonly": {
       "tools": {
@@ -423,7 +423,7 @@ You can configure permissions to manage what actions an agent can take. Currentl
 
 ```json title="opencode.json"
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "permission": {
     "edit": "deny"
   }
@@ -434,7 +434,7 @@ You can override these permissions per agent.
 
 ```json title="opencode.json" {3-5,8-10}
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "permission": {
     "edit": "deny"
   },
@@ -471,7 +471,7 @@ You can set permissions for specific bash commands.
 
 ```json title="opencode.json" {7}
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "agent": {
     "build": {
       "permission": {
@@ -489,7 +489,7 @@ This can take a glob pattern.
 
 ```json title="opencode.json" {7}
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "agent": {
     "build": {
       "permission": {
@@ -507,7 +507,7 @@ Since the last matching rule takes precedence, put the `*` wildcard first and sp
 
 ```json title="opencode.json" {8}
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://altimate.ai/config.json",
   "agent": {
     "build": {
       "permission": {
@@ -700,7 +700,7 @@ Here are some common use cases for different agents.
 Here are some example agents you might find useful.
 
 :::tip
-Do you have an agent you'd like to share? [Submit a PR](https://github.com/anomalyco/opencode).
+Do you have an agent you'd like to share? [Submit a PR](https://github.com/AltimateAI/altimate-code).
 :::
 
 ---

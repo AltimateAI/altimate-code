@@ -402,7 +402,7 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
+            "HTTP-Referer": "https://altimate.ai/",
             "X-Title": "opencode",
           },
         },
@@ -413,7 +413,7 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "http-referer": "https://opencode.ai/",
+            "http-referer": "https://altimate.ai/",
             "x-title": "opencode",
           },
         },
@@ -512,7 +512,7 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
+            "HTTP-Referer": "https://altimate.ai/",
             "X-Title": "opencode",
           },
         },
@@ -662,7 +662,7 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
+            "HTTP-Referer": "https://altimate.ai/",
             "X-Title": "opencode",
           },
         },

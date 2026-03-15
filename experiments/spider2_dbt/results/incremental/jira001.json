@@ -1,0 +1,13 @@
+{
+  "instance_id": "jira001",
+  "domain": "jira",
+  "instruction": "Retrieve information about Jira projects, including project lead details, associated epics, components, and metrics like the average and median time for closing issues, both in days and seconds.",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 1.28,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 1,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/jira001/agent_output.md\n",
+  "attempt": 2
+}

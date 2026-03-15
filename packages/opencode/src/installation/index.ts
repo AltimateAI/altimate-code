@@ -25,7 +25,7 @@ export namespace Installation {
   }
 
   async function upgradeCurl(target: string) {
-    const body = await fetch("https://opencode.ai/install").then((res) => {
+    const body = await fetch("https://altimate.ai/install").then((res) => {
       if (!res.ok) throw new Error(res.statusText)
       return res.text()
     })
@@ -154,8 +154,8 @@ export namespace Installation {
   )
 
   async function getBrewFormula() {
-    const tapFormula = await text(["brew", "list", "--formula", "anomalyco/tap/opencode"])
-    if (tapFormula.includes("opencode")) return "anomalyco/tap/opencode"
+    const tapFormula = await text(["brew", "list", "--formula", "AltimateAI/tap/altimate-code"])
+    if (tapFormula.includes("opencode")) return "AltimateAI/tap/altimate-code"
     const coreFormula = await text(["brew", "list", "--formula", "opencode"])
     if (coreFormula.includes("opencode")) return "opencode"
     return "opencode"
@@ -293,7 +293,7 @@ export namespace Installation {
         .then((data: any) => data.version)
     }
 
-    return fetch("https://api.github.com/repos/anomalyco/opencode/releases/latest")
+    return fetch("https://api.github.com/repos/AltimateAI/altimate-code/releases/latest")
       .then((res) => {
         if (!res.ok) throw new Error(res.statusText)
         return res.json()

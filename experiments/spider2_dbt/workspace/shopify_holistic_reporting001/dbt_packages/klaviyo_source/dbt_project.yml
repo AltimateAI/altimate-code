@@ -1,0 +1,26 @@
+name: 'klaviyo_source'
+version: '0.7.1'
+config-version: 2
+require-dbt-version: [">=1.0.0", "<2.0.0"]
+
+vars:
+  klaviyo_source:
+    event_table: "{{ source('klaviyo', 'event') }}"
+    campaign: "{{ source('klaviyo', 'campaign') }}"
+    flow: "{{ source('klaviyo', 'flow') }}"
+    integration: "{{ source('klaviyo', 'integration') }}"
+    person: "{{ source('klaviyo', 'person') }}"
+    metric: "{{ source('klaviyo', 'metric') }}"
+    klaviyo__event_pass_through_columns: []
+    klaviyo__person_pass_through_columns: []
+
+  dbt_utils_dispatch_list: ['spark_utils', 'dbt_utils']
+  fivetran_utils_dispatch_list: [spark_utils]
+
+models:
+  klaviyo_source:
+    tmp:
+      +materialized: view
+    +materialized: table
+    +schema: stg_klaviyo
+

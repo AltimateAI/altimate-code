@@ -1,0 +1,13 @@
+{
+  "instance_id": "airport001",
+  "domain": "airport",
+  "instruction": "aggregate and summarize Malaysian airport arrival data, including flight counts and calculate the distances between Malaysian airports in kilometers.",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 246.39,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 87,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/airport001/agent_output.md\n",
+  "attempt": 1
+}

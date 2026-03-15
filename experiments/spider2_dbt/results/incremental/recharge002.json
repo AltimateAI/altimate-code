@@ -1,0 +1,13 @@
+{
+  "instance_id": "recharge002",
+  "domain": "recharge",
+  "instruction": "Calculate daily and running totals for customer transactions, including charges, discounts, taxes, refunds, and order quantities, and determine the number of active months for each customer?",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 450.82,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 195,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/recharge002/agent_output.md\n",
+  "attempt": 1
+}

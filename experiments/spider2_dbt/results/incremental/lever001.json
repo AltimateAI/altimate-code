@@ -1,0 +1,13 @@
+{
+  "instance_id": "lever001",
+  "domain": "lever",
+  "instruction": "Pull together the data from multiple tables related to job postings and create a complete report that covers job applications, interviews, requisitions, tags, and the hiring manager details.",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 267.52,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 116,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/lever001/agent_output.md\n",
+  "attempt": 1
+}

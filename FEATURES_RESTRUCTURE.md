@@ -179,7 +179,7 @@ Custom agent modes added to `packages/opencode/src/agent/agent.ts` via `altimate
 
 #### 16. Anthropic OAuth Plugin
 - **Files**: `packages/opencode/src/altimate/plugin/anthropic.ts`
-- **Description**: Custom plugin implementing Anthropic OAuth 2.0 authentication via PKCE flow. Supports two login modes: Claude Pro/Max subscription (claude.ai) and API key creation via console (console.anthropic.com). Handles token refresh, injects required OAuth beta headers, prefixes all tool names with `mcp_` as required by Anthropic's OAuth endpoint, strips the prefix in streaming responses, and sanitizes system prompts (replaces "OpenCode" with "Claude Code"). Also zeroes out model costs for Pro/Max subscribers.
+- **Description**: Custom plugin implementing Anthropic OAuth 2.0 authentication via PKCE flow. Supports two login modes: Claude Pro/Max subscription (claude.ai) and API key creation via console (console.anthropic.com). Handles token refresh, injects required OAuth beta headers, prefixes all tool names with `mcp_` as required by Anthropic's OAuth endpoint, strips the prefix in streaming responses, and sanitizes system prompts (replaces "Altimate Code" with "Claude Code"). Also zeroes out model costs for Pro/Max subscribers.
 - **Category**: Plugin
 
 ---

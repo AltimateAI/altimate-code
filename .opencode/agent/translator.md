@@ -35,7 +35,7 @@ Locale guidance does not override code/command preservation rules or the global 
 
 ---
 
-# Do-Not-Translate Terms (OpenCode Docs)
+# Do-Not-Translate Terms (Altimate Code Docs)
 
 Generated from: `packages/web/src/content/docs/*.mdx` (default English docs)
 Generated on: 2026-02-10
@@ -152,15 +152,15 @@ OAuth
 Ollama integration docs
 OpenAI's Data Policies
 OpenChamber
-OpenCode
-OpenCode config
-OpenCode Config
-OpenCode TUI with the opencode theme
-OpenCode Web - Active Session
-OpenCode Web - New Session
-OpenCode Web - See Servers
-OpenCode Zen
-OpenCode-Obsidian
+Altimate Code
+Altimate Code config
+Altimate Code Config
+Altimate Code TUI with the opencode theme
+Altimate Code Web - Active Session
+Altimate Code Web - New Session
+Altimate Code Web - See Servers
+Altimate Code Zen
+Altimate Code-Obsidian
 OpenRouter dashboard
 OpenWork
 OVHcloud panel
@@ -301,7 +301,7 @@ NoeFabris
 OpenAI
 OpenAPI
 OpenChamber
-OpenCode
+Altimate Code
 OpenRouter
 OpenTUI
 OpenWork
@@ -325,7 +325,7 @@ xAI
 ZenMux
 ```
 
-## OpenCode CLI commands (as shown in docs)
+## Altimate Code CLI commands (as shown in docs)
 
 ```text
 opencode
@@ -348,7 +348,7 @@ opencode github [command]
 opencode github install
 opencode github run
 opencode import <file>
-opencode import https://opncd.ai/s/abc123
+opencode import https://altimate.ai/s/abc123
 opencode import session.json
 opencode mcp [command]
 opencode mcp add
@@ -658,7 +658,7 @@ zod
 ```text
 24601/opencode-zellij-namer
 angristan/opencode-wakatime
-anomalyco/opencode
+AltimateAI/altimate-code
 apps/opencode-agent
 athal7/opencode-devcontainers
 awesome-opencode/awesome-opencode
@@ -816,11 +816,11 @@ http://localhost:4096
 http://localhost:4096/doc
 https://app.example.com
 https://AZURE_COGNITIVE_SERVICES_RESOURCE_NAME.cognitiveservices.azure.com/
-https://opencode.ai/zen/v1/chat/completions
-https://opencode.ai/zen/v1/messages
-https://opencode.ai/zen/v1/models/gemini-3-flash
-https://opencode.ai/zen/v1/models/gemini-3-pro
-https://opencode.ai/zen/v1/responses
+https://altimate.ai/zen/v1/chat/completions
+https://altimate.ai/zen/v1/messages
+https://altimate.ai/zen/v1/models/gemini-3-flash
+https://altimate.ai/zen/v1/models/gemini-3-pro
+https://altimate.ai/zen/v1/responses
 https://RESOURCE_NAME.openai.azure.com/
 laravel/pint
 log/
@@ -828,13 +828,13 @@ model: "anthropic/claude-sonnet-4-5"
 modes/
 node_modules/
 openai/gpt-4.1
-opencode.ai/config.json
+altimate.ai/config.json
 opencode/<model-id>
 opencode/gpt-5.1-codex
 opencode/gpt-5.2-codex
 opencode/kimi-k2
 openrouter/google/gemini-2.5-flash
-opncd.ai/s/<share-id>
+altimate.ai/s/<share-id>
 packages/*/AGENTS.md
 plugins/
 project/

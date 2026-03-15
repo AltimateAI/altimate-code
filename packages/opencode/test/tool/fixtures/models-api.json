@@ -20977,9 +20977,9 @@
     "id": "opencode",
     "env": ["OPENCODE_API_KEY"],
     "npm": "@ai-sdk/openai-compatible",
-    "api": "https://opencode.ai/zen/v1",
-    "name": "OpenCode Zen",
-    "doc": "https://opencode.ai/docs/zen",
+    "api": "https://altimate.ai/zen/v1",
+    "name": "Altimate Code Zen",
+    "doc": "https://altimate.ai/docs/zen",
     "models": {
       "glm-4.7": {
         "id": "glm-4.7",

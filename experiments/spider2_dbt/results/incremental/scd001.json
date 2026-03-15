@@ -1,0 +1,13 @@
+{
+  "instance_id": "scd001",
+  "domain": "scd",
+  "instruction": "Generate a report that aggregates corporate account metrics, including the number of gaggles, users, events, and orders associated with corporate emails, while also identifying the first user, most active user, and the user with the most orders for each corporate email",
+  "exit_code": -1,
+  "timed_out": true,
+  "dbt_success": false,
+  "elapsed_s": 600.03,
+  "agent_output": "",
+  "event_count": 0,
+  "stderr_tail": "Task timed out after 600s",
+  "attempt": 1
+}

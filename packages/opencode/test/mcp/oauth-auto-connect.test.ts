@@ -107,7 +107,7 @@ test("first connect to OAuth server shows needs_auth instead of failed", async (
       await Bun.write(
         `${dir}/opencode.json`,
         JSON.stringify({
-          $schema: "https://opencode.ai/config.json",
+          $schema: "https://altimate.ai/config.json",
           mcp: {
             "test-oauth": {
               type: "remote",

@@ -1,0 +1,3 @@
+﻿ID,NAME,STATUS,CREATED,UPDATED,CUSTOMER_FILTER,_FIVETRAN_DELETED,_FIVETRAN_SYNCED,ARCHIVED,TRIGGER_TYPE
+X839zt,Welcome SMS -  Redesign,live,2020-10-12 22:56:59.000,2021-02-10 18:34:39.000,"{""stanzas"": [ {""criteria"": [{""timeframe"": ""alltime"",""type"": ""customer-in-flow""}]}]}",FALSE,2021-04-14 07:46:13.280,false,Metric
+S6uajk,Abandoned Cart - NEW VERSION - Katelyn & DW Working,draft,2020-07-08 20:55:56.000,2020-07-09 16:27:58.000,"{""stanzas"": [{""criteria"": [{""operator"": ""nin"",""region_id"": ""EUROPEAN_UNION"",""type"": ""customer-location""}]}]}",FALSE,2021-04-14 07:46:13.285,false,Added to List

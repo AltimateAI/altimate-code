@@ -1,0 +1,33 @@
+{
+  "version": "v1.2.26",
+  "mergeBranch": "upstream/merge-v1.2.26",
+  "backupBranch": "backup/main-2026-03-15T02-55-10",
+  "baseBranch": "main",
+  "step": 4,
+  "versionSnapshot": {
+    "package.json": {
+      "name": "opencode",
+      "version": ""
+    },
+    "packages/opencode/package.json": {
+      "name": "@altimateai/altimate-code",
+      "version": "1.2.20"
+    },
+    "packages/plugin/package.json": {
+      "name": "@opencode-ai/plugin",
+      "version": "1.2.20"
+    },
+    "packages/sdk/js/package.json": {
+      "name": "@opencode-ai/sdk",
+      "version": "1.2.20"
+    },
+    "packages/script/package.json": {
+      "name": "@opencode-ai/script",
+      "version": ""
+    },
+    "packages/util/package.json": {
+      "name": "@opencode-ai/util",
+      "version": "1.2.20"
+    }
+  }
+}

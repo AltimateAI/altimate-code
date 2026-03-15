@@ -1,0 +1,13 @@
+{
+  "instance_id": "quickbooks002",
+  "domain": "quickbooks",
+  "instruction": "Generate a table that includes bill and invoice transaction information, including supplier and customer details, payment status, balance, overdue days, and other financial information.",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 244.12,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 125,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/quickbooks002/agent_output.md\n",
+  "attempt": 1
+}

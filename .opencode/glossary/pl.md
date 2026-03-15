@@ -2,12 +2,12 @@
 
 ## Sources
 
-- PR #9884: https://github.com/anomalyco/opencode/pull/9884
+- PR #9884: https://github.com/AltimateAI/altimate-code/pull/9884
 
 ## Do Not Translate (Locale Additions)
 
-- `OpenCode` (preserve casing in prose; keep `opencode` only in commands, package names, paths, or code)
-- `OpenCode CLI`
+- `Altimate Code` (preserve casing in prose; keep `opencode` only in commands, package names, paths, or code)
+- `Altimate Code CLI`
 - `CLI`, `TUI`, `MCP`, `OAuth`
 - Commands, flags, file paths, and code literals (keep exactly as written)
 

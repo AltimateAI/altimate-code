@@ -217,7 +217,7 @@ function buildCommand(args: string, env: Record<string, string>) {
       "set -e",
       'BIN="$HOME/.opencode/bin/opencode"',
       'if [ ! -x "$BIN" ]; then',
-      `  curl -fsSL https://opencode.ai/install | bash -s -- --version ${shellEscape(version)} --no-modify-path`,
+      `  curl -fsSL https://altimate.ai/install | bash -s -- --version ${shellEscape(version)} --no-modify-path`,
       "fi",
       `${envPrefix(env)} exec "$BIN" ${args}`,
     ].join("\n")

@@ -1,0 +1,13 @@
+{
+  "instance_id": "social_media001",
+  "domain": "social_media",
+  "instruction": "Generate a comprehensive social media report that includes Facebook, Instagram, LinkedIn, and Twitter reports.",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 1.05,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 1,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/social_media001/agent_output.md\n",
+  "attempt": 2
+}

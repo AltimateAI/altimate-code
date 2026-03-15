@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Datamate manager — dynamic MCP server management (#99)
 - Non-interactive mode for `mcp add` command with input validation
 - `mcp remove` command
-- Upstream merge with OpenCode v1.2.20
+- Upstream merge with Altimate Code v1.2.20
 
 ### Fixed
 
@@ -134,7 +134,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Build: resolve @opentui/core parser.worker.js via import.meta.resolve for monorepo hoisting
 - Build: output binary as `altimate-code` instead of `opencode`
-- Publish: update Docker/AUR/Homebrew references from anomalyco/opencode to AltimateAI/altimate-code
+- Publish: update Docker/AUR/Homebrew references from AltimateAI/altimate-code to AltimateAI/altimate-code
 - Publish: make Docker/AUR/Homebrew steps non-fatal
 - Bin wrapper: look for `@altimateai/altimate-code-*` scoped platform packages
 - Postinstall: resolve `@altimateai` scoped platform packages

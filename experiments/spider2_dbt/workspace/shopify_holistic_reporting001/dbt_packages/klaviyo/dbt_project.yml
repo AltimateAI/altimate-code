@@ -1,0 +1,52 @@
+name: 'klaviyo' 
+version: '0.7.2'
+config-version: 2
+require-dbt-version: [">=1.3.0", "<2.0.0"]
+vars:
+  klaviyo:
+    event_table: "{{ ref( 'stg_klaviyo__event') }}"
+    campaign: "{{ ref( 'stg_klaviyo__campaign') }}"
+    flow: "{{ ref( 'stg_klaviyo__flow') }}"
+    integration: "{{ ref( 'stg_klaviyo__integration') }}"
+    person: "{{ ref( 'stg_klaviyo__person') }}"
+    metric: "{{ ref( 'stg_klaviyo__metric') }}"
+    klaviyo__email_attribution_lookback: 120
+    klaviyo__sms_attribution_lookback: 24
+    klaviyo__eligible_attribution_events: # default in klaviyo -> https://help.klaviyo.com/hc/en-us/articles/115005248128 
+    - 'opened email'
+    - 'clicked email'
+    - 'clicked sms'
+
+    klaviyo__count_metrics:
+    - 'Active on Site'   # default API metrics
+    - 'Viewed Product'
+    - 'Ordered Product'   # some default Shopify metrics
+    - 'Placed Order'   # there are X 'ordered product' events for every `placed order` purchase event of X products
+    - 'Refunded Order'   # note: klaviyo only tracks FULL refunds (not partial)
+    - 'Received Email'   # default email and sms conversion metrics in Klaviyo
+    - 'Clicked Email'
+    - 'Opened Email'
+    - 'Marked Email as Spam'
+    - 'Unsubscribed'
+    - 'Received SMS'
+    - 'Clicked SMS'
+    - 'Sent SMS'
+    - 'Unsubscribed from SMS'
+
+    klaviyo__sum_revenue_metrics:
+    - 'Refunded Order'
+    - 'Placed Order'
+    - 'Ordered Product'
+    - 'checkout started'
+    - 'cancelled order'
+
+  klaviyo_source:
+    klaviyo__event_pass_through_columns: []
+    klaviyo__person_pass_through_columns: []
+models:
+  klaviyo:
+    intermediate:
+      +schema: int_klaviyo
+      +materialized: view
+    +materialized: table
+    +schema: klaviyo

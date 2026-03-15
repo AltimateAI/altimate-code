@@ -66,7 +66,7 @@ export function createMainWindow(globals: Globals) {
     width: state.width,
     height: state.height,
     show: true,
-    title: "OpenCode",
+    title: "Altimate Code",
     icon: iconPath(),
     backgroundColor,
     ...(process.platform === "darwin"

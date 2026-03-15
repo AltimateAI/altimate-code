@@ -1,0 +1,13 @@
+{
+  "instance_id": "google_play002",
+  "domain": "google_play",
+  "instruction": "Generate an overview report on Google Play app performance, including installs, uninstalls, crashes, ANRs, ratings, and store performance metrics over time.",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 1.31,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 1,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/google_play002/agent_output.md\n",
+  "attempt": 2
+}

@@ -3,11 +3,11 @@ title: 키바인드
 description: 키바인드를 커스터마이즈하세요.
 ---
 
-OpenCode에는 `tui.json`을 통해 커스터마이즈할 수 있는 키바인드 목록이 있습니다.
+Altimate Code에는 `tui.json`을 통해 커스터마이즈할 수 있는 키바인드 목록이 있습니다.
 
 ```json title="tui.json"
 {
-  "$schema": "https://opencode.ai/tui.json",
+  "$schema": "https://altimate.ai/tui.json",
   "keybinds": {
     "leader": "ctrl+x",
     "app_exit": "ctrl+c,ctrl+d,<leader>q",
@@ -108,7 +108,7 @@ OpenCode에는 `tui.json`을 통해 커스터마이즈할 수 있는 키바인�
 
 ## 리더 키
 
-OpenCode는 대부분의 keybinds에 `leader` 키를 사용합니다. 이렇게 하면 terminal에서 충돌을 피할 수 있습니다.
+Altimate Code는 대부분의 keybinds에 `leader` 키를 사용합니다. 이렇게 하면 terminal에서 충돌을 피할 수 있습니다.
 
 기본값으로 `ctrl+x`가 리더 키이며, 대부분의 작업은 먼저 리더 키를 누른 뒤 단축키를 누릅니다. 예를 들어 새 세션을 시작하려면 먼저 `ctrl+x`를 누르고 `n`을 누릅니다.
 
@@ -122,7 +122,7 @@ keybinds에 리더 키를 꼭 사용할 필요는 없지만, 사용하는 것을
 
 ```json title="tui.json"
 {
-  "$schema": "https://opencode.ai/tui.json",
+  "$schema": "https://altimate.ai/tui.json",
   "keybinds": {
     "session_compact": "none"
   }

@@ -1,0 +1,13 @@
+{
+  "instance_id": "tickit002",
+  "domain": "tickit",
+  "instruction": "Get detailed information about events and ticket listings, including venue details, event timing, categories, seller information, and pricing for each listing",
+  "exit_code": 0,
+  "timed_out": false,
+  "dbt_success": false,
+  "elapsed_s": 143.47,
+  "agent_output": "(no text output \u2014 tool-only response)",
+  "event_count": 93,
+  "stderr_tail": "\n\u2713 Output saved to: /Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/workspace/tickit002/agent_output.md\n",
+  "attempt": 1
+}

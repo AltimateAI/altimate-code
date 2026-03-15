@@ -1,0 +1,13 @@
+{
+  "instance_id": "asana001",
+  "domain": "asana",
+  "instruction": "Can you describe the process used to aggregate task and project metrics for Asana teams and users, including open tasks, completed tasks, and average close times?",
+  "exit_code": -1,
+  "timed_out": true,
+  "dbt_success": false,
+  "elapsed_s": 540.01,
+  "agent_output": "",
+  "event_count": 0,
+  "stderr_tail": "Task timed out after 540s",
+  "attempt": 1
+}

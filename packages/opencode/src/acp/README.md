@@ -69,7 +69,7 @@ Add to your Zed configuration (`~/.config/zed/settings.json`):
 ```json
 {
   "agent_servers": {
-    "OpenCode": {
+    "Altimate Code": {
       "command": "opencode",
       "args": ["acp"]
     }
@@ -158,7 +158,7 @@ Each component has a single responsibility:
 
 This makes the codebase maintainable and testable.
 
-### Mapping to OpenCode
+### Mapping to Altimate Code
 
 ACP sessions map cleanly to opencode's internal session model:
 

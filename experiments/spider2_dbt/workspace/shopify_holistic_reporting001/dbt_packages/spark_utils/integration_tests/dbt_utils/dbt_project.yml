@@ -1,0 +1,53 @@
+name: 'spark_utils_dbt_utils_integration_tests'
+version: '1.0'
+config-version: 2
+
+profile: 'integration_tests'
+
+analysis-paths: ["analysis"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_modules"
+dispatch:
+  - macro_namespace: dbt_utils
+    search_order:
+      - spark_utils
+      - dbt_utils_integration_tests
+      - dbt_utils
+
+seeds:
+  dbt_utils_integration_tests:
+    +file_format: delta
+
+models:
+  dbt_utils_integration_tests:
+    +file_format: delta
+    sql:
+      # macro doesn't work for this integration test (schema pattern)
+      test_get_relations_by_pattern:
+        +enabled: false
+      # integration test doesn't work
+      test_groupby:
+        +enabled: false
+    schema_tests:
+      # integration test doesn't work
+      test_recency:
+        +enabled: false
+    cross_db_utils:
+      # integration test doesn't work
+      test_any_value:
+        +enabled: false
+
+tests:
+  dbt_utils_integration_tests:
+    cross_db_utils:
+      # expect exactly two failures
+      # (both use "order by", which isn't supported in SparkSQL)
+      assert_equal_test_listagg_actual__expected:
+        +error_if: ">2"
+flags:
+  require_generic_test_arguments_property: true
+seed-paths: ["data"]
+model-paths: ["models"]

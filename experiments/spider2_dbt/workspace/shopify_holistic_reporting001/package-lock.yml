@@ -1,0 +1,18 @@
+packages:
+  - package: fivetran/shopify
+    version: 0.13.2
+  - package: fivetran/klaviyo
+    version: 0.7.2
+  - package: fivetran/shopify_source
+    version: 0.12.1
+  - package: fivetran/klaviyo_source
+    version: 0.7.1
+  - package: fivetran/fivetran_utils
+    version: 0.4.11
+  - package: dbt-labs/spark_utils
+    version: 0.3.3
+  - package: calogica/dbt_date
+    version: 0.10.1
+  - package: dbt-labs/dbt_utils
+    version: 1.3.3
+sha1_hash: 47c3b2e542060874337f28455f688d5630e1a676

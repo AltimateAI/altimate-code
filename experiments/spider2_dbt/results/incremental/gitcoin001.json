@@ -1,0 +1,13 @@
+{
+  "instance_id": "gitcoin001",
+  "domain": "gitcoin",
+  "instruction": "Transform and clean the raw application, project, and application answer data by renaming fields, extracting metadata, and linking answers to their respective questions and projects.",
+  "exit_code": -1,
+  "timed_out": true,
+  "dbt_success": false,
+  "elapsed_s": 540.0,
+  "agent_output": "",
+  "event_count": 0,
+  "stderr_tail": "Task timed out after 540s",
+  "attempt": 1
+}

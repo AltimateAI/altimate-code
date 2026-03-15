@@ -1,0 +1,9 @@
+
+/**/target/
+/**/dbt_modules/
+/**/dbt_packages/
+/**/logs/
+/**/env/
+/**/__pycache__/
+test.env
+dbt_internal_packages/

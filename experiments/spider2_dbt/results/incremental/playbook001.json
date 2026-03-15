@@ -1,0 +1,13 @@
+{
+  "instance_id": "playbook001",
+  "domain": "playbook",
+  "instruction": "Complete the project of this database to show the metrics of each traffic source, I believe every touchpoint in the conversion path is equally important, please choose the most suitable attribution method.",
+  "exit_code": -1,
+  "timed_out": true,
+  "dbt_success": false,
+  "elapsed_s": 540.0,
+  "agent_output": "",
+  "event_count": 0,
+  "stderr_tail": "Task timed out after 540s",
+  "attempt": 1
+}

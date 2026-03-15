@@ -3,11 +3,11 @@ title: Combinaciones de teclas
 description: Personaliza tus combinaciones de teclas.
 ---
 
-OpenCode tiene una lista de combinaciones de teclas que puede personalizar a través de `tui.json`.
+Altimate Code tiene una lista de combinaciones de teclas que puede personalizar a través de `tui.json`.
 
 ```json title="tui.json"
 {
-  "$schema": "https://opencode.ai/tui.json",
+  "$schema": "https://altimate.ai/tui.json",
   "keybinds": {
     "leader": "ctrl+x",
     "app_exit": "ctrl+c,ctrl+d,<leader>q",
@@ -108,7 +108,7 @@ OpenCode tiene una lista de combinaciones de teclas que puede personalizar a tra
 
 ## Tecla líder
 
-OpenCode usa una tecla `leader` para la mayoría de las combinaciones de teclas. Esto evita conflictos en tu terminal.
+Altimate Code usa una tecla `leader` para la mayoría de las combinaciones de teclas. Esto evita conflictos en tu terminal.
 
 De forma predeterminada, `ctrl+x` es la tecla principal y la mayoría de las acciones requieren que primero presione la tecla principal y luego el acceso directo. Por ejemplo, para iniciar una nueva sesión, primero presione `ctrl+x` y luego presione `n`.
 
@@ -122,7 +122,7 @@ Puede deshabilitar una combinación de teclas agregando la clave a `tui.json` co
 
 ```json title="tui.json"
 {
-  "$schema": "https://opencode.ai/tui.json",
+  "$schema": "https://altimate.ai/tui.json",
   "keybinds": {
     "session_compact": "none"
   }

@@ -103,11 +103,11 @@ describe("Installation Script", () => {
     expect(installContent).toContain(".altimate-code/bin")
   })
 
-  test("no references to opencode.ai domain", () => {
-    // Should reference altimate.ai, not opencode.ai
+  test("no references to altimate.ai domain", () => {
+    // Should reference altimate.ai, not altimate.ai
     const lines = installContent.split("\n")
     for (const line of lines) {
-      expect(line).not.toContain("opencode.ai")
+      expect(line).not.toContain("altimate.ai")
     }
   })
 
@@ -154,9 +154,9 @@ describe("User-Agent & Version", () => {
 // ---------------------------------------------------------------------------
 describe("Upstream Branding Leak Detection", () => {
   const leakedPatterns = [
-    { pattern: /opencode\.ai/i, label: "opencode.ai domain" },
+    { pattern: /opencode\.ai/i, label: "altimate.ai domain" },
     { pattern: /anomalyco/i, label: "anomalyco GitHub org" },
-    { pattern: /opncd\.ai/i, label: "opncd.ai short domain" },
+    { pattern: /opncd\.ai/i, label: "altimate.ai short domain" },
   ]
 
   // Lines matching any of these patterns are intentionally kept (internal identifiers)
@@ -187,7 +187,7 @@ describe("Upstream Branding Leak Detection", () => {
     return false
   }
 
-  test("no opencode.ai domain references in src/ files", async () => {
+  test("no altimate.ai domain references in src/ files", async () => {
     const violations: string[] = []
     const glob = new Glob("**/*.{ts,tsx,js}")
     for await (const file of glob.scan({ cwd: srcDir })) {
@@ -223,7 +223,7 @@ describe("Upstream Branding Leak Detection", () => {
     expect(violations).toEqual([])
   })
 
-  test("no opncd.ai references in src/ files", async () => {
+  test("no altimate.ai references in src/ files", async () => {
     const violations: string[] = []
     const glob = new Glob("**/*.{ts,tsx,js}")
     for await (const file of glob.scan({ cwd: srcDir })) {

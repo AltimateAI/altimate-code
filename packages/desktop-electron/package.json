@@ -4,10 +4,10 @@
   "version": "1.2.26",
   "type": "module",
   "license": "MIT",
-  "homepage": "https://opencode.ai",
+  "homepage": "https://altimate.ai",
   "author": {
-    "name": "OpenCode",
-    "email": "hello@opencode.ai"
+    "name": "Altimate Code",
+    "email": "hello@altimate.ai"
   },
   "scripts": {
     "typecheck": "tsgo -b",

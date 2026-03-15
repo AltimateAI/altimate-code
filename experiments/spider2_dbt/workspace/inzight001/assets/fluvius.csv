@@ -1,0 +1,4 @@
+van datum,van tijdstip,tot datum,tot tijdstip,ean,meter,metertype,register,volume,eenheid,validatiestatus
+2020-01-01,00:00:00,2020-01-01,00:15:00,541448820006139028,E17ZZZF100203490,MSK,Afname Nacht,"1,234",kWh,Gevalideerd
+2020-02-02,00:00:00,2020-02-02,00:15:00,541448820006139028,E17ZZZF100203490,MSK,Afname Nacht,"5,678",kWh,Gevalideerd
+2020-03-03,00:00:00,2020-03-03,00:15:00,541448820006139028,E17ZZZF100203490,MSK,Afname Nacht,"4,321",kWh,Gevalideerd

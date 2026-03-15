@@ -1,0 +1,26 @@
+{
+  "timestamp": "20260309_075052",
+  "source_results": "/Users/anandgupta/codebase/altimate-code/experiments/spider2_dbt/results/spider2_benchmark_20260309_075042.json",
+  "model": "anthropic/claude-sonnet-4-6",
+  "total": 1,
+  "passed": 0,
+  "failed": 1,
+  "errors": 0,
+  "pass_rate": 0.0,
+  "domain_stats": {
+    "tpch": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "errors": 0
+    }
+  },
+  "evaluations": [
+    {
+      "instance_id": "tpch001",
+      "passed": false,
+      "error": null,
+      "method": "spider2_duckdb_match"
+    }
+  ]
+}
