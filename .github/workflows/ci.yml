@@ -94,7 +94,7 @@ jobs:
       - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/anomalyco/opencode.git || true
-          git fetch upstream --quiet
+          git fetch upstream --quiet --no-tags
 
       - name: Install merge tooling deps
         run: bun install

@@ -10,7 +10,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 # Get the latest Git tag
-git fetch --force --tags
+git fetch origin --force --tags
 latest_tag=$(git tag --sort=committerdate | grep -E '^github-v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)
 if [ -z "$latest_tag" ]; then
     echo "No tags found"
@@ -38,4 +38,4 @@ echo "New version: $new_version"
 
 # Tag
 git tag $new_version
-git push --tags
+git push origin "$new_version"

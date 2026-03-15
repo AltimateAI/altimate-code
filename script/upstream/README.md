@@ -283,7 +283,7 @@ Run `bun run script/upstream/analyze.ts --branding --verbose` to see details. Co
 
 ```bash
 git remote add upstream https://github.com/anomalyco/opencode.git
-git fetch upstream --tags
+git fetch upstream --no-tags
 ```
 
 ### Aborting a merge

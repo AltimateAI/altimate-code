@@ -69,7 +69,7 @@ Add a new section at the top of `CHANGELOG.md`:
 git add -A
 git commit -m "release: v0.2.0"
 git tag v0.2.0
-git push origin main --tags
+git push origin main v0.2.0
 ```
 
 ### 4. What happens automatically
@@ -111,7 +111,7 @@ bun run packages/altimate-code/script/bump-version.ts --engine 0.2.1
 git add -A
 git commit -m "release: engine-v0.2.1"
 git tag engine-v0.2.1
-git push origin main --tags
+git push origin main engine-v0.2.1
 ```
 
 This triggers `.github/workflows/publish-engine.yml` which publishes only to PyPI.
