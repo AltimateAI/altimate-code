@@ -266,7 +266,71 @@ describe("No opencode.ai domain leaks in src/", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 6. Repository Hygiene
+// 6. Build & Package Branding
+// ---------------------------------------------------------------------------
+describe("Build and package branding", () => {
+  const buildTs = readText(join(pkgDir, "script", "build.ts"))
+  const pkg = readJSON(join(pkgDir, "package.json"))
+
+  test("build.ts compiles binary as 'altimate' not 'opencode'", () => {
+    expect(buildTs).toContain("bin/altimate")
+    expect(buildTs).not.toMatch(/outfile:.*opencode/)
+  })
+
+  test("build.ts user-agent is 'altimate/' not 'opencode/'", () => {
+    expect(buildTs).toContain("--user-agent=altimate/")
+    expect(buildTs).not.toContain("--user-agent=opencode/")
+  })
+
+  test("build.ts embeds ALTIMATE_ENGINE_VERSION", () => {
+    expect(buildTs).toContain("ALTIMATE_ENGINE_VERSION")
+  })
+
+  test("build.ts reads engine version from pyproject.toml", () => {
+    expect(buildTs).toContain("altimate-engine/pyproject.toml")
+  })
+
+  test("build.ts creates altimate-code backward-compat symlink", () => {
+    expect(buildTs).toContain("altimate-code")
+    expect(buildTs).toMatch(/ln -sf altimate|altimate-code\.exe/)
+  })
+
+  test("build.ts has sourcemap: 'external'", () => {
+    expect(buildTs).toContain('sourcemap: "external"')
+  })
+
+  test("package.json bin has 'altimate' pointing to ./bin/altimate", () => {
+    expect(pkg.bin.altimate).toBe("./bin/altimate")
+  })
+
+  test("package.json bin has 'altimate-code' pointing to ./bin/altimate-code", () => {
+    expect(pkg.bin["altimate-code"]).toBe("./bin/altimate-code")
+  })
+
+  test("package.json bin does not have 'opencode' entry", () => {
+    expect(pkg.bin.opencode).toBeUndefined()
+  })
+
+  test("package.json has no junk fields", () => {
+    expect(pkg.randomField).toBeUndefined()
+  })
+
+  test("package.json has no echo-stub scripts", () => {
+    const junkNames = ["random", "clean", "lint", "format", "docs", "deploy"]
+    for (const name of junkNames) {
+      if (pkg.scripts?.[name]) {
+        expect(pkg.scripts[name]).not.toMatch(/^echo /)
+      }
+    }
+  })
+
+  test("bin/opencode does not exist", () => {
+    expect(existsSync(join(pkgDir, "bin", "opencode"))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7. Repository Hygiene
 // ---------------------------------------------------------------------------
 describe("Repository hygiene", () => {
   test("__pycache__ is in .gitignore", () => {
@@ -301,7 +365,7 @@ describe("Repository hygiene", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 7. Config Integrity
+// 8. Config Integrity
 // ---------------------------------------------------------------------------
 describe("Config integrity", () => {
   const configTsPath = join(repoRoot, "script", "upstream", "utils", "config.ts")
@@ -313,6 +377,10 @@ describe("Config integrity", () => {
       "script/upstream/**",
       "packages/opencode/src/altimate/**",
       "packages/opencode/src/bridge/**",
+      "packages/opencode/script/build.ts",
+      "packages/opencode/script/publish.ts",
+      "packages/opencode/bin/**",
+      "CHANGELOG.md",
     ]
     for (const pattern of criticalKeepOurs) {
       expect(configTs).toContain(`"${pattern}"`)
@@ -344,7 +412,7 @@ describe("Config integrity", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 8. altimate_change Marker Integrity
+// 9. altimate_change Marker Integrity
 // ---------------------------------------------------------------------------
 describe("altimate_change marker integrity", () => {
   // Files that MUST have altimate_change markers (they contain custom logic in upstream-shared files)
