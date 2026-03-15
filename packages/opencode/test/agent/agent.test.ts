@@ -683,6 +683,8 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
         executive: { disable: true },
         validator: { disable: true },
         migrator: { disable: true },
+        researcher: { disable: true },
+        trainer: { disable: true },
         plan: { disable: true },
       },
     },

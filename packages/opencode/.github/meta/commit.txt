@@ -1,22 +1,27 @@
-refactor: cut training_scan and training_validate, simplify docs
+fix: address Sentry review findings — 7 bugs fixed
 
-Research from 8 independent evaluations + SkillsBench (7,308 test runs)
-found that compact focused context beats comprehensive docs by 20pp.
-The training system's value is in correction capture (2-sec saves) and
-team propagation (git sync) — not in regex scanning or keyword grep.
+1. stripTrainingMeta/parseTrainingMeta regex: remove multiline `m` flag
+   that could match user content starting with `<!-- training` mid-string
+   (types.ts, store.ts)
 
-Removed:
-- training_scan (255 lines) — regex pattern counting, not discovery
-- training_validate (315 lines) — keyword grep, not validation
+2. training_save content limit: reduce from 2500 to 1800 chars to account
+   for ~200 char metadata overhead against MemoryStore's 2048 char limit
+   (training-save.ts)
 
-Simplified:
-- trainer.txt: removed scan/validate workflows, focused on guided
-  teaching and curation
-- agent-modes.md: updated trainer section with correction-focused example
-- training docs: complete rewrite with new pitch:
-  "Correct the agent once. It remembers forever. Your team inherits it."
-  Backed by SkillsBench research showing compact > comprehensive.
+3. injectTrainingOnly: change `break` to `continue` so budget-exceeding
+   section headers skip to next kind instead of stopping all injection
+   (memory/prompt.ts)
 
-Net: -753 lines. 152 tests pass.
+4. injectTrainingOnly: track itemCount and return empty string when no
+   items injected (was returning header-only string, inflating budget
+   reports) (memory/prompt.ts)
+
+5. projectDir cache: replace module-level singleton with Map keyed by
+   Instance.directory to prevent stale paths when AsyncLocalStorage
+   context changes across concurrent requests (memory/store.ts)
+
+6. budgetUsage side effect: already fixed — delegates to injectTrainingOnly
+   which is read-only (no applied count increment). Sentry comments were
+   against pre-refactor code.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

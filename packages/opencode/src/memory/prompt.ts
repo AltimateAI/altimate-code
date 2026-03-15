@@ -199,7 +199,8 @@ export namespace MemoryPrompt {
     // Inject non-training memory blocks
     if (memoryBlocks.length > 0) {
       const memHeader = "\n### Memory\n"
-      if (used + memHeader.length < budget) {
+      const firstMemFormatted = formatBlock(memoryBlocks[0].block)
+      if (used + memHeader.length + firstMemFormatted.length + 2 < budget) {
         result += memHeader
         used += memHeader.length
 
@@ -270,15 +271,18 @@ export namespace MemoryPrompt {
 
       const section = KIND_HEADERS[kind]
       const sectionHeader = `\n### ${section.header}\n_${section.instruction}_\n`
-      if (used + sectionHeader.length > budget) continue
-      result += sectionHeader
-      used += sectionHeader.length
 
       const sorted = [...items].sort((a, b) => {
         const metaA = parseTrainingMeta(a.content)
         const metaB = parseTrainingMeta(b.content)
         return (metaB?.applied ?? 0) - (metaA?.applied ?? 0)
       })
+
+      // Check if header + at least one entry fits before adding header
+      const firstFormatted = formatTrainingEntry(sorted[0])
+      if (used + sectionHeader.length + firstFormatted.length + 2 > budget) continue
+      result += sectionHeader
+      used += sectionHeader.length
 
       for (const block of sorted) {
         const formatted = formatTrainingEntry(block)
