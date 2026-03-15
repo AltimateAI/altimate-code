@@ -1,8 +1,11 @@
 // altimate_change - Training list tool for AI Teammate learned knowledge
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import { Log } from "../../util/log"
 import { TrainingStore, TrainingPrompt, TrainingInsights } from "../training"
 import { TrainingKind } from "../training/types"
+
+const log = Log.create({ service: "tool.training_list" })
 
 export const TrainingListTool = Tool.define("training_list", {
   description: [
@@ -82,7 +85,10 @@ export const TrainingListTool = Tool.define("training_list", {
           const applied = e.meta.applied > 0 ? ` (applied ${e.meta.applied}x)` : ""
           const source = e.meta.source ? ` — from: ${e.meta.source}` : ""
           const scope = e.scope === "global" ? " [global]" : ""
-          sections.push(`- **${e.name}**${scope}${applied}${source}\n  ${e.content.split("\n")[0].slice(0, 120)}`)
+          const firstLine = e.content.split("\n")[0]
+          const preview = firstLine.slice(0, 120)
+          const truncated = firstLine.length > 120 || e.content.includes("\n") ? "..." : ""
+          sections.push(`- **${e.name}**${scope}${applied}${source}\n  ${preview}${truncated}`)
         }
         sections.push("")
       }
@@ -97,10 +103,12 @@ export const TrainingListTool = Tool.define("training_list", {
         output: summary + highlights + sections.join("\n") + insightText,
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      log.error("failed to list training", { error: msg })
       return {
         title: "Training List: ERROR",
         metadata: { count: 0, budgetPercent: 0 },
-        output: `Failed to list training: ${e instanceof Error ? e.message : String(e)}`,
+        output: `Failed to list training: ${msg}`,
       }
     }
   },

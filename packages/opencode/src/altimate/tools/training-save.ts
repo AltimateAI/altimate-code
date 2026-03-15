@@ -1,9 +1,12 @@
 // altimate_change - Training save tool for AI Teammate learning
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import { Log } from "../../util/log"
 import { TrainingStore, TrainingPrompt } from "../training"
 import { TrainingKind, TRAINING_MAX_PATTERNS_PER_KIND, TRAINING_BUDGET } from "../training/types"
 import { CitationSchema } from "../../memory/types"
+
+const log = Log.create({ service: "tool.training_save" })
 
 export const TrainingSaveTool = Tool.define("training_save", {
   description: [
@@ -142,10 +145,12 @@ export const TrainingSaveTool = Tool.define("training_save", {
         output,
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      log.error("failed to save training", { kind: args.kind, name: args.name, error: msg })
       return {
         title: "Training Save: ERROR",
         metadata: { action: "error" as string, kind: args.kind, name: args.name, scope: args.scope },
-        output: `Failed to save training: ${e instanceof Error ? e.message : String(e)}`,
+        output: `Failed to save training: ${msg}`,
       }
     }
   },

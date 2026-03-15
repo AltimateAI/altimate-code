@@ -1,8 +1,11 @@
 // altimate_change - Training remove tool for AI Teammate
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import { Log } from "../../util/log"
 import { TrainingStore, TrainingPrompt } from "../training"
 import { TrainingKind } from "../training/types"
+
+const log = Log.create({ service: "tool.training_remove" })
 
 export const TrainingRemoveTool = Tool.define("training_remove", {
   description:
@@ -46,10 +49,12 @@ export const TrainingRemoveTool = Tool.define("training_remove", {
         output: `Removed ${args.kind} "${args.name}" from ${args.scope} training.${appliedNote}\nTraining usage: ${budget.used}/${budget.budget} chars (${budget.percent}% full).`,
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      log.error("failed to remove training", { kind: args.kind, name: args.name, error: msg })
       return {
         title: "Training Remove: ERROR",
         metadata: { action: "error", kind: args.kind, name: args.name },
-        output: `Failed to remove training: ${e instanceof Error ? e.message : String(e)}`,
+        output: `Failed to remove training: ${msg}`,
       }
     }
   },

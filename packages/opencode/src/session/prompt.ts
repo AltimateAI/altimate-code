@@ -654,6 +654,9 @@ export namespace SessionPrompt {
       }
 
       if (step === 1) {
+        // altimate_change start - reset training session tracking to avoid stale applied counts
+        TrainingPrompt.resetSession()
+        // altimate_change end
         SessionSummary.summarize({
           sessionID: sessionID,
           messageID: lastUser.id,
