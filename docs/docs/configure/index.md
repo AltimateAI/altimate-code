@@ -73,9 +73,13 @@ Altimate Code is built from a small set of composable pieces. This section cover
 
     ---
 
-    Rules, permissions, context management, and formatters that control how Altimate Code operates.
+    **Rules** — Guide agent behavior with instruction files (`AGENTS.md`) that provide project context, coding conventions, and workflow guidance, merged automatically into the system prompt.
 
-    [:octicons-arrow-right-24: Rules](rules.md) · [:octicons-arrow-right-24: Permissions](permissions.md)
+    **Permissions** — Control which tools agents can use with `allow`, `ask`, or `deny` levels. Supports pattern-based matching and per-agent overrides.
+
+    **Context Management** — Automatic conversation compaction, observation pruning, and overflow recovery so long sessions never lose important context.
+
+    [:octicons-arrow-right-24: Rules](rules.md) · [:octicons-arrow-right-24: Permissions](permissions.md) · [:octicons-arrow-right-24: Context](context-management.md) · [:octicons-arrow-right-24: Formatters](formatters.md)
 
 -   :material-palette:{ .lg .middle } **Appearance**
 
