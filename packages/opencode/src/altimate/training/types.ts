@@ -6,7 +6,7 @@ export const TRAINING_ID_PREFIX = "training"
 export const TRAINING_MAX_PATTERNS_PER_KIND = 20
 export const TRAINING_BUDGET = 6000
 
-export const TrainingKind = z.enum(["pattern", "rule", "glossary", "standard"])
+export const TrainingKind = z.enum(["pattern", "rule", "glossary", "standard", "context", "playbook"])
 export type TrainingKind = z.infer<typeof TrainingKind>
 
 export const TrainingBlockMeta = z.object({

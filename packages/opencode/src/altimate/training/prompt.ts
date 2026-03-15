@@ -19,6 +19,14 @@ const KIND_HEADERS: Record<TrainingKind, { header: string; instruction: string }
     header: "Team Standards",
     instruction: "Enforce these standards in code reviews and when writing new code. They were loaded from team documentation.",
   },
+  context: {
+    header: "Domain Context",
+    instruction: "Use this background knowledge to inform your reasoning. Not directly enforceable, but critical for understanding 'why'.",
+  },
+  playbook: {
+    header: "Playbooks",
+    instruction: "Follow these step-by-step procedures when handling the described scenarios.",
+  },
 }
 
 // Track which entries have been applied this session to avoid double-counting
@@ -52,7 +60,7 @@ export namespace TrainingPrompt {
     let used = header.length
     const injected: TrainingEntry[] = []
 
-    for (const kind of ["rule", "pattern", "standard", "glossary"] as TrainingKind[]) {
+    for (const kind of ["rule", "pattern", "standard", "glossary", "context", "playbook"] as TrainingKind[]) {
       const items = grouped.get(kind)
       if (!items || items.length === 0) continue
 

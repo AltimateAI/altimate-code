@@ -13,10 +13,10 @@ export const TrainingListTool = Tool.define("training_list", {
     "Shows what your teammate has been taught and how often each entry has been applied.",
     "Use this to review training, check what's been learned, or find entries to update/remove.",
     "",
-    "Filter by kind (pattern/rule/glossary/standard) or scope (global/project/all).",
+    "Filter by kind (pattern/rule/glossary/standard/context/playbook) or scope (global/project/all).",
   ].join("\n"),
   parameters: z.object({
-    kind: TrainingKind.optional().describe("Filter by kind: pattern, rule, glossary, or standard"),
+    kind: TrainingKind.optional().describe("Filter by kind: pattern, rule, glossary, standard, context, or playbook"),
     scope: z
       .enum(["global", "project", "all"])
       .optional()
@@ -49,6 +49,8 @@ export const TrainingListTool = Tool.define("training_list", {
         `| Rules | ${counts.rule} |`,
         `| Glossary | ${counts.glossary} |`,
         `| Standards | ${counts.standard} |`,
+        `| Context | ${counts.context} |`,
+        `| Playbooks | ${counts.playbook} |`,
         `| **Total** | **${entries.length}** |`,
         "",
         `**Context budget**: ${budget.used}/${budget.budget} chars (${budget.percent}% full)`,
@@ -77,7 +79,7 @@ export const TrainingListTool = Tool.define("training_list", {
       }
 
       const sections: string[] = []
-      for (const kind of ["rule", "pattern", "standard", "glossary"] as const) {
+      for (const kind of ["rule", "pattern", "standard", "glossary", "context", "playbook"] as const) {
         const items = grouped.get(kind)
         if (!items || items.length === 0) continue
         sections.push(`### ${kind.charAt(0).toUpperCase() + kind.slice(1)}s`)

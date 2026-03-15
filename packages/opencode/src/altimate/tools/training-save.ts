@@ -18,6 +18,8 @@ export const TrainingSaveTool = Tool.define("training_save", {
     "- rule: A specific rule from a correction (e.g., 'never use FLOAT for financial columns')",
     "- glossary: A domain-specific term definition (e.g., 'ARR means Annual Recurring Revenue')",
     "- standard: A team standard from documentation (e.g., SQL style guide rules)",
+    "- context: Background knowledge explaining 'why' (e.g., why we chose Snowflake over BigQuery)",
+    "- playbook: A multi-step procedure (e.g., how to respond to a data quality incident)",
     "",
     `Max ${TRAINING_MAX_PATTERNS_PER_KIND} entries per kind. Training persists across sessions.`,
     "Project-scope training is committed to git so the whole team benefits.",

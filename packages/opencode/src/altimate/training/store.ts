@@ -3,7 +3,7 @@ import { MemoryStore, type MemoryBlock } from "../../memory"
 import {
   TRAINING_TAG,
   TRAINING_MAX_PATTERNS_PER_KIND,
-  type TrainingKind,
+  TrainingKind,
   trainingId,
   trainingTags,
   isTrainingBlock,
@@ -113,7 +113,7 @@ export namespace TrainingStore {
     scope?: "global" | "project" | "all"
   }): Promise<Record<TrainingKind, number>> {
     const entries = await list(opts)
-    const counts: Record<string, number> = { pattern: 0, rule: 0, glossary: 0, standard: 0 }
+    const counts: Record<string, number> = Object.fromEntries(TrainingKind.options.map((k) => [k, 0]))
     for (const entry of entries) {
       counts[entry.kind] = (counts[entry.kind] ?? 0) + 1
     }
