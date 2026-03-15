@@ -61,7 +61,7 @@ export ALTIMATE_CLI_MODELS_PATH=/path/to/models.json
 
 ## What telemetry is collected?
 
-Anonymous usage telemetry — event names, token counts, timing, and error types. **Never** code, queries, credentials, file paths, or prompt content. See the full [Telemetry reference](configure/telemetry.md) for the complete event list.
+Anonymous usage telemetry — event names, token counts, timing, and error types. **Never** code, queries, credentials, file paths, or prompt content. See the full [Telemetry reference](telemetry.md) for the complete event list.
 
 Disable telemetry entirely:
 

@@ -128,9 +128,9 @@ my-dbt-project/
 
 ## Next steps
 
-- [TUI Guide](usage/tui.md) — Learn the terminal interface, keybinds, and slash commands
-- [CLI Reference](usage/cli.md) — Subcommands, flags, and environment variables
-- [Configuration](configure/config.md) — Full config file reference
-- [Providers](configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
-- [Agent Modes](data-engineering/agent-modes.md) — Builder, Analyst, Validator, Migrator
-- [Data Engineering Tools](data-engineering/tools/index.md) — 55+ specialized tools for SQL, dbt, and warehouses
+- [TUI Guide](../interfaces/tui.md) — Learn the terminal interface, keybinds, and slash commands
+- [CLI Reference](../interfaces/cli.md) — Subcommands, flags, and environment variables
+- [Configuration](../configure/config.md) — Full config file reference
+- [Providers](../configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
+- [Agent Modes](../configure/agent-modes.md) — Builder, Analyst, Validator, Migrator
+- [Data Engineering Tools](../configure/tools/index.md) — 55+ specialized tools for SQL, dbt, and warehouses

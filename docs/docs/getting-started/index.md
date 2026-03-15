@@ -12,7 +12,7 @@ hide:
 <div class="hero" markdown>
 
 <p align="center">
-  <img src="assets/images/altimate-code-banner.png" alt="altimate-code" />
+  <img src="../assets/images/altimate-code-banner.png" alt="altimate-code" />
 </p>
 
 <p class="hero-tagline">The open-source data engineering harness.</p>
@@ -21,8 +21,8 @@ hide:
 
 <p class="hero-actions" markdown>
 
-[Get Started](getting-started.md){ .md-button .md-button--primary }
-[See Examples](examples/index.md){ .md-button }
+[Get Started](quickstart.md){ .md-button .md-button--primary }
+[See Examples](../examples/index.md){ .md-button }
 [View on GitHub :material-github:](https://github.com/AltimateAI/altimate-code){ .md-button }
 
 </p>
@@ -42,7 +42,7 @@ npm i -g @altimateai/altimate-code && altimate
 <h2 class="section-heading">See it in action</h2>
 <p class="section-sub">Build dbt models from Jira tickets, find broken Snowflake views, optimize warehouse costs, migrate PySpark to dbt, debug Airflow DAGs, and more — all from your terminal.</p>
 
-<p class="section-sub" markdown>[:octicons-arrow-right-24: Browse examples](examples/index.md)</p>
+<p class="section-sub" markdown>[:octicons-arrow-right-24: Browse examples](../examples/index.md)</p>
 
 ---
 
@@ -179,6 +179,6 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
 <div class="doc-links" markdown>
 
-**Learn More** — [Quickstart](getting-started.md) | [Examples](examples/index.md) | [Configure](configure/index.md) | [Interfaces](usage/tui.md) | [Reference](security-faq.md)
+**Learn More** — [Quickstart](quickstart.md) | [Examples](../examples/index.md) | [Configure](../configure/index.md) | [Interfaces](../interfaces/tui.md) | [Reference](../reference/security-faq.md)
 
 </div>

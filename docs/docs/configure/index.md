@@ -23,7 +23,7 @@ Altimate Code is built from a small set of composable pieces. This section cover
 └─────────────────────────────────────────────┘
 ```
 
-**[Agent Modes](../data-engineering/agent-modes.md)** define *how* Altimate Code behaves — permissions, guardrails, and tool access. **[Skills](skills.md)** are high-level workflows (e.g. `/data`, `/migrate`). **[Tools](../data-engineering/tools/index.md)** are the 55+ low-level capabilities that skills orchestrate. **[Providers & Models](providers.md)** connect Altimate Code to your LLM of choice.
+**[Agent Modes](agent-modes.md)** define *how* Altimate Code behaves — permissions, guardrails, and tool access. **[Skills](skills.md)** are high-level workflows (e.g. `/data`, `/migrate`). **[Tools](tools/index.md)** are the 55+ low-level capabilities that skills orchestrate. **[Providers & Models](providers.md)** connect Altimate Code to your LLM of choice.
 
 ## What's in this section
 
@@ -35,7 +35,7 @@ Altimate Code is built from a small set of composable pieces. This section cover
 
     Five governed modes — Builder, Analyst, Validator, Migrator, Documenter — each with different permissions and tool access.
 
-    [:octicons-arrow-right-24: Agent Modes](../data-engineering/agent-modes.md)
+    [:octicons-arrow-right-24: Agent Modes](agent-modes.md)
 
 -   :material-lightning-bolt:{ .lg .middle } **Skills**
 
@@ -51,7 +51,7 @@ Altimate Code is built from a small set of composable pieces. This section cover
 
     55+ specialized tools for SQL analysis, schema inspection, lineage, cost prediction, dbt, and warehouse operations.
 
-    [:octicons-arrow-right-24: Tools](../data-engineering/tools/index.md)
+    [:octicons-arrow-right-24: Tools](tools/index.md)
 
 -   :material-cloud-outline:{ .lg .middle } **Providers & Models**
 
@@ -67,7 +67,7 @@ Altimate Code is built from a small set of composable pieces. This section cover
 
     Fine-tune agent prompts, tool permissions, custom tools, and slash commands.
 
-    [:octicons-arrow-right-24: Agents](agents.md) · [:octicons-arrow-right-24: Custom Tools](custom-tools.md)
+    [:octicons-arrow-right-24: Agents](agents.md) · [:octicons-arrow-right-24: Custom Tools](tools/custom.md)
 
 -   :material-shield-check:{ .lg .middle } **Governance**
 
