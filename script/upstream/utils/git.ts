@@ -89,9 +89,20 @@ export async function getModifiedFiles(base: string): Promise<string[]> {
   return git(`diff --name-only ${base}...HEAD`).split("\n").filter((f) => f.length > 0)
 }
 
-/** Stage all changes (tracked and untracked). */
+/** Stage all changes to tracked files (avoids picking up untracked experiment dirs). */
 export async function stageAll(): Promise<void> {
-  git("add -A")
+  git("add -u")
+}
+
+/** Stage specific files. */
+export async function stageFiles(files: string[]): Promise<void> {
+  if (files.length === 0) return
+  // Stage in batches to avoid arg-list-too-long
+  const batchSize = 100
+  for (let i = 0; i < files.length; i += batchSize) {
+    const batch = files.slice(i, i + batchSize)
+    git(`add -- ${batch.map((f) => JSON.stringify(f)).join(" ")}`)
+  }
 }
 
 /** Create a commit with the given message. */
@@ -102,9 +113,9 @@ export async function commit(message: string): Promise<void> {
   })
 }
 
-/** Fetch all refs from a remote. */
+/** Fetch all refs from a remote. Uses --force for tags to handle local/upstream tag conflicts. */
 export async function fetchRemote(remote: string): Promise<void> {
-  git(`fetch ${remote} --tags`)
+  git(`fetch ${remote} --tags --force`)
 }
 
 /** List all tags from a remote, returned as an array of tag names. */
