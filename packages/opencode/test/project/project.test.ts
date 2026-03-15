@@ -7,6 +7,7 @@ import fs from "fs/promises"
 import { tmpdir } from "../fixture/fixture"
 import { Filesystem } from "../../src/util/filesystem"
 import { GlobalBus } from "../../src/bus/global"
+import { ProjectID } from "../../src/project/schema"
 
 Log.init({ print: false })
 
@@ -75,7 +76,7 @@ describe("Project.fromDirectory", () => {
     const { project } = await p.fromDirectory(tmp.path)
 
     expect(project).toBeDefined()
-    expect(project.id).toBe("global")
+    expect(project.id).toBe(ProjectID.global)
     expect(project.vcs).toBe("git")
     expect(project.worktree).toBe(tmp.path)
 
@@ -91,7 +92,7 @@ describe("Project.fromDirectory", () => {
     const { project } = await p.fromDirectory(tmp.path)
 
     expect(project).toBeDefined()
-    expect(project.id).not.toBe("global")
+    expect(project.id).not.toBe(ProjectID.global)
     expect(project.vcs).toBe("git")
     expect(project.worktree).toBe(tmp.path)
 
@@ -129,7 +130,7 @@ describe("Project.fromDirectory", () => {
     await withMode("rev-list-fail", async () => {
       const { project } = await p.fromDirectory(tmp.path)
       expect(project.vcs).toBe("git")
-      expect(project.id).toBe("global")
+      expect(project.id).toBe(ProjectID.global)
       expect(project.worktree).toBe(tmp.path)
     })
   })
@@ -323,7 +324,7 @@ describe("Project.update", () => {
 
     await expect(
       Project.update({
-        projectID: "nonexistent-project-id",
+        projectID: ProjectID.make("nonexistent-project-id"),
         name: "Should Fail",
       }),
     ).rejects.toThrow("Project not found: nonexistent-project-id")

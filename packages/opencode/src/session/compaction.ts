@@ -1,7 +1,7 @@
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import { Session } from "."
-import { Identifier } from "../id/id"
+import { SessionID, MessageID, PartID } from "./schema"
 import { Instance } from "../project/instance"
 import { Provider } from "../provider/provider"
 import { MessageV2 } from "./message-v2"
@@ -14,58 +14,16 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
-import { Telemetry } from "@/telemetry"
+import { ModelID, ProviderID } from "@/provider/schema"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
-
-  function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  }
-
-  function truncateArgs(input: Record<string, any> | null | undefined, maxLen: number): string {
-    if (!input || typeof input !== "object") return ""
-    let str: string
-    try {
-      str = Object.entries(input)
-        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
-        .join(", ")
-    } catch {
-      return "[unserializable]"
-    }
-    if (str.length <= maxLen) return str
-    // Avoid slicing mid-surrogate pair by finding a safe boundary
-    let end = maxLen
-    const code = str.charCodeAt(end - 1)
-    if (code >= 0xd800 && code <= 0xdbff) end--
-    return str.slice(0, end) + "…"
-  }
-
-  export function createObservationMask(part: MessageV2.ToolPart): string {
-    const output =
-      (part.state.status === "completed" ? part.state.output : "") || ""
-    const lines = output.split("\n").length
-    const bytes = Buffer.byteLength(output, "utf8")
-    const args = truncateArgs(
-      part.state.status === "completed" ||
-        part.state.status === "running" ||
-        part.state.status === "error"
-        ? part.state.input
-        : {},
-      80,
-    )
-    const firstLine = output.split("\n")[0]?.slice(0, 80) || ""
-    const fingerprint = firstLine ? ` — "${firstLine}"` : ""
-    return `[Tool output cleared — ${part.tool}(${args}) returned ${lines} lines, ${formatBytes(bytes)}${fingerprint}]`
-  }
 
   export const Event = {
     Compacted: BusEvent.define(
       "session.compacted",
       z.object({
-        sessionID: z.string(),
+        sessionID: SessionID.zod,
       }),
     ),
   }
@@ -82,12 +40,12 @@ export namespace SessionCompaction {
       input.tokens.total ||
       input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
 
-    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
-    const reserved = config.compaction?.reserved ?? COMPACTION_BUFFER
-    const headroom = Math.max(reserved, maxOutput)
-    const base = input.model.limit.input ?? context
-    if (base <= headroom) return false
-    return count >= base - headroom
+    const reserved =
+      config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
+    const usable = input.model.limit.input
+      ? input.model.limit.input - reserved
+      : context - ProviderTransform.maxOutputTokens(input.model)
+    return count >= usable
   }
 
   export const PRUNE_MINIMUM = 20_000
@@ -98,7 +56,7 @@ export namespace SessionCompaction {
   // goes backwards through parts until there are 40_000 tokens worth of tool
   // calls. then erases output of previous tool calls. idea is to throw away old
   // tool calls that are no longer relevant.
-  export async function prune(input: { sessionID: string }) {
+  export async function prune(input: { sessionID: SessionID }) {
     const config = await Config.get()
     if (config.compaction?.prune === false) return
     log.info("pruning")
@@ -133,54 +91,50 @@ export namespace SessionCompaction {
     if (pruned > PRUNE_MINIMUM) {
       for (const part of toPrune) {
         if (part.state.status === "completed") {
-          const mask = createObservationMask(part)
           part.state.time.compacted = Date.now()
-          part.state.metadata = {
-            ...part.state.metadata,
-            observation_mask: mask,
-          }
           await Session.updatePart(part)
         }
       }
       log.info("pruned", { count: toPrune.length })
-      Telemetry.track({
-        type: "tool_outputs_pruned",
-        timestamp: Date.now(),
-        session_id: input.sessionID,
-        count: toPrune.length,
-        tokens_pruned: pruned,
-      })
     }
   }
 
-  const compactionAttempts = new Map<string, number>()
-
   export async function process(input: {
-    parentID: string
+    parentID: MessageID
     messages: MessageV2.WithParts[]
-    sessionID: string
+    sessionID: SessionID
     abort: AbortSignal
     auto: boolean
+    overflow?: boolean
   }) {
-    const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
-    compactionAttempts.set(input.sessionID, attempt)
-    input.abort.addEventListener("abort", () => {
-      compactionAttempts.delete(input.sessionID)
-    }, { once: true })
-    Telemetry.track({
-      type: "compaction_triggered",
-      timestamp: Date.now(),
-      session_id: input.sessionID,
-      trigger: input.auto ? "overflow_detection" : "error_recovery",
-      attempt,
-    })
     const userMessage = input.messages.findLast((m) => m.info.id === input.parentID)!.info as MessageV2.User
+
+    let messages = input.messages
+    let replay: MessageV2.WithParts | undefined
+    if (input.overflow) {
+      const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
+      for (let i = idx - 1; i >= 0; i--) {
+        const msg = input.messages[i]
+        if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction")) {
+          replay = msg
+          messages = input.messages.slice(0, i)
+          break
+        }
+      }
+      const hasContent =
+        replay && messages.some((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
+      if (!hasContent) {
+        replay = undefined
+        messages = input.messages
+      }
+    }
+
     const agent = await Agent.get("compaction")
     const model = agent.model
       ? await Provider.getModel(agent.model.providerID, agent.model.modelID)
       : await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
     const msg = (await Session.updateMessage({
-      id: Identifier.ascending("message"),
+      id: MessageID.ascending(),
       role: "assistant",
       parentID: input.parentID,
       sessionID: input.sessionID,
@@ -232,15 +186,6 @@ When constructing the summary, try to stick to this template:
 - [What important instructions did the user give you that are relevant]
 - [If there is a plan or spec, include information about it so next agent can continue using it]
 
-## Data Context
-
-- [What warehouse(s) or database(s) are we connected to?]
-- [What schemas, tables, or columns were discovered or are relevant?]
-- [What dbt models, sources, or tests are involved?]
-- [Any lineage findings (upstream/downstream dependencies)?]
-- [Any query patterns, anti-patterns, or optimization opportunities found?]
-- [Skip this section entirely if the task is not data-engineering related]
-
 ## Discoveries
 
 [What notable things were learned during this conversation that would be useful for the next agent to know when continuing the work]
@@ -263,7 +208,7 @@ When constructing the summary, try to stick to this template:
       tools: {},
       system: [],
       messages: [
-        ...MessageV2.toModelMessages(input.messages, model),
+        ...MessageV2.toModelMessages(messages, model, { stripMedia: true }),
         {
           role: "user",
           content: [
@@ -277,52 +222,92 @@ When constructing the summary, try to stick to this template:
       model,
     })
 
-    if (result === "continue" && input.auto) {
-      const continueMsg = await Session.updateMessage({
-        id: Identifier.ascending("message"),
-        role: "user",
-        sessionID: input.sessionID,
-        time: {
-          created: Date.now(),
-        },
-        agent: userMessage.agent,
-        model: userMessage.model,
-      })
-      await Session.updatePart({
-        id: Identifier.ascending("part"),
-        messageID: continueMsg.id,
-        sessionID: input.sessionID,
-        type: "text",
-        synthetic: true,
-        text: "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
-        time: {
-          start: Date.now(),
-          end: Date.now(),
-        },
-      })
-    }
-    if (processor.message.error) {
-      compactionAttempts.delete(input.sessionID)
+    if (result === "compact") {
+      processor.message.error = new MessageV2.ContextOverflowError({
+        message: replay
+          ? "Conversation history too large to compact - exceeds model context limit"
+          : "Session too large to compact - context exceeds model limit even after stripping media",
+      }).toObject()
+      processor.message.finish = "error"
+      await Session.updateMessage(processor.message)
       return "stop"
     }
+
+    if (result === "continue" && input.auto) {
+      if (replay) {
+        const original = replay.info as MessageV2.User
+        const replayMsg = await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: input.sessionID,
+          time: { created: Date.now() },
+          agent: original.agent,
+          model: original.model,
+          format: original.format,
+          tools: original.tools,
+          system: original.system,
+          variant: original.variant,
+        })
+        for (const part of replay.parts) {
+          if (part.type === "compaction") continue
+          const replayPart =
+            part.type === "file" && MessageV2.isMedia(part.mime)
+              ? { type: "text" as const, text: `[Attached ${part.mime}: ${part.filename ?? "file"}]` }
+              : part
+          await Session.updatePart({
+            ...replayPart,
+            id: PartID.ascending(),
+            messageID: replayMsg.id,
+            sessionID: input.sessionID,
+          })
+        }
+      } else {
+        const continueMsg = await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: input.sessionID,
+          time: { created: Date.now() },
+          agent: userMessage.agent,
+          model: userMessage.model,
+        })
+        const text =
+          (input.overflow
+            ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
+            : "") +
+          "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+        await Session.updatePart({
+          id: PartID.ascending(),
+          messageID: continueMsg.id,
+          sessionID: input.sessionID,
+          type: "text",
+          synthetic: true,
+          text,
+          time: {
+            start: Date.now(),
+            end: Date.now(),
+          },
+        })
+      }
+    }
+    if (processor.message.error) return "stop"
     Bus.publish(Event.Compacted, { sessionID: input.sessionID })
-    compactionAttempts.delete(input.sessionID)
     return "continue"
   }
 
   export const create = fn(
     z.object({
-      sessionID: Identifier.schema("session"),
+      sessionID: SessionID.zod,
       agent: z.string(),
       model: z.object({
-        providerID: z.string(),
-        modelID: z.string(),
+        providerID: ProviderID.zod,
+        modelID: ModelID.zod,
       }),
       auto: z.boolean(),
+      overflow: z.boolean().optional(),
     }),
     async (input) => {
       const msg = await Session.updateMessage({
-        id: Identifier.ascending("message"),
+        id: MessageID.ascending(),
         role: "user",
         model: input.model,
         sessionID: input.sessionID,
@@ -332,11 +317,12 @@ When constructing the summary, try to stick to this template:
         },
       })
       await Session.updatePart({
-        id: Identifier.ascending("part"),
+        id: PartID.ascending(),
         messageID: msg.id,
         sessionID: msg.sessionID,
         type: "compaction",
         auto: input.auto,
+        overflow: input.overflow,
       })
     },
   )

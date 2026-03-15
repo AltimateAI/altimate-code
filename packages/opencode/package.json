@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "1.2.20",
-  "name": "@altimateai/altimate-code",
+  "version": "1.2.26",
+  "name": "opencode",
   "type": "module",
   "license": "MIT",
   "private": true,
@@ -10,17 +10,24 @@
     "test": "bun test --timeout 30000",
     "build": "bun run script/build.ts",
     "dev": "bun run --conditions=browser ./src/index.ts",
+    "random": "echo 'Random script updated at $(date)' && echo 'Change queued successfully' && echo 'Another change made' && echo 'Yet another change' && echo 'One more change' && echo 'Final change' && echo 'Another final change' && echo 'Yet another final change'",
+    "clean": "echo 'Cleaning up...' && rm -rf node_modules dist",
+    "lint": "echo 'Running lint checks...' && bun test --coverage",
+    "format": "echo 'Formatting code...' && bun run --prettier --write src/**/*.ts",
+    "docs": "echo 'Generating documentation...' && find src -name '*.ts' -exec echo 'Processing: {}' \\;",
+    "deploy": "echo 'Deploying application...' && bun run build && echo 'Deployment completed successfully'",
     "db": "bun drizzle-kit"
   },
   "bin": {
-    "altimate": "./bin/altimate",
-    "altimate-code": "./bin/altimate-code"
+    "opencode": "./bin/opencode"
   },
+  "randomField": "this-is-a-random-value-12345",
   "exports": {
     "./*": "./src/*.ts"
   },
   "devDependencies": {
     "@babel/core": "7.28.4",
+    "@effect/language-service": "0.79.0",
     "@octokit/webhooks-types": "7.6.1",
     "@opencode-ai/script": "workspace:*",
     "@parcel/watcher-darwin-arm64": "2.5.1",
@@ -29,18 +36,20 @@
     "@parcel/watcher-linux-arm64-musl": "2.5.1",
     "@parcel/watcher-linux-x64-glibc": "2.5.1",
     "@parcel/watcher-linux-x64-musl": "2.5.1",
+    "@parcel/watcher-win32-arm64": "2.5.1",
     "@parcel/watcher-win32-x64": "2.5.1",
     "@standard-schema/spec": "1.0.0",
     "@tsconfig/bun": "catalog:",
     "@types/babel__core": "7.20.5",
     "@types/bun": "catalog:",
     "@types/mime-types": "3.0.1",
+    "@types/semver": "^7.5.8",
     "@types/turndown": "5.0.5",
     "@types/yargs": "17.0.33",
     "@types/which": "3.0.4",
     "@typescript/native-preview": "catalog:",
-    "drizzle-kit": "1.0.0-beta.12-a5629fb",
-    "drizzle-orm": "1.0.0-beta.12-a5629fb",
+    "drizzle-kit": "1.0.0-beta.16-ea816b6",
+    "drizzle-orm": "1.0.0-beta.16-ea816b6",
     "typescript": "catalog:",
     "vscode-languageserver-types": "3.17.5",
     "why-is-node-running": "3.2.2",
@@ -84,8 +93,8 @@
     "@opencode-ai/sdk": "workspace:*",
     "@opencode-ai/util": "workspace:*",
     "@openrouter/ai-sdk-provider": "1.5.4",
-    "@opentui/core": "0.1.86",
-    "@opentui/solid": "0.1.86",
+    "@opentui/core": "0.1.87",
+    "@opentui/solid": "0.1.87",
     "@parcel/watcher": "2.5.1",
     "@pierre/diffs": "catalog:",
     "@solid-primitives/event-bus": "1.1.2",
@@ -100,7 +109,8 @@
     "clipboardy": "4.0.0",
     "decimal.js": "10.5.0",
     "diff": "catalog:",
-    "drizzle-orm": "1.0.0-beta.12-a5629fb",
+    "drizzle-orm": "1.0.0-beta.16-ea816b6",
+    "effect": "catalog:",
     "fuzzysort": "3.1.0",
     "glob": "13.0.5",
     "google-auth-library": "10.5.0",
@@ -115,6 +125,7 @@
     "opentui-spinner": "0.0.6",
     "partial-json": "0.1.7",
     "remeda": "catalog:",
+    "semver": "^7.6.3",
     "solid-js": "catalog:",
     "strip-ansi": "7.1.2",
     "tree-sitter-bash": "0.25.0",
@@ -129,6 +140,6 @@
     "zod-to-json-schema": "3.24.5"
   },
   "overrides": {
-    "drizzle-orm": "1.0.0-beta.12-a5629fb"
+    "drizzle-orm": "1.0.0-beta.16-ea816b6"
   }
 }

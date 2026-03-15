@@ -6,6 +6,8 @@ import { PermissionNext } from "../permission/next"
 import type { Agent } from "../agent/agent"
 import { Scheduler } from "../scheduler"
 import { Filesystem } from "../util/filesystem"
+import { Glob } from "../util/glob"
+import { ToolID } from "./schema"
 
 export namespace Truncate {
   export const MAX_LINES = 2000
@@ -34,15 +36,9 @@ export namespace Truncate {
 
   export async function cleanup() {
     const cutoff = Identifier.timestamp(Identifier.create("tool", false, Date.now() - RETENTION_MS))
-    const entries = await fs.readdir(DIR).catch(() => [] as string[])
+    const entries = await Glob.scan("tool_*", { cwd: DIR, include: "file" }).catch(() => [] as string[])
     for (const entry of entries) {
-      if (!entry.startsWith("tool_")) continue
-      try {
-        if (Identifier.timestamp(entry) >= cutoff) continue
-      } catch {
-        // Skip malformed IDs (e.g. legacy format or descending IDs)
-        continue
-      }
+      if (Identifier.timestamp(entry) >= cutoff) continue
       await fs.unlink(path.join(DIR, entry)).catch(() => {})
     }
   }
@@ -95,7 +91,7 @@ export namespace Truncate {
     const unit = hitBytes ? "bytes" : "lines"
     const preview = out.join("\n")
 
-    const id = Identifier.ascending("tool")
+    const id = ToolID.ascending()
     const filepath = path.join(DIR, id)
     await Filesystem.write(filepath, text)
 

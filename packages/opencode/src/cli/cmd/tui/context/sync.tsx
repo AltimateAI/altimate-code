@@ -28,6 +28,7 @@ import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import { Log } from "@/util/log"
 import type { Path } from "@opencode-ai/sdk"
+import type { Workspace } from "@opencode-ai/sdk/v2"
 
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
@@ -73,6 +74,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       formatter: FormatterStatus[]
       vcs: VcsInfo | undefined
       path: Path
+      workspaceList: Workspace[]
     }>({
       provider_next: {
         all: [],
@@ -100,9 +102,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       formatter: [],
       vcs: undefined,
       path: { state: "", config: "", worktree: "", directory: "" },
+      workspaceList: [],
     })
 
     const sdk = useSDK()
+
+    async function syncWorkspaces() {
+      const result = await sdk.client.experimental.workspace.list().catch(() => undefined)
+      if (!result?.data) return
+      setStore("workspaceList", reconcile(result.data))
+    }
 
     sdk.event.listen((e) => {
       const event = e.details
@@ -336,11 +345,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
 
-        case "mcp.tools.changed": {
-          sdk.client.mcp.status().then((x) => setStore("mcp", reconcile(x.data!))).catch(() => {})
-          break
-        }
-
         case "vcs.branch.updated": {
           setStore("vcs", { branch: event.properties.branch })
           break
@@ -404,26 +408,21 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         })
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
-          // non-blocking — each request catches errors individually so one
-          // failure doesn't prevent the others from populating the store.
-          const safe = <T,>(p: Promise<T>) => p.catch((e) => {
-            Log.Default.warn("non-blocking sync request failed", {
-              error: e instanceof Error ? e.message : String(e),
-            })
-          })
+          // non-blocking
           Promise.all([
-            ...(args.continue ? [] : [safe(sessionListPromise.then((sessions) => setStore("session", reconcile(sessions))))]),
-            safe(sdk.client.command.list().then((x) => setStore("command", reconcile(x.data ?? [])))),
-            safe(sdk.client.lsp.status().then((x) => setStore("lsp", reconcile(x.data!)))),
-            safe(sdk.client.mcp.status().then((x) => setStore("mcp", reconcile(x.data!)))),
-            safe(sdk.client.experimental.resource.list().then((x) => setStore("mcp_resource", reconcile(x.data ?? {})))),
-            safe(sdk.client.formatter.status().then((x) => setStore("formatter", reconcile(x.data!)))),
-            safe(sdk.client.session.status().then((x) => {
+            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
+            sdk.client.command.list().then((x) => setStore("command", reconcile(x.data ?? []))),
+            sdk.client.lsp.status().then((x) => setStore("lsp", reconcile(x.data!))),
+            sdk.client.mcp.status().then((x) => setStore("mcp", reconcile(x.data!))),
+            sdk.client.experimental.resource.list().then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
+            sdk.client.formatter.status().then((x) => setStore("formatter", reconcile(x.data!))),
+            sdk.client.session.status().then((x) => {
               setStore("session_status", reconcile(x.data!))
-            })),
-            safe(sdk.client.provider.auth().then((x) => setStore("provider_auth", reconcile(x.data ?? {})))),
-            safe(sdk.client.vcs.get().then((x) => setStore("vcs", reconcile(x.data)))),
-            safe(sdk.client.path.get().then((x) => setStore("path", reconcile(x.data!)))),
+            }),
+            sdk.client.provider.auth().then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
+            sdk.client.vcs.get().then((x) => setStore("vcs", reconcile(x.data))),
+            sdk.client.path.get().then((x) => setStore("path", reconcile(x.data!))),
+            syncWorkspaces(),
           ]).then(() => {
             setStore("status", "complete")
           })
@@ -491,6 +490,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           )
           fullSyncedSessions.add(sessionID)
         },
+      },
+      workspace: {
+        get(workspaceID: string) {
+          return store.workspaceList.find((workspace) => workspace.id === workspaceID)
+        },
+        sync: syncWorkspaces,
       },
       bootstrap,
     }

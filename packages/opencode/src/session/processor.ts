@@ -1,6 +1,5 @@
 import { MessageV2 } from "./message-v2"
 import { Log } from "@/util/log"
-import { Identifier } from "@/id/id"
 import { Session } from "."
 import { Agent } from "@/agent/agent"
 import { Snapshot } from "@/snapshot"
@@ -15,8 +14,8 @@ import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
-import { Telemetry } from "@/telemetry"
-import { MCP } from "@/mcp"
+import { PartID } from "./schema"
+import type { SessionID, MessageID } from "./schema"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -27,7 +26,7 @@ export namespace SessionProcessor {
 
   export function create(input: {
     assistantMessage: MessageV2.Assistant
-    sessionID: string
+    sessionID: SessionID
     model: Provider.Model
     abort: AbortSignal
   }) {
@@ -36,19 +35,10 @@ export namespace SessionProcessor {
     let blocked = false
     let attempt = 0
     let needsCompaction = false
-    let stepStartTime = Date.now()
-    let toolCallCounter = 0
-    let previousTool: string | null = null
-    let generationCounter = 0
-    let retryErrorType: string | null = null
-    let retryStartTime: number | null = null
 
     const result = {
       get message() {
         return input.assistantMessage
-      },
-      get toolCallCount() {
-        return toolCallCounter
       },
       partFromToolCall(toolCallID: string) {
         return toolcalls[toolCallID]
@@ -75,7 +65,7 @@ export namespace SessionProcessor {
                     continue
                   }
                   const reasoningPart = {
-                    id: Identifier.ascending("part"),
+                    id: PartID.ascending(),
                     messageID: input.assistantMessage.id,
                     sessionID: input.assistantMessage.sessionID,
                     type: "reasoning" as const,
@@ -121,7 +111,7 @@ export namespace SessionProcessor {
 
                 case "tool-input-start":
                   const part = await Session.updatePart({
-                    id: toolcalls[value.id]?.id ?? Identifier.ascending("part"),
+                    id: toolcalls[value.id]?.id ?? PartID.ascending(),
                     messageID: input.assistantMessage.id,
                     sessionID: input.assistantMessage.sessionID,
                     type: "tool",
@@ -184,13 +174,6 @@ export namespace SessionProcessor {
                         always: [value.toolName],
                         ruleset: agent.permission,
                       })
-                      Telemetry.track({
-                        type: "doom_loop_detected",
-                        timestamp: Date.now(),
-                        session_id: input.sessionID,
-                        tool_name: value.toolName,
-                        repeat_count: DOOM_LOOP_THRESHOLD,
-                      })
                     }
                   }
                   break
@@ -213,22 +196,7 @@ export namespace SessionProcessor {
                         attachments: value.output.attachments,
                       },
                     })
-                    const toolType = MCP.isMcpTool(match.tool) ? "mcp" as const : "standard" as const
-                    Telemetry.track({
-                      type: "tool_call",
-                      timestamp: Date.now(),
-                      session_id: input.sessionID,
-                      message_id: input.assistantMessage.id,
-                      tool_name: match.tool,
-                      tool_type: toolType,
-                      tool_category: Telemetry.categorizeToolName(match.tool, toolType),
-                      status: "success",
-                      duration_ms: Date.now() - match.state.time.start,
-                      sequence_index: toolCallCounter,
-                      previous_tool: previousTool,
-                    })
-                    toolCallCounter++
-                    previousTool = match.tool
+
                     delete toolcalls[value.toolCallId]
                   }
                   break
@@ -242,30 +210,14 @@ export namespace SessionProcessor {
                       state: {
                         status: "error",
                         input: value.input ?? match.state.input,
-                        error: (value.error instanceof Error ? value.error.message : String(value.error)).slice(0, 1000),
+                        error: (value.error as any).toString(),
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),
                         },
                       },
                     })
-                    const errToolType = MCP.isMcpTool(match.tool) ? "mcp" as const : "standard" as const
-                    Telemetry.track({
-                      type: "tool_call",
-                      timestamp: Date.now(),
-                      session_id: input.sessionID,
-                      message_id: input.assistantMessage.id,
-                      tool_name: match.tool,
-                      tool_type: errToolType,
-                      tool_category: Telemetry.categorizeToolName(match.tool, errToolType),
-                      status: "error",
-                      duration_ms: Date.now() - match.state.time.start,
-                      sequence_index: toolCallCounter,
-                      previous_tool: previousTool,
-                      error: (value.error instanceof Error ? value.error.message : String(value.error)).slice(0, 500),
-                    })
-                    toolCallCounter++
-                    previousTool = match.tool
+
                     if (
                       value.error instanceof PermissionNext.RejectedError ||
                       value.error instanceof Question.RejectedError
@@ -280,10 +232,9 @@ export namespace SessionProcessor {
                   throw value.error
 
                 case "start-step":
-                  stepStartTime = Date.now()
                   snapshot = await Snapshot.track()
                   await Session.updatePart({
-                    id: Identifier.ascending("part"),
+                    id: PartID.ascending(),
                     messageID: input.assistantMessage.id,
                     sessionID: input.sessionID,
                     snapshot,
@@ -292,21 +243,6 @@ export namespace SessionProcessor {
                   break
 
                 case "finish-step":
-                  generationCounter++
-                  if (attempt > 0 && retryErrorType) {
-                    Telemetry.track({
-                      type: "error_recovered",
-                      timestamp: Date.now(),
-                      session_id: input.sessionID,
-                      error_type: retryErrorType,
-                      recovery_strategy: "retry",
-                      attempts: attempt,
-                      recovered: true,
-                      duration_ms: Date.now() - (retryStartTime ?? Date.now()),
-                    })
-                    retryErrorType = null
-                    retryStartTime = null
-                  }
                   const usage = Session.getUsage({
                     model: input.model,
                     usage: value.usage,
@@ -316,7 +252,7 @@ export namespace SessionProcessor {
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
                   await Session.updatePart({
-                    id: Identifier.ascending("part"),
+                    id: PartID.ascending(),
                     reason: value.finishReason,
                     snapshot: await Snapshot.track(),
                     messageID: input.assistantMessage.id,
@@ -326,48 +262,11 @@ export namespace SessionProcessor {
                     cost: usage.cost,
                   })
                   await Session.updateMessage(input.assistantMessage)
-                  Telemetry.track({
-                    type: "generation",
-                    timestamp: Date.now(),
-                    session_id: input.sessionID,
-                    message_id: input.assistantMessage.id,
-                    model_id: input.model.id,
-                    provider_id: input.model.providerID,
-                    agent: input.assistantMessage.agent ?? "",
-                    finish_reason: value.finishReason,
-                    tokens: {
-                      input: usage.tokens.input,
-                      output: usage.tokens.output,
-                      reasoning: usage.tokens.reasoning,
-                      cache_read: usage.tokens.cache.read,
-                      cache_write: usage.tokens.cache.write,
-                    },
-                    cost: usage.cost,
-                    duration_ms: Date.now() - stepStartTime,
-                  })
-                  // Context utilization tracking
-                  const totalTokens = usage.tokens.input + usage.tokens.output + usage.tokens.cache.read
-                  const contextLimit = input.model.limit?.context ?? 0
-                  if (contextLimit > 0) {
-                    const cacheRead = usage.tokens.cache.read
-                    const totalInput = cacheRead + usage.tokens.input
-                    Telemetry.track({
-                      type: "context_utilization",
-                      timestamp: Date.now(),
-                      session_id: input.sessionID,
-                      model_id: input.model.id,
-                      tokens_used: totalTokens,
-                      context_limit: contextLimit,
-                      utilization_pct: Math.round((totalTokens / contextLimit) * 1000) / 1000,
-                      generation_number: generationCounter,
-                      cache_hit_ratio: totalInput > 0 ? Math.round((cacheRead / totalInput) * 1000) / 1000 : 0,
-                    })
-                  }
                   if (snapshot) {
                     const patch = await Snapshot.patch(snapshot)
                     if (patch.files.length) {
                       await Session.updatePart({
-                        id: Identifier.ascending("part"),
+                        id: PartID.ascending(),
                         messageID: input.assistantMessage.id,
                         sessionID: input.sessionID,
                         type: "patch",
@@ -381,14 +280,17 @@ export namespace SessionProcessor {
                     sessionID: input.sessionID,
                     messageID: input.assistantMessage.parentID,
                   })
-                  if (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: input.model })) {
+                  if (
+                    !input.assistantMessage.summary &&
+                    (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: input.model }))
+                  ) {
                     needsCompaction = true
                   }
                   break
 
                 case "text-start":
                   currentText = {
-                    id: Identifier.ascending("part"),
+                    id: PartID.ascending(),
                     messageID: input.assistantMessage.id,
                     sessionID: input.assistantMessage.sessionID,
                     type: "text",
@@ -429,9 +331,9 @@ export namespace SessionProcessor {
                     )
                     currentText.text = textOutput.text
                     currentText.time = {
-                      ...currentText.time,
+                      start: Date.now(),
                       end: Date.now(),
-                    } as typeof currentText.time
+                    }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
                     await Session.updatePart(currentText)
                   }
@@ -454,70 +356,40 @@ export namespace SessionProcessor {
               error: e,
               stack: JSON.stringify(e.stack),
             })
-            Telemetry.track({
-              type: "error",
-              timestamp: Date.now(),
-              session_id: input.sessionID,
-              error_name: e?.name ?? "UnknownError",
-              error_message: (e?.message ?? String(e)).slice(0, 500),
-              context: "processor",
-            })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
             if (MessageV2.ContextOverflowError.isInstance(error)) {
-              log.info("context overflow detected, triggering compaction")
               needsCompaction = true
-              const tokens = input.assistantMessage.tokens
-              Telemetry.track({
-                type: "context_overflow_recovered",
-                timestamp: Date.now(),
-                session_id: input.sessionID,
-                model_id: input.model.id,
-                provider_id: input.model.providerID,
-                tokens_used:
-                  tokens.total ||
-                  tokens.input + tokens.output + tokens.cache.read + tokens.cache.write,
+              Bus.publish(Session.Event.Error, {
+                sessionID: input.sessionID,
+                error,
               })
-              break
-            }
-            const retry = SessionRetry.retryable(error)
-            if (retry !== undefined) {
-              Telemetry.track({
-                type: "provider_error",
-                timestamp: Date.now(),
-                session_id: input.sessionID,
-                provider_id: input.model.providerID,
-                model_id: input.model.id,
-                error_type: e?.name ?? "UnknownError",
-                error_message: (e?.message ?? String(e)).slice(0, 500),
-                http_status: (e as any)?.status,
-              })
-              if (attempt === 0) {
-                retryStartTime = Date.now()
+            } else {
+              const retry = SessionRetry.retryable(error)
+              if (retry !== undefined) {
+                attempt++
+                const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
+                SessionStatus.set(input.sessionID, {
+                  type: "retry",
+                  attempt,
+                  message: retry,
+                  next: Date.now() + delay,
+                })
+                await SessionRetry.sleep(delay, input.abort).catch(() => {})
+                continue
               }
-              retryErrorType = e?.name ?? "UnknownError"
-              attempt++
-              const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
-              SessionStatus.set(input.sessionID, {
-                type: "retry",
-                attempt,
-                message: retry,
-                next: Date.now() + delay,
+              input.assistantMessage.error = error
+              Bus.publish(Session.Event.Error, {
+                sessionID: input.assistantMessage.sessionID,
+                error: input.assistantMessage.error,
               })
-              await SessionRetry.sleep(delay, input.abort).catch(() => {})
-              continue
+              SessionStatus.set(input.sessionID, { type: "idle" })
             }
-            input.assistantMessage.error = error
-            Bus.publish(Session.Event.Error, {
-              sessionID: input.assistantMessage.sessionID,
-              error: input.assistantMessage.error,
-            })
-            SessionStatus.set(input.sessionID, { type: "idle" })
           }
           if (snapshot) {
             const patch = await Snapshot.patch(snapshot)
             if (patch.files.length) {
               await Session.updatePart({
-                id: Identifier.ascending("part"),
+                id: PartID.ascending(),
                 messageID: input.assistantMessage.id,
                 sessionID: input.sessionID,
                 type: "patch",

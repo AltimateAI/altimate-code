@@ -10,7 +10,6 @@ import { GlobalBus } from "@/bus/global"
 import { createOpencodeClient, type Event } from "@opencode-ai/sdk/v2"
 import type { BunWebSocketData } from "hono/bun"
 import { Flag } from "@/flag/flag"
-import { Telemetry } from "@/telemetry"
 import { setTimeout as sleep } from "node:timers/promises"
 
 await Log.init({
@@ -34,9 +33,6 @@ process.on("uncaughtException", (e) => {
   })
 })
 
-// Initialize telemetry early so MCP/engine events are captured before session starts
-Telemetry.init().catch(() => {})
-
 // Subscribe to global events and forward them via RPC
 GlobalBus.on("event", (event) => {
   Rpc.emit("global.event", event)
@@ -48,7 +44,7 @@ const eventStream = {
   abort: undefined as AbortController | undefined,
 }
 
-const startEventStream = (directory: string) => {
+const startEventStream = (input: { directory: string; workspaceID?: string }) => {
   if (eventStream.abort) eventStream.abort.abort()
   const abort = new AbortController()
   eventStream.abort = abort
@@ -58,12 +54,13 @@ const startEventStream = (directory: string) => {
     const request = new Request(input, init)
     const auth = getAuthorizationHeader()
     if (auth) request.headers.set("Authorization", auth)
-    return Server.App().fetch(request)
+    return Server.Default().fetch(request)
   }) as typeof globalThis.fetch
 
   const sdk = createOpencodeClient({
-    baseUrl: "http://altimate-code.internal",
-    directory,
+    baseUrl: "http://opencode.internal",
+    directory: input.directory,
+    experimental_workspaceID: input.workspaceID,
     fetch: fetchFn,
     signal,
   })
@@ -99,7 +96,7 @@ const startEventStream = (directory: string) => {
   })
 }
 
-startEventStream(process.cwd())
+startEventStream({ directory: process.cwd() })
 
 export const rpc = {
   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
@@ -113,7 +110,7 @@ export const rpc = {
       headers,
       body: input.body,
     })
-    const response = await Server.App().fetch(request)
+    const response = await Server.Default().fetch(request)
     const body = await response.text()
     return {
       status: response.status,
@@ -135,25 +132,18 @@ export const rpc = {
       },
     })
   },
-  async tuiConfig() {
-    const response = await Server.App().fetch(new Request("http://altimate-code.internal/config/tui"))
-    return response.json()
-  },
   async reload() {
     Config.global.reset()
     await Instance.disposeAll()
   },
+  async setWorkspace(input: { workspaceID?: string }) {
+    startEventStream({ directory: process.cwd(), workspaceID: input.workspaceID })
+  },
   async shutdown() {
     Log.Default.info("worker shutting down")
     if (eventStream.abort) eventStream.abort.abort()
-    await Promise.race([
-      Instance.disposeAll(),
-      new Promise((resolve) => {
-        setTimeout(resolve, 5000)
-      }),
-    ])
+    await Instance.disposeAll()
     if (server) server.stop(true)
-    await Telemetry.shutdown()
   },
 }
 
@@ -162,6 +152,6 @@ Rpc.listen(rpc)
 function getAuthorizationHeader(): string | undefined {
   const password = Flag.OPENCODE_SERVER_PASSWORD
   if (!password) return undefined
-  const username = Flag.OPENCODE_SERVER_USERNAME ?? "altimate"
+  const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
   return `Basic ${btoa(`${username}:${password}`)}`
 }

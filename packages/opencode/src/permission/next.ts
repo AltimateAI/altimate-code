@@ -1,13 +1,15 @@
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import { Config } from "@/config/config"
-import { Identifier } from "@/id/id"
+import { SessionID, MessageID } from "@/session/schema"
+import { PermissionID } from "./schema"
 import { Instance } from "@/project/instance"
 import { Database, eq } from "@/storage/db"
 import { PermissionTable } from "@/session/session.sql"
 import { Telemetry } from "@/telemetry"
 import { fn } from "@/util/fn"
 import { Log } from "@/util/log"
+import { ProjectID } from "@/project/schema"
 import { Wildcard } from "@/util/wildcard"
 import os from "os"
 import z from "zod"
@@ -68,15 +70,15 @@ export namespace PermissionNext {
 
   export const Request = z
     .object({
-      id: Identifier.schema("permission"),
-      sessionID: Identifier.schema("session"),
+      id: PermissionID.zod,
+      sessionID: SessionID.zod,
       permission: z.string(),
       patterns: z.string().array(),
       metadata: z.record(z.string(), z.any()),
       always: z.string().array(),
       tool: z
         .object({
-          messageID: z.string(),
+          messageID: MessageID.zod,
           callID: z.string(),
         })
         .optional(),
@@ -91,7 +93,7 @@ export namespace PermissionNext {
   export type Reply = z.infer<typeof Reply>
 
   export const Approval = z.object({
-    projectID: z.string(),
+    projectID: ProjectID.zod,
     patterns: z.string().array(),
   })
 
@@ -100,11 +102,17 @@ export namespace PermissionNext {
     Replied: BusEvent.define(
       "permission.replied",
       z.object({
-        sessionID: z.string(),
-        requestID: z.string(),
+        sessionID: SessionID.zod,
+        requestID: PermissionID.zod,
         reply: Reply,
       }),
     ),
+  }
+
+  interface PendingEntry {
+    info: Request
+    resolve: () => void
+    reject: (e: any) => void
   }
 
   const state = Instance.state(() => {
@@ -114,17 +122,8 @@ export namespace PermissionNext {
     )
     const stored = row?.data ?? ([] as Ruleset)
 
-    const pending: Record<
-      string,
-      {
-        info: Request
-        resolve: () => void
-        reject: (e: any) => void
-      }
-    > = {}
-
     return {
-      pending,
+      pending: new Map<PermissionID, PendingEntry>(),
       approved: stored,
     }
   })
@@ -151,17 +150,17 @@ export namespace PermissionNext {
           throw new DeniedError(ruleset.filter((r) => Wildcard.match(request.permission, r.permission)))
         }
         if (rule.action === "ask") {
-          const id = input.id ?? Identifier.ascending("permission")
+          const id = input.id ?? PermissionID.ascending()
           return new Promise<void>((resolve, reject) => {
             const info: Request = {
               id,
               ...request,
             }
-            s.pending[id] = {
+            s.pending.set(id, {
               info,
               resolve,
               reject,
-            }
+            })
             Bus.publish(Event.Asked, info)
           })
         }
@@ -172,15 +171,15 @@ export namespace PermissionNext {
 
   export const reply = fn(
     z.object({
-      requestID: Identifier.schema("permission"),
+      requestID: PermissionID.zod,
       reply: Reply,
       message: z.string().optional(),
     }),
     async (input) => {
       const s = await state()
-      const existing = s.pending[input.requestID]
+      const existing = s.pending.get(input.requestID)
       if (!existing) return
-      delete s.pending[input.requestID]
+      s.pending.delete(input.requestID)
       Bus.publish(Event.Replied, {
         sessionID: existing.info.sessionID,
         requestID: existing.info.id,
@@ -198,9 +197,9 @@ export namespace PermissionNext {
         existing.reject(input.message ? new CorrectedError(input.message) : new RejectedError())
         // Reject all other pending permissions for this session
         const sessionID = existing.info.sessionID
-        for (const [id, pending] of Object.entries(s.pending)) {
+        for (const [id, pending] of s.pending) {
           if (pending.info.sessionID === sessionID) {
-            delete s.pending[id]
+            s.pending.delete(id)
             Bus.publish(Event.Replied, {
               sessionID: pending.info.sessionID,
               requestID: pending.info.id,
@@ -227,13 +226,13 @@ export namespace PermissionNext {
         existing.resolve()
 
         const sessionID = existing.info.sessionID
-        for (const [id, pending] of Object.entries(s.pending)) {
+        for (const [id, pending] of s.pending) {
           if (pending.info.sessionID !== sessionID) continue
           const ok = pending.info.patterns.every(
             (pattern) => evaluate(pending.info.permission, pattern, s.approved).action === "allow",
           )
           if (!ok) continue
-          delete s.pending[id]
+          s.pending.delete(id)
           Bus.publish(Event.Replied, {
             sessionID: pending.info.sessionID,
             requestID: pending.info.id,
@@ -299,6 +298,6 @@ export namespace PermissionNext {
 
   export async function list() {
     const s = await state()
-    return Object.values(s.pending).map((x) => x.info)
+    return Array.from(s.pending.values(), (x) => x.info)
   }
 }

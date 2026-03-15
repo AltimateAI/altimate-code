@@ -29,12 +29,13 @@ import {
 } from "@agentclientprotocol/sdk"
 
 import { Log } from "../util/log"
-import { pathToFileURL } from "bun"
+import { pathToFileURL } from "url"
 import { Filesystem } from "../util/filesystem"
 import { Hash } from "../util/hash"
 import { ACPSessionManager } from "./session"
 import type { ACPConfig } from "./types"
 import { Provider } from "../provider/provider"
+import { ModelID, ProviderID } from "../provider/schema"
 import { Agent as AgentModule } from "../agent/agent"
 import { Installation } from "@/installation"
 import { MessageV2 } from "@/session/message-v2"
@@ -55,8 +56,8 @@ export namespace ACP {
 
   async function getContextLimit(
     sdk: OpencodeClient,
-    providerID: string,
-    modelID: string,
+    providerID: ProviderID,
+    modelID: ModelID,
     directory: string,
   ): Promise<number | null> {
     const providers = await sdk.config
@@ -96,7 +97,8 @@ export namespace ACP {
     if (!lastAssistant) return
 
     const msg = lastAssistant.info
-    const size = await getContextLimit(sdk, msg.providerID, msg.modelID, directory)
+    if (!msg.providerID || !msg.modelID) return
+    const size = await getContextLimit(sdk, ProviderID.make(msg.providerID), ModelID.make(msg.modelID), directory)
 
     if (!size) {
       // Cannot calculate usage without known context size
@@ -137,7 +139,7 @@ export namespace ACP {
     private eventAbort = new AbortController()
     private eventStarted = false
     private bashSnapshots = new Map<string, string>()
-    private pendingEmitted = new Set<string>()
+    private toolStarts = new Set<string>()
     private permissionQueues = new Map<string, Promise<void>>()
     private permissionOptions: PermissionOption[] = [
       { optionId: "once", kind: "allow_once", name: "Allow once" },
@@ -269,68 +271,16 @@ export namespace ACP {
           const session = this.sessionManager.tryGet(part.sessionID)
           if (!session) return
           const sessionId = session.id
-          const directory = session.cwd
-
-          const message = await this.sdk.session
-            .message(
-              {
-                sessionID: part.sessionID,
-                messageID: part.messageID,
-                directory,
-              },
-              { throwOnError: true },
-            )
-            .then((x) => x.data)
-            .catch((error) => {
-              log.error("unexpected error when fetching message", { error })
-              return undefined
-            })
-
-          if (!message || message.info.role !== "assistant") return
 
           if (part.type === "tool") {
+            await this.toolStart(sessionId, part)
+
             switch (part.state.status) {
               case "pending":
                 this.bashSnapshots.delete(part.callID)
-                this.pendingEmitted.add(part.callID)
-                await this.connection
-                  .sessionUpdate({
-                    sessionId,
-                    update: {
-                      sessionUpdate: "tool_call",
-                      toolCallId: part.callID,
-                      title: part.tool,
-                      kind: toToolKind(part.tool),
-                      status: "pending",
-                      locations: [],
-                      rawInput: {},
-                    },
-                  })
-                  .catch((error) => {
-                    log.error("failed to send tool pending to ACP", { error })
-                  })
                 return
 
               case "running":
-                if (!this.pendingEmitted.has(part.callID)) {
-                  this.pendingEmitted.add(part.callID)
-                  await this.connection
-                    .sessionUpdate({
-                      sessionId,
-                      update: {
-                        sessionUpdate: "tool_call",
-                        toolCallId: part.callID,
-                        title: part.tool,
-                        kind: toToolKind(part.tool),
-                        status: "pending",
-                        locations: [],
-                        rawInput: {},
-                      },
-                    })
-                    .catch((error) => {
-                      log.error("failed to send synthetic tool pending to ACP", { error })
-                    })
-                }
                 const output = this.bashOutput(part)
                 const content: ToolCallContent[] = []
                 if (output) {
@@ -385,6 +335,8 @@ export namespace ACP {
                 return
 
               case "completed": {
+                this.toolStarts.delete(part.callID)
+                this.bashSnapshots.delete(part.callID)
                 const kind = toToolKind(part.tool)
                 const content: ToolCallContent[] = [
                   {
@@ -464,6 +416,8 @@ export namespace ACP {
                 return
               }
               case "error":
+                this.toolStarts.delete(part.callID)
+                this.bashSnapshots.delete(part.callID)
                 await this.connection
                   .sessionUpdate({
                     sessionId,
@@ -485,6 +439,7 @@ export namespace ACP {
                       ],
                       rawOutput: {
                         error: part.state.error,
+                        metadata: part.state.metadata,
                       },
                     },
                   })
@@ -566,18 +521,18 @@ export namespace ACP {
       log.info("initialize", { protocolVersion: params.protocolVersion })
 
       const authMethod: AuthMethod = {
-        description: "Run `altimate auth login` in the terminal",
-        name: "Login with altimate",
-        id: "altimate-code-login",
+        description: "Run `opencode auth login` in the terminal",
+        name: "Login with opencode",
+        id: "opencode-login",
       }
 
       // If client supports terminal-auth capability, use that instead.
       if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
         authMethod._meta = {
           "terminal-auth": {
-            command: "altimate",
+            command: "opencode",
             args: ["auth", "login"],
-            label: "Altimate CLI Login",
+            label: "OpenCode Login",
           },
         }
       }
@@ -602,7 +557,7 @@ export namespace ACP {
         },
         authMethods: [authMethod],
         agentInfo: {
-          name: "Altimate CLI",
+          name: "OpenCode",
           version: Installation.VERSION,
         },
       }
@@ -637,7 +592,7 @@ export namespace ACP {
         }
       } catch (e) {
         const error = MessageV2.fromError(e, {
-          providerID: this.config.defaultModel?.providerID ?? "unknown",
+          providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
         })
         if (LoadAPIKeyError.isInstance(error)) {
           throw RequestError.authRequired()
@@ -683,8 +638,8 @@ export namespace ACP {
         if (lastUser?.role === "user") {
           result.models.currentModelId = `${lastUser.model.providerID}/${lastUser.model.modelID}`
           this.sessionManager.setModel(sessionId, {
-            providerID: lastUser.model.providerID,
-            modelID: lastUser.model.modelID,
+            providerID: ProviderID.make(lastUser.model.providerID),
+            modelID: ModelID.make(lastUser.model.modelID),
           })
           if (result.modes?.availableModes.some((m) => m.id === lastUser.agent)) {
             result.modes.currentModeId = lastUser.agent
@@ -702,7 +657,7 @@ export namespace ACP {
         return result
       } catch (e) {
         const error = MessageV2.fromError(e, {
-          providerID: this.config.defaultModel?.providerID ?? "unknown",
+          providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
         })
         if (LoadAPIKeyError.isInstance(error)) {
           throw RequestError.authRequired()
@@ -747,7 +702,7 @@ export namespace ACP {
         return response
       } catch (e) {
         const error = MessageV2.fromError(e, {
-          providerID: this.config.defaultModel?.providerID ?? "unknown",
+          providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
         })
         if (LoadAPIKeyError.isInstance(error)) {
           throw RequestError.authRequired()
@@ -812,7 +767,7 @@ export namespace ACP {
         return mode
       } catch (e) {
         const error = MessageV2.fromError(e, {
-          providerID: this.config.defaultModel?.providerID ?? "unknown",
+          providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
         })
         if (LoadAPIKeyError.isInstance(error)) {
           throw RequestError.authRequired()
@@ -843,7 +798,7 @@ export namespace ACP {
         return result
       } catch (e) {
         const error = MessageV2.fromError(e, {
-          providerID: this.config.defaultModel?.providerID ?? "unknown",
+          providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
         })
         if (LoadAPIKeyError.isInstance(error)) {
           throw RequestError.authRequired()
@@ -859,45 +814,22 @@ export namespace ACP {
 
       for (const part of message.parts) {
         if (part.type === "tool") {
+          await this.toolStart(sessionId, part)
           switch (part.state.status) {
             case "pending":
-              this.pendingEmitted.add(part.callID)
-              await this.connection
-                .sessionUpdate({
-                  sessionId,
-                  update: {
-                    sessionUpdate: "tool_call",
-                    toolCallId: part.callID,
-                    title: part.tool,
-                    kind: toToolKind(part.tool),
-                    status: "pending",
-                    locations: [],
-                    rawInput: {},
-                  },
-                })
-                .catch((err) => {
-                  log.error("failed to send tool pending to ACP", { error: err })
-                })
+              this.bashSnapshots.delete(part.callID)
               break
             case "running":
-              if (!this.pendingEmitted.has(part.callID)) {
-                this.pendingEmitted.add(part.callID)
-                await this.connection
-                  .sessionUpdate({
-                    sessionId,
-                    update: {
-                      sessionUpdate: "tool_call",
-                      toolCallId: part.callID,
-                      title: part.tool,
-                      kind: toToolKind(part.tool),
-                      status: "pending",
-                      locations: [],
-                      rawInput: {},
-                    },
-                  })
-                  .catch((err) => {
-                    log.error("failed to send synthetic tool pending to ACP", { error: err })
-                  })
+              const output = this.bashOutput(part)
+              const runningContent: ToolCallContent[] = []
+              if (output) {
+                runningContent.push({
+                  type: "content",
+                  content: {
+                    type: "text",
+                    text: output,
+                  },
+                })
               }
               await this.connection
                 .sessionUpdate({
@@ -910,6 +842,7 @@ export namespace ACP {
                     title: part.tool,
                     locations: toLocations(part.tool, part.state.input),
                     rawInput: part.state.input,
+                    ...(runningContent.length > 0 && { content: runningContent }),
                   },
                 })
                 .catch((err) => {
@@ -917,6 +850,8 @@ export namespace ACP {
                 })
               break
             case "completed":
+              this.toolStarts.delete(part.callID)
+              this.bashSnapshots.delete(part.callID)
               const kind = toToolKind(part.tool)
               const content: ToolCallContent[] = [
                 {
@@ -995,6 +930,8 @@ export namespace ACP {
                 })
               break
             case "error":
+              this.toolStarts.delete(part.callID)
+              this.bashSnapshots.delete(part.callID)
               await this.connection
                 .sessionUpdate({
                   sessionId,
@@ -1016,6 +953,7 @@ export namespace ACP {
                     ],
                     rawOutput: {
                       error: part.state.error,
+                      metadata: part.state.metadata,
                     },
                   },
                 })
@@ -1045,7 +983,7 @@ export namespace ACP {
           }
         } else if (part.type === "file") {
           // Replay file attachments as appropriate ACP content blocks.
-          // Altimate CLI stores files internally as { type: "file", url, filename, mime }.
+          // OpenCode stores files internally as { type: "file", url, filename, mime }.
           // We convert these back to ACP blocks based on the URL scheme and MIME type:
           // - file:// URLs → resource_link
           // - data: URLs with image/* → image block
@@ -1140,6 +1078,35 @@ export namespace ACP {
           }
         }
       }
+    }
+
+    private bashOutput(part: ToolPart) {
+      if (part.tool !== "bash") return
+      if (!("metadata" in part.state) || !part.state.metadata || typeof part.state.metadata !== "object") return
+      const output = part.state.metadata["output"]
+      if (typeof output !== "string") return
+      return output
+    }
+
+    private async toolStart(sessionId: string, part: ToolPart) {
+      if (this.toolStarts.has(part.callID)) return
+      this.toolStarts.add(part.callID)
+      await this.connection
+        .sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: part.callID,
+            title: part.tool,
+            kind: toToolKind(part.tool),
+            status: "pending",
+            locations: [],
+            rawInput: {},
+          },
+        })
+        .catch((error) => {
+          log.error("failed to send tool pending to ACP", { error })
+        })
     }
 
     private async loadAvailableModes(directory: string): Promise<ModeOption[]> {
@@ -1511,14 +1478,6 @@ export namespace ACP {
         { throwOnError: true },
       )
     }
-
-    private bashOutput(part: ToolPart) {
-      if (part.tool !== "bash") return
-      if (!("metadata" in part.state) || !part.state.metadata || typeof part.state.metadata !== "object") return
-      const output = part.state.metadata["output"]
-      if (typeof output !== "string") return
-      return output
-    }
   }
 
   function toToolKind(toolName: string): ToolKind {
@@ -1568,7 +1527,7 @@ export namespace ACP {
     }
   }
 
-  async function defaultModel(config: ACPConfig, cwd?: string) {
+  async function defaultModel(config: ACPConfig, cwd?: string): Promise<{ providerID: ProviderID; modelID: ModelID }> {
     const sdk = config.sdk
     const configured = config.defaultModel
     if (configured) return configured
@@ -1580,11 +1539,7 @@ export namespace ACP {
       .then((resp) => {
         const cfg = resp.data
         if (!cfg || !cfg.model) return undefined
-        const parsed = Provider.parseModel(cfg.model)
-        return {
-          providerID: parsed.providerID,
-          modelID: parsed.modelID,
-        }
+        return Provider.parseModel(cfg.model)
       })
       .catch((error) => {
         log.error("failed to load user config for default model", { error })
@@ -1606,16 +1561,16 @@ export namespace ACP {
 
     if (specified && !providers.length) return specified
 
-    const altimateCodeProvider = providers.find((p) => p.id === "altimate-code")
-    if (altimateCodeProvider) {
-      if (altimateCodeProvider.models["big-pickle"]) {
-        return { providerID: "altimate-code", modelID: "big-pickle" }
+    const opencodeProvider = providers.find((p) => p.id === "opencode")
+    if (opencodeProvider) {
+      if (opencodeProvider.models["big-pickle"]) {
+        return { providerID: ProviderID.opencode, modelID: ModelID.make("big-pickle") }
       }
-      const [best] = Provider.sort(Object.values(altimateCodeProvider.models))
+      const [best] = Provider.sort(Object.values(opencodeProvider.models))
       if (best) {
         return {
-          providerID: best.providerID,
-          modelID: best.id,
+          providerID: ProviderID.make(best.providerID),
+          modelID: ModelID.make(best.id),
         }
       }
     }
@@ -1624,14 +1579,14 @@ export namespace ACP {
     const [best] = Provider.sort(models)
     if (best) {
       return {
-        providerID: best.providerID,
-        modelID: best.id,
+        providerID: ProviderID.make(best.providerID),
+        modelID: ModelID.make(best.id),
       }
     }
 
     if (specified) return specified
 
-    return { providerID: "altimate-code", modelID: "big-pickle" }
+    return { providerID: ProviderID.opencode, modelID: ModelID.make("big-pickle") }
   }
 
   function parseUri(
@@ -1694,7 +1649,7 @@ export namespace ACP {
 
   function modelVariantsFromProviders(
     providers: Array<{ id: string; models: Record<string, { variants?: Record<string, any> }> }>,
-    model: { providerID: string; modelID: string },
+    model: { providerID: ProviderID; modelID: ModelID },
   ): string[] {
     const provider = providers.find((entry) => entry.id === model.providerID)
     if (!provider) return []
@@ -1709,7 +1664,10 @@ export namespace ACP {
   ): ModelOption[] {
     const includeVariants = options.includeVariants ?? false
     return providers.flatMap((provider) => {
-      const models = Provider.sort(Object.values(provider.models) as any)
+      const unsorted: Array<{ id: string; name: string; variants?: Record<string, any> }> = Object.values(
+        provider.models,
+      )
+      const models = Provider.sort(unsorted)
       return models.flatMap((model) => {
         const base: ModelOption = {
           modelId: `${provider.id}/${model.id}`,
@@ -1727,7 +1685,7 @@ export namespace ACP {
   }
 
   function formatModelIdWithVariant(
-    model: { providerID: string; modelID: string },
+    model: { providerID: ProviderID; modelID: ModelID },
     variant: string | undefined,
     availableVariants: string[],
     includeVariant: boolean,
@@ -1738,12 +1696,12 @@ export namespace ACP {
   }
 
   function buildVariantMeta(input: {
-    model: { providerID: string; modelID: string }
+    model: { providerID: ProviderID; modelID: ModelID }
     variant?: string
     availableVariants: string[]
   }) {
     return {
-      "altimate-code": {
+      opencode: {
         modelId: `${input.model.providerID}/${input.model.modelID}`,
         variant: input.variant ?? null,
         availableVariants: input.availableVariants,
@@ -1754,7 +1712,7 @@ export namespace ACP {
   function parseModelSelection(
     modelId: string,
     providers: Array<{ id: string; models: Record<string, { variants?: Record<string, any> }> }>,
-  ): { model: { providerID: string; modelID: string }; variant?: string } {
+  ): { model: { providerID: ProviderID; modelID: ModelID }; variant?: string } {
     const parsed = Provider.parseModel(modelId)
     const provider = providers.find((p) => p.id === parsed.providerID)
     if (!provider) {
@@ -1774,7 +1732,7 @@ export namespace ACP {
       const baseModelInfo = provider.models[baseModelId]
       if (baseModelInfo?.variants && candidateVariant in baseModelInfo.variants) {
         return {
-          model: { providerID: parsed.providerID, modelID: baseModelId },
+          model: { providerID: parsed.providerID, modelID: ModelID.make(baseModelId) },
           variant: candidateVariant,
         }
       }
