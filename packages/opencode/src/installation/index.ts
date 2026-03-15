@@ -8,8 +8,11 @@ import { Flag } from "../flag/flag"
 import { Process } from "@/util/process"
 import { buffer } from "node:stream/consumers"
 // altimate_change start — telemetry (lazy import to avoid circular dep with Telemetry → Installation)
+let _telemetryCache: (typeof import("../telemetry"))["Telemetry"] | undefined
 async function getTelemetry() {
+  if (_telemetryCache) return _telemetryCache
   const { Telemetry } = await import("../telemetry")
+  _telemetryCache = Telemetry
   return Telemetry
 }
 // altimate_change end
@@ -221,11 +224,11 @@ export namespace Installation {
       default:
         throw new Error(`Unknown method: ${method}`)
     }
+    // altimate_change start — telemetry for upgrade result
+    const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
     if (!result || result.code !== 0) {
       const stderr =
         method === "choco" ? "not running from an elevated command shell" : result?.stderr.toString("utf8") || ""
-      // altimate_change start — telemetry for upgrade failure
-      const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
       const T = await getTelemetry()
       T.track({
         type: "upgrade_attempted",
@@ -237,7 +240,6 @@ export namespace Installation {
         status: "error",
         error: stderr.slice(0, 500),
       })
-      // altimate_change end
       throw new UpgradeFailedError({
         stderr: stderr,
       })
@@ -248,8 +250,6 @@ export namespace Installation {
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
     })
-    // altimate_change start — telemetry for upgrade success
-    const telemetryMethod = (["npm", "bun", "brew"].includes(method) ? method : "other") as "npm" | "bun" | "brew" | "other"
     const T2 = await getTelemetry()
     T2.track({
       type: "upgrade_attempted",

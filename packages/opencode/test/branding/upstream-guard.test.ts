@@ -4,11 +4,10 @@ import { join, resolve } from "path"
 
 const repoRoot = resolve(import.meta.dir, "..", "..", "..", "..")
 
-const mergeConfigPath = join(repoRoot, "script", "upstream", "merge-config.json")
-const mergeConfig = JSON.parse(readFileSync(mergeConfigPath, "utf-8"))
-
+// altimate_change start — config.ts is now single source of truth (merge-config.json removed)
 const brandingConfigPath = join(repoRoot, "script", "upstream", "utils", "config.ts")
 const brandingConfigText = readFileSync(brandingConfigPath, "utf-8")
+// altimate_change end
 
 const rootPkgPath = join(repoRoot, "package.json")
 const rootPkg = JSON.parse(readFileSync(rootPkgPath, "utf-8"))
@@ -60,7 +59,7 @@ describe("upstream merge guards", () => {
 
     for (const pattern of expectedSkipPatterns) {
       test(`skipFiles contains "${pattern}"`, () => {
-        expect(mergeConfig.skipFiles).toContain(pattern)
+        expect(brandingConfigText).toContain(pattern)
       })
     }
   })
@@ -70,12 +69,12 @@ describe("upstream merge guards", () => {
       "packages/altimate-engine/**",
       "script/upstream/**",
       "README.md",
-      ".github/**",
+      ".github/workflows/**",
     ]
 
     for (const pattern of expectedKeepOurs) {
       test(`keepOurs contains "${pattern}"`, () => {
-        expect(mergeConfig.keepOurs).toContain(pattern)
+        expect(brandingConfigText).toContain(pattern)
       })
     }
   })
@@ -174,7 +173,7 @@ describe("upstream merge guards", () => {
 
   describe("change marker", () => {
     test('changeMarker is "altimate_change"', () => {
-      expect(mergeConfig.changeMarker).toBe("altimate_change")
+      expect(brandingConfigText).toContain('"altimate_change"')
     })
   })
 

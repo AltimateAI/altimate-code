@@ -331,7 +331,7 @@ export namespace SessionProcessor {
                     )
                     currentText.text = textOutput.text
                     currentText.time = {
-                      start: Date.now(),
+                      start: currentText.time?.start ?? Date.now(),
                       end: Date.now(),
                     }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata

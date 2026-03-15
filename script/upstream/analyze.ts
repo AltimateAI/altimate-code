@@ -569,10 +569,30 @@ function getUpstreamFiles(config: MergeConfig): Set<string> {
   return _upstreamFilesCache
 }
 
+// altimate_change start — exclude test files, generated code, and config files from marker checks
+const markerExcludePatterns = [
+  "**/test/**",
+  "**/tests/**",
+  "**/*.test.ts",
+  "**/*.test.tsx",
+  "**/*.spec.ts",
+  "**/tsconfig.json",
+  "**/package.json",
+  "packages/sdk/js/src/gen/**",
+  "packages/sdk/js/src/v2/gen/**",
+  "packages/sdk/openapi.json",
+  "packages/script/**",
+  "script/**",
+]
+// altimate_change end
+
 function isUpstreamShared(file: string, config: MergeConfig): boolean {
   const { minimatch } = require("minimatch")
   if (config.keepOurs.some((p: string) => minimatch(file, p))) return false
   if (config.skipFiles.some((p: string) => minimatch(file, p))) return false
+  // altimate_change start — skip files that don't need marker protection
+  if (markerExcludePatterns.some((p) => minimatch(file, p))) return false
+  // altimate_change end
   const ext = path.extname(file)
   if (!config.transformableExtensions.includes(ext)) return false
 

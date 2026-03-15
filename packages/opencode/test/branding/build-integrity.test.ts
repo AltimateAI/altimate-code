@@ -181,44 +181,29 @@ describe("Binary Entry Points", () => {
 // 5. Skip Files / Keep Ours Consistency
 // ---------------------------------------------------------------------------
 
+// altimate_change start — config.ts is now single source of truth (merge-config.json removed)
 describe("Skip Files / Keep Ours Consistency", () => {
-  test("config.ts and merge-config.json keepOurs share key patterns", () => {
-    // Extract keepOurs from config.ts by reading the source
+  test("config.ts contains critical keepOurs patterns", () => {
     const configPath = join(repoRoot, "script/upstream/utils/config.ts")
     const configSource = readFileSync(configPath, "utf-8")
 
-    // Extract keepOurs from merge-config.json
-    const mergeConfig = readJSON("script/upstream/merge-config.json")
-    const jsonKeepOurs: string[] = mergeConfig.keepOurs
-
-    // Key patterns that should appear in both configs
     const criticalPatterns = ["packages/altimate-engine/**", "script/upstream/**"]
-
     for (const pattern of criticalPatterns) {
-      // Check config.ts source contains the pattern
       expect(configSource).toContain(pattern)
-
-      // Check merge-config.json contains the pattern
-      expect(jsonKeepOurs).toContain(pattern)
     }
   })
 
-  test("config.ts and merge-config.json skipFiles share key patterns", () => {
+  test("config.ts contains critical skipFiles patterns", () => {
     const configPath = join(repoRoot, "script/upstream/utils/config.ts")
     const configSource = readFileSync(configPath, "utf-8")
 
-    const mergeConfig = readJSON("script/upstream/merge-config.json")
-    const jsonSkipFiles: string[] = mergeConfig.skipFiles
-
-    // Key skip patterns that should appear in both
     const criticalSkipPatterns = ["packages/app/**", "packages/desktop/**", "packages/web/**"]
-
     for (const pattern of criticalSkipPatterns) {
       expect(configSource).toContain(pattern)
-      expect(jsonSkipFiles).toContain(pattern)
     }
   })
 })
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // 6. No Orphaned Package References

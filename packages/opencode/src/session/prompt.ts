@@ -303,6 +303,7 @@ export namespace SessionPrompt {
     let sessionTotalCost = 0
     let sessionTotalTokens = 0
     let toolCallCount = 0
+    let compactionCount = 0
     let sessionAgentName = ""
     let sessionHadError = false
     let emergencySessionEndFired = false
@@ -756,11 +757,16 @@ export namespace SessionPrompt {
       sessionTotalCost += processor.message.cost ?? 0
       const t = processor.message.tokens
       sessionTotalTokens += (t.input + t.output + t.reasoning + t.cache.read + t.cache.write)
+      const stepParts = await MessageV2.parts(processor.message.id)
+      toolCallCount += stepParts.filter((p) => p.type === "tool").length
       if (processor.message.error) sessionHadError = true
       // altimate_change end
 
       if (result === "stop") break
       if (result === "compact") {
+        // altimate_change start — track compaction count
+        compactionCount++
+        // altimate_change end
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -789,10 +795,13 @@ export namespace SessionPrompt {
       generations: step,
       duration_ms: Date.now() - sessionStartTime,
       cost: sessionTotalCost,
-      compactions: 0,
+      compactions: compactionCount,
       outcome,
     })
     if (!emergencySessionEndFired) {
+      emergencySessionEndFired = true
+      process.off("beforeExit", emergencySessionEnd)
+      process.off("exit", emergencySessionEnd)
       Telemetry.track({
         type: "session_end",
         timestamp: Date.now(),

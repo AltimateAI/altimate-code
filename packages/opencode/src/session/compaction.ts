@@ -174,7 +174,7 @@ export namespace SessionCompaction {
     auto: boolean
     overflow?: boolean
   }) {
-    // altimate_change start — telemetry and attempt tracking
+    // altimate_change start — telemetry, attempt tracking, and circuit breaker
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
     compactionAttempts.set(input.sessionID, attempt)
     input.abort.addEventListener("abort", () => {
@@ -187,6 +187,10 @@ export namespace SessionCompaction {
       trigger: input.auto ? "overflow_detection" : "error_recovery",
       attempt,
     })
+    if (attempt > 3) {
+      log.warn("compaction circuit breaker", { sessionID: input.sessionID, attempt })
+      return
+    }
     // altimate_change end
     const userMessage = input.messages.findLast((m) => m.info.id === input.parentID)!.info as MessageV2.User
 

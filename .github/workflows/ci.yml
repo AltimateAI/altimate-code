@@ -66,7 +66,14 @@ jobs:
         working-directory: script/upstream
 
       - name: Check for missing altimate_change markers
-        run: bun run script/upstream/analyze.ts --markers --base origin/main --strict
+        run: |
+          # Skip strict marker enforcement for upstream merge PRs — all changes come from upstream
+          if [[ "${{ github.head_ref }}" == merge-upstream-* ]] || [[ "${{ github.head_ref }}" == upstream/merge-* ]]; then
+            echo "Upstream merge PR detected — running marker check in non-strict mode"
+            bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }}
+          else
+            bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }} --strict
+          fi
 
   lint:
     name: Lint
