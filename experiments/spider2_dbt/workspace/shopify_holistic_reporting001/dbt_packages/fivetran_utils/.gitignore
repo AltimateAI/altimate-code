@@ -1,9 +1,0 @@
-
-target/
-dbt_modules/
-logs/
-venv/
-dbt_packages/
-test_run_models.sh
-env/
-package-lock.yml
