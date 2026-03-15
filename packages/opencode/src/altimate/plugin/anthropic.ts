@@ -167,7 +167,7 @@ export async function AnthropicAuthPlugin(input: PluginInput): Promise<Hooks> {
                     if (item.type === "text" && item.text) {
                       return {
                         ...item,
-                        text: item.text.replace(/OpenCode/g, "Claude Code").replace(/opencode/gi, "Claude"),
+                        text: item.text.replace(/\bOpenCode\b/g, "Claude Code").replace(/\bopencode\b/gi, "Claude"),
                       }
                     }
                     return item
