@@ -167,12 +167,13 @@ function createTestStore(baseDir: string) {
         throw new Error(`Cannot create memory block "${block.id}": scope at capacity`)
       }
 
-      // Dedup
+      // Dedup with unique tags to prevent duplicate tags inflating overlap
+      const uniqueTags = [...new Set(block.tags)]
       const duplicates = existing.filter((b) => {
         if (b.id === block.id) return false
-        if (block.tags.length === 0) return false
-        const overlap = block.tags.filter((t) => b.tags.includes(t))
-        return overlap.length >= Math.ceil(block.tags.length / 2)
+        if (uniqueTags.length === 0) return false
+        const overlap = uniqueTags.filter((t) => b.tags.includes(t))
+        return overlap.length >= Math.ceil(uniqueTags.length / 2)
       })
 
       const filepath = blockPath(block.id)

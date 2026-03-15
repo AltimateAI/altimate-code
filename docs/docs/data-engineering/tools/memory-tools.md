@@ -126,7 +126,7 @@ Files are human-readable and editable. You can create, edit, or delete them manu
 | Max blocks per scope | 50 | Bounds total memory footprint |
 | Max tags per block | 10 | Keeps metadata manageable |
 | Max tag length | 64 characters | Prevents tag abuse |
-| Max ID length | 128 characters | Reasonable filename length |
+| Max ID length | 256 characters | Reasonable filename length |
 
 ### Atomic writes
 

@@ -1,7 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { MemoryStore } from "../store"
+import { MemoryStore, isExpired } from "../store"
 import { MemoryPrompt } from "../prompt"
+import { MemoryBlockSchema } from "../types"
 
 export const MemoryReadTool = Tool.define("altimate_memory_read", {
   description:
@@ -17,7 +18,7 @@ export const MemoryReadTool = Tool.define("altimate_memory_read", {
       .optional()
       .default([])
       .describe("Filter blocks to only those containing all specified tags"),
-    id: z.string().optional().describe("Read a specific block by ID (supports hierarchical IDs like 'warehouse/snowflake')"),
+    id: MemoryBlockSchema.shape.id.optional().describe("Read a specific block by ID (supports hierarchical IDs like 'warehouse/snowflake')"),
     include_expired: z.boolean().optional().default(false).describe("Include expired memory blocks in results"),
   }),
   async execute(args, ctx) {
@@ -29,6 +30,8 @@ export const MemoryReadTool = Tool.define("altimate_memory_read", {
         for (const scope of scopes) {
           const block = await MemoryStore.read(scope, args.id)
           if (block) {
+            // Respect include_expired for ID reads
+            if (!args.include_expired && isExpired(block)) continue
             return {
               title: `Memory: ${block.id} (${block.scope})`,
               metadata: { count: 1 },

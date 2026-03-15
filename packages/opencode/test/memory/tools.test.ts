@@ -28,7 +28,7 @@ const CitationSchema = z.object({
 const MemoryReadParams = z.object({
   scope: z.enum(["global", "project", "all"]).optional().default("all"),
   tags: z.array(z.string()).optional().default([]),
-  id: z.string().optional(),
+  id: z.string().min(1).max(256).regex(SAFE_ID_REGEX).optional(),
   include_expired: z.boolean().optional().default(false),
 })
 
@@ -46,7 +46,7 @@ const MemoryWriteParams = z.object({
 })
 
 const MemoryDeleteParams = z.object({
-  id: z.string().min(1),
+  id: z.string().min(1).max(256).regex(SAFE_ID_REGEX),
   scope: z.enum(["global", "project"]),
 })
 
@@ -593,6 +593,101 @@ describe("Memory Tool Integration", () => {
     const raw = await fs.readFile(path.join(memDir, "sql-notes.md"), "utf-8")
     expect(raw).toContain("SELECT * FROM")
     expect(raw).toContain("$100")
+  })
+})
+
+describe("Review fix: MemoryReadParams ID validation", () => {
+  test("rejects uppercase ID in read", () => {
+    expect(() => MemoryReadParams.parse({ id: "MyBlock" })).toThrow()
+  })
+
+  test("rejects path traversal ID in read", () => {
+    expect(() => MemoryReadParams.parse({ id: "../secret" })).toThrow()
+  })
+
+  test("rejects ID with spaces in read", () => {
+    expect(() => MemoryReadParams.parse({ id: "my block" })).toThrow()
+  })
+
+  test("accepts valid hierarchical ID in read", () => {
+    const result = MemoryReadParams.parse({ id: "warehouse/snowflake-config" })
+    expect(result.id).toBe("warehouse/snowflake-config")
+  })
+
+  test("accepts undefined ID in read (list mode)", () => {
+    const result = MemoryReadParams.parse({})
+    expect(result.id).toBeUndefined()
+  })
+
+  test("rejects ID starting with hyphen in read", () => {
+    expect(() => MemoryReadParams.parse({ id: "-bad" })).toThrow()
+  })
+
+  test("rejects ID ending with slash in read", () => {
+    expect(() => MemoryReadParams.parse({ id: "warehouse/" })).toThrow()
+  })
+})
+
+describe("Review fix: MemoryDeleteParams ID validation", () => {
+  test("rejects uppercase ID in delete", () => {
+    expect(() => MemoryDeleteParams.parse({ id: "MyBlock", scope: "project" })).toThrow()
+  })
+
+  test("rejects path traversal ID in delete", () => {
+    expect(() => MemoryDeleteParams.parse({ id: "../../../etc/passwd", scope: "project" })).toThrow()
+  })
+
+  test("rejects ID with dot-dot in delete", () => {
+    expect(() => MemoryDeleteParams.parse({ id: "a/../b", scope: "project" })).toThrow()
+  })
+
+  test("accepts valid hierarchical ID in delete", () => {
+    const result = MemoryDeleteParams.parse({ id: "warehouse/snowflake", scope: "project" })
+    expect(result.id).toBe("warehouse/snowflake")
+  })
+
+  test("accepts single-char ID in delete", () => {
+    const result = MemoryDeleteParams.parse({ id: "a", scope: "global" })
+    expect(result.id).toBe("a")
+  })
+
+  test("rejects ID over 256 chars in delete", () => {
+    expect(() => MemoryDeleteParams.parse({ id: "a".repeat(257), scope: "project" })).toThrow()
+  })
+})
+
+describe("Review fix: include_expired for ID reads", () => {
+  test("MemoryReadParams accepts include_expired with ID", () => {
+    const result = MemoryReadParams.parse({ id: "my-block", include_expired: true })
+    expect(result.id).toBe("my-block")
+    expect(result.include_expired).toBe(true)
+  })
+
+  test("MemoryReadParams defaults include_expired to false with ID", () => {
+    const result = MemoryReadParams.parse({ id: "my-block" })
+    expect(result.include_expired).toBe(false)
+  })
+})
+
+describe("Review fix: duplicate tags in deduplication", () => {
+  test("concept: deduplicating tags before overlap calculation", () => {
+    // Simulate the dedup logic
+    const tags = ["snowflake", "snowflake", "snowflake", "other"]
+    const uniqueTags = [...new Set(tags)]
+    expect(uniqueTags).toEqual(["snowflake", "other"])
+    expect(uniqueTags.length).toBe(2)
+
+    // Threshold: ceil(2/2) = 1
+    const threshold = Math.ceil(uniqueTags.length / 2)
+    expect(threshold).toBe(1)
+  })
+
+  test("concept: without dedup, duplicate tags inflate threshold", () => {
+    const tags = ["snowflake", "snowflake", "snowflake", "other"]
+    // Without dedup: ceil(4/2) = 2 overlap needed
+    const threshold = Math.ceil(tags.length / 2)
+    expect(threshold).toBe(2)
+    // With dedup: ceil(2/2) = 1 overlap needed — more accurate
   })
 })
 

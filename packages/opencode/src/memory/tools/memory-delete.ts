@@ -1,12 +1,13 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { MemoryStore } from "../store"
+import { MemoryBlockSchema } from "../types"
 
 export const MemoryDeleteTool = Tool.define("altimate_memory_delete", {
   description:
     "Delete an Altimate Memory block that is outdated, incorrect, or no longer needed. Use this to keep Altimate Memory clean and relevant.",
   parameters: z.object({
-    id: z.string().min(1).describe("The ID of the memory block to delete"),
+    id: MemoryBlockSchema.shape.id.describe("The ID of the memory block to delete"),
     scope: z
       .enum(["global", "project"])
       .describe("The scope of the memory block to delete"),

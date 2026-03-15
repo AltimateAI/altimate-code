@@ -3,7 +3,7 @@ import fs from "fs/promises"
 import path from "path"
 import { Global } from "@/global"
 import { Instance } from "@/project/instance"
-import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, type MemoryBlock, type Citation } from "./types"
+import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, MemoryBlockSchema, type MemoryBlock, type Citation } from "./types"
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 
@@ -118,7 +118,7 @@ export namespace MemoryStore {
       return undefined
     })()
 
-    return {
+    const block = {
       id: String(parsed.meta.id ?? id),
       scope: (parsed.meta.scope as "global" | "project") ?? scope,
       tags: Array.isArray(parsed.meta.tags) ? (parsed.meta.tags as string[]) : [],
@@ -128,6 +128,12 @@ export namespace MemoryStore {
       citations,
       content: parsed.content,
     }
+
+    // Validate block against schema to catch corrupted or manually-edited files
+    const validated = MemoryBlockSchema.safeParse(block)
+    if (!validated.success) return undefined
+
+    return validated.data
   }
 
   export async function list(scope: "global" | "project", opts?: { includeExpired?: boolean }): Promise<MemoryBlock[]> {
@@ -174,13 +180,15 @@ export namespace MemoryStore {
   export async function findDuplicates(
     scope: "global" | "project",
     block: { id: string; tags: string[] },
+    preloaded?: MemoryBlock[],
   ): Promise<MemoryBlock[]> {
-    const existing = await list(scope)
+    const existing = preloaded ?? await list(scope)
+    const uniqueTags = [...new Set(block.tags)]
     return existing.filter((b) => {
       if (b.id === block.id) return false // same block = update, not duplicate
-      if (block.tags.length === 0) return false
-      const overlap = block.tags.filter((t) => b.tags.includes(t))
-      return overlap.length >= Math.ceil(block.tags.length / 2)
+      if (uniqueTags.length === 0) return false
+      const overlap = uniqueTags.filter((t) => b.tags.includes(t))
+      return overlap.length >= Math.ceil(uniqueTags.length / 2)
     })
   }
 
@@ -193,6 +201,7 @@ export namespace MemoryStore {
 
     const allBlocks = await list(block.scope, { includeExpired: true })
     const isUpdate = allBlocks.some((b) => b.id === block.id)
+    let needsCleanup = false
     if (!isUpdate) {
       // Count only non-expired blocks against the capacity limit.
       // Expired blocks should not prevent new writes.
@@ -202,16 +211,13 @@ export namespace MemoryStore {
           `Cannot create memory block "${block.id}": scope "${block.scope}" already has ${MEMORY_MAX_BLOCKS_PER_SCOPE} active blocks (maximum). Delete an existing block first.`,
         )
       }
-      // Auto-clean expired blocks when approaching capacity to reclaim disk space
-      if (allBlocks.length >= MEMORY_MAX_BLOCKS_PER_SCOPE) {
-        const expiredBlocks = allBlocks.filter((b) => isExpired(b))
-        for (const expired of expiredBlocks) {
-          await remove(block.scope, expired.id)
-        }
-      }
+      // Flag for cleanup after successful write
+      needsCleanup = allBlocks.length >= MEMORY_MAX_BLOCKS_PER_SCOPE
     }
 
-    const duplicates = await findDuplicates(block.scope, block)
+    // Pass pre-loaded blocks to avoid double directory scan
+    const activeBlocks = allBlocks.filter((b) => !isExpired(b))
+    const duplicates = await findDuplicates(block.scope, block, activeBlocks)
 
     const filepath = blockPath(block.scope, block.id)
     const dir = path.dirname(filepath)
@@ -225,6 +231,14 @@ export namespace MemoryStore {
 
     const action = isUpdate ? "UPDATE" : "CREATE"
     await appendAuditLog(block.scope, auditEntry(action, block.id, block.scope))
+
+    // Auto-clean expired blocks AFTER successful write to avoid data loss
+    if (needsCleanup) {
+      const expiredBlocks = allBlocks.filter((b) => isExpired(b))
+      for (const expired of expiredBlocks) {
+        await remove(block.scope, expired.id)
+      }
+    }
 
     return { duplicates }
   }
