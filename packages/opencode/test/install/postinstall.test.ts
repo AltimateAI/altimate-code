@@ -78,7 +78,7 @@ describe("postinstall.mjs", () => {
     }
   })
 
-  test("prints welcome banner with correct version", () => {
+  test("does not print banner (npm v7+ suppresses all postinstall output)", () => {
     const { dir, cleanup: c } = installTmpdir()
     cleanup = c
 
@@ -88,23 +88,9 @@ describe("postinstall.mjs", () => {
     const dataDir = path.join(dir, "xdg-data")
     const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
     expect(result.exitCode).toBe(0)
-    // Banner is written to stderr (npm v7+ silences postinstall stdout)
-    expect(result.stderr).toContain("altimate-code v2.5.0 installed")
-  })
-
-  test("does not produce double-v when version already has v prefix", () => {
-    const { dir, cleanup: c } = installTmpdir()
-    cleanup = c
-
-    createMainPackageDir(dir, { version: "v2.5.0" })
-    createBinaryPackage(dir)
-
-    const dataDir = path.join(dir, "xdg-data")
-    const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
-    expect(result.exitCode).toBe(0)
-    // Banner is written to stderr (npm v7+ silences postinstall stdout)
-    expect(result.stderr).toContain("altimate-code v2.5.0 installed")
-    expect(result.stderr).not.toContain("vv2.5.0")
+    // Postinstall only writes the marker — banner is shown by the CLI on first run
+    expect(result.stdout).not.toContain("altimate-code")
+    expect(result.stderr).not.toContain("altimate-code")
   })
 
   test("writes upgrade marker file to XDG_DATA_HOME", () => {

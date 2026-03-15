@@ -143,11 +143,7 @@ async function main() {
     if (os.platform() === "win32") {
       // On Windows, the .exe is already included in the package and bin field points to it
       // No postinstall setup needed
-      console.log("Windows detected: binary setup not needed (using packaged .exe)")
-      if (version) {
-        writeUpgradeMarker(version)
-        printWelcome(version)
-      }
+      if (version) writeUpgradeMarker(version)
       return
     }
 
@@ -162,10 +158,9 @@ async function main() {
       fs.copyFileSync(binaryPath, target)
     }
     fs.chmodSync(target, 0o755)
-    if (version) {
-      writeUpgradeMarker(version)
-      printWelcome(version)
-    }
+    // Write marker only — npm v7+ suppresses all postinstall output.
+    // The CLI picks up the marker and shows the welcome box on first run.
+    if (version) writeUpgradeMarker(version)
   } catch (error) {
     console.error("Failed to setup altimate-code binary:", error.message)
     process.exit(1)

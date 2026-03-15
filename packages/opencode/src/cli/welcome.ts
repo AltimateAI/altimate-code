@@ -15,11 +15,12 @@ function getDataDir(): string {
 
 /**
  * Check for a post-install/upgrade marker written by postinstall.mjs.
- * If found, display a brief upgrade confirmation on stderr, then remove the marker.
+ * If found, display a welcome box on stderr, then remove the marker.
  *
- * The postinstall script shows the full welcome box (with get-started hints).
- * This function handles the case where postinstall output was silenced (npm v7+)
- * or the install method didn't run postinstall at all (brew, curl).
+ * npm v7+ silences ALL postinstall output (stdout AND stderr), so
+ * the postinstall script only writes a marker file. This function
+ * picks it up on first CLI run and shows the welcome box before
+ * the TUI launches.
  */
 export function showWelcomeBannerIfNeeded(): void {
   try {
@@ -40,16 +41,36 @@ export function showWelcomeBannerIfNeeded(): void {
 
     if (!isUpgrade) return
 
-    // Show a brief confirmation — the full welcome box is in postinstall.mjs
     const tty = process.stderr.isTTY
     if (!tty) return
 
+    // Show the welcome box that postinstall couldn't display
     const orange = "\x1b[38;5;214m"
     const reset = "\x1b[0m"
     const bold = "\x1b[1m"
 
+    const v = `altimate-code v${currentVersion} installed`
+    const lines = [
+      "",
+      "  Get started:",
+      "    altimate              Open the TUI",
+      '    altimate run "hello"  Run a quick task',
+      "    altimate --help       See all commands",
+      "",
+    ]
+    const contentWidth = Math.max(v.length, ...lines.map((l) => l.length)) + 2
+    const pad = (s: string) => s + " ".repeat(contentWidth - s.length)
+    const top = `  ${orange}╭${"─".repeat(contentWidth + 2)}╮${reset}`
+    const bot = `  ${orange}╰${"─".repeat(contentWidth + 2)}╯${reset}`
+    const empty = `  ${orange}│${reset} ${" ".repeat(contentWidth)} ${orange}│${reset}`
+    const row = (s: string) => `  ${orange}│${reset} ${pad(s)} ${orange}│${reset}`
+
     process.stderr.write(EOL)
-    process.stderr.write(`  ${orange}${bold}altimate-code v${currentVersion}${reset} installed successfully!${EOL}`)
+    process.stderr.write(top + EOL)
+    process.stderr.write(empty + EOL)
+    process.stderr.write(row(` ${bold}${v}${reset}`) + EOL)
+    for (const line of lines) process.stderr.write(row(line) + EOL)
+    process.stderr.write(bot + EOL)
     process.stderr.write(EOL)
   } catch {
     // Non-fatal — never let banner display break the CLI
