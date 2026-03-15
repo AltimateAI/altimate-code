@@ -146,10 +146,13 @@ Training doesn't replace CLAUDE.md. They complement each other:
 
 ## Limitations
 
-- **Not a linter.** Training is advisory — the agent follows it, but it's not enforced at build time. For critical rules, also add dbt tests.
-- **Not an audit trail.** No approval workflows or change tracking beyond git history.
-- **Not automatic.** The agent proposes, you confirm. This is intentional.
-- **SQL-focused scanning.** The `/teach` skill works best with SQL/dbt files. Python patterns must be taught manually.
+- **Advisory, not enforced.** Training guides the agent, but it's not a hard gate. For critical rules, also add dbt tests or sqlfluff rules that block CI.
+- **No approval workflow.** Anyone with repo access can save training to project scope. Use code review on `.altimate-code/memory/` changes for governance.
+- **No audit trail** beyond git history. Training doesn't track who saved what — use `git blame` on the training files.
+- **Context budget.** Training competes for context space. Under pressure, least-relevant entries are excluded. Run `/training-status` to see what's included.
+- **20 entries per kind.** Hard limit. Consolidate related rules into one entry rather than saving many small ones.
+- **SQL-focused file analysis.** The `/teach` skill works best with SQL/dbt files. Python, PySpark, and other patterns must be taught manually via conversation.
+- **Team sync requires git discipline.** Training saves to disk but doesn't auto-commit. Commit `.altimate-code/memory/` changes to share with your team.
 
 ## Quick Reference
 

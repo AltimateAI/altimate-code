@@ -14,8 +14,6 @@ export const TrainingBlockMeta = z.object({
   kind: TrainingKind,
   source: z.string().optional(),
   applied: z.number().int().min(0).default(0),
-  accepted: z.number().int().min(0).default(0),
-  rejected: z.number().int().min(0).default(0),
 })
 export type TrainingBlockMeta = z.infer<typeof TrainingBlockMeta>
 
@@ -62,8 +60,6 @@ export function embedTrainingMeta(content: string, meta: TrainingBlockMeta): str
     `kind: ${meta.kind}`,
     ...(meta.source ? [`source: ${meta.source}`] : []),
     `applied: ${meta.applied}`,
-    `accepted: ${meta.accepted}`,
-    `rejected: ${meta.rejected}`,
     "-->",
   ].join("\n")
   // Strip existing training meta block if present

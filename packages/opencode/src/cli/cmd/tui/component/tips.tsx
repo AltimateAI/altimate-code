@@ -149,4 +149,11 @@ const TIPS = [
   "Run {highlight}/help{/highlight} or {highlight}Ctrl+X H{/highlight} to show the help dialog",
   "Use {highlight}/rename{/highlight} to rename the current session",
   "Press {highlight}Ctrl+Z{/highlight} to suspend the terminal and return to your shell",
+  // altimate_change start - training discoverability tips
+  "Correct me once and I'll remember forever — say {highlight}yes{/highlight} when I ask to save a correction",
+  "Use {highlight}/teach @file.sql{/highlight} to teach me patterns from your code",
+  "Use {highlight}/train @docs/style-guide.md{/highlight} to load team standards from documentation",
+  "Use {highlight}/training-status{/highlight} to see what your team has taught me",
+  "Switch to {highlight}trainer{/highlight} mode to systematically teach me about your project",
+  // altimate_change end
 ]

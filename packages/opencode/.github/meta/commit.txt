@@ -1,0 +1,22 @@
+refactor: cut training_scan and training_validate, simplify docs
+
+Research from 8 independent evaluations + SkillsBench (7,308 test runs)
+found that compact focused context beats comprehensive docs by 20pp.
+The training system's value is in correction capture (2-sec saves) and
+team propagation (git sync) — not in regex scanning or keyword grep.
+
+Removed:
+- training_scan (255 lines) — regex pattern counting, not discovery
+- training_validate (315 lines) — keyword grep, not validation
+
+Simplified:
+- trainer.txt: removed scan/validate workflows, focused on guided
+  teaching and curation
+- agent-modes.md: updated trainer section with correction-focused example
+- training docs: complete rewrite with new pitch:
+  "Correct the agent once. It remembers forever. Your team inherits it."
+  Backed by SkillsBench research showing compact > comprehensive.
+
+Net: -753 lines. 152 tests pass.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

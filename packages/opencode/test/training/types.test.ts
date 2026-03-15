@@ -107,16 +107,12 @@ describe("embedTrainingMeta", () => {
       kind: "pattern",
       source: "stg_orders.sql",
       applied: 3,
-      accepted: 2,
-      rejected: 1,
     }
     const result = embedTrainingMeta("Pattern content here", meta)
     expect(result).toContain("<!-- training")
     expect(result).toContain("kind: pattern")
     expect(result).toContain("source: stg_orders.sql")
     expect(result).toContain("applied: 3")
-    expect(result).toContain("accepted: 2")
-    expect(result).toContain("rejected: 1")
     expect(result).toContain("-->")
     expect(result).toContain("Pattern content here")
   })
@@ -125,20 +121,16 @@ describe("embedTrainingMeta", () => {
     const meta: TrainingBlockMeta = {
       kind: "rule",
       applied: 0,
-      accepted: 0,
-      rejected: 0,
     }
     const result = embedTrainingMeta("Rule content", meta)
     expect(result).not.toContain("source:")
   })
 
   test("replaces existing meta block", () => {
-    const existing = "<!-- training\nkind: pattern\napplied: 1\naccepted: 0\nrejected: 0\n-->\nOld content"
+    const existing = "<!-- training\nkind: pattern\napplied: 1\n-->\nOld content"
     const meta: TrainingBlockMeta = {
       kind: "pattern",
       applied: 5,
-      accepted: 3,
-      rejected: 0,
     }
     const result = embedTrainingMeta(existing, meta)
     expect(result).toContain("applied: 5")
@@ -150,14 +142,12 @@ describe("embedTrainingMeta", () => {
 
 describe("parseTrainingMeta", () => {
   test("parses embedded meta", () => {
-    const content = "<!-- training\nkind: pattern\nsource: stg_orders.sql\napplied: 3\naccepted: 2\nrejected: 1\n-->\nPattern content"
+    const content = "<!-- training\nkind: pattern\nsource: stg_orders.sql\napplied: 3\n-->\nPattern content"
     const meta = parseTrainingMeta(content)
     expect(meta).toBeDefined()
     expect(meta!.kind).toBe("pattern")
     expect(meta!.source).toBe("stg_orders.sql")
     expect(meta!.applied).toBe(3)
-    expect(meta!.accepted).toBe(2)
-    expect(meta!.rejected).toBe(1)
   })
 
   test("returns undefined for content without meta", () => {
@@ -165,7 +155,7 @@ describe("parseTrainingMeta", () => {
   })
 
   test("handles meta without source", () => {
-    const content = "<!-- training\nkind: rule\napplied: 0\naccepted: 0\nrejected: 0\n-->\nRule"
+    const content = "<!-- training\nkind: rule\napplied: 0\n-->\nRule"
     const meta = parseTrainingMeta(content)
     expect(meta).toBeDefined()
     expect(meta!.kind).toBe("rule")
@@ -177,8 +167,6 @@ describe("parseTrainingMeta", () => {
       kind: "standard",
       source: "docs/style-guide.md",
       applied: 7,
-      accepted: 5,
-      rejected: 2,
     }
     const embedded = embedTrainingMeta("Test content", original)
     const parsed = parseTrainingMeta(embedded)
@@ -186,8 +174,6 @@ describe("parseTrainingMeta", () => {
     expect(parsed!.kind).toBe(original.kind)
     expect(parsed!.source).toBe(original.source)
     expect(parsed!.applied).toBe(original.applied)
-    expect(parsed!.accepted).toBe(original.accepted)
-    expect(parsed!.rejected).toBe(original.rejected)
   })
 })
 

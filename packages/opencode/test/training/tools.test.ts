@@ -106,21 +106,19 @@ describe("training meta roundtrip through content", () => {
     expect(parsed!.kind).toBe("pattern")
     expect(parsed!.source).toBe("stg_orders.sql")
     expect(parsed!.applied).toBe(5)
-    expect(parsed!.accepted).toBe(3)
-    expect(parsed!.rejected).toBe(1)
   })
 
   test("preserves content after embedding meta", () => {
     const content = "Rule: Use NUMERIC(18,2)\n\nDetails:\n- For all *_amount columns"
-    const meta: TrainingBlockMeta = { kind: "rule", applied: 0, accepted: 0, rejected: 0 }
+    const meta: TrainingBlockMeta = { kind: "rule", applied: 0 }
     const embedded = embedTrainingMeta(content, meta)
     expect(embedded).toContain("Rule: Use NUMERIC(18,2)")
     expect(embedded).toContain("- For all *_amount columns")
   })
 
   test("replaces existing meta on re-embed", () => {
-    const meta1: TrainingBlockMeta = { kind: "pattern", applied: 1, accepted: 0, rejected: 0 }
-    const meta2: TrainingBlockMeta = { kind: "pattern", applied: 10, accepted: 8, rejected: 2 }
+    const meta1: TrainingBlockMeta = { kind: "pattern", applied: 1 }
+    const meta2: TrainingBlockMeta = { kind: "pattern", applied: 10 }
     const content = "Pattern content"
 
     const embedded1 = embedTrainingMeta(content, meta1)
@@ -128,7 +126,6 @@ describe("training meta roundtrip through content", () => {
 
     const embedded2 = embedTrainingMeta(embedded1, meta2)
     expect(parseTrainingMeta(embedded2)!.applied).toBe(10)
-    expect(parseTrainingMeta(embedded2)!.accepted).toBe(8)
 
     // Should not have duplicate meta blocks
     const metaBlocks = embedded2.match(/<!-- training/g)
@@ -137,7 +134,7 @@ describe("training meta roundtrip through content", () => {
 
   test("handles content with special characters", () => {
     const content = "Use `{{ source('schema', 'table') }}` macro\n<!-- not training -->"
-    const meta: TrainingBlockMeta = { kind: "pattern", applied: 0, accepted: 0, rejected: 0 }
+    const meta: TrainingBlockMeta = { kind: "pattern", applied: 0 }
     const embedded = embedTrainingMeta(content, meta)
     expect(embedded).toContain("{{ source('schema', 'table') }}")
     expect(embedded).toContain("<!-- not training -->")

@@ -43,8 +43,6 @@ export namespace TrainingStore {
       kind: input.kind,
       source: input.source,
       applied: prevMeta?.applied ?? 0,
-      accepted: prevMeta?.accepted ?? 0,
-      rejected: prevMeta?.rejected ?? 0,
     }
 
     const enriched = embedTrainingMeta(input.content, meta)
@@ -144,8 +142,6 @@ export namespace TrainingStore {
     const meta = parseTrainingMeta(block.content) ?? {
       kind,
       applied: 0,
-      accepted: 0,
-      rejected: 0,
     }
     return {
       id: block.id,
