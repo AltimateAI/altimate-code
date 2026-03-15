@@ -83,7 +83,7 @@ npm install -g @altimateai/altimate-code
 
 ---
 
-<h2 class="section-heading">Four specialized agents</h2>
+<h2 class="section-heading">Seven specialized agents</h2>
 <p class="section-sub">Each agent has scoped permissions and purpose-built tools for its role.</p>
 
 <div class="grid cards" markdown>
@@ -111,6 +111,24 @@ npm install -g @altimateai/altimate-code
     ---
 
     Cross-warehouse SQL translation, schema migration, and dialect conversion workflows.
+
+-   :material-magnify:{ .lg .middle } **Researcher**
+
+    ---
+
+    Deep multi-step investigations with structured reports. Root cause analysis, cost audits, deprecation checks.
+
+-   :material-school:{ .lg .middle } **Trainer**
+
+    ---
+
+    Correct the agent once, it remembers forever, your team inherits it. Teach patterns, rules, and domain knowledge.
+
+-   :material-account-tie:{ .lg .middle } **Executive**
+
+    ---
+
+    Business-friendly reporting. No SQL jargon — translates technical findings into impact and recommendations.
 
 </div>
 

@@ -1,24 +1,10 @@
-feat: merge training into memory with context-aware relevance scoring
+docs: update site-wide docs for training and new agent modes
 
-Replace two parallel injection systems (memory 8KB + training 16KB)
-with a single unified injection that scores blocks by relevance to
-the current agent.
-
-How it works:
-- All blocks (memory + training) loaded in one pass
-- Each block scored: agent tag match (+10), training kind relevance
-  per agent (+1-5), applied count bonus (+0-3), recency (+0-2),
-  non-training base (+5)
-- Builder sees rules/patterns first; analyst sees glossary/context first
-- Budget is 20KB unified, filled greedily by score
-- Training blocks still tracked with applied counts (fire-and-forget)
-
-Architecture:
-- memory/prompt.ts: new scoreBlock(), unified inject() with InjectionContext
-- memory/types.ts: UNIFIED_INJECTION_BUDGET, AGENT_TRAINING_RELEVANCE weights
-- session/prompt.ts: single inject call with agent context (was 2 separate)
-- training/prompt.ts: deprecated, delegates to MemoryPrompt (backward compat)
-
-No changes to: MemoryStore, TrainingStore, training tools, memory tools.
+- Homepage: update from "Four agents" to "Seven agents" — add Researcher,
+  Trainer, Executive cards with descriptions
+- Getting Started: update training link to match new pitch
+  "Corrections That Stick"
+- Tools index: add Training row (3 tools + 3 skills) with link
+- All references now consistent with simplified training system
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

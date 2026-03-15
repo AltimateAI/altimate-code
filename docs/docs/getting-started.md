@@ -206,5 +206,5 @@ If you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backe
 - [Configuration](configure/config.md) — Full config file reference
 - [Providers](configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
 - [Agent Modes](data-engineering/agent-modes.md) — Builder, Analyst, Validator, Migrator, Researcher, Trainer
-- [Train Your AI Teammate](data-engineering/training/index.md) — Teach patterns, rules, glossary, and standards
+- [Training: Corrections That Stick](data-engineering/training/index.md) — Correct the agent once, it remembers forever, your team inherits it
 - [Data Engineering Tools](data-engineering/tools/index.md) — 55+ specialized tools for SQL, dbt, and warehouses
