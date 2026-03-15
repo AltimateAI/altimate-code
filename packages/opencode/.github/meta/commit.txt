@@ -1,10 +1,16 @@
-fix: CI failure + new Sentry finding — orphaned headers and agent test
+fix: address multi-model code review findings
 
-1. Agent test: add researcher + trainer to "all disabled" test so it
-   correctly expects "no primary visible agent" when ALL agents are off
+Fixes from 6-model consensus review (Claude + GPT + Gemini + Kimi + MiniMax + GLM-5):
 
-2. Orphaned section headers: add pre-check that at least one entry fits
-   before adding section header in both injectTrainingOnly and inject
-   memory section (prevents header-only output inflating budget reports)
+1. training_remove: add name validation regex matching training_save
+   (Gemini finding — prevents path traversal via malformed names)
+
+2. training_save: improve name transform to strip ALL non-alphanumeric
+   chars, not just whitespace (Gemini finding — "don't-use-float!"
+   now becomes "don-t-use-float" instead of failing regex)
+
+3. incrementApplied: replace silent `.catch(() => {})` with warning
+   log (Kimi + GLM-5 consensus — fire-and-forget is by design but
+   failures should be visible in logs for debugging)
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

@@ -79,7 +79,7 @@ export namespace MemoryPrompt {
     const meta = parseTrainingMeta(block.content)
     const appliedStr = meta && meta.applied > 0 ? ` (applied ${meta.applied}x)` : ""
     // Strip the training metadata comment from content for display
-    const content = block.content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/m, "").trim()
+    const content = block.content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "").trim()
     const name = block.id.split("/").slice(2).join("/") || block.id
     return `#### ${name}${appliedStr}\n${content}`
   }
@@ -201,7 +201,7 @@ export namespace MemoryPrompt {
     if (memoryBlocks.length > 0) {
       const memHeader = "\n### Memory\n"
       const firstMemFormatted = formatBlock(memoryBlocks[0].block)
-      if (used + memHeader.length + firstMemFormatted.length + 2 < budget) {
+      if (used + memHeader.length + firstMemFormatted.length + 2 <= budget) {
         result += memHeader
         used += memHeader.length
 
