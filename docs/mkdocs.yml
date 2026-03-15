@@ -56,6 +56,8 @@ nav:
   - Getting Started: getting-started.md
   - Data Engineering:
       - Agent Modes: data-engineering/agent-modes.md
+      - Training:
+          - Overview: data-engineering/training/index.md
       - Tools:
           - Overview: data-engineering/tools/index.md
           - SQL Tools: data-engineering/tools/sql-tools.md

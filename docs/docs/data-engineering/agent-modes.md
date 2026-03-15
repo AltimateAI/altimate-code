@@ -1,6 +1,16 @@
 # Agent Modes
 
-altimate runs in one of four specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
+altimate runs in one of seven specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
+
+| Mode | Access | Purpose |
+|---|---|---|
+| **Builder** | Read/Write | Create and modify data pipelines |
+| **Analyst** | Read-only | Safe exploration and cost analysis |
+| **Validator** | Read + Validate | Data quality and integrity checks |
+| **Migrator** | Cross-warehouse | Dialect translation and migration |
+| **Researcher** | Read-only + Parallel | Deep multi-step investigations |
+| **Trainer** | Read-only + Training | Teach your AI teammate |
+| **Executive** | Read-only | Business-friendly reporting (no SQL jargon) |
 
 ## Builder
 
@@ -210,3 +220,135 @@ Migrator:
 | PostgreSQL | Snowflake, BigQuery, Databricks |
 | MySQL | PostgreSQL, Snowflake |
 | SQL Server | PostgreSQL, Snowflake |
+
+---
+
+## Researcher
+
+**Read-only + parallel investigation. For complex analytical questions.**
+
+```bash
+altimate --agent researcher
+```
+
+Researcher mode follows a 4-phase protocol for thorough investigation:
+
+1. **Plan** — Outline questions, data sources, and tool sequence
+2. **Gather** — Execute investigation steps, parallelize where possible
+3. **Analyze** — Cross-reference findings, identify root causes
+4. **Report** — Produce structured report with evidence and recommendations
+
+### Example: Investigate a cost spike
+
+```
+You: Why did our Snowflake costs spike last week?
+
+Researcher: Let me plan the investigation.
+
+  Investigation Plan:
+  1. Pull credit consumption trends (finops_analyze_credits)
+  2. Identify top expensive queries (finops_expensive_queries)
+  3. Check for deployment changes (git log)
+  4. Correlate query patterns with cost changes
+
+  Proceeding...
+
+> finops_analyze_credits prod-snowflake --days 14
+  Last 7 days: 847 credits (↑ 38% vs prior week)
+  Top warehouse: TRANSFORM_WH (523 credits, 62%)
+
+> finops_expensive_queries prod-snowflake --days 7
+  1. Full table scan on events (89 credits, 47 runs)
+  2. New model fct_attribution (45 credits, added 3 days ago)
+
+> bash: git log --oneline --since="7 days ago" -- models/
+  abc1234 feat: add fct_attribution model
+  def5678 fix: remove partition filter from stg_events
+
+  # Investigation Report
+
+  ## Summary
+  Costs increased 38% due to two changes deployed 3 days ago.
+
+  ## Key Findings
+  1. fct_attribution model (new) scans 2.1B events rows without partition filter — 45 credits/week
+  2. Partition filter was accidentally removed from stg_events in commit def5678 — caused 47 full scans
+
+  ## Recommendations
+  1. [ ] Add date partition filter to fct_attribution (estimated savings: 40 credits/week)
+  2. [ ] Restore partition filter in stg_events (estimated savings: 60 credits/week)
+```
+
+### What researcher can do
+
+- Run all read-only SQL and schema tools
+- Use `bash` for git history and code analysis
+- Launch parallel sub-investigations with the `task` tool
+- Access `websearch` and `webfetch` for external research
+- Save discoveries as training for future sessions
+
+### When to use researcher vs analyst
+
+| Use Analyst for... | Use Researcher for... |
+|---|---|
+| Quick data exploration | Multi-step investigations |
+| Single-query answers | Root cause analysis |
+| Schema browsing | Cross-referencing multiple data sources |
+| Ad-hoc cost checks | Comprehensive audits with reports |
+
+---
+
+## Trainer
+
+**Read-only + training management. For teaching your AI teammate.**
+
+```bash
+altimate --agent trainer
+```
+
+Trainer mode is dedicated to building your AI's knowledge base. It cannot modify project files — it can only read, scan, validate, and manage training entries.
+
+### Example: Scan for patterns and teach
+
+```
+You: Scan my project for patterns I should teach you
+
+Trainer:
+> training_scan target:models
+  Scanned 24 files in models/
+
+  Discovered Patterns:
+  - Naming: `stg_*` (12 files), `fct_*` (6 files), `dim_*` (4 files)
+  - Common: CTEs in 92%, {{ source() }} in 50%, incremental in 25%
+
+  Suggested Next Steps:
+  Review the patterns above and tell me which ones to save.
+
+You: Save the naming convention
+
+Trainer: Saved pattern "dbt-model-naming" to project training.
+  Content: "stg_{source}__{entity}, int_{entity}__{verb}, fct_{entity}, dim_{entity}"
+  Training usage: 180/6000 chars (3% full).
+  This will be shared with your team when committed to git.
+```
+
+### What trainer can do
+
+- Scan codebases for patterns (`training_scan`)
+- Validate training against actual code (`training_validate`)
+- Save, list, and remove training entries
+- Guide users through systematic knowledge capture
+- Analyze training gaps and suggest what to teach next
+
+### When to use trainer mode
+
+| Scenario | Why trainer mode |
+|---|---|
+| New project setup | Systematically scan and extract conventions |
+| Team onboarding | Walk through existing training with explanations |
+| Post-incident review | Save lessons learned as rules |
+| Quarterly audit | Validate training, remove stale entries, consolidate |
+| Loading a style guide | Extract rules and standards from documentation |
+| Pre-migration prep | Document current patterns as context |
+
+For a comprehensive guide with scenarios and examples, see [Training Your AI Teammate](training/index.md).
