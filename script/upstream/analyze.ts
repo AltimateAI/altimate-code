@@ -528,9 +528,11 @@ interface MarkerWarning {
 function getChangedFiles(base?: string): string[] {
   const { execSync } = require("child_process")
   const root = repoRoot()
+  // Only check Modified files (M), not Added (A). New files don't exist
+  // upstream so they can't be overwritten by a merge — no markers needed.
   const cmd = base
-    ? `git diff --name-only --diff-filter=AM ${base}...HEAD`
-    : `git diff --name-only --diff-filter=AM HEAD`
+    ? `git diff --name-only --diff-filter=M ${base}...HEAD`
+    : `git diff --name-only --diff-filter=M HEAD`
   try {
     return execSync(cmd, { cwd: root, encoding: "utf-8" })
       .trim()
