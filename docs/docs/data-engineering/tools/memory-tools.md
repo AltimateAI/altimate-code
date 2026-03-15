@@ -132,9 +132,19 @@ Files are human-readable and editable. You can create, edit, or delete them manu
 
 Blocks are written to a temporary file first, then atomically renamed. This prevents corruption if the process is interrupted mid-write.
 
+## Disabling memory
+
+Set the environment variable to disable all memory functionality — tools and automatic injection:
+
+```bash
+ALTIMATE_DISABLE_MEMORY=true
+```
+
+This is useful for **benchmarks**, CI pipelines, or any environment where persistent memory should not influence agent behavior. When disabled, memory tools are removed from the tool registry and no memory blocks are injected into the system prompt.
+
 ## Context window impact
 
-Altimate Memory injects relevant blocks into the system prompt at session start, subject to a configurable token budget (default: 8,000 characters). Blocks are sorted by last-updated timestamp, so the most recently relevant information is loaded first.
+Altimate Memory automatically injects relevant blocks into the system prompt at session start, subject to a configurable token budget (default: 8,000 characters). Blocks are sorted by last-updated timestamp, so the most recently relevant information is loaded first. The agent also has access to memory tools (`altimate_memory_read`, `altimate_memory_write`, `altimate_memory_delete`) to manage blocks on demand during a session.
 
 **What this means in practice:**
 
@@ -142,6 +152,7 @@ Altimate Memory injects relevant blocks into the system prompt at session start,
 - Memory injection adds a one-time cost at session start — it does not grow during the session
 - If you notice context pressure, reduce the number of blocks or keep them concise
 - The agent's own tool calls and responses consume far more context than memory blocks
+- To disable injection entirely (e.g., for benchmarks), set `ALTIMATE_DISABLE_MEMORY=true`
 
 !!! tip
     Keep blocks concise and focused. A block titled "warehouse-config" with 5 bullet points is better than a wall of text. The agent can always call `altimate_memory_read` to fetch specific blocks on demand.

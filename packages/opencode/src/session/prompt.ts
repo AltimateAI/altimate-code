@@ -17,6 +17,7 @@ import { Bus } from "../bus"
 import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
+import { MemoryPrompt } from "../memory/prompt"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -712,8 +713,11 @@ export namespace SessionPrompt {
       await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
       // Build system prompt, adding structured output instruction if needed
+      // Inject persistent memory blocks from previous sessions (gated by feature flag)
+      const memoryInjection = Flag.ALTIMATE_DISABLE_MEMORY ? "" : await MemoryPrompt.inject()
       const system = [
         ...(await SystemPrompt.environment(model)),
+        ...(memoryInjection ? [memoryInjection] : []),
         ...(await InstructionPrompt.system()),
         ...(lastUser.system ? [lastUser.system] : []),
       ]

@@ -254,6 +254,26 @@ export namespace Telemetry {
         tool_count: number
         resource_count: number
       }
+    | {
+        type: "memory_operation"
+        timestamp: number
+        session_id: string
+        operation: "write" | "delete"
+        scope: "global" | "project"
+        block_id: string
+        is_update: boolean
+        duplicate_count: number
+        tags_count: number
+      }
+    | {
+        type: "memory_injection"
+        timestamp: number
+        session_id: string
+        block_count: number
+        total_chars: number
+        budget: number
+        scopes_used: string[]
+      }
 
   const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep", "bash"])
 
@@ -266,6 +286,7 @@ export namespace Telemetry {
     { category: "dbt", keywords: ["dbt"] },
     { category: "warehouse", keywords: ["warehouse", "connection"] },
     { category: "lineage", keywords: ["lineage", "dag"] },
+    { category: "memory", keywords: ["memory"] },
   ]
 
   export function categorizeToolName(name: string, type: "standard" | "mcp"): string {

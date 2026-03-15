@@ -4,6 +4,7 @@ import path from "path"
 import { Global } from "@/global"
 import { Instance } from "@/project/instance"
 import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, MemoryBlockSchema, type MemoryBlock, type Citation } from "./types"
+import { Telemetry } from "@/altimate/telemetry"
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 
@@ -232,6 +233,18 @@ export namespace MemoryStore {
     const action = isUpdate ? "UPDATE" : "CREATE"
     await appendAuditLog(block.scope, auditEntry(action, block.id, block.scope))
 
+    Telemetry.track({
+      type: "memory_operation",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      operation: "write",
+      scope: block.scope,
+      block_id: block.id,
+      is_update: isUpdate,
+      duplicate_count: duplicates.length,
+      tags_count: block.tags.length,
+    })
+
     // Auto-clean expired blocks AFTER successful write to avoid data loss
     if (needsCleanup) {
       const expiredBlocks = allBlocks.filter((b) => isExpired(b))
@@ -248,6 +261,17 @@ export namespace MemoryStore {
     try {
       await fs.unlink(filepath)
       await appendAuditLog(scope, auditEntry("DELETE", id, scope))
+      Telemetry.track({
+        type: "memory_operation",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        operation: "delete",
+        scope,
+        block_id: id,
+        is_update: false,
+        duplicate_count: 0,
+        tags_count: 0,
+      })
       return true
     } catch (e: any) {
       if (e.code === "ENOENT") return false

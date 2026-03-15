@@ -1,5 +1,6 @@
 import { MemoryStore, isExpired } from "./store"
 import { MEMORY_DEFAULT_INJECTION_BUDGET, type MemoryBlock } from "./types"
+import { Telemetry } from "@/altimate/telemetry"
 
 export namespace MemoryPrompt {
   export function formatBlock(block: MemoryBlock): string {
@@ -26,6 +27,8 @@ export namespace MemoryPrompt {
     const header = "## Altimate Memory\n\nThe following memory blocks were saved from previous sessions:\n"
     let result = header
     let used = header.length
+    let injectedCount = 0
+    const scopesSeen = new Set<string>()
 
     for (const block of blocks) {
       if (isExpired(block)) continue
@@ -34,6 +37,20 @@ export namespace MemoryPrompt {
       if (used + needed > budget) break
       result += "\n" + formatted + "\n"
       used += needed
+      injectedCount++
+      scopesSeen.add(block.scope)
+    }
+
+    if (injectedCount > 0) {
+      Telemetry.track({
+        type: "memory_injection",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        block_count: injectedCount,
+        total_chars: used,
+        budget,
+        scopes_used: [...scopesSeen],
+      })
     }
 
     return result
