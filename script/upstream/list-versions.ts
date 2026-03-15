@@ -193,6 +193,7 @@ async function main(): Promise<void> {
   logger.info(`Fetching releases from GitHub (${config.upstreamRepo})...`)
   const releases = await fetchReleases(config.upstreamRepo, {
     includePrerelease: Boolean(args["include-prerelease"]),
+    limit: limit === Infinity ? undefined : limit,
   })
 
   // Extract tags and sort by version

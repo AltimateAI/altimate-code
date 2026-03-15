@@ -23,7 +23,7 @@ export async function fetchReleases(
   repo: string,
   options: { limit?: number; includePrerelease?: boolean } = {},
 ): Promise<GitHubRelease[]> {
-  const { limit = 100, includePrerelease = false } = options
+  const { limit, includePrerelease = false } = options
 
   // `gh api --paginate` with `--jq '.[]'` unpacks each page's array into
   // individual JSON objects (one per line). We then pipe to external `jq -s`
@@ -32,7 +32,8 @@ export async function fetchReleases(
   const condition = includePrerelease
     ? "select(.draft == false)"
     : "select(.draft == false and .prerelease == false)"
-  const jqFilter = `[.[] | ${condition}] | .[0:${limit}]`
+  const slice = limit != null ? ` | .[0:${limit}]` : ""
+  const jqFilter = `[.[] | ${condition}]${slice}`
 
   const cmd = `gh api repos/${repo}/releases --paginate --jq '.[]' | jq -s '${jqFilter}'`
 
