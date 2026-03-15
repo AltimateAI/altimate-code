@@ -51,7 +51,8 @@ export function parseTrainingMeta(content: string): TrainingBlockMeta | undefine
     if (/^\d+$/.test(value as string)) value = parseInt(value as string, 10)
     meta[key] = value
   }
-  return TrainingBlockMeta.safeParse(meta).data
+  const result = TrainingBlockMeta.safeParse(meta)
+  return result.success ? result.data : undefined
 }
 
 export function embedTrainingMeta(content: string, meta: TrainingBlockMeta): string {

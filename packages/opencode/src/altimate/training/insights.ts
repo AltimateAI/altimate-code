@@ -23,7 +23,7 @@ export namespace TrainingInsights {
     const insights: TrainingInsight[] = []
 
     // 1. Stale entries: saved but never applied after being injected multiple sessions
-    const stale = entries.filter((e) => e.meta.applied === 0 && isOlderThanDays(e.created, 7))
+    const stale = entries.filter((e) => e.meta.applied === 0 && isOlderThanDays(e.updated, 7))
     if (stale.length > 0) {
       insights.push({
         type: "stale",

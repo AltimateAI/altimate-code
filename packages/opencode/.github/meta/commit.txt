@@ -1,16 +1,14 @@
-fix: address multi-model code review findings
+fix: address new Sentry findings — regex m flag and off-by-one budget check
 
-Fixes from 6-model consensus review (Claude + GPT + Gemini + Kimi + MiniMax + GLM-5):
+1. formatTrainingEntry regex: remove multiline `m` flag that could
+   match user content mid-string (memory/prompt.ts:82)
 
-1. training_remove: add name validation regex matching training_save
-   (Gemini finding — prevents path traversal via malformed names)
+2. Memory block budget check: change `<` to `<=` so blocks that fit
+   exactly into remaining budget are included (memory/prompt.ts:204)
 
-2. training_save: improve name transform to strip ALL non-alphanumeric
-   chars, not just whitespace (Gemini finding — "don't-use-float!"
-   now becomes "don-t-use-float" instead of failing regex)
-
-3. incrementApplied: replace silent `.catch(() => {})` with warning
-   log (Kimi + GLM-5 consensus — fire-and-forget is by design but
-   failures should be visible in logs for debugging)
+3 prior Sentry findings already fixed in earlier commits:
+   - projectDir cache (Map keyed by Instance.directory)
+   - injectTrainingOnly header-only return (itemCount guard)
+   - orphaned section headers (first-entry pre-check)
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

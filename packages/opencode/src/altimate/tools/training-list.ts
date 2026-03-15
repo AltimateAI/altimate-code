@@ -39,7 +39,7 @@ export const TrainingListTool = Tool.define("training_list", {
       // Budget usage
       const budget = await TrainingPrompt.budgetUsage()
 
-      const counts = await TrainingStore.count()
+      const counts = await TrainingStore.count({ kind: args.kind, scope: args.scope === "all" ? undefined : args.scope })
       const summary = [
         `## Training Status`,
         "",

@@ -34,7 +34,7 @@ export const TrainingRemoveTool = Tool.define("training_remove", {
 
       if (!removed) {
         // Help the user find the right name
-        const available = await TrainingStore.list({ kind: args.kind })
+        const available = await TrainingStore.list({ kind: args.kind, scope: args.scope })
         let hint = ""
         if (available.length > 0) {
           const names = available.map((e) => `\`${e.name}\``).join(", ")
