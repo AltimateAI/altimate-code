@@ -5,12 +5,10 @@ import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
 import { Log } from "@/util/log"
 import { MessageV2 } from "@/session/message-v2"
+import { MessageID, SessionID } from "@/session/schema"
 
 const ENHANCE_NAME = "enhance-prompt"
 const ENHANCE_TIMEOUT_MS = 15_000
-// MessageV2.User requires branded MessageID/SessionID types, but this is a
-// synthetic message that never enters the session store — cast is safe here.
-const ENHANCE_ID = ENHANCE_NAME as any
 
 const log = Log.create({ service: ENHANCE_NAME })
 
@@ -105,8 +103,8 @@ export async function enhancePrompt(text: string): Promise<string> {
     }
 
     const user: MessageV2.User = {
-      id: ENHANCE_ID,
-      sessionID: ENHANCE_ID,
+      id: MessageID.ascending(),
+      sessionID: SessionID.descending(),
       role: "user",
       time: { created: Date.now() },
       agent: ENHANCE_NAME,
@@ -124,7 +122,7 @@ export async function enhancePrompt(text: string): Promise<string> {
       tools: {},
       model,
       abort: controller.signal,
-      sessionID: ENHANCE_ID,
+      sessionID: user.sessionID,
       retries: 2,
       messages: [
         {

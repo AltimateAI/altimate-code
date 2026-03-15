@@ -207,8 +207,10 @@ export function Prompt(props: PromptProps) {
         enabled: !!store.prompt.input,
         onSelect: async (dialog) => {
           if (!store.prompt.input.trim()) return
+          if (enhancingInProgress) return
           dialog.clear()
           const original = store.prompt.input
+          enhancingInProgress = true
           toast.show({
             message: "Enhancing prompt...",
             variant: "info",
@@ -241,6 +243,8 @@ export function Prompt(props: PromptProps) {
               variant: "error",
               duration: 3000,
             })
+          } finally {
+            enhancingInProgress = false
           }
         },
       },
@@ -625,9 +629,11 @@ export function Prompt(props: PromptProps) {
           enhancingInProgress = true
           toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
           const enhanced = await enhancePrompt(inputText)
-          // Discard if user changed the prompt during enhancement
-          if (store.prompt.input !== inputText) return
-          if (enhanced !== inputText) {
+          // If user changed the prompt during enhancement, skip enhancement
+          // but continue submission with the original text (don't abandon it)
+          if (store.prompt.input !== inputText) {
+            inputText = store.prompt.input
+          } else if (enhanced !== inputText) {
             inputText = enhanced
             setStore("prompt", "input", enhanced)
           }

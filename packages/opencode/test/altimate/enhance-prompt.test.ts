@@ -60,6 +60,16 @@ mock.module("@/session/message-v2", () => ({
   MessageV2: {},
 }))
 
+let idCounter = 0
+mock.module("@/session/schema", () => ({
+  MessageID: {
+    ascending: () => `msg-${++idCounter}`,
+  },
+  SessionID: {
+    descending: () => `session-${++idCounter}`,
+  },
+}))
+
 // Import after mocking
 const { enhancePrompt, isAutoEnhanceEnabled } = await import("../../src/altimate/enhance-prompt")
 
