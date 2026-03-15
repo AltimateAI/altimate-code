@@ -56,6 +56,11 @@ jobs:
         with:
           bun-version: "1.3.10"
 
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/anomalyco/opencode.git || true
+          git fetch upstream --quiet
+
       - name: Install merge tooling deps
         run: bun install
         working-directory: script/upstream

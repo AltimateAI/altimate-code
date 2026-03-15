@@ -543,14 +543,47 @@ function getChangedFiles(base?: string): string[] {
   }
 }
 
+// Cache for upstream file existence checks (populated on first use)
+let _upstreamFilesCache: Set<string> | null = null
+
+function getUpstreamFiles(config: MergeConfig): Set<string> {
+  if (_upstreamFilesCache) return _upstreamFilesCache
+  const { execSync } = require("child_process")
+  const root = repoRoot()
+  const refs = [`${config.upstreamRemote}/dev`, `${config.upstreamRemote}/main`]
+  for (const ref of refs) {
+    try {
+      const output = execSync(`git ls-tree -r --name-only ${ref}`, {
+        cwd: root,
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024,
+      })
+      _upstreamFilesCache = new Set(output.trim().split("\n").filter(Boolean))
+      return _upstreamFilesCache
+    } catch {
+      // ref not available, try next
+    }
+  }
+  // Upstream not available — return empty set (all files treated as ours-only)
+  _upstreamFilesCache = new Set()
+  return _upstreamFilesCache
+}
+
 function isUpstreamShared(file: string, config: MergeConfig): boolean {
   const { minimatch } = require("minimatch")
   if (config.keepOurs.some((p: string) => minimatch(file, p))) return false
   if (config.skipFiles.some((p: string) => minimatch(file, p))) return false
   const ext = path.extname(file)
   if (!config.transformableExtensions.includes(ext)) return false
-  if (!file.startsWith("packages/opencode/src/")) return false
-  return true
+
+  // Only flag files that actually exist in upstream. Files we created
+  // that don't exist upstream can't be overwritten by a merge.
+  const upstreamFiles = getUpstreamFiles(config)
+  if (upstreamFiles.size === 0) {
+    // Fallback: if upstream isn't available, use directory heuristic
+    return file.startsWith("packages/opencode/src/")
+  }
+  return upstreamFiles.has(file)
 }
 
 function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
@@ -625,6 +658,18 @@ function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
 }
 
 function runMarkerCheck(config: MergeConfig, base?: string, strict?: boolean): number {
+  const { execSync } = require("child_process")
+  const root = repoRoot()
+
+  // Ensure upstream remote exists and is fetched so we can check file existence
+  try {
+    execSync(`git remote get-url ${config.upstreamRemote}`, { cwd: root, stdio: "ignore" })
+    execSync(`git fetch ${config.upstreamRemote} --quiet`, { cwd: root, stdio: "ignore" })
+  } catch {
+    // If upstream remote doesn't exist, fall back to pattern-only checks
+    logger.warn(`Could not fetch '${config.upstreamRemote}' remote — falling back to pattern-based detection`)
+  }
+
   const changedFiles = getChangedFiles(base)
   const sharedFiles = changedFiles.filter((f) => isUpstreamShared(f, config))
 
