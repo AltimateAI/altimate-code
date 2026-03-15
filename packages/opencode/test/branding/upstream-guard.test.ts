@@ -277,4 +277,35 @@ describe("upstream merge guards", () => {
       })
     }
   })
+
+  // altimate_change start — marker guard safety: ensure src/ files are never excluded
+  describe("marker guard exclusions must never bypass src/ protection", () => {
+    test("markerExcludePatterns in analyze.ts must not match packages/opencode/src/**/*.ts", () => {
+      const analyzeContent = readFileSync(join(repoRoot, "script", "upstream", "analyze.ts"), "utf-8")
+      // Extract markerExcludePatterns array
+      const match = analyzeContent.match(/markerExcludePatterns\s*=\s*\[([\s\S]*?)\]/)
+      expect(match).not.toBeNull()
+      const patternsBlock = match![1]
+
+      // These patterns must NEVER appear — they would bypass marker protection for source code
+      const dangerousPatterns = [
+        "packages/opencode/src/**",
+        "packages/opencode/src/*.ts",
+        "**/src/**",
+        "**/*.ts",
+      ]
+      for (const dangerous of dangerousPatterns) {
+        expect(patternsBlock).not.toContain(`"${dangerous}"`)
+      }
+    })
+
+    test("CI marker guard runs in strict mode for non-merge PRs", () => {
+      const ciContent = readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf-8")
+      // Must have --strict flag for regular PRs
+      expect(ciContent).toContain("--strict")
+      // Must detect merge branches to skip strict
+      expect(ciContent).toContain("merge-upstream-")
+    })
+  })
+  // altimate_change end
 })
