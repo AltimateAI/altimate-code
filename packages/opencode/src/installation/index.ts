@@ -169,9 +169,9 @@ export namespace Installation {
   // altimate_change start — brew formula detection
   async function getBrewFormula() {
     const tapFormula = await text(["brew", "list", "--formula", "AltimateAI/tap/altimate-code"])
-    if (tapFormula.includes("altimate")) return "AltimateAI/tap/altimate-code"
+    if (tapFormula.includes("altimate-code")) return "AltimateAI/tap/altimate-code"
     const coreFormula = await text(["brew", "list", "--formula", "altimate-code"])
-    if (coreFormula.includes("altimate")) return "altimate-code"
+    if (coreFormula.includes("altimate-code")) return "altimate-code"
     return "AltimateAI/tap/altimate-code"
   }
   // altimate_change end
