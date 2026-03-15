@@ -8,6 +8,10 @@ import { MessageV2 } from "@/session/message-v2"
 
 const log = Log.create({ service: "enhance-prompt" })
 
+const ENHANCE_TIMEOUT_MS = 15_000
+// Synthetic ID for enhancement requests — not a real session/message
+const ENHANCE_ID = "enhance-prompt" as any
+
 // Research-backed enhancement prompt based on:
 // - AutoPrompter (arxiv 2504.20196): 5 missing info categories that cause 27% lower edit correctness
 // - Meta-prompting best practices: clear role, structural scaffolding, few-shot examples
@@ -49,9 +53,14 @@ Enhanced: "Analyze why the query is slow. Run EXPLAIN/query profile to identify 
 User: "migrate this from snowflake to bigquery"
 Enhanced: "Migrate the SQL from Snowflake dialect to BigQuery dialect. Convert Snowflake-specific functions (e.g. DATEADD, IFF, QUALIFY) to BigQuery equivalents. Preserve the query logic and verify the translated query is syntactically valid."`
 
+export function stripThinkTags(text: string) {
+  return text.replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+}
+
 export function clean(text: string) {
   return text
-    .replace(/^```\w*\n?|```$/g, "")
+    .trim()
+    .replace(/^```\w*\n([\s\S]*?)\n```$/, "$1")
     .trim()
     .replace(/^(['"])([\s\S]*)\1$/, "$2")
     .trim()
@@ -67,67 +76,73 @@ export async function isAutoEnhanceEnabled(): Promise<boolean> {
 }
 
 export async function enhancePrompt(text: string): Promise<string> {
-  if (!text.trim()) return text
+  const trimmed = text.trim()
+  if (!trimmed) return text
 
-  log.info("enhancing", { length: text.length })
+  log.info("enhancing", { length: trimmed.length })
 
-  const defaultModel = await Provider.defaultModel()
-  const model =
-    (await Provider.getSmallModel(defaultModel.providerID)) ??
-    (await Provider.getModel(defaultModel.providerID, defaultModel.modelID))
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENHANCE_TIMEOUT_MS)
 
-  const agent: Agent.Info = {
-    name: "enhance-prompt",
-    mode: "primary",
-    hidden: true,
-    options: {},
-    permission: [],
-    prompt: ENHANCE_SYSTEM_PROMPT,
-    temperature: 0.7,
-  }
+  try {
+    const defaultModel = await Provider.defaultModel()
+    const model =
+      (await Provider.getSmallModel(defaultModel.providerID)) ??
+      (await Provider.getModel(defaultModel.providerID, defaultModel.modelID))
 
-  const user: MessageV2.User = {
-    id: "enhance-prompt" as any,
-    sessionID: "enhance-prompt" as any,
-    role: "user",
-    time: { created: Date.now() },
-    agent: "enhance-prompt",
-    model: {
-      providerID: model.providerID,
-      modelID: model.id,
-    },
-  }
+    const agent: Agent.Info = {
+      name: "enhance-prompt",
+      mode: "primary",
+      hidden: true,
+      options: {},
+      permission: [],
+      prompt: ENHANCE_SYSTEM_PROMPT,
+      temperature: 0.7,
+    }
 
-  const stream = await LLM.stream({
-    agent,
-    user,
-    system: [],
-    small: true,
-    tools: {},
-    model,
-    abort: new AbortController().signal,
-    sessionID: "enhance-prompt" as any,
-    retries: 2,
-    messages: [
-      {
-        role: "user",
-        content: text,
+    const user: MessageV2.User = {
+      id: ENHANCE_ID,
+      sessionID: ENHANCE_ID,
+      role: "user",
+      time: { created: Date.now() },
+      agent: "enhance-prompt",
+      model: {
+        providerID: model.providerID,
+        modelID: model.id,
       },
-    ],
-  })
+    }
 
-  const result = await stream.text.catch((err) => {
-    log.error("failed to enhance prompt", { error: err })
-    return undefined
-  })
+    const stream = await LLM.stream({
+      agent,
+      user,
+      system: [],
+      small: true,
+      tools: {},
+      model,
+      abort: controller.signal,
+      sessionID: ENHANCE_ID,
+      retries: 2,
+      messages: [
+        {
+          role: "user",
+          content: trimmed,
+        },
+      ],
+    })
 
-  if (!result) return text
+    const result = await stream.text.catch((err) => {
+      log.error("failed to enhance prompt", { error: err })
+      return undefined
+    })
 
-  const cleaned = clean(
-    result
-      .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
-      .trim(),
-  )
+    if (!result) return text
 
-  return cleaned || text
+    const cleaned = clean(stripThinkTags(result).trim())
+    return cleaned || text
+  } catch (err) {
+    log.error("enhance prompt failed", { error: err })
+    return text
+  } finally {
+    clearTimeout(timeout)
+  }
 }

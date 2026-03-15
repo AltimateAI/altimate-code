@@ -611,6 +611,26 @@ export function Prompt(props: PromptProps) {
     const messageID = MessageID.ascending()
     let inputText = store.prompt.input
 
+    // altimate_change start - auto-enhance prompt before expanding paste text
+    // Only enhance the raw user text, not shell commands or slash commands
+    if (store.mode === "normal" && !inputText.startsWith("/")) {
+      try {
+        const autoEnhance = await isAutoEnhanceEnabled()
+        if (autoEnhance) {
+          toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
+          const enhanced = await enhancePrompt(inputText)
+          if (enhanced !== inputText) {
+            inputText = enhanced
+            setStore("prompt", "input", enhanced)
+          }
+        }
+      } catch (err) {
+        // Enhancement failure should never block prompt submission
+        console.error("auto-enhance failed, using original prompt", err)
+      }
+    }
+    // altimate_change end
+
     // Expand pasted text inline before submitting
     const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
     const sortedExtmarks = allExtmarks.sort((a: { start: number }, b: { start: number }) => b.start - a.start)
@@ -629,20 +649,6 @@ export function Prompt(props: PromptProps) {
 
     // Filter out text parts (pasted content) since they're now expanded inline
     const nonTextParts = store.prompt.parts.filter((part) => part.type !== "text")
-
-    // altimate_change start - auto-enhance prompt before sending (if enabled)
-    // Only enhance normal prompts, not shell commands or slash commands
-    if (store.mode === "normal" && !inputText.startsWith("/")) {
-      try {
-        const autoEnhance = await isAutoEnhanceEnabled()
-        if (autoEnhance) {
-          inputText = await enhancePrompt(inputText)
-        }
-      } catch {
-        // Enhancement failure should never block prompt submission
-      }
-    }
-    // altimate_change end
 
     // Capture mode before it gets reset
     const currentMode = store.mode
