@@ -2,29 +2,6 @@
 
 Altimate Code is built from a small set of composable pieces. This section covers what they are and how to configure them.
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│                 Agent Modes                  │
-│        (Builder · Analyst · Validator        │
-│          Migrator · Documenter)              │
-├─────────────────────────────────────────────┤
-│              Skills & Commands               │
-│   (high-level workflows you can invoke)      │
-├─────────────────────────────────────────────┤
-│                   Tools                      │
-│  (55+ specialized tools for SQL, dbt,        │
-│   lineage, cost, schema, warehouses)         │
-├─────────────────────────────────────────────┤
-│            Providers & Models                │
-│   (Anthropic · OpenAI · Bedrock · Ollama     │
-│    + 30 more LLM backends)                   │
-└─────────────────────────────────────────────┘
-```
-
-**[Agent Modes](agent-modes.md)** define *how* Altimate Code behaves — permissions, guardrails, and tool access. **[Skills](skills.md)** are high-level workflows (e.g. `/data`, `/migrate`). **[Tools](tools/index.md)** are the 55+ low-level capabilities that skills orchestrate. **[Providers & Models](providers.md)** connect Altimate Code to your LLM of choice.
-
 ## What's in this section
 
 <div class="grid cards" markdown>
