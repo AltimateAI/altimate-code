@@ -34,6 +34,9 @@ import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
+// altimate_change start - import prompt enhancement
+import { enhancePrompt } from "@/altimate/enhance-prompt"
+// altimate_change end
 
 export type PromptProps = {
   sessionID?: string
@@ -194,6 +197,50 @@ export function Prompt(props: PromptProps) {
           dialog.clear()
         },
       },
+      // altimate_change start - add prompt enhance command
+      {
+        title: "Enhance prompt",
+        value: "prompt.enhance",
+        keybind: "prompt_enhance",
+        category: "Prompt",
+        enabled: !!store.prompt.input,
+        onSelect: async (dialog) => {
+          if (!store.prompt.input.trim()) return
+          dialog.clear()
+          const original = store.prompt.input
+          toast.show({
+            message: "Enhancing prompt...",
+            variant: "info",
+            duration: 2000,
+          })
+          try {
+            const enhanced = await enhancePrompt(original)
+            if (enhanced !== original) {
+              input.setText(enhanced)
+              setStore("prompt", "input", enhanced)
+              input.gotoBufferEnd()
+              toast.show({
+                message: "Prompt enhanced",
+                variant: "success",
+                duration: 2000,
+              })
+            } else {
+              toast.show({
+                message: "Prompt already looks good",
+                variant: "info",
+                duration: 2000,
+              })
+            }
+          } catch {
+            toast.show({
+              message: "Failed to enhance prompt",
+              variant: "error",
+              duration: 3000,
+            })
+          }
+        },
+      },
+      // altimate_change end
       {
         title: "Paste",
         value: "prompt.paste",
@@ -1155,6 +1202,11 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {keybind.print("command_list")} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
+                  {/* altimate_change start - show enhance hint */}
+                  <text fg={theme.text}>
+                    {keybind.print("prompt_enhance")} <span style={{ fg: theme.textMuted }}>enhance</span>
+                  </text>
+                  {/* altimate_change end */}
                 </Match>
                 <Match when={store.mode === "shell"}>
                   <text fg={theme.text}>
