@@ -53,29 +53,29 @@ markdown_extensions:
 
 nav:
   - Getting Started:
-      - Overview: index.md
-      - Quickstart: getting-started.md
+      - Overview: getting-started/index.md
+      - Quickstart: getting-started/quickstart.md
   - Examples:
       - Showcase: examples/index.md
       - Guides:
-          - Cost Optimization: data-engineering/guides/cost-optimization.md
-          - Migration: data-engineering/guides/migration.md
+          - Cost Optimization: examples/guides/cost-optimization.md
+          - Migration: examples/guides/migration.md
   - Configure:
       - Overview: configure/index.md
       - Config File Reference: configure/config.md
       - Agents:
-          - Agent Modes: data-engineering/agent-modes.md
+          - Agent Modes: configure/agent-modes.md
           - Agent Config: configure/agents.md
       - Tools:
-          - Tool Config: configure/tools.md
-          - Custom Tools: configure/custom-tools.md
-          - Overview: data-engineering/tools/index.md
-          - SQL Tools: data-engineering/tools/sql-tools.md
-          - Schema Tools: data-engineering/tools/schema-tools.md
-          - FinOps Tools: data-engineering/tools/finops-tools.md
-          - Lineage Tools: data-engineering/tools/lineage-tools.md
-          - dbt Tools: data-engineering/tools/dbt-tools.md
-          - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+          - Tool Config: configure/tools/config.md
+          - Custom Tools: configure/tools/custom.md
+          - Overview: configure/tools/index.md
+          - SQL Tools: configure/tools/sql-tools.md
+          - Schema Tools: configure/tools/schema-tools.md
+          - FinOps Tools: configure/tools/finops-tools.md
+          - Lineage Tools: configure/tools/lineage-tools.md
+          - dbt Tools: configure/tools/dbt-tools.md
+          - Warehouse Tools: configure/tools/warehouse-tools.md
       - Skills: configure/skills.md
       - Commands: configure/commands.md
       - Providers & Models:
@@ -94,15 +94,15 @@ nav:
           - MCP Servers: configure/mcp-servers.md
           - ACP Support: configure/acp.md
   - Interfaces:
-      - TUI: usage/tui.md
-      - CLI: usage/cli.md
-      - IDE: usage/ide.md
-      - GitHub: usage/github.md
-      - GitLab: usage/gitlab.md
+      - TUI: interfaces/tui.md
+      - CLI: interfaces/cli.md
+      - IDE: interfaces/ide.md
+      - GitHub: interfaces/github.md
+      - GitLab: interfaces/gitlab.md
   - Reference:
-      - What's New: changelog.md
-      - Security FAQ: security-faq.md
-      - Network: network.md
-      - Troubleshooting: troubleshooting.md
-      - Windows / WSL: windows-wsl.md
-      - Telemetry: configure/telemetry.md
+      - What's New: reference/changelog.md
+      - Security FAQ: reference/security-faq.md
+      - Network: reference/network.md
+      - Troubleshooting: reference/troubleshooting.md
+      - Windows / WSL: reference/windows-wsl.md
+      - Telemetry: reference/telemetry.md
