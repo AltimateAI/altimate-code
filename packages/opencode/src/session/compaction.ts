@@ -14,13 +14,13 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
-import { Telemetry } from "@/telemetry"
+import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
 
-  // altimate_change: observation masks for pruned tool outputs
+  // altimate_change start — observation masks for pruned tool outputs
   function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -61,7 +61,7 @@ export namespace SessionCompaction {
     const fingerprint = firstLine ? ` — "${firstLine}"` : ""
     return `[Tool output cleared — ${part.tool}(${args}) returned ${lines} lines, ${formatBytes(bytes)}${fingerprint}]`
   }
-  // end altimate_change
+  // altimate_change end
 
   export const Event = {
     Compacted: BusEvent.define(
@@ -74,7 +74,7 @@ export namespace SessionCompaction {
 
   const COMPACTION_BUFFER = 20_000
 
-  // altimate_change: improved isOverflow formula with safety guard and unified headroom
+  // altimate_change start — improved isOverflow formula with safety guard and unified headroom
   // See PR #35 — fixes upstream bugs with limit.input models and small-context models
   export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
     const config = await Config.get()
@@ -93,7 +93,7 @@ export namespace SessionCompaction {
     if (base <= headroom) return false
     return count >= base - headroom
   }
-  // end altimate_change
+  // altimate_change end
 
   export const PRUNE_MINIMUM = 20_000
   export const PRUNE_PROTECT = 40_000
@@ -138,19 +138,19 @@ export namespace SessionCompaction {
     if (pruned > PRUNE_MINIMUM) {
       for (const part of toPrune) {
         if (part.state.status === "completed") {
-          // altimate_change: observation masks for pruned tool outputs
+          // altimate_change start — observation masks for pruned tool outputs
           const mask = createObservationMask(part)
           part.state.time.compacted = Date.now()
           part.state.metadata = {
             ...part.state.metadata,
             observation_mask: mask,
           }
-          // end altimate_change
+          // altimate_change end
           await Session.updatePart(part)
         }
       }
       log.info("pruned", { count: toPrune.length })
-      // altimate_change: telemetry for pruning
+      // altimate_change start — telemetry for pruning
       Telemetry.track({
         type: "tool_outputs_pruned",
         timestamp: Date.now(),
@@ -158,13 +158,13 @@ export namespace SessionCompaction {
         count: toPrune.length,
         tokens_pruned: pruned,
       })
-      // end altimate_change
+      // altimate_change end
     }
   }
 
-  // altimate_change: compaction attempt tracking for loop protection
+  // altimate_change start — compaction attempt tracking for loop protection
   const compactionAttempts = new Map<string, number>()
-  // end altimate_change
+  // altimate_change end
 
   export async function process(input: {
     parentID: MessageID
@@ -174,7 +174,7 @@ export namespace SessionCompaction {
     auto: boolean
     overflow?: boolean
   }) {
-    // altimate_change: telemetry and attempt tracking
+    // altimate_change start — telemetry and attempt tracking
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
     compactionAttempts.set(input.sessionID, attempt)
     input.abort.addEventListener("abort", () => {
@@ -187,7 +187,7 @@ export namespace SessionCompaction {
       trigger: input.auto ? "overflow_detection" : "error_recovery",
       attempt,
     })
-    // end altimate_change
+    // altimate_change end
     const userMessage = input.messages.findLast((m) => m.info.id === input.parentID)!.info as MessageV2.User
 
     let messages = input.messages
@@ -267,7 +267,7 @@ When constructing the summary, try to stick to this template:
 - [What important instructions did the user give you that are relevant]
 - [If there is a plan or spec, include information about it so next agent can continue using it]
 
-## Data Context
+## Data Context (altimate_change start — data engineering context for compaction summaries)
 
 - [What warehouse(s) or database(s) are we connected to?]
 - [What schemas, tables, or columns were discovered or are relevant?]
@@ -275,6 +275,7 @@ When constructing the summary, try to stick to this template:
 - [Any lineage findings (upstream/downstream dependencies)?]
 - [Any query patterns, anti-patterns, or optimization opportunities found?]
 - [Skip this section entirely if the task is not data-engineering related]
+(altimate_change end)
 
 ## Discoveries
 
@@ -380,11 +381,11 @@ When constructing the summary, try to stick to this template:
       }
     }
     if (processor.message.error) {
-      compactionAttempts.delete(input.sessionID) // altimate_change
+      compactionAttempts.delete(input.sessionID) // altimate_change — cleanup on error
       return "stop"
     }
     Bus.publish(Event.Compacted, { sessionID: input.sessionID })
-    compactionAttempts.delete(input.sessionID) // altimate_change
+    compactionAttempts.delete(input.sessionID) // altimate_change — cleanup on success
     return "continue"
   }
 
