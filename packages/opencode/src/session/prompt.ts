@@ -698,7 +698,7 @@ export namespace SessionPrompt {
       // Inject persistent memory blocks from previous sessions (gated by feature flag)
       const memoryInjection = Flag.ALTIMATE_DISABLE_MEMORY ? "" : await MemoryPrompt.inject()
       // altimate_change start - inject training knowledge from AI teammate learning
-      const trainingInjection = Flag.ALTIMATE_DISABLE_MEMORY ? "" : await TrainingPrompt.inject()
+      const trainingInjection = Flag.ALTIMATE_DISABLE_TRAINING ? "" : await TrainingPrompt.inject()
       // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),

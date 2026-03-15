@@ -5,7 +5,7 @@ import { TrainingStore, type TrainingEntry } from "./store"
 import { TRAINING_MAX_PATTERNS_PER_KIND, type TrainingKind } from "./types"
 
 export interface TrainingInsight {
-  type: "stale" | "high-value" | "near-limit" | "budget-warning" | "consolidation"
+  type: "stale" | "high-value" | "near-limit" | "consolidation"
   severity: "info" | "warning"
   message: string
   entries?: string[]

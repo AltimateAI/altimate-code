@@ -284,7 +284,7 @@ export namespace ToolRegistry {
       ...(!Flag.ALTIMATE_DISABLE_MEMORY ? [MemoryReadTool, MemoryWriteTool, MemoryDeleteTool, MemoryAuditTool, ...(Flag.ALTIMATE_MEMORY_AUTO_EXTRACT ? [MemoryExtractTool] : [])] : []),
       // altimate_change end
       // altimate_change start - register training tools for AI teammate
-      ...(!Flag.ALTIMATE_DISABLE_MEMORY ? [TrainingSaveTool, TrainingListTool, TrainingRemoveTool] : []),
+      ...(!Flag.ALTIMATE_DISABLE_TRAINING ? [TrainingSaveTool, TrainingListTool, TrainingRemoveTool] : []),
       // altimate_change end
       ...custom,
     ]

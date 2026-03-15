@@ -36,6 +36,9 @@ export namespace Flag {
   // altimate_change start - opt-in for session-end auto-extraction
   export const ALTIMATE_MEMORY_AUTO_EXTRACT = altTruthy("ALTIMATE_MEMORY_AUTO_EXTRACT", "OPENCODE_MEMORY_AUTO_EXTRACT")
   // altimate_change end
+  // altimate_change start - opt-out for AI Teammate training system
+  export const ALTIMATE_DISABLE_TRAINING = altTruthy("ALTIMATE_DISABLE_TRAINING", "OPENCODE_DISABLE_TRAINING")
+  // altimate_change end
   export const OPENCODE_DISABLE_TERMINAL_TITLE = truthy("OPENCODE_DISABLE_TERMINAL_TITLE")
   export const OPENCODE_PERMISSION = process.env["OPENCODE_PERMISSION"]
   export const OPENCODE_DISABLE_DEFAULT_PLUGINS = truthy("OPENCODE_DISABLE_DEFAULT_PLUGINS")
