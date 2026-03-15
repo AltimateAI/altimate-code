@@ -80,6 +80,44 @@ export namespace Database {
     return sql.sort((a, b) => a.timestamp - b.timestamp)
   }
 
+  // altimate_change start — backfill migration names for upgrade compatibility
+  function backfillMigrationNames(sqlite: BunDatabase, entries: Journal) {
+    try {
+      // Check if the migrations table exists and has the name column
+      const tableInfo = sqlite
+        .prepare("SELECT name FROM pragma_table_info('__drizzle_migrations')")
+        .all() as { name: string }[]
+      if (!tableInfo.length || !tableInfo.some((c) => c.name === "name")) return
+
+      // Find entries with NULL or empty names
+      const rows = sqlite
+        .prepare("SELECT created_at FROM __drizzle_migrations WHERE name IS NULL OR name = ''")
+        .all() as { created_at: number }[]
+      if (!rows.length) return
+
+      log.info("backfilling migration names", { count: rows.length })
+
+      // Build timestamp → name lookup from local migrations
+      const byTimestamp = new Map<number, string>()
+      for (const entry of entries) {
+        byTimestamp.set(entry.timestamp, entry.name)
+      }
+
+      const stmt = sqlite.prepare("UPDATE __drizzle_migrations SET name = ? WHERE created_at = ?")
+      for (const row of rows) {
+        const name = byTimestamp.get(row.created_at)
+        if (name) {
+          stmt.run(name, row.created_at)
+        }
+      }
+    } catch (e) {
+      log.info("migration name backfill skipped", {
+        error: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+  // altimate_change end
+
   export const Client = lazy(() => {
     log.info("opening database", { path: Path })
 
@@ -110,6 +148,9 @@ export namespace Database {
           item.sql = "select 1;"
         }
       }
+      // altimate_change start — backfill migration names before migrate
+      backfillMigrationNames(sqlite, entries)
+      // altimate_change end
       migrate(db, entries)
     }
 

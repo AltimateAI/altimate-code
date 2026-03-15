@@ -38,40 +38,6 @@ export function showWelcomeBannerIfNeeded(): void {
     const isUpgrade = installedVersion === currentVersion && installedVersion !== "local"
 
     if (!isUpgrade) return
-
-    // Show welcome box
-    const tty = process.stderr.isTTY
-    if (!tty) return
-
-    const orange = "\x1b[38;5;214m"
-    const reset = "\x1b[0m"
-    const bold = "\x1b[1m"
-
-    process.stderr.write(EOL)
-    process.stderr.write(`  ${orange}${bold}altimate-code v${currentVersion}${reset} installed successfully!${EOL}`)
-    process.stderr.write(EOL)
-
-    // Try to show changelog for this version
-    const changelog = extractChangelog("0.0.0", currentVersion)
-    if (changelog) {
-      // Extract only the latest version section
-      const latestSection = changelog.split(/\n## \[/)[0]
-      if (latestSection) {
-        const dim = "\x1b[2m"
-        const cyan = "\x1b[36m"
-        const lines = latestSection.split("\n")
-        for (const line of lines) {
-          if (line.startsWith("## [")) {
-            process.stderr.write(`  ${cyan}${line}${reset}${EOL}`)
-          } else if (line.startsWith("### ")) {
-            process.stderr.write(`  ${bold}${line}${reset}${EOL}`)
-          } else if (line.trim()) {
-            process.stderr.write(`  ${dim}${line}${reset}${EOL}`)
-          }
-        }
-        process.stderr.write(EOL)
-      }
-    }
   } catch {
     // Non-fatal — never let banner display break the CLI
   }

@@ -47,6 +47,41 @@ describe("Installation script branding", () => {
       expect(line).not.toMatch(/["'`]opencode-ai["'`@]/)
     }
   })
+
+  test("method() detects npm-installed @altimateai/altimate-code, not opencode-ai", () => {
+    // The installedName for npm/bun/pnpm must be our scoped package, not upstream
+    const methodBlock = installSrc.slice(
+      installSrc.indexOf("export async function method()"),
+      installSrc.indexOf("export const UpgradeFailedError"),
+    )
+    expect(methodBlock).toContain("@altimateai/altimate-code")
+    expect(methodBlock).not.toMatch(/installedName[^@]*opencode-ai/)
+  })
+
+  test("method() detects brew formula as altimate-code, not opencode", () => {
+    const brewListLine = installSrc
+      .split("\n")
+      .find((l) => l.includes("brew") && l.includes("list") && l.includes("formula"))
+    expect(brewListLine).toBeDefined()
+    expect(brewListLine).toContain("altimate-code")
+    expect(brewListLine).not.toMatch(/formula.*["']opencode["']/)
+  })
+
+  test("latest() fetches @altimateai/altimate-code from npm registry, not opencode-ai", () => {
+    const latestBlock = installSrc.slice(installSrc.indexOf("export async function latest("))
+    // The npm registry fetch must use our package name
+    expect(latestBlock).toContain("@altimateai/altimate-code")
+    expect(latestBlock).not.toMatch(/registry.*opencode-ai/)
+  })
+
+  test("getBrewFormula() references AltimateAI/tap/altimate-code", () => {
+    const formulaBlock = installSrc.slice(
+      installSrc.indexOf("async function getBrewFormula()"),
+      installSrc.indexOf("export async function upgrade("),
+    )
+    expect(formulaBlock).toContain("AltimateAI/tap/altimate-code")
+    expect(formulaBlock).not.toContain("anomalyco")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -361,6 +396,7 @@ describe("altimate_change marker integrity", () => {
     "src/telemetry/index.ts",
     "src/global/index.ts",
     "src/util/token.ts",
+    "src/storage/db.ts",
   ]
 
   for (const relPath of requiredMarkerFiles) {

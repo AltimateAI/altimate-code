@@ -121,10 +121,12 @@ export namespace Installation {
         name: "bun" as const,
         command: () => text(["bun", "pm", "ls", "-g"]),
       },
+      // altimate_change start — brew formula name
       {
         name: "brew" as const,
-        command: () => text(["brew", "list", "--formula", "opencode"]),
+        command: () => text(["brew", "list", "--formula", "altimate-code"]),
       },
+      // altimate_change end
       {
         name: "scoop" as const,
         command: () => text(["scoop", "list", "opencode"]),
@@ -145,8 +147,10 @@ export namespace Installation {
 
     for (const check of checks) {
       const output = await check.command()
+      // altimate_change start — package names for detection
       const installedName =
-        check.name === "brew" || check.name === "choco" || check.name === "scoop" ? "opencode" : "opencode-ai"
+        check.name === "brew" ? "altimate-code" : check.name === "choco" || check.name === "scoop" ? "opencode" : "@altimateai/altimate-code"
+      // altimate_change end
       if (output.includes(installedName)) {
         return check.name
       }
@@ -162,13 +166,15 @@ export namespace Installation {
     }),
   )
 
+  // altimate_change start — brew formula detection
   async function getBrewFormula() {
     const tapFormula = await text(["brew", "list", "--formula", "AltimateAI/tap/altimate-code"])
-    if (tapFormula.includes("opencode")) return "AltimateAI/tap/altimate-code"
-    const coreFormula = await text(["brew", "list", "--formula", "opencode"])
-    if (coreFormula.includes("opencode")) return "opencode"
-    return "opencode"
+    if (tapFormula.includes("altimate")) return "AltimateAI/tap/altimate-code"
+    const coreFormula = await text(["brew", "list", "--formula", "altimate-code"])
+    if (coreFormula.includes("altimate")) return "altimate-code"
+    return "AltimateAI/tap/altimate-code"
   }
+  // altimate_change end
 
   export async function upgrade(method: Method, target: string) {
     let result: Awaited<ReturnType<typeof upgradeCurl>> | undefined
@@ -280,7 +286,9 @@ export namespace Installation {
         if (!version) throw new Error(`Could not detect version for tap formula: ${formula}`)
         return version
       }
-      return fetch("https://formulae.brew.sh/api/formula/opencode.json")
+      // altimate_change start — brew formula URL
+      return fetch("https://formulae.brew.sh/api/formula/altimate-code.json")
+      // altimate_change end
         .then((res) => {
           if (!res.ok) throw new Error(res.statusText)
           return res.json()
@@ -295,7 +303,9 @@ export namespace Installation {
         return reg.endsWith("/") ? reg.slice(0, -1) : reg
       })
       const channel = CHANNEL
-      return fetch(`${registry}/opencode-ai/${channel}`)
+      // altimate_change start — npm package name for version check
+      return fetch(`${registry}/@altimateai/altimate-code/${channel}`)
+      // altimate_change end
         .then((res) => {
           if (!res.ok) throw new Error(res.statusText)
           return res.json()

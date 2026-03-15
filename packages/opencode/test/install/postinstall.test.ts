@@ -88,7 +88,8 @@ describe("postinstall.mjs", () => {
     const dataDir = path.join(dir, "xdg-data")
     const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain("altimate-code v2.5.0 installed")
+    // Banner is written to stderr (npm v7+ silences postinstall stdout)
+    expect(result.stderr).toContain("altimate-code v2.5.0 installed")
   })
 
   test("does not produce double-v when version already has v prefix", () => {
@@ -101,8 +102,9 @@ describe("postinstall.mjs", () => {
     const dataDir = path.join(dir, "xdg-data")
     const result = runPostinstall(dir, { XDG_DATA_HOME: dataDir })
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain("altimate-code v2.5.0 installed")
-    expect(result.stdout).not.toContain("vv2.5.0")
+    // Banner is written to stderr (npm v7+ silences postinstall stdout)
+    expect(result.stderr).toContain("altimate-code v2.5.0 installed")
+    expect(result.stderr).not.toContain("vv2.5.0")
   })
 
   test("writes upgrade marker file to XDG_DATA_HOME", () => {

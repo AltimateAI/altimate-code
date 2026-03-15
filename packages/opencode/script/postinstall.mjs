@@ -106,11 +106,13 @@ function printWelcome(version) {
   const empty = `  │ ${" ".repeat(contentWidth)} │`
   const row = (s) => `  │ ${pad(s)} │`
 
-  console.log(top)
-  console.log(empty)
-  console.log(row(` ${v}`))
-  for (const line of lines) console.log(row(line))
-  console.log(bot)
+  // Use stderr — npm v7+ silences postinstall stdout
+  const out = (s) => process.stderr.write(s + "\n")
+  out(top)
+  out(empty)
+  out(row(` ${v}`))
+  for (const line of lines) out(row(line))
+  out(bot)
 }
 
 /**
