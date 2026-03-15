@@ -164,5 +164,5 @@ export namespace TrainingStore {
 }
 
 function stripTrainingMeta(content: string): string {
-  return content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/m, "").trim()
+  return content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "").trim()
 }

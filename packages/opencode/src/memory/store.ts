@@ -14,20 +14,24 @@ function globalDir(): string {
 }
 
 // altimate_change start - use .altimate-code (primary) with .opencode (fallback)
-let _cachedProjectDir: string | undefined
+// Cache keyed by Instance.directory to avoid stale paths when context changes
+const _projectDirCache = new Map<string, string>()
 function projectDir(): string {
-  if (_cachedProjectDir) return _cachedProjectDir
-  const primary = path.join(Instance.directory, ".altimate-code", "memory")
-  const fallback = path.join(Instance.directory, ".opencode", "memory")
-  // Use .altimate-code if it exists, fall back to .opencode, default to .altimate-code for new projects
-  if (fsSync.existsSync(path.join(Instance.directory, ".altimate-code"))) {
-    _cachedProjectDir = primary
-  } else if (fsSync.existsSync(path.join(Instance.directory, ".opencode"))) {
-    _cachedProjectDir = fallback
+  const dir = Instance.directory
+  const cached = _projectDirCache.get(dir)
+  if (cached) return cached
+  const primary = path.join(dir, ".altimate-code", "memory")
+  const fallback = path.join(dir, ".opencode", "memory")
+  let result: string
+  if (fsSync.existsSync(path.join(dir, ".altimate-code"))) {
+    result = primary
+  } else if (fsSync.existsSync(path.join(dir, ".opencode"))) {
+    result = fallback
   } else {
-    _cachedProjectDir = primary
+    result = primary
   }
-  return _cachedProjectDir
+  _projectDirCache.set(dir, result)
+  return result
 }
 // altimate_change end
 

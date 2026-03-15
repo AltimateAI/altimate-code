@@ -43,8 +43,8 @@ export const TrainingSaveTool = Tool.define("training_save", {
     content: z
       .string()
       .min(1)
-      .max(2500)
-      .describe("The knowledge to save. Be specific and actionable. Use markdown for structure. Max 2500 chars."),
+      .max(1800)
+      .describe("The knowledge to save. Be specific and actionable. Use markdown for structure. Max 1800 chars."),
     scope: z
       .enum(["global", "project"])
       .default("project")

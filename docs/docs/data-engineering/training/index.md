@@ -177,7 +177,7 @@ Training doesn't replace CLAUDE.md. They complement each other:
 | Limit | Value |
 |---|---|
 | Max entries per kind | 20 |
-| Max content per entry | 2,500 characters |
+| Max content per entry | 1,800 characters |
 | Training kinds | 6 |
 | Scopes | 2 (global = personal, project = team) |
 

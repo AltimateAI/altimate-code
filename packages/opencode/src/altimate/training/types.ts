@@ -39,7 +39,7 @@ export function trainingKind(block: { tags: string[] }): TrainingKind | undefine
 
 export function parseTrainingMeta(content: string): TrainingBlockMeta | undefined {
   // Training blocks store structured metadata in the first YAML-like section
-  const match = content.match(/^<!--\s*training\n([\s\S]*?)\n-->/m)
+  const match = content.match(/^<!--\s*training\n([\s\S]*?)\n-->/)
   if (!match) return undefined
   const meta: Record<string, unknown> = {}
   for (const line of match[1].split("\n")) {
@@ -63,6 +63,6 @@ export function embedTrainingMeta(content: string, meta: TrainingBlockMeta): str
     "-->",
   ].join("\n")
   // Strip existing training meta block if present
-  const stripped = content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/m, "")
+  const stripped = content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "")
   return header + "\n" + stripped
 }

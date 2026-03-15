@@ -253,6 +253,7 @@ export namespace MemoryPrompt {
     const header = "## Teammate Training\n\nYou have been trained on the following knowledge by your team. Apply it consistently.\n"
     let result = header
     let used = header.length
+    let itemCount = 0
 
     const byKind = new Map<TrainingKind, MemoryBlock[]>()
     for (const block of training) {
@@ -269,7 +270,7 @@ export namespace MemoryPrompt {
 
       const section = KIND_HEADERS[kind]
       const sectionHeader = `\n### ${section.header}\n_${section.instruction}_\n`
-      if (used + sectionHeader.length > budget) break
+      if (used + sectionHeader.length > budget) continue
       result += sectionHeader
       used += sectionHeader.length
 
@@ -285,9 +286,10 @@ export namespace MemoryPrompt {
         if (used + needed > budget) break
         result += "\n" + formatted + "\n"
         used += needed
+        itemCount++
       }
     }
 
-    return result
+    return itemCount > 0 ? result : ""
   }
 }
