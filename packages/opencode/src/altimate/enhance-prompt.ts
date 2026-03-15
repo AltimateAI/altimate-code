@@ -134,6 +134,11 @@ export async function enhancePrompt(text: string): Promise<string> {
       ],
     })
 
+    // Consume the stream explicitly to avoid potential SDK hangs where
+    // .text never resolves if the stream isn't drained (Vercel AI SDK caveat)
+    for await (const _ of stream.fullStream) {
+      // drain
+    }
     const result = await stream.text.catch((err) => {
       log.error("failed to enhance prompt", { error: err })
       return undefined

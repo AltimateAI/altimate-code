@@ -216,6 +216,9 @@ export function Prompt(props: PromptProps) {
           })
           try {
             const enhanced = await enhancePrompt(original)
+            // Guard against race condition: if user edited the prompt while
+            // enhancement was in-flight, discard the stale enhanced result
+            if (store.prompt.input !== original) return
             if (enhanced !== original) {
               input.setText(enhanced)
               setStore("prompt", "input", enhanced)
@@ -622,6 +625,8 @@ export function Prompt(props: PromptProps) {
           enhancingInProgress = true
           toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
           const enhanced = await enhancePrompt(inputText)
+          // Discard if user changed the prompt during enhancement
+          if (store.prompt.input !== inputText) return
           if (enhanced !== inputText) {
             inputText = enhanced
             setStore("prompt", "input", enhanced)

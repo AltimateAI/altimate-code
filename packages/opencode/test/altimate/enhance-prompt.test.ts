@@ -28,6 +28,12 @@ mock.module("@/session/llm", () => ({
     stream: () => {
       if (mockStreamShouldThrow) return Promise.reject(new Error("stream init failed"))
       return Promise.resolve({
+        // fullStream must be an async iterable (consumed by for-await in enhancePrompt)
+        fullStream: {
+          [Symbol.asyncIterator]: () => ({
+            next: () => Promise.resolve({ done: true, value: undefined }),
+          }),
+        },
         text: mockStreamResult !== undefined
           ? Promise.resolve(mockStreamResult)
           : Promise.reject(new Error("stream text failed")),
