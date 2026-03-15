@@ -95,8 +95,6 @@ describe("training meta roundtrip through content", () => {
       kind: "pattern",
       source: "stg_orders.sql",
       applied: 5,
-      accepted: 3,
-      rejected: 1,
     }
     const content = "- Use CTEs\n- Cast types"
     const embedded = embedTrainingMeta(content, meta)
