@@ -41,12 +41,19 @@ async function createFakeFile(filePath: string) {
   await fsp.writeFile(filePath, "")
 }
 
+// Platform-aware venv python path (matches venvPythonBin in production code)
+function testVenvPythonBin(venvDir: string): string {
+  return process.platform === "win32"
+    ? path.join(venvDir, "Scripts", "python.exe")
+    : path.join(venvDir, "bin", "python")
+}
+
 // Paths that resolvePython() checks for dev/cwd venvs.
 // From source file: __dirname is <repo>/packages/altimate-code/src/bridge/
 // From test file:   __dirname is <repo>/packages/altimate-code/test/bridge/
 // Both resolve 3 levels up to <repo>/packages/, so the dev venv path is identical.
-const devVenvPython = path.resolve(__dirname, "..", "..", "..", "altimate-engine", ".venv", "bin", "python")
-const cwdVenvPython = path.join(process.cwd(), ".venv", "bin", "python")
+const devVenvPython = testVenvPythonBin(path.resolve(__dirname, "..", "..", "..", "altimate-engine", ".venv"))
+const cwdVenvPython = testVenvPythonBin(path.join(process.cwd(), ".venv"))
 const hasLocalDevVenv = existsSync(devVenvPython) || existsSync(cwdVenvPython)
 
 // ---------------------------------------------------------------------------

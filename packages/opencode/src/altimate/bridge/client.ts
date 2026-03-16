@@ -175,6 +175,11 @@ export namespace Bridge {
     try {
       await call("ping", {} as any)
     } catch (e) {
+      // Clean up the spawned process so subsequent call() invocations
+      // correctly detect !child and trigger a restart instead of writing
+      // to a non-functional process and hanging until timeout.
+      child?.kill()
+      child = undefined
       throw new Error(`Failed to start Python bridge: ${e}`)
     }
   }
