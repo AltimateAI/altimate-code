@@ -13,6 +13,11 @@ import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { PermissionNext } from "@/permission/next"
 import { Skill } from "@/skill"
+// altimate_change start - import for env-based skill selection
+import { Fingerprint } from "../altimate/fingerprint"
+import { Config } from "../config/config"
+import { selectSkillsWithLLM } from "../altimate/skill-selector"
+// altimate_change end
 
 export namespace SystemPrompt {
   export function instructions() {
@@ -61,12 +66,24 @@ export namespace SystemPrompt {
 
     const list = await Skill.available(agent)
 
+    // altimate_change start - apply env-based skill selection
+    const cfg = await Config.get()
+    let filtered: Skill.Info[]
+    if (cfg.experimental?.env_fingerprint_skill_selection === true) {
+      filtered = await selectSkillsWithLLM(list, Fingerprint.get())
+    } else {
+      filtered = list
+    }
+    // altimate_change end
+
     return [
       "Skills provide specialized instructions and workflows for specific tasks.",
       "Use the skill tool to load a skill when a task matches its description.",
       // the agents seem to ingest the information about skills a bit better if we present a more verbose
       // version of them here and a less verbose version in tool description, rather than vice versa.
-      Skill.fmt(list, { verbose: true }),
+      // altimate_change start - use filtered skill list
+      Skill.fmt(filtered, { verbose: true }),
+      // altimate_change end
     ].join("\n")
   }
 }

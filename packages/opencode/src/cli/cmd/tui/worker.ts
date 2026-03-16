@@ -93,6 +93,7 @@ function getOrCreateTracer(sessionID: string): Tracer | null {
       ? Tracer.withExporters([...tracingExporters], { maxFiles: tracingMaxFiles })
       : Tracer.create()
     tracer.startTrace(sessionID, {})
+    Tracer.setActive(tracer)
     sessionTracers.set(sessionID, tracer)
     return tracer
   } catch {

@@ -41,7 +41,7 @@ export interface TraceSpan {
   spanId: string
   parentSpanId: string | null
   name: string
-  kind: "session" | "generation" | "tool" | "text"
+  kind: "session" | "generation" | "tool" | "text" | "span"
   startTime: number
   endTime?: number
   status: "ok" | "error"
@@ -246,6 +246,11 @@ interface TracerOptions {
 }
 
 export class Tracer {
+  // Global active tracer — set when a session starts, cleared on end.
+  private static _active: Tracer | null = null
+  static get active(): Tracer | null { return Tracer._active }
+  static setActive(tracer: Tracer | null) { Tracer._active = tracer }
+
   private traceId: string
   private sessionId: string | undefined
   private rootSpanId: string | undefined
@@ -559,6 +564,39 @@ export class Tracer {
    */
   logText(part: { text: string }) {
     if (part.text != null) this.generationText.push(String(part.text))
+  }
+
+  /**
+   * Log a custom span (e.g., fingerprint detection, skill selection).
+   * Used for internal operations that aren't LLM generations or tool calls.
+   */
+  logSpan(span: {
+    name: string
+    startTime: number
+    endTime: number
+    status?: "ok" | "error"
+    input?: unknown
+    output?: unknown
+    attributes?: Record<string, unknown>
+  }) {
+    if (!this.rootSpanId) return
+    try {
+      this.spans.push({
+        spanId: randomUUIDv7(),
+        parentSpanId: this.rootSpanId,
+        name: span.name,
+        kind: "span",
+        startTime: span.startTime,
+        endTime: span.endTime,
+        status: span.status ?? "ok",
+        input: span.input,
+        output: span.output,
+        attributes: span.attributes,
+      })
+      this.snapshot()
+    } catch {
+      // best-effort
+    }
   }
 
   /**

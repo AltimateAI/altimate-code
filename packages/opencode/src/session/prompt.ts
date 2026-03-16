@@ -50,6 +50,11 @@ import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
 import { decodeDataUrl } from "@/util/data-url"
+// altimate_change start - import fingerprint for env-based skill selection
+import { Fingerprint } from "../altimate/fingerprint"
+import { Config } from "../config/config"
+import { Tracer } from "../altimate/observability/tracing"
+// altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 
 // @ts-ignore
@@ -297,6 +302,14 @@ export namespace SessionPrompt {
 
     let step = 0
     const session = await Session.get(sessionID)
+    // altimate_change start - detect environment fingerprint at session start
+    const altCfg = await Config.get()
+    if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
+      await Fingerprint.detect(Instance.directory, Instance.worktree).catch((e) => {
+        log.warn("fingerprint detection failed", { error: e })
+      })
+    }
+    // altimate_change end
     // altimate_change start — session telemetry tracking
     await Telemetry.init()
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
@@ -714,6 +727,16 @@ export namespace SessionPrompt {
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
+
+      // altimate_change start - trace system prompt
+      Tracer.active?.logSpan({
+        name: "system-prompt",
+        startTime: Date.now(),
+        endTime: Date.now(),
+        input: { agent: agent.name, step },
+        output: { parts: system.length, content: system.join("\n\n") },
+      })
+      // altimate_change end
 
       const result = await processor.process({
         user: lastUser,

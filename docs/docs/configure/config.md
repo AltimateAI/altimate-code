@@ -61,6 +61,25 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 | `compaction` | `object` | Context compaction settings (see [Context Management](context-management.md)) |
 | `experimental` | `object` | Experimental feature flags |
 
+### Experimental Flags
+
+These flags are under `experimental` and may change or be removed in future releases.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `env_fingerprint_skill_selection` | `boolean` | `false` | Use environment fingerprint (dbt, airflow, databricks, SQL) to select relevant skills once per session via LLM. When enabled, the configured model runs once at session start to filter skills based on detected project environment. Results are cached per working directory. When disabled (default), all skills are shown. |
+| `auto_enhance_prompt` | `boolean` | `false` | Automatically rewrite prompts with AI before sending. Uses a small model to clarify rough prompts. |
+
+Example:
+
+```json
+{
+  "experimental": {
+    "env_fingerprint_skill_selection": true
+  }
+}
+```
+
 ## Value Substitution
 
 Config values support dynamic substitution so you never need to hardcode secrets.

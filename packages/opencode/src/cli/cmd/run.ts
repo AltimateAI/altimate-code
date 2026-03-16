@@ -720,6 +720,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
         variant: args.variant,
         prompt: message,
       })
+      // altimate_change start - activate tracer for session
+      if (tracer) Tracer.setActive(tracer)
+      // altimate_change end
 
       // Register crash handlers to flush the trace on unexpected exit
       const onSigint = () => { tracer?.flushSync("Process interrupted"); process.exit(130) }
@@ -766,6 +769,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // Finalize trace and save to disk
       if (tracer) {
+        Tracer.setActive(null)
         const tracePath = await tracer.endTrace(error)
         if (tracePath) {
           emit("trace_saved", { path: tracePath })
