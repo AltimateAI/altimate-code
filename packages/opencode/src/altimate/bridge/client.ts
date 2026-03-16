@@ -14,6 +14,13 @@ import type { BridgeMethod, BridgeMethods } from "./protocol"
 import { Telemetry } from "../telemetry"
 import { Log } from "../../util/log"
 
+/** Platform-aware path to the python binary inside a venv directory. */
+function venvPythonBin(venvDir: string): string {
+  return process.platform === "win32"
+    ? path.join(venvDir, "Scripts", "python.exe")
+    : path.join(venvDir, "bin", "python")
+}
+
 /** Resolve the Python interpreter to use for the engine sidecar.
  *  Exported for testing — not part of the public API. */
 export function resolvePython(): string {
@@ -22,7 +29,7 @@ export function resolvePython(): string {
 
   // 2. Check for .venv relative to altimate-engine package (local dev)
   const engineDir = path.resolve(__dirname, "..", "..", "..", "altimate-engine")
-  const venvPython = path.join(engineDir, ".venv", "bin", "python")
+  const venvPython = venvPythonBin(path.join(engineDir, ".venv"))
   if (existsSync(venvPython)) return venvPython
 
   // 3. Check the managed engine venv (created by ensureEngine)
@@ -33,7 +40,7 @@ export function resolvePython(): string {
   if (existsSync(managedPython)) return managedPython
 
   // 4. Check for .venv in cwd
-  const cwdVenv = path.join(process.cwd(), ".venv", "bin", "python")
+  const cwdVenv = venvPythonBin(path.join(process.cwd(), ".venv"))
   if (existsSync(cwdVenv)) return cwdVenv
 
   // 5. Fallback
@@ -48,6 +55,8 @@ export namespace Bridge {
   const CALL_TIMEOUT_MS = 30_000
   const pending = new Map<number, { resolve: (value: any) => void; reject: (reason: any) => void }>()
   let buffer = ""
+  // Mutex to prevent concurrent start() calls from spawning duplicate processes
+  let pendingStart: Promise<void> | null = null
 
   export async function call<M extends BridgeMethod>(
     method: M,
@@ -56,7 +65,16 @@ export namespace Bridge {
     const startTime = Date.now()
     if (!child || child.exitCode !== null) {
       if (restartCount >= MAX_RESTARTS) throw new Error("Python bridge failed after max restarts")
-      await start()
+      if (pendingStart) {
+        await pendingStart
+      } else {
+        pendingStart = start()
+        try {
+          await pendingStart
+        } finally {
+          pendingStart = null
+        }
+      }
     }
     const id = ++requestId
     const request = JSON.stringify({ jsonrpc: "2.0", method, params, id })
