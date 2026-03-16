@@ -177,7 +177,7 @@ export namespace Bridge {
     })
 
     child.on("exit", (code) => {
-      if (code !== 0) restartCount++
+      if (code !== null && code !== 0) restartCount++
       for (const [id, p] of pending) {
         p.reject(new Error(`Bridge process exited (code ${code})`))
         pending.delete(id)
