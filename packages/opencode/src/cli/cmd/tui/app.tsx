@@ -27,6 +27,55 @@ import { Home } from "@tui/routes/home"
 import { Session } from "@tui/routes/session"
 import { PromptHistoryProvider } from "./component/prompt/history"
 import { FrecencyProvider } from "./component/prompt/frecency"
+import { Tracer } from "@/altimate/observability/tracing"
+import { renderTraceViewer } from "@/altimate/observability/viewer"
+import fsAsync from "fs/promises"
+
+// altimate_change start - shared trace viewer server
+let traceViewerServer: ReturnType<typeof Bun.serve> | undefined
+function getTraceViewerUrl(sessionID: string): string {
+  if (!traceViewerServer) {
+    const tracesDir = Tracer.getTracesDir()
+    traceViewerServer = Bun.serve({
+      port: 0, // random available port
+      hostname: "127.0.0.1",
+      async fetch(req) {
+        const url = new URL(req.url)
+        // Extract session ID from path: /view/<sessionID> or /api/<sessionID>
+        const parts = url.pathname.split("/").filter(Boolean)
+        const action = parts[0] // "view" or "api"
+        const sid = parts[1]
+        if (!sid) return new Response("Usage: /view/<sessionID>", { status: 400 })
+
+        const safeId = sid.replace(/[/\\.:]/g, "_")
+        const traceFile = `${tracesDir}/${safeId}.json`
+
+        if (action === "api") {
+          try {
+            const content = await fsAsync.readFile(traceFile, "utf-8")
+            return new Response(content, {
+              headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+            })
+          } catch {
+            return new Response("{}", { status: 404 })
+          }
+        }
+
+        // Serve HTML viewer
+        try {
+          const trace = JSON.parse(await fsAsync.readFile(traceFile, "utf-8"))
+          const html = renderTraceViewer(trace, { live: true, apiPath: "/api/" + sid })
+          return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })
+        } catch {
+          return new Response("Trace not found. Try again after the agent responds.", { status: 404 })
+        }
+      },
+    })
+  }
+  return `http://localhost:${traceViewerServer.port}/view/${sessionID}`
+}
+
+// altimate_change end — renderInlineViewer removed, now using renderTraceViewer from viewer.ts
 import { PromptStashProvider } from "./component/prompt/stash"
 import { DialogAlert } from "./ui/dialog-alert"
 import { ToastProvider, useToast } from "./ui/toast"
@@ -592,6 +641,40 @@ function App() {
       },
       onSelect: () => exit(),
       category: "System",
+    },
+    {
+      title: "View session trace",
+      value: "trace.view",
+      category: "Debug",
+      slash: {
+        name: "trace",
+      },
+      onSelect: (dialog) => {
+        const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+        if (!sessionID) {
+          toast.show({ variant: "warning", message: "No active session to trace", duration: 3000 })
+          dialog.clear()
+          return
+        }
+        try {
+          const url = getTraceViewerUrl(sessionID)
+          const openArgs = process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd", "/c", "start", url] : ["xdg-open", url]
+          Bun.spawn(openArgs, { stdout: "ignore", stderr: "ignore" })
+          toast.show({
+            variant: "info",
+            message: `Trace viewer: ${url}`,
+            duration: 6000,
+          })
+        } catch (e) {
+          // Show the trace directory so user can find the file manually
+          toast.show({
+            variant: "info",
+            message: `Trace files: ${Tracer.getTracesDir()}`,
+            duration: 8000,
+          })
+        }
+        dialog.clear()
+      },
     },
     {
       title: "Toggle debug panel",

@@ -1210,6 +1210,36 @@ export namespace Config {
             .describe("Token buffer for compaction. Leaves enough window to avoid overflow during compaction."),
         })
         .optional(),
+      // altimate_change start - tracing config
+      tracing: z
+        .object({
+          enabled: z
+            .boolean()
+            .optional()
+            .describe("Enable session tracing (default: true). Traces are saved locally and can be viewed with `altimate-code trace`."),
+          dir: z
+            .string()
+            .optional()
+            .describe("Custom directory for trace files (default: ~/.local/share/altimate-code/traces/)"),
+          maxFiles: z
+            .number()
+            .int()
+            .nonnegative()
+            .optional()
+            .describe("Maximum number of trace files to keep. 0 for unlimited. Oldest files are removed when exceeded (default: 100)."),
+          exporters: z
+            .array(
+              z.object({
+                name: z.string().describe("Exporter identifier"),
+                endpoint: z.string().url().describe("HTTP endpoint to POST trace data to"),
+                headers: z.record(z.string(), z.string()).optional().describe("Custom headers (e.g., Authorization)"),
+              }),
+            )
+            .optional()
+            .describe("Additional trace exporters. Each receives the full trace JSON via HTTP POST."),
+        })
+        .optional(),
+      // altimate_change end
       experimental: z
         .object({
           disable_paste_summary: z.boolean().optional(),

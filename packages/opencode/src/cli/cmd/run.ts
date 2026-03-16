@@ -27,7 +27,8 @@ import { SkillTool } from "../../tool/skill"
 import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
-import { LangfuseTracer } from "../../altimate/observability/langfuse"
+import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
+import { Config } from "../../config/config"
 
 type ToolProps<T extends Tool.Info> = {
   input: Tool.InferParameters<T>
@@ -345,6 +346,11 @@ export const RunCommand = cmd({
         type: "number",
         describe: "when using --file with a SQL file, analyze only the Nth statement (1-indexed)",
       })
+      .option("trace", {
+        type: "boolean",
+        describe: "enable session tracing (default: true, disable with --no-trace)",
+        default: true,
+      })
   },
   handler: async (args) => {
     let message = [...args.message, ...(args["--"] || [])]
@@ -517,8 +523,29 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const events = await sdk.event.subscribe()
       let error: string | undefined
 
-      // Langfuse tracing — initialized lazily after sessionID is available
-      const tracer = LangfuseTracer.fromEnv()
+      // Build tracer from config + CLI flags — must never crash the run command
+      const tracer = await (async () => {
+        try {
+          if (args.trace === false) return null
+
+          const cfg = await Config.get()
+          const tracingCfg = cfg.tracing
+          if (tracingCfg?.enabled === false) return null
+
+          const exporters: TraceExporter[] = [new FileExporter(tracingCfg?.dir)]
+
+          if (tracingCfg?.exporters) {
+            for (const exp of tracingCfg.exporters) {
+              exporters.push(new HttpExporter(exp.name, exp.endpoint, exp.headers))
+            }
+          }
+
+          return Tracer.withExporters(exporters, { maxFiles: tracingCfg?.maxFiles })
+        } catch {
+          // Config failure should never prevent the run command from working
+          return null
+        }
+      })()
 
       async function loop() {
         const toggles = new Map<string, boolean>()
@@ -534,6 +561,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
             UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
             UI.empty()
             toggles.set("start", true)
+
+            // Enrich trace with resolved model/provider from the first assistant message
+            const info = event.properties.info
+            tracer?.enrichFromAssistant({
+              modelID: info.modelID,
+              providerID: info.providerID,
+              agent: info.agent,
+              variant: info.variant,
+            })
           }
 
           if (event.type === "message.part.updated") {
@@ -541,7 +577,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.sessionID !== sessionID) continue
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
-              tracer?.logToolCall(part as Parameters<LangfuseTracer["logToolCall"]>[0])
+              tracer?.logToolCall(part as Parameters<Tracer["logToolCall"]>[0])
               if (emit("tool_use", { part })) continue
               if (part.state.status === "completed") {
                 tool(part)
@@ -676,14 +712,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       await share(sdk, sessionID)
 
-      // Start Langfuse trace now that sessionID is available
-      if (tracer) {
-        tracer.startTrace(sessionID, {
-          model: args.model,
-          agent,
-          prompt: message,
-        })
-      }
+      // Start trace now that sessionID is available
+      tracer?.startTrace(sessionID, {
+        title: title() || message.slice(0, 80),
+        model: args.model,
+        agent,
+        variant: args.variant,
+        prompt: message,
+      })
+
+      // Register crash handlers to flush the trace on unexpected exit
+      const onSigint = () => { tracer?.flushSync("Process interrupted"); process.exit(130) }
+      const onSigterm = () => { tracer?.flushSync("Process interrupted"); process.exit(143) }
+      const onBeforeExit = () => { tracer?.flushSync("Process exited") }
+      process.on("SIGINT", onSigint)
+      process.on("SIGTERM", onSigterm)
+      process.on("beforeExit", onBeforeExit)
 
       // Start event listener before sending the prompt so no events are missed
       const loopPromise = loop().catch((e) => {
@@ -715,10 +759,20 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
 
-      // Finalize Langfuse trace and emit URL
+      // Remove crash handlers — trace will be finalized cleanly
+      process.removeListener("SIGINT", onSigint)
+      process.removeListener("SIGTERM", onSigterm)
+      process.removeListener("beforeExit", onBeforeExit)
+
+      // Finalize trace and save to disk
       if (tracer) {
-        const traceUrl = await tracer.endTrace(error)
-        if (traceUrl) emit("langfuse_trace", { url: traceUrl })
+        const tracePath = await tracer.endTrace(error)
+        if (tracePath) {
+          emit("trace_saved", { path: tracePath })
+          if (args.format !== "json" && process.stdout.isTTY) {
+            UI.println(UI.Style.TEXT_DIM + `Trace saved: ${tracePath}` + UI.Style.TEXT_NORMAL)
+          }
+        }
       }
 
       // Write accumulated text output to file if --output was specified
