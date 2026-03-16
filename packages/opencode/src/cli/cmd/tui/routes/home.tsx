@@ -15,6 +15,8 @@ import { Installation } from "@/installation"
 import { useKV } from "../context/kv"
 import { useCommandDialog } from "../component/dialog-command"
 import { useLocal } from "../context/local"
+import { UpgradeIndicator } from "../component/upgrade-indicator"
+import { UPGRADE_KV_KEY, getAvailableVersion } from "../component/upgrade-indicator-utils"
 
 // TODO: what is the best way to do this?
 let once = false
@@ -152,7 +154,10 @@ export function Home() {
         </box>
         <box flexGrow={1} />
         <box flexShrink={0}>
-          <text fg={theme.textMuted}>{Installation.VERSION}</text>
+          <UpgradeIndicator />
+          <Show when={!getAvailableVersion(kv.get(UPGRADE_KV_KEY))}>
+            <text fg={theme.textMuted}>{Installation.VERSION}</text>
+          </Show>
         </box>
       </box>
     </>

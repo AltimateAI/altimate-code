@@ -842,6 +842,7 @@ function App() {
 
   // altimate_change start — branding: altimate upgrade
   sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
+    kv.set("update_available_version", evt.properties.version)
     toast.show({
       variant: "info",
       title: "Update Available",
