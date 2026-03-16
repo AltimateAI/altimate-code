@@ -198,6 +198,48 @@ For additional safety:
 - Run against a **staging environment** before production
 - Use the `analyst` agent with restricted permissions for ad-hoc queries
 
+## What protections does Altimate Code have for file access?
+
+Altimate Code includes several layers of protection to keep the agent within your project:
+
+- **Project boundary enforcement** — File operations check that paths stay within your project directory (or git worktree for monorepos). Attempts to read or write outside the project trigger an `external_directory` permission prompt.
+- **Path traversal blocking** — Paths containing `../` sequences that would escape the project are rejected with an "Access denied" error.
+- **Bash command analysis** — The bash tool parses commands with tree-sitter to detect file operations (`rm`, `cp`, `mv`, etc.) targeting paths outside your project, and prompts for permission.
+- **Non-git project safety** — For projects outside a git repository, the boundary is strictly the working directory (not the entire filesystem).
+
+These protections operate at the application level. For additional isolation, you can run Altimate Code inside a Docker container or VM.
+
+## Best practices for staying safe
+
+1. **Review before approving.** The permission prompt shows you exactly what will happen — diffs for file edits, the full command for bash. Take a moment to read it.
+
+2. **Deny destructive commands.** Add these to your `altimate-code.json` to block the most dangerous operations regardless of other rules:
+
+    ```json
+    {
+      "permission": {
+        "bash": {
+          "rm -rf *": "deny",
+          "DROP *": "deny",
+          "DELETE *": "deny",
+          "git push --force *": "deny",
+          "git reset --hard *": "deny",
+          "*": "ask"
+        }
+      }
+    }
+    ```
+
+3. **Use per-agent permissions.** Give each agent only what it needs. The `analyst` agent doesn't need write access. See [Permissions](configure/permissions.md) for examples.
+
+4. **Use read-only database credentials for exploration.** When using the agent for analysis or ad-hoc queries, connect with a read-only database user.
+
+5. **Work on a branch.** Let the agent work on a feature branch so you can review changes before merging. Git gives you a full safety net.
+
+6. **Back up before large operations.** If the agent is about to make sweeping changes, commit your current state first. You can always `git stash` or revert.
+
+7. **Use Docker for sensitive environments.** If you're working with production systems or sensitive data, running Altimate Code in a container provides OS-level isolation on top of the permission system.
+
 ## Where should I report security vulnerabilities?
 
 **Do not open public GitHub issues for security vulnerabilities.** Instead, email **security@altimate.ai** with a description, reproduction steps, and your severity assessment. You'll receive acknowledgment within 48 hours. See the full [Security Policy](https://github.com/AltimateAI/altimate-code/blob/main/SECURITY.md) for details.

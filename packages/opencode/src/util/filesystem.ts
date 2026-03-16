@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from "fs/promises"
 import { createWriteStream, existsSync, statSync } from "fs"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
-import { dirname, join, relative, resolve as pathResolve } from "path"
+import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { Glob } from "./glob"
@@ -146,7 +146,59 @@ export namespace Filesystem {
   }
 
   export function contains(parent: string, child: string) {
-    return !relative(parent, child).startsWith("..")
+    const rel = relative(parent, child)
+    // Block cross-drive paths on Windows where relative() returns an absolute path
+    if (isAbsolute(rel)) return false
+    return !rel.startsWith("..")
+  }
+
+  /**
+   * Symlink-aware containment check. Resolves both paths to their real
+   * filesystem location before comparing, preventing symlink escape attacks.
+   * For non-existent paths (write operations), walks up to the nearest
+   * existing ancestor and resolves from there.
+   * Falls back to lexical `contains()` if resolution fails entirely.
+   */
+  export function containsReal(parent: string, child: string): boolean {
+    let realParent: string
+    try {
+      realParent = realpathSync(parent)
+    } catch {
+      // Parent doesn't exist — fall back to lexical check
+      return contains(parent, child)
+    }
+
+    // Try resolving the child directly (exists on disk)
+    try {
+      const realChild = realpathSync(child)
+      const rel = relative(realParent, realChild)
+      return !isAbsolute(rel) && !rel.startsWith("..")
+    } catch {
+      // Child doesn't exist — walk up to find nearest existing ancestor
+    }
+
+    // Walk up the directory tree to find the nearest existing ancestor,
+    // then append the remaining segments. This handles write operations
+    // where the target directory hasn't been created yet.
+    const resolved = pathResolve(child)
+    let current = resolved
+    const trailing: string[] = []
+    while (true) {
+      try {
+        const realAncestor = realpathSync(current)
+        const realChild = trailing.length > 0 ? join(realAncestor, ...trailing) : realAncestor
+        const rel = relative(realParent, realChild)
+        return !isAbsolute(rel) && !rel.startsWith("..")
+      } catch {
+        const parent_ = dirname(current)
+        if (parent_ === current) {
+          // Reached filesystem root without finding an existing dir — fall back
+          return contains(parent, child)
+        }
+        trailing.unshift(basename(current))
+        current = parent_
+      }
+    }
   }
 
   export async function findUp(target: string, start: string, stop?: string) {

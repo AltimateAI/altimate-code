@@ -80,6 +80,23 @@ export namespace Agent {
         "*.env.*": "ask",
         "*.env.example": "allow",
       },
+      // Safety defaults: deny destructive commands that are rarely intentional.
+      // Users can override these in altimate-code.json if needed.
+      bash: {
+        "rm -rf *": "deny",
+        "rm -fr *": "deny",
+        "rmdir /s *": "deny",
+        "git push --force *": "deny",
+        "git push -f *": "deny",
+        "git reset --hard *": "deny",
+        "git clean -fd *": "deny",
+        "git clean -f *": "deny",
+        "git checkout -- .": "deny",
+        "DROP DATABASE *": "deny",
+        "DROP SCHEMA *": "deny",
+        "TRUNCATE *": "deny",
+        "*": "ask",
+      },
     })
     const user = PermissionNext.fromConfig(cfg.permission ?? {})
 

@@ -1,6 +1,7 @@
 import path from "path"
 import type { Tool } from "./tool"
 import { Instance } from "../project/instance"
+import { Protected } from "../file/protected"
 
 type Kind = "file" | "directory"
 
@@ -27,6 +28,30 @@ export async function assertExternalDirectory(ctx: Tool.Context, target?: string
     metadata: {
       filepath: target,
       parentDir,
+    },
+  })
+}
+
+/**
+ * Checks if a write target is a sensitive file or directory (e.g., .git/, .ssh/,
+ * .env, credentials). If so, prompts the user for explicit permission even if the
+ * path is inside the project boundary.
+ */
+export async function assertSensitiveWrite(ctx: Tool.Context, target?: string) {
+  if (!target) return
+
+  const relativePath = path.relative(Instance.directory, target)
+  const matched = Protected.isSensitiveWrite(relativePath)
+  if (!matched) return
+
+  await ctx.ask({
+    permission: "edit",
+    patterns: [relativePath],
+    always: [],
+    metadata: {
+      filepath: target,
+      sensitive: matched,
+      reason: `This file is in a sensitive location (${matched}). Modifications could affect credentials, version control, or security configuration.`,
     },
   })
 }
