@@ -67,6 +67,10 @@ export namespace Bridge {
       if (restartCount >= MAX_RESTARTS) throw new Error("Python bridge failed after max restarts")
       if (pendingStart) {
         await pendingStart
+        // Re-check: the process may have died between startup and now
+        if (!child || child.exitCode !== null) {
+          throw new Error("Bridge process died during startup")
+        }
       } else {
         pendingStart = start()
         try {
@@ -160,6 +164,16 @@ export namespace Bridge {
     child.stderr!.on("data", (data: Buffer) => {
       const msg = data.toString().trim()
       if (msg) Log.Default.error("altimate-engine stderr", { message: msg })
+    })
+
+    child.on("error", (err) => {
+      Log.Default.error("altimate-engine spawn error", { error: String(err) })
+      restartCount++
+      for (const [id, p] of pending) {
+        p.reject(new Error(`Bridge process failed to spawn: ${err}`))
+        pending.delete(id)
+      }
+      child = undefined
     })
 
     child.on("exit", (code) => {

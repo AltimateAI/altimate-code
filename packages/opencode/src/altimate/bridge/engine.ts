@@ -179,8 +179,9 @@ async function ensureEngineImpl(): Promise<void> {
   const dir = engineDir()
   const venvDir = path.join(dir, "venv")
 
-  // Create venv if it doesn't exist
-  if (!existsSync(venvDir)) {
+  // Create venv if it doesn't exist, or recreate if the Python binary is missing
+  // (e.g. user deleted the binary but left the venv directory intact)
+  if (!existsSync(venvDir) || !pythonExists) {
     Log.Default.info("creating python environment")
     try {
       execFileSync(uv, ["venv", "--python", "3.12", venvDir], { stdio: "pipe" })
