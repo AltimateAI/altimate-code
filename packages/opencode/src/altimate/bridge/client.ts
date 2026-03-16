@@ -12,6 +12,7 @@ import path from "path"
 import { ensureEngine, enginePythonPath } from "./engine"
 import type { BridgeMethod, BridgeMethods } from "./protocol"
 import { Telemetry } from "../telemetry"
+import { Log } from "../../util/log"
 
 /** Resolve the Python interpreter to use for the engine sidecar.
  *  Exported for testing — not part of the public API. */
@@ -137,7 +138,7 @@ export namespace Bridge {
 
     child.stderr!.on("data", (data: Buffer) => {
       const msg = data.toString().trim()
-      if (msg) console.error(`[altimate-engine] ${msg}`)
+      if (msg) Log.Default.error(`[altimate-engine] ${msg}`)
     })
 
     child.on("exit", (code) => {

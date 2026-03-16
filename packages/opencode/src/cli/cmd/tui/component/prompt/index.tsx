@@ -23,6 +23,7 @@ import { useExit } from "../../context/exit"
 import { Clipboard } from "../../util/clipboard"
 import type { FilePart } from "@opencode-ai/sdk/v2"
 import { TuiEvent } from "../../event"
+import { Log } from "@/util/log"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
 import { formatDuration } from "@/util/format"
@@ -603,7 +604,7 @@ export function Prompt(props: PromptProps) {
       })
 
       if (res.error) {
-        console.log("Creating a session failed:", res.error)
+        Log.Default.error("Creating a session failed", { error: res.error })
 
         toast.show({
           message: "Creating a session failed. Open console for more details.",
@@ -640,7 +641,7 @@ export function Prompt(props: PromptProps) {
         }
       } catch (err) {
         // Enhancement failure should never block prompt submission
-        console.error("auto-enhance failed, using original prompt", err)
+        Log.Default.error("auto-enhance failed, using original prompt", { error: err })
       } finally {
         enhancingInProgress = false
       }

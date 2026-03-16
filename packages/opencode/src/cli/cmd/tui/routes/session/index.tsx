@@ -13,6 +13,7 @@ import {
   useContext,
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
+import { Log } from "@/util/log"
 import path from "path"
 import { useRoute, useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
@@ -195,7 +196,7 @@ export function Session() {
         if (scroll) scroll.scrollBy(100_000)
       })
       .catch((e) => {
-        console.error(e)
+        Log.Default.error("session sync failed", { error: e })
         toast.show({
           message: `Session not found: ${route.sessionID}`,
           variant: "error",

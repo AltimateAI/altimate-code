@@ -7,6 +7,7 @@ import { Switch, Match, createEffect, untrack, ErrorBoundary, createSignal, onMo
 import { win32DisableProcessedInput, win32FlushInputBuffer, win32InstallCtrlCGuard } from "./win32"
 import { Installation } from "@/installation"
 import { Flag } from "@/flag/flag"
+import { Log } from "@/util/log"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderList } from "@tui/component/dialog-provider"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
@@ -190,7 +191,7 @@ export function tui(input: {
           keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
           onCopySelection: (text) => {
             Clipboard.copy(text).catch((error) => {
-              console.error(`Failed to copy console selection to clipboard: ${error}`)
+              Log.Default.error(`Failed to copy console selection to clipboard: ${error}`)
             })
           },
         },
@@ -257,7 +258,7 @@ function App() {
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
 
   createEffect(() => {
-    console.log(JSON.stringify(route.data))
+    Log.Default.info("route changed", { route: route.data })
   })
 
   // Update terminal window title based on current route and session

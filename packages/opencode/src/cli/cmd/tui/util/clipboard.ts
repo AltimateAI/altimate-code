@@ -7,6 +7,7 @@ import fs from "fs/promises"
 import { Filesystem } from "../../../../util/filesystem"
 import { Process } from "../../../../util/process"
 import { which } from "../../../../util/which"
+import { Log } from "../../../../util/log"
 
 /**
  * Writes text to clipboard via OSC 52 escape sequence.
@@ -95,7 +96,7 @@ export namespace Clipboard {
     const os = platform()
 
     if (os === "darwin" && which("osascript")) {
-      console.log("clipboard: using osascript")
+      Log.Default.info("clipboard: using osascript")
       return async (text: string) => {
         const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
         await Process.run(["osascript", "-e", `set the clipboard to "${escaped}"`], { nothrow: true })
@@ -104,7 +105,7 @@ export namespace Clipboard {
 
     if (os === "linux") {
       if (process.env["WAYLAND_DISPLAY"] && which("wl-copy")) {
-        console.log("clipboard: using wl-copy")
+        Log.Default.info("clipboard: using wl-copy")
         return async (text: string) => {
           const proc = Process.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" })
           if (!proc.stdin) return
@@ -114,7 +115,7 @@ export namespace Clipboard {
         }
       }
       if (which("xclip")) {
-        console.log("clipboard: using xclip")
+        Log.Default.info("clipboard: using xclip")
         return async (text: string) => {
           const proc = Process.spawn(["xclip", "-selection", "clipboard"], {
             stdin: "pipe",
@@ -128,7 +129,7 @@ export namespace Clipboard {
         }
       }
       if (which("xsel")) {
-        console.log("clipboard: using xsel")
+        Log.Default.info("clipboard: using xsel")
         return async (text: string) => {
           const proc = Process.spawn(["xsel", "--clipboard", "--input"], {
             stdin: "pipe",
@@ -144,7 +145,7 @@ export namespace Clipboard {
     }
 
     if (os === "win32") {
-      console.log("clipboard: using powershell")
+      Log.Default.info("clipboard: using powershell")
       return async (text: string) => {
         // Pipe via stdin to avoid PowerShell string interpolation ($env:FOO, $(), etc.)
         const proc = Process.spawn(
@@ -169,7 +170,7 @@ export namespace Clipboard {
       }
     }
 
-    console.log("clipboard: no native support")
+    Log.Default.info("clipboard: no native support")
     return async (text: string) => {
       await clipboardy.write(text).catch(() => {})
     }

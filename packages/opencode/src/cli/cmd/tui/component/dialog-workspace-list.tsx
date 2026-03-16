@@ -7,6 +7,7 @@ import type { Session } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../context/sdk"
 import { useToast } from "../ui/toast"
 import { useKeybind } from "../context/keybind"
+import { Log } from "@/util/log"
 import { DialogSessionList } from "./workspace/dialog-session-list"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 
@@ -112,10 +113,10 @@ function DialogWorkspaceCreate(props: { onSelect: (workspaceID: string) => Promi
     setCreating(type)
 
     const result = await sdk.client.experimental.workspace.create({ type, branch: null }).catch((err) => {
-      console.log(err)
+      Log.Default.error("workspace creation failed", { error: err })
       return undefined
     })
-    console.log(JSON.stringify(result, null, 2))
+    Log.Default.info("workspace created", { result })
     const workspace = result?.data
     if (!workspace) {
       setCreating(undefined)

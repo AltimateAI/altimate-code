@@ -1,4 +1,5 @@
 import { SyntaxStyle, RGBA, type TerminalColors } from "@opentui/core"
+import { Log } from "@/util/log"
 import path from "path"
 import { createEffect, createMemo, onMount } from "solid-js"
 import { createSimpleContext } from "./helper"
@@ -319,13 +320,13 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     onMount(init)
 
     function resolveSystemTheme() {
-      console.log("resolveSystemTheme")
+      Log.Default.info("resolveSystemTheme")
       renderer
         .getPalette({
           size: 16,
         })
         .then((colors) => {
-          console.log(colors.palette)
+          Log.Default.info("system theme palette", { palette: colors.palette })
           if (!colors.palette[0]) {
             if (store.active === "system") {
               setStore(
