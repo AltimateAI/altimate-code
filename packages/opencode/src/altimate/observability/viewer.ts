@@ -183,7 +183,7 @@ pre.io { background: var(--bg); border: 1px solid var(--border); border-radius: 
 
 <script>
 var t = ${traceJSON};
-var e = function(s) { if (s == null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+var e = function(s) { if (s == null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;'); };
 var fd = function(ms) { if (!ms && ms !== 0) return '-'; ms = Math.abs(ms); if (ms < 1000) return ms + 'ms'; if (ms < 60000) return (ms/1000).toFixed(1) + 's'; return Math.floor(ms/60000) + 'm' + Math.floor((ms%60000)/1000) + 's'; };
 var fc = function(c) { if (c == null || isNaN(c)) return '$0'; return c < 0.01 ? '$' + c.toFixed(4) : '$' + c.toFixed(2); };
 var fb = function(b) { if (!b) return '0 B'; if (b < 1024) return b + ' B'; if (b < 1048576) return (b/1024).toFixed(1) + ' KB'; if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB'; return (b/1073741824).toFixed(2) + ' GB'; };
@@ -209,11 +209,11 @@ if (t.metadata.prompt) {
 // --- Summary cards ---
 var s = t.summary || {}, tk = s.tokens || {};
 var cardsData = [
-  ['Duration', fd(s.duration), 'primary', true], ['Input', (tk.input||0).toLocaleString(), 'accent', (tk.input||0) > 0],
-  ['Output', (tk.output||0).toLocaleString(), 'accent', (tk.output||0) > 0], ['Cache', (tk.cacheRead||0).toLocaleString(), 'cyan', (tk.cacheRead||0) > 0],
-  ['Reasoning', (tk.reasoning||0).toLocaleString(), 'accent', (tk.reasoning||0) > 0], ['Total', (s.totalTokens||0).toLocaleString(), 'accent', true],
-  ['Cost', fc(s.totalCost), 'orange', true], ['Gens', s.totalGenerations||0, 'secondary', true],
-  ['Tools', s.totalToolCalls||0, 'green', true]
+  ['Duration', fd(s.duration), 'primary', true], ['Input', Number(tk.input||0).toLocaleString(), 'accent', Number(tk.input||0) > 0],
+  ['Output', Number(tk.output||0).toLocaleString(), 'accent', Number(tk.output||0) > 0], ['Cache', Number(tk.cacheRead||0).toLocaleString(), 'cyan', Number(tk.cacheRead||0) > 0],
+  ['Reasoning', Number(tk.reasoning||0).toLocaleString(), 'accent', Number(tk.reasoning||0) > 0], ['Total', Number(s.totalTokens||0).toLocaleString(), 'accent', true],
+  ['Cost', fc(s.totalCost), 'orange', true], ['Gens', Number(s.totalGenerations||0), 'secondary', true],
+  ['Tools', Number(s.totalToolCalls||0), 'green', true]
 ];
 document.getElementById('cards').innerHTML = cardsData.filter(function(c) { return c[3]; }).map(function(c) {
   return '<div class="card"><div class="lbl">' + c[0] + '</div><div class="val" style="color:var(--' + c[2] + ')">' + c[1] + '</div></div>';
@@ -239,8 +239,8 @@ var icons = { session: '\\u25A0', generation: '\\u2B50', tool: '\\u2692', text: 
 function showDetail(span) {
   var dur = (span.endTime || Date.now()) - (span.startTime || 0);
   var h = '<div class="detail-panel"><h3>' + e(span.name) + '</h3><dl class="dg">';
-  h += '<dt>Kind</dt><dd>' + (span.kind||'') + '</dd>';
-  h += '<dt>Status</dt><dd' + (span.status==='error'?' style="color:var(--red)"':'') + '>' + (span.status||'') + '</dd>';
+  h += '<dt>Kind</dt><dd>' + e(span.kind||'') + '</dd>';
+  h += '<dt>Status</dt><dd' + (span.status==='error'?' style="color:var(--red)"':'') + '>' + e(span.status||'') + '</dd>';
   if (span.statusMessage) h += '<dt>Error</dt><dd style="color:var(--red)">' + e(span.statusMessage) + '</dd>';
   h += '<dt>Duration</dt><dd>' + fd(dur) + '</dd>';
   if (span.model) {
@@ -251,12 +251,12 @@ function showDetail(span) {
   if (span.finishReason) h += '<dt>Finish Reason</dt><dd>' + e(span.finishReason) + '</dd>';
   if (span.cost != null) h += '<dt>Cost</dt><dd>' + fc(span.cost) + '</dd>';
   if (span.tokens) {
-    h += '<dt>Input Tokens</dt><dd>' + (span.tokens.input||0).toLocaleString() + '</dd>';
-    h += '<dt>Output Tokens</dt><dd>' + (span.tokens.output||0).toLocaleString() + '</dd>';
-    if (span.tokens.reasoning) h += '<dt>Reasoning</dt><dd>' + span.tokens.reasoning.toLocaleString() + '</dd>';
-    if (span.tokens.cacheRead) h += '<dt>Cache Read</dt><dd>' + span.tokens.cacheRead.toLocaleString() + '</dd>';
-    if (span.tokens.cacheWrite) h += '<dt>Cache Write</dt><dd>' + span.tokens.cacheWrite.toLocaleString() + '</dd>';
-    h += '<dt>Total</dt><dd>' + (span.tokens.total||0).toLocaleString() + '</dd>';
+    h += '<dt>Input Tokens</dt><dd>' + Number(span.tokens.input||0).toLocaleString() + '</dd>';
+    h += '<dt>Output Tokens</dt><dd>' + Number(span.tokens.output||0).toLocaleString() + '</dd>';
+    if (span.tokens.reasoning) h += '<dt>Reasoning</dt><dd>' + Number(span.tokens.reasoning).toLocaleString() + '</dd>';
+    if (span.tokens.cacheRead) h += '<dt>Cache Read</dt><dd>' + Number(span.tokens.cacheRead).toLocaleString() + '</dd>';
+    if (span.tokens.cacheWrite) h += '<dt>Cache Write</dt><dd>' + Number(span.tokens.cacheWrite).toLocaleString() + '</dd>';
+    h += '<dt>Total</dt><dd>' + Number(span.tokens.total||0).toLocaleString() + '</dd>';
   }
   if (span.tool) {
     if (span.tool.callId) h += '<dt>Call ID</dt><dd>' + e(span.tool.callId) + '</dd>';
@@ -309,10 +309,10 @@ function showDetail(span) {
     var dur = (span.endTime || Date.now()) - (span.startTime||0);
     var left = (st / tTotal * 100).toFixed(2);
     var width = Math.max(0.5, dur / tTotal * 100).toFixed(2);
-    var cls = span.status === 'error' ? 'error' : span.kind;
+    var cls = span.status === 'error' ? 'error' : e(span.kind);
     var row = document.createElement('div');
     row.className = 'wf-row';
-    var iconCls = span.status === 'error' ? 'error' : span.kind;
+    var iconCls = span.status === 'error' ? 'error' : e(span.kind);
     row.innerHTML = '<div class="wf-icon ' + iconCls + '">' + (icons[span.kind]||'\\u2022') + '</div>' +
       '<div class="wf-name">' + e(span.name) + '</div>' +
       '<div class="wf-bar-c"><div class="wf-bar ' + cls + '" style="left:'+left+'%;width:'+width+'%"><span class="wf-bar-label">' + fd(dur) + '</span></div></div>' +
@@ -338,12 +338,12 @@ function showDetail(span) {
       var dur = (span.endTime||Date.now()) - (span.startTime||0);
       var meta = [];
       meta.push(fd(dur));
-      if (span.tokens) meta.push(span.tokens.total + ' tok');
+      if (span.tokens) meta.push(Number(span.tokens.total||0) + ' tok');
       if (span.cost) meta.push(fc(span.cost));
       if (span.status === 'error') meta.push('<span style="color:var(--red)">error</span>');
-      html += '<div class="tree-node"><div class="tree-item" data-sid="' + span.spanId + '">';
+      html += '<div class="tree-node"><div class="tree-item" data-sid="' + e(span.spanId) + '">';
       html += '<div class="tree-head">';
-      html += '<span class="tree-type ' + span.kind + '">' + span.kind + '</span>';
+      html += '<span class="tree-type ' + e(span.kind) + '">' + e(span.kind) + '</span>';
       html += '<span class="tree-title">' + e(span.name) + '</span>';
       html += '</div>';
       html += '<div class="tree-meta">' + meta.join(' &middot; ') + '</div>';
@@ -400,7 +400,7 @@ function showDetail(span) {
       html += '<div class="chat-msg agent"><div class="chat-role">\\u2B50 ' + e(t.metadata.agent || 'Agent') + '</div>';
       html += '<div class="chat-bubble">' + e(String(gen.output)) + '</div>';
       var meta = [];
-      if (gen.tokens) meta.push(gen.tokens.total + ' tokens');
+      if (gen.tokens) meta.push(Number(gen.tokens.total||0) + ' tokens');
       if (gen.cost) meta.push(fc(gen.cost));
       meta.push(fd((gen.endTime||0)-(gen.startTime||0)));
       html += '<div style="font-size:11px;color:var(--dim);margin-top:4px">' + meta.join(' &middot; ') + '</div>';
@@ -420,13 +420,13 @@ function showDetail(span) {
   sorted.forEach(function(span) {
     if (span.kind === 'session') return;
     var ts = span.startTime ? new Date(span.startTime).toISOString().slice(11,23) : '';
-    var kindCls = span.status === 'error' ? 'error' : span.kind;
+    var kindCls = span.status === 'error' ? 'error' : e(span.kind);
     html += '<div class="log-entry">';
     html += '<span class="log-ts">' + ts + '</span>';
     var logIcon = span.kind === 'generation' ? '\\u2B50' : span.kind === 'tool' ? '\\u2692' : '\\u25A0';
-    html += '<span class="log-kind ' + kindCls + '">' + logIcon + ' ' + (span.kind||'') + '</span>';
+    html += '<span class="log-kind ' + kindCls + '">' + logIcon + ' ' + e(span.kind||'') + '</span>';
     html += '<span class="log-name">' + e(span.name) + '</span>';
-    if (span.tokens) html += ' <span style="color:var(--dim);font-size:11px">' + span.tokens.total + ' tok</span>';
+    if (span.tokens) html += ' <span style="color:var(--dim);font-size:11px">' + Number(span.tokens.total||0) + ' tok</span>';
     if (span.cost) html += ' <span style="color:var(--orange);font-size:11px">' + fc(span.cost) + '</span>';
     if (span.tool && span.tool.durationMs != null) html += ' <span style="color:var(--dim);font-size:11px">' + fd(span.tool.durationMs) + '</span>';
     if (span.status === 'error') html += ' <span style="color:var(--red);font-size:11px">\\u2718 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
