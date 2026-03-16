@@ -219,7 +219,7 @@ export class HttpExporter implements TraceExporter {
         method: "POST",
         headers: { "Content-Type": "application/json", ...this.headers },
         body: JSON.stringify(trace),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(5_000),
       })
 
       if (!res.ok) return undefined
@@ -735,11 +735,24 @@ export class Tracer {
 
     const trace = this.buildTraceFile(error)
 
-    // Wrap each exporter call to catch synchronous throws as well as rejections
+    // Wrap each exporter call with a timeout to prevent hanging exporters
+    // from blocking the entire endTrace call
+    const EXPORTER_TIMEOUT_MS = 5_000
+    const withTimeout = (p: Promise<string | undefined>, name: string) => {
+      let timer: ReturnType<typeof setTimeout>
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          console.warn(`[tracing] Exporter "${name}" timed out after ${EXPORTER_TIMEOUT_MS}ms`)
+          resolve(undefined)
+        }, EXPORTER_TIMEOUT_MS)
+      })
+      return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+    }
+
     const results = await Promise.allSettled(
       this.exporters.map((e) => {
         try {
-          return e.export(trace)
+          return withTimeout(Promise.resolve(e.export(trace)), e.name)
         } catch {
           return Promise.resolve(undefined)
         }

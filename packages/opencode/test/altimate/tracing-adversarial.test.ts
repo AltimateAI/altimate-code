@@ -548,18 +548,24 @@ describe("Adversarial — exporter failures", () => {
     }
     const fileExporter = makeExporter()
 
+    // Put FileExporter first so its result is returned
     const tracer = Tracer.withExporters([fileExporter, hangingExporter])
     tracer.startTrace("s-hang", { prompt: "test" })
 
-    // Use Promise.race to prevent test from hanging
+    // endTrace has a per-exporter timeout (5s), so the hanging exporter
+    // will be timed out and the FileExporter result returned.
+    // Use a generous outer timeout just as a safety net.
+    let safetyTimer: ReturnType<typeof setTimeout>
     const result = await Promise.race([
       tracer.endTrace(),
-      new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 5000)),
-    ])
+      new Promise<string>((resolve) => {
+        safetyTimer = setTimeout(() => resolve("timeout"), 8000)
+      }),
+    ]).finally(() => clearTimeout(safetyTimer!))
 
-    // This will either return the file path or "timeout" — either way no crash
-    expect(typeof result).toBe("string")
-  })
+    // Should get the file path from FileExporter, not "timeout"
+    expect(result).toContain(".json")
+  }, 10000)
 
   test("exporter that returns null/undefined", async () => {
     const nullExporter: TraceExporter = {
