@@ -67,14 +67,12 @@ function listTraces(traces: Array<{ sessionId: string; trace: TraceFile }>) {
   UI.println(UI.Style.TEXT_DIM + header + UI.Style.TEXT_NORMAL)
 
   for (const { sessionId, trace } of traces) {
-    const status =
-      trace.summary.status === "error"
-        ? UI.Style.TEXT_DANGER_BOLD + "error" + UI.Style.TEXT_NORMAL
-        : trace.summary.status === "crashed"
-          ? UI.Style.TEXT_DANGER_BOLD + "crashed" + UI.Style.TEXT_NORMAL
-          : trace.summary.status === "running"
-            ? UI.Style.TEXT_WARNING_BOLD + "running" + UI.Style.TEXT_NORMAL
-            : "ok"
+    // Pad visible text first, then wrap with ANSI codes so padEnd counts correctly
+    const statusText = trace.summary.status === "error" || trace.summary.status === "crashed"
+      ? UI.Style.TEXT_DANGER_BOLD + (trace.summary.status).padEnd(10) + UI.Style.TEXT_NORMAL
+      : trace.summary.status === "running"
+        ? UI.Style.TEXT_WARNING_BOLD + "running".padEnd(10) + UI.Style.TEXT_NORMAL
+        : "ok".padEnd(10)
 
     // Title: prefer metadata.title, fall back to truncated prompt, then session ID
     const displayTitle = trace.metadata.title
@@ -84,7 +82,7 @@ function listTraces(traces: Array<{ sessionId: string; trace: TraceFile }>) {
     const row = [
       formatDate(trace.startedAt).padEnd(13),
       formatTimestamp(trace.startedAt).padEnd(10),
-      status.padEnd(10),
+      statusText,
       formatDuration(trace.summary.duration).padEnd(10),
       trace.summary.totalTokens.toLocaleString().padEnd(10),
       formatCost(trace.summary.totalCost).padEnd(10),
