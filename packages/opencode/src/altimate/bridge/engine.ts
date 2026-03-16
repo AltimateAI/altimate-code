@@ -189,7 +189,7 @@ async function ensureEngineImpl(): Promise<void> {
   const pythonPath = enginePythonPath()
   Log.Default.info("installing altimate-engine", { version: ALTIMATE_ENGINE_VERSION })
   try {
-    execFileSync(uv, ["pip", "install", "--python", pythonPath, `altimate-engine==${ALTIMATE_ENGINE_VERSION}`], { stdio: "pipe" })
+    execFileSync(uv, ["pip", "install", "--python", pythonPath, `altimate-engine[warehouses]==${ALTIMATE_ENGINE_VERSION}`], { stdio: "pipe" })
   } catch (e: any) {
     Telemetry.track({
       type: "engine_error",
