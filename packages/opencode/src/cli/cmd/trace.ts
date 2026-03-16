@@ -212,7 +212,7 @@ export const TraceCommand = cmd({
 
       // Graceful shutdown on interrupt
       const shutdown = async () => {
-        await server.stop()
+        try { await server.stop() } catch {}
         process.exit(0)
       }
       process.on("SIGINT", shutdown)
