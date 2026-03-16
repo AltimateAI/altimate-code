@@ -16,7 +16,7 @@ import { existsSync } from "fs"
 import fs from "fs/promises"
 import path from "path"
 import { Global } from "../../global"
-import { UI } from "../../cli/ui"
+import { Log } from "../../util/log"
 import { Telemetry } from "@/telemetry"
 
 declare const ALTIMATE_ENGINE_VERSION: string
@@ -89,7 +89,7 @@ export async function ensureUv(): Promise<void> {
 
   const url = `https://github.com/astral-sh/uv/releases/latest/download/${asset}`
 
-  UI.println(`${UI.Style.TEXT_DIM}Downloading uv...${UI.Style.TEXT_NORMAL}`)
+  Log.Default.info("downloading uv")
 
   const dir = engineDir()
   await fs.mkdir(path.join(dir, "bin"), { recursive: true })
@@ -140,7 +140,7 @@ export async function ensureUv(): Promise<void> {
     await fs.chmod(uv, 0o755)
   }
 
-  UI.println(`${UI.Style.TEXT_SUCCESS}uv installed${UI.Style.TEXT_NORMAL}`)
+  Log.Default.info("uv installed")
 }
 
 /** Creates venv + installs altimate-engine. Upgrades on version mismatch.
@@ -170,7 +170,7 @@ async function ensureEngineImpl(): Promise<void> {
 
   // Create venv if it doesn't exist
   if (!existsSync(venvDir)) {
-    UI.println(`${UI.Style.TEXT_DIM}Creating Python environment...${UI.Style.TEXT_NORMAL}`)
+    Log.Default.info("creating python environment")
     try {
       execFileSync(uv, ["venv", "--python", "3.12", venvDir], { stdio: "pipe" })
     } catch (e: any) {
@@ -187,7 +187,7 @@ async function ensureEngineImpl(): Promise<void> {
 
   // Install/upgrade engine
   const pythonPath = enginePythonPath()
-  UI.println(`${UI.Style.TEXT_DIM}Installing altimate-engine ${ALTIMATE_ENGINE_VERSION}...${UI.Style.TEXT_NORMAL}`)
+  Log.Default.info("installing altimate-engine", { version: ALTIMATE_ENGINE_VERSION })
   try {
     execFileSync(uv, ["pip", "install", "--python", pythonPath, `altimate-engine==${ALTIMATE_ENGINE_VERSION}`], { stdio: "pipe" })
   } catch (e: any) {
@@ -224,7 +224,7 @@ async function ensureEngineImpl(): Promise<void> {
     duration_ms: Date.now() - startTime,
   })
 
-  UI.println(`${UI.Style.TEXT_SUCCESS}Engine ready${UI.Style.TEXT_NORMAL}`)
+  Log.Default.info("engine ready", { version: ALTIMATE_ENGINE_VERSION })
 }
 
 /** Returns current engine status */
