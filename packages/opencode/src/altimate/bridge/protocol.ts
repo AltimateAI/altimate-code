@@ -951,6 +951,24 @@ export interface LocalTestResult {
   error?: string
 }
 
+// --- Warehouse Explore ---
+
+export interface WarehouseExploreParams {
+  warehouse?: string
+}
+
+export interface WarehouseExploreTableInfo {
+  schema: string
+  name: string
+  columns: string[]
+}
+
+export interface WarehouseExploreResult {
+  tables: WarehouseExploreTableInfo[]
+  table_count: number
+}
+
+
 // --- Method registry ---
 
 export const BridgeMethods = {
@@ -975,6 +993,7 @@ export const BridgeMethods = {
   "warehouse.add": {} as { params: WarehouseAddParams; result: WarehouseAddResult },
   "warehouse.remove": {} as { params: WarehouseRemoveParams; result: WarehouseRemoveResult },
   "warehouse.discover": {} as { params: Record<string, never>; result: WarehouseDiscoverResult },
+  "warehouse.explore": {} as { params: WarehouseExploreParams; result: WarehouseExploreResult },
   "finops.query_history": {} as { params: QueryHistoryParams; result: QueryHistoryResult },
   "finops.analyze_credits": {} as { params: CreditAnalysisParams; result: CreditAnalysisResult },
   "finops.expensive_queries": {} as { params: ExpensiveQueriesParams; result: ExpensiveQueriesResult },

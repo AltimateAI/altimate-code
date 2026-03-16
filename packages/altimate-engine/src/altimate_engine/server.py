@@ -65,6 +65,9 @@ from altimate_engine.models import (
     SqlRewriteRule,
     SqlTranslateParams,
     SqlTranslateResult,
+    WarehouseExploreParams,
+    WarehouseExploreTableInfo,
+    WarehouseExploreResult,
     WarehouseInfo,
     WarehouseListResult,
     WarehouseTestParams,
@@ -210,6 +213,37 @@ INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
+
+
+# --- Warehouse helpers ---
+
+
+def _resolve_warehouse(warehouse_name: str | None):
+    """Resolve warehouse: explicit name > registered connections > dbt profiles."""
+    if warehouse_name:
+        return ConnectionRegistry.get(warehouse_name)
+    # Try first registered connection
+    connections = ConnectionRegistry.list()
+    if connections:
+        return ConnectionRegistry.get(connections[0]["name"])
+    # Try dbt profiles
+    dbt_conns = discover_dbt_connections()
+    if dbt_conns:
+        first_name = next(iter(dbt_conns))
+        # Register it so ConnectionRegistry.get() works
+        ConnectionRegistry.add(first_name, dbt_conns[first_name])
+        return ConnectionRegistry.get(first_name)
+    raise ValueError(
+        "No warehouse connection found. Configure one or pass warehouse name."
+    )
+
+
+def _parse_table_ref(table_name: str) -> tuple[str | None, str]:
+    """Parse 'schema.table' into (schema, table) or (None, table)."""
+    parts = table_name.split(".", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return None, parts[0]
 
 
 # Lazily-initialized singletons
@@ -453,6 +487,28 @@ def dispatch(request: JsonRpcRequest) -> JsonRpcResponse:
             result = parse_manifest(DbtManifestParams(**params))
         elif method == "dbt.lineage":
             result = dbt_lineage(DbtLineageParams(**params))
+        elif method == "warehouse.explore":
+            p = WarehouseExploreParams(**params)
+            connector = _resolve_warehouse(p.warehouse)
+            connector.connect()
+            try:
+                tables_info = []
+                for schema in connector.list_schemas():
+                    for tbl in connector.list_tables(schema):
+                        cols = connector.describe_table(schema, tbl["name"])
+                        col_names = [c["name"] for c in cols]
+                        tables_info.append(
+                            WarehouseExploreTableInfo(
+                                schema=schema,
+                                name=tbl["name"],
+                                columns=col_names,
+                            )
+                        )
+                result = WarehouseExploreResult(
+                    tables=tables_info, table_count=len(tables_info)
+                )
+            finally:
+                connector.close()
         elif method == "warehouse.list":
             warehouses = [WarehouseInfo(**w) for w in ConnectionRegistry.list()]
             result = WarehouseListResult(warehouses=warehouses)

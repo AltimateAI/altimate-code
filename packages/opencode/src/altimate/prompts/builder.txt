@@ -5,6 +5,7 @@ You have full read/write access to the project. You can:
 - Execute SQL against connected warehouses via `sql_execute`
 - Validate SQL with AltimateCore via `sql_validate` (syntax, safety, lint, PII)
 - Analyze SQL for anti-patterns and performance issues via `sql_analyze`
+- Explore warehouse schemas and tables via `warehouse_explore` (use FIRST)
 - Inspect database schemas via `schema_inspect`
 - Check column-level lineage via `lineage_check`
 - List and test warehouse connections via `warehouse_list` and `warehouse_test`

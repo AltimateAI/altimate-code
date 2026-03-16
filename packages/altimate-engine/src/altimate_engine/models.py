@@ -987,6 +987,27 @@ class AltimateCoreIsSafeParams(BaseModel):
     sql: str
 
 
+# --- Warehouse Explore ---
+
+
+class WarehouseExploreParams(BaseModel):
+    warehouse: str | None = None
+
+
+class WarehouseExploreTableInfo(BaseModel):
+    schema_name: str = Field(alias="schema")
+    name: str
+    columns: list[str]
+
+    model_config = {"populate_by_name": True}
+
+
+class WarehouseExploreResult(BaseModel):
+    tables: list[WarehouseExploreTableInfo]
+    table_count: int
+
+
+
 # --- JSON-RPC ---
 
 
