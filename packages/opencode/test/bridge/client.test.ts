@@ -406,9 +406,11 @@ describe("Bridge.start integration", () => {
       expect(r.status).toBe("rejected")
     }
 
-    // ensureEngine should have been called, but not 3 times
-    // (mutex coalesces concurrent calls)
+    // The startup mutex should coalesce concurrent calls into a single
+    // ensureEngine invocation. In JS's single-threaded model, the first
+    // call sets pendingStart before any await, so subsequent calls join it.
     expect(ensureEngineCalls).toBeGreaterThanOrEqual(1)
+    expect(ensureEngineCalls).toBeLessThanOrEqual(2)
     Bridge.stop()
   })
 })

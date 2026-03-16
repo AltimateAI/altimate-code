@@ -25,7 +25,8 @@ declare const OPENCODE_VERSION: string
 // Mutex to prevent concurrent ensureEngine/ensureUv calls from corrupting state
 let pendingEnsure: Promise<void> | null = null
 
-/** The pip install spec used by ensureEngine — exported for tests. */
+/** Pip extras spec for altimate-engine (e.g. "warehouses" → altimate-engine[warehouses]).
+ *  Used in ensureEngine install command and recorded in manifest for upgrade detection. */
 export const ENGINE_INSTALL_SPEC = "warehouses"
 
 interface Manifest {
@@ -199,9 +200,7 @@ async function ensureEngineImpl(): Promise<void> {
   const pythonPath = enginePythonPath()
   Log.Default.info("installing altimate-engine", { version: ALTIMATE_ENGINE_VERSION })
   try {
-    const spec = ENGINE_INSTALL_SPEC
-      ? `altimate-engine[${ENGINE_INSTALL_SPEC}]==${ALTIMATE_ENGINE_VERSION}`
-      : `altimate-engine==${ALTIMATE_ENGINE_VERSION}`
+    const spec = `altimate-engine[${ENGINE_INSTALL_SPEC}]==${ALTIMATE_ENGINE_VERSION}`
     execFileSync(uv, ["pip", "install", "--python", pythonPath, spec], { stdio: "pipe" })
   } catch (e: any) {
     Telemetry.track({
@@ -234,6 +233,7 @@ async function ensureEngineImpl(): Promise<void> {
     session_id: Telemetry.getContext().sessionId,
     engine_version: ALTIMATE_ENGINE_VERSION,
     python_version: pyVersion,
+    extras: ENGINE_INSTALL_SPEC,
     status: isUpgrade ? "upgraded" : "started",
     duration_ms: Date.now() - startTime,
   })

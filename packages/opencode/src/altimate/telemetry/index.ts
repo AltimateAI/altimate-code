@@ -153,6 +153,7 @@ export namespace Telemetry {
         session_id: string
         engine_version: string
         python_version: string
+        extras?: string
         status: "started" | "restarted" | "upgraded"
         duration_ms: number
       }
