@@ -25,13 +25,16 @@ export function resolvePython(): string {
   const venvPython = path.join(engineDir, ".venv", "bin", "python")
   if (existsSync(venvPython)) return venvPython
 
-  // 3. Check for .venv in cwd
-  const cwdVenv = path.join(process.cwd(), ".venv", "bin", "python")
-  if (existsSync(cwdVenv)) return cwdVenv
-
-  // 4. Check the managed engine venv (created by ensureEngine)
+  // 3. Check the managed engine venv (created by ensureEngine)
+  //    This must come before the CWD venv check — ensureEngine() installs
+  //    altimate-engine here, so an unrelated .venv in the user's project
+  //    directory must not shadow it.
   const managedPython = enginePythonPath()
   if (existsSync(managedPython)) return managedPython
+
+  // 4. Check for .venv in cwd
+  const cwdVenv = path.join(process.cwd(), ".venv", "bin", "python")
+  if (existsSync(cwdVenv)) return cwdVenv
 
   // 5. Fallback
   return "python3"
