@@ -627,7 +627,8 @@ export class Tracer {
     this.snapshotPromise = fs.mkdir(this.snapshotDir, { recursive: true })
       .then(() => fs.writeFile(tmpPath, JSON.stringify(trace, null, 2)))
       .then(() => fs.rename(tmpPath, filePath))
-      .catch(() => {
+      .catch((err) => {
+        console.debug(`[tracing] failed to write trace snapshot: ${err}`)
         fs.unlink(tmpPath).catch(() => {})
       })
       .finally(() => {

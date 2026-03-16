@@ -210,6 +210,14 @@ export const TraceCommand = cmd({
         // User can open manually
       }
 
+      // Graceful shutdown on interrupt
+      const shutdown = () => {
+        server.stop()
+        process.exit(0)
+      }
+      process.on("SIGINT", shutdown)
+      process.on("SIGTERM", shutdown)
+
       // Keep server alive until interrupted
       await new Promise(() => {})
     }

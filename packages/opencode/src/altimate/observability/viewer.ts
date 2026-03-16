@@ -197,7 +197,7 @@ tagsHtml += '<span class="tag">Provider: <strong>' + e(t.metadata.providerId || 
 tagsHtml += '<span class="tag">Model: <strong>' + e(model) + '</strong></span>';
 tagsHtml += '<span class="tag">Agent: <strong>' + e(t.metadata.agent || 'default') + '</strong></span>';
 var stColor = t.summary.status === 'error' || t.summary.status === 'crashed' ? 'var(--red)' : t.summary.status === 'running' ? 'var(--orange)' : 'var(--green)';
-tagsHtml += '<span class="tag" style="border-color:' + stColor + '">Status: <strong style="color:' + stColor + '">' + (t.summary.status || 'unknown') + '</strong></span>';
+tagsHtml += '<span class="tag" style="border-color:' + stColor + '">Status: <strong style="color:' + stColor + '">' + e(t.summary.status || 'unknown') + '</strong></span>';
 ${live ? "tagsHtml += '<span class=\"live-badge\"><span class=\"live-dot\"></span>LIVE</span>';" : ""}
 document.getElementById('tags').innerHTML = tagsHtml;
 
