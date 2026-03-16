@@ -411,23 +411,21 @@ describe("tool.feedback_submit", () => {
 
       expect(result.title).toBe("Feedback submitted")
       expect(result.metadata.error).toBe("")
-      expect(result.metadata.issueUrl).toBe(
-        "https://github.com/AltimateAI/altimate-code/issues/42",
-      )
+      expect(result.metadata.issueUrl).toBe("https://github.com/AltimateAI/altimate-code/issues/42")
       expect(result.output).toContain("successfully")
-      expect(result.output).toContain(
-        "https://github.com/AltimateAI/altimate-code/issues/42",
-      )
+      expect(result.output).toContain("https://github.com/AltimateAI/altimate-code/issues/42")
     })
 
-    test("returns failure when issue creation output has no github URL", async () => {
+    test("returns failure when both label and no-label attempts have no github URL", async () => {
       const tool = await FeedbackSubmitTool.init()
 
       // gh --version
       pushShellResult("gh version 2.40.0")
       // gh auth status
       pushShellResult("Logged in as user", 0)
-      // gh issue create fails with unexpected output
+      // gh issue create with labels — fails
+      pushShellResult("some error occurred")
+      // gh issue create without labels — also fails
       pushShellResult("some error occurred")
 
       const result = await tool.execute(
@@ -445,11 +443,14 @@ describe("tool.feedback_submit", () => {
       expect(result.output).toContain("Failed to create GitHub issue")
     })
 
-    test("returns failure when issue creation returns empty output", async () => {
+    test("returns failure when both attempts return empty output", async () => {
       const tool = await FeedbackSubmitTool.init()
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
+      // with labels — empty
+      pushShellResult("")
+      // without labels — also empty
       pushShellResult("")
 
       const result = await tool.execute(
@@ -466,13 +467,40 @@ describe("tool.feedback_submit", () => {
       expect(result.metadata.error).toBe("issue_creation_failed")
     })
 
-    test("returns failure when issue creation has non-zero exitCode even with stdout", async () => {
+    test("succeeds via fallback when label creation fails but no-label attempt works", async () => {
       const tool = await FeedbackSubmitTool.init()
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
-      // gh issue create exits non-zero (e.g. label doesn't exist) with partial output
+      // gh issue create with labels — fails (e.g. missing label)
+      shellResults.push({ text: "label 'from-cli' not found", exitCode: 1 })
+      // gh issue create without labels — succeeds
+      pushShellResult("https://github.com/AltimateAI/altimate-code/issues/99")
+
+      const result = await tool.execute(
+        {
+          title: "Test fallback",
+          category: "feature" as const,
+          description: "test",
+          include_context: false,
+        },
+        ctx,
+      )
+
+      expect(result.title).toBe("Feedback submitted")
+      expect(result.metadata.error).toBe("")
+      expect(result.metadata.issueUrl).toBe("https://github.com/AltimateAI/altimate-code/issues/99")
+    })
+
+    test("returns failure when label attempt has non-zero exitCode and retry also fails", async () => {
+      const tool = await FeedbackSubmitTool.init()
+
+      pushShellResult("gh version 2.40.0")
+      pushShellResult("Logged in", 0)
+      // gh issue create with labels — exits non-zero
       shellResults.push({ text: "https://github.com/AltimateAI/altimate-code/issues/1", exitCode: 1 })
+      // retry without labels — also fails
+      shellResults.push({ text: "rate limit exceeded", exitCode: 1 })
 
       const result = await tool.execute(
         {
@@ -494,6 +522,30 @@ describe("tool.feedback_submit", () => {
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
       // gh issue create throws ENOENT
+      pushShellThrow()
+
+      const result = await tool.execute(
+        {
+          title: "Test",
+          category: "bug" as const,
+          description: "test",
+          include_context: false,
+        },
+        ctx,
+      )
+
+      expect(result.title).toBe("Feedback submission failed")
+      expect(result.metadata.error).toBe("issue_creation_failed")
+    })
+
+    test("returns failure when retry without labels throws", async () => {
+      const tool = await FeedbackSubmitTool.init()
+
+      pushShellResult("gh version 2.40.0")
+      pushShellResult("Logged in", 0)
+      // first attempt fails (non-zero exit)
+      shellResults.push({ text: "label not found", exitCode: 1 })
+      // retry throws
       pushShellThrow()
 
       const result = await tool.execute(
@@ -687,7 +739,7 @@ describe("tool.feedback_submit", () => {
       expect(createCall).toContain("My specific title")
     })
 
-    test("makes exactly 3 shell calls for successful submission", async () => {
+    test("makes exactly 3 shell calls for successful submission when labels exist", async () => {
       const tool = await FeedbackSubmitTool.init()
 
       pushShellResult("gh version 2.40.0")
@@ -705,6 +757,32 @@ describe("tool.feedback_submit", () => {
       )
 
       expect(shellCalls.length).toBe(3)
+    })
+
+    test("makes exactly 4 shell calls when label attempt fails and retry succeeds", async () => {
+      const tool = await FeedbackSubmitTool.init()
+
+      pushShellResult("gh version 2.40.0")
+      pushShellResult("Logged in", 0)
+      // with labels — fails
+      shellResults.push({ text: "label not found", exitCode: 1 })
+      // without labels — succeeds
+      pushShellResult("https://github.com/AltimateAI/altimate-code/issues/1")
+
+      await tool.execute(
+        {
+          title: "Test",
+          category: "bug" as const,
+          description: "test",
+          include_context: false,
+        },
+        ctx,
+      )
+
+      expect(shellCalls.length).toBe(4)
+      // Verify the retry call does NOT contain --label
+      const retryCall = shellCalls[3].join("")
+      expect(retryCall).not.toContain("--label")
     })
 
     test("makes only 1 shell call when gh is not installed", async () => {

@@ -11,6 +11,8 @@ import { useKeybind } from "../../context/keybind"
 import { useDirectory } from "../../context/directory"
 import { useKV } from "../../context/kv"
 import { TodoItem } from "../../component/todo-item"
+// altimate_change start - trace section
+// altimate_change end
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const sync = useSync()
@@ -106,6 +108,14 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>{context()?.percentage ?? 0}% used</text>
               <text fg={theme.textMuted}>{cost()} spent</text>
             </box>
+            {/* altimate_change start - trace section */}
+            <box>
+              <text fg={theme.text}>
+                <b>Trace</b>
+              </text>
+              <text fg={theme.textMuted}>type <span style={{ fg: theme.accent }}>/trace</span> to view</text>
+            </box>
+            {/* altimate_change end */}
             <Show when={mcpEntries().length > 0}>
               <box>
                 <box

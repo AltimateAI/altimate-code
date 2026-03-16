@@ -33,6 +33,7 @@ altimate --agent analyst
 | `export` | Export session data |
 | `import` | Import session data |
 | `session` | Session management |
+| `trace` | List and view session traces |
 | `github` | GitHub integration |
 | `pr` | Pull request tools |
 | `upgrade` | Upgrade to latest version |
@@ -106,4 +107,19 @@ altimate run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
 
 # Print logs for debugging
 altimate --print-logs --log-level DEBUG run "test query"
+
+# Disable tracing for a single run
+altimate run --no-trace "quick question"
+```
+
+## Tracing
+
+Every `run` command automatically saves a trace file with the full session details — generations, tool calls, tokens, cost, and timing. See [Tracing](../configure/tracing.md) for configuration options.
+
+```bash
+# List recent traces
+altimate trace list
+
+# View a trace in the browser
+altimate trace view <session-id>
 ```

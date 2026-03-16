@@ -98,6 +98,7 @@ nav:
       - Appearance:
           - Themes: configure/themes.md
           - Keybinds: configure/keybinds.md
+      - Tracing: configure/tracing.md
       - Telemetry: configure/telemetry.md
       - Integrations:
           - LSP Servers: configure/lsp.md

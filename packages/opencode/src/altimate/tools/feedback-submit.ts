@@ -63,8 +63,7 @@ export const FeedbackSubmitTool = Tool.define("feedback_submit", {
         title: "Feedback submission failed",
         metadata: { error: "gh_auth_check_failed", issueUrl: "" },
         output:
-          "Failed to verify `gh` authentication status. Please check your installation with:\n" +
-          "  `gh auth status`",
+          "Failed to verify `gh` authentication status. Please check your installation with:\n" + "  `gh auth status`",
       }
     }
     if (authStatus.exitCode !== 0) {
@@ -105,20 +104,44 @@ export const FeedbackSubmitTool = Tool.define("feedback_submit", {
     // Build labels
     const labels = ["user-feedback", "from-cli", CATEGORY_LABELS[args.category]]
 
-    // Create the issue
+    // Create the issue — try with labels first, fall back without labels
+    // if it fails (e.g. when labels don't exist in the repository yet)
     let issueResult: { stdout: Buffer; stderr: Buffer; exitCode: number }
     try {
-      issueResult = await Bun.$`gh issue create --repo AltimateAI/altimate-code --title ${args.title} --body ${body} --label ${labels.join(",")}`.quiet().nothrow()
+      issueResult =
+        await Bun.$`gh issue create --repo AltimateAI/altimate-code --title ${args.title} --body ${body} --label ${labels.join(",")}`
+          .quiet()
+          .nothrow()
     } catch {
       return {
         title: "Feedback submission failed",
         metadata: { error: "issue_creation_failed", issueUrl: "" },
-        output: "Failed to create GitHub issue. The `gh` CLI encountered an unexpected error.\n\nPlease check your gh CLI installation and try again.",
+        output:
+          "Failed to create GitHub issue. The `gh` CLI encountered an unexpected error.\n\nPlease check your gh CLI installation and try again.",
       }
     }
 
-    const stdout = issueResult.stdout.toString().trim()
-    const stderr = issueResult.stderr.toString().trim()
+    let stdout = issueResult.stdout.toString().trim()
+    let stderr = issueResult.stderr.toString().trim()
+
+    // If creation failed (e.g. missing labels), retry without labels
+    if (issueResult.exitCode !== 0 || !stdout || !stdout.includes("github.com")) {
+      try {
+        issueResult = await Bun.$`gh issue create --repo AltimateAI/altimate-code --title ${args.title} --body ${body}`
+          .quiet()
+          .nothrow()
+      } catch {
+        return {
+          title: "Feedback submission failed",
+          metadata: { error: "issue_creation_failed", issueUrl: "" },
+          output:
+            "Failed to create GitHub issue. The `gh` CLI encountered an unexpected error.\n\nPlease check your gh CLI installation and try again.",
+        }
+      }
+
+      stdout = issueResult.stdout.toString().trim()
+      stderr = issueResult.stderr.toString().trim()
+    }
 
     if (issueResult.exitCode !== 0 || !stdout || !stdout.includes("github.com")) {
       const errorDetail = stderr || stdout || "No output from gh CLI"
