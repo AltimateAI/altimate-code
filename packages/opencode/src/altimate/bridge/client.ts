@@ -138,7 +138,7 @@ export namespace Bridge {
 
     child.stderr!.on("data", (data: Buffer) => {
       const msg = data.toString().trim()
-      if (msg) Log.Default.error(`[altimate-engine] ${msg}`)
+      if (msg) Log.Default.error("altimate-engine stderr", { message: msg })
     })
 
     child.on("exit", (code) => {

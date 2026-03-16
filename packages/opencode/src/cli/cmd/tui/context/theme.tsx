@@ -320,13 +320,13 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     onMount(init)
 
     function resolveSystemTheme() {
-      Log.Default.info("resolveSystemTheme")
+      Log.Default.debug("resolving system theme")
       renderer
         .getPalette({
           size: 16,
         })
         .then((colors) => {
-          Log.Default.info("system theme palette", { palette: colors.palette })
+          Log.Default.debug("system theme palette", { palette: colors.palette })
           if (!colors.palette[0]) {
             if (store.active === "system") {
               setStore(

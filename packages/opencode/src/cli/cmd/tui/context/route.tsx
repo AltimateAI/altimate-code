@@ -33,7 +33,7 @@ export const { use: useRoute, provider: RouteProvider } = createSimpleContext({
         return store
       },
       navigate(route: Route) {
-        Log.Default.info("navigate", { route })
+        Log.Default.debug("navigate", { route })
         setStore(route)
       },
     }

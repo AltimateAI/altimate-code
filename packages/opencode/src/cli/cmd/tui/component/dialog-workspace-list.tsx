@@ -116,7 +116,6 @@ function DialogWorkspaceCreate(props: { onSelect: (workspaceID: string) => Promi
       Log.Default.error("workspace creation failed", { error: err })
       return undefined
     })
-    Log.Default.info("workspace created", { result })
     const workspace = result?.data
     if (!workspace) {
       setCreating(undefined)
@@ -126,6 +125,7 @@ function DialogWorkspaceCreate(props: { onSelect: (workspaceID: string) => Promi
       })
       return
     }
+    Log.Default.info("workspace created", { workspaceId: workspace.id })
     await sync.workspace.sync()
     await props.onSelect(workspace.id)
     setCreating(undefined)
