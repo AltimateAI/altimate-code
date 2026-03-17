@@ -491,6 +491,56 @@ describe("engine.ts extras tracking", () => {
 })
 
 // ---------------------------------------------------------------------------
+// Tests — telemetry opt-out env var propagation
+// ---------------------------------------------------------------------------
+
+describe("Bridge telemetry opt-out propagation", () => {
+  test("source code injects ALTIMATE_TELEMETRY_DISABLED before spawning child process", async () => {
+    const clientSrc = path.resolve(
+      __dirname,
+      "../../src/altimate/bridge/client.ts",
+    )
+    const source = await fsp.readFile(clientSrc, "utf-8")
+
+    // Must await Telemetry.init() before spawning so opt-out state is known
+    expect(source).toContain("await Telemetry.init()")
+    // Must inject the env var when telemetry is disabled
+    expect(source).toContain("ALTIMATE_TELEMETRY_DISABLED")
+    expect(source).toContain('"true"')
+    // Must use a copy of process.env (not mutate the parent env)
+    expect(source).toContain("{ ...process.env }")
+  })
+
+  test("source code checks Telemetry.isEnabled() to gate env var injection", async () => {
+    const clientSrc = path.resolve(
+      __dirname,
+      "../../src/altimate/bridge/client.ts",
+    )
+    const source = await fsp.readFile(clientSrc, "utf-8")
+
+    expect(source).toContain("Telemetry.isEnabled()")
+    // Env var must only be set when telemetry is NOT enabled
+    const lines = source.split("\n")
+    const injectionLine = lines.findIndex(l => l.includes("ALTIMATE_TELEMETRY_DISABLED") && l.includes('"true"'))
+    expect(injectionLine).toBeGreaterThan(0)
+    // The line injecting the var must be inside an if (!Telemetry.isEnabled()) block
+    const surroundingBlock = lines.slice(Math.max(0, injectionLine - 5), injectionLine + 1).join("\n")
+    expect(surroundingBlock).toContain("isEnabled()")
+  })
+
+  test("source code passes childEnv to spawn (not process.env directly)", async () => {
+    const clientSrc = path.resolve(
+      __dirname,
+      "../../src/altimate/bridge/client.ts",
+    )
+    const source = await fsp.readFile(clientSrc, "utf-8")
+
+    // spawn() must use childEnv, not the raw process.env
+    expect(source).toContain("env: childEnv")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Tests — engine.ts ensureEngineImpl validation logic
 // ---------------------------------------------------------------------------
 
