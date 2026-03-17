@@ -4,20 +4,27 @@
  *
  * Feature flags:
  *   ALTIMATE_NATIVE_ONLY=1   — throws if no native handler (CI gate)
- *   ALTIMATE_SHADOW_MODE=1   — runs both native + bridge, logs mismatches
+ *   ALTIMATE_SHADOW_MODE=1   — runs native first, then fires bridge
+ *                              comparison asynchronously (no latency cost)
  */
 
 import { Bridge } from "../bridge/client"
 import { BridgeMethods, type BridgeMethod } from "../bridge/protocol"
 import { Log } from "../../util/log"
+import { Telemetry } from "../telemetry"
 
 type NativeHandler = (params: any) => Promise<any>
 
 const nativeHandlers = new Map<string, NativeHandler>()
 
 /** Register a native TypeScript handler for a bridge method. */
-export function register(method: string, handler: NativeHandler): void {
+export function register(method: BridgeMethod, handler: NativeHandler): void {
   nativeHandlers.set(method, handler)
+}
+
+/** Clear all registered handlers (for test isolation). */
+export function reset(): void {
+  nativeHandlers.clear()
 }
 
 /** Dispatch a method call to native handler or bridge fallback. */
@@ -28,41 +35,37 @@ export async function call<M extends BridgeMethod>(
   const native = nativeHandlers.get(method as string)
 
   if (native) {
-    if (process.env.ALTIMATE_SHADOW_MODE === "1") {
-      // Parity testing: run both native and bridge, log mismatches
-      try {
-        const [nativeResult, bridgeResult] = await Promise.allSettled([
-          native(params),
-          Bridge.call(method, params),
-        ])
-        if (
-          nativeResult.status === "fulfilled" &&
-          bridgeResult.status === "fulfilled"
-        ) {
-          const nativeJson = JSON.stringify(nativeResult.value, null, 0)
-          const bridgeJson = JSON.stringify(bridgeResult.value, null, 0)
-          if (nativeJson !== bridgeJson) {
-            Log.Default.warn("shadow mode mismatch", {
-              method: String(method),
-              native: nativeJson.slice(0, 500),
-              bridge: bridgeJson.slice(0, 500),
-            })
-          }
-        }
-        if (nativeResult.status === "fulfilled") {
-          return nativeResult.value as any
-        }
-        // Native failed — fall through to bridge result or throw
-        if (bridgeResult.status === "fulfilled") {
-          return bridgeResult.value as any
-        }
-        throw nativeResult.reason
-      } catch (e) {
-        // Shadow mode should not break the user — fall through to bridge
-        return Bridge.call(method, params)
+    const startTime = Date.now()
+    try {
+      const result = await native(params)
+
+      Telemetry.track({
+        type: "bridge_call",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        method: method as string,
+        status: "success",
+        duration_ms: Date.now() - startTime,
+      })
+
+      // Shadow mode: fire-and-forget bridge comparison (no latency cost)
+      if (process.env.ALTIMATE_SHADOW_MODE === "1") {
+        compareShadow(method, params, result)
       }
+
+      return result as any
+    } catch (e) {
+      Telemetry.track({
+        type: "bridge_call",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        method: method as string,
+        status: "error",
+        duration_ms: Date.now() - startTime,
+        error: String(e).slice(0, 500),
+      })
+      throw e
     }
-    return native(params) as any
   }
 
   if (process.env.ALTIMATE_NATIVE_ONLY === "1") {
@@ -75,11 +78,44 @@ export async function call<M extends BridgeMethod>(
 }
 
 /** Check if a native handler is registered for a method. */
-export function hasNativeHandler(method: string): boolean {
+export function hasNativeHandler(method: BridgeMethod): boolean {
   return nativeHandlers.has(method)
 }
 
 /** List all methods that have native handlers registered. */
 export function listNativeMethods(): string[] {
   return Array.from(nativeHandlers.keys())
+}
+
+/**
+ * Fire-and-forget bridge comparison for shadow mode.
+ * Runs the bridge call asynchronously after native returns —
+ * does not block the user or add latency.
+ */
+function compareShadow(method: BridgeMethod, params: any, nativeValue: any): void {
+  Bridge.call(method, params)
+    .then((bridgeValue) => {
+      try {
+        const nativeJson = JSON.stringify(nativeValue, null, 0)
+        const bridgeJson = JSON.stringify(bridgeValue, null, 0)
+        if (nativeJson !== bridgeJson) {
+          Log.Default.warn("shadow mode mismatch", {
+            method: String(method),
+            native: nativeJson.slice(0, 500),
+            bridge: bridgeJson.slice(0, 500),
+          })
+        }
+      } catch (serializeErr) {
+        Log.Default.warn("shadow mode serialization error", {
+          method: String(method),
+          error: String(serializeErr).slice(0, 200),
+        })
+      }
+    })
+    .catch((bridgeErr) => {
+      Log.Default.warn("shadow mode bridge error", {
+        method: String(method),
+        error: String(bridgeErr).slice(0, 200),
+      })
+    })
 }
