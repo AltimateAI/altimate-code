@@ -17,7 +17,7 @@ hide:
 
 <p class="hero-tagline">The data engineering agent for<br/>dbt, SQL, and cloud warehouses.</p>
 
-<p class="hero-description">An AI-powered CLI with 55+ specialized tools — SQL analysis, schema inspection, column-level lineage, FinOps, and RBAC. Connects to your warehouse, understands your data, and helps you ship faster.</p>
+<p class="hero-description">An AI-powered CLI with 99+ specialized tools — SQL analysis, schema inspection, column-level lineage, FinOps, data visualization, PII detection, and RBAC. Connects to your warehouse, understands your data, and helps you ship faster.</p>
 
 <p class="hero-actions" markdown>
 

@@ -34,15 +34,12 @@ Focus on the query: $ARGUMENTS
 
 Skills are loaded from these locations (in priority order):
 
-1. **External directories** (if not disabled):
-    - `~/.claude/skills/`
-    - `~/.agents/skills/`
-    - `.claude/skills/` (project, searched up tree)
-    - `.agents/skills/` (project, searched up tree)
-
-2. **altimate-code directories**:
+1. **altimate-code directories** (project-scoped, highest priority):
     - `.altimate-code/skill/`
     - `.altimate-code/skills/`
+
+2. **Global user directories**:
+    - `~/.altimate-code/skills/`
 
 3. **Custom paths** (from config):
 
@@ -54,7 +51,11 @@ Skills are loaded from these locations (in priority order):
     }
     ```
 
-4. **Remote URLs** (from config):
+4. **External directories & remote URLs** (if not disabled):
+    - `~/.claude/skills/`
+    - `~/.agents/skills/`
+    - `.claude/skills/` (project, searched up tree)
+    - `.agents/skills/` (project, searched up tree)
 
     ```json
     {
@@ -66,13 +67,9 @@ Skills are loaded from these locations (in priority order):
 
 ## Built-in Data Engineering Skills
 
-altimate includes skills for common data engineering tasks:
+altimate ships with built-in skills for common data engineering tasks. Skills are loaded and surfaced dynamically at runtime — type `/` in the TUI to browse what's available and get autocomplete on skill names.
 
-- SQL analysis and optimization
-- dbt model generation
-- Schema exploration
-- Cost estimation
-- Migration planning
+For custom skills, see [Adding Custom Skills](#adding-custom-skills) below.
 
 ## Disabling External Skills
 

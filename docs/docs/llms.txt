@@ -1,0 +1,42 @@
+# altimate-code llms.txt
+# AI-friendly documentation index for altimate-code
+# Generated: 2026-03-17 | Version: v0.4.1
+# Source: https://altimateai.github.io/altimate-code
+
+> altimate-code is an open-source data engineering harness — 99+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the tool layer for your data agents. Includes a deterministic SQL Intelligence Engine (100% F1 across 1,077 queries), column-level lineage, FinOps analysis, PII detection, and dbt integration. Works with any LLM provider. Local-first, MIT-licensed.
+
+## Get Started
+
+- [Quickstart (5 min)](https://altimateai.github.io/altimate-code/quickstart/): Install altimate, configure your LLM provider, connect your warehouse, and run your first query in under 5 minutes.
+- [Full Setup Guide](https://altimateai.github.io/altimate-code/getting-started/): Complete installation, warehouse configuration for all 8 supported warehouses, LLM provider setup, and first-run walkthrough.
+- [Network & Proxy](https://altimateai.github.io/altimate-code/network/): Proxy configuration, CA certificate setup, firewall requirements.
+
+## Data Engineering
+
+- [Agent Modes](https://altimateai.github.io/altimate-code/data-engineering/agent-modes/): 7 specialized agents — Builder (full read/write), Analyst (read-only enforced), Validator, Migrator, Researcher, Trainer, Executive — each with scoped permissions and purpose-built tool access.
+- [Training Overview](https://altimateai.github.io/altimate-code/data-engineering/training/): How to teach altimate project-specific patterns, naming conventions, and corrections that persist across sessions and team members.
+- [Team Deployment](https://altimateai.github.io/altimate-code/data-engineering/training/team-deployment/): How to commit training to git so your entire team inherits SQL conventions automatically.
+- [SQL Tools](https://altimateai.github.io/altimate-code/data-engineering/tools/sql-tools/): 9 SQL analysis tools with 19 anti-pattern rules. 100% F1 accuracy on 1,077 benchmark queries.
+- [Schema Tools](https://altimateai.github.io/altimate-code/data-engineering/tools/schema-tools/): Warehouse schema introspection, metadata indexing, and column-level analysis tools.
+- [FinOps Tools](https://altimateai.github.io/altimate-code/data-engineering/tools/finops-tools/): Credit analysis, expensive query detection, warehouse right-sizing, unused resource cleanup, RBAC auditing.
+- [Lineage Tools](https://altimateai.github.io/altimate-code/data-engineering/tools/lineage-tools/): Column-level lineage extraction from SQL. 100% edge-match accuracy on 500 benchmark queries.
+- [dbt Tools](https://altimateai.github.io/altimate-code/data-engineering/tools/dbt-tools/): dbt manifest parsing, test generation, model scaffolding, incremental logic detection.
+- [Warehouse Tools](https://altimateai.github.io/altimate-code/data-engineering/tools/warehouse-tools/): Direct connectivity to Snowflake, BigQuery, Databricks, PostgreSQL, Redshift, DuckDB, MySQL, SQL Server.
+- [Memory Tools](https://altimateai.github.io/altimate-code/data-engineering/tools/memory-tools/): Session memory, persistent corrections, and team training storage.
+- [Cost Optimization Guide](https://altimateai.github.io/altimate-code/data-engineering/guides/cost-optimization/): Step-by-step warehouse cost reduction with before/after SQL examples and savings estimates.
+- [Migration Guide](https://altimateai.github.io/altimate-code/data-engineering/guides/migration/): Cross-warehouse SQL migration with side-by-side examples.
+- [CI & Headless Mode](https://altimateai.github.io/altimate-code/data-engineering/guides/ci-headless/): Non-interactive use in GitHub Actions, scheduled jobs, and pre-commit hooks.
+
+## Configure
+
+- [Configuration Overview](https://altimateai.github.io/altimate-code/configure/config/): Full altimate-code.json schema, value substitution, project structure, experimental flags.
+- [Providers](https://altimateai.github.io/altimate-code/configure/providers/): 17 LLM provider configurations with JSON examples: Anthropic, OpenAI, Google Gemini, Vertex AI, Amazon Bedrock, Azure OpenAI, Mistral, Groq, Ollama, and more.
+- [Agent Skills](https://altimateai.github.io/altimate-code/configure/skills/): How to configure, discover, and add custom skills.
+- [Permissions](https://altimateai.github.io/altimate-code/configure/permissions/): Permission levels, pattern matching, per-agent restrictions, deny rules for destructive SQL.
+- [Tracing](https://altimateai.github.io/altimate-code/configure/tracing/): Local-first observability — trace schema, span types, live viewing, remote OTLP exporters, crash recovery.
+- [Telemetry](https://altimateai.github.io/altimate-code/configure/telemetry/): 25 anonymized event types, privacy guarantees, opt-out instructions.
+
+## Reference
+
+- [Security FAQ](https://altimateai.github.io/altimate-code/security-faq/): 12 Q&A pairs on data handling, credentials, permissions, network endpoints, and team hardening.
+- [Troubleshooting](https://altimateai.github.io/altimate-code/troubleshooting/): 6 common issues with step-by-step fixes, including Python bridge failures and warehouse connection errors.

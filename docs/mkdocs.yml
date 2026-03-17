@@ -31,12 +31,32 @@ theme:
   features:
     - navigation.sections
     - navigation.top
+    - navigation.instant
+    - navigation.tracking
     - search.suggest
     - search.highlight
     - content.code.copy
+    - toc.follow
+    - content.tooltips
 
 extra_css:
   - assets/css/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/AltimateAI/altimate-code
+    - icon: fontawesome/brands/discord
+      link: https://altimate.ai/discord
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/altimate-engine/
+  analytics:
+    provider: google
+    property: G-XXXXXXXXXX   # TODO: Replace with actual GA4 property ID
+  consent:
+    title: Cookie consent
+    description: >-
+      We use cookies to measure usage and improve the documentation.
 
 markdown_extensions:
   - admonition
@@ -53,11 +73,16 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
+  - Get Started:
+      - Quickstart (5 min): quickstart.md
+      - Full Setup Guide: getting-started.md
+      - Network & Proxy: network.md
+      - Windows / WSL: windows-wsl.md
   - Data Engineering:
       - Agent Modes: data-engineering/agent-modes.md
       - Training:
           - Overview: data-engineering/training/index.md
+          - Team Deployment: data-engineering/training/team-deployment.md
       - Tools:
           - Overview: data-engineering/tools/index.md
           - SQL Tools: data-engineering/tools/sql-tools.md
@@ -66,10 +91,12 @@ nav:
           - Lineage Tools: data-engineering/tools/lineage-tools.md
           - dbt Tools: data-engineering/tools/dbt-tools.md
           - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+          - Memory Tools: data-engineering/tools/memory-tools.md
       - Guides:
           - Overview: data-engineering/guides/index.md
           - Cost Optimization: data-engineering/guides/cost-optimization.md
           - Migration: data-engineering/guides/migration.md
+          - CI & Headless Mode: data-engineering/guides/ci-headless.md
           - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
           - Using with Codex: data-engineering/guides/using-with-codex.md
   - Usage:
@@ -111,6 +138,6 @@ nav:
       - Ecosystem: develop/ecosystem.md
   - Reference:
       - Security FAQ: security-faq.md
-      - Network: network.md
       - Troubleshooting: troubleshooting.md
-      - Windows / WSL: windows-wsl.md
+      - llms.txt: llms.txt
+      - Changelog: https://github.com/AltimateAI/altimate-code/blob/main/CHANGELOG.md

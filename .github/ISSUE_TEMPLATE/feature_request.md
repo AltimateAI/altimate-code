@@ -21,3 +21,9 @@ A clear and concise description of how you'd like it to work.
 ## Alternatives Considered
 
 A clear and concise description of any alternative solutions or features you've considered.
+
+## Pre-submission Checklist
+
+- [ ] I have searched existing issues and this is not a duplicate
+- [ ] I have described a concrete use case, not just a feature in the abstract
+- [ ] I understand that feature requests require a linked issue before a PR will be accepted

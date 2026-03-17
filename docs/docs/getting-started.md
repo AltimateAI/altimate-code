@@ -1,5 +1,7 @@
 # Getting Started
 
+> **New to altimate?** [Start with the 5-minute quickstart](quickstart.md) to go from install to your first analysis in minutes.
+
 ## Why altimate?
 
 Unlike general-purpose coding agents, altimate is built for data teams:
@@ -14,7 +16,7 @@ Unlike general-purpose coding agents, altimate is built for data teams:
 | PII detection | None | Automatic column scanning |
 | dbt integration | Basic file editing | Manifest parsing, test generation, model scaffolding |
 
-## Installation
+## Step 1: Install
 
 ```bash
 npm install -g @altimateai/altimate-code
@@ -22,7 +24,9 @@ npm install -g @altimateai/altimate-code
 
 After install, you'll see a welcome banner with quick-start commands. On upgrades, the banner also shows what changed since your previous version.
 
-## First run
+## Step 2: Connect Your LLM (`/connect`)
+
+Before anything else, connect an LLM provider. Launch altimate and run:
 
 ```bash
 altimate
@@ -30,7 +34,19 @@ altimate
 
 > **Note:** `altimate-code` still works as a backward-compatible alias.
 
-The TUI launches with an interactive terminal. On first run, use the `/discover` command to auto-detect your data stack:
+Then in the TUI:
+
+```
+/connect
+```
+
+This walks you through selecting and authenticating with an LLM provider (Anthropic, OpenAI, Bedrock, Codex, Ollama, etc.). You need a working LLM connection before the agent can do anything useful.
+
+## Step 3: Configure Your Warehouse
+
+Set up warehouse connections so altimate can query your data platform. You have two options:
+
+### Option A: Auto-discover with `/discover`
 
 ```
 /discover
@@ -44,9 +60,103 @@ The TUI launches with an interactive terminal. On first run, use the `/discover`
 4. **Offers to configure connections** — walks you through adding and testing each discovered warehouse
 5. **Indexes schemas** — populates the schema cache for autocomplete and context-aware analysis
 
-You can also configure connections manually — see [Warehouse connections](#warehouse-connections) below.
+### Option B: Manual configuration
 
-To set up your LLM provider, use the `/connect` command.
+Add a warehouse connection to your `altimate-code.json`. Here are minimal snippets for each warehouse type:
+
+#### Snowflake (quick-connect)
+
+```json
+{
+  "warehouses": {
+    "snowflake": {
+      "type": "snowflake",
+      "account": "xy12345.us-east-1",
+      "user": "your_user",
+      "password": "${SNOWFLAKE_PASSWORD}",
+      "warehouse": "COMPUTE_WH",
+      "database": "ANALYTICS"
+    }
+  }
+}
+```
+
+#### BigQuery (quick-connect)
+
+```json
+{
+  "warehouses": {
+    "bigquery": {
+      "type": "bigquery",
+      "project": "my-gcp-project",
+      "dataset": "analytics"
+    }
+  }
+}
+```
+
+> Tip: Omit `service_account` to use Application Default Credentials (`gcloud auth application-default login`).
+
+#### Databricks (quick-connect)
+
+```json
+{
+  "warehouses": {
+    "databricks": {
+      "type": "databricks",
+      "host": "dbc-abc123.cloud.databricks.com",
+      "token": "${DATABRICKS_TOKEN}",
+      "warehouse_id": "abcdef1234567890",
+      "catalog": "main"
+    }
+  }
+}
+```
+
+#### DuckDB (quick-connect)
+
+```json
+{
+  "warehouses": {
+    "duckdb": {
+      "type": "duckdb",
+      "database": "./dev.duckdb"
+    }
+  }
+}
+```
+
+See [Warehouse connections](#warehouse-connections) below for full configuration options including key-pair auth, Redshift, and PostgreSQL.
+
+## Step 4: Discover Your Data Stack
+
+Once connected, run `/discover` to let altimate index your schemas and detect your tooling. This enables schema-aware autocomplete and context-rich analysis.
+
+## Step 5: Choose an Agent Mode
+
+altimate offers specialized agent modes for different workflows:
+
+| What do you want to do? | Use this agent mode |
+|---|---|
+| Analyzing data without risk of changes | **Analyst** — read-only queries, cost analysis, data profiling |
+| Building or generating dbt models | **Builder** — model scaffolding, SQL generation, ref() wiring |
+| Validating data quality | **Validator** — test generation, anomaly detection, data contracts |
+| Migrating across warehouses | **Migrator** — cross-dialect SQL translation, compatibility checks |
+| Teaching team conventions | **Trainer** — learns corrections, enforces naming/style rules across team |
+| Research and exploration | **Researcher** — deep-dive analysis, lineage tracing, impact assessment |
+| Executive summaries and reports | **Executive** — high-level overviews, cost summaries, health dashboards |
+
+Switch modes in the TUI:
+
+```
+/mode analyst
+```
+
+## Step 6: Start Working
+
+You are ready to go. Type a natural-language prompt in the TUI and the agent will use the appropriate tools to answer. See [Example prompts](#example-prompts) at the bottom of this page for ideas.
+
+---
 
 ## Configuration
 
@@ -197,6 +307,41 @@ If you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backe
 
 > warehouse_test prod-snowflake
 ✓ Connected successfully
+```
+
+## Example Prompts
+
+Copy and paste these into the TUI to get started with common use cases:
+
+### Cost analysis
+
+```
+Analyze our Snowflake credit consumption over the last 30 days. Show the top 10 most expensive queries, which warehouses they ran on, and suggest optimizations.
+```
+
+### dbt model generation
+
+```
+Create a dbt staging model for the raw_orders table in our Snowflake warehouse. Include column descriptions, a unique test on order_id, and a not_null test on customer_id.
+```
+
+### SQL anti-pattern review
+
+```
+Scan all SQL files in the models/ directory for anti-patterns. Flag any SELECT *, missing WHERE clauses on DELETE statements, implicit cartesian joins, and non-sargable predicates.
+```
+
+### Cross-warehouse migration
+
+```
+Translate the following Snowflake SQL to BigQuery-compatible SQL, noting any function differences, data type changes, and features that don't have a direct equivalent:
+SELECT DATEADD(day, -7, CURRENT_TIMESTAMP()), TRY_TO_NUMBER(amount), ARRAY_AGG(DISTINCT category) WITHIN GROUP (ORDER BY category) FROM sales QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY sale_date DESC) = 1;
+```
+
+### Data quality validation
+
+```
+Generate data quality tests for all models in the marts/ directory. For each model, suggest unique tests, not-null tests, accepted-values tests, and relationship tests based on the column names and types.
 ```
 
 ## Next steps
