@@ -1,0 +1,328 @@
+/**
+ * Register composite SQL dispatcher methods that combine
+ * altimate-core analysis calls with result formatting.
+ *
+ * These 10 methods were previously handled by the Python bridge
+ * as composite operations (calling multiple guard_* functions).
+ */
+
+import * as core from "@altimateai/altimate-core"
+import { register } from "../dispatcher"
+import { schemaOrEmpty, resolveSchema } from "../schema-resolver"
+import { preprocessIff, postprocessQualify } from "../altimate-core"
+import type {
+  SqlAnalyzeResult,
+  SqlAnalyzeIssue,
+  SqlTranslateResult,
+  SqlOptimizeResult,
+  SqlOptimizeSuggestion,
+  LineageCheckResult,
+} from "../../bridge/protocol"
+
+// ---------------------------------------------------------------------------
+// sql.analyze — lint + semantics + safety
+// ---------------------------------------------------------------------------
+register("sql.analyze", async (params) => {
+  try {
+    const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+    const [lintRaw, semanticsRaw, safetyRaw] = await Promise.all([
+      core.lint(params.sql, schema),
+      core.checkSemantics(params.sql, schema),
+      core.scanSql(params.sql),
+    ])
+
+    const lint = JSON.parse(JSON.stringify(lintRaw))
+    const semantics = JSON.parse(JSON.stringify(semanticsRaw))
+    const safety = JSON.parse(JSON.stringify(safetyRaw))
+
+    const issues: SqlAnalyzeIssue[] = []
+
+    for (const f of lint.findings ?? []) {
+      issues.push({
+        type: "lint",
+        severity: f.severity ?? "warning",
+        message: f.message ?? f.rule ?? "",
+        recommendation: f.suggestion ?? "",
+        location: f.line ? `line ${f.line}` : undefined,
+        confidence: "high",
+      })
+    }
+
+    for (const f of semantics.findings ?? []) {
+      issues.push({
+        type: "semantic",
+        severity: f.severity ?? "warning",
+        message: f.message ?? "",
+        recommendation: f.suggestion ?? f.explanation ?? "",
+        confidence: String(f.confidence ?? "medium"),
+      })
+    }
+
+    for (const t of safety.threats ?? []) {
+      issues.push({
+        type: "safety",
+        severity: t.severity ?? "high",
+        message: t.message ?? "",
+        recommendation: t.detail ?? "",
+        location: t.location ? `chars ${t.location[0]}-${t.location[1]}` : undefined,
+        confidence: "high",
+      })
+    }
+
+    return {
+      success: issues.length === 0,
+      issues,
+      issue_count: issues.length,
+      confidence: "high",
+      confidence_factors: ["lint", "semantics", "safety"],
+    } satisfies SqlAnalyzeResult
+  } catch (e) {
+    return {
+      success: false,
+      issues: [],
+      issue_count: 0,
+      confidence: "low",
+      confidence_factors: [],
+      error: String(e),
+    } satisfies SqlAnalyzeResult
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sql.translate — transpile with IFF/QUALIFY transforms
+// ---------------------------------------------------------------------------
+register("sql.translate", async (params) => {
+  try {
+    const processed = preprocessIff(params.sql)
+    const raw = core.transpile(processed, params.source_dialect, params.target_dialect)
+    const result = JSON.parse(JSON.stringify(raw))
+
+    let translatedSql = result.transpiled_sql?.[0] ?? ""
+    const target = params.target_dialect.toLowerCase()
+    if (["bigquery", "databricks", "spark", "trino"].includes(target)) {
+      if (translatedSql.toUpperCase().includes("QUALIFY")) {
+        translatedSql = postprocessQualify(translatedSql)
+      }
+    }
+
+    return {
+      success: result.success ?? true,
+      translated_sql: translatedSql,
+      source_dialect: params.source_dialect,
+      target_dialect: params.target_dialect,
+      warnings: result.error ? [result.error] : [],
+    } satisfies SqlTranslateResult
+  } catch (e) {
+    return {
+      success: false,
+      source_dialect: params.source_dialect,
+      target_dialect: params.target_dialect,
+      warnings: [],
+      error: String(e),
+    } satisfies SqlTranslateResult
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sql.optimize — rewrite + lint
+// ---------------------------------------------------------------------------
+register("sql.optimize", async (params) => {
+  try {
+    const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+    const [rewriteRaw, lintRaw] = await Promise.all([
+      core.rewrite(params.sql, schema),
+      core.lint(params.sql, schema),
+    ])
+
+    const rewrite = JSON.parse(JSON.stringify(rewriteRaw))
+    const lint = JSON.parse(JSON.stringify(lintRaw))
+
+    const suggestions: SqlOptimizeSuggestion[] = (rewrite.suggestions ?? []).map((s: any) => ({
+      type: "REWRITE",
+      description: s.explanation ?? s.rule ?? "",
+      before: params.sql,
+      after: s.rewritten_sql,
+      impact: s.confidence > 0.7 ? "high" : s.confidence > 0.4 ? "medium" : "low",
+    }))
+
+    const antiPatterns = (lint.findings ?? []).map((f: any) => ({
+      type: f.rule ?? "lint",
+      severity: f.severity ?? "warning",
+      message: f.message ?? "",
+      recommendation: f.suggestion ?? "",
+      location: f.line ? `line ${f.line}` : undefined,
+      confidence: "high",
+    }))
+
+    const bestRewrite = rewrite.suggestions?.[0]?.rewritten_sql
+
+    return {
+      success: true,
+      original_sql: params.sql,
+      optimized_sql: bestRewrite ?? params.sql,
+      suggestions,
+      anti_patterns: antiPatterns,
+      confidence: suggestions.length > 0 ? "high" : "medium",
+    } satisfies SqlOptimizeResult
+  } catch (e) {
+    return {
+      success: false,
+      original_sql: params.sql,
+      suggestions: [],
+      anti_patterns: [],
+      confidence: "low",
+      error: String(e),
+    } satisfies SqlOptimizeResult
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sql.format
+// ---------------------------------------------------------------------------
+register("sql.format", async (params) => {
+  try {
+    const raw = core.formatSql(params.sql, params.dialect)
+    const result = JSON.parse(JSON.stringify(raw))
+    return {
+      success: result.success ?? true,
+      formatted_sql: result.formatted_sql ?? params.sql,
+      dialect: params.dialect ?? "generic",
+      error: result.error,
+    }
+  } catch (e) {
+    return { success: false, formatted_sql: params.sql, dialect: params.dialect ?? "generic", error: String(e) }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sql.fix
+// ---------------------------------------------------------------------------
+register("sql.fix", async (params) => {
+  try {
+    const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+    const raw = await core.fix(params.sql, schema)
+    const result = JSON.parse(JSON.stringify(raw))
+    return {
+      success: result.fixed ?? true,
+      original_sql: result.original_sql ?? params.sql,
+      fixed_sql: result.fixed_sql ?? params.sql,
+      fixes_applied: result.fixes_applied ?? [],
+      error: result.error,
+    }
+  } catch (e) {
+    return { success: false, original_sql: params.sql, fixed_sql: params.sql, fixes_applied: [], error: String(e) }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sql.autocomplete — deferred to bridge for now (complex cursor logic)
+// ---------------------------------------------------------------------------
+// Not registered — falls back to bridge
+
+// ---------------------------------------------------------------------------
+// sql.diff — text diff + equivalence check
+// ---------------------------------------------------------------------------
+register("sql.diff", async (params) => {
+  try {
+    const schema = params.schema_context
+      ? resolveSchema(undefined, params.schema_context) ?? undefined
+      : undefined
+
+    const compareRaw = schema
+      ? await core.checkEquivalence(params.sql_a, params.sql_b, schema)
+      : null
+    const compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
+
+    // Simple line-based diff
+    const linesA = params.sql_a.split("\n")
+    const linesB = params.sql_b.split("\n")
+    const diffLines: string[] = []
+    const maxLen = Math.max(linesA.length, linesB.length)
+    for (let i = 0; i < maxLen; i++) {
+      const a = linesA[i] ?? ""
+      const b = linesB[i] ?? ""
+      if (a !== b) {
+        if (a) diffLines.push(`- ${a}`)
+        if (b) diffLines.push(`+ ${b}`)
+      }
+    }
+
+    return {
+      success: true,
+      diff: diffLines.join("\n"),
+      equivalent: compare?.equivalent ?? false,
+      equivalence_confidence: compare?.confidence ?? 0,
+      differences: compare?.differences ?? [],
+    }
+  } catch (e) {
+    return { success: false, diff: "", equivalent: false, equivalence_confidence: 0, differences: [], error: String(e) }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sql.rewrite
+// ---------------------------------------------------------------------------
+register("sql.rewrite", async (params) => {
+  try {
+    const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+    const raw = core.rewrite(params.sql, schema)
+    const result = JSON.parse(JSON.stringify(raw))
+    return {
+      success: true,
+      original_sql: params.sql,
+      rewritten_sql: result.suggestions?.[0]?.rewritten_sql ?? null,
+      rewrites_applied: result.suggestions?.map((s: any) => ({
+        rule: s.rule,
+        description: s.explanation,
+        rewritten_sql: s.rewritten_sql,
+      })) ?? [],
+    }
+  } catch (e) {
+    return { success: false, original_sql: params.sql, rewritten_sql: null, rewrites_applied: [], error: String(e) }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sql.schema_diff
+// ---------------------------------------------------------------------------
+register("sql.schema_diff", async (params) => {
+  try {
+    const oldSchema = core.Schema.fromJson(JSON.stringify(params.old_schema))
+    const newSchema = core.Schema.fromJson(JSON.stringify(params.new_schema))
+    const raw = core.diffSchemas(oldSchema, newSchema)
+    const result = JSON.parse(JSON.stringify(raw))
+    return {
+      success: true,
+      data: result,
+    }
+  } catch (e) {
+    return { success: false, data: {}, error: String(e) }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// lineage.check
+// ---------------------------------------------------------------------------
+register("lineage.check", async (params) => {
+  try {
+    const schema = params.schema_context
+      ? resolveSchema(undefined, params.schema_context) ?? undefined
+      : undefined
+    const raw = core.columnLineage(
+      params.sql,
+      params.dialect ?? undefined,
+      schema ?? undefined,
+    )
+    const result = JSON.parse(JSON.stringify(raw))
+    return {
+      success: true,
+      data: result,
+    } satisfies LineageCheckResult
+  } catch (e) {
+    return {
+      success: false,
+      data: {},
+      error: String(e),
+    } satisfies LineageCheckResult
+  }
+})

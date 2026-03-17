@@ -1,5 +1,7 @@
 // Side-effect import: registers all altimate_core.* native handlers on load
 import "./altimate-core"
+// Side-effect import: registers composite sql.* handlers (analyze, optimize, translate, etc.)
+import "./sql/register"
 // Side-effect import: registers connection/warehouse/sql handlers on load
 import "./connections/register"
 // Side-effect import: registers schema cache, PII, and tag handlers
