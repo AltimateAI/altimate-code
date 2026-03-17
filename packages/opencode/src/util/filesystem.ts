@@ -181,11 +181,27 @@ export namespace Filesystem {
       // Child doesn't exist — walk up to find nearest existing ancestor
     }
 
+    // SECURITY: If the raw child path contains '..' segments, reject it.
+    // realpathSync normalizes '..' lexically (before symlink resolution),
+    // but the OS kernel resolves symlinks THEN applies '..'. For example:
+    //   realpathSync("project/symlink/..") → project/  (lexical)
+    //   writeFile("project/symlink/../f")  → writes outside project (kernel)
+    // Since we can't trust realpathSync's resolution of paths with '..',
+    // any path containing '..' that couldn't be fully resolved above is denied.
+    const segments = child.split(/[/\\]/)
+    if (segments.includes("..")) return false
+
     // Walk up the directory tree to find the nearest existing ancestor,
     // then append the remaining segments. This handles write operations
     // where the target directory hasn't been created yet.
-    const resolved = pathResolve(child)
-    let current = resolved
+    //
+    // CRITICAL: realpathSync normalizes '..' lexically (before symlink resolution),
+    // but the OS kernel resolves symlinks THEN applies '..'. For example:
+    //   realpathSync("project/symlink/..") → project/  (lexical)
+    //   writeFile("project/symlink/../f")  → writes outside project (kernel)
+    // Therefore, if any trailing segment is '..', we MUST deny the access since
+    // we cannot predict where the OS will actually write.
+    let current = child
     const trailing: string[] = []
     while (true) {
       try {

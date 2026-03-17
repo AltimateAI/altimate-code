@@ -45,6 +45,7 @@ const WIN32_HOME = ["AppData", "Downloads", "Desktop", "Documents", "Pictures", 
  */
 const SENSITIVE_DIRS = [
   ".git",
+  ".github",
   ".ssh",
   ".gnupg",
   ".aws",

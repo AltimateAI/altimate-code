@@ -131,6 +131,32 @@ describe("E2E: symlink escape attacks", () => {
     })
   })
 
+  test("symlink/../file.txt escape for non-existent write target is blocked", async () => {
+    // CRITICAL: This tests the Gemini-found vulnerability where path.resolve()
+    // strips '..' lexically before symlinks are resolved. The agent writes to
+    // /project/symlink/../secret.txt. Without the fix, pathResolve normalizes
+    // this to /project/secret.txt (looks safe). With the fix, realpathSync on
+    // /project/symlink/.. correctly follows the symlink first.
+    await using outside = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "existing.txt"), "data")
+      },
+    })
+
+    await using project = await tmpdir({
+      init: async (dir) => {
+        // symlink inside project pointing outside
+        await fs.symlink(outside.path, path.join(dir, "link"))
+      },
+    })
+
+    // /project/link/../new-file.txt — OS resolves link to outside, then ..
+    // goes to outside's parent. This must be DENIED.
+    // NOTE: path.join normalizes away '..', so we construct the path manually
+    const escapePath = project.path + "/link/../new-file.txt"
+    expect(Filesystem.containsReal(project.path, escapePath)).toBe(false)
+  })
+
   test("relative symlink that resolves outside is blocked", async () => {
     await using outside = await tmpdir({
       init: async (dir) => {

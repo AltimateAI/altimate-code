@@ -1,13 +1,13 @@
-fix: address code review findings — rule ordering bug, cross-platform paths, TOCTOU docs
+fix: address multi-model review consensus — movePath guard, case-insensitive matching, expanded patterns
 
-- Fix critical bug: bash deny defaults had `"*": "ask"` LAST which overrode deny rules
-  due to last-match-wins semantics. Moved `"*": "ask"` to first position so deny rules
-  take precedence.
-- Fix all doc examples with same ordering bug (security-faq.md, permissions.md)
-- Fix `isSensitiveWrite` to use regex split `/[/\\]/` for cross-platform path handling
-- Allow per-path "Always" approval for sensitive file writes (reduces approval fatigue)
-- Document TOCTOU limitation in `containsReal` JSDoc
-- Add doc clarification about last-match-wins rule ordering with examples
-- Add tests: bash deny defaults evaluation, user override merge, Windows backslash paths
+Fixes from consensus across GPT 5.2, Kimi K2.5, MiniMax M2.5, and GLM-5 reviews:
+
+- Add `assertSensitiveWrite(ctx, movePath)` for move destinations in `apply_patch`
+  (CRITICAL: 3 models flagged that moves to `.ssh/`, `.env` bypassed sensitive check)
+- Add case-insensitive matching on macOS/Windows for sensitive dirs and files
+  (`.GIT/config`, `.SSH/id_rsa` now correctly detected on case-insensitive FS)
+- Expand `SENSITIVE_FILES` with `.htpasswd`, `.pgpass`
+- Add `SENSITIVE_EXTENSIONS` for private keys: `.pem`, `.key`, `.p12`, `.pfx`
+- Add tests: case-insensitive matching, certificate extensions, credential files
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
