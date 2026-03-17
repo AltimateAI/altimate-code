@@ -45,7 +45,7 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       return {
         title: "Lineage: ERROR",
         metadata: { success: false },
-        output: `Failed to check lineage: ${msg}\n\nEnsure the Python bridge is running and altimate-core is initialized.`,
+        output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
       }
     }
   },

@@ -1,11 +1,9 @@
 // Barrel export for all Altimate custom code
 
-// Bridge (legacy — being replaced by native dispatcher)
-export { Bridge } from "./bridge/client"
-export { ensureEngine, enginePythonPath } from "./bridge/engine"
+// Protocol types (kept for backward compatibility)
 export * from "./bridge/protocol"
 
-// Native dispatcher (new — Strangler Fig migration layer)
+// Native dispatcher (all 73 methods implemented in TypeScript)
 export { Dispatcher } from "./native"
 
 // Telemetry

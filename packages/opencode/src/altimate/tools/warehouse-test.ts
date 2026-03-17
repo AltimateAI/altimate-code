@@ -29,7 +29,7 @@ export const WarehouseTestTool = Tool.define("warehouse_test", {
       return {
         title: `Connection '${args.name}': ERROR`,
         metadata: { connected: false },
-        output: `Failed to test connection: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to test connection: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

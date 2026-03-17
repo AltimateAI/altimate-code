@@ -29,7 +29,7 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
       return {
         title: "Manifest: ERROR",
         metadata: { model_count: 0, source_count: 0, test_count: 0, snapshot_count: 0, seed_count: 0 },
-        output: `Failed to parse manifest: ${msg}\n\nEnsure the manifest.json exists and the Python bridge is running.`,
+        output: `Failed to parse manifest: ${msg}\n\nEnsure the manifest.json exists and the dispatcher is running.`,
       }
     }
   },

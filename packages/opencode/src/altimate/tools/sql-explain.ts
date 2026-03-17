@@ -37,7 +37,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
       return {
         title: "Explain: ERROR",
         metadata: { success: false, analyzed: false, warehouse_type: "unknown" },
-        output: `Failed to run EXPLAIN: ${msg}\n\nEnsure a warehouse connection is configured and the Python bridge is running.`,
+        output: `Failed to run EXPLAIN: ${msg}\n\nEnsure a warehouse connection is configured and the dispatcher is running.`,
       }
     }
   },

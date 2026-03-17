@@ -46,7 +46,7 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
       return {
         title: "Schema Diff: ERROR",
         metadata: { success: false, changeCount: 0, breakingCount: 0, hasBreakingChanges: false },
-        output: `Failed to diff schema: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to diff schema: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

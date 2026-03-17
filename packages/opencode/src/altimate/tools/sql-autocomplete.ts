@@ -48,7 +48,7 @@ export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
       return {
         title: "Complete: ERROR",
         metadata: { suggestion_count: 0, position: args.position ?? "any" },
-        output: `Failed to get completions: ${msg}\n\nEnsure schema_index has been run and the Python bridge is running.`,
+        output: `Failed to get completions: ${msg}\n\nEnsure schema_index has been run and the dispatcher is running.`,
       }
     }
   },

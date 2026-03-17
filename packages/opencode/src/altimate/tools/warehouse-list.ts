@@ -32,7 +32,7 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
       return {
         title: "Warehouses: ERROR",
         metadata: { count: 0 },
-        output: `Failed to list warehouses: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to list warehouses: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

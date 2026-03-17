@@ -33,7 +33,7 @@ export const SqlFixTool = Tool.define("sql_fix", {
       return {
         title: "Fix: ERROR",
         metadata: { success: false, suggestion_count: 0, has_fix: false },
-        output: `Failed to analyze error: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to analyze error: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

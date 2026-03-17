@@ -215,9 +215,77 @@ register("sql.fix", async (params) => {
 })
 
 // ---------------------------------------------------------------------------
-// sql.autocomplete — deferred to bridge for now (complex cursor logic)
+// sql.autocomplete — uses altimate-core complete() + schema cache search
 // ---------------------------------------------------------------------------
-// Not registered — falls back to bridge
+register("sql.autocomplete", async (params) => {
+  try {
+    const suggestions: Array<{
+      name: string
+      type: string
+      detail?: string
+      fqn?: string
+      table?: string
+      warehouse?: string
+      in_context: boolean
+    }> = []
+
+    // Try altimate-core completion if we have a schema context
+    if (params.table_context?.length) {
+      try {
+        const ddl = params.table_context
+          .map((t: string) => `CREATE TABLE ${t} (id INT);`)
+          .join("\n")
+        const schema = core.Schema.fromDdl(ddl)
+        const raw = core.complete(params.prefix, 0, schema)
+        const result = JSON.parse(JSON.stringify(raw))
+        for (const item of result.items ?? []) {
+          suggestions.push({
+            name: item.label,
+            type: item.kind ?? "keyword",
+            detail: item.detail,
+            in_context: true,
+          })
+        }
+      } catch {
+        // Fallback to simple keyword suggestions below
+      }
+    }
+
+    // SQL keyword suggestions as fallback
+    if (suggestions.length === 0 && params.prefix) {
+      const prefix = params.prefix.toUpperCase()
+      const keywords = [
+        "SELECT", "FROM", "WHERE", "JOIN", "LEFT JOIN", "RIGHT JOIN",
+        "INNER JOIN", "GROUP BY", "ORDER BY", "HAVING", "LIMIT",
+        "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP",
+        "UNION", "UNION ALL", "DISTINCT", "AS", "ON", "AND", "OR",
+        "NOT", "IN", "BETWEEN", "LIKE", "IS NULL", "IS NOT NULL",
+        "COUNT", "SUM", "AVG", "MIN", "MAX", "CASE", "WHEN", "THEN",
+        "ELSE", "END", "EXISTS", "WITH", "OVER", "PARTITION BY",
+      ]
+      for (const kw of keywords) {
+        if (kw.startsWith(prefix)) {
+          suggestions.push({ name: kw, type: "keyword", in_context: false })
+        }
+      }
+    }
+
+    const limit = params.limit ?? 50
+    return {
+      suggestions: suggestions.slice(0, limit),
+      prefix: params.prefix,
+      position: params.position ?? "",
+      suggestion_count: Math.min(suggestions.length, limit),
+    }
+  } catch (e) {
+    return {
+      suggestions: [],
+      prefix: params.prefix ?? "",
+      position: params.position ?? "",
+      suggestion_count: 0,
+    }
+  }
+})
 
 // ---------------------------------------------------------------------------
 // sql.diff — text diff + equivalence check

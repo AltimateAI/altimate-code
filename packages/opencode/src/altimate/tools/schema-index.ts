@@ -29,7 +29,7 @@ export const SchemaIndexTool = Tool.define("schema_index", {
       return {
         title: "Schema Index: ERROR",
         metadata: { schemas: 0, tables: 0, columns: 0 },
-        output: `Failed to index warehouse schema: ${msg}\n\nEnsure the warehouse connection is configured in connections.json and the Python bridge is running.`,
+        output: `Failed to index warehouse schema: ${msg}\n\nEnsure the warehouse connection is configured in connections.json and the dispatcher is running.`,
       }
     }
   },

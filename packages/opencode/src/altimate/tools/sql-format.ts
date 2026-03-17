@@ -36,7 +36,7 @@ export const SqlFormatTool = Tool.define("sql_format", {
       return {
         title: "Format: ERROR",
         metadata: { success: false, statement_count: 0 },
-        output: `Failed to format SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to format SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

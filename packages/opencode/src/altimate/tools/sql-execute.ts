@@ -29,7 +29,7 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       return {
         title: "SQL: ERROR",
         metadata: { rowCount: 0, truncated: false },
-        output: `Failed to execute SQL: ${msg}\n\nEnsure the Python bridge is running and a warehouse connection is configured.`,
+        output: `Failed to execute SQL: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
       }
     }
   },

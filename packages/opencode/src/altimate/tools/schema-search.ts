@@ -41,7 +41,7 @@ export const SchemaSearchTool = Tool.define("schema_search", {
       return {
         title: "Schema Search: ERROR",
         metadata: { matchCount: 0, tableCount: 0, columnCount: 0 },
-        output: `Failed to search schema: ${msg}\n\nEnsure schema_index has been run and the Python bridge is running.`,
+        output: `Failed to search schema: ${msg}\n\nEnsure schema_index has been run and the dispatcher is running.`,
       }
     }
   },

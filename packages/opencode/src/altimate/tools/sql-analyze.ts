@@ -35,7 +35,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       return {
         title: "Analyze: ERROR",
         metadata: { success: false, issueCount: 0, confidence: "unknown" },
-        output: `Failed to analyze SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

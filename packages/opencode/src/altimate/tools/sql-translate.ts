@@ -38,7 +38,7 @@ export const SqlTranslateTool = Tool.define("sql_translate", {
       return {
         title: `Translate: ERROR`,
         metadata: { success: false, source_dialect: args.source_dialect, target_dialect: args.target_dialect, warningCount: 0 },
-        output: `Failed to translate SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to translate SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

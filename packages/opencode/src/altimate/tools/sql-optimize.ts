@@ -47,7 +47,7 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
       return {
         title: "Optimize: ERROR",
         metadata: { success: false, suggestionCount: 0, antiPatternCount: 0, hasOptimizedSql: false, confidence: "unknown" },
-        output: `Failed to optimize SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to optimize SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

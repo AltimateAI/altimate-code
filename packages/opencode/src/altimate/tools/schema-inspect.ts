@@ -28,7 +28,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       return {
         title: "Schema: ERROR",
         metadata: { columnCount: 0, rowCount: undefined },
-        output: `Failed to inspect schema: ${msg}\n\nEnsure the Python bridge is running and a warehouse connection is configured.`,
+        output: `Failed to inspect schema: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
       }
     }
   },
