@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreResolveTermTool = Tool.define("altimate_core_resolve_term", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreResolveTermTool = Tool.define("altimate_core_resolve_te
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.resolve_term", {
+      const result = await Dispatcher.call("altimate_core.resolve_term", {
         term: args.term,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

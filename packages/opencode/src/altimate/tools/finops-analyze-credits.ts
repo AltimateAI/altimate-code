@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 function formatCreditsAnalysis(
   totalCredits: number,
@@ -72,7 +72,7 @@ export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.analyze_credits", {
+      const result = await Dispatcher.call("finops.analyze_credits", {
         warehouse: args.warehouse,
         days: args.days,
         limit: args.limit,

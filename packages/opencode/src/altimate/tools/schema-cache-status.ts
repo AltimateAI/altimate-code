@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SchemaCacheStatusResult } from "../bridge/protocol"
 
 export const SchemaCacheStatusTool = Tool.define("schema_cache_status", {
@@ -8,7 +8,7 @@ export const SchemaCacheStatusTool = Tool.define("schema_cache_status", {
   parameters: z.object({}),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.cache_status", {})
+      const result = await Dispatcher.call("schema.cache_status", {})
 
       return {
         title: `Schema Cache: ${result.total_tables} tables, ${result.total_columns} columns`,

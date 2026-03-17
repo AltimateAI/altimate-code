@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreFormatTool = Tool.define("altimate_core_format", {
   description:
@@ -11,7 +11,7 @@ export const AltimateCoreFormatTool = Tool.define("altimate_core_format", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.format", {
+      const result = await Dispatcher.call("altimate_core.format", {
         sql: args.sql,
         dialect: args.dialect ?? "",
       })

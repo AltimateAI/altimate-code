@@ -1,9 +1,12 @@
 // Barrel export for all Altimate custom code
 
-// Bridge
+// Bridge (legacy — being replaced by native dispatcher)
 export { Bridge } from "./bridge/client"
 export { ensureEngine, enginePythonPath } from "./bridge/engine"
 export * from "./bridge/protocol"
+
+// Native dispatcher (new — Strangler Fig migration layer)
+export { Dispatcher } from "./native"
 
 // Telemetry
 export { Telemetry } from "./telemetry"

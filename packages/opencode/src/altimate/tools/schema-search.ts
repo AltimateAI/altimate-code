@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SchemaSearchResult } from "../bridge/protocol"
 
 export const SchemaSearchTool = Tool.define("schema_search", {
@@ -13,7 +13,7 @@ export const SchemaSearchTool = Tool.define("schema_search", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.search", {
+      const result = await Dispatcher.call("schema.search", {
         query: args.query,
         warehouse: args.warehouse,
         limit: args.limit,

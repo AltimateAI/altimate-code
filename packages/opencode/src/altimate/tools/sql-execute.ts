@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../bridge/protocol"
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
@@ -12,7 +12,7 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.execute", {
+      const result = await Dispatcher.call("sql.execute", {
         sql: args.query,
         warehouse: args.warehouse,
         limit: args.limit,

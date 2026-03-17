@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCorePruneSchemaTool = Tool.define("altimate_core_prune_schema", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCorePruneSchemaTool = Tool.define("altimate_core_prune_sche
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.prune_schema", {
+      const result = await Dispatcher.call("altimate_core.prune_schema", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

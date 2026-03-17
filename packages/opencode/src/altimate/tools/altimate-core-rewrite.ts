@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.rewrite", {
+      const result = await Dispatcher.call("altimate_core.rewrite", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

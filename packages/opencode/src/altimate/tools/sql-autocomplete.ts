@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SqlAutocompleteResult } from "../bridge/protocol"
 
 export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
@@ -22,7 +22,7 @@ export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.autocomplete", {
+      const result = await Dispatcher.call("sql.autocomplete", {
         prefix: args.prefix,
         position: args.position,
         warehouse: args.warehouse,

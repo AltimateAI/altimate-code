@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { PiiDetectResult } from "../bridge/protocol"
 
 export const SchemaDetectPiiTool = Tool.define("schema_detect_pii", {
@@ -13,7 +13,7 @@ export const SchemaDetectPiiTool = Tool.define("schema_detect_pii", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.detect_pii", {
+      const result = await Dispatcher.call("schema.detect_pii", {
         warehouse: args.warehouse,
         schema_name: args.schema_name,
         table: args.table,

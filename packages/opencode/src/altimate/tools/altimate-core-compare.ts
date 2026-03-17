@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreCompareTool = Tool.define("altimate_core_compare", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreCompareTool = Tool.define("altimate_core_compare", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.compare", {
+      const result = await Dispatcher.call("altimate_core.compare", {
         left_sql: args.left_sql,
         right_sql: args.right_sql,
         dialect: args.dialect ?? "",

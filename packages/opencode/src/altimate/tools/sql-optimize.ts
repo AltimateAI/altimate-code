@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../bridge/protocol"
 
 export const SqlOptimizeTool = Tool.define("sql_optimize", {
@@ -22,7 +22,7 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.optimize", {
+      const result = await Dispatcher.call("sql.optimize", {
         sql: args.sql,
         dialect: args.dialect,
         ...(args.schema_context ? { schema_context: args.schema_context } : {}),

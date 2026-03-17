@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SqlTranslateResult } from "../bridge/protocol"
 
 export const SqlTranslateTool = Tool.define("sql_translate", {
@@ -17,7 +17,7 @@ export const SqlTranslateTool = Tool.define("sql_translate", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.translate", {
+      const result = await Dispatcher.call("sql.translate", {
         sql: args.sql,
         source_dialect: args.source_dialect,
         target_dialect: args.target_dialect,

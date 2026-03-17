@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const SqlDiffTool = Tool.define("sql_diff", {
   description:
@@ -12,7 +12,7 @@ export const SqlDiffTool = Tool.define("sql_diff", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.diff", {
+      const result = await Dispatcher.call("sql.diff", {
         original: args.original,
         modified: args.modified,
         context_lines: args.context_lines,

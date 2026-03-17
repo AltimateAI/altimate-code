@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const SqlFormatTool = Tool.define("sql_format", {
   description:
@@ -12,7 +12,7 @@ export const SqlFormatTool = Tool.define("sql_format", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.format", {
+      const result = await Dispatcher.call("sql.format", {
         sql: args.sql,
         dialect: args.dialect,
         indent: args.indent,

@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 function formatUnusedResources(
   summary: Record<string, unknown>,
@@ -68,7 +68,7 @@ export const FinopsUnusedResourcesTool = Tool.define("finops_unused_resources", 
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.unused_resources", {
+      const result = await Dispatcher.call("finops.unused_resources", {
         warehouse: args.warehouse,
         days: args.days,
         limit: args.limit,

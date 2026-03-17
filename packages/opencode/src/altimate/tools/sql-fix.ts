@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SqlFixResult } from "../bridge/protocol"
 
 export const SqlFixTool = Tool.define("sql_fix", {
@@ -13,7 +13,7 @@ export const SqlFixTool = Tool.define("sql_fix", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.fix", {
+      const result = await Dispatcher.call("sql.fix", {
         sql: args.sql,
         error_message: args.error_message,
         dialect: args.dialect,

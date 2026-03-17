@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SchemaInspectResult } from "../bridge/protocol"
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
@@ -12,7 +12,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.inspect", {
+      const result = await Dispatcher.call("schema.inspect", {
         table: args.table,
         schema_name: args.schema_name,
         warehouse: args.warehouse,

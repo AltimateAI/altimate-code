@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { DbtManifestResult } from "../bridge/protocol"
 
 export const DbtManifestTool = Tool.define("dbt_manifest", {
@@ -11,7 +11,7 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("dbt.manifest", { path: args.path })
+      const result = await Dispatcher.call("dbt.manifest", { path: args.path })
 
       return {
         title: `Manifest: ${result.model_count} models, ${result.source_count} sources`,

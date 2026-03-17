@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreTrackLineageTool = Tool.define("altimate_core_track_lineage", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreTrackLineageTool = Tool.define("altimate_core_track_lin
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.track_lineage", {
+      const result = await Dispatcher.call("altimate_core.track_lineage", {
         queries: args.queries,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

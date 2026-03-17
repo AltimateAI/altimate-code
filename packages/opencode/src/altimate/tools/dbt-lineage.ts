@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { DbtLineageResult } from "../bridge/protocol"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
@@ -13,7 +13,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("dbt.lineage", {
+      const result = await Dispatcher.call("dbt.lineage", {
         manifest_path: args.manifest_path,
         model: args.model,
         dialect: args.dialect,

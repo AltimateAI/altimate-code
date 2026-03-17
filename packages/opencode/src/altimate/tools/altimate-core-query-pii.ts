@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.query_pii", {
+      const result = await Dispatcher.call("altimate_core.query_pii", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

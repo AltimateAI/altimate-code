@@ -1,13 +1,13 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const WarehouseListTool = Tool.define("warehouse_list", {
   description: "List all configured warehouse connections. Shows connection name, type, and database.",
   parameters: z.object({}),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("warehouse.list", {})
+      const result = await Dispatcher.call("warehouse.list", {})
 
       if (result.warehouses.length === 0) {
         return {

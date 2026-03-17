@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const WarehouseDiscoverTool = Tool.define("warehouse_discover", {
   description:
@@ -8,7 +8,7 @@ export const WarehouseDiscoverTool = Tool.define("warehouse_discover", {
   parameters: z.object({}),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("warehouse.discover", {})
+      const result = await Dispatcher.call("warehouse.discover", {})
 
       if (result.error) {
         return {

@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 function formatWarehouseAdvice(
   recommendations: unknown[],
@@ -77,7 +77,7 @@ export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice", 
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.warehouse_advice", {
+      const result = await Dispatcher.call("finops.warehouse_advice", {
         warehouse: args.warehouse,
         days: args.days,
       })

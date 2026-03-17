@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SchemaIndexResult } from "../bridge/protocol"
 
 export const SchemaIndexTool = Tool.define("schema_index", {
@@ -11,7 +11,7 @@ export const SchemaIndexTool = Tool.define("schema_index", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.index", {
+      const result = await Dispatcher.call("schema.index", {
         warehouse: args.warehouse,
       })
 

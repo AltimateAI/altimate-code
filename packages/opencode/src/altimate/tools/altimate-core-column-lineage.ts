@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_lineage", {
   description:
@@ -13,7 +13,7 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.column_lineage", {
+      const result = await Dispatcher.call("altimate_core.column_lineage", {
         sql: args.sql,
         dialect: args.dialect ?? "",
         schema_path: args.schema_path ?? "",

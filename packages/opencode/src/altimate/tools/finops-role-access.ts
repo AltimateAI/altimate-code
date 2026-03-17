@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 function formatGrants(privilegeSummary: unknown, grants: unknown[]): string {
   const lines: string[] = []
@@ -108,7 +108,7 @@ export const FinopsRoleGrantsTool = Tool.define("finops_role_grants", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.role_grants", {
+      const result = await Dispatcher.call("finops.role_grants", {
         warehouse: args.warehouse,
         role: args.role,
         object_name: args.object_name,
@@ -146,7 +146,7 @@ export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.role_hierarchy", { warehouse: args.warehouse })
+      const result = await Dispatcher.call("finops.role_hierarchy", { warehouse: args.warehouse })
 
       if (!result.success) {
         return {
@@ -181,7 +181,7 @@ export const FinopsUserRolesTool = Tool.define("finops_user_roles", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.user_roles", {
+      const result = await Dispatcher.call("finops.user_roles", {
         warehouse: args.warehouse,
         user: args.user,
         limit: args.limit,

@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SchemaDiffResult, ColumnChange } from "../bridge/protocol"
 
 export const SchemaDiffTool = Tool.define("schema_diff", {
@@ -21,7 +21,7 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.schema_diff", {
+      const result = await Dispatcher.call("sql.schema_diff", {
         old_sql: args.old_sql,
         new_sql: args.new_sql,
         dialect: args.dialect,

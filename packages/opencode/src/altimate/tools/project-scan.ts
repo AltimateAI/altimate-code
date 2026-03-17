@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import { existsSync, readFileSync } from "fs"
 import path from "path"
 import { Telemetry } from "@/telemetry"
@@ -393,28 +393,28 @@ export const ProjectScanTool = Tool.define("project_scan", {
     ])
 
     // Run bridge-dependent detections with individual error handling
-    const engineHealth = await Bridge.call("ping", {} as any)
+    const engineHealth = await Dispatcher.call("ping", {} as any)
       .then((r) => ({ healthy: true, status: r.status }))
       .catch(() => ({ healthy: false, status: undefined as string | undefined }))
 
-    const existingConnections = await Bridge.call("warehouse.list", {})
+    const existingConnections = await Dispatcher.call("warehouse.list", {})
       .then((r) => r.warehouses)
       .catch(() => [] as Array<{ name: string; type: string; database?: string }>)
 
-    const dbtProfiles = await Bridge.call("dbt.profiles", {})
+    const dbtProfiles = await Dispatcher.call("dbt.profiles", {})
       .then((r) => r.connections ?? [])
       .catch(() => [] as Array<{ name: string; type: string; config: Record<string, unknown> }>)
 
     const dockerContainers = args.skip_docker
       ? []
-      : await Bridge.call("warehouse.discover", {} as any)
+      : await Dispatcher.call("warehouse.discover", {} as any)
           .then((r) => r.containers ?? [])
           .catch(() => [] as Array<{ name: string; db_type: string; host: string; port: number; database?: string }>)
 
-    const schemaCache = await Bridge.call("schema.cache_status", {}).catch(() => null)
+    const schemaCache = await Dispatcher.call("schema.cache_status", {}).catch(() => null)
 
     const dbtManifest = dbtProject.manifestPath
-      ? await Bridge.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => null)
+      ? await Dispatcher.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => null)
       : null
 
     // Deduplicate connections

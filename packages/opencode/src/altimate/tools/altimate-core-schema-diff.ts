@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreSchemaDiffTool = Tool.define("altimate_core_schema_diff", {
   description:
@@ -13,7 +13,7 @@ export const AltimateCoreSchemaDiffTool = Tool.define("altimate_core_schema_diff
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.schema_diff", {
+      const result = await Dispatcher.call("altimate_core.schema_diff", {
         schema1_path: args.schema1_path ?? "",
         schema2_path: args.schema2_path ?? "",
         schema1_context: args.schema1_context,

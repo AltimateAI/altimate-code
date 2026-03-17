@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { LineageCheckResult } from "../bridge/protocol"
 
 export const LineageCheckTool = Tool.define("lineage_check", {
@@ -20,7 +20,7 @@ export const LineageCheckTool = Tool.define("lineage_check", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("lineage.check", {
+      const result = await Dispatcher.call("lineage.check", {
         sql: args.sql,
         dialect: args.dialect,
         schema_context: args.schema_context,

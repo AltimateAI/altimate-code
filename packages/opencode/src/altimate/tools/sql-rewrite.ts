@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import type { SqlRewriteResult, SqlRewriteRule } from "../bridge/protocol"
 
 export const SqlRewriteTool = Tool.define("sql_rewrite", {
@@ -22,7 +22,7 @@ export const SqlRewriteTool = Tool.define("sql_rewrite", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.rewrite", {
+      const result = await Dispatcher.call("sql.rewrite", {
         sql: args.sql,
         dialect: args.dialect,
         ...(args.schema_context ? { schema_context: args.schema_context } : {}),
