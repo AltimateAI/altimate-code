@@ -73,8 +73,12 @@
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
+    "@types/pg": "8.18.0",
     "@typescript/native-preview": "catalog:",
     "husky": "9.1.7",
+    "mssql": "12.2.0",
+    "mysql2": "3.20.0",
+    "pg": "8.20.0",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
     "turbo": "2.8.13"

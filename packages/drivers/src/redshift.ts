@@ -8,7 +8,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let pg: any
   try {
-    // @ts-expect-error — optional dependency
     pg = await import("pg")
   } catch {
     throw new Error(

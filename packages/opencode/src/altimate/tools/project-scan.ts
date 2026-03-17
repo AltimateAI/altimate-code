@@ -185,6 +185,42 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
         password: "REDSHIFT_PASSWORD",
       },
     },
+    {
+      type: "sqlserver",
+      signals: ["MSSQL_HOST", "SQLSERVER_HOST"],
+      configMap: {
+        host: ["MSSQL_HOST", "SQLSERVER_HOST"],
+        port: ["MSSQL_PORT", "SQLSERVER_PORT"],
+        database: ["MSSQL_DATABASE", "SQLSERVER_DATABASE"],
+        user: ["MSSQL_USER", "SQLSERVER_USER"],
+        password: ["SA_PASSWORD", "MSSQL_SA_PASSWORD", "MSSQL_PASSWORD", "SQLSERVER_PASSWORD"],
+      },
+    },
+    {
+      type: "oracle",
+      signals: ["ORACLE_HOST", "ORACLE_SID", "ORACLE_SERVICE_NAME"],
+      configMap: {
+        host: "ORACLE_HOST",
+        port: "ORACLE_PORT",
+        user: "ORACLE_USER",
+        password: "ORACLE_PASSWORD",
+        database: ["ORACLE_SID", "ORACLE_SERVICE_NAME", "ORACLE_DATABASE"],
+      },
+    },
+    {
+      type: "duckdb",
+      signals: ["DUCKDB_PATH", "DUCKDB_DATABASE"],
+      configMap: {
+        database: ["DUCKDB_PATH", "DUCKDB_DATABASE"],
+      },
+    },
+    {
+      type: "sqlite",
+      signals: ["SQLITE_PATH", "SQLITE_DATABASE"],
+      configMap: {
+        database: ["SQLITE_PATH", "SQLITE_DATABASE"],
+      },
+    },
   ]
 
   for (const wh of warehouses) {
@@ -225,6 +261,11 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
       redshift: "redshift",
       sqlite: "sqlite",
       sqlite3: "sqlite",
+      mssql: "sqlserver",
+      sqlserver: "sqlserver",
+      oracle: "oracle",
+      duckdb: "duckdb",
+      databricks: "databricks",
     }
     const dbType = schemeTypeMap[scheme] ?? "postgres"
     // Only add if we don't already have this type detected from other env vars

@@ -9,7 +9,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let Database: any
   try {
-    // @ts-expect-error — optional dependency, loaded at runtime
     const mod = await import("better-sqlite3")
     Database = mod.default || mod
   } catch {

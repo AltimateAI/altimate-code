@@ -1,0 +1,197 @@
+# Database Driver Support
+
+## Overview
+
+Altimate Code connects to 10 databases natively via TypeScript drivers. No Python dependency required. Drivers are loaded lazily — only the driver you need is imported at runtime.
+
+## Support Matrix
+
+| Database | Package | Auth Methods | E2E Tested | Notes |
+|----------|---------|-------------|------------|-------|
+| PostgreSQL | `pg` | Password, Connection String, SSL | ✅ Docker | Stable, fully parameterized queries |
+| DuckDB | `duckdb` | File/Memory (no auth) | ✅ In-memory | Default local database |
+| SQLite | `better-sqlite3` | File (no auth) | ✅ File-based | Sync API wrapped async |
+| MySQL | `mysql2` | Password | ✅ Docker | Parameterized introspection |
+| SQL Server | `mssql` | Password, Azure AD | ✅ Docker | Uses `tedious` TDS protocol |
+| Redshift | `pg` (wire-compat) | Password | ✅ Docker (PG wire) | Uses SVV system views |
+| Snowflake | `snowflake-sdk` | Password, Key-Pair, OAuth | ❌ Needs credentials | Key-pair auth with PEM support |
+| BigQuery | `@google-cloud/bigquery` | Service Account, ADC | ❌ Needs credentials | REST/gRPC API |
+| Databricks | `@databricks/sql` | PAT, OAuth | ❌ Needs credentials | Thrift API to SQL warehouses |
+| Oracle | `oracledb` (thin) | Password | ❌ Needs Oracle 12.1+ | Thin mode only, no Instant Client |
+
+## Installation
+
+Drivers are `optionalDependencies` — install only what you need:
+
+```bash
+# Embedded databases (no external service needed)
+bun add duckdb
+bun add better-sqlite3
+
+# Standard databases
+bun add pg                        # PostgreSQL + Redshift
+bun add mysql2                    # MySQL
+bun add mssql                     # SQL Server
+
+# Cloud warehouses
+bun add snowflake-sdk             # Snowflake
+bun add @google-cloud/bigquery    # BigQuery
+bun add @databricks/sql           # Databricks
+bun add oracledb                  # Oracle (thin mode)
+```
+
+## Connection Configuration
+
+### Via `~/.altimate-code/connections.json`
+
+```json
+{
+  "my-postgres": {
+    "type": "postgres",
+    "host": "localhost",
+    "port": 5432,
+    "database": "analytics",
+    "user": "analyst",
+    "password": "secret"
+  },
+  "my-snowflake": {
+    "type": "snowflake",
+    "account": "xy12345.us-east-1",
+    "user": "dbt_user",
+    "private_key_path": "~/.ssh/snowflake_key.p8",
+    "warehouse": "COMPUTE_WH",
+    "database": "ANALYTICS"
+  },
+  "local-duckdb": {
+    "type": "duckdb",
+    "path": "./analytics.duckdb"
+  }
+}
+```
+
+### Via Environment Variables
+
+```bash
+export ALTIMATE_CODE_CONN_MYDB='{"type":"postgres","host":"localhost","port":5432,"database":"mydb","user":"admin","password":"secret"}'
+```
+
+### Via dbt Profiles
+
+Connections are auto-discovered from `~/.dbt/profiles.yml`. Jinja `{{ env_var() }}` patterns are resolved automatically. Discovered connections are named `dbt_{profile}_{target}`.
+
+## Auth Methods by Database
+
+### PostgreSQL / Redshift
+| Method | Config Fields |
+|--------|--------------|
+| Password | `host`, `port`, `database`, `user`, `password` |
+| Connection String | `connection_string: "postgresql://user:pass@host:port/db"` |
+| SSL | Add `ssl: true` or `ssl: { rejectUnauthorized: false }` |
+
+### Snowflake
+| Method | Config Fields |
+|--------|--------------|
+| Password | `account`, `user`, `password`, `warehouse`, `database` |
+| Key-Pair | `account`, `user`, `private_key_path`, `private_key_passphrase?`, `warehouse`, `database` |
+| OAuth | `account`, `user`, `authenticator: "oauth"`, `token` |
+
+### BigQuery
+| Method | Config Fields |
+|--------|--------------|
+| Service Account | `project`, `credentials_path` (path to JSON key file) |
+| ADC | `project` (uses Application Default Credentials) |
+
+### Databricks
+| Method | Config Fields |
+|--------|--------------|
+| PAT | `server_hostname`, `http_path`, `access_token` |
+
+### MySQL
+| Method | Config Fields |
+|--------|--------------|
+| Password | `host`, `port`, `database`, `user`, `password` |
+
+### SQL Server
+| Method | Config Fields |
+|--------|--------------|
+| Password | `host`, `port`, `database`, `user`, `password` |
+| Azure AD | `host`, `database`, `authentication: { type: "azure-active-directory-default" }` |
+
+### Oracle (thin mode)
+| Method | Config Fields |
+|--------|--------------|
+| Password | `host`, `port`, `service_name`, `user`, `password` |
+
+### DuckDB
+| Method | Config Fields |
+|--------|--------------|
+| In-memory | `path: ":memory:"` |
+| File | `path: "./my-database.duckdb"` |
+
+### SQLite
+| Method | Config Fields |
+|--------|--------------|
+| File | `path: "./my-database.sqlite"` |
+
+## SSH Tunneling
+
+Connect through a bastion host by adding SSH config to any connection:
+
+```json
+{
+  "type": "postgres",
+  "host": "db.internal.company.com",
+  "port": 5432,
+  "database": "prod",
+  "user": "analyst",
+  "ssh_host": "bastion.company.com",
+  "ssh_port": 22,
+  "ssh_user": "admin",
+  "ssh_auth_type": "key",
+  "ssh_key_path": "~/.ssh/id_rsa"
+}
+```
+
+SSH auth types: `"key"` (default) or `"password"` (set `ssh_password`).
+
+> **Note:** SSH tunneling cannot be used with `connection_string` — use explicit `host`/`port` instead.
+
+## Auto-Discovery
+
+The CLI auto-discovers connections from:
+
+1. **Docker containers** — detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle containers
+2. **dbt profiles** — parses `~/.dbt/profiles.yml` for all supported adapters
+3. **Environment variables** — detects `SNOWFLAKE_ACCOUNT`, `PGHOST`, `MYSQL_HOST`, `MSSQL_HOST`, `ORACLE_HOST`, `DUCKDB_PATH`, `SQLITE_PATH`, etc.
+
+Use the `warehouse_discover` tool or run project scan to find available connections.
+
+## What's Not Yet E2E Tested
+
+These features work based on SDK documentation but haven't been verified with automated E2E tests:
+
+### Snowflake
+- Key-pair authentication (PEM file loading)
+- OAuth/external browser auth
+- Multi-cluster warehouse selection
+- SHOW SCHEMAS/TABLES introspection commands
+
+### BigQuery
+- Application Default Credentials (ADC)
+- Location-specific query execution
+- Dry run / cost estimation
+
+### Databricks
+- Unity Catalog schema browsing
+- Cluster auto-start on query
+- OAuth M2M authentication
+
+### Oracle
+- Thick mode (requires Oracle Instant Client)
+- Wallet-based authentication
+- TNS connection strings
+
+### General
+- SSH tunnel with password authentication
+- SSH tunnel with passphrase-protected keys
+- Credential store with keytar (OS keychain)

@@ -15,6 +15,8 @@ const IMAGE_MAP: Array<{ pattern: RegExp; type: string }> = [
   { pattern: /mariadb/i, type: "mysql" },
   { pattern: /mcr\.microsoft\.com\/mssql/i, type: "sqlserver" },
   { pattern: /mssql/i, type: "sqlserver" },
+  { pattern: /oracle/i, type: "oracle" },
+  { pattern: /gvenzl\/oracle/i, type: "oracle" },
 ]
 
 /** Map environment variable names to connection config fields by db type. */
@@ -34,6 +36,12 @@ const ENV_MAP: Record<string, Record<string, string>> = {
     SA_PASSWORD: "password",
     MSSQL_SA_PASSWORD: "password",
   },
+  oracle: {
+    ORACLE_PASSWORD: "password",
+    APP_USER: "user",
+    APP_USER_PASSWORD: "password",
+    ORACLE_DATABASE: "database",
+  },
 }
 
 /** Default ports by database type. */
@@ -41,6 +49,7 @@ const DEFAULT_PORTS: Record<string, number> = {
   postgres: 5432,
   mysql: 3306,
   sqlserver: 1433,
+  oracle: 1521,
 }
 
 /** Default users by database type. */
@@ -48,6 +57,7 @@ const DEFAULT_USERS: Record<string, string> = {
   postgres: "postgres",
   mysql: "root",
   sqlserver: "sa",
+  oracle: "system",
 }
 
 function detectDbType(image: string): string | null {

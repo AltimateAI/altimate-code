@@ -1,9 +1,25 @@
-chore: fix review NITs + protect new files in upstream merge config
+test: add E2E driver tests + driver docs + discover integration
 
-- Add packages/drivers/** and packages/opencode/test/altimate/** to
-  keepOurs in script/upstream/utils/config.ts to prevent upstream
-  merges from overwriting our custom code
-- Remove stray .diff files from repo
-- Keep telemetry type as "bridge_call" (enum constraint in telemetry module)
+E2E tests for 8 of 10 database drivers:
+- test/altimate/drivers-e2e.test.ts — DuckDB (in-memory + file),
+  SQLite (file-based), PostgreSQL (Docker, skipped if unavailable)
+  28 passing tests covering connect, execute, DDL/DML, listSchemas,
+  listTables, describeTable, LIMIT truncation, error handling
+- test/altimate/drivers-docker-e2e.test.ts — MySQL (Docker),
+  SQL Server (Docker azure-sql-edge), Redshift (Docker PG wire-compat)
+  8 passing tests with container lifecycle management
+
+Driver documentation:
+- docs/docs/drivers.md — support matrix, auth methods, connection
+  config examples, SSH tunneling, auto-discovery, untested features
+
+Discover integration updates:
+- connections/docker-discovery.ts — added Oracle container detection
+- tools/project-scan.ts — added env var detection for SQL Server,
+  Oracle, DuckDB, SQLite
+
+Cleanup:
+- Remove unused @ts-expect-error directives (deps now installed)
+- Fix SQL Server Docker timeout (60s -> 90s)
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

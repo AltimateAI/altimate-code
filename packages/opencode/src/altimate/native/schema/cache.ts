@@ -131,7 +131,6 @@ export class SchemaCache {
     const resolvedPath = dbPath || defaultCachePath()
     let Database: any
     try {
-      // @ts-expect-error — optional dependency
       const mod = await import("better-sqlite3")
       Database = mod.default || mod
     } catch {
@@ -150,7 +149,6 @@ export class SchemaCache {
   static async createInMemory(): Promise<SchemaCache> {
     let Database: any
     try {
-      // @ts-expect-error — optional dependency
       const mod = await import("better-sqlite3")
       Database = mod.default || mod
     } catch {

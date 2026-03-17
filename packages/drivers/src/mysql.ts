@@ -7,7 +7,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mysql: any
   try {
-    // @ts-expect-error — optional dependency, loaded at runtime
     mysql = await import("mysql2/promise")
     mysql = mysql.default || mysql
   } catch {

@@ -8,7 +8,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let duckdb: any
   try {
-    // @ts-expect-error — optional dependency, loaded at runtime
     duckdb = await import("duckdb")
     duckdb = duckdb.default || duckdb
   } catch {
@@ -38,13 +37,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             else resolve(instance)
           },
         )
+        // Bun: native callback may not fire; fall back to sync return
+        setTimeout(() => resolve(instance), 500)
       })
-      connection = await new Promise<any>((resolve, reject) => {
-        const conn = db.connect((err: Error | null) => {
-          if (err) reject(err)
-          else resolve(conn)
-        })
-      })
+      connection = db.connect()
     },
 
     async execute(sql: string, limit?: number): Promise<ConnectorResult> {
@@ -122,6 +118,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           db.close((err: Error | null) => {
             resolve()
           })
+          // Bun: native callback may not fire; fall back after timeout
+          setTimeout(resolve, 500)
         })
         db = null
         connection = null
