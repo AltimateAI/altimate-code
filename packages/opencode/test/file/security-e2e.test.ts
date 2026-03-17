@@ -602,4 +602,29 @@ describe("E2E: sensitive file detection with backslash paths", () => {
     expect(Protected.isSensitiveWrite("path/to\\.git/config")).toBe(".git")
     expect(Protected.isSensitiveWrite("path\\.ssh/id_rsa")).toBe(".ssh")
   })
+
+  test("case-insensitive matching on macOS/Windows", () => {
+    // On macOS and Windows, .GIT and .git are the same directory
+    if (process.platform === "darwin" || process.platform === "win32") {
+      expect(Protected.isSensitiveWrite(".GIT/config")).toBe(".git")
+      expect(Protected.isSensitiveWrite(".Git/hooks/pre-commit")).toBe(".git")
+      expect(Protected.isSensitiveWrite(".SSH/id_rsa")).toBe(".ssh")
+      expect(Protected.isSensitiveWrite(".AWS/credentials")).toBe(".aws")
+      expect(Protected.isSensitiveWrite(".ENV")).toBeDefined()
+      expect(Protected.isSensitiveWrite(".Env.Production")).toBeDefined()
+    }
+  })
+
+  test("detects private key / certificate extensions", () => {
+    expect(Protected.isSensitiveWrite("server.pem")).toBeDefined()
+    expect(Protected.isSensitiveWrite("private.key")).toBeDefined()
+    expect(Protected.isSensitiveWrite("cert.p12")).toBeDefined()
+    expect(Protected.isSensitiveWrite("keystore.pfx")).toBeDefined()
+    expect(Protected.isSensitiveWrite("certs/tls.key")).toBeDefined()
+  })
+
+  test("detects additional credential files", () => {
+    expect(Protected.isSensitiveWrite(".htpasswd")).toBe(".htpasswd")
+    expect(Protected.isSensitiveWrite(".pgpass")).toBe(".pgpass")
+  })
 })

@@ -119,6 +119,7 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
 
           const movePath = hunk.move_path ? path.resolve(Instance.directory, hunk.move_path) : undefined
           await assertExternalDirectory(ctx, movePath)
+          await assertSensitiveWrite(ctx, movePath)
 
           fileChanges.push({
             filePath,

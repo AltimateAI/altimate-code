@@ -63,11 +63,19 @@ const SENSITIVE_FILES = [
   ".npmrc",
   ".pypirc",
   ".netrc",
+  ".htpasswd",
+  ".pgpass",
   "credentials.json",
   "service-account.json",
   "id_rsa",
   "id_ed25519",
 ]
+
+/** File extensions that typically contain private keys or certificates. */
+const SENSITIVE_EXTENSIONS = [".pem", ".key", ".p12", ".pfx"]
+
+/** Whether the current platform uses case-insensitive filesystem by default. */
+const CASE_INSENSITIVE = process.platform === "darwin" || process.platform === "win32"
 
 export namespace Protected {
   /** Directory basenames to skip when scanning the home directory. */
@@ -99,19 +107,32 @@ export namespace Protected {
     const segments = filepath.split(/[/\\]/)
     const filename = segments[segments.length - 1] ?? ""
 
+    // Use case-insensitive comparison on macOS/Windows where
+    // .GIT/config and .git/config refer to the same path
+    const cmp = (a: string, b: string) =>
+      CASE_INSENSITIVE ? a.toLowerCase() === b.toLowerCase() : a === b
+
     // Check if any path segment is a sensitive directory
     for (const segment of segments) {
-      if (SENSITIVE_DIRS.includes(segment)) {
-        return segment
+      for (const dir of SENSITIVE_DIRS) {
+        if (cmp(segment, dir)) return dir
       }
     }
 
     // Check if the filename matches a sensitive file pattern
     for (const pattern of SENSITIVE_FILES) {
-      if (filename === pattern) return pattern
-      // Match .env.* variants (e.g., .env.local.bak)
-      if (pattern === ".env" && filename.startsWith(".env.")) return filename
+      if (cmp(filename, pattern)) return pattern
+      // Match .env.* variants (e.g., .env.local, .env.production.local)
+      if (pattern === ".env") {
+        const lower = CASE_INSENSITIVE ? filename.toLowerCase() : filename
+        if (lower.startsWith(".env.")) return filename
+      }
     }
+
+    // Check for private key / certificate extensions
+    const ext = filename.includes(".") ? "." + filename.split(".").pop()! : ""
+    const extLower = ext.toLowerCase()
+    if (SENSITIVE_EXTENSIONS.includes(extLower)) return filename
 
     return undefined
   }
