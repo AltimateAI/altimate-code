@@ -520,6 +520,7 @@ export namespace ACP {
     async initialize(params: InitializeRequest): Promise<InitializeResponse> {
       log.info("initialize", { protocolVersion: params.protocolVersion })
 
+      // altimate_change start — branding: altimate auth
       const authMethod: AuthMethod = {
         description: "Run `altimate auth login` in the terminal",
         name: "Login with altimate",
@@ -536,6 +537,7 @@ export namespace ACP {
           },
         }
       }
+      // altimate_change end
 
       return {
         protocolVersion: 1,

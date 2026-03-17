@@ -813,6 +813,7 @@ function App() {
     })
   })
 
+  // altimate_change start — branding: altimate upgrade
   sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
     toast.show({
       variant: "info",
@@ -821,6 +822,7 @@ function App() {
       duration: 10000,
     })
   })
+  // altimate_change end
 
   return (
     <box

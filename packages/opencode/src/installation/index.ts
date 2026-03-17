@@ -270,9 +270,9 @@ export namespace Installation {
     await Process.text([process.execPath, "--version"], { nothrow: true })
   }
 
-  // Strip "v" prefix so VERSION is always a clean semver (e.g. "0.4.1", never "v0.4.1").
-  // CI sets OPENCODE_VERSION from the git tag (e.g. "v0.4.1"), so we normalize here.
+  // altimate_change start — normalize VERSION: strip "v" prefix from CI git tag
   export const VERSION = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION.trim().replace(/^v/, "") : "local"
+  // altimate_change end
   export const CHANNEL = typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : "local"
   export const USER_AGENT = `altimate-code/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
 
