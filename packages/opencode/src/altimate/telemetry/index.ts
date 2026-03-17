@@ -455,6 +455,11 @@ export namespace Telemetry {
     return { sessionId, projectId }
   }
 
+  /** Returns true only after init() has completed and telemetry is enabled. */
+  export function isEnabled(): boolean {
+    return initDone && enabled
+  }
+
   export function track(event: Event) {
     // Before init completes: buffer (flushed once init enables, or cleared if disabled).
     // After init completed and disabled telemetry: drop silently.

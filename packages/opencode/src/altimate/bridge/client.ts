@@ -132,8 +132,19 @@ export namespace Bridge {
   async function start() {
     await ensureEngine()
     const pythonCmd = resolvePython()
+
+    // Propagate altimate-code's telemetry opt-out to the Python engine.
+    // The engine calls altimate_core.init() lazily; this env var ensures
+    // it won't send telemetry when the user has disabled it here.
+    await Telemetry.init()
+    const childEnv = { ...process.env }
+    if (!Telemetry.isEnabled()) {
+      childEnv.ALTIMATE_TELEMETRY_DISABLED = "true"
+    }
+
     child = spawn(pythonCmd, ["-m", "altimate_engine.server"], {
       stdio: ["pipe", "pipe", "pipe"],
+      env: childEnv,
     })
 
     buffer = ""
