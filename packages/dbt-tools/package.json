@@ -1,0 +1,22 @@
+{
+  "name": "@altimateai/dbt-tools",
+  "version": "0.1.0",
+  "type": "module",
+  "private": false,
+  "bin": {
+    "altimate-dbt": "./bin/altimate-dbt"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node --format esm && bun run script/copy-python.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test --timeout 30000"
+  },
+  "dependencies": {
+    "@altimateai/dbt-integration": "^0.2.2"
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:"
+  }
+}
