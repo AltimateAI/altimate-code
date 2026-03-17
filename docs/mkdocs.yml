@@ -73,71 +73,76 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+
   - Get Started:
-      - Quickstart (5 min): quickstart.md
-      - Full Setup Guide: getting-started.md
-      - Network & Proxy: network.md
-      - Windows / WSL: windows-wsl.md
-  - Data Engineering:
+      - Quickstart: quickstart.md
+      - Full Setup: getting-started.md
       - Agent Modes: data-engineering/agent-modes.md
-      - Training:
-          - Overview: data-engineering/training/index.md
-          - Team Deployment: data-engineering/training/team-deployment.md
-      - Tools:
-          - Overview: data-engineering/tools/index.md
-          - SQL Tools: data-engineering/tools/sql-tools.md
-          - Schema Tools: data-engineering/tools/schema-tools.md
-          - FinOps Tools: data-engineering/tools/finops-tools.md
-          - Lineage Tools: data-engineering/tools/lineage-tools.md
-          - dbt Tools: data-engineering/tools/dbt-tools.md
-          - Warehouse Tools: data-engineering/tools/warehouse-tools.md
-          - Memory Tools: data-engineering/tools/memory-tools.md
-      - Guides:
-          - Overview: data-engineering/guides/index.md
-          - Cost Optimization: data-engineering/guides/cost-optimization.md
-          - Migration: data-engineering/guides/migration.md
-          - CI & Headless Mode: data-engineering/guides/ci-headless.md
-          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
-          - Using with Codex: data-engineering/guides/using-with-codex.md
-  - Usage:
-      - TUI: usage/tui.md
-      - CLI: usage/cli.md
-      - Web: usage/web.md
-      - IDE: usage/ide.md
-      - GitHub: usage/github.md
-      - GitLab: usage/gitlab.md
+      - Interfaces:
+          - Terminal UI: usage/tui.md
+          - CLI: usage/cli.md
+          - IDE / VS Code: usage/ide.md
+          - Web UI: usage/web.md
+
+  - Guides:
+      - Cost Optimization: data-engineering/guides/cost-optimization.md
+      - SQL Migration: data-engineering/guides/migration.md
+      - CI & Automation: data-engineering/guides/ci-headless.md
+
+  - Tools:
+      - SQL Analysis: data-engineering/tools/sql-tools.md
+      - Schema & Metadata: data-engineering/tools/schema-tools.md
+      - Column-Level Lineage: data-engineering/tools/lineage-tools.md
+      - dbt Integration: data-engineering/tools/dbt-tools.md
+      - Cost & FinOps: data-engineering/tools/finops-tools.md
+      - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+
+  - Integrations:
+      - GitHub Actions: usage/github.md
+      - GitLab CI: usage/gitlab.md
+      - Claude Code: data-engineering/guides/using-with-claude-code.md
+      - Codex: data-engineering/guides/using-with-codex.md
+      - MCP Servers: configure/mcp-servers.md
+      - LSP: configure/lsp.md
+      - ACP: configure/acp.md
+
   - Configure:
-      - Overview: configure/config.md
-      - Providers & Models:
+      - Config Files: configure/config.md
+      - AI Providers & Models:
           - Providers: configure/providers.md
           - Models: configure/models.md
-      - Agents & Tools:
+      - Agents & Skills:
           - Agents: configure/agents.md
-          - Tools: configure/tools.md
-          - Agent Skills: configure/skills.md
+          - Skills: configure/skills.md
+      - Tools & Access:
+          - Allowed Tools: configure/tools.md
           - Custom Tools: configure/custom-tools.md
-          - Commands: configure/commands.md
+          - Access Control: configure/permissions.md
       - Behavior:
           - Rules: configure/rules.md
-          - Permissions: configure/permissions.md
+          - Commands: configure/commands.md
           - Context Management: configure/context-management.md
-          - Formatters: configure/formatters.md
+          - Memory: data-engineering/tools/memory-tools.md
+          - Training:
+              - Overview: data-engineering/training/index.md
+              - Team Deployment: data-engineering/training/team-deployment.md
       - Appearance:
           - Themes: configure/themes.md
           - Keybinds: configure/keybinds.md
-      - Tracing: configure/tracing.md
-      - Telemetry: configure/telemetry.md
-      - Integrations:
-          - LSP Servers: configure/lsp.md
-          - MCP Servers: configure/mcp-servers.md
-          - ACP Support: configure/acp.md
-  - Develop:
+          - Formatters: configure/formatters.md
+      - Observability:
+          - Tracing: configure/tracing.md
+          - Telemetry: configure/telemetry.md
+      - Network & Proxy: network.md
+      - Windows / WSL: windows-wsl.md
+
+  - Extend:
       - SDK: develop/sdk.md
-      - Server: develop/server.md
+      - Server API: develop/server.md
       - Plugins: develop/plugins.md
       - Ecosystem: develop/ecosystem.md
+
   - Reference:
       - Security FAQ: security-faq.md
       - Troubleshooting: troubleshooting.md
-      - llms.txt: llms.txt
       - Changelog: https://github.com/AltimateAI/altimate-code/blob/main/CHANGELOG.md

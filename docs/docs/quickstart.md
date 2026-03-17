@@ -75,15 +75,13 @@ altimate /discover
 
 ---
 
-## Step 4 — Run Your First Query (30 seconds)
+## Step 4 — Build Your First Artifact (2.5 minutes)
 
 In the TUI, paste this prompt:
 
 ```
-Analyze this query for anti-patterns: SELECT * FROM orders o, customers c WHERE o.customer_id = c.id AND c.region = 'US'
+Look at my snowflake account and do a comprehensive Analysis our Snowflake credit consumption over the last 30 days. After doing this generate a dashboard for my consumption.
 ```
-
-**Expected output:** The SQL Intelligence Engine returns identified anti-patterns (implicit cross join, SELECT *) with rule names, confidence scores, and suggested rewrites.
 
 ---
 
