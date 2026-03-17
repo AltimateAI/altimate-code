@@ -52,6 +52,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       // Key-pair auth
       if (config.private_key_path) {
         const keyPath = config.private_key_path as string
+        if (!fs.existsSync(keyPath)) {
+          throw new Error(`Snowflake private key file not found: ${keyPath}`)
+        }
         const privateKey = fs.readFileSync(keyPath, "utf-8")
         options.authenticator = "SNOWFLAKE_JWT"
         options.privateKey = privateKey
@@ -74,9 +77,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async execute(sql: string, limit?: number): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
       let query = sql
+      const isSelectLike = /^\s*(SELECT|WITH|VALUES|SHOW)\b/i.test(sql)
       if (
+        isSelectLike &&
         effectiveLimit &&
-        !sql.trim().toLowerCase().includes("limit")
+        !/\bLIMIT\b/i.test(sql)
       ) {
         query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }

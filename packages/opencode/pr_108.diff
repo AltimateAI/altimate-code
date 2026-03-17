@@ -1,0 +1,75 @@
+diff --git a/crates/altimate-core-node/Cargo.toml b/crates/altimate-core-node/Cargo.toml
+index 3bc21a6f..8eaa0569 100644
+--- a/crates/altimate-core-node/Cargo.toml
++++ b/crates/altimate-core-node/Cargo.toml
+@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
+ 
+ [dependencies]
+ altimate-core = { path = "../altimate-core" }
++polyglot-sql.workspace = true
+ napi = { version = "3", features = ["tokio_rt", "serde-json"] }
+ napi-derive = "3"
+ tokio.workspace = true
+diff --git a/crates/altimate-core-node/src/convert.rs b/crates/altimate-core-node/src/convert.rs
+index ae18c7df..95b93de2 100644
+--- a/crates/altimate-core-node/src/convert.rs
++++ b/crates/altimate-core-node/src/convert.rs
+@@ -47,6 +47,35 @@ pub fn parse_dialect(s: &str) -> Result<SqlDialect, Error> {
+     }
+ }
+ 
++/// Parse a dialect string into a polyglot-sql `DialectType` (case-insensitive).
++pub fn parse_polyglot_dialect(s: &str) -> Result<polyglot_sql::dialects::DialectType, Error> {
++    use polyglot_sql::dialects::DialectType;
++    match s.to_lowercase().as_str() {
++        "snowflake" => Ok(DialectType::Snowflake),
++        "postgres" | "postgresql" => Ok(DialectType::PostgreSQL),
++        "bigquery" => Ok(DialectType::BigQuery),
++        "databricks" => Ok(DialectType::Databricks),
++        "duckdb" => Ok(DialectType::DuckDB),
++        "mysql" => Ok(DialectType::MySQL),
++        "redshift" => Ok(DialectType::Redshift),
++        "hive" => Ok(DialectType::Hive),
++        "spark" => Ok(DialectType::Spark),
++        "sqlite" => Ok(DialectType::SQLite),
++        "trino" => Ok(DialectType::Trino),
++        "presto" => Ok(DialectType::Presto),
++        "clickhouse" => Ok(DialectType::ClickHouse),
++        "oracle" => Ok(DialectType::Oracle),
++        "tsql" | "mssql" => Ok(DialectType::TSQL),
++        "athena" => Ok(DialectType::Athena),
++        "generic" => Ok(DialectType::Generic),
++        _ => Err(Error::from_reason(format!(
++            "unknown dialect '{s}' for analyze_tags. Supported: snowflake, postgres, bigquery, \
++             databricks, duckdb, mysql, redshift, hive, spark, sqlite, trino, presto, \
++             clickhouse, oracle, tsql, athena, generic"
++        ))),
++    }
++}
++
+ /// Serialize any `Serialize` type to a `serde_json::Value` for NAPI auto-conversion.
+ pub fn to_json<T: serde::Serialize>(val: &T) -> Result<serde_json::Value, Error> {
+     serde_json::to_value(val).map_err(|e| Error::from_reason(format!("serialization error: {e}")))
+diff --git a/crates/altimate-core-node/src/safety.rs b/crates/altimate-core-node/src/safety.rs
+index e662797e..77ce8642 100644
+--- a/crates/altimate-core-node/src/safety.rs
++++ b/crates/altimate-core-node/src/safety.rs
+@@ -53,3 +53,18 @@ pub fn resolve_term(term: String, schema: &Schema) -> Result<serde_json::Value>
+     let result = altimate_core::glossary::resolve_term(&term, &schema.inner);
+     crate::convert::to_json(&result)
+ }
++
++/// Analyze SQL for anti-pattern tags using polyglot-sql-tags.
++#[napi]
++pub fn analyze_tags(
++    sql: String,
++    dialect: String,
++    skip_tags: Option<Vec<String>>,
++) -> Result<serde_json::Value> {
++    let dialect_type = crate::convert::parse_polyglot_dialect(&dialect)?;
++    let config = altimate_core::tagger::AnalysisConfig {
++        skip_tags: skip_tags.unwrap_or_default(),
++    };
++    let result = altimate_core::tagger::analyze_tags(&sql, dialect_type, &config);
++    crate::convert::to_json(&result)
++}

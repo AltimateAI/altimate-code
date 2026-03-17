@@ -46,9 +46,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       try {
         const effectiveLimit = limit ?? 1000
         let query = sql
+        const isSelectLike = /^\s*(SELECT|WITH|VALUES)\b/i.test(sql)
         if (
+          isSelectLike &&
           effectiveLimit &&
-          !sql.trim().toLowerCase().includes("limit")
+          !/\bLIMIT\b/i.test(sql)
         ) {
           query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
         }
@@ -87,36 +89,46 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async listTables(
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
-      const result = await connector.execute(
-        `SELECT tablename, tabletype
-         FROM svv_tables
-         WHERE schemaname = '${schema.replace(/'/g, "''")}'
-         ORDER BY tablename`,
-        10000,
-      )
-      return result.rows.map((r) => ({
-        name: r[0] as string,
-        type: String(r[1]).toLowerCase() === "view" ? "view" : "table",
-      }))
+      const client = await pool.connect()
+      try {
+        const result = await client.query(
+          `SELECT tablename, tabletype
+           FROM svv_tables
+           WHERE schemaname = $1
+           ORDER BY tablename`,
+          [schema],
+        )
+        return result.rows.map((r: any) => ({
+          name: r.tablename as string,
+          type: String(r.tabletype).toLowerCase() === "view" ? "view" : "table",
+        }))
+      } finally {
+        client.release()
+      }
     },
 
     async describeTable(
       schema: string,
       table: string,
     ): Promise<SchemaColumn[]> {
-      const result = await connector.execute(
-        `SELECT columnname, external_type, is_nullable
-         FROM svv_columns
-         WHERE schemaname = '${schema.replace(/'/g, "''")}'
-           AND tablename = '${table.replace(/'/g, "''")}'
-         ORDER BY ordinal_position`,
-        10000,
-      )
-      return result.rows.map((r) => ({
-        name: r[0] as string,
-        data_type: r[1] as string,
-        nullable: String(r[2]).toUpperCase() === "YES",
-      }))
+      const client = await pool.connect()
+      try {
+        const result = await client.query(
+          `SELECT columnname, external_type, is_nullable
+           FROM svv_columns
+           WHERE schemaname = $1
+             AND tablename = $2
+           ORDER BY ordinal_position`,
+          [schema, table],
+        )
+        return result.rows.map((r: any) => ({
+          name: r.columnname as string,
+          data_type: r.external_type as string,
+          nullable: String(r.is_nullable).toUpperCase() === "YES",
+        }))
+      } finally {
+        client.release()
+      }
     },
 
     async close() {

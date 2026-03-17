@@ -5,6 +5,7 @@
  */
 
 import * as Registry from "../connections/registry"
+import { escapeSqlString } from "../sql-escape"
 import type {
   CreditAnalysisParams,
   CreditAnalysisResult,
@@ -194,7 +195,7 @@ function buildCreditUsageSql(
   whType: string, days: number, limit: number, warehouseFilter?: string,
 ): string | null {
   if (whType === "snowflake") {
-    const whF = warehouseFilter ? `AND warehouse_name = '${warehouseFilter}'` : ""
+    const whF = warehouseFilter ? `AND warehouse_name = '${escapeSqlString(warehouseFilter)}'` : ""
     return SNOWFLAKE_CREDIT_USAGE_SQL
       .replace("{days}", String(days))
       .replace("{limit}", String(limit))

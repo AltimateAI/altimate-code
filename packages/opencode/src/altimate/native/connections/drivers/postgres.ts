@@ -51,10 +51,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
         let query = sql
         const effectiveLimit = limit ?? 1000
-        // Add LIMIT if not already present
+        const isSelectLike = /^\s*(SELECT|WITH|VALUES)\b/i.test(sql)
+        // Add LIMIT only for SELECT-like queries and if not already present
         if (
+          isSelectLike &&
           effectiveLimit &&
-          !sql.trim().toLowerCase().includes("limit")
+          !/\bLIMIT\b/i.test(sql)
         ) {
           query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
         }
@@ -90,36 +92,46 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async listTables(
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
-      const result = await connector.execute(
-        `SELECT table_name, table_type
-         FROM information_schema.tables
-         WHERE table_schema = '${schema.replace(/'/g, "''")}'
-         ORDER BY table_name`,
-        10000,
-      )
-      return result.rows.map((r) => ({
-        name: r[0] as string,
-        type: r[1] === "VIEW" ? "view" : "table",
-      }))
+      const client = await pool.connect()
+      try {
+        const result = await client.query(
+          `SELECT table_name, table_type
+           FROM information_schema.tables
+           WHERE table_schema = $1
+           ORDER BY table_name`,
+          [schema],
+        )
+        return result.rows.map((r: any) => ({
+          name: r.table_name as string,
+          type: r.table_type === "VIEW" ? "view" : "table",
+        }))
+      } finally {
+        client.release()
+      }
     },
 
     async describeTable(
       schema: string,
       table: string,
     ): Promise<SchemaColumn[]> {
-      const result = await connector.execute(
-        `SELECT column_name, data_type, is_nullable
-         FROM information_schema.columns
-         WHERE table_schema = '${schema.replace(/'/g, "''")}'
-           AND table_name = '${table.replace(/'/g, "''")}'
-         ORDER BY ordinal_position`,
-        10000,
-      )
-      return result.rows.map((r) => ({
-        name: r[0] as string,
-        data_type: r[1] as string,
-        nullable: r[2] === "YES",
-      }))
+      const client = await pool.connect()
+      try {
+        const result = await client.query(
+          `SELECT column_name, data_type, is_nullable
+           FROM information_schema.columns
+           WHERE table_schema = $1
+             AND table_name = $2
+           ORDER BY ordinal_position`,
+          [schema, table],
+        )
+        return result.rows.map((r: any) => ({
+          name: r.column_name as string,
+          data_type: r.data_type as string,
+          nullable: r.is_nullable === "YES",
+        }))
+      } finally {
+        client.release()
+      }
     },
 
     async close() {

@@ -40,9 +40,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async execute(sql: string, limit?: number): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
       let query = sql
+      const isSelectLike = /^\s*(SELECT|WITH)\b/i.test(sql)
 
       // Oracle uses FETCH FIRST N ROWS ONLY (12c+) or ROWNUM
       if (
+        isSelectLike &&
         effectiveLimit &&
         !sql.trim().toLowerCase().includes("rownum") &&
         !sql.trim().toLowerCase().includes("fetch first")
@@ -88,37 +90,49 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async listTables(
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
-      const result = await connector.execute(
-        `SELECT object_name, object_type
-         FROM all_objects
-         WHERE owner = '${schema.replace(/'/g, "''").toUpperCase()}'
-           AND object_type IN ('TABLE', 'VIEW')
-         ORDER BY object_name`,
-        10000,
-      )
-      return result.rows.map((r) => ({
-        name: r[0] as string,
-        type: (r[1] as string).toLowerCase(),
-      }))
+      const connection = await pool.getConnection()
+      try {
+        const result = await connection.execute(
+          `SELECT object_name, object_type
+           FROM all_objects
+           WHERE owner = :1
+             AND object_type IN ('TABLE', 'VIEW')
+           ORDER BY object_name`,
+          [schema.toUpperCase()],
+          { outFormat: oracledb.OUT_FORMAT_OBJECT },
+        )
+        return (result.rows ?? []).map((r: any) => ({
+          name: r.OBJECT_NAME as string,
+          type: (r.OBJECT_TYPE as string).toLowerCase(),
+        }))
+      } finally {
+        await connection.close()
+      }
     },
 
     async describeTable(
       schema: string,
       table: string,
     ): Promise<SchemaColumn[]> {
-      const result = await connector.execute(
-        `SELECT column_name, data_type, nullable
-         FROM all_tab_columns
-         WHERE owner = '${schema.replace(/'/g, "''").toUpperCase()}'
-           AND table_name = '${table.replace(/'/g, "''").toUpperCase()}'
-         ORDER BY column_id`,
-        10000,
-      )
-      return result.rows.map((r) => ({
-        name: r[0] as string,
-        data_type: r[1] as string,
-        nullable: r[2] === "Y",
-      }))
+      const connection = await pool.getConnection()
+      try {
+        const result = await connection.execute(
+          `SELECT column_name, data_type, nullable
+           FROM all_tab_columns
+           WHERE owner = :1
+             AND table_name = :2
+           ORDER BY column_id`,
+          [schema.toUpperCase(), table.toUpperCase()],
+          { outFormat: oracledb.OUT_FORMAT_OBJECT },
+        )
+        return (result.rows ?? []).map((r: any) => ({
+          name: r.COLUMN_NAME as string,
+          data_type: r.DATA_TYPE as string,
+          nullable: r.NULLABLE === "Y",
+        }))
+      } finally {
+        await connection.close()
+      }
     },
 
     async close() {

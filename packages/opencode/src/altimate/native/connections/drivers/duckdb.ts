@@ -2,6 +2,7 @@
  * DuckDB driver using the `duckdb` package.
  */
 
+import { escapeSqlString } from "../../sql-escape"
 import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
@@ -50,9 +51,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const effectiveLimit = limit ?? 1000
 
       let finalSql = sql
+      const isSelectLike = /^\s*(SELECT|WITH|VALUES)\b/i.test(sql)
       if (
+        isSelectLike &&
         effectiveLimit &&
-        !sql.trim().toLowerCase().includes("limit")
+        !/\bLIMIT\b/i.test(sql)
       ) {
         finalSql = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }
@@ -86,7 +89,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const rows = await query(
         `SELECT table_name, table_type
          FROM information_schema.tables
-         WHERE table_schema = '${schema.replace(/'/g, "''")}'
+         WHERE table_schema = '${escapeSqlString(schema)}'
          ORDER BY table_name`,
       )
       return rows.map((r) => ({
@@ -102,8 +105,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const rows = await query(
         `SELECT column_name, data_type, is_nullable
          FROM information_schema.columns
-         WHERE table_schema = '${schema.replace(/'/g, "''")}'
-           AND table_name = '${table.replace(/'/g, "''")}'
+         WHERE table_schema = '${escapeSqlString(schema)}'
+           AND table_name = '${escapeSqlString(table)}'
          ORDER BY ordinal_position`,
       )
       return rows.map((r) => ({

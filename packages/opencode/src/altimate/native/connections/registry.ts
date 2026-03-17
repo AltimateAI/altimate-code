@@ -150,8 +150,17 @@ async function createConnector(
   }
 
   // Lazy import the driver
-  const mod = await import(driverPath)
-  const connector = await mod.connect(resolvedConfig)
+  let connector: Connector
+  try {
+    const mod = await import(driverPath)
+    connector = await mod.connect(resolvedConfig)
+  } catch (e) {
+    // Clean up SSH tunnel if driver creation fails
+    if (sshConfig) {
+      closeTunnel(name)
+    }
+    throw e
+  }
   return connector
 }
 
@@ -215,7 +224,7 @@ export async function add(
     ensureLoaded()
 
     // Store credentials in keychain, get sanitized config
-    const sanitized = await saveConnection(name, config)
+    const { sanitized, warnings } = await saveConnection(name, config)
 
     // Save to global config file
     const globalPath = globalConfigPath()
@@ -242,7 +251,11 @@ export async function add(
       connectors.delete(name)
     }
 
-    return { success: true, name, type: config.type }
+    const result: { success: boolean; name: string; type: string; warnings?: string[] } = { success: true, name, type: config.type }
+    if (warnings.length > 0) {
+      result.warnings = warnings
+    }
+    return result
   } catch (e) {
     return { success: false, name, type: config.type ?? "unknown", error: String(e) }
   }

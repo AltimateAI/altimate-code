@@ -5,6 +5,7 @@
  */
 
 import * as Registry from "../connections/registry"
+import { escapeSqlString } from "../sql-escape"
 import type {
   RoleGrantsParams,
   RoleGrantsResult,
@@ -126,21 +127,21 @@ function buildGrantsSql(
   whType: string, role?: string, objectName?: string, limit: number = 100,
 ): string | null {
   if (whType === "snowflake") {
-    const roleF = role ? `AND grantee_name = '${role}'` : ""
-    const objF = objectName ? `AND name = '${objectName}'` : ""
+    const roleF = role ? `AND grantee_name = '${escapeSqlString(role)}'` : ""
+    const objF = objectName ? `AND name = '${escapeSqlString(objectName)}'` : ""
     return SNOWFLAKE_GRANTS_ON_SQL
       .replace("{role_filter}", roleF)
       .replace("{object_filter}", objF)
       .replace("{limit}", String(limit))
   }
   if (whType === "bigquery") {
-    const granteeF = role ? `AND grantee = '${role}'` : ""
+    const granteeF = role ? `AND grantee = '${escapeSqlString(role)}'` : ""
     return BIGQUERY_GRANTS_SQL
       .replace("{grantee_filter}", granteeF)
       .replace("{limit}", String(limit))
   }
   if (whType === "databricks") {
-    const granteeF = role ? `AND grantee = '${role}'` : ""
+    const granteeF = role ? `AND grantee = '${escapeSqlString(role)}'` : ""
     return DATABRICKS_GRANTS_SQL
       .replace("{grantee_filter}", granteeF)
       .replace("{limit}", String(limit))
@@ -250,7 +251,7 @@ export async function queryUserRoles(params: UserRolesParams): Promise<UserRoles
   try {
     const connector = await Registry.get(params.warehouse)
     const limit = params.limit ?? 100
-    const userF = params.user ? `AND grantee_name = '${params.user}'` : ""
+    const userF = params.user ? `AND grantee_name = '${escapeSqlString(params.user)}'` : ""
     const sql = SNOWFLAKE_USER_ROLES_SQL
       .replace("{user_filter}", userF)
       .replace("{limit}", String(limit))

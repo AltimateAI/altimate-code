@@ -1,0 +1,932 @@
+diff --git a/package.json b/package.json
+index ca899ff..5b4a20e 100644
+--- a/package.json
++++ b/package.json
+@@ -46,6 +46,8 @@
+         "@types/fs-extra": "^11.0.4",
+         "@types/jest": "^29.5.14",
+         "@types/node": "^20.0.0",
++        "@types/better-sqlite3": "^7.6.0",
++        "@types/mssql": "^9.1.0",
+         "@types/pg": "^8",
+         "@types/pino": "^7.0.5",
+         "@typescript-eslint/eslint-plugin": "^8.29.0",
+@@ -103,6 +105,13 @@
+         "zod": "^3.24.2",
+         "zod-to-json-schema": "^3.24.5"
+     },
++    "optionalDependencies": {
++        "mysql2": "^3.11.0",
++        "mssql": "^11.0.0",
++        "oracledb": "^6.7.0",
++        "duckdb": "^1.1.0",
++        "better-sqlite3": "^11.6.0"
++    },
+     "bin": "dist/cli.js",
+     "keywords": [
+         "Altimate",
+diff --git a/src/tools/duckdb/index.ts b/src/tools/duckdb/index.ts
+new file mode 100644
+index 0000000..d474764
+--- /dev/null
++++ b/src/tools/duckdb/index.ts
+@@ -0,0 +1,141 @@
++import { ToolsBase } from "../toolsBase";
++import { Connection, RegisteredTool, ToolInput } from "../../server/types";
++import { z } from "zod";
++import zodToJsonSchema from "zod-to-json-schema";
++import { getConnectionsInstance } from "../..";
++
++export class DuckDBTools extends ToolsBase {
++  name = "duckdb";
++  description = "Run SQL queries using DuckDB embedded database";
++  integrationId = "duckdb";
++
++  requiresConnectionSelection() {
++    return false;
++  }
++
++  private async executeWithConnection(
++    connection: Connection,
++    sqlQuery: string
++  ): Promise<Record<string, unknown>[]> {
++    let duckdb: typeof import("duckdb");
++    try {
++      duckdb = await import("duckdb");
++    } catch {
++      throw new Error(
++        "duckdb package is not installed. Install it with: npm install duckdb"
++      );
++    }
++
++    const dbPath = (connection.config.duckdbPath as string) || ":memory:";
++
++    return new Promise((resolve, reject) => {
++      const db = new duckdb.default.Database(dbPath, (err) => {
++        if (err) {
++          reject(new Error(`Failed to open DuckDB database: ${err.message}`));
++          return;
++        }
++
++        const conn = db.connect();
++        conn.all(sqlQuery, (queryErr, rows) => {
++          if (queryErr) {
++            db.close(() => {});
++            reject(queryErr);
++            return;
++          }
++
++          db.close((closeErr) => {
++            if (closeErr) {
++              reject(closeErr);
++              return;
++            }
++            resolve((rows as Record<string, unknown>[]) || []);
++          });
++        });
++      });
++    });
++  }
++
++  async getTools(): Promise<RegisteredTool[]> {
++    return [
++      {
++        name: "duckdb_execute_database_query",
++        description: "Execute SQL queries against a DuckDB database",
++        inputSchema: zodToJsonSchema(
++          z.object({
++            connection_id: z.string().min(1, "Connection ID is required"),
++            sql_query: z.string().min(1, "SQL query is required"),
++          })
++        ) as ToolInput,
++        handler: async (args: Record<string, unknown>) => {
++          const connectionId = args.connection_id as string;
++          const sqlQuery = args.sql_query as string;
++
++          const connections = await getConnectionsInstance().getConnections();
++          const connection = connections.find(conn => conn.id === connectionId);
++
++          if (!connection) {
++            throw new Error(`Connection with ID ${connectionId} not found`);
++          }
++
++          const rows = await this.executeWithConnection(connection, sqlQuery);
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(rows, null, 2),
++              },
++            ],
++          };
++        },
++      },
++      {
++        name: "duckdb_list_database_connections",
++        description:
++          "List all available DuckDB connections, call this tool before executing queries to get the connection ID",
++        inputSchema: zodToJsonSchema(z.object({})) as ToolInput,
++        handler: async () => {
++          const connections = await getConnectionsInstance().getConnections();
++          const duckdbConnections = connections.filter(
++            conn => conn.integration_id === this.integrationId
++          );
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(
++                  duckdbConnections.map(conn => ({
++                    id: conn.id,
++                    name: conn.name,
++                    integration_id: conn.integration_id,
++                  })),
++                  null,
++                  2
++                ),
++              },
++            ],
++          };
++        },
++      },
++    ];
++  }
++
++  async validateConnection(
++    connection: Connection
++  ): Promise<{ isValid: boolean; message?: string }> {
++    try {
++      await this.executeWithConnection(connection, "SELECT 1 AS test");
++
++      return {
++        isValid: true,
++        message: "DuckDB connection validated successfully",
++      };
++    } catch (error) {
++      return {
++        isValid: false,
++        message: `Failed to validate DuckDB connection: ${error instanceof Error ? error.message : String(error)}`,
++      };
++    }
++  }
++}
+diff --git a/src/tools/index.ts b/src/tools/index.ts
+index 28080b6..e6c95ed 100644
+--- a/src/tools/index.ts
++++ b/src/tools/index.ts
+@@ -11,6 +11,12 @@ import { DatabricksTools } from "./databricks";
+ import { DbtTools } from "./dbt";
+ import { DagsterTools } from "./dagster";
+ import { LinearTools } from "./linear";
++import { RedshiftTools } from "./redshift";
++import { MySQLTools } from "./mysql";
++import { SQLServerTools } from "./sqlserver";
++import { OracleTools } from "./oracle";
++import { DuckDBTools } from "./duckdb";
++import { SQLiteTools } from "./sqlite";
+ export * from "./airflow";
+ export * from "./alation";
+ export * from "./azure-devops";
+@@ -25,6 +31,12 @@ export * from "./postgreSQL";
+ export * from "./memory";
+ export * from "./dagster";
+ export * from "./linear";
++export * from "./redshift";
++export * from "./mysql";
++export * from "./sqlserver";
++export * from "./oracle";
++export * from "./duckdb";
++export * from "./sqlite";
+ 
+ export const InHouseTools = {
+   airflow: AirflowTools,
+@@ -40,4 +52,10 @@ export const InHouseTools = {
+   postgresql: PostgresTools,
+   dagster: DagsterTools,
+   linear: LinearTools,
++  redshift: RedshiftTools,
++  mysql: MySQLTools,
++  sqlserver: SQLServerTools,
++  oracle: OracleTools,
++  duckdb: DuckDBTools,
++  sqlite: SQLiteTools,
+ };
+diff --git a/src/tools/mysql/index.ts b/src/tools/mysql/index.ts
+new file mode 100644
+index 0000000..6ed52f9
+--- /dev/null
++++ b/src/tools/mysql/index.ts
+@@ -0,0 +1,130 @@
++import { ToolsBase } from "../toolsBase";
++import { Connection, RegisteredTool, ToolInput } from "../../server/types";
++import { z } from "zod";
++import zodToJsonSchema from "zod-to-json-schema";
++import { getConnectionsInstance } from "../..";
++
++export class MySQLTools extends ToolsBase {
++  name = "mysql";
++  description = "Run SQL queries using MySQL client";
++  integrationId = "mysql";
++
++  requiresConnectionSelection() {
++    return false;
++  }
++
++  private async getClient(connection: Connection) {
++    let mysql2: typeof import("mysql2/promise");
++    try {
++      mysql2 = await import("mysql2/promise");
++    } catch {
++      throw new Error(
++        "mysql2 package is not installed. Install it with: npm install mysql2"
++      );
++    }
++
++    const mysqlConfig = {
++      host: connection.config.mysqlHost as string,
++      port: parseInt(connection.config.mysqlPort as string) || 3306,
++      database: connection.config.mysqlDatabase as string,
++      user: connection.config.mysqlUsername as string,
++      password: connection.config.mysqlPassword as string,
++    };
++
++    return mysql2.createConnection(mysqlConfig);
++  }
++
++  async getTools(): Promise<RegisteredTool[]> {
++    return [
++      {
++        name: "mysql_execute_database_query",
++        description: "Execute SQL queries against a MySQL database",
++        inputSchema: zodToJsonSchema(
++          z.object({
++            connection_id: z.string().min(1, "Connection ID is required"),
++            sql_query: z.string().min(1, "SQL query is required"),
++          })
++        ) as ToolInput,
++        handler: async (args: Record<string, unknown>) => {
++          const connectionId = args.connection_id as string;
++          const sqlQuery = args.sql_query as string;
++
++          const connections = await getConnectionsInstance().getConnections();
++          const connection = connections.find(conn => conn.id === connectionId);
++
++          if (!connection) {
++            throw new Error(`Connection with ID ${connectionId} not found`);
++          }
++
++          const client = await this.getClient(connection);
++
++          try {
++            const [rows] = await client.execute(sqlQuery);
++            await client.end();
++
++            return {
++              content: [
++                {
++                  type: "text",
++                  text: JSON.stringify(rows, null, 2),
++                },
++              ],
++            };
++          } catch (error) {
++            await client.end();
++            throw error;
++          }
++        },
++      },
++      {
++        name: "mysql_list_database_connections",
++        description:
++          "List all available MySQL connections, call this tool before executing queries to get the connection ID",
++        inputSchema: zodToJsonSchema(z.object({})) as ToolInput,
++        handler: async () => {
++          const connections = await getConnectionsInstance().getConnections();
++          const mysqlConnections = connections.filter(
++            conn => conn.integration_id === this.integrationId
++          );
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(
++                  mysqlConnections.map(conn => ({
++                    id: conn.id,
++                    name: conn.name,
++                    integration_id: conn.integration_id,
++                  })),
++                  null,
++                  2
++                ),
++              },
++            ],
++          };
++        },
++      },
++    ];
++  }
++
++  async validateConnection(
++    connection: Connection
++  ): Promise<{ isValid: boolean; message?: string }> {
++    try {
++      const client = await this.getClient(connection);
++      await client.execute("SELECT 1");
++      await client.end();
++
++      return {
++        isValid: true,
++        message: "MySQL connection validated successfully",
++      };
++    } catch (error) {
++      return {
++        isValid: false,
++        message: `Failed to validate MySQL connection: ${error instanceof Error ? error.message : String(error)}`,
++      };
++    }
++  }
++}
+diff --git a/src/tools/oracle/index.ts b/src/tools/oracle/index.ts
+new file mode 100644
+index 0000000..a66997a
+--- /dev/null
++++ b/src/tools/oracle/index.ts
+@@ -0,0 +1,136 @@
++import { ToolsBase } from "../toolsBase";
++import { Connection, RegisteredTool, ToolInput } from "../../server/types";
++import { z } from "zod";
++import zodToJsonSchema from "zod-to-json-schema";
++import { getConnectionsInstance } from "../..";
++
++export class OracleTools extends ToolsBase {
++  name = "oracle";
++  description = "Run SQL queries using Oracle Database client (thin mode)";
++  integrationId = "oracle";
++
++  requiresConnectionSelection() {
++    return false;
++  }
++
++  private async executeWithConnection(
++    connection: Connection,
++    sqlQuery: string
++  ): Promise<Record<string, unknown>[]> {
++    let oracledb: typeof import("oracledb");
++    try {
++      oracledb = await import("oracledb");
++    } catch {
++      throw new Error(
++        "oracledb package is not installed. Install it with: npm install oracledb"
++      );
++    }
++
++    const host = connection.config.oracleHost as string;
++    const port = parseInt(connection.config.oraclePort as string) || 1521;
++    const serviceName = connection.config.oracleServiceName as string;
++
++    const connectString = `${host}:${port}/${serviceName}`;
++
++    const conn = await oracledb.default.getConnection({
++      user: connection.config.oracleUsername as string,
++      password: connection.config.oraclePassword as string,
++      connectString,
++    });
++
++    try {
++      const result = await conn.execute(sqlQuery, [], {
++        outFormat: oracledb.default.OUT_FORMAT_OBJECT,
++      });
++      await conn.close();
++      return (result.rows as Record<string, unknown>[]) || [];
++    } catch (error) {
++      await conn.close();
++      throw error;
++    }
++  }
++
++  async getTools(): Promise<RegisteredTool[]> {
++    return [
++      {
++        name: "oracle_execute_database_query",
++        description: "Execute SQL queries against an Oracle database",
++        inputSchema: zodToJsonSchema(
++          z.object({
++            connection_id: z.string().min(1, "Connection ID is required"),
++            sql_query: z.string().min(1, "SQL query is required"),
++          })
++        ) as ToolInput,
++        handler: async (args: Record<string, unknown>) => {
++          const connectionId = args.connection_id as string;
++          const sqlQuery = args.sql_query as string;
++
++          const connections = await getConnectionsInstance().getConnections();
++          const connection = connections.find(conn => conn.id === connectionId);
++
++          if (!connection) {
++            throw new Error(`Connection with ID ${connectionId} not found`);
++          }
++
++          const rows = await this.executeWithConnection(connection, sqlQuery);
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(rows, null, 2),
++              },
++            ],
++          };
++        },
++      },
++      {
++        name: "oracle_list_database_connections",
++        description:
++          "List all available Oracle connections, call this tool before executing queries to get the connection ID",
++        inputSchema: zodToJsonSchema(z.object({})) as ToolInput,
++        handler: async () => {
++          const connections = await getConnectionsInstance().getConnections();
++          const oracleConnections = connections.filter(
++            conn => conn.integration_id === this.integrationId
++          );
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(
++                  oracleConnections.map(conn => ({
++                    id: conn.id,
++                    name: conn.name,
++                    integration_id: conn.integration_id,
++                  })),
++                  null,
++                  2
++                ),
++              },
++            ],
++          };
++        },
++      },
++    ];
++  }
++
++  async validateConnection(
++    connection: Connection
++  ): Promise<{ isValid: boolean; message?: string }> {
++    try {
++      await this.executeWithConnection(connection, "SELECT 1 FROM DUAL");
++
++      return {
++        isValid: true,
++        message: "Oracle connection validated successfully",
++      };
++    } catch (error) {
++      return {
++        isValid: false,
++        message: `Failed to validate Oracle connection: ${error instanceof Error ? error.message : String(error)}`,
++      };
++    }
++  }
++}
+diff --git a/src/tools/redshift/index.ts b/src/tools/redshift/index.ts
+new file mode 100644
+index 0000000..c582674
+--- /dev/null
++++ b/src/tools/redshift/index.ts
+@@ -0,0 +1,141 @@
++import { ToolsBase } from "../toolsBase";
++import { Connection, RegisteredTool, ToolInput } from "../../server/types";
++import { Client } from "pg";
++import { z } from "zod";
++import zodToJsonSchema from "zod-to-json-schema";
++import { getConnectionsInstance } from "../..";
++
++export class RedshiftTools extends ToolsBase {
++  name = "redshift";
++  description = "Run SQL queries using Amazon Redshift (PostgreSQL wire-compatible)";
++  integrationId = "redshift";
++
++  requiresConnectionSelection() {
++    return false;
++  }
++
++  async getTools(): Promise<RegisteredTool[]> {
++    return [
++      {
++        name: "redshift_execute_database_query",
++        description: "Execute SQL queries against an Amazon Redshift database",
++        inputSchema: zodToJsonSchema(
++          z.object({
++            connection_id: z.string().min(1, "Connection ID is required"),
++            sql_query: z.string().min(1, "SQL query is required"),
++          })
++        ) as ToolInput,
++        handler: async (args: Record<string, unknown>) => {
++          const connectionId = args.connection_id as string;
++          const sqlQuery = args.sql_query as string;
++
++          const connections = await getConnectionsInstance().getConnections();
++          const connection = connections.find(conn => conn.id === connectionId);
++
++          if (!connection) {
++            throw new Error(`Connection with ID ${connectionId} not found`);
++          }
++
++          const pgConfig = {
++            host: connection.config.redshiftHost as string,
++            port: parseInt(connection.config.redshiftPort as string) || 5439,
++            database: connection.config.redshiftDatabase as string,
++            user: connection.config.redshiftUsername as string,
++            password: connection.config.redshiftPassword as string,
++            ssl: { rejectUnauthorized: false },
++          };
++
++          const client = new Client(pgConfig);
++
++          try {
++            await client.connect();
++
++            if (connection.config.redshiftSchema) {
++              await client.query(`SET search_path TO '${connection.config.redshiftSchema}'`);
++            }
++
++            const result = await client.query(sqlQuery);
++            await client.end();
++
++            return {
++              content: [
++                {
++                  type: "text",
++                  text: JSON.stringify(result.rows, null, 2),
++                },
++              ],
++            };
++          } catch (error) {
++            await client.end();
++            throw error;
++          }
++        },
++      },
++      {
++        name: "redshift_list_database_connections",
++        description:
++          "List all available Redshift connections, call this tool before executing queries to get the connection ID",
++        inputSchema: zodToJsonSchema(z.object({})) as ToolInput,
++        handler: async () => {
++          const connections = await getConnectionsInstance().getConnections();
++          const redshiftConnections = connections.filter(
++            conn => conn.integration_id === this.integrationId
++          );
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(
++                  redshiftConnections.map(conn => ({
++                    id: conn.id,
++                    name: conn.name,
++                    integration_id: conn.integration_id,
++                  })),
++                  null,
++                  2
++                ),
++              },
++            ],
++          };
++        },
++      },
++    ];
++  }
++
++  async validateConnection(
++    connection: Connection
++  ): Promise<{ isValid: boolean; message?: string }> {
++    const pgConfig = {
++      host: connection.config.redshiftHost as string,
++      port: parseInt(connection.config.redshiftPort as string) || 5439,
++      database: connection.config.redshiftDatabase as string,
++      user: connection.config.redshiftUsername as string,
++      password: connection.config.redshiftPassword as string,
++      ssl: { rejectUnauthorized: false },
++    };
++
++    const client = new Client(pgConfig);
++
++    try {
++      await client.connect();
++      await client.query("SELECT 1");
++      await client.end();
++
++      return {
++        isValid: true,
++        message: "Redshift connection validated successfully",
++      };
++    } catch (error) {
++      try {
++        await client.end();
++      } catch {
++        // Ignore cleanup errors
++      }
++      return {
++        isValid: false,
++        message: `Failed to validate Redshift connection: ${error instanceof Error ? error.message : String(error)}`,
++      };
++    }
++  }
++}
+diff --git a/src/tools/sqlite/index.ts b/src/tools/sqlite/index.ts
+new file mode 100644
+index 0000000..258ce42
+--- /dev/null
++++ b/src/tools/sqlite/index.ts
+@@ -0,0 +1,144 @@
++import { ToolsBase } from "../toolsBase";
++import { Connection, RegisteredTool, ToolInput } from "../../server/types";
++import { z } from "zod";
++import zodToJsonSchema from "zod-to-json-schema";
++import { getConnectionsInstance } from "../..";
++
++export class SQLiteTools extends ToolsBase {
++  name = "sqlite";
++  description = "Run SQL queries using SQLite embedded database";
++  integrationId = "sqlite";
++
++  requiresConnectionSelection() {
++    return false;
++  }
++
++  private async executeWithConnection(
++    connection: Connection,
++    sqlQuery: string
++  ): Promise<Record<string, unknown>[]> {
++    let betterSqlite3: typeof import("better-sqlite3");
++    try {
++      betterSqlite3 = await import("better-sqlite3");
++    } catch {
++      throw new Error(
++        "better-sqlite3 package is not installed. Install it with: npm install better-sqlite3"
++      );
++    }
++
++    const dbPath = connection.config.sqlitePath as string;
++    if (!dbPath) {
++      throw new Error("SQLite database path (sqlitePath) is required");
++    }
++
++    const db = betterSqlite3.default(dbPath);
++
++    try {
++      // Determine if the query is a SELECT/read query or a write query
++      const trimmedQuery = sqlQuery.trim().toUpperCase();
++      const isReadQuery =
++        trimmedQuery.startsWith("SELECT") ||
++        trimmedQuery.startsWith("PRAGMA") ||
++        trimmedQuery.startsWith("EXPLAIN") ||
++        trimmedQuery.startsWith("WITH");
++
++      let rows: Record<string, unknown>[];
++      if (isReadQuery) {
++        rows = db.prepare(sqlQuery).all() as Record<string, unknown>[];
++      } else {
++        const result = db.prepare(sqlQuery).run();
++        rows = [{ changes: result.changes, lastInsertRowid: result.lastInsertRowid }];
++      }
++
++      db.close();
++      return rows;
++    } catch (error) {
++      db.close();
++      throw error;
++    }
++  }
++
++  async getTools(): Promise<RegisteredTool[]> {
++    return [
++      {
++        name: "sqlite_execute_database_query",
++        description: "Execute SQL queries against a SQLite database",
++        inputSchema: zodToJsonSchema(
++          z.object({
++            connection_id: z.string().min(1, "Connection ID is required"),
++            sql_query: z.string().min(1, "SQL query is required"),
++          })
++        ) as ToolInput,
++        handler: async (args: Record<string, unknown>) => {
++          const connectionId = args.connection_id as string;
++          const sqlQuery = args.sql_query as string;
++
++          const connections = await getConnectionsInstance().getConnections();
++          const connection = connections.find(conn => conn.id === connectionId);
++
++          if (!connection) {
++            throw new Error(`Connection with ID ${connectionId} not found`);
++          }
++
++          const rows = await this.executeWithConnection(connection, sqlQuery);
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(rows, null, 2),
++              },
++            ],
++          };
++        },
++      },
++      {
++        name: "sqlite_list_database_connections",
++        description:
++          "List all available SQLite connections, call this tool before executing queries to get the connection ID",
++        inputSchema: zodToJsonSchema(z.object({})) as ToolInput,
++        handler: async () => {
++          const connections = await getConnectionsInstance().getConnections();
++          const sqliteConnections = connections.filter(
++            conn => conn.integration_id === this.integrationId
++          );
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(
++                  sqliteConnections.map(conn => ({
++                    id: conn.id,
++                    name: conn.name,
++                    integration_id: conn.integration_id,
++                  })),
++                  null,
++                  2
++                ),
++              },
++            ],
++          };
++        },
++      },
++    ];
++  }
++
++  async validateConnection(
++    connection: Connection
++  ): Promise<{ isValid: boolean; message?: string }> {
++    try {
++      await this.executeWithConnection(connection, "SELECT 1 AS test");
++
++      return {
++        isValid: true,
++        message: "SQLite connection validated successfully",
++      };
++    } catch (error) {
++      return {
++        isValid: false,
++        message: `Failed to validate SQLite connection: ${error instanceof Error ? error.message : String(error)}`,
++      };
++    }
++  }
++}
+diff --git a/src/tools/sqlserver/index.ts b/src/tools/sqlserver/index.ts
+new file mode 100644
+index 0000000..642cd91
+--- /dev/null
++++ b/src/tools/sqlserver/index.ts
+@@ -0,0 +1,136 @@
++import { ToolsBase } from "../toolsBase";
++import { Connection, RegisteredTool, ToolInput } from "../../server/types";
++import { z } from "zod";
++import zodToJsonSchema from "zod-to-json-schema";
++import { getConnectionsInstance } from "../..";
++
++export class SQLServerTools extends ToolsBase {
++  name = "sqlserver";
++  description = "Run SQL queries using Microsoft SQL Server client";
++  integrationId = "sqlserver";
++
++  requiresConnectionSelection() {
++    return false;
++  }
++
++  private async executeWithConnection(
++    connection: Connection,
++    sqlQuery: string
++  ): Promise<Record<string, unknown>[]> {
++    let mssql: typeof import("mssql");
++    try {
++      mssql = await import("mssql");
++    } catch {
++      throw new Error(
++        "mssql package is not installed. Install it with: npm install mssql"
++      );
++    }
++
++    const config: import("mssql").config = {
++      server: connection.config.sqlserverHost as string,
++      port: parseInt(connection.config.sqlserverPort as string) || 1433,
++      database: connection.config.sqlserverDatabase as string,
++      user: connection.config.sqlserverUsername as string,
++      password: connection.config.sqlserverPassword as string,
++      options: {
++        encrypt: true,
++        trustServerCertificate: true,
++      },
++    };
++
++    const pool = await mssql.default.connect(config);
++
++    try {
++      const result = await pool.request().query(sqlQuery);
++      await pool.close();
++      return result.recordset;
++    } catch (error) {
++      await pool.close();
++      throw error;
++    }
++  }
++
++  async getTools(): Promise<RegisteredTool[]> {
++    return [
++      {
++        name: "sqlserver_execute_database_query",
++        description: "Execute SQL queries against a Microsoft SQL Server database",
++        inputSchema: zodToJsonSchema(
++          z.object({
++            connection_id: z.string().min(1, "Connection ID is required"),
++            sql_query: z.string().min(1, "SQL query is required"),
++          })
++        ) as ToolInput,
++        handler: async (args: Record<string, unknown>) => {
++          const connectionId = args.connection_id as string;
++          const sqlQuery = args.sql_query as string;
++
++          const connections = await getConnectionsInstance().getConnections();
++          const connection = connections.find(conn => conn.id === connectionId);
++
++          if (!connection) {
++            throw new Error(`Connection with ID ${connectionId} not found`);
++          }
++
++          const rows = await this.executeWithConnection(connection, sqlQuery);
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(rows, null, 2),
++              },
++            ],
++          };
++        },
++      },
++      {
++        name: "sqlserver_list_database_connections",
++        description:
++          "List all available SQL Server connections, call this tool before executing queries to get the connection ID",
++        inputSchema: zodToJsonSchema(z.object({})) as ToolInput,
++        handler: async () => {
++          const connections = await getConnectionsInstance().getConnections();
++          const sqlserverConnections = connections.filter(
++            conn => conn.integration_id === this.integrationId
++          );
++
++          return {
++            content: [
++              {
++                type: "text",
++                text: JSON.stringify(
++                  sqlserverConnections.map(conn => ({
++                    id: conn.id,
++                    name: conn.name,
++                    integration_id: conn.integration_id,
++                  })),
++                  null,
++                  2
++                ),
++              },
++            ],
++          };
++        },
++      },
++    ];
++  }
++
++  async validateConnection(
++    connection: Connection
++  ): Promise<{ isValid: boolean; message?: string }> {
++    try {
++      await this.executeWithConnection(connection, "SELECT 1 AS test");
++
++      return {
++        isValid: true,
++        message: "SQL Server connection validated successfully",
++      };
++    } catch (error) {
++      return {
++        isValid: false,
++        message: `Failed to validate SQL Server connection: ${error instanceof Error ? error.message : String(error)}`,
++      };
++    }
++  }
++}

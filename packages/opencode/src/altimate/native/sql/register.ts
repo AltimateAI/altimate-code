@@ -296,14 +296,17 @@ register("sql.diff", async (params) => {
       ? resolveSchema(undefined, params.schema_context) ?? undefined
       : undefined
 
+    const sqlA = params.original ?? params.sql_a
+    const sqlB = params.modified ?? params.sql_b
+
     const compareRaw = schema
-      ? await core.checkEquivalence(params.sql_a, params.sql_b, schema)
+      ? await core.checkEquivalence(sqlA, sqlB, schema)
       : null
     const compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
 
     // Simple line-based diff
-    const linesA = params.sql_a.split("\n")
-    const linesB = params.sql_b.split("\n")
+    const linesA = sqlA.split("\n")
+    const linesB = sqlB.split("\n")
     const diffLines: string[] = []
     const maxLen = Math.max(linesA.length, linesB.length)
     for (let i = 0; i < maxLen; i++) {
@@ -355,8 +358,10 @@ register("sql.rewrite", async (params) => {
 // ---------------------------------------------------------------------------
 register("sql.schema_diff", async (params) => {
   try {
-    const oldSchema = core.Schema.fromJson(JSON.stringify(params.old_schema))
-    const newSchema = core.Schema.fromJson(JSON.stringify(params.new_schema))
+    const oldSchemaData = params.old_schema ?? params.old_sql
+    const newSchemaData = params.new_schema ?? params.new_sql
+    const oldSchema = core.Schema.fromJson(JSON.stringify(oldSchemaData))
+    const newSchema = core.Schema.fromJson(JSON.stringify(newSchemaData))
     const raw = core.diffSchemas(oldSchema, newSchema)
     const result = JSON.parse(JSON.stringify(raw))
     return {

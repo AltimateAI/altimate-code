@@ -46,11 +46,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const effectiveLimit = limit ?? 1000
 
       let query = sql
+      const isSelectLike = /^\s*SELECT\b/i.test(sql)
       // SQL Server uses TOP, not LIMIT
       if (
+        isSelectLike &&
         effectiveLimit &&
-        !sql.trim().toLowerCase().includes("top ") &&
-        !sql.trim().toLowerCase().includes("limit")
+        !/\bTOP\b/i.test(sql) &&
+        !/\bLIMIT\b/i.test(sql)
       ) {
         // Insert TOP after SELECT
         query = sql.replace(

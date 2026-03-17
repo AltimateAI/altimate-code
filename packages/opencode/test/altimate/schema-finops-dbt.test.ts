@@ -309,8 +309,8 @@ describe("FinOps: SQL template generation", () => {
 })
 
 describe("dbt: manifest parser", () => {
-  test("returns empty result for non-existent file", () => {
-    const result = parseManifest({ path: "/tmp/nonexistent-manifest.json" })
+  test("returns empty result for non-existent file", async () => {
+    const result = await parseManifest({ path: "/tmp/nonexistent-manifest.json" })
     expect(result.models).toEqual([])
     expect(result.sources).toEqual([])
     expect(result.model_count).toBe(0)
@@ -369,7 +369,7 @@ describe("dbt: manifest parser", () => {
     fs.writeFileSync(tmpFile, JSON.stringify(fixture))
 
     try {
-      const result = parseManifest({ path: tmpFile })
+      const result = await parseManifest({ path: tmpFile })
 
       expect(result.model_count).toBe(1)
       expect(result.source_count).toBe(1)

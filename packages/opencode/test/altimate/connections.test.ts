@@ -122,11 +122,12 @@ describe("CredentialStore", () => {
     expect(resolved).toEqual(config)
   })
 
-  test("saveConnection returns config unchanged when keytar unavailable", async () => {
+  test("saveConnection returns config with warnings when keytar unavailable", async () => {
     const config = { type: "postgres", password: "secret123" } as any
-    const saved = await CredentialStore.saveConnection("mydb", config)
-    // Password stays in config since keytar can't store it
-    expect(saved.password).toBe("secret123")
+    const { sanitized, warnings } = await CredentialStore.saveConnection("mydb", config)
+    // Password stripped from config since keytar can't store it, warning emitted
+    expect(sanitized.password).toBeUndefined()
+    expect(warnings.length).toBeGreaterThan(0)
   })
 
   test("isSensitiveField identifies sensitive fields", () => {
@@ -327,11 +328,12 @@ describe("Connection dispatcher registration", () => {
     expect(result.container_count).toBe(0)
   })
 
-  test("sql.execute throws when no warehouse configured", async () => {
+  test("sql.execute returns error when no warehouse configured", async () => {
     Registry.setConfigs({})
-    await expect(
-      Dispatcher.call("sql.execute", { sql: "SELECT 1" }),
-    ).rejects.toThrow("No warehouse configured")
+    const result = await Dispatcher.call("sql.execute", { sql: "SELECT 1" }) as any
+    expect(result.error).toContain("No warehouse configured")
+    expect(result.columns).toEqual([])
+    expect(result.rows).toEqual([])
   })
 
   test("dbt.profiles returns empty for non-existent path", async () => {

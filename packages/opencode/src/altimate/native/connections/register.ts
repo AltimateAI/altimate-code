@@ -37,20 +37,24 @@ export function registerAll(): void {
 
 // --- sql.execute ---
 register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResult> => {
-  const warehouseName = params.warehouse
-  if (!warehouseName) {
-    const warehouses = Registry.list().warehouses
-    if (warehouses.length === 0) {
-      throw new Error(
-        "No warehouse configured. Use warehouse.add or set ALTIMATE_CODE_CONN_* env vars.",
-      )
+  try {
+    const warehouseName = params.warehouse
+    if (!warehouseName) {
+      const warehouses = Registry.list().warehouses
+      if (warehouses.length === 0) {
+        throw new Error(
+          "No warehouse configured. Use warehouse.add or set ALTIMATE_CODE_CONN_* env vars.",
+        )
+      }
+      // Use the first warehouse as default
+      const connector = await Registry.get(warehouses[0].name)
+      return connector.execute(params.sql, params.limit)
     }
-    // Use the first warehouse as default
-    const connector = await Registry.get(warehouses[0].name)
+    const connector = await Registry.get(warehouseName)
     return connector.execute(params.sql, params.limit)
+  } catch (e) {
+    return { columns: [], rows: [], row_count: 0, truncated: false, error: String(e) } as SqlExecuteResult & { error: string }
   }
-  const connector = await Registry.get(warehouseName)
-  return connector.execute(params.sql, params.limit)
 })
 
 // --- sql.explain ---
@@ -153,31 +157,40 @@ register("warehouse.discover", async (): Promise<WarehouseDiscoverResult> => {
 
 // --- schema.inspect ---
 register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaInspectResult> => {
-  const warehouseName = params.warehouse
-  let connector
+  try {
+    const warehouseName = params.warehouse
+    let connector
 
-  if (warehouseName) {
-    connector = await Registry.get(warehouseName)
-  } else {
-    const warehouses = Registry.list().warehouses
-    if (warehouses.length === 0) {
-      throw new Error("No warehouse configured.")
+    if (warehouseName) {
+      connector = await Registry.get(warehouseName)
+    } else {
+      const warehouses = Registry.list().warehouses
+      if (warehouses.length === 0) {
+        throw new Error("No warehouse configured.")
+      }
+      connector = await Registry.get(warehouses[0].name)
     }
-    connector = await Registry.get(warehouses[0].name)
-  }
 
-  const schemaName = params.schema_name ?? "public"
-  const columns = await connector.describeTable(schemaName, params.table)
+    const schemaName = params.schema_name ?? "public"
+    const columns = await connector.describeTable(schemaName, params.table)
 
-  return {
-    table: params.table,
-    schema_name: schemaName,
-    columns: columns.map((c) => ({
-      name: c.name,
-      data_type: c.data_type,
-      nullable: c.nullable,
-      primary_key: false, // would need additional query for PK detection
-    })),
+    return {
+      table: params.table,
+      schema_name: schemaName,
+      columns: columns.map((c) => ({
+        name: c.name,
+        data_type: c.data_type,
+        nullable: c.nullable,
+        primary_key: false, // would need additional query for PK detection
+      })),
+    }
+  } catch (e) {
+    return {
+      table: params.table,
+      schema_name: params.schema_name ?? "public",
+      columns: [],
+      error: String(e),
+    } as SchemaInspectResult & { error: string }
   }
 })
 

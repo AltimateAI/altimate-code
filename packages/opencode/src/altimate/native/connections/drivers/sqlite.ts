@@ -3,6 +3,7 @@
  * Synchronous API wrapped in async interface.
  */
 
+import { escapeSqlIdentifier } from "../../sql-escape"
 import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
@@ -30,13 +31,6 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
     async execute(sql: string, limit?: number): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
-      let query = sql
-      if (
-        effectiveLimit &&
-        !sql.trim().toLowerCase().includes("limit")
-      ) {
-        query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
-      }
 
       // Determine if this is a SELECT-like statement
       const trimmed = sql.trim().toLowerCase()
@@ -45,6 +39,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         trimmed.startsWith("pragma") ||
         trimmed.startsWith("with") ||
         trimmed.startsWith("explain")
+
+      let query = sql
+      if (
+        isSelect &&
+        effectiveLimit &&
+        !/\bLIMIT\b/i.test(sql)
+      ) {
+        query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
+      }
 
       if (!isSelect) {
         // Non-SELECT statements (INSERT, UPDATE, DELETE, CREATE, etc.)
@@ -96,7 +99,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       _schema: string,
       table: string,
     ): Promise<SchemaColumn[]> {
-      const rows = db.prepare(`PRAGMA table_info("${table.replace(/"/g, '""')}")`).all()
+      const rows = db.prepare(`PRAGMA table_info("${escapeSqlIdentifier(table)}")`).all()
       return rows.map((r: any) => ({
         name: r.name as string,
         data_type: r.type as string,

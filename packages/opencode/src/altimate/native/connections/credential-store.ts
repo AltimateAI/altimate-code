@@ -94,13 +94,14 @@ export async function resolveConfig(
 
 /**
  * Save a connection config, extracting sensitive fields to the keychain.
- * Returns the sanitized config (sensitive fields removed if stored in keychain).
+ * Returns the sanitized config and any warnings about stripped credentials.
  */
 export async function saveConnection(
   name: string,
   config: ConnectionConfig,
-): Promise<ConnectionConfig> {
+): Promise<{ sanitized: ConnectionConfig; warnings: string[] }> {
   const sanitized = { ...config }
+  const warnings: string[] = []
   for (const field of SENSITIVE_FIELDS) {
     const value = config[field]
     if (typeof value !== "string" || !value) continue
@@ -110,14 +111,14 @@ export async function saveConnection(
     } else {
       // keytar unavailable — strip sensitive field from config to prevent
       // plaintext storage. Users should use ALTIMATE_CODE_CONN_* env vars.
-      Log.Default.warn(
-        `Cannot securely store '${field}' for connection '${name}'. ` +
-        `Set ALTIMATE_CODE_CONN_${name.toUpperCase()} env var with full config JSON instead.`,
-      )
+      const warning = `Cannot securely store '${field}' for connection '${name}'. ` +
+        `Set ALTIMATE_CODE_CONN_${name.toUpperCase()} env var with full config JSON instead.`
+      Log.Default.warn(warning)
+      warnings.push(warning)
       delete sanitized[field]
     }
   }
-  return sanitized
+  return { sanitized, warnings }
 }
 
 /** Check if a field is sensitive. */

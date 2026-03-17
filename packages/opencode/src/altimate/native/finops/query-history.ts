@@ -5,6 +5,7 @@
  */
 
 import * as Registry from "../connections/registry"
+import { escapeSqlString } from "../sql-escape"
 import type {
   QueryHistoryParams,
   QueryHistoryResult,
@@ -122,8 +123,8 @@ function buildHistoryQuery(
   whType: string, days: number, limit: number, user?: string, warehouseFilter?: string,
 ): string | null {
   if (whType === "snowflake") {
-    const userF = user ? `AND user_name = '${user}'` : ""
-    const whF = warehouseFilter ? `AND warehouse_name = '${warehouseFilter}'` : ""
+    const userF = user ? `AND user_name = '${escapeSqlString(user)}'` : ""
+    const whF = warehouseFilter ? `AND warehouse_name = '${escapeSqlString(warehouseFilter)}'` : ""
     return SNOWFLAKE_HISTORY_SQL
       .replace("{days}", String(days))
       .replace("{limit}", String(limit))

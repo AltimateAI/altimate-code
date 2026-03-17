@@ -3,6 +3,7 @@
  */
 
 import * as Registry from "../connections/registry"
+import { escapeSqlString } from "../sql-escape"
 import type {
   TagsGetParams,
   TagsGetResult,
@@ -78,10 +79,10 @@ export async function getTags(params: TagsGetParams): Promise<TagsGetResult> {
 
     if (params.object_name) {
       const tagFilter = params.tag_name
-        ? `WHERE tag_name = '${params.tag_name}'`
+        ? `WHERE tag_name = '${escapeSqlString(params.tag_name)}'`
         : ""
       sql = SNOWFLAKE_TAG_REFERENCES_SQL
-        .replace("{object_name}", params.object_name)
+        .replace("{object_name}", escapeSqlString(params.object_name))
         .replace("{domain}", "TABLE")
         .replace("{tag_filter}", tagFilter)
         .replace("{limit}", String(limit))

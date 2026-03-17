@@ -26,7 +26,7 @@ function extractColumns(columnsDict: Record<string, any>): ModelColumn[] {
 /**
  * Parse a dbt manifest.json and extract model, source, and node information.
  */
-export function parseManifest(params: DbtManifestParams): DbtManifestResult {
+export async function parseManifest(params: DbtManifestParams): Promise<DbtManifestResult> {
   const emptyResult: DbtManifestResult = {
     models: [],
     sources: [],
@@ -47,7 +47,7 @@ export function parseManifest(params: DbtManifestParams): DbtManifestResult {
     if (stat.size > LARGE_MANIFEST_BYTES) {
       // Log warning but continue
     }
-    raw = fs.readFileSync(params.path, "utf-8")
+    raw = await fs.promises.readFile(params.path, "utf-8")
   } catch {
     return emptyResult
   }
