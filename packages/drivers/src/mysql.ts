@@ -2,7 +2,7 @@
  * MySQL driver using the `mysql2` package.
  */
 
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
+import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mysql: any

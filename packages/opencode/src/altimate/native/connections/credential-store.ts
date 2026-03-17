@@ -8,7 +8,7 @@
  */
 
 import { Log } from "../../../util/log"
-import type { ConnectionConfig } from "./types"
+import type { ConnectionConfig } from "@altimateai/drivers"
 
 const SERVICE_NAME = "altimate-code"
 

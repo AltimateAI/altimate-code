@@ -2,7 +2,7 @@
  * SQL Server driver using the `mssql` (tedious) package.
  */
 
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
+import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mssql: any

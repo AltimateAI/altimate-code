@@ -1,24 +1,26 @@
-feat: [Phase 5 final] delete Python bridge + engine, move types, update docs
+refactor: extract @altimateai/drivers shared workspace package
 
-Complete the Python elimination — close all remaining gaps from the plan:
+Move the 10 database drivers, types, and SQL escape utilities from
+packages/opencode/src/altimate/native/connections/drivers/ into a new
+shared workspace package at packages/drivers/.
 
-1. Move protocol types: bridge/protocol.ts -> native/types.ts
-   Update all 42 imports across src/ to use native/types
-2. Delete packages/altimate-engine/ (entire Python package)
-3. Delete packages/opencode/src/altimate/bridge/ (client, engine, protocol)
-4. Delete test/bridge/ (bridge-specific tests)
-5. Fix credential store: no plaintext fallback — strip sensitive fields
-   and warn users to use ALTIMATE_CODE_CONN_* env vars instead
-6. Update CLI engine command: reports native TypeScript mode
-7. Update README.md: remove Python references, update architecture diagram,
-   replace PyPI badge with npm, simplify dev setup (no pip/venv)
-8. Update troubleshooting.md: replace Python bridge section with native
-   TypeScript troubleshooting
-9. Remove bridge mocks from test files (no longer needed)
+This enables altimate-mcp-engine (and any future consumer) to import
+the same driver code instead of maintaining separate implementations.
 
-73/73 methods native. Zero Python dependency. Bridge deleted.
+New package: packages/drivers/
+- src/types.ts — Connector, ConnectorResult, SchemaColumn, ConnectionConfig
+- src/sql-escape.ts — escapeSqlString, escapeSqlIdentifier
+- src/{postgres,snowflake,bigquery,databricks,redshift,mysql,sqlserver,
+  oracle,duckdb,sqlite}.ts — 10 database drivers
+- src/index.ts — barrel exports
 
-Closes #220
-Closes #210
+Updated packages/opencode/:
+- package.json — added @altimateai/drivers: workspace:*
+- 13 files updated to import from @altimateai/drivers instead of local
+
+Deleted from packages/opencode/:
+- src/altimate/native/connections/drivers/ (10 files)
+- src/altimate/native/connections/types.ts
+- src/altimate/native/sql-escape.ts
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

@@ -95,7 +95,7 @@ export async function syncSchema(params: LocalSchemaSyncParams): Promise<LocalSc
   // Dynamic import of DuckDB driver
   let localConnector: any
   try {
-    const duckdbDriver = await import("../connections/drivers/duckdb")
+    const duckdbDriver = await import("@altimateai/drivers/duckdb")
     localConnector = await duckdbDriver.connect({ type: "duckdb", path: targetPath })
     await localConnector.connect()
   } catch {

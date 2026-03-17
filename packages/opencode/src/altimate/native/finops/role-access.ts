@@ -5,7 +5,7 @@
  */
 
 import * as Registry from "../connections/registry"
-import { escapeSqlString } from "../sql-escape"
+import { escapeSqlString } from "@altimateai/drivers"
 import type {
   RoleGrantsParams,
   RoleGrantsResult,

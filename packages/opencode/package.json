@@ -73,6 +73,7 @@
     "@ai-sdk/vercel": "1.0.33",
     "@ai-sdk/xai": "2.0.51",
     "@altimateai/altimate-core": "0.2.3",
+    "@altimateai/drivers": "workspace:*",
     "@aws-sdk/credential-providers": "3.993.0",
     "@clack/prompts": "1.0.0-alpha.1",
     "@gitlab/gitlab-ai-provider": "3.6.0",

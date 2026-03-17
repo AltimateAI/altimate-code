@@ -9,7 +9,7 @@
 import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
-import type { Connector } from "../connections/types"
+import type { Connector } from "@altimateai/drivers"
 import type {
   SchemaIndexResult,
   SchemaSearchResult,

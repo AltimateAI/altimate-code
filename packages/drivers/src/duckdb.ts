@@ -2,8 +2,8 @@
  * DuckDB driver using the `duckdb` package.
  */
 
-import { escapeSqlString } from "../../sql-escape"
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
+import { escapeSqlString } from "./sql-escape"
+import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let duckdb: any

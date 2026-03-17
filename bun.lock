@@ -34,6 +34,10 @@
         "typescript": "catalog:",
       },
     },
+    "packages/drivers": {
+      "name": "@altimateai/drivers",
+      "version": "0.1.0",
+    },
     "packages/opencode": {
       "name": "@altimateai/altimate-code",
       "version": "1.2.20",
@@ -65,6 +69,7 @@
         "@ai-sdk/vercel": "1.0.33",
         "@ai-sdk/xai": "2.0.51",
         "@altimateai/altimate-core": "0.2.3",
+        "@altimateai/drivers": "workspace:*",
         "@aws-sdk/credential-providers": "3.993.0",
         "@clack/prompts": "1.0.0-alpha.1",
         "@gitlab/gitlab-ai-provider": "3.6.0",
@@ -338,6 +343,8 @@
     "@altimateai/dbt-integration": ["@altimateai/dbt-integration@0.2.9", "", { "dependencies": { "@altimateai/altimate-core": "0.1.6", "node-abort-controller": "^3.1.1", "node-fetch": "^3.3.2", "python-bridge": "^1.1.0", "semver": "^7.6.3", "yaml": "^2.5.0" }, "peerDependencies": { "patch-package": "^8.0.0" } }, "sha512-L+sazdclVNVPuRrSRq/0dGfyNEOHHGKqOCGEkZiXFbaW9hRGRqk+9LgmOUwyDq2VA79qvduOehe7+Uk0Oo3sow=="],
 
     "@altimateai/dbt-tools": ["@altimateai/dbt-tools@workspace:packages/dbt-tools"],
+
+    "@altimateai/drivers": ["@altimateai/drivers@workspace:packages/drivers"],
 
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],
 

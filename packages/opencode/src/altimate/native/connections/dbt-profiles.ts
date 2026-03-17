@@ -9,7 +9,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import type { DbtProfileConnection } from "../types"
-import type { ConnectionConfig } from "./types"
+import type { ConnectionConfig } from "@altimateai/drivers"
 
 /** Map dbt adapter types to altimate connector types. */
 const ADAPTER_TYPE_MAP: Record<string, string> = {

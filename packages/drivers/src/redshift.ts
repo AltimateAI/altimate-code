@@ -3,7 +3,7 @@
  * Uses svv_ system views for introspection.
  */
 
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
+import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let pg: any

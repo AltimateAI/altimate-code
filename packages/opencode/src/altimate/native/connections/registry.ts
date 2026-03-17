@@ -13,7 +13,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import { Log } from "../../../util/log"
-import type { ConnectionConfig, Connector } from "./types"
+import type { ConnectionConfig, Connector } from "@altimateai/drivers"
 import { resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
@@ -108,19 +108,19 @@ function ensureLoaded(): void {
 // ---------------------------------------------------------------------------
 
 const DRIVER_MAP: Record<string, string> = {
-  postgres: "./drivers/postgres",
-  postgresql: "./drivers/postgres",
-  redshift: "./drivers/redshift",
-  snowflake: "./drivers/snowflake",
-  bigquery: "./drivers/bigquery",
-  mysql: "./drivers/mysql",
-  mariadb: "./drivers/mysql",
-  sqlserver: "./drivers/sqlserver",
-  mssql: "./drivers/sqlserver",
-  databricks: "./drivers/databricks",
-  duckdb: "./drivers/duckdb",
-  oracle: "./drivers/oracle",
-  sqlite: "./drivers/sqlite",
+  postgres: "@altimateai/drivers/postgres",
+  postgresql: "@altimateai/drivers/postgres",
+  redshift: "@altimateai/drivers/redshift",
+  snowflake: "@altimateai/drivers/snowflake",
+  bigquery: "@altimateai/drivers/bigquery",
+  mysql: "@altimateai/drivers/mysql",
+  mariadb: "@altimateai/drivers/mysql",
+  sqlserver: "@altimateai/drivers/sqlserver",
+  mssql: "@altimateai/drivers/sqlserver",
+  databricks: "@altimateai/drivers/databricks",
+  duckdb: "@altimateai/drivers/duckdb",
+  oracle: "@altimateai/drivers/oracle",
+  sqlite: "@altimateai/drivers/sqlite",
 }
 
 async function createConnector(

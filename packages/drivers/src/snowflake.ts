@@ -3,7 +3,7 @@
  */
 
 import * as fs from "fs"
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
+import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let snowflake: any

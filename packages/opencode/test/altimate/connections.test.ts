@@ -356,7 +356,7 @@ describe("DuckDB driver (in-memory)", () => {
   beforeEach(async () => {
     try {
       const { connect } = await import(
-        "../../src/altimate/native/connections/drivers/duckdb"
+        "@altimateai/drivers/duckdb"
       )
       connector = await connect({ type: "duckdb", path: ":memory:" })
       await connector.connect()

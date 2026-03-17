@@ -2,7 +2,7 @@
  * Oracle driver using the `oracledb` package (thin mode, pure JS).
  */
 
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
+import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let oracledb: any

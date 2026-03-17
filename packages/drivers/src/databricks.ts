@@ -2,7 +2,7 @@
  * Databricks driver using the `@databricks/sql` package.
  */
 
-import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "../types"
+import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let databricksModule: any

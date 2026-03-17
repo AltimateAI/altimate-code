@@ -5,7 +5,7 @@
  * throws a clear error message.
  */
 
-import type { ConnectionConfig } from "./types"
+import type { ConnectionConfig } from "@altimateai/drivers"
 
 export interface TunnelInfo {
   localPort: number

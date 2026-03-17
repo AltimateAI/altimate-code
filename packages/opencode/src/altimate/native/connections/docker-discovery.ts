@@ -5,7 +5,7 @@
  * if dockerode is not installed or Docker is not running.
  */
 
-import type { ConnectionConfig } from "./types"
+import type { ConnectionConfig } from "@altimateai/drivers"
 import type { DockerContainer } from "../types"
 
 /** Map container images to database types. */

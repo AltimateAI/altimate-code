@@ -30,7 +30,7 @@ import type {
   DbtProfilesParams,
   DbtProfilesResult,
 } from "../types"
-import type { ConnectionConfig } from "./types"
+import type { ConnectionConfig } from "@altimateai/drivers"
 
 /** Register all connection-related handlers. Exported for test re-registration. */
 export function registerAll(): void {
