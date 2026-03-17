@@ -158,6 +158,10 @@ export namespace Filesystem {
    * For non-existent paths (write operations), walks up to the nearest
    * existing ancestor and resolves from there.
    * Falls back to lexical `contains()` if resolution fails entirely.
+   *
+   * Note: Like all application-level path checks, this is subject to TOCTOU
+   * races — a symlink could be created between check and use. Only OS-level
+   * sandboxing (Seatbelt, bubblewrap) can fully prevent this.
    */
   export function containsReal(parent: string, child: string): boolean {
     let realParent: string

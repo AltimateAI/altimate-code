@@ -38,18 +38,20 @@ For tools that accept arguments (like `bash`), use pattern matching:
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
       "git status": "allow",
       "git diff *": "allow",
       "rm *": "deny",
-      "DROP *": "deny",
-      "*": "ask"
+      "DROP *": "deny"
     }
   }
 }
 ```
 
-Patterns are matched in order — last matching rule wins. Use `*` as a wildcard. Place your most specific rules first and your catch-all `"*"` rule last.
+Patterns are matched in order — **last matching rule wins**. Use `*` as a wildcard. Place your catch-all `"*"` rule first and more specific rules after it.
+
+For example, with `"*": "ask"` first and `"rm *": "deny"` after it, all `rm` commands are denied while everything else prompts. If you put `"*": "ask"` last, it would override the deny rule.
 
 ## Per-Agent Permissions
 
@@ -121,6 +123,7 @@ A good starting point for most data engineering workflows. Allows safe read oper
     "edit": "ask",
     "write": "ask",
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
       "git status": "allow",
       "git diff *": "allow",
@@ -130,8 +133,7 @@ A good starting point for most data engineering workflows. Allows safe read oper
       "rm *": "deny",
       "DROP *": "deny",
       "DELETE *": "deny",
-      "TRUNCATE *": "deny",
-      "*": "ask"
+      "TRUNCATE *": "deny"
     },
     "external_directory": "ask"
   }
@@ -152,6 +154,7 @@ When working near production systems. Blocks destructive operations entirely and
     "edit": "ask",
     "write": "ask",
     "bash": {
+      "*": "ask",
       "dbt *": "ask",
       "git status": "allow",
       "rm *": "deny",
@@ -160,8 +163,7 @@ When working near production systems. Blocks destructive operations entirely and
       "TRUNCATE *": "deny",
       "ALTER *": "deny",
       "git push *": "deny",
-      "git reset *": "deny",
-      "*": "ask"
+      "git reset *": "deny"
     },
     "external_directory": "deny"
   }
@@ -189,10 +191,10 @@ Give each agent only the permissions it needs:
     "builder": {
       "permission": {
         "bash": {
+          "*": "ask",
           "dbt *": "allow",
           "git *": "ask",
-          "DROP *": "deny",
-          "*": "ask"
+          "DROP *": "deny"
         }
       }
     }

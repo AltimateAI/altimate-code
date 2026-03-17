@@ -47,7 +47,7 @@ export async function assertSensitiveWrite(ctx: Tool.Context, target?: string) {
   await ctx.ask({
     permission: "edit",
     patterns: [relativePath],
-    always: [],
+    always: [relativePath],
     metadata: {
       filepath: target,
       sensitive: matched,

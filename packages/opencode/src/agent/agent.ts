@@ -82,7 +82,10 @@ export namespace Agent {
       },
       // Safety defaults: deny destructive commands that are rarely intentional.
       // Users can override these in altimate-code.json if needed.
+      // IMPORTANT: "*": "ask" must come FIRST because evaluation uses last-match-wins.
+      // Deny rules after it take precedence for matching patterns.
       bash: {
+        "*": "ask",
         "rm -rf *": "deny",
         "rm -fr *": "deny",
         "rmdir /s *": "deny",
@@ -95,7 +98,6 @@ export namespace Agent {
         "DROP DATABASE *": "deny",
         "DROP SCHEMA *": "deny",
         "TRUNCATE *": "deny",
-        "*": "ask",
       },
     })
     const user = PermissionNext.fromConfig(cfg.permission ?? {})

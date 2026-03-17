@@ -1,13 +1,19 @@
-fix: [AI-190] prevent tracing exporter timeout from leaking timers
+fix: harden path sandboxing with symlink protection, safe defaults, and sensitive file guards
 
-- Add `clearTimeout` in `.finally()` to `withTimeout` so the event loop
-  exits immediately after `endTrace()` instead of hanging for 5 seconds
-- Log a `console.warn` when an exporter times out (uses the previously
-  unused `name` parameter for diagnostics)
-- Align `HttpExporter` internal `AbortSignal.timeout` from 10s to 5s to
-  match the per-exporter wrapper timeout
-- Clean up safety-net timer in adversarial test to prevent open handles
+- Add `Filesystem.containsReal()` with `realpathSync` to prevent symlink escape attacks
+  (same class of bug as Codex GHSA-w5fx-fh39-j5rw and Claude Code CVE-2025-54794)
+- Add `isAbsolute(rel)` check to `Filesystem.contains()` for Windows cross-drive bypass
+- Update `Instance.containsPath()` to use symlink-aware `containsReal()`
+- Add safe permission defaults: deny `rm -rf`, `git push --force`, `git reset --hard`,
+  `DROP DATABASE`, `TRUNCATE` out of the box
+- Add `Protected.isSensitiveWrite()` to detect writes to `.git/`, `.ssh/`, `.aws/`,
+  `.env*`, credential files even inside the project boundary
+- Add `assertSensitiveWrite()` guard to write, edit, and apply_patch tools
+- Remove resolved TODO comments from `file/index.ts`
+- Update SECURITY.md, permissions docs, and security FAQ with practical guidance
+- Add 94 tests including 62 e2e tests covering symlink attacks, path traversal,
+  sensitive file detection, and combined attack scenarios
 
-Closes #190
+Closes #202
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

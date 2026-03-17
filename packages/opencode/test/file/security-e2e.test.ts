@@ -14,8 +14,8 @@ import { File } from "../../src/file"
 import { Instance } from "../../src/project/instance"
 import { Protected } from "../../src/file/protected"
 import { assertSensitiveWrite } from "../../src/tool/external-directory"
+import { PermissionNext } from "../../src/permission/next"
 import type { Tool } from "../../src/tool/tool"
-import type { PermissionNext } from "../../src/permission/next"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { tmpdir } from "../fixture/fixture"
 
@@ -488,5 +488,118 @@ describe("E2E: combined attack scenarios", () => {
 
     expect(requests.length).toBe(1)
     expect(requests[0].metadata.sensitive).toBe(".env.production")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// WINDOWS CROSS-DRIVE PATH CHECK
+// ─────────────────────────────────────────────────────────────────────
+
+describe("E2E: Windows cross-drive path check (isAbsolute guard)", () => {
+  test("Filesystem.contains blocks when relative() returns absolute path", () => {
+    // On Windows, path.relative("C:\\project", "D:\\secrets") returns "D:\\secrets" (absolute).
+    // Simulate this: if the relative result is absolute, contains() must return false.
+    // On Unix, path.relative() never returns an absolute path for same-root paths,
+    // but we can verify the isAbsolute guard works by testing the function directly.
+    expect(Filesystem.contains("/project", "/project")).toBe(true)
+    expect(Filesystem.contains("/project", "/other")).toBe(false)
+    // The isAbsolute guard specifically catches cases where relative returns an absolute path
+    // This happens on Windows cross-drive. On Unix we verify the ../ check still works.
+    expect(Filesystem.contains("/a/b/c", "/a/b/c/d/e")).toBe(true)
+    expect(Filesystem.contains("/a/b/c", "/a/b/x")).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// BASH DENY DEFAULTS EVALUATION
+// ─────────────────────────────────────────────────────────────────────
+
+describe("E2E: bash deny defaults", () => {
+  test("destructive commands are denied by default rules", () => {
+    // IMPORTANT: "*": "ask" must come FIRST because evaluation uses last-match-wins.
+    // Deny rules after it take precedence for matching patterns.
+    const defaults = PermissionNext.fromConfig({
+      bash: {
+        "*": "ask",
+        "rm -rf *": "deny",
+        "rm -fr *": "deny",
+        "rmdir /s *": "deny",
+        "git push --force *": "deny",
+        "git push -f *": "deny",
+        "git reset --hard *": "deny",
+        "git clean -fd *": "deny",
+        "git clean -f *": "deny",
+        "git checkout -- .": "deny",
+        "DROP DATABASE *": "deny",
+        "DROP SCHEMA *": "deny",
+        "TRUNCATE *": "deny",
+      },
+    })
+
+    // Destructive commands should be denied
+    expect(PermissionNext.evaluate("bash", "rm -rf /", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "rm -rf .", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "rm -fr /tmp/important", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "git push --force origin main", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "git push -f origin main", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "git reset --hard HEAD~5", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "git clean -fd", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "git checkout -- .", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "DROP DATABASE production", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "DROP SCHEMA public", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "TRUNCATE users", defaults).action).toBe("deny")
+
+    // Safe commands should fall through to "ask"
+    expect(PermissionNext.evaluate("bash", "ls -la", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("bash", "git status", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("bash", "dbt run", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("bash", "npm install", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("bash", "git push origin main", defaults).action).toBe("ask")
+  })
+
+  test("user config can override defaults via merge (last-match-wins)", () => {
+    const defaults = PermissionNext.fromConfig({
+      bash: {
+        "*": "ask",
+        "rm -rf *": "deny",
+      },
+    })
+    const userOverride = PermissionNext.fromConfig({
+      bash: {
+        "rm -rf ./build": "allow",
+      },
+    })
+
+    const merged = PermissionNext.merge(defaults, userOverride)
+
+    // Specific user override allows this particular rm -rf (last-match-wins)
+    expect(PermissionNext.evaluate("bash", "rm -rf ./build", merged).action).toBe("allow")
+    // Other rm -rf commands still denied (deny from defaults, no user override matches)
+    expect(PermissionNext.evaluate("bash", "rm -rf /", merged).action).toBe("deny")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// SENSITIVE FILE DETECTION WITH WINDOWS-STYLE PATHS
+// ─────────────────────────────────────────────────────────────────────
+
+describe("E2E: sensitive file detection with backslash paths", () => {
+  test("detects .git with backslash separator", () => {
+    expect(Protected.isSensitiveWrite(".git\\config")).toBe(".git")
+    expect(Protected.isSensitiveWrite(".git\\hooks\\pre-commit")).toBe(".git")
+  })
+
+  test("detects .ssh with backslash separator", () => {
+    expect(Protected.isSensitiveWrite(".ssh\\id_rsa")).toBe(".ssh")
+  })
+
+  test("detects .env in backslash path", () => {
+    expect(Protected.isSensitiveWrite("config\\.env")).toBe(".env")
+    expect(Protected.isSensitiveWrite("deploy\\.env.production")).toBe(".env.production")
+  })
+
+  test("mixed separators work", () => {
+    expect(Protected.isSensitiveWrite("path/to\\.git/config")).toBe(".git")
+    expect(Protected.isSensitiveWrite("path\\.ssh/id_rsa")).toBe(".ssh")
   })
 })

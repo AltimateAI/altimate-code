@@ -95,7 +95,8 @@ export namespace Protected {
    * Returns the name of the matched sensitive pattern, or undefined if not sensitive.
    */
   export function isSensitiveWrite(filepath: string): string | undefined {
-    const segments = filepath.split(path.sep)
+    // Split on both / and \ for cross-platform safety
+    const segments = filepath.split(/[/\\]/)
     const filename = segments[segments.length - 1] ?? ""
 
     // Check if any path segment is a sensitive directory

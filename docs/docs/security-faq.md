@@ -33,11 +33,11 @@ By default, destructive operations like `bash`, `write`, and `edit` require conf
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
       "git status": "allow",
       "DROP *": "deny",
-      "rm *": "deny",
-      "*": "ask"
+      "rm *": "deny"
     }
   }
 }
@@ -51,11 +51,11 @@ Yes. Use pattern-based permissions to deny destructive SQL:
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "DROP *": "deny",
       "DELETE *": "deny",
       "TRUNCATE *": "deny",
-      "ALTER *": "deny",
-      "*": "ask"
+      "ALTER *": "deny"
     }
   }
 }
@@ -219,12 +219,12 @@ These protections operate at the application level. For additional isolation, yo
     {
       "permission": {
         "bash": {
+          "*": "ask",
           "rm -rf *": "deny",
           "DROP *": "deny",
           "DELETE *": "deny",
           "git push --force *": "deny",
-          "git reset --hard *": "deny",
-          "*": "ask"
+          "git reset --hard *": "deny"
         }
       }
     }
