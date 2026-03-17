@@ -38,7 +38,7 @@ export async function call<M extends BridgeMethod>(
     const result = await native(params)
 
     Telemetry.track({
-      type: "bridge_call",
+      type: "native_call",
       timestamp: Date.now(),
       session_id: Telemetry.getContext().sessionId,
       method: method as string,
@@ -49,7 +49,7 @@ export async function call<M extends BridgeMethod>(
     return result as any
   } catch (e) {
     Telemetry.track({
-      type: "bridge_call",
+      type: "native_call",
       timestamp: Date.now(),
       session_id: Telemetry.getContext().sessionId,
       method: method as string,

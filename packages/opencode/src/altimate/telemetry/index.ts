@@ -66,7 +66,7 @@ export namespace Telemetry {
         error?: string
       }
     | {
-        type: "bridge_call"
+        type: "native_call"
         timestamp: number
         session_id: string
         method: string
