@@ -36,6 +36,10 @@ export async function assertExternalDirectory(ctx: Tool.Context, target?: string
  * Checks if a write target is a sensitive file or directory (e.g., .git/, .ssh/,
  * .env, credentials). If so, prompts the user for explicit permission even if the
  * path is inside the project boundary.
+ *
+ * Uses a dedicated "sensitive_write" permission (not "edit") so that agents with
+ * `edit: "allow"` don't silently bypass this check. The "sensitive_write" permission
+ * defaults to "ask" when not explicitly configured.
  */
 export async function assertSensitiveWrite(ctx: Tool.Context, target?: string) {
   if (!target) return
@@ -45,7 +49,7 @@ export async function assertSensitiveWrite(ctx: Tool.Context, target?: string) {
   if (!matched) return
 
   await ctx.ask({
-    permission: "edit",
+    permission: "sensitive_write",
     patterns: [relativePath],
     always: [relativePath],
     metadata: {

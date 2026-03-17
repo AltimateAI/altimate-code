@@ -1,15 +1,21 @@
-fix: critical symlink/../ escape via realpathSync lexical normalization divergence
+fix: UX evaluation — soften bash defaults, expand FAQ, remove .github from sensitive dirs
 
-Gemini 3.1 Pro found that `realpathSync` and the OS kernel disagree on
-`symlink/../file.txt`:
-- `realpathSync("project/link/..")` → `project/` (lexical normalization)
-- `writeFile("project/link/../f")` → writes to parent of symlink TARGET (kernel)
+UX impact evaluation of each change:
 
-This means `containsReal` would approve a write that the OS places OUTSIDE
-the project boundary. The fix rejects any unresolved path containing `..`
-segments, since their behavior through symlinks is fundamentally unpredictable
-at the application level.
+1. **Bash defaults softened**: Changed destructive shell/git commands from
+   `deny` (blocked silently) to `ask` (prompted). `rm -rf ./build` and
+   `git push --force` after rebase are legitimate workflows — blocking them
+   without a prompt is poor UX. Database DDL (`DROP DATABASE`, `TRUNCATE`)
+   stays `deny` since it's almost never intentional in agent context.
 
-Also adds `.github` to `SENSITIVE_DIRS` (workflow injection vector).
+2. **Removed `.github` from sensitive dirs**: Editing CI/CD workflows is a
+   core use case. Prompting on every workflow edit would cause severe
+   approval fatigue.
+
+3. **Expanded FAQ**: Added "Why am I being prompted to edit .env files?"
+   with table of protected patterns and guidance on "Allow always".
+   Added "What commands are blocked or prompted by default?" with clear
+   table showing which commands prompt vs block. Reordered best practices
+   to lead with "work on a branch" (most effective, least friction).
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

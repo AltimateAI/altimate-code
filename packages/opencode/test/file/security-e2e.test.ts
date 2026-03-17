@@ -400,7 +400,7 @@ describe("E2E: assertSensitiveWrite triggers permission prompt", () => {
     })
 
     expect(requests.length).toBe(1)
-    expect(requests[0].permission).toBe("edit")
+    expect(requests[0].permission).toBe("sensitive_write")
     expect(requests[0].metadata.sensitive).toBe(".git")
   })
 
