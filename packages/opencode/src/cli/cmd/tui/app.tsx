@@ -817,7 +817,7 @@ function App() {
     toast.show({
       variant: "info",
       title: "Update Available",
-      message: `Altimate Code v${evt.properties.version} is available. Run 'opencode upgrade' to update manually.`,
+      message: `Altimate Code v${evt.properties.version} is available. Run 'altimate upgrade' to update manually.`,
       duration: 10000,
     })
   })

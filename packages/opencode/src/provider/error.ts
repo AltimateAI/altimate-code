@@ -72,7 +72,7 @@ export namespace ProviderError {
       // provide a human-readable message instead of dumping raw markup
       if (/^\s*<!doctype|^\s*<html/i.test(e.responseBody)) {
         if (e.statusCode === 401) {
-          return "Unauthorized: request was blocked by a gateway or proxy. Your authentication token may be missing or expired — try running `opencode auth login <your provider URL>` to re-authenticate."
+          return "Unauthorized: request was blocked by a gateway or proxy. Your authentication token may be missing or expired — try running `altimate auth login <your provider URL>` to re-authenticate."
         }
         if (e.statusCode === 403) {
           return "Forbidden: request was blocked by a gateway or proxy. You may not have permission to access this resource — check your account and provider settings."
