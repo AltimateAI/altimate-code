@@ -542,40 +542,37 @@ describe("E2E: Windows cross-drive path check (isAbsolute guard)", () => {
 
 describe("E2E: bash deny defaults", () => {
   test("destructive commands are denied by default rules", () => {
-    // IMPORTANT: "*": "ask" must come FIRST because evaluation uses last-match-wins.
-    // Deny rules after it take precedence for matching patterns.
+    // Mirrors the actual defaults in agent.ts:
+    // - Destructive shell/git commands → "ask" (prompt, not block — common in legitimate workflows)
+    // - Database DDL → "deny" (almost never intentional in agent context)
     const defaults = PermissionNext.fromConfig({
       bash: {
         "*": "ask",
-        "rm -rf *": "deny",
-        "rm -fr *": "deny",
-        "rmdir /s *": "deny",
-        "git push --force *": "deny",
-        "git push -f *": "deny",
-        "git reset --hard *": "deny",
-        "git clean -fd *": "deny",
-        "git clean -f *": "deny",
-        "git checkout -- .": "deny",
+        "rm -rf *": "ask",
+        "rm -fr *": "ask",
+        "git push --force *": "ask",
+        "git push -f *": "ask",
+        "git reset --hard *": "ask",
+        "git clean -f *": "ask",
         "DROP DATABASE *": "deny",
         "DROP SCHEMA *": "deny",
         "TRUNCATE *": "deny",
       },
     })
 
-    // Destructive commands should be denied
-    expect(PermissionNext.evaluate("bash", "rm -rf /", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "rm -rf .", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "rm -fr /tmp/important", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "git push --force origin main", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "git push -f origin main", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "git reset --hard HEAD~5", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "git clean -fd", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "git checkout -- .", defaults).action).toBe("deny")
+    // Database DDL is blocked entirely (deny)
     expect(PermissionNext.evaluate("bash", "DROP DATABASE production", defaults).action).toBe("deny")
     expect(PermissionNext.evaluate("bash", "DROP SCHEMA public", defaults).action).toBe("deny")
     expect(PermissionNext.evaluate("bash", "TRUNCATE users", defaults).action).toBe("deny")
 
-    // Safe commands should fall through to "ask"
+    // Destructive file/git commands are prompted (ask), not blocked
+    // This is intentional — rm -rf ./build, git push --force after rebase, etc. are legitimate
+    expect(PermissionNext.evaluate("bash", "rm -rf ./build", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("bash", "git push --force origin main", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("bash", "git reset --hard HEAD~5", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("bash", "git clean -f", defaults).action).toBe("ask")
+
+    // Regular commands also prompt (ask)
     expect(PermissionNext.evaluate("bash", "ls -la", defaults).action).toBe("ask")
     expect(PermissionNext.evaluate("bash", "git status", defaults).action).toBe("ask")
     expect(PermissionNext.evaluate("bash", "dbt run", defaults).action).toBe("ask")
@@ -587,21 +584,21 @@ describe("E2E: bash deny defaults", () => {
     const defaults = PermissionNext.fromConfig({
       bash: {
         "*": "ask",
-        "rm -rf *": "deny",
+        "DROP DATABASE *": "deny",
       },
     })
     const userOverride = PermissionNext.fromConfig({
       bash: {
-        "rm -rf ./build": "allow",
+        "DROP DATABASE test_db": "allow",
       },
     })
 
     const merged = PermissionNext.merge(defaults, userOverride)
 
-    // Specific user override allows this particular rm -rf (last-match-wins)
-    expect(PermissionNext.evaluate("bash", "rm -rf ./build", merged).action).toBe("allow")
-    // Other rm -rf commands still denied (deny from defaults, no user override matches)
-    expect(PermissionNext.evaluate("bash", "rm -rf /", merged).action).toBe("deny")
+    // Specific user override allows dropping a test database (last-match-wins)
+    expect(PermissionNext.evaluate("bash", "DROP DATABASE test_db", merged).action).toBe("allow")
+    // Other DROP DATABASE commands still denied (deny from defaults, no user override matches)
+    expect(PermissionNext.evaluate("bash", "DROP DATABASE production", merged).action).toBe("deny")
   })
 })
 

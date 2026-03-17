@@ -80,21 +80,24 @@ export namespace Agent {
         "*.env.*": "ask",
         "*.env.example": "allow",
       },
-      // Safety defaults: deny destructive commands that are rarely intentional.
-      // Users can override these in altimate-code.json if needed.
+      // Safety defaults for bash commands.
       // IMPORTANT: "*": "ask" must come FIRST because evaluation uses last-match-wins.
-      // Deny rules after it take precedence for matching patterns.
+      //
+      // "ask" = user sees prompt and can approve. Used for destructive file/git
+      //         commands that are common in legitimate workflows (rm -rf ./build,
+      //         git push --force after rebase, git clean in CI).
+      // "deny" = blocked entirely, no prompt. Used for database DDL that is
+      //          almost never intentional in an agent context.
+      //
+      // Users can override any of these in altimate-code.json.
       bash: {
         "*": "ask",
-        "rm -rf *": "deny",
-        "rm -fr *": "deny",
-        "rmdir /s *": "deny",
-        "git push --force *": "deny",
-        "git push -f *": "deny",
-        "git reset --hard *": "deny",
-        "git clean -fd *": "deny",
-        "git clean -f *": "deny",
-        "git checkout -- .": "deny",
+        "rm -rf *": "ask",
+        "rm -fr *": "ask",
+        "git push --force *": "ask",
+        "git push -f *": "ask",
+        "git reset --hard *": "ask",
+        "git clean -f *": "ask",
         "DROP DATABASE *": "deny",
         "DROP SCHEMA *": "deny",
         "TRUNCATE *": "deny",
