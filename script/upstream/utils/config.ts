@@ -259,8 +259,10 @@ export const defaultConfig: MergeConfig = {
     "github/index.ts",
     "install",
     "packages/altimate-engine/**",
+    "packages/drivers/**",
     "packages/opencode/src/altimate/**",
     "packages/opencode/src/bridge/**",
+    "packages/opencode/test/altimate/**",
     // Build and publish scripts have critical branding (binary name, user-agent,
     // engine version embedding, archive naming, altimate-code symlink)
     "packages/opencode/script/build.ts",
