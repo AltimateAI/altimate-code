@@ -24,6 +24,9 @@ target
 .scripts
 .direnv/
 
+# Commit message scratch files
+.github/meta/
+
 # Local dev files
 opencode-dev
 logs/

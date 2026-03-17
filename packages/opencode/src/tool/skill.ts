@@ -147,5 +147,3 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
     },
   }
 })
-
-// altimate_change end - old partitionByFingerprint + rescueByMessage removed, replaced by selectSkillsWithLLM

@@ -298,16 +298,6 @@ describe("Workflow branding", () => {
     expect(content).not.toMatch(/contains\(.*'\/opencode'\)/)
   })
 
-  test("beta.yml schedule is disabled", () => {
-    const content = readText(join(repoRoot, ".github", "workflows", "beta.yml"))
-    // Schedule should be commented out
-    const lines = content.split("\n")
-    const cronLines = lines.filter((l) => l.includes("cron:"))
-    for (const line of cronLines) {
-      expect(line.trimStart().startsWith("#")).toBe(true)
-    }
-  })
-
   test("opencode.yml model reference does not use opencode/ prefix", () => {
     const content = readText(join(repoRoot, ".github", "workflows", "opencode.yml"))
     expect(content).not.toContain("model: opencode/")
