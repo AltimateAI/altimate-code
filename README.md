@@ -2,8 +2,6 @@
 
 <img src="docs/docs/assets/images/altimate-code-banner.png" alt="altimate-code" width="600" />
 
-# altimate
-
 **The data engineering agent for dbt, SQL, and cloud warehouses.**
 
 An AI-powered CLI with 99+ specialized tools — SQL analysis, schema inspection,

@@ -101,6 +101,9 @@ export namespace Agent {
         "DROP DATABASE *": "deny",
         "DROP SCHEMA *": "deny",
         "TRUNCATE *": "deny",
+        "drop database *": "deny",
+        "drop schema *": "deny",
+        "truncate *": "deny",
       },
     })
     const user = PermissionNext.fromConfig(cfg.permission ?? {})
@@ -109,11 +112,19 @@ export namespace Agent {
     // Appended after user config so they always take precedence via last-match-wins.
     // Users who need to override must use specific patterns like
     // `"DROP DATABASE test_db": "allow"` — wildcard `bash: "allow"` won't work.
+    // Both UPPER and lowercase variants are included because Wildcard.match
+    // is case-sensitive on Linux/macOS.
     const safetyDenials = PermissionNext.fromConfig({
       bash: {
         "DROP DATABASE *": "deny",
         "DROP SCHEMA *": "deny",
         "TRUNCATE *": "deny",
+        "drop database *": "deny",
+        "drop schema *": "deny",
+        "truncate *": "deny",
+        "Drop Database *": "deny",
+        "Drop Schema *": "deny",
+        "Truncate *": "deny",
       },
     })
 

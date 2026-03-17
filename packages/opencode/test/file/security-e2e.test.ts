@@ -557,13 +557,19 @@ describe("E2E: bash deny defaults", () => {
         "DROP DATABASE *": "deny",
         "DROP SCHEMA *": "deny",
         "TRUNCATE *": "deny",
+        "drop database *": "deny",
+        "drop schema *": "deny",
+        "truncate *": "deny",
       },
     })
 
-    // Database DDL is blocked entirely (deny)
+    // Database DDL is blocked entirely (deny) — both upper and lowercase
     expect(PermissionNext.evaluate("bash", "DROP DATABASE production", defaults).action).toBe("deny")
     expect(PermissionNext.evaluate("bash", "DROP SCHEMA public", defaults).action).toBe("deny")
     expect(PermissionNext.evaluate("bash", "TRUNCATE users", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "drop database production", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "drop schema public", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("bash", "truncate users", defaults).action).toBe("deny")
 
     // Destructive file/git commands are prompted (ask), not blocked
     // This is intentional — rm -rf ./build, git push --force after rebase, etc. are legitimate
