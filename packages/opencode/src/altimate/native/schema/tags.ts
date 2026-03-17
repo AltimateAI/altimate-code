@@ -8,7 +8,7 @@ import type {
   TagsGetResult,
   TagsListParams,
   TagsListResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // SQL templates (Snowflake-specific)

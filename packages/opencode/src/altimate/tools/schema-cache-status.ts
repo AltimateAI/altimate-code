@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SchemaCacheStatusResult } from "../bridge/protocol"
+import type { SchemaCacheStatusResult } from "../native/types"
 
 export const SchemaCacheStatusTool = Tool.define("schema_cache_status", {
   description: "Show status of the local schema cache — which warehouses are indexed, how many tables/columns, when last refreshed.",

@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { PiiDetectResult } from "../bridge/protocol"
+import type { PiiDetectResult } from "../native/types"
 
 export const SchemaDetectPiiTool = Tool.define("schema_detect_pii", {
   description:

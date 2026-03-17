@@ -12,7 +12,7 @@ import type {
   RoleHierarchyResult,
   UserRolesParams,
   UserRolesResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // Snowflake SQL templates

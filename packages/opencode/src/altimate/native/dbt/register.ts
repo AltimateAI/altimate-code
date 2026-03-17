@@ -13,7 +13,7 @@ import type {
   DbtManifestResult,
   DbtLineageParams,
   DbtLineageResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 /** Register all dbt.* native handlers. Exported for test re-registration. */
 export function registerAll(): void {

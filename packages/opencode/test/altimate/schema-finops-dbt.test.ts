@@ -1,11 +1,6 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-// Mock Bridge.call to avoid spawning Python
-mock.module("../../src/altimate/bridge/client", () => ({
-  Bridge: { call: mock(() => Promise.resolve({ status: "ok" })) },
-}))
-
 // Mock Telemetry
 mock.module("../../src/altimate/telemetry", () => ({
   Telemetry: {

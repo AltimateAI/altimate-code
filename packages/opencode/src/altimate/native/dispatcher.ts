@@ -5,7 +5,7 @@
  * The Python bridge is no longer used.
  */
 
-import { BridgeMethods, type BridgeMethod } from "../bridge/protocol"
+import { BridgeMethods, type BridgeMethod } from "./types"
 import { Telemetry } from "../telemetry"
 
 type NativeHandler = (params: any) => Promise<any>

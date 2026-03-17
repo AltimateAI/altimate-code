@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SqlAutocompleteResult } from "../bridge/protocol"
+import type { SqlAutocompleteResult } from "../native/types"
 
 export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
   description:

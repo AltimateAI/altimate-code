@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { DbtLineageResult } from "../bridge/protocol"
+import type { DbtLineageResult } from "../native/types"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:

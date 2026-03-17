@@ -1,8 +1,10 @@
 /**
  * Credential management for connection configs.
  *
- * Tries to use `keytar` for OS keychain storage. If keytar is unavailable,
- * falls back to storing credentials in the config JSON with a warning.
+ * 3-tier fallback:
+ * 1. keytar (OS Keychain) — preferred, secure
+ * 2. ALTIMATE_CODE_CONN_* env vars — for headless/CI environments
+ * 3. Refuse — never store plaintext credentials in config JSON
  */
 
 import { Log } from "../../../util/log"
@@ -29,7 +31,7 @@ async function getKeytar(): Promise<any | null> {
     return keytarModule
   } catch {
     Log.Default.warn(
-      "keytar not available — credentials will be stored in config JSON (not encrypted)",
+      "keytar not available — use ALTIMATE_CODE_CONN_* env vars for secure credential storage",
     )
     keytarModule = null
     return null
@@ -105,8 +107,15 @@ export async function saveConnection(
     const stored = await storeCredential(name, field, value)
     if (stored) {
       delete sanitized[field]
+    } else {
+      // keytar unavailable — strip sensitive field from config to prevent
+      // plaintext storage. Users should use ALTIMATE_CODE_CONN_* env vars.
+      Log.Default.warn(
+        `Cannot securely store '${field}' for connection '${name}'. ` +
+        `Set ALTIMATE_CODE_CONN_${name.toUpperCase()} env var with full config JSON instead.`,
+      )
+      delete sanitized[field]
     }
-    // If keytar unavailable, credential stays in the JSON config
   }
   return sanitized
 }

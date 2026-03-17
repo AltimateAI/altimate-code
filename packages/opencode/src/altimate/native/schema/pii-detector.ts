@@ -10,7 +10,7 @@ import type {
   PiiDetectParams,
   PiiDetectResult,
   PiiFinding,
-} from "../../bridge/protocol"
+} from "../types"
 
 /**
  * Detect PII in cached schema metadata by running altimate-core's

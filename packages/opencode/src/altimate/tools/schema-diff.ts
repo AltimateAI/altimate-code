@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SchemaDiffResult, ColumnChange } from "../bridge/protocol"
+import type { SchemaDiffResult, ColumnChange } from "../native/types"
 
 export const SchemaDiffTool = Tool.define("schema_diff", {
   description:

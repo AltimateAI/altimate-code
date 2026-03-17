@@ -1,14 +1,24 @@
-fix: address new Sentry findings — regex m flag and off-by-one budget check
+feat: [Phase 5 final] delete Python bridge + engine, move types, update docs
 
-1. formatTrainingEntry regex: remove multiline `m` flag that could
-   match user content mid-string (memory/prompt.ts:82)
+Complete the Python elimination — close all remaining gaps from the plan:
 
-2. Memory block budget check: change `<` to `<=` so blocks that fit
-   exactly into remaining budget are included (memory/prompt.ts:204)
+1. Move protocol types: bridge/protocol.ts -> native/types.ts
+   Update all 42 imports across src/ to use native/types
+2. Delete packages/altimate-engine/ (entire Python package)
+3. Delete packages/opencode/src/altimate/bridge/ (client, engine, protocol)
+4. Delete test/bridge/ (bridge-specific tests)
+5. Fix credential store: no plaintext fallback — strip sensitive fields
+   and warn users to use ALTIMATE_CODE_CONN_* env vars instead
+6. Update CLI engine command: reports native TypeScript mode
+7. Update README.md: remove Python references, update architecture diagram,
+   replace PyPI badge with npm, simplify dev setup (no pip/venv)
+8. Update troubleshooting.md: replace Python bridge section with native
+   TypeScript troubleshooting
+9. Remove bridge mocks from test files (no longer needed)
 
-3 prior Sentry findings already fixed in earlier commits:
-   - projectDir cache (Map keyed by Instance.directory)
-   - injectTrainingOnly header-only return (itemCount guard)
-   - orphaned section headers (first-entry pre-check)
+73/73 methods native. Zero Python dependency. Bridge deleted.
+
+Closes #220
+Closes #210
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

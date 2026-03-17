@@ -8,7 +8,7 @@ import * as Registry from "../connections/registry"
 import type {
   QueryHistoryParams,
   QueryHistoryResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // SQL templates

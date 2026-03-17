@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SchemaIndexResult } from "../bridge/protocol"
+import type { SchemaIndexResult } from "../native/types"
 
 export const SchemaIndexTool = Tool.define("schema_index", {
   description:

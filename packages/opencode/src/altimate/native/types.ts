@@ -1,6 +1,6 @@
 /**
- * Bridge protocol — RPC method contracts between TypeScript CLI and Python engine.
- * Define types here FIRST, then implement both sides against these contracts.
+ * Type definitions for all dispatcher method contracts.
+ * Originally from bridge/protocol.ts — now the canonical location for all method types.
  */
 
 // --- SQL ---

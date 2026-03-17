@@ -16,7 +16,7 @@ import { Log } from "../../../util/log"
 import type { ConnectionConfig, Connector } from "./types"
 import { resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
-import type { WarehouseInfo } from "../../bridge/protocol"
+import type { WarehouseInfo } from "../types"
 
 /** In-memory config store. */
 let configs = new Map<string, ConnectionConfig>()

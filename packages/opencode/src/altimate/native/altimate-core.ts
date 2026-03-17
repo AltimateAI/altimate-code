@@ -11,7 +11,7 @@
 import * as core from "@altimateai/altimate-core"
 import { register } from "./dispatcher"
 import { schemaOrEmpty, resolveSchema } from "./schema-resolver"
-import type { AltimateCoreResult } from "../bridge/protocol"
+import type { AltimateCoreResult } from "./types"
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -8,7 +8,7 @@ import * as Registry from "../connections/registry"
 import type {
   UnusedResourcesParams,
   UnusedResourcesResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // Snowflake SQL templates

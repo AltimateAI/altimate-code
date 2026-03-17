@@ -8,7 +8,7 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
-import type { DbtProfileConnection } from "../../bridge/protocol"
+import type { DbtProfileConnection } from "../types"
 import type { ConnectionConfig } from "./types"
 
 /** Map dbt adapter types to altimate connector types. */

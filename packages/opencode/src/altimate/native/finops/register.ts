@@ -25,7 +25,7 @@ import type {
   RoleHierarchyResult,
   UserRolesParams,
   UserRolesResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 /** Register all finops.* native handlers. Exported for test re-registration. */
 export function registerAll(): void {

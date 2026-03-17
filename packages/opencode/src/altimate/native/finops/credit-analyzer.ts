@@ -10,7 +10,7 @@ import type {
   CreditAnalysisResult,
   ExpensiveQueriesParams,
   ExpensiveQueriesResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // Snowflake SQL templates

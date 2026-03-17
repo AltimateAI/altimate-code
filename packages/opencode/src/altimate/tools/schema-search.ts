@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SchemaSearchResult } from "../bridge/protocol"
+import type { SchemaSearchResult } from "../native/types"
 
 export const SchemaSearchTool = Tool.define("schema_search", {
   description:

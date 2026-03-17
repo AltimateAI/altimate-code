@@ -19,7 +19,7 @@ import type {
   TagsGetResult,
   TagsListParams,
   TagsListResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 /** Register all schema.* native handlers. Exported for test re-registration. */
 export function registerAll(): void {

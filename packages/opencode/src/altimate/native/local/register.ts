@@ -10,7 +10,7 @@ import type {
   LocalSchemaSyncResult,
   LocalTestParams,
   LocalTestResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 /** Register all local.* native handlers + ping. Exported for test re-registration. */
 export function registerAll(): void {

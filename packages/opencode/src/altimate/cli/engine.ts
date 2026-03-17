@@ -4,43 +4,33 @@ import { UI } from "../../cli/ui"
 
 const StatusCommand = cmd({
   command: "status",
-  describe: "show engine status (uv, Python, engine versions)",
+  describe: "show engine status",
   handler: async () => {
-    const { engineStatus } = await import("../bridge/engine")
-    const status = await engineStatus()
     UI.println(`${UI.Style.TEXT_NORMAL_BOLD}Engine Status${UI.Style.TEXT_NORMAL}`)
-    UI.println(`  Path:           ${status.path}`)
-    UI.println(`  uv installed:   ${status.uvInstalled ? "yes" : "no"}`)
-    UI.println(`  Python version: ${status.pythonVersion ?? "not installed"}`)
-    UI.println(`  Engine version: ${status.engineVersion ?? "not installed"}`)
-    UI.println(`  CLI version:    ${status.cliVersion ?? "n/a"}`)
-    UI.println(`  Installed at:   ${status.installedAt ?? "n/a"}`)
+    UI.println(`  Mode: native TypeScript (no Python dependency)`)
+    UI.println(`  All 73 methods running natively via @altimateai/altimate-core`)
   },
 })
 
 const ResetCommand = cmd({
   command: "reset",
-  describe: "remove engine directory and reinstall from scratch",
+  describe: "reset engine state",
   handler: async () => {
-    const { resetEngine } = await import("../bridge/engine")
-    UI.println("Resetting engine...")
-    await resetEngine()
-    UI.println(`${UI.Style.TEXT_SUCCESS}Engine reset complete${UI.Style.TEXT_NORMAL}`)
+    UI.println("No Python engine to reset — all methods run natively in TypeScript.")
   },
 })
 
 const PathCommand = cmd({
   command: "path",
-  describe: "print engine directory path",
+  describe: "print engine directory path (deprecated)",
   handler: async () => {
-    const { engineDir } = await import("../bridge/engine")
-    console.log(engineDir())
+    UI.println("No engine directory — Python bridge has been replaced with native TypeScript.")
   },
 })
 
 export const EngineCommand = cmd({
   command: "engine",
-  describe: "manage the Python engine",
+  describe: "manage the engine",
   builder: (yargs: Argv) => {
     return yargs.command(StatusCommand).command(ResetCommand).command(PathCommand).demandCommand()
   },

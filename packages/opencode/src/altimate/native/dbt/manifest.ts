@@ -11,7 +11,7 @@ import type {
   DbtModelInfo,
   DbtSourceInfo,
   ModelColumn,
-} from "../../bridge/protocol"
+} from "../types"
 
 const LARGE_MANIFEST_BYTES = 50 * 1024 * 1024 // 50 MB
 

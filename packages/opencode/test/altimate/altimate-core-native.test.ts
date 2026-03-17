@@ -7,11 +7,6 @@ import {
   registerAll,
 } from "../../src/altimate/native/altimate-core"
 
-// Mock Bridge.call to prevent Python subprocess spawn
-mock.module("../../src/altimate/bridge/client", () => ({
-  Bridge: { call: mock(() => Promise.resolve({ status: "ok" })) },
-}))
-
 // Mock Telemetry
 mock.module("../../src/altimate/telemetry", () => ({
   Telemetry: {

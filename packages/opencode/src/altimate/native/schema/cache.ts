@@ -17,7 +17,7 @@ import type {
   SchemaCacheWarehouseStatus,
   SchemaSearchTableResult,
   SchemaSearchColumnResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // DDL

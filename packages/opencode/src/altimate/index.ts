@@ -1,7 +1,7 @@
 // Barrel export for all Altimate custom code
 
-// Protocol types (kept for backward compatibility)
-export * from "./bridge/protocol"
+// Protocol types
+export * from "./native/types"
 
 // Native dispatcher (all 73 methods implemented in TypeScript)
 export { Dispatcher } from "./native"

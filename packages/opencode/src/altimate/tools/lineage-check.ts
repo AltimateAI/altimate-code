@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { LineageCheckResult } from "../bridge/protocol"
+import type { LineageCheckResult } from "../native/types"
 
 export const LineageCheckTool = Tool.define("lineage_check", {
   description:

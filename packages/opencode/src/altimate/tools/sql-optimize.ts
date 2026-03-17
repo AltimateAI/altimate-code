@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../bridge/protocol"
+import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../native/types"
 
 export const SqlOptimizeTool = Tool.define("sql_optimize", {
   description:

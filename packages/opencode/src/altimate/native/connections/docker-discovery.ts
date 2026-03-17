@@ -6,7 +6,7 @@
  */
 
 import type { ConnectionConfig } from "./types"
-import type { DockerContainer } from "../../bridge/protocol"
+import type { DockerContainer } from "../types"
 
 /** Map container images to database types. */
 const IMAGE_MAP: Array<{ pattern: RegExp; type: string }> = [

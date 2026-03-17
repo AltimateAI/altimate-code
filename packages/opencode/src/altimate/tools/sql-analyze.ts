@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SqlAnalyzeResult } from "../bridge/protocol"
+import type { SqlAnalyzeResult } from "../native/types"
 
 export const SqlAnalyzeTool = Tool.define("sql_analyze", {
   description:

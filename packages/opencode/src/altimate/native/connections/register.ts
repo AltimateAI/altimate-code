@@ -29,7 +29,7 @@ import type {
   SchemaInspectResult,
   DbtProfilesParams,
   DbtProfilesResult,
-} from "../../bridge/protocol"
+} from "../types"
 import type { ConnectionConfig } from "./types"
 
 /** Register all connection-related handlers. Exported for test re-registration. */

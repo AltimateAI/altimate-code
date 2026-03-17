@@ -5,12 +5,6 @@ import * as Dispatcher from "../../src/altimate/native/dispatcher"
 // Mocks — must be set up before imports that trigger registration
 // ---------------------------------------------------------------------------
 
-// Mock Bridge.call to avoid spawning Python
-const mockBridgeCall = mock(() => Promise.resolve({ status: "ok" }))
-mock.module("../../src/altimate/bridge/client", () => ({
-  Bridge: { call: mockBridgeCall },
-}))
-
 // Mock Telemetry
 mock.module("../../src/altimate/telemetry", () => ({
   Telemetry: {

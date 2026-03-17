@@ -8,7 +8,7 @@ import * as Registry from "../connections/registry"
 import type {
   WarehouseAdvisorParams,
   WarehouseAdvisorResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // Snowflake SQL templates

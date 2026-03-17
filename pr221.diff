@@ -1,0 +1,1555 @@
+diff --git a/packages/opencode/src/altimate/index.ts b/packages/opencode/src/altimate/index.ts
+index 3dad78d86..a77cab60a 100644
+--- a/packages/opencode/src/altimate/index.ts
++++ b/packages/opencode/src/altimate/index.ts
+@@ -1,10 +1,13 @@
+ // Barrel export for all Altimate custom code
+ 
+-// Bridge
++// Bridge (legacy — being replaced by native dispatcher)
+ export { Bridge } from "./bridge/client"
+ export { ensureEngine, enginePythonPath } from "./bridge/engine"
+ export * from "./bridge/protocol"
+ 
++// Native dispatcher (new — Strangler Fig migration layer)
++export { Dispatcher } from "./native"
++
+ // Telemetry
+ export { Telemetry } from "./telemetry"
+ 
+diff --git a/packages/opencode/src/altimate/native/dispatcher.ts b/packages/opencode/src/altimate/native/dispatcher.ts
+new file mode 100644
+index 000000000..bb6033e56
+--- /dev/null
++++ b/packages/opencode/src/altimate/native/dispatcher.ts
+@@ -0,0 +1,85 @@
++/**
++ * Dispatcher — routes tool calls to either native TypeScript handlers or the
++ * Python bridge (fallback). This is the Strangler Fig migration layer.
++ *
++ * Feature flags:
++ *   ALTIMATE_NATIVE_ONLY=1   — throws if no native handler (CI gate)
++ *   ALTIMATE_SHADOW_MODE=1   — runs both native + bridge, logs mismatches
++ */
++
++import { Bridge } from "../bridge/client"
++import { BridgeMethods, type BridgeMethod } from "../bridge/protocol"
++import { Log } from "../../util/log"
++
++type NativeHandler = (params: any) => Promise<any>
++
++const nativeHandlers = new Map<string, NativeHandler>()
++
++/** Register a native TypeScript handler for a bridge method. */
++export function register(method: string, handler: NativeHandler): void {
++  nativeHandlers.set(method, handler)
++}
++
++/** Dispatch a method call to native handler or bridge fallback. */
++export async function call<M extends BridgeMethod>(
++  method: M,
++  params: (typeof BridgeMethods)[M] extends { params: infer P } ? P : never,
++): Promise<(typeof BridgeMethods)[M] extends { result: infer R } ? R : never> {
++  const native = nativeHandlers.get(method as string)
++
++  if (native) {
++    if (process.env.ALTIMATE_SHADOW_MODE === "1") {
++      // Parity testing: run both native and bridge, log mismatches
++      try {
++        const [nativeResult, bridgeResult] = await Promise.allSettled([
++          native(params),
++          Bridge.call(method, params),
++        ])
++        if (
++          nativeResult.status === "fulfilled" &&
++          bridgeResult.status === "fulfilled"
++        ) {
++          const nativeJson = JSON.stringify(nativeResult.value, null, 0)
++          const bridgeJson = JSON.stringify(bridgeResult.value, null, 0)
++          if (nativeJson !== bridgeJson) {
++            Log.Default.warn("shadow mode mismatch", {
++              method: String(method),
++              native: nativeJson.slice(0, 500),
++              bridge: bridgeJson.slice(0, 500),
++            })
++          }
++        }
++        if (nativeResult.status === "fulfilled") {
++          return nativeResult.value as any
++        }
++        // Native failed — fall through to bridge result or throw
++        if (bridgeResult.status === "fulfilled") {
++          return bridgeResult.value as any
++        }
++        throw nativeResult.reason
++      } catch (e) {
++        // Shadow mode should not break the user — fall through to bridge
++        return Bridge.call(method, params)
++      }
++    }
++    return native(params) as any
++  }
++
++  if (process.env.ALTIMATE_NATIVE_ONLY === "1") {
++    throw new Error(
++      `No native handler for ${String(method)} (ALTIMATE_NATIVE_ONLY=1)`,
++    )
++  }
++
++  return Bridge.call(method, params)
++}
++
++/** Check if a native handler is registered for a method. */
++export function hasNativeHandler(method: string): boolean {
++  return nativeHandlers.has(method)
++}
++
++/** List all methods that have native handlers registered. */
++export function listNativeMethods(): string[] {
++  return Array.from(nativeHandlers.keys())
++}
+diff --git a/packages/opencode/src/altimate/native/index.ts b/packages/opencode/src/altimate/native/index.ts
+new file mode 100644
+index 000000000..bc666e85d
+--- /dev/null
++++ b/packages/opencode/src/altimate/native/index.ts
+@@ -0,0 +1 @@
++export * as Dispatcher from "./dispatcher"
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-check.ts b/packages/opencode/src/altimate/tools/altimate-core-check.ts
+index 44908609a..63b36fd58 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-check.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-check.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.check", {
++      const result = await Dispatcher.call("altimate_core.check", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-classify-pii.ts b/packages/opencode/src/altimate/tools/altimate-core-classify-pii.ts
+index 7bb92b206..9c9a04140 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-classify-pii.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-classify-pii.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_pii", {
+   description:
+@@ -11,7 +11,7 @@ export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_p
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.classify_pii", {
++      const result = await Dispatcher.call("altimate_core.classify_pii", {
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+       })
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-column-lineage.ts b/packages/opencode/src/altimate/tools/altimate-core-column-lineage.ts
+index 498468be6..ccec57dd4 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-column-lineage.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-column-lineage.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_lineage", {
+   description:
+@@ -13,7 +13,7 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.column_lineage", {
++      const result = await Dispatcher.call("altimate_core.column_lineage", {
+         sql: args.sql,
+         dialect: args.dialect ?? "",
+         schema_path: args.schema_path ?? "",
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-compare.ts b/packages/opencode/src/altimate/tools/altimate-core-compare.ts
+index 09a24da8f..d877eee60 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-compare.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-compare.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreCompareTool = Tool.define("altimate_core_compare", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreCompareTool = Tool.define("altimate_core_compare", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.compare", {
++      const result = await Dispatcher.call("altimate_core.compare", {
+         left_sql: args.left_sql,
+         right_sql: args.right_sql,
+         dialect: args.dialect ?? "",
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-complete.ts b/packages/opencode/src/altimate/tools/altimate-core-complete.ts
+index 77d5618fe..b2a833e8e 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-complete.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-complete.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreCompleteTool = Tool.define("altimate_core_complete", {
+   description:
+@@ -13,7 +13,7 @@ export const AltimateCoreCompleteTool = Tool.define("altimate_core_complete", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.complete", {
++      const result = await Dispatcher.call("altimate_core.complete", {
+         sql: args.sql,
+         cursor_pos: args.cursor_pos,
+         schema_path: args.schema_path ?? "",
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-correct.ts b/packages/opencode/src/altimate/tools/altimate-core-correct.ts
+index 9e2e31ce0..d2ef172f1 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-correct.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-correct.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.correct", {
++      const result = await Dispatcher.call("altimate_core.correct", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-equivalence.ts b/packages/opencode/src/altimate/tools/altimate-core-equivalence.ts
+index 563a7e33a..4d1589672 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-equivalence.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-equivalence.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalence", {
+   description:
+@@ -13,7 +13,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.equivalence", {
++      const result = await Dispatcher.call("altimate_core.equivalence", {
+         sql1: args.sql1,
+         sql2: args.sql2,
+         schema_path: args.schema_path ?? "",
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-export-ddl.ts b/packages/opencode/src/altimate/tools/altimate-core-export-ddl.ts
+index aceb9f7b8..af71567aa 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-export-ddl.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-export-ddl.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreExportDdlTool = Tool.define("altimate_core_export_ddl", {
+   description:
+@@ -11,7 +11,7 @@ export const AltimateCoreExportDdlTool = Tool.define("altimate_core_export_ddl",
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.export_ddl", {
++      const result = await Dispatcher.call("altimate_core.export_ddl", {
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+       })
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-extract-metadata.ts b/packages/opencode/src/altimate/tools/altimate-core-extract-metadata.ts
+index 996982149..bd842b81c 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-extract-metadata.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-extract-metadata.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreExtractMetadataTool = Tool.define("altimate_core_extract_metadata", {
+   description:
+@@ -11,7 +11,7 @@ export const AltimateCoreExtractMetadataTool = Tool.define("altimate_core_extrac
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.metadata", {
++      const result = await Dispatcher.call("altimate_core.metadata", {
+         sql: args.sql,
+         dialect: args.dialect ?? "",
+       })
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-fingerprint.ts b/packages/opencode/src/altimate/tools/altimate-core-fingerprint.ts
+index 4b235de03..d73124459 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-fingerprint.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-fingerprint.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreFingerprintTool = Tool.define("altimate_core_fingerprint", {
+   description:
+@@ -11,7 +11,7 @@ export const AltimateCoreFingerprintTool = Tool.define("altimate_core_fingerprin
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.fingerprint", {
++      const result = await Dispatcher.call("altimate_core.fingerprint", {
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+       })
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-fix.ts b/packages/opencode/src/altimate/tools/altimate-core-fix.ts
+index 2e4a94ed1..052fe3ec7 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-fix.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-fix.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
+   description:
+@@ -13,7 +13,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.fix", {
++      const result = await Dispatcher.call("altimate_core.fix", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-format.ts b/packages/opencode/src/altimate/tools/altimate-core-format.ts
+index f01cb9d44..3c8c53ffa 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-format.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-format.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreFormatTool = Tool.define("altimate_core_format", {
+   description:
+@@ -11,7 +11,7 @@ export const AltimateCoreFormatTool = Tool.define("altimate_core_format", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.format", {
++      const result = await Dispatcher.call("altimate_core.format", {
+         sql: args.sql,
+         dialect: args.dialect ?? "",
+       })
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-grade.ts b/packages/opencode/src/altimate/tools/altimate-core-grade.ts
+index 55b880027..122b286c6 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-grade.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-grade.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreGradeTool = Tool.define("altimate_core_grade", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreGradeTool = Tool.define("altimate_core_grade", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.grade", {
++      const result = await Dispatcher.call("altimate_core.grade", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-import-ddl.ts b/packages/opencode/src/altimate/tools/altimate-core-import-ddl.ts
+index 50c2608c1..b4436a4bd 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-import-ddl.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-import-ddl.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreImportDdlTool = Tool.define("altimate_core_import_ddl", {
+   description:
+@@ -11,7 +11,7 @@ export const AltimateCoreImportDdlTool = Tool.define("altimate_core_import_ddl",
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.import_ddl", {
++      const result = await Dispatcher.call("altimate_core.import_ddl", {
+         ddl: args.ddl,
+         dialect: args.dialect ?? "",
+       })
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-introspection-sql.ts b/packages/opencode/src/altimate/tools/altimate-core-introspection-sql.ts
+index 30d0978ee..bf2959de1 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-introspection-sql.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-introspection-sql.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreIntrospectionSqlTool = Tool.define("altimate_core_introspection_sql", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreIntrospectionSqlTool = Tool.define("altimate_core_intro
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.introspection_sql", {
++      const result = await Dispatcher.call("altimate_core.introspection_sql", {
+         db_type: args.db_type,
+         database: args.database,
+         schema_name: args.schema_name,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-is-safe.ts b/packages/opencode/src/altimate/tools/altimate-core-is-safe.ts
+index c2beac031..fe583dbba 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-is-safe.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-is-safe.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreIsSafeTool = Tool.define("altimate_core_is_safe", {
+   description:
+@@ -10,7 +10,7 @@ export const AltimateCoreIsSafeTool = Tool.define("altimate_core_is_safe", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.is_safe", {
++      const result = await Dispatcher.call("altimate_core.is_safe", {
+         sql: args.sql,
+       })
+       const data = result.data as Record<string, any>
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-lint.ts b/packages/opencode/src/altimate/tools/altimate-core-lint.ts
+index 239676ac8..fe19d17ac 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-lint.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-lint.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreLintTool = Tool.define("altimate_core_lint", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreLintTool = Tool.define("altimate_core_lint", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.lint", {
++      const result = await Dispatcher.call("altimate_core.lint", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-migration.ts b/packages/opencode/src/altimate/tools/altimate-core-migration.ts
+index 60c05a4b3..0fae1f80d 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-migration.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-migration.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreMigrationTool = Tool.define("altimate_core_migration", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreMigrationTool = Tool.define("altimate_core_migration",
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.migration", {
++      const result = await Dispatcher.call("altimate_core.migration", {
+         old_ddl: args.old_ddl,
+         new_ddl: args.new_ddl,
+         dialect: args.dialect ?? "",
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-optimize-context.ts b/packages/opencode/src/altimate/tools/altimate-core-optimize-context.ts
+index f818cca68..f9b348396 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-optimize-context.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-optimize-context.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreOptimizeContextTool = Tool.define("altimate_core_optimize_context", {
+   description:
+@@ -11,7 +11,7 @@ export const AltimateCoreOptimizeContextTool = Tool.define("altimate_core_optimi
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.optimize_context", {
++      const result = await Dispatcher.call("altimate_core.optimize_context", {
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+       })
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-optimize-for-query.ts b/packages/opencode/src/altimate/tools/altimate-core-optimize-for-query.ts
+index 2d81cdf84..0302f0328 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-optimize-for-query.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-optimize-for-query.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreOptimizeForQueryTool = Tool.define("altimate_core_optimize_for_query", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreOptimizeForQueryTool = Tool.define("altimate_core_optim
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.optimize_for_query", {
++      const result = await Dispatcher.call("altimate_core.optimize_for_query", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-parse-dbt.ts b/packages/opencode/src/altimate/tools/altimate-core-parse-dbt.ts
+index c8d3afb87..eff8a7ed5 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-parse-dbt.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-parse-dbt.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
+   description:
+@@ -10,7 +10,7 @@ export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.parse_dbt", {
++      const result = await Dispatcher.call("altimate_core.parse_dbt", {
+         project_dir: args.project_dir,
+       })
+       const data = result.data as Record<string, any>
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-policy.ts b/packages/opencode/src/altimate/tools/altimate-core-policy.ts
+index 8e5ba30e7..b1e2abbdf 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-policy.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-policy.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
+   description:
+@@ -13,7 +13,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.policy", {
++      const result = await Dispatcher.call("altimate_core.policy", {
+         sql: args.sql,
+         policy_json: args.policy_json,
+         schema_path: args.schema_path ?? "",
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-prune-schema.ts b/packages/opencode/src/altimate/tools/altimate-core-prune-schema.ts
+index 65758d282..7cc78218b 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-prune-schema.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-prune-schema.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCorePruneSchemaTool = Tool.define("altimate_core_prune_schema", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCorePruneSchemaTool = Tool.define("altimate_core_prune_sche
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.prune_schema", {
++      const result = await Dispatcher.call("altimate_core.prune_schema", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-query-pii.ts b/packages/opencode/src/altimate/tools/altimate-core-query-pii.ts
+index 4ae35b621..0cbf70739 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-query-pii.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-query-pii.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.query_pii", {
++      const result = await Dispatcher.call("altimate_core.query_pii", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-resolve-term.ts b/packages/opencode/src/altimate/tools/altimate-core-resolve-term.ts
+index 926d15d96..fe9e384b9 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-resolve-term.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-resolve-term.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreResolveTermTool = Tool.define("altimate_core_resolve_term", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreResolveTermTool = Tool.define("altimate_core_resolve_te
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.resolve_term", {
++      const result = await Dispatcher.call("altimate_core.resolve_term", {
+         term: args.term,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-rewrite.ts b/packages/opencode/src/altimate/tools/altimate-core-rewrite.ts
+index fdae86af9..828e2e2e6 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-rewrite.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-rewrite.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.rewrite", {
++      const result = await Dispatcher.call("altimate_core.rewrite", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-safety.ts b/packages/opencode/src/altimate/tools/altimate-core-safety.ts
+index ec1068ab3..27af50d03 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-safety.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-safety.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreSafetyTool = Tool.define("altimate_core_safety", {
+   description:
+@@ -10,7 +10,7 @@ export const AltimateCoreSafetyTool = Tool.define("altimate_core_safety", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.safety", { sql: args.sql })
++      const result = await Dispatcher.call("altimate_core.safety", { sql: args.sql })
+       const data = result.data as Record<string, any>
+       return {
+         title: `Safety: ${data.safe ? "SAFE" : `${data.threats?.length ?? 0} threats`}`,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-schema-diff.ts b/packages/opencode/src/altimate/tools/altimate-core-schema-diff.ts
+index 2dad8fc1e..71aa975fd 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-schema-diff.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-schema-diff.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreSchemaDiffTool = Tool.define("altimate_core_schema_diff", {
+   description:
+@@ -13,7 +13,7 @@ export const AltimateCoreSchemaDiffTool = Tool.define("altimate_core_schema_diff
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.schema_diff", {
++      const result = await Dispatcher.call("altimate_core.schema_diff", {
+         schema1_path: args.schema1_path ?? "",
+         schema2_path: args.schema2_path ?? "",
+         schema1_context: args.schema1_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-semantics.ts b/packages/opencode/src/altimate/tools/altimate-core-semantics.ts
+index 7cebd7d44..74ccfe0d4 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-semantics.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-semantics.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics",
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.semantics", {
++      const result = await Dispatcher.call("altimate_core.semantics", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-testgen.ts b/packages/opencode/src/altimate/tools/altimate-core-testgen.ts
+index e2047d157..9bece66be 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-testgen.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-testgen.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreTestgenTool = Tool.define("altimate_core_testgen", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreTestgenTool = Tool.define("altimate_core_testgen", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.testgen", {
++      const result = await Dispatcher.call("altimate_core.testgen", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-track-lineage.ts b/packages/opencode/src/altimate/tools/altimate-core-track-lineage.ts
+index fedc00c69..9e961b0b9 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-track-lineage.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-track-lineage.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreTrackLineageTool = Tool.define("altimate_core_track_lineage", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreTrackLineageTool = Tool.define("altimate_core_track_lin
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.track_lineage", {
++      const result = await Dispatcher.call("altimate_core.track_lineage", {
+         queries: args.queries,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-transpile.ts b/packages/opencode/src/altimate/tools/altimate-core-transpile.ts
+index 7a82d6ec8..badd6050c 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-transpile.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-transpile.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreTranspileTool = Tool.define("altimate_core_transpile", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreTranspileTool = Tool.define("altimate_core_transpile",
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.transpile", {
++      const result = await Dispatcher.call("altimate_core.transpile", {
+         sql: args.sql,
+         from_dialect: args.from_dialect,
+         to_dialect: args.to_dialect,
+diff --git a/packages/opencode/src/altimate/tools/altimate-core-validate.ts b/packages/opencode/src/altimate/tools/altimate-core-validate.ts
+index f0347cee2..d35836d13 100644
+--- a/packages/opencode/src/altimate/tools/altimate-core-validate.ts
++++ b/packages/opencode/src/altimate/tools/altimate-core-validate.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
+   description:
+@@ -12,7 +12,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("altimate_core.validate", {
++      const result = await Dispatcher.call("altimate_core.validate", {
+         sql: args.sql,
+         schema_path: args.schema_path ?? "",
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/dbt-lineage.ts b/packages/opencode/src/altimate/tools/dbt-lineage.ts
+index 6f9b1f1c2..a53b15de5 100644
+--- a/packages/opencode/src/altimate/tools/dbt-lineage.ts
++++ b/packages/opencode/src/altimate/tools/dbt-lineage.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { DbtLineageResult } from "../bridge/protocol"
+ 
+ export const DbtLineageTool = Tool.define("dbt_lineage", {
+@@ -13,7 +13,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("dbt.lineage", {
++      const result = await Dispatcher.call("dbt.lineage", {
+         manifest_path: args.manifest_path,
+         model: args.model,
+         dialect: args.dialect,
+diff --git a/packages/opencode/src/altimate/tools/dbt-manifest.ts b/packages/opencode/src/altimate/tools/dbt-manifest.ts
+index de0cd7e42..0141c3e22 100644
+--- a/packages/opencode/src/altimate/tools/dbt-manifest.ts
++++ b/packages/opencode/src/altimate/tools/dbt-manifest.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { DbtManifestResult } from "../bridge/protocol"
+ 
+ export const DbtManifestTool = Tool.define("dbt_manifest", {
+@@ -11,7 +11,7 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("dbt.manifest", { path: args.path })
++      const result = await Dispatcher.call("dbt.manifest", { path: args.path })
+ 
+       return {
+         title: `Manifest: ${result.model_count} models, ${result.source_count} sources`,
+diff --git a/packages/opencode/src/altimate/tools/dbt-profiles.ts b/packages/opencode/src/altimate/tools/dbt-profiles.ts
+index 53bb3016f..2642880bc 100644
+--- a/packages/opencode/src/altimate/tools/dbt-profiles.ts
++++ b/packages/opencode/src/altimate/tools/dbt-profiles.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const DbtProfilesTool = Tool.define("dbt_profiles", {
+   description:
+@@ -10,7 +10,7 @@ export const DbtProfilesTool = Tool.define("dbt_profiles", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("dbt.profiles", {
++      const result = await Dispatcher.call("dbt.profiles", {
+         path: args.path,
+       })
+ 
+diff --git a/packages/opencode/src/altimate/tools/finops-analyze-credits.ts b/packages/opencode/src/altimate/tools/finops-analyze-credits.ts
+index 527ff026f..0fd01417a 100644
+--- a/packages/opencode/src/altimate/tools/finops-analyze-credits.ts
++++ b/packages/opencode/src/altimate/tools/finops-analyze-credits.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ function formatCreditsAnalysis(
+   totalCredits: number,
+@@ -72,7 +72,7 @@ export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.analyze_credits", {
++      const result = await Dispatcher.call("finops.analyze_credits", {
+         warehouse: args.warehouse,
+         days: args.days,
+         limit: args.limit,
+diff --git a/packages/opencode/src/altimate/tools/finops-expensive-queries.ts b/packages/opencode/src/altimate/tools/finops-expensive-queries.ts
+index cf2d8cefe..16dbb17bb 100644
+--- a/packages/opencode/src/altimate/tools/finops-expensive-queries.ts
++++ b/packages/opencode/src/altimate/tools/finops-expensive-queries.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import { formatBytes, truncateQuery } from "./finops-formatting"
+ 
+ function formatExpensiveQueries(queries: unknown[]): string {
+@@ -40,7 +40,7 @@ export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries"
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.expensive_queries", {
++      const result = await Dispatcher.call("finops.expensive_queries", {
+         warehouse: args.warehouse,
+         days: args.days,
+         limit: args.limit,
+diff --git a/packages/opencode/src/altimate/tools/finops-query-history.ts b/packages/opencode/src/altimate/tools/finops-query-history.ts
+index acc12a6b9..cf298ab31 100644
+--- a/packages/opencode/src/altimate/tools/finops-query-history.ts
++++ b/packages/opencode/src/altimate/tools/finops-query-history.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import { formatBytes, truncateQuery } from "./finops-formatting"
+ 
+ function formatQueryHistory(summary: Record<string, unknown>, queries: unknown[]): string {
+@@ -56,7 +56,7 @@ export const FinopsQueryHistoryTool = Tool.define("finops_query_history", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.query_history", {
++      const result = await Dispatcher.call("finops.query_history", {
+         warehouse: args.warehouse,
+         days: args.days,
+         limit: args.limit,
+diff --git a/packages/opencode/src/altimate/tools/finops-role-access.ts b/packages/opencode/src/altimate/tools/finops-role-access.ts
+index 45dc136a6..76c964af0 100644
+--- a/packages/opencode/src/altimate/tools/finops-role-access.ts
++++ b/packages/opencode/src/altimate/tools/finops-role-access.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ function formatGrants(privilegeSummary: unknown, grants: unknown[]): string {
+   const lines: string[] = []
+@@ -108,7 +108,7 @@ export const FinopsRoleGrantsTool = Tool.define("finops_role_grants", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.role_grants", {
++      const result = await Dispatcher.call("finops.role_grants", {
+         warehouse: args.warehouse,
+         role: args.role,
+         object_name: args.object_name,
+@@ -146,7 +146,7 @@ export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.role_hierarchy", { warehouse: args.warehouse })
++      const result = await Dispatcher.call("finops.role_hierarchy", { warehouse: args.warehouse })
+ 
+       if (!result.success) {
+         return {
+@@ -181,7 +181,7 @@ export const FinopsUserRolesTool = Tool.define("finops_user_roles", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.user_roles", {
++      const result = await Dispatcher.call("finops.user_roles", {
+         warehouse: args.warehouse,
+         user: args.user,
+         limit: args.limit,
+diff --git a/packages/opencode/src/altimate/tools/finops-unused-resources.ts b/packages/opencode/src/altimate/tools/finops-unused-resources.ts
+index ff4c7ec0a..c0c91c39a 100644
+--- a/packages/opencode/src/altimate/tools/finops-unused-resources.ts
++++ b/packages/opencode/src/altimate/tools/finops-unused-resources.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ function formatUnusedResources(
+   summary: Record<string, unknown>,
+@@ -68,7 +68,7 @@ export const FinopsUnusedResourcesTool = Tool.define("finops_unused_resources",
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.unused_resources", {
++      const result = await Dispatcher.call("finops.unused_resources", {
+         warehouse: args.warehouse,
+         days: args.days,
+         limit: args.limit,
+diff --git a/packages/opencode/src/altimate/tools/finops-warehouse-advice.ts b/packages/opencode/src/altimate/tools/finops-warehouse-advice.ts
+index ad28b1acd..7b9415fe7 100644
+--- a/packages/opencode/src/altimate/tools/finops-warehouse-advice.ts
++++ b/packages/opencode/src/altimate/tools/finops-warehouse-advice.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ function formatWarehouseAdvice(
+   recommendations: unknown[],
+@@ -77,7 +77,7 @@ export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice",
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("finops.warehouse_advice", {
++      const result = await Dispatcher.call("finops.warehouse_advice", {
+         warehouse: args.warehouse,
+         days: args.days,
+       })
+diff --git a/packages/opencode/src/altimate/tools/lineage-check.ts b/packages/opencode/src/altimate/tools/lineage-check.ts
+index dd4884064..47332e590 100644
+--- a/packages/opencode/src/altimate/tools/lineage-check.ts
++++ b/packages/opencode/src/altimate/tools/lineage-check.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { LineageCheckResult } from "../bridge/protocol"
+ 
+ export const LineageCheckTool = Tool.define("lineage_check", {
+@@ -20,7 +20,7 @@ export const LineageCheckTool = Tool.define("lineage_check", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("lineage.check", {
++      const result = await Dispatcher.call("lineage.check", {
+         sql: args.sql,
+         dialect: args.dialect,
+         schema_context: args.schema_context,
+diff --git a/packages/opencode/src/altimate/tools/project-scan.ts b/packages/opencode/src/altimate/tools/project-scan.ts
+index 28bcf2ed4..ff6a39e91 100644
+--- a/packages/opencode/src/altimate/tools/project-scan.ts
++++ b/packages/opencode/src/altimate/tools/project-scan.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import { existsSync, readFileSync } from "fs"
+ import path from "path"
+ import { Telemetry } from "@/telemetry"
+@@ -393,28 +393,28 @@ export const ProjectScanTool = Tool.define("project_scan", {
+     ])
+ 
+     // Run bridge-dependent detections with individual error handling
+-    const engineHealth = await Bridge.call("ping", {} as any)
++    const engineHealth = await Dispatcher.call("ping", {} as any)
+       .then((r) => ({ healthy: true, status: r.status }))
+       .catch(() => ({ healthy: false, status: undefined as string | undefined }))
+ 
+-    const existingConnections = await Bridge.call("warehouse.list", {})
++    const existingConnections = await Dispatcher.call("warehouse.list", {})
+       .then((r) => r.warehouses)
+       .catch(() => [] as Array<{ name: string; type: string; database?: string }>)
+ 
+-    const dbtProfiles = await Bridge.call("dbt.profiles", {})
++    const dbtProfiles = await Dispatcher.call("dbt.profiles", {})
+       .then((r) => r.connections ?? [])
+       .catch(() => [] as Array<{ name: string; type: string; config: Record<string, unknown> }>)
+ 
+     const dockerContainers = args.skip_docker
+       ? []
+-      : await Bridge.call("warehouse.discover", {} as any)
++      : await Dispatcher.call("warehouse.discover", {} as any)
+           .then((r) => r.containers ?? [])
+           .catch(() => [] as Array<{ name: string; db_type: string; host: string; port: number; database?: string }>)
+ 
+-    const schemaCache = await Bridge.call("schema.cache_status", {}).catch(() => null)
++    const schemaCache = await Dispatcher.call("schema.cache_status", {}).catch(() => null)
+ 
+     const dbtManifest = dbtProject.manifestPath
+-      ? await Bridge.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => null)
++      ? await Dispatcher.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => null)
+       : null
+ 
+     // Deduplicate connections
+diff --git a/packages/opencode/src/altimate/tools/schema-cache-status.ts b/packages/opencode/src/altimate/tools/schema-cache-status.ts
+index 481468700..b6d01640a 100644
+--- a/packages/opencode/src/altimate/tools/schema-cache-status.ts
++++ b/packages/opencode/src/altimate/tools/schema-cache-status.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SchemaCacheStatusResult } from "../bridge/protocol"
+ 
+ export const SchemaCacheStatusTool = Tool.define("schema_cache_status", {
+@@ -8,7 +8,7 @@ export const SchemaCacheStatusTool = Tool.define("schema_cache_status", {
+   parameters: z.object({}),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("schema.cache_status", {})
++      const result = await Dispatcher.call("schema.cache_status", {})
+ 
+       return {
+         title: `Schema Cache: ${result.total_tables} tables, ${result.total_columns} columns`,
+diff --git a/packages/opencode/src/altimate/tools/schema-detect-pii.ts b/packages/opencode/src/altimate/tools/schema-detect-pii.ts
+index b4f4e15b7..5a8d69196 100644
+--- a/packages/opencode/src/altimate/tools/schema-detect-pii.ts
++++ b/packages/opencode/src/altimate/tools/schema-detect-pii.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { PiiDetectResult } from "../bridge/protocol"
+ 
+ export const SchemaDetectPiiTool = Tool.define("schema_detect_pii", {
+@@ -13,7 +13,7 @@ export const SchemaDetectPiiTool = Tool.define("schema_detect_pii", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("schema.detect_pii", {
++      const result = await Dispatcher.call("schema.detect_pii", {
+         warehouse: args.warehouse,
+         schema_name: args.schema_name,
+         table: args.table,
+diff --git a/packages/opencode/src/altimate/tools/schema-diff.ts b/packages/opencode/src/altimate/tools/schema-diff.ts
+index dc346cdeb..9e1c94999 100644
+--- a/packages/opencode/src/altimate/tools/schema-diff.ts
++++ b/packages/opencode/src/altimate/tools/schema-diff.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SchemaDiffResult, ColumnChange } from "../bridge/protocol"
+ 
+ export const SchemaDiffTool = Tool.define("schema_diff", {
+@@ -21,7 +21,7 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.schema_diff", {
++      const result = await Dispatcher.call("sql.schema_diff", {
+         old_sql: args.old_sql,
+         new_sql: args.new_sql,
+         dialect: args.dialect,
+diff --git a/packages/opencode/src/altimate/tools/schema-index.ts b/packages/opencode/src/altimate/tools/schema-index.ts
+index f7cd401db..16bda9e57 100644
+--- a/packages/opencode/src/altimate/tools/schema-index.ts
++++ b/packages/opencode/src/altimate/tools/schema-index.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SchemaIndexResult } from "../bridge/protocol"
+ 
+ export const SchemaIndexTool = Tool.define("schema_index", {
+@@ -11,7 +11,7 @@ export const SchemaIndexTool = Tool.define("schema_index", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("schema.index", {
++      const result = await Dispatcher.call("schema.index", {
+         warehouse: args.warehouse,
+       })
+ 
+diff --git a/packages/opencode/src/altimate/tools/schema-inspect.ts b/packages/opencode/src/altimate/tools/schema-inspect.ts
+index 274af0830..9580b66af 100644
+--- a/packages/opencode/src/altimate/tools/schema-inspect.ts
++++ b/packages/opencode/src/altimate/tools/schema-inspect.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SchemaInspectResult } from "../bridge/protocol"
+ 
+ export const SchemaInspectTool = Tool.define("schema_inspect", {
+@@ -12,7 +12,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("schema.inspect", {
++      const result = await Dispatcher.call("schema.inspect", {
+         table: args.table,
+         schema_name: args.schema_name,
+         warehouse: args.warehouse,
+diff --git a/packages/opencode/src/altimate/tools/schema-search.ts b/packages/opencode/src/altimate/tools/schema-search.ts
+index 0a6c3c058..847c8ec4f 100644
+--- a/packages/opencode/src/altimate/tools/schema-search.ts
++++ b/packages/opencode/src/altimate/tools/schema-search.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SchemaSearchResult } from "../bridge/protocol"
+ 
+ export const SchemaSearchTool = Tool.define("schema_search", {
+@@ -13,7 +13,7 @@ export const SchemaSearchTool = Tool.define("schema_search", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("schema.search", {
++      const result = await Dispatcher.call("schema.search", {
+         query: args.query,
+         warehouse: args.warehouse,
+         limit: args.limit,
+diff --git a/packages/opencode/src/altimate/tools/schema-tags.ts b/packages/opencode/src/altimate/tools/schema-tags.ts
+index 63be6aa65..011127615 100644
+--- a/packages/opencode/src/altimate/tools/schema-tags.ts
++++ b/packages/opencode/src/altimate/tools/schema-tags.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ function formatTags(tagSummary: unknown, tags: unknown[]): string {
+   const lines: string[] = []
+@@ -81,7 +81,7 @@ export const SchemaTagsTool = Tool.define("schema_tags", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("schema.tags", {
++      const result = await Dispatcher.call("schema.tags", {
+         warehouse: args.warehouse,
+         object_name: args.object_name,
+         tag_name: args.tag_name,
+@@ -120,7 +120,7 @@ export const SchemaTagsListTool = Tool.define("schema_tags_list", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("schema.tags_list", {
++      const result = await Dispatcher.call("schema.tags_list", {
+         warehouse: args.warehouse,
+         limit: args.limit,
+       })
+diff --git a/packages/opencode/src/altimate/tools/sql-analyze.ts b/packages/opencode/src/altimate/tools/sql-analyze.ts
+index de2fc2a35..4ab5080a8 100644
+--- a/packages/opencode/src/altimate/tools/sql-analyze.ts
++++ b/packages/opencode/src/altimate/tools/sql-analyze.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlAnalyzeResult } from "../bridge/protocol"
+ 
+ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
+@@ -16,7 +16,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.analyze", {
++      const result = await Dispatcher.call("sql.analyze", {
+         sql: args.sql,
+         dialect: args.dialect,
+       })
+diff --git a/packages/opencode/src/altimate/tools/sql-autocomplete.ts b/packages/opencode/src/altimate/tools/sql-autocomplete.ts
+index 666646b85..9ae316faa 100644
+--- a/packages/opencode/src/altimate/tools/sql-autocomplete.ts
++++ b/packages/opencode/src/altimate/tools/sql-autocomplete.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlAutocompleteResult } from "../bridge/protocol"
+ 
+ export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
+@@ -22,7 +22,7 @@ export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.autocomplete", {
++      const result = await Dispatcher.call("sql.autocomplete", {
+         prefix: args.prefix,
+         position: args.position,
+         warehouse: args.warehouse,
+diff --git a/packages/opencode/src/altimate/tools/sql-diff.ts b/packages/opencode/src/altimate/tools/sql-diff.ts
+index c4ee9d5e7..ca08bc867 100644
+--- a/packages/opencode/src/altimate/tools/sql-diff.ts
++++ b/packages/opencode/src/altimate/tools/sql-diff.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const SqlDiffTool = Tool.define("sql_diff", {
+   description:
+@@ -12,7 +12,7 @@ export const SqlDiffTool = Tool.define("sql_diff", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.diff", {
++      const result = await Dispatcher.call("sql.diff", {
+         original: args.original,
+         modified: args.modified,
+         context_lines: args.context_lines,
+diff --git a/packages/opencode/src/altimate/tools/sql-execute.ts b/packages/opencode/src/altimate/tools/sql-execute.ts
+index 0b5525c07..e14e3abd9 100644
+--- a/packages/opencode/src/altimate/tools/sql-execute.ts
++++ b/packages/opencode/src/altimate/tools/sql-execute.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlExecuteResult } from "../bridge/protocol"
+ 
+ export const SqlExecuteTool = Tool.define("sql_execute", {
+@@ -12,7 +12,7 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.execute", {
++      const result = await Dispatcher.call("sql.execute", {
+         sql: args.query,
+         warehouse: args.warehouse,
+         limit: args.limit,
+diff --git a/packages/opencode/src/altimate/tools/sql-explain.ts b/packages/opencode/src/altimate/tools/sql-explain.ts
+index 03acbcc32..082b5821d 100644
+--- a/packages/opencode/src/altimate/tools/sql-explain.ts
++++ b/packages/opencode/src/altimate/tools/sql-explain.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlExplainResult } from "../bridge/protocol"
+ 
+ export const SqlExplainTool = Tool.define("sql_explain", {
+@@ -13,7 +13,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.explain", {
++      const result = await Dispatcher.call("sql.explain", {
+         sql: args.sql,
+         warehouse: args.warehouse,
+         analyze: args.analyze,
+diff --git a/packages/opencode/src/altimate/tools/sql-fix.ts b/packages/opencode/src/altimate/tools/sql-fix.ts
+index 5e1c43614..ea5137b1f 100644
+--- a/packages/opencode/src/altimate/tools/sql-fix.ts
++++ b/packages/opencode/src/altimate/tools/sql-fix.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlFixResult } from "../bridge/protocol"
+ 
+ export const SqlFixTool = Tool.define("sql_fix", {
+@@ -13,7 +13,7 @@ export const SqlFixTool = Tool.define("sql_fix", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.fix", {
++      const result = await Dispatcher.call("sql.fix", {
+         sql: args.sql,
+         error_message: args.error_message,
+         dialect: args.dialect,
+diff --git a/packages/opencode/src/altimate/tools/sql-format.ts b/packages/opencode/src/altimate/tools/sql-format.ts
+index 350b2afe6..d4b92dd9d 100644
+--- a/packages/opencode/src/altimate/tools/sql-format.ts
++++ b/packages/opencode/src/altimate/tools/sql-format.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const SqlFormatTool = Tool.define("sql_format", {
+   description:
+@@ -12,7 +12,7 @@ export const SqlFormatTool = Tool.define("sql_format", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.format", {
++      const result = await Dispatcher.call("sql.format", {
+         sql: args.sql,
+         dialect: args.dialect,
+         indent: args.indent,
+diff --git a/packages/opencode/src/altimate/tools/sql-optimize.ts b/packages/opencode/src/altimate/tools/sql-optimize.ts
+index ea0756d07..10e097786 100644
+--- a/packages/opencode/src/altimate/tools/sql-optimize.ts
++++ b/packages/opencode/src/altimate/tools/sql-optimize.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../bridge/protocol"
+ 
+ export const SqlOptimizeTool = Tool.define("sql_optimize", {
+@@ -22,7 +22,7 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.optimize", {
++      const result = await Dispatcher.call("sql.optimize", {
+         sql: args.sql,
+         dialect: args.dialect,
+         ...(args.schema_context ? { schema_context: args.schema_context } : {}),
+diff --git a/packages/opencode/src/altimate/tools/sql-rewrite.ts b/packages/opencode/src/altimate/tools/sql-rewrite.ts
+index 52b8c338c..ae72e06db 100644
+--- a/packages/opencode/src/altimate/tools/sql-rewrite.ts
++++ b/packages/opencode/src/altimate/tools/sql-rewrite.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlRewriteResult, SqlRewriteRule } from "../bridge/protocol"
+ 
+ export const SqlRewriteTool = Tool.define("sql_rewrite", {
+@@ -22,7 +22,7 @@ export const SqlRewriteTool = Tool.define("sql_rewrite", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.rewrite", {
++      const result = await Dispatcher.call("sql.rewrite", {
+         sql: args.sql,
+         dialect: args.dialect,
+         ...(args.schema_context ? { schema_context: args.schema_context } : {}),
+diff --git a/packages/opencode/src/altimate/tools/sql-translate.ts b/packages/opencode/src/altimate/tools/sql-translate.ts
+index 35d713354..302e1fd93 100644
+--- a/packages/opencode/src/altimate/tools/sql-translate.ts
++++ b/packages/opencode/src/altimate/tools/sql-translate.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ import type { SqlTranslateResult } from "../bridge/protocol"
+ 
+ export const SqlTranslateTool = Tool.define("sql_translate", {
+@@ -17,7 +17,7 @@ export const SqlTranslateTool = Tool.define("sql_translate", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("sql.translate", {
++      const result = await Dispatcher.call("sql.translate", {
+         sql: args.sql,
+         source_dialect: args.source_dialect,
+         target_dialect: args.target_dialect,
+diff --git a/packages/opencode/src/altimate/tools/warehouse-add.ts b/packages/opencode/src/altimate/tools/warehouse-add.ts
+index b73ddd3ba..d39671538 100644
+--- a/packages/opencode/src/altimate/tools/warehouse-add.ts
++++ b/packages/opencode/src/altimate/tools/warehouse-add.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const WarehouseAddTool = Tool.define("warehouse_add", {
+   description:
+@@ -23,7 +23,7 @@ export const WarehouseAddTool = Tool.define("warehouse_add", {
+     }
+ 
+     try {
+-      const result = await Bridge.call("warehouse.add", {
++      const result = await Dispatcher.call("warehouse.add", {
+         name: args.name,
+         config: args.config,
+       })
+diff --git a/packages/opencode/src/altimate/tools/warehouse-discover.ts b/packages/opencode/src/altimate/tools/warehouse-discover.ts
+index 4c10ebe77..36e003019 100644
+--- a/packages/opencode/src/altimate/tools/warehouse-discover.ts
++++ b/packages/opencode/src/altimate/tools/warehouse-discover.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const WarehouseDiscoverTool = Tool.define("warehouse_discover", {
+   description:
+@@ -8,7 +8,7 @@ export const WarehouseDiscoverTool = Tool.define("warehouse_discover", {
+   parameters: z.object({}),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("warehouse.discover", {})
++      const result = await Dispatcher.call("warehouse.discover", {})
+ 
+       if (result.error) {
+         return {
+diff --git a/packages/opencode/src/altimate/tools/warehouse-list.ts b/packages/opencode/src/altimate/tools/warehouse-list.ts
+index 3738a5c88..2a7942e69 100644
+--- a/packages/opencode/src/altimate/tools/warehouse-list.ts
++++ b/packages/opencode/src/altimate/tools/warehouse-list.ts
+@@ -1,13 +1,13 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const WarehouseListTool = Tool.define("warehouse_list", {
+   description: "List all configured warehouse connections. Shows connection name, type, and database.",
+   parameters: z.object({}),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("warehouse.list", {})
++      const result = await Dispatcher.call("warehouse.list", {})
+ 
+       if (result.warehouses.length === 0) {
+         return {
+diff --git a/packages/opencode/src/altimate/tools/warehouse-remove.ts b/packages/opencode/src/altimate/tools/warehouse-remove.ts
+index a6ad11a48..6e136a104 100644
+--- a/packages/opencode/src/altimate/tools/warehouse-remove.ts
++++ b/packages/opencode/src/altimate/tools/warehouse-remove.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const WarehouseRemoveTool = Tool.define("warehouse_remove", {
+   description: "Remove a warehouse connection. Deletes both the config entry and any stored keyring credentials.",
+@@ -9,7 +9,7 @@ export const WarehouseRemoveTool = Tool.define("warehouse_remove", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("warehouse.remove", { name: args.name })
++      const result = await Dispatcher.call("warehouse.remove", { name: args.name })
+ 
+       if (result.success) {
+         return {
+diff --git a/packages/opencode/src/altimate/tools/warehouse-test.ts b/packages/opencode/src/altimate/tools/warehouse-test.ts
+index f47d07bb7..c66174d59 100644
+--- a/packages/opencode/src/altimate/tools/warehouse-test.ts
++++ b/packages/opencode/src/altimate/tools/warehouse-test.ts
+@@ -1,6 +1,6 @@
+ import z from "zod"
+ import { Tool } from "../../tool/tool"
+-import { Bridge } from "../bridge/client"
++import { Dispatcher } from "../native"
+ 
+ export const WarehouseTestTool = Tool.define("warehouse_test", {
+   description: "Test connectivity to a named warehouse connection. Verifies the connection is reachable and credentials are valid.",
+@@ -9,7 +9,7 @@ export const WarehouseTestTool = Tool.define("warehouse_test", {
+   }),
+   async execute(args, ctx) {
+     try {
+-      const result = await Bridge.call("warehouse.test", { name: args.name })
++      const result = await Dispatcher.call("warehouse.test", { name: args.name })
+ 
+       if (result.connected) {
+         return {

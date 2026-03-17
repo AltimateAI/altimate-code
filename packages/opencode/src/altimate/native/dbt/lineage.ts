@@ -9,7 +9,7 @@ import * as core from "@altimateai/altimate-core"
 import type {
   DbtLineageParams,
   DbtLineageResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 /**
  * Compute column-level lineage for a dbt model.

@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SqlRewriteResult, SqlRewriteRule } from "../bridge/protocol"
+import type { SqlRewriteResult, SqlRewriteRule } from "../native/types"
 
 export const SqlRewriteTool = Tool.define("sql_rewrite", {
   description:

@@ -8,7 +8,7 @@ import * as core from "@altimateai/altimate-core"
 import type {
   LocalTestParams,
   LocalTestResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 /**
  * Execute SQL against a local DuckDB database for validation.

@@ -8,7 +8,7 @@ import * as Registry from "../connections/registry"
 import type {
   LocalSchemaSyncParams,
   LocalSchemaSyncResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // Type mapping: remote types → DuckDB types

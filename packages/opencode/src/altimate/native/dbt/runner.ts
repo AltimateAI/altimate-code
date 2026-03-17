@@ -8,7 +8,7 @@ import { execFile } from "child_process"
 import type {
   DbtRunParams,
   DbtRunResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 /**
  * Prepend + to selector for build/run/test to include upstream deps.

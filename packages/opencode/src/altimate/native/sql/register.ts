@@ -17,7 +17,7 @@ import type {
   SqlOptimizeResult,
   SqlOptimizeSuggestion,
   LineageCheckResult,
-} from "../../bridge/protocol"
+} from "../types"
 
 // ---------------------------------------------------------------------------
 // sql.analyze — lint + semantics + safety

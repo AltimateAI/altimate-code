@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { SqlFixResult } from "../bridge/protocol"
+import type { SqlFixResult } from "../native/types"
 
 export const SqlFixTool = Tool.define("sql_fix", {
   description:

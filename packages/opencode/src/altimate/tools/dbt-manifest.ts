@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { DbtManifestResult } from "../bridge/protocol"
+import type { DbtManifestResult } from "../native/types"
 
 export const DbtManifestTool = Tool.define("dbt_manifest", {
   description:

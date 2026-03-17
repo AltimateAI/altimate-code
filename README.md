@@ -9,7 +9,7 @@ column-level lineage, FinOps, PII detection, and data visualization. Connects to
 understands your data, and helps you ship faster.
 
 [![npm](https://img.shields.io/npm/v/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
-[![PyPI](https://img.shields.io/pypi/v/altimate-engine)](https://pypi.org/project/altimate-engine/)
+[![npm](https://img.shields.io/npm/v/@altimateai/altimate-core)](https://www.npmjs.com/package/@altimateai/altimate-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![CI](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml/badge.svg)](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-altimate--code.sh-blue)](https://altimate.ai)
@@ -136,22 +136,24 @@ Anthropic · OpenAI · Google Gemini · Google Vertex AI · Amazon Bedrock · Az
 ```
 altimate (TypeScript CLI)
         |
-   JSON-RPC 2.0 (stdio)
+   @altimateai/altimate-core (napi-rs → Rust)
+   SQL analysis, lineage, PII, safety — 45 functions, ~2ms per call
         |
-altimate-engine (Python)
-   SQL analysis, lineage, dbt, warehouse connections
+   Native Node.js drivers
+   10 warehouses: Snowflake, BigQuery, PostgreSQL, Databricks,
+   Redshift, MySQL, SQL Server, Oracle, DuckDB, SQLite
 ```
 
-The CLI handles AI interactions, TUI, and tool orchestration. The Python engine handles SQL parsing, analysis, lineage computation, and warehouse interactions via a JSON-RPC bridge.
+The CLI handles AI interactions, TUI, and tool orchestration. SQL analysis is powered by the Rust-based `@altimateai/altimate-core` engine via napi-rs bindings (no Python required). Database connectivity uses native Node.js drivers with lazy loading.
 
-**Zero-dependency bootstrap**: On first run the CLI downloads [`uv`](https://github.com/astral-sh/uv), creates an isolated Python environment, and installs the engine with all warehouse drivers automatically. No system Python required.
+**No Python dependency**: All 73 tool methods run natively in TypeScript. No pip, venv, or Python installation needed.
 
 ### Monorepo structure
 
 ```
 packages/
-  altimate-code/       TypeScript CLI
-  altimate-engine/     Python engine (SQL, lineage, warehouses)
+  altimate-code/       TypeScript CLI (main entry point)
+  dbt-tools/           dbt integration (TypeScript)
   plugin/              Plugin system
   sdk/js/              JavaScript SDK
   util/                Shared utilities
@@ -178,7 +180,6 @@ Contributions welcome! Please read the [Contributing Guide](./CONTRIBUTING.md) b
 git clone https://github.com/AltimateAI/altimate-code.git
 cd altimate-code
 bun install
-cd packages/altimate-engine && python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 ```
 
 ## Acknowledgements
