@@ -60,6 +60,8 @@ Set up warehouse connections so altimate can query your data platform. You have 
 4. **Offers to configure connections** — walks you through adding and testing each discovered warehouse
 5. **Indexes schemas** — populates the schema cache for autocomplete and context-aware analysis
 
+Once complete, altimate indexes your schemas and detects your tooling, enabling schema-aware autocomplete and context-rich analysis.
+
 ### Option B: Manual configuration
 
 Add a warehouse connection to your `altimate-code.json`. Here are minimal snippets for each warehouse type:
@@ -128,11 +130,7 @@ Add a warehouse connection to your `altimate-code.json`. Here are minimal snippe
 
 See [Warehouse connections](#warehouse-connections) below for full configuration options including key-pair auth, Redshift, and PostgreSQL.
 
-## Step 4: Discover Your Data Stack
-
-Once connected, run `/discover` to let altimate index your schemas and detect your tooling. This enables schema-aware autocomplete and context-rich analysis.
-
-## Step 5: Choose an Agent Mode
+## Step 4: Choose an Agent Mode
 
 altimate offers specialized agent modes for different workflows:
 
@@ -152,7 +150,7 @@ Switch modes in the TUI:
 /mode analyst
 ```
 
-## Step 6: Start Working
+## Step 5: Start Working
 
 You are ready to go. Type a natural-language prompt in the TUI and the agent will use the appropriate tools to answer. See [Example prompts](#example-prompts) at the bottom of this page for ideas.
 

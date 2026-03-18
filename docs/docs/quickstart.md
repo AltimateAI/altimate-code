@@ -1,14 +1,14 @@
 ---
-description: "Install altimate-code and run your first SQL analysis in 5 minutes. The open-source data engineering harness — 99+ tools for building, validating, optimizing, and shipping data products."
+description: "Install altimate-code and run your first SQL analysis. The open-source data engineering harness — 99+ tools for building, validating, optimizing, and shipping data products."
 ---
 
-# Quickstart — 5 Minutes to Your First Result
+# Quickstart
 
 > **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider — or use Codex (built-in, no key required).
 
 ---
 
-## Step 1 — Install (30 seconds)
+## Step 1 — Install
 
 ```bash
 # npm (recommended)
@@ -22,7 +22,7 @@ brew install AltimateAI/tap/altimate-code
 
 ---
 
-## Step 2 — Configure Your LLM (1 minute)
+## Step 2 — Configure Your LLM
 
 ```bash
 altimate        # Launch the TUI
@@ -52,7 +52,9 @@ Minimal config file option (`altimate-code.json` in your project root):
 
 ---
 
-## Step 3 — Connect Your Warehouse (1 minute)
+## Step 3 — Connect Your Warehouse _(Optional)_
+
+> Skip this step if you want to work locally or don't need warehouse/orchestration connections. You can always run `/discover` later.
 
 ```bash
 altimate /discover
@@ -75,7 +77,7 @@ altimate /discover
 
 ---
 
-## Step 4 — Build Your First Artifact (2.5 minutes)
+## Step 4 — Build Your First Artifact
 
 In the TUI, try these prompts or describe your own use case:
 
