@@ -65,10 +65,18 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
             const existing = deltaMap.get(key)
             if (existing !== undefined) {
               const prev = merged[existing] as typeof event
-              ;(prev.properties as typeof props).delta += props.delta
+              merged[existing] = {
+                ...prev,
+                properties: {
+                  ...prev.properties,
+                  delta: (prev.properties as typeof props).delta + props.delta,
+                },
+              } as Event
               continue
             }
             deltaMap.set(key, merged.length)
+          } else {
+            deltaMap.clear()
           }
           merged.push(event)
         }

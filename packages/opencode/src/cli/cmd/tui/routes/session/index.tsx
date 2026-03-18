@@ -1483,13 +1483,18 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
             />
           </Match>
           <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
-            <markdown syntaxStyle={syntax()} streaming={false} content={trimmed()} conceal={ctx.conceal()} />
+            <markdown
+              syntaxStyle={syntax()}
+              streaming={!props.message.time.completed}
+              content={trimmed()}
+              conceal={ctx.conceal()}
+            />
           </Match>
           <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
             <code
               filetype="markdown"
               drawUnstyledText={false}
-              streaming={false}
+              streaming={!props.message.time.completed}
               syntaxStyle={syntax()}
               content={trimmed()}
               conceal={ctx.conceal()}
