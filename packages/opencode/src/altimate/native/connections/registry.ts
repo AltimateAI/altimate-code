@@ -253,7 +253,13 @@ export async function get(name: string): Promise<Connector> {
   const promise = (async () => {
     try {
       const connector = await createConnector(name, config)
-      await connector.connect()
+      try {
+        await connector.connect()
+      } catch (connectErr) {
+        // If connect() fails after tunnel was started, clean up the tunnel
+        closeTunnel(name)
+        throw connectErr
+      }
       connectors.set(name, connector)
       try {
         Telemetry.track({

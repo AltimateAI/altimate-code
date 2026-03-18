@@ -37,14 +37,18 @@ export async function call<M extends BridgeMethod>(
   try {
     const result = await native(params)
 
-    Telemetry.track({
-      type: "native_call",
-      timestamp: Date.now(),
-      session_id: Telemetry.getContext().sessionId,
-      method: method as string,
-      status: "success",
-      duration_ms: Date.now() - startTime,
-    })
+    try {
+      Telemetry.track({
+        type: "native_call",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        method: method as string,
+        status: "success",
+        duration_ms: Date.now() - startTime,
+      })
+    } catch {
+      // Telemetry must never turn a successful operation into an error
+    }
 
     return result as any
   } catch (e) {

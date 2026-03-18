@@ -92,7 +92,7 @@ SELECT
     MAX(num_queued_queries) as peak_queue_load,
     COUNT(*) as sample_count
 FROM system.compute.warehouse_events
-WHERE event_time >= DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL '{days}' DAY)
+WHERE event_time >= DATE_SUB(CURRENT_TIMESTAMP(), {days})
 GROUP BY warehouse_id
 ORDER BY avg_queue_load DESC
 `
@@ -107,7 +107,7 @@ SELECT
     AVG(read_bytes) as avg_bytes_scanned,
     0 as total_credits
 FROM system.query.history
-WHERE start_time >= DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL '{days}' DAY)
+WHERE start_time >= DATE_SUB(CURRENT_TIMESTAMP(), {days})
   AND status = 'FINISHED'
 GROUP BY warehouse_id
 ORDER BY query_count DESC
