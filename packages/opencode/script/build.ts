@@ -204,17 +204,26 @@ for (const item of targets) {
     tsconfig: "./tsconfig.json",
     plugins: [solidPlugin],
     sourcemap: "external",
-    // Packages excluded from the compiled binary — loaded lazily at runtime.
-    // NOTE: @altimateai/altimate-core is intentionally NOT external — it's a
-    // napi binary that must be bundled for the CLI to work out of the box.
+    // Packages excluded from the compiled binary — resolved from node_modules
+    // at runtime. Bun compiled binaries resolve externals via standard Node
+    // resolution from the binary's location, walking up to the wrapper
+    // package's node_modules.
+    //
+    // IMPORTANT: Without code splitting, Bun inlines dynamic import() targets
+    // into the main chunk. Any external require() in those targets will fail
+    // at startup — not when the import() is called. Only mark packages as
+    // external when they truly cannot be bundled (e.g. NAPI native addons).
     external: [
-      // dbt integration — heavy transitive deps, loaded on first dbt operation
-      "@altimateai/dbt-integration",
-      // Database drivers — users install on demand per warehouse
+      // NAPI native module — cannot be embedded in Bun single-file executable.
+      // The JS loader dynamically require()s platform-specific .node binaries
+      // (e.g. @altimateai/altimate-core-darwin-arm64).
+      // Must be installed as a dependency of the published wrapper package.
+      "@altimateai/altimate-core",
+      // Database drivers — native addons, users install on demand per warehouse
       "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
       "mysql2", "mssql", "oracledb", "duckdb", "better-sqlite3",
-      // Optional infra packages
-      "keytar", "ssh2", "dockerode", "yaml",
+      // Optional infra packages — native addons or heavy optional deps
+      "keytar", "ssh2", "dockerode",
     ],
     compile: {
       autoloadBunfig: false,
