@@ -45,6 +45,7 @@ altimate --agent analyst
 |------|------------|
 | `--model <provider/model>` | Override the default model |
 | `--agent <name>` | Start with a specific agent |
+| `--yolo` | Auto-approve all permission prompts (explicit `deny` rules still enforced) |
 | `--print-logs` | Print logs to stderr |
 | `--log-level <level>` | Set log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `--help`, `-h` | Show help |
@@ -84,6 +85,21 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_SERVER_USERNAME` | Server HTTP basic auth username |
 | `ALTIMATE_CLI_SERVER_PASSWORD` | Server HTTP basic auth password |
 | `ALTIMATE_CLI_PERMISSION` | Permission config as JSON |
+
+### Permissions & Safety
+
+| Variable | Description |
+|----------|------------|
+| `ALTIMATE_CLI_YOLO` | Auto-approve all permission prompts (`true`/`false`). Explicit `deny` rules still enforced. |
+| `OPENCODE_YOLO` | Fallback for `ALTIMATE_CLI_YOLO`. When both are set, `ALTIMATE_CLI_YOLO` takes precedence. |
+
+### Memory & Training
+
+| Variable | Description |
+|----------|------------|
+| `ALTIMATE_DISABLE_MEMORY` | Disable the persistent memory system |
+| `ALTIMATE_MEMORY_AUTO_EXTRACT` | Auto-extract memories at session end |
+| `ALTIMATE_DISABLE_TRAINING` | Disable the AI teammate training system |
 
 ### Experimental
 

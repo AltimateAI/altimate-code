@@ -11,17 +11,17 @@ We collect the following categories of events:
 | `session_start` | A new CLI session begins |
 | `session_end` | A CLI session ends (includes duration) |
 | `session_forked` | A session is forked from an existing one |
-| `generation` | An AI model generation completes (model ID, token counts, duration — no prompt content) |
-| `tool_call` | A tool is invoked (tool name and category — no arguments or output) |
-| `bridge_call` | A Python engine RPC call completes (method name and duration — no arguments) |
+| `generation` | An AI model generation completes (model ID, token counts, duration, but no prompt content) |
+| `tool_call` | A tool is invoked (tool name and category, but no arguments or output) |
+| `bridge_call` | A native tool call completes (method name and duration, but no arguments) |
 | `command` | A CLI command is executed (command name only) |
 | `error` | An unhandled error occurs (error type and truncated message — no stack traces) |
 | `auth_login` | Authentication succeeds or fails (provider and method — no credentials) |
 | `auth_logout` | A user logs out (provider only) |
 | `mcp_server_status` | An MCP server connects, disconnects, or errors (server name and transport) |
 | `provider_error` | An AI provider returns an error (error type and HTTP status — no request content) |
-| `engine_started` | The Python engine starts or restarts (version and duration) |
-| `engine_error` | The Python engine fails to start (phase and truncated error) |
+| `engine_started` | The native tool engine initializes (version and duration) |
+| `engine_error` | The native tool engine fails to start (phase and truncated error) |
 | `upgrade_attempted` | A CLI upgrade is attempted (version and method) |
 | `permission_denied` | A tool permission is denied (tool name and source) |
 | `doom_loop_detected` | A repeated tool call pattern is detected (tool name and count) |
@@ -47,9 +47,9 @@ No events are ever written to disk — if the process is killed before the final
 Telemetry helps us:
 
 - **Detect errors** — identify crashes, provider failures, and engine issues before users report them
-- **Improve reliability** — track MCP server stability, engine startup success rates, and upgrade outcomes
+- **Improve reliability** — track MCP server stability, engine initialization, and upgrade outcomes
 - **Understand usage patterns** — know which tools and features are used so we can prioritize development
-- **Measure performance** — track generation latency, engine startup time, and bridge call duration
+- **Measure performance** — track generation latency, tool call duration, and startup time
 
 ## Disabling Telemetry
 
@@ -103,7 +103,7 @@ Event type names use **snake_case** with a `domain_action` pattern:
 
 - `auth_login`, `auth_logout` — authentication events
 - `mcp_server_status`, `mcp_server_census` — MCP server lifecycle
-- `engine_started`, `engine_error` — Python engine events
+- `engine_started`, `engine_error` — native engine events
 - `provider_error` — AI provider errors
 - `session_forked` — session lifecycle
 - `environment_census` — environment snapshot events

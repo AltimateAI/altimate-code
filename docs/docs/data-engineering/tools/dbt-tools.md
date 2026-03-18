@@ -72,6 +72,36 @@ Source Freshness:
 
 ---
 
+## altimate-dbt CLI
+
+`altimate-dbt` is a standalone CLI for dbt workflows. It auto-detects your dbt project directory, Python environment, and adapter type (Snowflake, BigQuery, Databricks, Redshift, etc.).
+
+```bash
+# Initialize dbt integration
+altimate-dbt init
+
+# Diagnose issues
+altimate-dbt doctor
+
+# Run dbt commands
+altimate-dbt compile
+altimate-dbt build
+altimate-dbt run
+altimate-dbt test
+
+# Utilities
+altimate-dbt execute "SELECT 1"    # Run a query via dbt adapter
+altimate-dbt columns my_model      # List model columns
+altimate-dbt graph                 # View lineage/DAG
+altimate-dbt deps                  # Manage dependencies
+```
+
+All commands provide friendly error diagnostics with actionable fix suggestions when something goes wrong.
+
+> **Tip:** In builder mode, the agent prefers `altimate-dbt` over the raw `dbt_run` tool for better error handling and auto-detection.
+
+---
+
 ## dbt Skills
 
 ### /generate-tests

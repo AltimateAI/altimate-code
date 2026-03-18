@@ -34,6 +34,7 @@ The leader key (default: `Ctrl+X`) gives access to all TUI keybindings. Press le
 | `s` | Toggle sidebar |
 | `t` | List themes |
 | `m` | List models |
+| `i` | Enhance prompt (rewrite with AI for clarity) |
 | `a` | List agents |
 | `k` | List keybinds |
 | `q` | Quit |

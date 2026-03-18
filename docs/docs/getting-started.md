@@ -4,7 +4,7 @@
 
 ## Why altimate?
 
-altimate is the open-source data engineering harness — 99+ deterministic tools for building, validating, optimizing, and shipping data products. Unlike general-purpose coding agents, every tool is purpose-built for data engineering:
+altimate is the open-source data engineering harness with 50+ deterministic tools for building, validating, optimizing, and shipping data products. Unlike general-purpose coding agents, every tool is purpose-built for data engineering:
 
 | Capability | General coding agents | altimate |
 |---|---|---|
@@ -42,7 +42,7 @@ Then in the TUI:
 
 This walks you through selecting and authenticating with an LLM provider (Anthropic, OpenAI, Bedrock, Codex, Ollama, etc.). You need a working LLM connection before the agent can do anything useful.
 
-## Step 3: Configure Your Warehouse
+## Step 3: Configure Your Warehouse _(Optional)_
 
 Set up warehouse connections so altimate can query your data platform. You have two options:
 
@@ -54,11 +54,11 @@ Set up warehouse connections so altimate can query your data platform. You have 
 
 `/discover` scans your environment and sets up everything automatically:
 
-1. **Detects your dbt project** — finds `dbt_project.yml`, parses the manifest, and reads profiles
-2. **Discovers warehouse connections** — from `~/.dbt/profiles.yml`, running Docker containers, and environment variables (e.g. `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABASE_URL`)
-3. **Checks installed tools** — dbt, sqlfluff, airflow, dagster, prefect, soda, sqlmesh, great_expectations, sqlfmt
-4. **Offers to configure connections** — walks you through adding and testing each discovered warehouse
-5. **Indexes schemas** — populates the schema cache for autocomplete and context-aware analysis
+1. **Detects your dbt project** by finding `dbt_project.yml`, parsing the manifest, and reading profiles
+2. **Discovers warehouse connections** from `~/.dbt/profiles.yml`, running Docker containers, and environment variables (e.g. `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABASE_URL`)
+3. **Checks installed tools** including dbt, sqlfluff, airflow, dagster, prefect, soda, sqlmesh, great_expectations, sqlfmt
+4. **Offers to configure connections** and walks you through adding and testing each discovered warehouse
+5. **Indexes schemas** to populate the schema cache for autocomplete and context-aware analysis
 
 Once complete, altimate indexes your schemas and detects your tooling, enabling schema-aware autocomplete and context-rich analysis.
 
@@ -136,13 +136,13 @@ altimate offers specialized agent modes for different workflows:
 
 | What do you want to do? | Use this agent mode |
 |---|---|
-| Analyzing data without risk of changes | **Analyst** — read-only queries, cost analysis, data profiling |
-| Building or generating dbt models | **Builder** — model scaffolding, SQL generation, ref() wiring |
-| Validating data quality | **Validator** — test generation, anomaly detection, data contracts |
-| Migrating across warehouses | **Migrator** — cross-dialect SQL translation, compatibility checks |
-| Teaching team conventions | **Trainer** — learns corrections, enforces naming/style rules across team |
-| Research and exploration | **Researcher** — deep-dive analysis, lineage tracing, impact assessment |
-| Executive summaries and reports | **Executive** — high-level overviews, cost summaries, health dashboards |
+| Analyzing data without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling |
+| Building or generating dbt models | **Builder** for model scaffolding, SQL generation, ref() wiring |
+| Validating data quality | **Validator** for test generation, anomaly detection, data contracts |
+| Migrating across warehouses | **Migrator** for cross-dialect SQL translation, compatibility checks |
+| Teaching team conventions | **Trainer**, which learns corrections and enforces naming/style rules across team |
+| Research and exploration | **Researcher** for deep-dive analysis, lineage tracing, impact assessment |
+| Executive summaries and reports | **Executive** for high-level overviews, cost summaries, health dashboards |
 
 Switch modes in the TUI:
 
@@ -215,7 +215,7 @@ altimate uses a JSON config file. Create `altimate-code.json` in your project ro
 }
 ```
 
-Or use Application Default Credentials (ADC) — just omit `service_account` and run `gcloud auth application-default login`.
+Or use Application Default Credentials (ADC). Just omit `service_account` and run `gcloud auth application-default login`.
 
 ### Databricks
 
@@ -290,7 +290,7 @@ If you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backe
 1. Run `/connect` in the TUI
 2. Select **Codex** as your provider
 3. Authenticate via browser OAuth
-4. Your subscription covers all usage — no API keys needed
+4. Your subscription covers all usage, so no API keys are needed
 
 ## Verify your setup
 
@@ -344,10 +344,10 @@ Generate data quality tests for all models in the marts/ directory. For each mod
 
 ## Next steps
 
-- [Terminal UI](usage/tui.md) — Learn the terminal interface, keybinds, and slash commands
-- [CLI](usage/cli.md) — Subcommands, flags, and environment variables
-- [Config Files](configure/config.md) — Full config file reference
-- [Providers](configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
-- [Agent Modes](data-engineering/agent-modes.md) — Builder, Analyst, Validator, Migrator, Researcher, Trainer
-- [Training](data-engineering/training/index.md) — Correct the agent once, it remembers forever, your team inherits it
-- [Tools](data-engineering/tools/sql-tools.md) — 99+ specialized tools for SQL, dbt, and warehouses
+- [Terminal UI](usage/tui.md): Learn the terminal interface, keybinds, and slash commands
+- [CLI](usage/cli.md): Subcommands, flags, and environment variables
+- [Config Files](configure/config.md): Full config file reference
+- [Providers](configure/providers.md): Set up Anthropic, OpenAI, Bedrock, Ollama, and more
+- [Agent Modes](data-engineering/agent-modes.md): Builder, Analyst, Validator, Migrator, Researcher, Trainer
+- [Training](data-engineering/training/index.md): Correct the agent once, it remembers forever, your team inherits it
+- [Tools](data-engineering/tools/sql-tools.md): 50+ specialized tools for SQL, dbt, and warehouses

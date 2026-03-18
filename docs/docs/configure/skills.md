@@ -67,7 +67,26 @@ Skills are loaded from these locations (in priority order):
 
 ## Built-in Data Engineering Skills
 
-altimate ships with built-in skills for common data engineering tasks. Skills are loaded and surfaced dynamically at runtime — type `/` in the TUI to browse what's available and get autocomplete on skill names.
+altimate ships with built-in skills for common data engineering tasks. Type `/` in the TUI to browse what's available and get autocomplete on skill names.
+
+| Skill | Description |
+|-------|-------------|
+| `/sql-review` | SQL quality gate — lint 26 anti-patterns, validate syntax, check safety |
+| `/sql-translate` | Cross-dialect SQL translation |
+| `/schema-migration` | Schema migration planning and execution |
+| `/pii-audit` | PII detection and compliance audits |
+| `/cost-report` | Snowflake FinOps analysis |
+| `/lineage-diff` | Column-level lineage comparison |
+| `/query-optimize` | Query optimization suggestions |
+| `/data-viz` | Interactive data visualization and dashboards |
+| `/dbt-develop` | dbt model development and scaffolding |
+| `/dbt-test` | dbt test generation |
+| `/dbt-docs` | dbt documentation generation |
+| `/dbt-analyze` | dbt project analysis |
+| `/dbt-troubleshoot` | dbt issue diagnosis |
+| `/teach` | Teach patterns from example files |
+| `/train` | Learn standards from documents/style guides |
+| `/training-status` | Dashboard of all learned knowledge |
 
 For custom skills, see [Adding Custom Skills](#adding-custom-skills) below.
 

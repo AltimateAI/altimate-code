@@ -74,6 +74,12 @@ Override it in your config:
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` | Redo |
 
+### Prompt
+
+| Keybind | Action |
+|---------|--------|
+| Leader + `i` | Enhance prompt (AI-powered rewrite for clarity) |
+
 ### Other
 
 | Keybind | Action |

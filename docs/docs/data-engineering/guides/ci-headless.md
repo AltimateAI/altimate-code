@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install altimate
-        run: npm install -g @altimateai/altimate-code
+        run: npm install -g altimate-code
 
       - name: Run cost report
         env:

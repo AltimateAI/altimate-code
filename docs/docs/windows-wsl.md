@@ -8,7 +8,7 @@ You can install and run altimate directly in PowerShell or Command Prompt withou
 
 ```powershell
 # PowerShell or CMD — install globally
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 
 # Launch
 altimate

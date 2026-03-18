@@ -20,11 +20,13 @@ altimate runs in one of seven specialized modes. Each mode has different permiss
 altimate --agent builder
 ```
 
+> Tip: `--yolo` auto-approves permission prompts for faster iteration (`altimate --yolo --agent builder`). Not recommended with live warehouse connections. Use on local/dev environments only. See [Permissions: Yolo Mode](../configure/permissions.md#yolo-mode).
+
 Builder mode follows a strict pre-execution protocol for every SQL operation:
 
-1. `sql_analyze` — Check for anti-patterns
-2. `sql_validate` — Verify syntax and schema references
-3. `sql_execute` — Run the query
+1. `sql_analyze` to check for anti-patterns
+2. `sql_validate` to verify syntax and schema references
+3. `sql_execute` to run the query
 
 ### Example: Create a staging model
 
@@ -87,10 +89,10 @@ altimate --agent analyst
 
 Analyst mode enforces strict guardrails:
 
-- **SELECT only** — INSERT, UPDATE, DELETE, DROP are blocked by altimate-core
-- **Cost-first** — Every query gets a cost prediction before execution
-- **LIMIT enforced** — Large scans are automatically limited
-- **No file writes** — Cannot modify your codebase
+- **SELECT only.** INSERT, UPDATE, DELETE, DROP are blocked by altimate-core
+- **Cost-first.** Every query gets a cost prediction before execution
+- **LIMIT enforced.** Large scans are automatically limited
+- **No file writes.** Cannot modify your codebase
 
 ### Example: Investigate expensive queries
 
@@ -105,9 +107,9 @@ Analyst: Let me pull the query history and credit analysis.
   Daily trend: ↑ 15% vs last week
 
 > finops_expensive_queries prod-snowflake --days 7 --limit 5
-  1. SELECT * FROM events JOIN users... — 89.3 credits, 47 runs
-  2. CREATE TABLE AS SELECT...         — 45.1 credits, 1 run
-  3. SELECT COUNT(DISTINCT...)         — 23.7 credits, 312 runs
+  1. SELECT * FROM events JOIN users... (89.3 credits, 47 runs)
+  2. CREATE TABLE AS SELECT...         (45.1 credits, 1 run)
+  3. SELECT COUNT(DISTINCT...)         (23.7 credits, 312 runs)
 
 The #1 cost driver is a query running 47 times that scans the full
 events table with a SELECT *. Let me analyze it:
@@ -118,7 +120,7 @@ events table with a SELECT *. Let me analyze it:
 
 Recommendations:
 1. Replace SELECT * with only the 6 columns actually used downstream
-2. Add a date filter — the events table has 2.1B rows but most queries
+2. Add a date filter, since the events table has 2.1B rows but most queries
    only need the last 7 days
 3. Consider materializing this as a view with the filter baked in
 
@@ -165,8 +167,8 @@ Validator:
   Severity: medium (type change may affect downstream)
 
 Issues found:
-1. FUNCTION_IN_FILTER on line 23 — use a pre-computed date column instead
-2. Type change from FLOAT to DECIMAL(18,2) — verify downstream consumers
+1. FUNCTION_IN_FILTER on line 23: use a pre-computed date column instead
+2. Type change from FLOAT to DECIMAL(18,2): verify downstream consumers
 3. Missing test coverage for the new revenue_category column
 ```
 
@@ -207,7 +209,7 @@ Migrator:
 
 > lineage_check [source SQL]
 > lineage_check [translated SQL]
-  ✓ Lineage preserved — same columns, same sources
+  ✓ Lineage preserved, same columns, same sources
 ```
 
 ### Supported translation paths
@@ -233,10 +235,10 @@ altimate --agent researcher
 
 Researcher mode follows a 4-phase protocol for thorough investigation:
 
-1. **Plan** — Outline questions, data sources, and tool sequence
-2. **Gather** — Execute investigation steps, parallelize where possible
-3. **Analyze** — Cross-reference findings, identify root causes
-4. **Report** — Produce structured report with evidence and recommendations
+1. **Plan.** Outline questions, data sources, and tool sequence
+2. **Gather.** Execute investigation steps, parallelize where possible
+3. **Analyze.** Cross-reference findings, identify root causes
+4. **Report.** Produce structured report with evidence and recommendations
 
 ### Example: Investigate a cost spike
 
@@ -271,8 +273,8 @@ Researcher: Let me plan the investigation.
   Costs increased 38% due to two changes deployed 3 days ago.
 
   ## Key Findings
-  1. fct_attribution model (new) scans 2.1B events rows without partition filter — 45 credits/week
-  2. Partition filter was accidentally removed from stg_events in commit def5678 — caused 47 full scans
+  1. fct_attribution model (new) scans 2.1B events rows without partition filter, costing 45 credits/week
+  2. Partition filter was accidentally removed from stg_events in commit def5678, causing 47 full scans
 
   ## Recommendations
   1. [ ] Add date partition filter to fct_attribution (estimated savings: 40 credits/week)
@@ -306,7 +308,7 @@ Researcher: Let me plan the investigation.
 altimate --agent trainer
 ```
 
-Trainer mode helps you systematically teach the agent about your project. It cannot modify files — it only reads, explores, and manages training.
+Trainer mode helps you systematically teach the agent about your project. It cannot modify files. It only reads, explores, and manages training.
 
 ### Example: Teach from a correction
 
