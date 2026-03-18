@@ -37,7 +37,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       })
     },
 
-    async execute(sql: string, limit?: number): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, _binds?: any[]): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
       let query = sql
       const isSelectLike = /^\s*(SELECT|WITH)\b/i.test(sql)

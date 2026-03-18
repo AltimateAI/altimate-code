@@ -18,6 +18,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   let client: any
   let session: any
 
+  function escapeIdentifier(value: string): string {
+    return value.replace(/`/g, "``")
+  }
+
   return {
     async connect() {
       const DBSQLClient = databricksModule.DBSQLClient ?? databricksModule
@@ -40,7 +44,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       })
     },
 
-    async execute(sql: string, limit?: number): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, binds?: any[]): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
       let query = sql
       const isSelectLike = /^\s*(SELECT|WITH|VALUES)\b/i.test(sql)
@@ -52,7 +56,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }
 
-      const operation = await session.executeStatement(query)
+      const stmtOptions: Record<string, any> = {}
+      if (binds?.length) {
+        stmtOptions.ordinalParameters = binds
+      }
+      const operation = await session.executeStatement(query, stmtOptions)
       const rows = await operation.fetchAll()
       await operation.close()
 
@@ -84,7 +92,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
       const operation = await session.executeStatement(
-        `SHOW TABLES IN \`${schema}\``,
+        `SHOW TABLES IN \`${escapeIdentifier(schema)}\``,
       )
       const rows = await operation.fetchAll()
       await operation.close()
@@ -102,7 +110,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       table: string,
     ): Promise<SchemaColumn[]> {
       const operation = await session.executeStatement(
-        `DESCRIBE TABLE \`${schema}\`.\`${table}\``,
+        `DESCRIBE TABLE \`${escapeIdentifier(schema)}\`.\`${escapeIdentifier(table)}\``,
       )
       const rows = await operation.fetchAll()
       await operation.close()

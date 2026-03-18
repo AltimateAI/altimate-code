@@ -3,7 +3,6 @@
  * Synchronous API wrapped in async interface.
  */
 
-import { escapeSqlIdentifier } from "./sql-escape"
 import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
@@ -28,7 +27,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       db.pragma("journal_mode = WAL")
     },
 
-    async execute(sql: string, limit?: number): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, _binds?: any[]): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
 
       // Determine if this is a SELECT-like statement
@@ -98,7 +97,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       _schema: string,
       table: string,
     ): Promise<SchemaColumn[]> {
-      const rows = db.prepare(`PRAGMA table_info("${escapeSqlIdentifier(table)}")`).all()
+      const rows = db.prepare('SELECT * FROM pragma_table_info(?) ORDER BY cid').all(table)
       return rows.map((r: any) => ({
         name: r.name as string,
         data_type: r.type as string,

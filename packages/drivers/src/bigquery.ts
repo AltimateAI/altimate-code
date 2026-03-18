@@ -37,19 +37,18 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       client = new BigQuery(options)
     },
 
-    async execute(sql: string, limit?: number): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, binds?: any[]): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
-      let query = sql
+      const query = sql.replace(/;\s*$/, "")
       const isSelectLike = /^\s*(SELECT|WITH|VALUES)\b/i.test(sql)
-      if (
-        isSelectLike &&
-        effectiveLimit &&
-        !/\bLIMIT\b/i.test(sql)
-      ) {
-        query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
-      }
 
+      // BigQuery does not allow appending LIMIT to parameterized queries.
+      // Use maxResults instead — it limits rows returned at the API level.
       const options: Record<string, unknown> = { query }
+      if (isSelectLike && effectiveLimit && !/\bLIMIT\b/i.test(sql)) {
+        options.maxResults = effectiveLimit + 1
+      }
+      if (binds?.length) options.params = binds
       if (config.dataset) {
         options.defaultDataset = {
           datasetId: config.dataset,

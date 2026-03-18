@@ -5,7 +5,6 @@
  */
 
 import * as Registry from "../connections/registry"
-import { escapeSqlString } from "@altimateai/drivers"
 import type {
   RoleGrantsParams,
   RoleGrantsResult,
@@ -34,7 +33,7 @@ WHERE 1=1
 {object_filter}
 AND deleted_on IS NULL
 ORDER BY granted_on, name
-LIMIT {limit}
+LIMIT ?
 `
 
 const SNOWFLAKE_ROLE_HIERARCHY_SQL = `
@@ -60,7 +59,7 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
 WHERE deleted_on IS NULL
 {user_filter}
 ORDER BY grantee_name, role
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -80,7 +79,7 @@ FROM \`region-US.INFORMATION_SCHEMA.OBJECT_PRIVILEGES\`
 WHERE 1=1
 {grantee_filter}
 ORDER BY object_type, object_name
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -100,7 +99,7 @@ FROM system.information_schema.table_privileges
 WHERE 1=1
 {grantee_filter}
 ORDER BY table_name
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -125,26 +124,36 @@ function rowsToRecords(result: { columns: string[]; rows: any[][] }): Record<str
 
 function buildGrantsSql(
   whType: string, role?: string, objectName?: string, limit: number = 100,
-): string | null {
+): { sql: string; binds: any[] } | null {
   if (whType === "snowflake") {
-    const roleF = role ? `AND grantee_name = '${escapeSqlString(role)}'` : ""
-    const objF = objectName ? `AND name = '${escapeSqlString(objectName)}'` : ""
-    return SNOWFLAKE_GRANTS_ON_SQL
-      .replace("{role_filter}", roleF)
-      .replace("{object_filter}", objF)
-      .replace("{limit}", String(limit))
+    const binds: any[] = []
+    const roleF = role ? (binds.push(role), "AND grantee_name = ?") : ""
+    const objF = objectName ? (binds.push(objectName), "AND name = ?") : ""
+    binds.push(limit)
+    return {
+      sql: SNOWFLAKE_GRANTS_ON_SQL
+        .replace("{role_filter}", roleF)
+        .replace("{object_filter}", objF),
+      binds,
+    }
   }
   if (whType === "bigquery") {
-    const granteeF = role ? `AND grantee = '${escapeSqlString(role)}'` : ""
-    return BIGQUERY_GRANTS_SQL
-      .replace("{grantee_filter}", granteeF)
-      .replace("{limit}", String(limit))
+    const binds: any[] = []
+    const granteeF = role ? (binds.push(role), "AND grantee = ?") : ""
+    binds.push(limit)
+    return {
+      sql: BIGQUERY_GRANTS_SQL.replace("{grantee_filter}", granteeF),
+      binds,
+    }
   }
   if (whType === "databricks") {
-    const granteeF = role ? `AND grantee = '${escapeSqlString(role)}'` : ""
-    return DATABRICKS_GRANTS_SQL
-      .replace("{grantee_filter}", granteeF)
-      .replace("{limit}", String(limit))
+    const binds: any[] = []
+    const granteeF = role ? (binds.push(role), "AND grantee = ?") : ""
+    binds.push(limit)
+    return {
+      sql: DATABRICKS_GRANTS_SQL.replace("{grantee_filter}", granteeF),
+      binds,
+    }
   }
   return null
 }
@@ -157,8 +166,8 @@ export async function queryGrants(params: RoleGrantsParams): Promise<RoleGrantsR
   const whType = getWhType(params.warehouse)
   const limit = params.limit ?? 100
 
-  const sql = buildGrantsSql(whType, params.role, params.object_name, limit)
-  if (!sql) {
+  const built = buildGrantsSql(whType, params.role, params.object_name, limit)
+  if (!built) {
     return {
       success: false,
       grants: [],
@@ -170,7 +179,7 @@ export async function queryGrants(params: RoleGrantsParams): Promise<RoleGrantsR
 
   try {
     const connector = await Registry.get(params.warehouse)
-    const result = await connector.execute(sql, limit)
+    const result = await connector.execute(built.sql, limit, built.binds)
     const grants = rowsToRecords(result)
 
     const privilegeSummary: Record<string, number> = {}
@@ -251,12 +260,12 @@ export async function queryUserRoles(params: UserRolesParams): Promise<UserRoles
   try {
     const connector = await Registry.get(params.warehouse)
     const limit = params.limit ?? 100
-    const userF = params.user ? `AND grantee_name = '${escapeSqlString(params.user)}'` : ""
-    const sql = SNOWFLAKE_USER_ROLES_SQL
-      .replace("{user_filter}", userF)
-      .replace("{limit}", String(limit))
+    const binds: any[] = []
+    const userF = params.user ? (binds.push(params.user), "AND grantee_name = ?") : ""
+    binds.push(limit)
+    const sql = SNOWFLAKE_USER_ROLES_SQL.replace("{user_filter}", userF)
 
-    const result = await connector.execute(sql, limit)
+    const result = await connector.execute(sql, limit, binds)
     const assignments = rowsToRecords(result)
 
     return {

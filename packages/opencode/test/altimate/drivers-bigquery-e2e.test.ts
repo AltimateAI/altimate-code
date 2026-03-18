@@ -244,4 +244,93 @@ describe.skipIf(!HAS_BIGQUERY)("BigQuery Driver E2E", () => {
       expect(r.columns.length).toBe(50)
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // Bind Parameters
+  // ---------------------------------------------------------------------------
+  describe("Bind Parameters", () => {
+    test("scalar bind — SELECT ? returns the bound value", async () => {
+      const r = await connector.execute("SELECT ? AS val", undefined, [42])
+      expect(r.columns).toEqual(["val"])
+      expect(r.rows[0][0]).toBe(42)
+    })
+
+    test("binds a single integer with UNNEST", async () => {
+      const r = await connector.execute(
+        "SELECT n FROM UNNEST(GENERATE_ARRAY(1, 5)) AS n WHERE n = ?",
+        undefined,
+        [3],
+      )
+      expect(r.rows).toHaveLength(1)
+      expect(r.rows[0][0]).toBe(3)
+    })
+
+    test("binds multiple parameters", async () => {
+      const r = await connector.execute(
+        "SELECT n FROM UNNEST(GENERATE_ARRAY(1, 10)) AS n WHERE n >= ? AND n <= ? ORDER BY n",
+        undefined,
+        [3, 5],
+      )
+      expect(r.rows).toHaveLength(3)
+      expect(r.rows[0][0]).toBe(3)
+      expect(r.rows[2][0]).toBe(5)
+    })
+
+    test("returns no rows when bind value matches nothing", async () => {
+      const r = await connector.execute(
+        "SELECT n FROM UNNEST(GENERATE_ARRAY(1, 5)) AS n WHERE n = ?",
+        undefined,
+        [99],
+      )
+      expect(r.rows).toHaveLength(0)
+      expect(r.row_count).toBe(0)
+    })
+
+    test("empty binds array behaves same as no binds", async () => {
+      const withEmpty = await connector.execute("SELECT 1 AS n", undefined, [])
+      const withNone = await connector.execute("SELECT 1 AS n")
+      expect(withEmpty.rows[0][0]).toBe(withNone.rows[0][0])
+    })
+
+    test("prevents SQL injection via binding", async () => {
+      const r = await connector.execute(
+        "SELECT x FROM UNNEST(['alice', 'bob']) AS x WHERE x = ?",
+        undefined,
+        ["' OR '1'='1"],
+      )
+      expect(r.rows).toHaveLength(0)
+    })
+
+    test("binds a string parameter", async () => {
+      const r = await connector.execute(
+        "SELECT x FROM UNNEST(['alice', 'bob', 'carol']) AS x WHERE x = ?",
+        undefined,
+        ["bob"],
+      )
+      expect(r.rows).toHaveLength(1)
+      expect(r.rows[0][0]).toBe("bob")
+    })
+
+    test("binds a string with special characters", async () => {
+      const special = "O'Brien & \"Partners\""
+      const r = await connector.execute("SELECT ? AS val", undefined, [special])
+      expect(r.rows[0][0]).toBe(special)
+    })
+
+    test("binds a Unicode string", async () => {
+      const unicode = "日本語テスト"
+      const r = await connector.execute("SELECT ? AS val", undefined, [unicode])
+      expect(r.rows[0][0]).toBe(unicode)
+    })
+
+    test("binds work alongside maxResults truncation", async () => {
+      const r = await connector.execute(
+        "SELECT n FROM UNNEST(GENERATE_ARRAY(1, 200)) AS n WHERE n >= ?",
+        100,
+        [1],
+      )
+      expect(r.truncated).toBe(true)
+      expect(r.row_count).toBe(100)
+    })
+  })
 })

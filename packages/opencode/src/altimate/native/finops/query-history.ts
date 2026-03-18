@@ -5,7 +5,6 @@
  */
 
 import * as Registry from "../connections/registry"
-import { escapeSqlString } from "@altimateai/drivers"
 import type {
   QueryHistoryParams,
   QueryHistoryResult,
@@ -33,11 +32,11 @@ SELECT
     rows_produced,
     credits_used_cloud_services
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
 {user_filter}
 {warehouse_filter}
 ORDER BY start_time DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 const POSTGRES_HISTORY_SQL = `
@@ -81,9 +80,9 @@ SELECT
     total_rows as rows_produced,
     0 as credits_used_cloud_services
 FROM \`region-US.INFORMATION_SCHEMA.JOBS\`
-WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY)
 ORDER BY creation_time DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 const DATABRICKS_HISTORY_SQL = `
@@ -104,9 +103,9 @@ SELECT
     rows_produced,
     0 as credits_used_cloud_services
 FROM system.query.history
-WHERE start_time >= DATE_SUB(CURRENT_DATE(), {days})
+WHERE start_time >= DATE_SUB(CURRENT_DATE(), ?)
 ORDER BY start_time DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -121,28 +120,27 @@ function getWhType(warehouse: string): string {
 
 function buildHistoryQuery(
   whType: string, days: number, limit: number, user?: string, warehouseFilter?: string,
-): string | null {
+): { sql: string; binds: any[] } | null {
   if (whType === "snowflake") {
-    const userF = user ? `AND user_name = '${escapeSqlString(user)}'` : ""
-    const whF = warehouseFilter ? `AND warehouse_name = '${escapeSqlString(warehouseFilter)}'` : ""
-    return SNOWFLAKE_HISTORY_SQL
-      .replace("{days}", String(days))
-      .replace("{limit}", String(limit))
-      .replace("{user_filter}", userF)
-      .replace("{warehouse_filter}", whF)
+    const binds: any[] = [-days]
+    const userF = user ? (binds.push(user), "AND user_name = ?") : ""
+    const whF = warehouseFilter ? (binds.push(warehouseFilter), "AND warehouse_name = ?") : ""
+    binds.push(limit)
+    return {
+      sql: SNOWFLAKE_HISTORY_SQL
+        .replace("{user_filter}", userF)
+        .replace("{warehouse_filter}", whF),
+      binds,
+    }
   }
   if (whType === "postgres" || whType === "postgresql") {
-    return POSTGRES_HISTORY_SQL.replace("{limit}", String(limit))
+    return { sql: POSTGRES_HISTORY_SQL.replace("{limit}", String(Math.floor(Number(limit)))), binds: [] }
   }
   if (whType === "bigquery") {
-    return BIGQUERY_HISTORY_SQL
-      .replace("{days}", String(days))
-      .replace("{limit}", String(limit))
+    return { sql: BIGQUERY_HISTORY_SQL, binds: [days, limit] }
   }
   if (whType === "databricks") {
-    return DATABRICKS_HISTORY_SQL
-      .replace("{days}", String(days))
-      .replace("{limit}", String(limit))
+    return { sql: DATABRICKS_HISTORY_SQL, binds: [days, limit] }
   }
   if (whType === "duckdb") {
     return null // DuckDB has no native query history
@@ -169,8 +167,8 @@ export async function getQueryHistory(params: QueryHistoryParams): Promise<Query
   const days = params.days ?? 7
   const limit = params.limit ?? 100
 
-  const sql = buildHistoryQuery(whType, days, limit, params.user, params.warehouse_filter)
-  if (!sql) {
+  const built = buildHistoryQuery(whType, days, limit, params.user, params.warehouse_filter)
+  if (!built) {
     return {
       success: false,
       queries: [],
@@ -181,7 +179,7 @@ export async function getQueryHistory(params: QueryHistoryParams): Promise<Query
 
   try {
     const connector = await Registry.get(params.warehouse)
-    const result = await connector.execute(sql, limit)
+    const result = await connector.execute(built.sql, limit, built.binds)
     const queries = rowsToRecords(result)
 
     let totalBytes = 0

@@ -1,8 +1,6 @@
 // Re-export types
 export type { Connector, ConnectorResult, SchemaColumn, ConnectionConfig } from "./types"
 
-// Re-export escape utilities
-export { escapeSqlString, escapeSqlIdentifier } from "./sql-escape"
 
 // Re-export config normalization
 export { normalizeConfig } from "./normalize"

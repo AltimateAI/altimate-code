@@ -212,4 +212,128 @@ describe.skipIf(!HAS_DATABRICKS)("Databricks Driver E2E", () => {
       expect(r.rows[0][1]).toBe(false)
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // Bind Parameters
+  // ---------------------------------------------------------------------------
+  describe("Bind Parameters", () => {
+    beforeAll(async () => {
+      await connector.execute(`
+        CREATE OR REPLACE TEMPORARY VIEW _altimate_binds_test AS
+        SELECT * FROM (VALUES
+          (1, 'alice', 9.5,  true,  CAST('2024-01-01 10:00:00' AS TIMESTAMP)),
+          (2, 'bob',   7.2,  false, CAST('2024-06-15 12:30:00' AS TIMESTAMP)),
+          (3, 'carol', 8.8,  true,  CAST('2024-12-31 23:59:59' AS TIMESTAMP))
+        ) AS t(id, name, score, active, created_at)
+      `)
+    }, 30000)
+
+    afterAll(async () => {
+      try { await connector.execute("DROP VIEW IF EXISTS _altimate_binds_test") } catch {}
+    })
+
+    test("binds a single string parameter", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM _altimate_binds_test WHERE name = ?",
+        undefined,
+        ["alice"],
+      )
+      expect(result.columns).toEqual(["name"])
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0][0]).toBe("alice")
+    })
+
+    test("binds a single integer parameter", async () => {
+      const result = await connector.execute(
+        "SELECT id, name FROM _altimate_binds_test WHERE id = ?",
+        undefined,
+        [2],
+      )
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0][1]).toBe("bob")
+    })
+
+    test("binds multiple parameters", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM _altimate_binds_test WHERE id >= ? AND id <= ? ORDER BY id",
+        undefined,
+        [1, 2],
+      )
+      expect(result.rows).toHaveLength(2)
+      expect(result.rows[0][0]).toBe("alice")
+      expect(result.rows[1][0]).toBe("bob")
+    })
+
+    test("binds a float parameter", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM _altimate_binds_test WHERE score > ? ORDER BY score DESC",
+        undefined,
+        [9.0],
+      )
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0][0]).toBe("alice")
+    })
+
+    test("returns no rows when bind value matches nothing", async () => {
+      const result = await connector.execute(
+        "SELECT * FROM _altimate_binds_test WHERE name = ?",
+        undefined,
+        ["nobody"],
+      )
+      expect(result.rows).toHaveLength(0)
+      expect(result.row_count).toBe(0)
+    })
+
+    test("empty binds array behaves same as no binds", async () => {
+      const withEmpty = await connector.execute(
+        "SELECT COUNT(*) AS n FROM _altimate_binds_test",
+        undefined,
+        [],
+      )
+      const withNone = await connector.execute("SELECT COUNT(*) AS n FROM _altimate_binds_test")
+      expect(withEmpty.rows[0][0]).toBe(withNone.rows[0][0])
+    })
+
+    test("prevents SQL injection via binding", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM _altimate_binds_test WHERE name = ?",
+        undefined,
+        ["' OR '1'='1"],
+      )
+      expect(result.rows).toHaveLength(0)
+    })
+
+    test("binds a NULL parameter", async () => {
+      await connector.execute(`
+        CREATE OR REPLACE TEMPORARY VIEW _altimate_null_test AS
+        SELECT * FROM (VALUES (CAST(NULL AS STRING)), ('hello')) AS t(val)
+      `)
+      const result = await connector.execute(
+        "SELECT val FROM _altimate_null_test WHERE val IS NOT DISTINCT FROM ?",
+        undefined,
+        [null],
+      )
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0][0]).toBeNull()
+      await connector.execute("DROP VIEW IF EXISTS _altimate_null_test")
+    })
+
+    test("scalar bind — SELECT ? returns the bound value", async () => {
+      const result = await connector.execute("SELECT ? AS val", undefined, [42])
+      expect(result.columns).toEqual(["val"])
+      expect(Number(result.rows[0][0])).toBe(42)
+    })
+
+    test("binds a string with special characters", async () => {
+      const special = "O'Brien & \"Partners\""
+      const result = await connector.execute("SELECT ? AS val", undefined, [special])
+      expect(result.rows[0][0]).toBe(special)
+    })
+
+    test("binds a Unicode string", async () => {
+      const unicode = "日本語テスト"
+      const result = await connector.execute("SELECT ? AS val", undefined, [unicode])
+      expect(result.rows[0][0]).toBe(unicode)
+    })
+  })
 })

@@ -80,26 +80,27 @@ describe("ping", () => {
 describe("FinOps: SQL template generation", () => {
   describe("credit-analyzer", () => {
     test("builds Snowflake credit usage SQL", () => {
-      const sql = CreditTemplates.buildCreditUsageSql("snowflake", 30, 50)
-      expect(sql).toContain("WAREHOUSE_METERING_HISTORY")
-      expect(sql).toContain("30")
-      expect(sql).toContain("50")
+      const built = CreditTemplates.buildCreditUsageSql("snowflake", 30, 50)
+      expect(built?.sql).toContain("WAREHOUSE_METERING_HISTORY")
+      expect(built?.binds).toContain(-30)   // days bind (negative for Snowflake)
+      expect(built?.binds).toContain(50)    // limit bind
     })
 
     test("builds Snowflake credit usage SQL with warehouse filter", () => {
-      const sql = CreditTemplates.buildCreditUsageSql("snowflake", 7, 10, "MY_WH")
-      expect(sql).toContain("MY_WH")
+      const built = CreditTemplates.buildCreditUsageSql("snowflake", 7, 10, "MY_WH")
+      expect(built?.binds).toContain("MY_WH")
+      expect(built?.sql).toContain("?")
     })
 
     test("builds BigQuery credit usage SQL", () => {
-      const sql = CreditTemplates.buildCreditUsageSql("bigquery", 14, 25)
-      expect(sql).toContain("INFORMATION_SCHEMA.JOBS")
-      expect(sql).toContain("14")
+      const built = CreditTemplates.buildCreditUsageSql("bigquery", 14, 25)
+      expect(built?.sql).toContain("INFORMATION_SCHEMA.JOBS")
+      expect(built?.binds).toContain(14)
     })
 
     test("builds Databricks credit usage SQL", () => {
-      const sql = CreditTemplates.buildCreditUsageSql("databricks", 7, 20)
-      expect(sql).toContain("system.billing.usage")
+      const built = CreditTemplates.buildCreditUsageSql("databricks", 7, 20)
+      expect(built?.sql).toContain("system.billing.usage")
     })
 
     test("returns null for unsupported warehouse types", () => {
@@ -107,38 +108,40 @@ describe("FinOps: SQL template generation", () => {
     })
 
     test("builds Snowflake credit summary SQL", () => {
-      const sql = CreditTemplates.buildCreditSummarySql("snowflake", 30)
-      expect(sql).toContain("total_credits")
-      expect(sql).toContain("30")
+      const built = CreditTemplates.buildCreditSummarySql("snowflake", 30)
+      expect(built?.sql).toContain("total_credits")
+      expect(built?.binds).toContain(-30)
     })
 
     test("builds expensive queries SQL for Snowflake", () => {
-      const sql = CreditTemplates.buildExpensiveSql("snowflake", 7, 20)
-      expect(sql).toContain("bytes_scanned")
-      expect(sql).toContain("QUERY_HISTORY")
+      const built = CreditTemplates.buildExpensiveSql("snowflake", 7, 20)
+      expect(built?.sql).toContain("bytes_scanned")
+      expect(built?.sql).toContain("QUERY_HISTORY")
     })
 
     test("builds expensive queries SQL for BigQuery", () => {
-      const sql = CreditTemplates.buildExpensiveSql("bigquery", 7, 20)
-      expect(sql).toContain("total_bytes_billed")
+      const built = CreditTemplates.buildExpensiveSql("bigquery", 7, 20)
+      expect(built?.sql).toContain("total_bytes_billed")
     })
   })
 
   describe("query-history", () => {
     test("builds Snowflake history SQL", () => {
-      const sql = HistoryTemplates.buildHistoryQuery("snowflake", 7, 100)
-      expect(sql).toContain("QUERY_HISTORY")
-      expect(sql).toContain("7")
+      const built = HistoryTemplates.buildHistoryQuery("snowflake", 7, 100)
+      expect(built?.sql).toContain("QUERY_HISTORY")
+      expect(built?.binds).toContain(-7)
     })
 
     test("builds Snowflake history SQL with user filter", () => {
-      const sql = HistoryTemplates.buildHistoryQuery("snowflake", 7, 100, "ADMIN")
-      expect(sql).toContain("ADMIN")
+      const built = HistoryTemplates.buildHistoryQuery("snowflake", 7, 100, "ADMIN")
+      expect(built?.binds).toContain("ADMIN")
+      expect(built?.sql).toContain("user_name")
     })
 
     test("builds PostgreSQL history SQL", () => {
-      const sql = HistoryTemplates.buildHistoryQuery("postgres", 7, 50)
-      expect(sql).toContain("pg_stat_statements")
+      const built = HistoryTemplates.buildHistoryQuery("postgres", 7, 50)
+      expect(built?.sql).toContain("pg_stat_statements")
+      expect(built?.sql).toContain("50")  // postgres still uses string interpolation
     })
 
     test("returns null for DuckDB (no query history)", () => {
@@ -146,13 +149,14 @@ describe("FinOps: SQL template generation", () => {
     })
 
     test("builds BigQuery history SQL", () => {
-      const sql = HistoryTemplates.buildHistoryQuery("bigquery", 14, 100)
-      expect(sql).toContain("INFORMATION_SCHEMA.JOBS")
+      const built = HistoryTemplates.buildHistoryQuery("bigquery", 14, 100)
+      expect(built?.sql).toContain("INFORMATION_SCHEMA.JOBS")
+      expect(built?.binds).toContain(14)
     })
 
     test("builds Databricks history SQL", () => {
-      const sql = HistoryTemplates.buildHistoryQuery("databricks", 7, 50)
-      expect(sql).toContain("system.query.history")
+      const built = HistoryTemplates.buildHistoryQuery("databricks", 7, 50)
+      expect(built?.sql).toContain("system.query.history")
     })
   })
 
@@ -203,19 +207,21 @@ describe("FinOps: SQL template generation", () => {
 
   describe("role-access", () => {
     test("builds Snowflake grants SQL", () => {
-      const sql = RoleTemplates.buildGrantsSql("snowflake", "SYSADMIN", undefined, 50)
-      expect(sql).toContain("GRANTS_TO_ROLES")
-      expect(sql).toContain("SYSADMIN")
+      const built = RoleTemplates.buildGrantsSql("snowflake", "SYSADMIN", undefined, 50)
+      expect(built?.sql).toContain("GRANTS_TO_ROLES")
+      expect(built?.binds).toContain("SYSADMIN")
+      expect(built?.binds).toContain(50)  // limit
     })
 
     test("builds BigQuery grants SQL", () => {
-      const sql = RoleTemplates.buildGrantsSql("bigquery", undefined, undefined, 100)
-      expect(sql).toContain("OBJECT_PRIVILEGES")
+      const built = RoleTemplates.buildGrantsSql("bigquery", undefined, undefined, 100)
+      expect(built?.sql).toContain("OBJECT_PRIVILEGES")
+      expect(built?.binds).toContain(100)  // limit
     })
 
     test("builds Databricks grants SQL", () => {
-      const sql = RoleTemplates.buildGrantsSql("databricks", undefined, undefined, 100)
-      expect(sql).toContain("table_privileges")
+      const built = RoleTemplates.buildGrantsSql("databricks", undefined, undefined, 100)
+      expect(built?.sql).toContain("table_privileges")
     })
 
     test("returns null for unsupported types", () => {

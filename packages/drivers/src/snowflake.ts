@@ -28,9 +28,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   let connection: any
 
-  function executeQuery(sql: string): Promise<{ columns: string[]; rows: any[][] }> {
+  function escapeSqlIdentifier(value: string): string {
+    return value.replace(/"/g, '""')
+  }
+
+  function executeQuery(sql: string, binds?: any[]): Promise<{ columns: string[]; rows: any[][] }> {
     return new Promise((resolve, reject) => {
-      connection.execute({
+      const options: Record<string, any> = {
         sqlText: sql,
         complete(err: Error | null, _stmt: any, rows: any[]) {
           if (err) return reject(err)
@@ -43,7 +47,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           )
           resolve({ columns, rows: mapped })
         },
-      })
+      }
+      if (binds && binds.length > 0) options.binds = binds
+      connection.execute(options)
     })
   }
 
@@ -222,7 +228,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       })
     },
 
-    async execute(sql: string, limit?: number): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, binds?: any[]): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
       let query = sql
       const isSelectLike = /^\s*(SELECT|WITH|VALUES|SHOW)\b/i.test(sql)
@@ -234,7 +240,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }
 
-      const result = await executeQuery(query)
+      const result = await executeQuery(query, binds)
       const truncated = result.rows.length > effectiveLimit
       const rows = truncated
         ? result.rows.slice(0, effectiveLimit)
@@ -260,7 +266,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
       const result = await executeQuery(
-        `SHOW TABLES IN SCHEMA "${schema.replace(/"/g, '""')}"`,
+        `SHOW TABLES IN SCHEMA "${escapeSqlIdentifier(schema)}"`,
       )
       const nameIdx = result.columns.indexOf("name")
       const kindIdx = result.columns.indexOf("kind")
@@ -277,7 +283,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       table: string,
     ): Promise<SchemaColumn[]> {
       const result = await executeQuery(
-        `SHOW COLUMNS IN TABLE "${schema.replace(/"/g, '""')}"."${table.replace(/"/g, '""')}"`,
+        `SHOW COLUMNS IN TABLE "${escapeSqlIdentifier(schema)}"."${escapeSqlIdentifier(table)}"`,
       )
       const nameIdx = result.columns.indexOf("column_name")
       const typeIdx = result.columns.indexOf("data_type")

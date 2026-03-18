@@ -5,7 +5,6 @@
  */
 
 import * as Registry from "../connections/registry"
-import { escapeSqlString } from "@altimateai/drivers"
 import type {
   CreditAnalysisParams,
   CreditAnalysisResult,
@@ -27,11 +26,11 @@ SELECT
     COUNT(*) as query_count,
     AVG(credits_used) as avg_credits_per_query
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
 {warehouse_filter}
 GROUP BY warehouse_name, DATE_TRUNC('day', start_time)
 ORDER BY usage_date DESC, credits_used DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 const SNOWFLAKE_CREDIT_SUMMARY_SQL = `
@@ -43,7 +42,7 @@ SELECT
     COUNT(DISTINCT DATE_TRUNC('day', start_time)) as active_days,
     AVG(credits_used) as avg_daily_credits
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
 GROUP BY warehouse_name
 ORDER BY total_credits DESC
 `
@@ -61,11 +60,11 @@ SELECT
     credits_used_cloud_services as credits_used,
     start_time
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
   AND execution_status = 'SUCCESS'
   AND bytes_scanned > 0
 ORDER BY bytes_scanned DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -82,12 +81,12 @@ SELECT
     COUNT(*) as query_count,
     AVG(total_bytes_billed) / 1099511627776.0 * 5.0 as avg_credits_per_query
 FROM \`region-US.INFORMATION_SCHEMA.JOBS\`
-WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY)
   AND job_type = 'QUERY'
   AND state = 'DONE'
 GROUP BY DATE(creation_time)
 ORDER BY usage_date DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 const BIGQUERY_CREDIT_SUMMARY_SQL = `
@@ -99,7 +98,7 @@ SELECT
     COUNT(DISTINCT DATE(creation_time)) as active_days,
     AVG(total_bytes_billed) / 1099511627776.0 * 5.0 as avg_daily_credits
 FROM \`region-US.INFORMATION_SCHEMA.JOBS\`
-WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY)
   AND job_type = 'QUERY'
   AND state = 'DONE'
 `
@@ -117,12 +116,12 @@ SELECT
     total_bytes_billed / 1099511627776.0 * 5.0 as credits_used,
     start_time
 FROM \`region-US.INFORMATION_SCHEMA.JOBS\`
-WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY)
   AND job_type = 'QUERY'
   AND state = 'DONE'
   AND total_bytes_billed > 0
 ORDER BY total_bytes_billed DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -139,11 +138,11 @@ SELECT
     0 as query_count,
     AVG(usage_quantity) as avg_credits_per_query
 FROM system.billing.usage
-WHERE usage_date >= DATE_SUB(CURRENT_DATE(), {days})
+WHERE usage_date >= DATE_SUB(CURRENT_DATE(), ?)
   AND billing_origin_product = 'SQL'
 GROUP BY usage_metadata.warehouse_id, usage_date
 ORDER BY usage_date DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 const DATABRICKS_CREDIT_SUMMARY_SQL = `
@@ -155,7 +154,7 @@ SELECT
     COUNT(DISTINCT usage_date) as active_days,
     AVG(usage_quantity) as avg_daily_credits
 FROM system.billing.usage
-WHERE usage_date >= DATE_SUB(CURRENT_DATE(), {days})
+WHERE usage_date >= DATE_SUB(CURRENT_DATE(), ?)
   AND billing_origin_product = 'SQL'
 GROUP BY usage_metadata.warehouse_id
 ORDER BY total_credits DESC
@@ -174,11 +173,11 @@ SELECT
     0 as credits_used,
     start_time
 FROM system.query.history
-WHERE start_time >= DATE_SUB(CURRENT_DATE(), {days})
+WHERE start_time >= DATE_SUB(CURRENT_DATE(), ?)
   AND status = 'FINISHED'
   AND read_bytes > 0
 ORDER BY read_bytes DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -193,55 +192,47 @@ function getWhType(warehouse: string): string {
 
 function buildCreditUsageSql(
   whType: string, days: number, limit: number, warehouseFilter?: string,
-): string | null {
+): { sql: string; binds: any[] } | null {
   if (whType === "snowflake") {
-    const whF = warehouseFilter ? `AND warehouse_name = '${escapeSqlString(warehouseFilter)}'` : ""
-    return SNOWFLAKE_CREDIT_USAGE_SQL
-      .replace("{days}", String(days))
-      .replace("{limit}", String(limit))
-      .replace("{warehouse_filter}", whF)
+    const binds: any[] = [-days]
+    const whF = warehouseFilter ? (binds.push(warehouseFilter), "AND warehouse_name = ?") : ""
+    binds.push(limit)
+    return {
+      sql: SNOWFLAKE_CREDIT_USAGE_SQL.replace("{warehouse_filter}", whF),
+      binds,
+    }
   }
   if (whType === "bigquery") {
-    return BIGQUERY_CREDIT_USAGE_SQL
-      .replace(/{days}/g, String(days))
-      .replace("{limit}", String(limit))
+    return { sql: BIGQUERY_CREDIT_USAGE_SQL, binds: [days, limit] }
   }
   if (whType === "databricks") {
-    return DATABRICKS_CREDIT_USAGE_SQL
-      .replace("{days}", String(days))
-      .replace("{limit}", String(limit))
+    return { sql: DATABRICKS_CREDIT_USAGE_SQL, binds: [days, limit] }
   }
   return null
 }
 
-function buildCreditSummarySql(whType: string, days: number): string | null {
+function buildCreditSummarySql(whType: string, days: number): { sql: string; binds: any[] } | null {
   if (whType === "snowflake") {
-    return SNOWFLAKE_CREDIT_SUMMARY_SQL.replace("{days}", String(days))
+    return { sql: SNOWFLAKE_CREDIT_SUMMARY_SQL, binds: [-days] }
   }
   if (whType === "bigquery") {
-    return BIGQUERY_CREDIT_SUMMARY_SQL.replace(/{days}/g, String(days))
+    return { sql: BIGQUERY_CREDIT_SUMMARY_SQL, binds: [days] }
   }
   if (whType === "databricks") {
-    return DATABRICKS_CREDIT_SUMMARY_SQL.replace("{days}", String(days))
+    return { sql: DATABRICKS_CREDIT_SUMMARY_SQL, binds: [days] }
   }
   return null
 }
 
-function buildExpensiveSql(whType: string, days: number, limit: number): string | null {
+function buildExpensiveSql(whType: string, days: number, limit: number): { sql: string; binds: any[] } | null {
   if (whType === "snowflake") {
-    return SNOWFLAKE_EXPENSIVE_SQL
-      .replace("{days}", String(days))
-      .replace("{limit}", String(limit))
+    return { sql: SNOWFLAKE_EXPENSIVE_SQL, binds: [-days, limit] }
   }
   if (whType === "bigquery") {
-    return BIGQUERY_EXPENSIVE_SQL
-      .replace(/{days}/g, String(days))
-      .replace("{limit}", String(limit))
+    return { sql: BIGQUERY_EXPENSIVE_SQL, binds: [days, limit] }
   }
   if (whType === "databricks") {
-    return DATABRICKS_EXPENSIVE_SQL
-      .replace(/{days}/g, String(days))
-      .replace("{limit}", String(limit))
+    return { sql: DATABRICKS_EXPENSIVE_SQL, binds: [days, limit] }
   }
   return null
 }
@@ -305,10 +296,10 @@ export async function analyzeCredits(params: CreditAnalysisParams): Promise<Cred
   const days = params.days ?? 30
   const limit = params.limit ?? 50
 
-  const dailySql = buildCreditUsageSql(whType, days, limit, params.warehouse_filter)
-  const summarySql = buildCreditSummarySql(whType, days)
+  const dailyBuilt = buildCreditUsageSql(whType, days, limit, params.warehouse_filter)
+  const summaryBuilt = buildCreditSummarySql(whType, days)
 
-  if (!dailySql || !summarySql) {
+  if (!dailyBuilt || !summaryBuilt) {
     return {
       success: false,
       daily_usage: [],
@@ -322,8 +313,8 @@ export async function analyzeCredits(params: CreditAnalysisParams): Promise<Cred
 
   try {
     const connector = await Registry.get(params.warehouse)
-    const dailyResult = await connector.execute(dailySql, limit)
-    const summaryResult = await connector.execute(summarySql, 1000)
+    const dailyResult = await connector.execute(dailyBuilt.sql, limit, dailyBuilt.binds)
+    const summaryResult = await connector.execute(summaryBuilt.sql, 1000, summaryBuilt.binds)
 
     const daily = rowsToRecords(dailyResult)
     const summary = rowsToRecords(summaryResult)
@@ -356,8 +347,8 @@ export async function getExpensiveQueries(params: ExpensiveQueriesParams): Promi
   const days = params.days ?? 7
   const limit = params.limit ?? 20
 
-  const sql = buildExpensiveSql(whType, days, limit)
-  if (!sql) {
+  const built = buildExpensiveSql(whType, days, limit)
+  if (!built) {
     return {
       success: false,
       queries: [],
@@ -369,7 +360,7 @@ export async function getExpensiveQueries(params: ExpensiveQueriesParams): Promi
 
   try {
     const connector = await Registry.get(params.warehouse)
-    const result = await connector.execute(sql, limit)
+    const result = await connector.execute(built.sql, limit, built.binds)
     const queries = rowsToRecords(result)
 
     return {

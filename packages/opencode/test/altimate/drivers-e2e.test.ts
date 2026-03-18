@@ -285,6 +285,128 @@ describe("DuckDB Driver E2E", () => {
       expect(result.truncated).toBe(false)
     },
   )
+
+  // -------------------------------------------------------------------------
+  // Bind Parameters
+  // -------------------------------------------------------------------------
+  describe("Bind Parameters", () => {
+    beforeAll(async () => {
+      if (!duckdbAvailable || !connector) return
+      await connector.execute(`
+        CREATE TABLE bind_test (
+          id INTEGER,
+          name VARCHAR,
+          score DOUBLE,
+          active BOOLEAN,
+          created_at TIMESTAMP
+        )
+      `)
+      await connector.execute(`
+        INSERT INTO bind_test VALUES
+          (1, 'alice', 9.5, true, '2024-01-01 10:00:00'),
+          (2, 'bob',   7.2, false, '2024-06-15 12:30:00'),
+          (3, 'carol', 8.8, true, '2024-12-31 23:59:59')
+      `)
+    })
+
+    afterAll(async () => {
+      if (!connector) return
+      try { await connector.execute("DROP TABLE IF EXISTS bind_test") } catch {}
+    })
+
+    test.skipIf(!duckdbAvailable)("binds a single string parameter", async () => {
+      const result = await connector.execute("SELECT name FROM bind_test WHERE name = ?", undefined, ["alice"])
+      expect(result.columns).toEqual(["name"])
+      expect(result.rows).toEqual([["alice"]])
+    })
+
+    test.skipIf(!duckdbAvailable)("binds a single integer parameter", async () => {
+      const result = await connector.execute("SELECT id, name FROM bind_test WHERE id = ?", undefined, [2])
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0]).toEqual([2, "bob"])
+    })
+
+    test.skipIf(!duckdbAvailable)("binds multiple parameters", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM bind_test WHERE id >= ? AND id <= ?",
+        undefined,
+        [1, 2],
+      )
+      expect(result.rows).toHaveLength(2)
+      const names = result.rows.map((r) => r[0])
+      expect(names).toContain("alice")
+      expect(names).toContain("bob")
+    })
+
+    test.skipIf(!duckdbAvailable)("binds a boolean parameter", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM bind_test WHERE active = ? ORDER BY name",
+        undefined,
+        [true],
+      )
+      expect(result.rows).toHaveLength(2)
+      expect(result.rows[0][0]).toBe("alice")
+      expect(result.rows[1][0]).toBe("carol")
+    })
+
+    test.skipIf(!duckdbAvailable)("binds a float parameter", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM bind_test WHERE score > ? ORDER BY score",
+        undefined,
+        [9.0],
+      )
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0][0]).toBe("alice")
+    })
+
+    test.skipIf(!duckdbAvailable)("returns no rows when bind value matches nothing", async () => {
+      const result = await connector.execute("SELECT * FROM bind_test WHERE name = ?", undefined, ["nobody"])
+      expect(result.rows).toHaveLength(0)
+      expect(result.row_count).toBe(0)
+    })
+
+    test.skipIf(!duckdbAvailable)("empty binds array behaves same as no binds", async () => {
+      const withEmpty = await connector.execute("SELECT COUNT(*) AS n FROM bind_test", undefined, [])
+      const withNone = await connector.execute("SELECT COUNT(*) AS n FROM bind_test")
+      expect(withEmpty.rows[0][0]).toBe(withNone.rows[0][0])
+    })
+
+    test.skipIf(!duckdbAvailable)("binds work alongside auto-LIMIT truncation", async () => {
+      await connector.execute("CREATE TEMP TABLE many_rows AS SELECT range AS id FROM range(0, 200)")
+      const result = await connector.execute("SELECT id FROM many_rows WHERE id >= ?", 100, [0])
+      expect(result.truncated).toBe(true)
+      expect(result.rows).toHaveLength(100)
+      await connector.execute("DROP TABLE IF EXISTS many_rows")
+    })
+
+    test.skipIf(!duckdbAvailable)("prevents SQL injection via binding", async () => {
+      const result = await connector.execute(
+        "SELECT name FROM bind_test WHERE name = ?",
+        undefined,
+        ["' OR '1'='1"],
+      )
+      expect(result.rows).toHaveLength(0)
+    })
+
+    test.skipIf(!duckdbAvailable)("binds a NULL parameter", async () => {
+      await connector.execute("CREATE TEMP TABLE null_test (val VARCHAR)")
+      await connector.execute("INSERT INTO null_test VALUES (NULL), ('hello')")
+      const result = await connector.execute(
+        "SELECT val FROM null_test WHERE val IS NOT DISTINCT FROM ?",
+        undefined,
+        [null],
+      )
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0][0]).toBeNull()
+      await connector.execute("DROP TABLE IF EXISTS null_test")
+    })
+
+    test.skipIf(!duckdbAvailable)("scalar bind — SELECT ? returns the bound value", async () => {
+      const result = await connector.execute("SELECT ? AS val", undefined, [42])
+      expect(result.columns).toEqual(["val"])
+      expect(result.rows[0][0]).toBe(42)
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,6 @@
  */
 
 import * as Registry from "../connections/registry"
-import { escapeSqlString } from "@altimateai/drivers"
 import type {
   TagsGetParams,
   TagsGetResult,
@@ -26,10 +25,10 @@ SELECT
     object_name,
     column_name,
     domain as object_type
-FROM TABLE(INFORMATION_SCHEMA.TAG_REFERENCES_ALL_COLUMNS('{object_name}', '{domain}'))
+FROM TABLE(INFORMATION_SCHEMA.TAG_REFERENCES_ALL_COLUMNS(?, 'TABLE'))
 {tag_filter}
 ORDER BY tag_name, object_name
-LIMIT {limit}
+LIMIT ?
 `
 
 const SNOWFLAKE_TAG_LIST_SQL = `
@@ -43,7 +42,7 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.TAGS
 WHERE deleted IS NULL
 ORDER BY tag_name
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -76,22 +75,22 @@ export async function getTags(params: TagsGetParams): Promise<TagsGetResult> {
 
     const limit = params.limit || 100
     let sql: string
+    let binds: any[] = []
 
     if (params.object_name) {
+      binds = [params.object_name]
       const tagFilter = params.tag_name
-        ? `WHERE tag_name = '${escapeSqlString(params.tag_name)}'`
+        ? (binds.push(params.tag_name), "WHERE tag_name = ?")
         : ""
-      sql = SNOWFLAKE_TAG_REFERENCES_SQL
-        .replace("{object_name}", escapeSqlString(params.object_name))
-        .replace("{domain}", "TABLE")
-        .replace("{tag_filter}", tagFilter)
-        .replace("{limit}", String(limit))
+      binds.push(limit)
+      sql = SNOWFLAKE_TAG_REFERENCES_SQL.replace("{tag_filter}", tagFilter)
     } else {
       // Fall back to listing all tags
-      sql = SNOWFLAKE_TAG_LIST_SQL.replace("{limit}", String(limit))
+      binds = [limit]
+      sql = SNOWFLAKE_TAG_LIST_SQL
     }
 
-    const result = await connector.execute(sql, limit)
+    const result = await connector.execute(sql, limit, binds)
     const tags = result.rows.map((row) => {
       const obj: Record<string, unknown> = {}
       result.columns.forEach((col, i) => {
@@ -141,9 +140,9 @@ export async function listTags(params: TagsListParams): Promise<TagsListResult> 
   try {
     const connector = await Registry.get(params.warehouse)
     const limit = params.limit || 100
-    const sql = SNOWFLAKE_TAG_LIST_SQL.replace("{limit}", String(limit))
+    const sql = SNOWFLAKE_TAG_LIST_SQL
 
-    const result = await connector.execute(sql, limit)
+    const result = await connector.execute(sql, limit, [limit])
     const tags = result.rows.map((row) => {
       const obj: Record<string, unknown> = {}
       result.columns.forEach((col, i) => {

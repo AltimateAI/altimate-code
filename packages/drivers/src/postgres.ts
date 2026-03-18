@@ -39,7 +39,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       pool = new Pool(poolConfig)
     },
 
-    async execute(sql: string, limit?: number): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, _binds?: any[]): Promise<ConnectorResult> {
       const client = await pool.connect()
       try {
         if (config.statement_timeout) {

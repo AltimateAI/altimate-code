@@ -2,7 +2,6 @@
  * DuckDB driver using the `duckdb` package.
  */
 
-import { escapeSqlString } from "./sql-escape"
 import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
@@ -21,6 +20,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   function query(sql: string): Promise<any[]> {
     return new Promise((resolve, reject) => {
       connection.all(sql, (err: Error | null, rows: any[]) => {
+        if (err) reject(err)
+        else resolve(rows ?? [])
+      })
+    })
+  }
+
+  function queryWithParams(sql: string, params: any[]): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+      connection.all(sql, ...params, (err: Error | null, rows: any[]) => {
         if (err) reject(err)
         else resolve(rows ?? [])
       })
@@ -51,7 +59,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       connection = db.connect()
     },
 
-    async execute(sql: string, limit?: number): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, binds?: any[]): Promise<ConnectorResult> {
       const effectiveLimit = limit ?? 1000
 
       let finalSql = sql
@@ -64,7 +72,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         finalSql = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
       }
 
-      const rows = await query(finalSql)
+      const rows = binds?.length
+        ? await queryWithParams(finalSql, binds)
+        : await query(finalSql)
       const columns =
         rows.length > 0 ? Object.keys(rows[0]) : []
       const truncated = rows.length > effectiveLimit
@@ -90,11 +100,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async listTables(
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
-      const rows = await query(
-        `SELECT table_name, table_type
-         FROM information_schema.tables
-         WHERE table_schema = '${escapeSqlString(schema)}'
-         ORDER BY table_name`,
+      const rows = await queryWithParams(
+        `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`,
+        [schema],
       )
       return rows.map((r) => ({
         name: r.table_name as string,
@@ -106,12 +114,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       schema: string,
       table: string,
     ): Promise<SchemaColumn[]> {
-      const rows = await query(
-        `SELECT column_name, data_type, is_nullable
-         FROM information_schema.columns
-         WHERE table_schema = '${escapeSqlString(schema)}'
-           AND table_name = '${escapeSqlString(table)}'
-         ORDER BY ordinal_position`,
+      const rows = await queryWithParams(
+        `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
+        [schema, table],
       )
       return rows.map((r) => ({
         name: r.column_name as string,
