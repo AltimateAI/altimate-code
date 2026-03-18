@@ -7,7 +7,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let databricksModule: any
   try {
-    // @ts-expect-error — optional dependency, loaded at runtime
     databricksModule = await import("@databricks/sql")
     databricksModule = databricksModule.default || databricksModule
   } catch {

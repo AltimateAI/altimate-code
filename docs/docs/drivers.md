@@ -16,7 +16,7 @@ Altimate Code connects to 10 databases natively via TypeScript drivers. No Pytho
 | Redshift | `pg` (wire-compat) | Password | ✅ Docker (PG wire) | Uses SVV system views |
 | Snowflake | `snowflake-sdk` | Password, Key-Pair (unencrypted + encrypted), OAuth | ✅ Live account | 37 E2E tests, key-pair with passphrase support |
 | BigQuery | `@google-cloud/bigquery` | Service Account, ADC | ❌ Needs credentials | REST/gRPC API |
-| Databricks | `@databricks/sql` | PAT, OAuth | ❌ Needs credentials | Thrift API to SQL warehouses |
+| Databricks | `@databricks/sql` | PAT, OAuth | ✅ Live account | 24 E2E tests, Unity Catalog support |
 | Oracle | `oracledb` (thin) | Password | ❌ Needs Oracle 12.1+ | Thin mode only, no Instant Client |
 
 ## Installation
@@ -186,10 +186,14 @@ These features work based on SDK documentation but haven't been verified with au
 - Location-specific query execution
 - Dry run / cost estimation
 
-### Databricks
-- Unity Catalog schema browsing
-- Cluster auto-start on query
-- OAuth M2M authentication
+### Databricks (partially tested — 24 E2E tests pass)
+- ✅ Personal Access Token (PAT) authentication
+- ✅ Unity Catalog (SHOW CATALOGS, SHOW SCHEMAS)
+- ✅ Schema introspection (listSchemas, listTables, describeTable)
+- ✅ DDL (CREATE TEMPORARY VIEW)
+- ✅ Adversarial inputs (injection blocked, invalid SQL)
+- ❌ OAuth M2M authentication
+- ❌ Cluster auto-start behavior
 
 ### Oracle
 - Thick mode (requires Oracle Instant Client)

@@ -84,9 +84,11 @@
     "turbo": "2.8.13"
   },
   "dependencies": {
+    "@databricks/sql": "1.13.0",
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/script": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",
+    "snowflake-sdk": "2.3.5",
     "typescript": "catalog:"
   },
   "repository": {
