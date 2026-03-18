@@ -122,7 +122,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       // ---------------------------------------------------------------
       // 2. External browser SSO
-      //    User's browser opens for IdP login. Non-interactive — requires
+      //    Interactive — opens user's browser for IdP login. Requires
       //    connectAsync() instead of connect().
       // ---------------------------------------------------------------
       } else if (authUpper === "EXTERNALBROWSER") {
@@ -154,14 +154,20 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       // ---------------------------------------------------------------
       // 5. JWT token auth (non-key-pair JWT)
       // ---------------------------------------------------------------
-      } else if (authUpper === "JWT" && oauthToken) {
+      } else if (authUpper === "JWT") {
+        if (!oauthToken) {
+          throw new Error("Snowflake JWT authenticator specified but no token provided (expected 'token' or 'access_token')")
+        }
         options.authenticator = "SNOWFLAKE_JWT"
         options.token = oauthToken
 
       // ---------------------------------------------------------------
       // 6. Programmatic access token
       // ---------------------------------------------------------------
-      } else if (authUpper === "PROGRAMMATIC_ACCESS_TOKEN" && oauthToken) {
+      } else if (authUpper === "PROGRAMMATIC_ACCESS_TOKEN") {
+        if (!oauthToken) {
+          throw new Error("Snowflake PROGRAMMATIC_ACCESS_TOKEN authenticator specified but no token provided (expected 'token' or 'access_token')")
+        }
         options.authenticator = "PROGRAMMATIC_ACCESS_TOKEN"
         options.token = oauthToken
 
@@ -169,6 +175,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       // 7. Username + password + MFA
       // ---------------------------------------------------------------
       } else if (authUpper === "USERNAME_PASSWORD_MFA") {
+        if (!config.password) {
+          throw new Error("Snowflake USERNAME_PASSWORD_MFA authenticator requires 'password'")
+        }
         options.authenticator = "USERNAME_PASSWORD_MFA"
         options.password = config.password
         if (passcode) options.passcode = passcode
@@ -181,12 +190,16 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
 
       // Use connectAsync for browser-based auth (SSO/Okta), connect for everything else
-      const useBrowserAuth = authUpper === "EXTERNALBROWSER" ||
-        (authenticator && /^https?:\/\/.+\.okta\.com/i.test(authenticator))
+      const isOktaUrl = authenticator && /^https?:\/\/.+\.okta\.com/i.test(authenticator)
+      const useBrowserAuth = authUpper === "EXTERNALBROWSER" || isOktaUrl
 
       connection = await new Promise<any>((resolve, reject) => {
         const conn = snowflake.createConnection(options)
-        if (useBrowserAuth && typeof conn.connectAsync === "function") {
+        if (useBrowserAuth) {
+          if (typeof conn.connectAsync !== "function") {
+            reject(new Error("Snowflake browser/SSO auth requires snowflake-sdk with connectAsync support. Upgrade snowflake-sdk."))
+            return
+          }
           conn.connectAsync((err: Error | null) => {
             if (err) reject(err)
             else resolve(conn)
