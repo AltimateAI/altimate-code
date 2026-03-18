@@ -42,9 +42,14 @@ jobs:
             drivers:
               - 'packages/drivers/src/**'
               - 'packages/opencode/src/altimate/native/connections/**'
-              - 'packages/opencode/test/altimate/drivers-*.test.ts'
+              - 'packages/opencode/test/altimate/drivers-e2e.test.ts'
+              - 'packages/opencode/test/altimate/drivers-docker-e2e.test.ts'
               - 'packages/opencode/test/altimate/connections.test.ts'
 
+  # ---------------------------------------------------------------------------
+  # Main TypeScript tests — excludes driver E2E tests (separate job) and
+  # cloud credential tests (local-only).
+  # ---------------------------------------------------------------------------
   typescript:
     name: TypeScript
     needs: changes
@@ -77,18 +82,22 @@ jobs:
       - name: Run tests
         run: bun test
         working-directory: packages/opencode
+        # Cloud E2E tests (Snowflake, BigQuery, Databricks) auto-skip when
+        # ALTIMATE_CODE_CONN_* env vars are not set. Docker E2E tests auto-skip
+        # when Docker is not available. No exclusion needed — skipIf handles it.
 
   # ---------------------------------------------------------------------------
-  # Driver E2E tests — run when driver code or connection infra changes.
-  # Uses Docker for PostgreSQL, MySQL, SQL Server, Redshift (PG wire-compat).
-  # DuckDB and SQLite run without Docker (embedded).
+  # Driver E2E tests — only when driver code changes.
+  # Uses GitHub Actions services (no Docker-in-Docker).
+  # Cloud tests (Snowflake, BigQuery, Databricks) are NOT run here —
+  # they require real credentials and are run locally only.
   # ---------------------------------------------------------------------------
   driver-e2e:
     name: Driver E2E
     needs: changes
-    if: needs.changes.outputs.drivers == 'true' || github.event_name == 'push'
+    if: needs.changes.outputs.drivers == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16-alpine
@@ -128,7 +137,6 @@ jobs:
           --health-timeout 10s
           --health-retries 20
 
-      # Redshift wire-compatible (uses PostgreSQL)
       redshift:
         image: postgres:16-alpine
         env:
@@ -159,16 +167,15 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Run local driver E2E tests (DuckDB, SQLite, PostgreSQL)
+      - name: Run local driver E2E (DuckDB, SQLite, PostgreSQL)
         run: bun test test/altimate/drivers-e2e.test.ts
         working-directory: packages/opencode
         env:
-          # PostgreSQL service is available on port 15432
           TEST_PG_HOST: 127.0.0.1
           TEST_PG_PORT: "15432"
           TEST_PG_PASSWORD: testpass123
 
-      - name: Run Docker driver E2E tests (MySQL, SQL Server, Redshift)
+      - name: Run Docker driver E2E (MySQL, SQL Server, Redshift)
         run: bun test test/altimate/drivers-docker-e2e.test.ts
         working-directory: packages/opencode
         env:
@@ -181,6 +188,12 @@ jobs:
           TEST_REDSHIFT_HOST: 127.0.0.1
           TEST_REDSHIFT_PORT: "15439"
           TEST_REDSHIFT_PASSWORD: testpass123
+
+      # Cloud tests NOT included — they require real credentials
+      # Run locally with:
+      #   ALTIMATE_CODE_CONN_SNOWFLAKE_TEST='...' bun test test/altimate/drivers-snowflake-e2e.test.ts
+      #   ALTIMATE_CODE_CONN_BIGQUERY_TEST='...' bun test test/altimate/drivers-bigquery-e2e.test.ts
+      #   ALTIMATE_CODE_CONN_DATABRICKS_TEST='...' bun test test/altimate/drivers-databricks-e2e.test.ts
 
   marker-guard:
     name: Marker Guard
@@ -207,7 +220,6 @@ jobs:
 
       - name: Check for missing altimate_change markers
         run: |
-          # Skip strict marker enforcement for upstream merge PRs — all changes come from upstream
           if [[ "${{ github.head_ref }}" == merge-upstream-* ]] || [[ "${{ github.head_ref }}" == upstream/merge-* ]]; then
             echo "Upstream merge PR detected — running marker check in non-strict mode"
             bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }}
