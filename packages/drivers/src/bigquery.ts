@@ -21,7 +21,17 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async connect() {
       const options: Record<string, unknown> = {}
       if (config.project) options.projectId = config.project
-      if (config.credentials_path) options.keyFilename = config.credentials_path
+      if (config.credentials_json) {
+        try {
+          options.credentials = typeof config.credentials_json === "string"
+            ? JSON.parse(config.credentials_json as string)
+            : config.credentials_json
+        } catch (e) {
+          throw new Error(`Failed to parse credentials_json: ${e}`)
+        }
+      } else if (config.credentials_path) {
+        options.keyFilename = config.credentials_path
+      }
       if (config.location) options.location = config.location
 
       client = new BigQuery(options)

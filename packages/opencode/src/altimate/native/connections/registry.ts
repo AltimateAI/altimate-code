@@ -14,6 +14,7 @@ import * as path from "path"
 import * as os from "os"
 import { Log } from "../../../util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
+import { normalizeConfig } from "@altimateai/drivers"
 import { resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
@@ -138,8 +139,12 @@ async function createConnector(
     )
   }
 
+  // Normalize field names first (camelCase → snake_case, dbt → canonical)
+  // so credential resolution uses canonical names for keychain lookups
+  let resolvedConfig = normalizeConfig(config)
+
   // Resolve credentials from keychain
-  let resolvedConfig = await resolveConfig(name, config)
+  resolvedConfig = await resolveConfig(name, resolvedConfig)
 
   // Handle SSH tunnel
   const sshConfig = extractSshConfig(resolvedConfig)
@@ -209,7 +214,7 @@ async function createConnector(
 export function detectAuthMethod(config: ConnectionConfig | null | undefined): string {
   if (!config || typeof config !== "object") return "unknown"
   if (config.connection_string) return "connection_string"
-  if (config.private_key_path) return "key_pair"
+  if (config.private_key_path || config.private_key) return "key_pair"
   if (config.access_token || config.token) return "token"
   if (config.password) return "password"
   const t = typeof config.type === "string" ? config.type.toLowerCase() : ""
@@ -360,8 +365,12 @@ export async function add(
   try {
     ensureLoaded()
 
+    // Normalize field names before saving so sensitive fields under alias
+    // names (e.g., keyfileJson → credentials_json) are properly detected
+    const normalized = normalizeConfig(config)
+
     // Store credentials in keychain, get sanitized config
-    const { sanitized, warnings } = await saveConnection(name, config)
+    const { sanitized, warnings } = await saveConnection(name, normalized)
 
     // Save to global config file
     const globalPath = globalConfigPath()

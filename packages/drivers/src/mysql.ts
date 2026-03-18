@@ -30,6 +30,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       if (config.ssl !== undefined) {
         poolConfig.ssl = config.ssl
+      } else if (config.ssl_ca || config.ssl_cert || config.ssl_key) {
+        const sslObj: Record<string, unknown> = {}
+        if (config.ssl_ca) sslObj.ca = config.ssl_ca
+        if (config.ssl_cert) sslObj.cert = config.ssl_cert
+        if (config.ssl_key) sslObj.key = config.ssl_key
+        poolConfig.ssl = sslObj
       }
 
       pool = mysql.createPool(poolConfig)

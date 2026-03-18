@@ -15,9 +15,16 @@ const SERVICE_NAME = "altimate-code"
 const SENSITIVE_FIELDS = new Set([
   "password",
   "private_key_passphrase",
+  "private_key",
   "access_token",
+  "token",
   "ssh_password",
   "connection_string",
+  "credentials_json",
+  "keyfile_json",
+  "ssl_key",
+  "ssl_cert",
+  "ssl_ca",
 ])
 
 /** Cached keytar module (or null if unavailable). */

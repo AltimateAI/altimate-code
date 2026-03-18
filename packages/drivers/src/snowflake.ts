@@ -41,20 +41,27 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async connect() {
       const options: Record<string, unknown> = {
         account: config.account,
-        username: config.user ?? config.username,
+        username: config.user,
         database: config.database,
         schema: config.schema,
         warehouse: config.warehouse,
         role: config.role,
       }
 
-      // Key-pair auth
-      if (config.private_key_path) {
-        const keyPath = config.private_key_path as string
-        if (!fs.existsSync(keyPath)) {
-          throw new Error(`Snowflake private key file not found: ${keyPath}`)
+      // Key-pair auth (file path or inline PEM)
+      const keyPath = config.private_key_path as string | undefined
+      const inlinePem = config.private_key as string | undefined
+
+      if (keyPath || inlinePem) {
+        let keyContent: string
+        if (keyPath) {
+          if (!fs.existsSync(keyPath)) {
+            throw new Error(`Snowflake private key file not found: ${keyPath}`)
+          }
+          keyContent = fs.readFileSync(keyPath, "utf-8")
+        } else {
+          keyContent = inlinePem!
         }
-        const keyContent = fs.readFileSync(keyPath, "utf-8")
 
         // If key is encrypted (has ENCRYPTED in header or passphrase provided),
         // decrypt it using Node crypto — snowflake-sdk expects unencrypted PEM.
