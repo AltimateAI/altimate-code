@@ -11,9 +11,9 @@ export async function execute(adapter: DBTProjectIntegrationAdapter, args: strin
     if (limit !== undefined && !Number.isNaN(limit)) return await adapter.immediatelyExecuteSQLWithLimit(sql, model, limit)
     return await adapter.immediatelyExecuteSQL(sql, model)
   } catch (e) {
-    // Library's dbt show parsing may fail with newer dbt versions — fall back to direct CLI
-    const msg = e instanceof Error ? e.message : String(e)
-    if (msg.includes("Cannot read properties of undefined") || msg.includes("Could not find previewLine")) {
+    // Library's dbt show parsing may fail with newer dbt versions — fall back to direct CLI.
+    // Use TypeError check (not message strings) to work across V8 and Bun/JavaScriptCore.
+    if (e instanceof TypeError || (e instanceof Error && e.message.includes("Could not find previewLine"))) {
       return execDbtShow(sql, limit)
     }
     throw e

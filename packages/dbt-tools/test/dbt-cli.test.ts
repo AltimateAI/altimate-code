@@ -73,10 +73,11 @@ describe("execDbtShow", () => {
     mockExecFile.mockImplementation((_cmd: string, args: string[], _opts: any, cb: Function) => {
       expect(args).toContain("--limit")
       expect(args).toContain("10")
-      cb(null, JSON.stringify({ data: { preview: "[]" } }), "")
+      cb(null, JSON.stringify({ data: { preview: '[{"n": 1}]' } }), "")
     })
 
-    await execDbtShow("SELECT 1", 10)
+    const result = await execDbtShow("SELECT 1", 10)
+    expect(result.data).toEqual([{ n: 1 }])
   })
 
   // --- Tier 2: heuristic deep scan ---

@@ -8,8 +8,8 @@ export async function compile(adapter: DBTProjectIntegrationAdapter, args: strin
     const sql = await adapter.unsafeCompileNode(model)
     return { sql }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    if (msg.includes("Cannot read properties of undefined")) {
+    // Use TypeError check (not message strings) to work across V8 and Bun/JavaScriptCore
+    if (e instanceof TypeError) {
       return execDbtCompile(model)
     }
     throw e
@@ -24,8 +24,7 @@ export async function query(adapter: DBTProjectIntegrationAdapter, args: string[
     const result = await adapter.unsafeCompileQuery(sql, model)
     return { sql: result }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    if (msg.includes("Cannot read properties of undefined")) {
+    if (e instanceof TypeError) {
       return execDbtCompileInline(sql, model)
     }
     throw e

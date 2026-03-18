@@ -19,10 +19,34 @@
  */
 
 import { execFile } from "child_process"
+import { dirname, join } from "path"
+import { readFileSync } from "fs"
+
+/** Options for running dbt CLI commands in the correct environment. */
+export interface DbtCliOptions {
+  /** Path to the Python binary (used to find the venv's dbt). */
+  pythonPath?: string
+  /** dbt project root directory (used as cwd). */
+  projectRoot?: string
+}
+
+/** Module-level options, set once via `configure()`. */
+let globalOptions: DbtCliOptions = {}
+
+/** Configure the Python/project environment for all dbt CLI calls. */
+export function configure(opts: DbtCliOptions): void {
+  globalOptions = opts
+}
 
 function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const binDir = globalOptions.pythonPath ? dirname(globalOptions.pythonPath) : undefined
+  const env = binDir
+    ? { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+    : process.env
+  const cwd = globalOptions.projectRoot ?? process.cwd()
+
   return new Promise((resolve, reject) => {
-    execFile("dbt", args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile("dbt", args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024, env, cwd }, (err, stdout, stderr) => {
       if (err) reject(err)
       else resolve({ stdout, stderr })
     })
@@ -33,7 +57,7 @@ function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
  * Parse structured JSON log lines from dbt CLI output.
  * dbt emits one JSON object per line when --log-format json is used.
  */
-function parseJsonLines(stdout: string): any[] {
+function parseJsonLines(stdout: string): Record<string, unknown>[] {
   return stdout
     .trim()
     .split("\n")
@@ -44,7 +68,7 @@ function parseJsonLines(stdout: string): any[] {
         return null
       }
     })
-    .filter(Boolean)
+    .filter(Boolean) as Record<string, unknown>[]
 }
 
 // ---------------------------------------------------------------------------
@@ -52,9 +76,9 @@ function parseJsonLines(stdout: string): any[] {
 // ---------------------------------------------------------------------------
 
 /** Walk an object tree and return the first value matching a predicate. */
-function deepFind(obj: any, predicate: (val: unknown, key: string) => boolean, maxDepth = 5): any {
+function deepFind(obj: unknown, predicate: (val: unknown, key: string) => boolean, maxDepth = 5): unknown {
   if (maxDepth <= 0 || obj == null || typeof obj !== "object") return undefined
-  for (const [key, val] of Object.entries(obj)) {
+  for (const [key, val] of Object.entries(obj as Record<string, unknown>)) {
     if (predicate(val, key)) return val
     const nested = deepFind(val, predicate, maxDepth - 1)
     if (nested !== undefined) return nested
@@ -62,10 +86,28 @@ function deepFind(obj: any, predicate: (val: unknown, key: string) => boolean, m
   return undefined
 }
 
+/** Strip leading SQL comments (single-line `--` and block `/* ... * /`). */
+function stripLeadingComments(s: string): string {
+  let trimmed = s.trim()
+  // Strip block comments
+  while (trimmed.startsWith("/*")) {
+    const end = trimmed.indexOf("*/")
+    if (end < 0) break
+    trimmed = trimmed.slice(end + 2).trim()
+  }
+  // Strip single-line comments
+  while (trimmed.startsWith("--")) {
+    const nl = trimmed.indexOf("\n")
+    if (nl < 0) break
+    trimmed = trimmed.slice(nl + 1).trim()
+  }
+  return trimmed
+}
+
 /** Heuristic: does this string look like compiled SQL? */
 function looksLikeSql(val: unknown): boolean {
   if (typeof val !== "string" || val.length < 10) return false
-  const upper = val.trim().toUpperCase()
+  const upper = stripLeadingComments(val).toUpperCase()
   return (
     upper.startsWith("SELECT") ||
     upper.startsWith("WITH") ||
@@ -87,6 +129,11 @@ function looksLikeRowData(val: unknown): val is Record<string, unknown>[] {
   }
 }
 
+/** Strip ANSI escape codes from text. */
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "")
+}
+
 /**
  * Parse a dbt ASCII table (the default non-JSON output from `dbt show`).
  *
@@ -96,8 +143,9 @@ function looksLikeRowData(val: unknown): val is Record<string, unknown>[] {
  *   | val1 | val2 |
  */
 function parseAsciiTable(text: string): { columnNames: string[]; data: Record<string, unknown>[] } | null {
-  const lines = text.split("\n").filter((l) => l.trim().startsWith("|"))
-  if (lines.length < 2) return null
+  const cleaned = stripAnsi(text)
+  const lines = cleaned.split("\n").filter((l) => l.trim().startsWith("|"))
+  if (lines.length < 3) return null // Need header + separator + at least 1 data row
 
   const parseLine = (line: string) =>
     line
@@ -106,8 +154,8 @@ function parseAsciiTable(text: string): { columnNames: string[]; data: Record<st
       .map((c) => c.trim())
 
   const header = parseLine(lines[0]!)
-  // Skip separator line (dashes)
-  const dataLines = lines.slice(1).filter((l) => !l.includes("---"))
+  // Skip header (index 0) and separator (index 1) by position, not string match
+  const dataLines = lines.slice(2)
   const data = dataLines.map((line) => {
     const vals = parseLine(line)
     const row: Record<string, unknown> = {}
@@ -118,6 +166,37 @@ function parseAsciiTable(text: string): { columnNames: string[]; data: Record<st
   })
 
   return { columnNames: header, data }
+}
+
+/** Safely parse a JSON string, returning the parsed value or undefined on failure. */
+function safeJsonParse(val: string): unknown {
+  try {
+    return JSON.parse(val)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Extract compiled SQL from target/manifest.json after `dbt compile`.
+ * More reliable than parsing stdout which contains log lines.
+ */
+function readCompiledFromManifest(model: string): string | null {
+  const projectRoot = globalOptions.projectRoot ?? process.cwd()
+  const manifestPath = join(projectRoot, "target", "manifest.json")
+  try {
+    const raw = readFileSync(manifestPath, "utf-8")
+    const manifest = JSON.parse(raw)
+    const nodes: Record<string, { name?: string; compiled_code?: string }> = manifest.nodes ?? {}
+    for (const node of Object.values(nodes)) {
+      if (node.name === model && node.compiled_code) {
+        return node.compiled_code
+      }
+    }
+  } catch {
+    // manifest.json may not exist or be parseable
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +210,7 @@ export async function execDbtShow(sql: string, limit?: number) {
   const args = ["show", "--inline", sql, "--output", "json", "--log-format", "json"]
   if (limit !== undefined) args.push("--limit", String(limit))
 
-  let lines: any[]
+  let lines: Record<string, unknown>[]
   try {
     const { stdout } = await run(args)
     lines = parseJsonLines(stdout)
@@ -141,36 +220,51 @@ export async function execDbtShow(sql: string, limit?: number) {
 
   // --- Tier 1: known field paths ---
   const previewLine =
-    lines.find((l) => l.data?.preview) ??
-    lines.find((l) => l.data?.rows) ??
-    lines.find((l) => l.result?.preview) ??
-    lines.find((l) => l.result?.rows)
+    lines.find((l: any) => l.data?.preview) ??
+    lines.find((l: any) => l.data?.rows) ??
+    lines.find((l: any) => l.result?.preview) ??
+    lines.find((l: any) => l.result?.rows)
 
   const sqlLine =
-    lines.find((l) => l.data?.sql) ??
-    lines.find((l) => l.data?.compiled_sql) ??
-    lines.find((l) => l.result?.sql)
+    lines.find((l: any) => l.data?.sql) ??
+    lines.find((l: any) => l.data?.compiled_sql) ??
+    lines.find((l: any) => l.result?.sql)
 
   if (previewLine) {
     const preview =
-      previewLine.data?.preview ??
-      previewLine.data?.rows ??
-      previewLine.result?.preview ??
-      previewLine.result?.rows
-    const rows: Record<string, unknown>[] = typeof preview === "string" ? JSON.parse(preview) : preview
-    const columnNames = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : []
-    const compiledSql = sqlLine?.data?.sql ?? sqlLine?.data?.compiled_sql ?? sqlLine?.result?.sql ?? sql
+      (previewLine as any).data?.preview ??
+      (previewLine as any).data?.rows ??
+      (previewLine as any).result?.preview ??
+      (previewLine as any).result?.rows
 
-    return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
+    // Guard JSON.parse — fall through to Tier 2 on malformed strings
+    let rows: Record<string, unknown>[]
+    if (typeof preview === "string") {
+      const parsed = safeJsonParse(preview)
+      if (Array.isArray(parsed)) {
+        rows = parsed
+      } else {
+        rows = [] // Malformed — will fall through below
+      }
+    } else {
+      rows = preview
+    }
+
+    if (rows.length > 0) {
+      const columnNames = rows[0] ? Object.keys(rows[0]) : []
+      const compiledSql = (sqlLine as any)?.data?.sql ?? (sqlLine as any)?.data?.compiled_sql ?? (sqlLine as any)?.result?.sql ?? sql
+      return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
+    }
+    // Empty or unparseable — fall through to Tier 2
   }
 
   // --- Tier 2: heuristic deep scan ---
   for (const line of lines) {
     const found = deepFind(line, (val) => looksLikeRowData(val))
     if (found) {
-      const rows: Record<string, unknown>[] = typeof found === "string" ? JSON.parse(found) : found
+      const rows: Record<string, unknown>[] = typeof found === "string" ? JSON.parse(found as string) : (found as Record<string, unknown>[])
       const columnNames = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : []
-      const compiledSql = deepFind(line, (val) => looksLikeSql(val)) ?? sql
+      const compiledSql = (deepFind(line, (val) => looksLikeSql(val)) as string) ?? sql
       return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
     }
   }
@@ -202,7 +296,7 @@ export async function execDbtShow(sql: string, limit?: number) {
 export async function execDbtCompile(model: string): Promise<{ sql: string }> {
   const args = ["compile", "--select", model, "--output", "json", "--log-format", "json"]
 
-  let lines: any[]
+  let lines: Record<string, unknown>[]
   try {
     const { stdout } = await run(args)
     lines = parseJsonLines(stdout)
@@ -217,10 +311,16 @@ export async function execDbtCompile(model: string): Promise<{ sql: string }> {
   // --- Tier 2: heuristic deep scan ---
   for (const line of lines) {
     const found = deepFind(line, (val) => looksLikeSql(val))
-    if (found) return { sql: found }
+    if (found) return { sql: found as string }
   }
 
-  // --- Tier 3: plain text fallback ---
+  // --- Tier 3: read compiled SQL from manifest.json (more reliable than stdout) ---
+  // dbt compile writes compiled_code to target/manifest.json even when stdout is logs
+  await run(["compile", "--select", model]).catch(() => {})
+  const fromManifest = readCompiledFromManifest(model)
+  if (fromManifest) return { sql: fromManifest }
+
+  // Last resort: return stdout (may contain logs mixed with SQL)
   const { stdout: plainOut } = await run(["compile", "--select", model])
   return { sql: plainOut.trim() }
 }
@@ -234,7 +334,7 @@ export async function execDbtCompileInline(
 ): Promise<{ sql: string }> {
   const args = ["compile", "--inline", sql, "--output", "json", "--log-format", "json"]
 
-  let lines: any[]
+  let lines: Record<string, unknown>[]
   try {
     const { stdout } = await run(args)
     lines = parseJsonLines(stdout)
@@ -249,7 +349,7 @@ export async function execDbtCompileInline(
   // --- Tier 2: heuristic deep scan ---
   for (const line of lines) {
     const found = deepFind(line, (val) => looksLikeSql(val))
-    if (found) return { sql: found }
+    if (found) return { sql: found as string }
   }
 
   // --- Tier 3: plain text fallback ---
@@ -258,22 +358,22 @@ export async function execDbtCompileInline(
 }
 
 /** Shared: extract compiled SQL from known dbt JSON output formats. */
-function findCompiledSql(lines: any[]): string | null {
+function findCompiledSql(lines: Record<string, unknown>[]): string | null {
   const compiledLine =
-    lines.find((l) => l.data?.compiled) ??
-    lines.find((l) => l.data?.compiled_code) ??
-    lines.find((l) => l.result?.node?.compiled_code) ??
-    lines.find((l) => l.result?.compiled_code) ??
-    lines.find((l) => l.data?.compiled_sql)
+    lines.find((l: any) => l.data?.compiled) ??
+    lines.find((l: any) => l.data?.compiled_code) ??
+    lines.find((l: any) => l.result?.node?.compiled_code) ??
+    lines.find((l: any) => l.result?.compiled_code) ??
+    lines.find((l: any) => l.data?.compiled_sql)
 
   if (!compiledLine) return null
 
   return (
-    compiledLine.data?.compiled ??
-    compiledLine.data?.compiled_code ??
-    compiledLine.result?.node?.compiled_code ??
-    compiledLine.result?.compiled_code ??
-    compiledLine.data?.compiled_sql ??
+    (compiledLine as any).data?.compiled ??
+    (compiledLine as any).data?.compiled_code ??
+    (compiledLine as any).result?.node?.compiled_code ??
+    (compiledLine as any).result?.compiled_code ??
+    (compiledLine as any).data?.compiled_sql ??
     null
   )
 }
@@ -299,11 +399,11 @@ export async function execDbtLs(
 
     if (lines.length > 0) {
       return lines
-        .filter((l) => {
+        .filter((l: any) => {
           const name = l.name ?? l.unique_id?.split(".").pop()
           return name && name !== model
         })
-        .map((l) => ({
+        .map((l: any) => ({
           table: l.name ?? l.unique_id?.split(".").pop() ?? "unknown",
           label: l.name ?? l.unique_id?.split(".").pop() ?? "unknown",
         }))
@@ -312,13 +412,15 @@ export async function execDbtLs(
     // --output json may not be supported in older dbt for ls
   }
 
-  // Fallback: plain text (one unique_id per line, e.g. "model.jaffle.customers")
-  const { stdout: plainOut } = await run(["ls", "--select", selector, "--resource-types", "model"])
+  // Fallback: plain text with --quiet to suppress log lines
+  const { stdout: plainOut } = await run(["ls", "--select", selector, "--resource-types", "model", "--quiet"])
   return plainOut
     .trim()
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
+    // Filter out lines that look like dbt log output (contain timestamps or "Running with")
+    .filter((line) => /^[a-z_][\w.]*$/i.test(line) || line.includes("."))
     .map((uid) => uid.split(".").pop() ?? uid)
     .filter((name) => name !== model)
     .map((name) => ({ table: name, label: name }))

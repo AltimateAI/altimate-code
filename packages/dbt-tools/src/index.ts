@@ -126,6 +126,10 @@ async function main() {
   const issue = await validate(cfg)
   if (issue) return { error: issue }
 
+  // Configure CLI fallbacks with the project's Python environment
+  const { configure } = await import("./dbt-cli")
+  configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
+
   // Lazy import to avoid loading python-bridge until needed
   let adapter
   try {
