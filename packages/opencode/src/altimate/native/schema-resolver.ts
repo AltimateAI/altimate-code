@@ -25,7 +25,15 @@ import { Schema } from "@altimateai/altimate-core"
  * SchemaDefinition format: has a `tables` key with nested structure.
  */
 function isSchemaDefinitionFormat(ctx: Record<string, any>): boolean {
-  return "tables" in ctx && typeof ctx.tables === "object" && ctx.tables !== null
+  if (!("tables" in ctx) || typeof ctx.tables !== "object" || ctx.tables === null) {
+    return false
+  }
+  // Verify at least one value under `tables` looks like a table definition
+  // (has a `columns` array), not a flat column map like { "col": "TYPE" }.
+  // This prevents false positives when a flat schema has a table named "tables".
+  const values = Object.values(ctx.tables)
+  if (values.length === 0) return true // empty tables is valid SchemaDefinition
+  return values.some((v: any) => Array.isArray(v?.columns))
 }
 
 /**

@@ -16,7 +16,12 @@ import { describe, expect, test } from "bun:test"
  * Detect whether a schema_context object is in SchemaDefinition format.
  */
 function isSchemaDefinitionFormat(ctx: Record<string, any>): boolean {
-  return "tables" in ctx && typeof ctx.tables === "object" && ctx.tables !== null
+  if (!("tables" in ctx) || typeof ctx.tables !== "object" || ctx.tables === null) {
+    return false
+  }
+  const values = Object.values(ctx.tables)
+  if (values.length === 0) return true
+  return values.some((v: any) => Array.isArray(v?.columns))
 }
 
 /**
@@ -69,7 +74,13 @@ describe("isSchemaDefinitionFormat", () => {
     expect(isSchemaDefinitionFormat({
       version: "1",
       dialect: "generic",
-      tables: { users: { columns: [] } },
+      tables: { users: { columns: [{ name: "id", type: "INT" }] } },
+    })).toBe(true)
+  })
+
+  test("detects SchemaDefinition with empty tables map", () => {
+    expect(isSchemaDefinitionFormat({
+      tables: {},
     })).toBe(true)
   })
 
@@ -82,6 +93,15 @@ describe("isSchemaDefinitionFormat", () => {
   test("rejects array format", () => {
     expect(isSchemaDefinitionFormat({
       users: [{ name: "id", data_type: "INT" }],
+    })).toBe(false)
+  })
+
+  test("rejects flat schema with table named 'tables'", () => {
+    // A flat schema that happens to have a table called "tables"
+    // should NOT be mistaken for SchemaDefinition format
+    expect(isSchemaDefinitionFormat({
+      tables: { id: "INT", name: "VARCHAR" },
+      users: { id: "INT", email: "VARCHAR" },
     })).toBe(false)
   })
 

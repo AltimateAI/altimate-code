@@ -42,7 +42,9 @@ function formatClassifyPii(data: Record<string, any>): string {
   for (const f of piiColumns) {
     const classification = f.classification ?? f.category ?? "PII"
     const confidence = f.confidence ?? "high"
-    lines.push(`  ${f.table}.${f.column}: ${classification} (${confidence} confidence)`)
+    const table = f.table ?? "unknown"
+    const column = f.column ?? "unknown"
+    lines.push(`  ${table}.${column}: ${classification} (${confidence} confidence)`)
     if (f.suggested_masking) lines.push(`    Masking: ${f.suggested_masking}`)
   }
   return lines.join("\n")

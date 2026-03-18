@@ -41,7 +41,9 @@ function formatQueryPii(data: Record<string, any>): string {
   lines.push("PII exposure detected:\n")
   for (const e of piiCols) {
     const classification = e.classification ?? e.category ?? "PII"
-    lines.push(`  ${e.table}.${e.column}: ${classification}`)
+    const table = e.table ?? "unknown"
+    const column = e.column ?? "unknown"
+    lines.push(`  ${table}.${column}: ${classification}`)
     if (e.suggested_masking) lines.push(`    Masking: ${e.suggested_masking}`)
   }
   if (data.suggested_alternatives?.length) {
