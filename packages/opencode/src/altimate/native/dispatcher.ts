@@ -22,11 +22,26 @@ export function reset(): void {
   nativeHandlers.clear()
 }
 
+/** Lazy registration hook — set by native/index.ts */
+let _ensureRegistered: (() => void) | null = null
+
+/** Called by native/index.ts to set the lazy registration function. */
+export function setRegistrationHook(fn: () => void): void {
+  _ensureRegistered = fn
+}
+
 /** Dispatch a method call to the registered native handler. */
 export async function call<M extends BridgeMethod>(
   method: M,
   params: (typeof BridgeMethods)[M] extends { params: infer P } ? P : never,
 ): Promise<(typeof BridgeMethods)[M] extends { result: infer R } ? R : never> {
+  // Lazy registration: load all handler modules on first call
+  if (_ensureRegistered) {
+    const fn = _ensureRegistered
+    _ensureRegistered = null
+    fn()
+  }
+
   const native = nativeHandlers.get(method as string)
 
   if (!native) {

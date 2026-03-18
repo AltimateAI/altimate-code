@@ -1,0 +1,10 @@
+fix: comprehensive XSS hardening for trace viewer HTML
+
+Systematically escape all user-controllable fields in `viewer.ts`:
+
+- Escape `span.kind` and `span.status` in detail panel, waterfall, tree, and log views
+- Escape `span.spanId` in `data-sid` attributes
+- Coerce all numeric fields with `Number()` to prevent string injection via `.toLocaleString()`
+- Add single-quote escaping (`&#x27;`) to the `e()` function for defense-in-depth
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
