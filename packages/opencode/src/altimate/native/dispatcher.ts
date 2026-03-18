@@ -48,15 +48,19 @@ export async function call<M extends BridgeMethod>(
 
     return result as any
   } catch (e) {
-    Telemetry.track({
-      type: "native_call",
-      timestamp: Date.now(),
-      session_id: Telemetry.getContext().sessionId,
-      method: method as string,
-      status: "error",
-      duration_ms: Date.now() - startTime,
-      error: String(e).slice(0, 500),
-    })
+    try {
+      Telemetry.track({
+        type: "native_call",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        method: method as string,
+        status: "error",
+        duration_ms: Date.now() - startTime,
+        error: String(e).slice(0, 500),
+      })
+    } catch {
+      // Telemetry must never prevent error propagation
+    }
     throw e
   }
 }

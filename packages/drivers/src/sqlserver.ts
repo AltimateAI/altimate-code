@@ -125,13 +125,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         .input("table", table)
         .query(
           `SELECT c.name AS column_name,
-                  t.name AS data_type,
+                  tp.name AS data_type,
                   c.is_nullable
            FROM sys.columns c
-           INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-           INNER JOIN sys.tables tbl ON c.object_id = tbl.object_id
-           INNER JOIN sys.schemas s ON tbl.schema_id = s.schema_id
-           WHERE s.name = @schema AND tbl.name = @table
+           INNER JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+           INNER JOIN sys.objects o ON c.object_id = o.object_id
+           INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+           WHERE s.name = @schema AND o.name = @table
+             AND o.type IN ('U', 'V')
            ORDER BY c.column_id`,
         )
       return result.recordset.map((r: any) => ({

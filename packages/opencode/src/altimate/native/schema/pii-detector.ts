@@ -46,10 +46,10 @@ export async function detectPii(params: PiiDetectParams): Promise<PiiDetectResul
   const tablesWithPii = new Set<string>()
 
   for (const wh of targetWarehouses) {
-    // Search all columns in this warehouse
-    const searchResult = cache.search("", wh.name, 10000)
+    // List all columns in this warehouse
+    const columns = cache.listColumns(wh.name, 10000)
 
-    for (const col of searchResult.columns) {
+    for (const col of columns) {
       if (params.schema_name && col.schema_name !== params.schema_name) continue
       if (params.table && col.table !== params.table) continue
 
@@ -200,7 +200,7 @@ async function detectPiiLive(params: PiiDetectParams): Promise<PiiDetectResult> 
     }
   } catch (e) {
     return {
-      success: true,
+      success: false,
       findings: [],
       finding_count: 0,
       columns_scanned: 0,

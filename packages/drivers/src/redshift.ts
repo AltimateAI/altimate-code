@@ -113,7 +113,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const client = await pool.connect()
       try {
         const result = await client.query(
-          `SELECT columnname, external_type, is_nullable
+          `SELECT columnname, data_type, is_nullable
            FROM svv_columns
            WHERE schemaname = $1
              AND tablename = $2
@@ -122,7 +122,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         )
         return result.rows.map((r: any) => ({
           name: r.columnname as string,
-          data_type: r.external_type as string,
+          data_type: r.data_type as string,
           nullable: String(r.is_nullable).toUpperCase() === "YES",
         }))
       } finally {

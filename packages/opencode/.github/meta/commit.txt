@@ -1,21 +1,29 @@
-test: adversarial telemetry safety tests + defensive helper fixes
+fix: address all 17 Sentry bot review comments on PR #221
 
-14 adversarial tests that mock Telemetry.track to ALWAYS THROW,
-then verify every driver operation still succeeds:
-- warehouse.list with throwing census telemetry
-- warehouse.test with throwing connect telemetry
-- warehouse.add with throwing telemetry
-- warehouse.discover with throwing telemetry
-- 10 sequential operations with throwing telemetry
-- Telemetry.getContext() throwing
-- Helper functions with null/undefined/bizarre input
+CRITICAL (4):
+- Redshift describeTable: external_type -> data_type in svv_columns query
+- sql.fix handler: return correct SqlFixResult shape (error_message,
+  suggestions, suggestion_count)
+- sql.schema_diff: use Schema.fromDdl() not fromJson() for DDL strings,
+  return flat SchemaDiffResult (not wrapped in data)
+- DuckDB connect: verified correct (db.connect() is sync, no fix needed)
 
-Defensive fixes to helper functions:
-- detectAuthMethod: handles null, undefined, non-object input
-- detectQueryType: handles null, undefined, non-string input
-- Both return safe defaults instead of crashing
+HIGH (5):
+- analyzeMigration: removed unused combinedDdl, clarified comment
+- Dynamic import: replaced import(variable) with static switch statement
+  for bundler compatibility (10 cases)
+- Race condition: added pending Map for in-flight connector creation,
+  concurrent callers await the same Promise
+- registry.add: cache sanitized config (not unsanitized with plaintext creds)
+- detectPiiLive: return success:false on error (not success:true)
 
-These tests guarantee the previous incident (bad telemetry breaking
-drivers) cannot happen again.
+MEDIUM (6):
+- Dispatcher error path: wrap Telemetry.track in try/catch to not mask errors
+- SSH tunnel: add process.exit(0) after SIGINT/SIGTERM cleanup
+- PII detector: add listColumns() to SchemaCache, use instead of search("")
+- sql.autocomplete: pass prefix.length as cursor position (not hardcoded 0)
+- SQL Server describeTable: query sys.objects (tables+views) not just sys.tables
+- Databricks INTERVAL syntax: DATE_SUB takes integer, not INTERVAL expression
+  (fixed in unused-resources.ts and credit-analyzer.ts)
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

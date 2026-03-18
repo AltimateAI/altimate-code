@@ -25,6 +25,9 @@ let configs = new Map<string, ConnectionConfig>()
 /** Cached connector instances. */
 const connectors = new Map<string, Connector>()
 
+/** In-flight connector creation promises to prevent race conditions. */
+const pending = new Map<string, Promise<Connector>>()
+
 /** Whether the registry has been loaded. */
 let loaded = false
 
@@ -150,10 +153,44 @@ async function createConnector(
     }
   }
 
-  // Lazy import the driver
+  // Import the driver using static string literals for bundler compatibility
   let connector: Connector
   try {
-    const mod = await import(driverPath)
+    let mod: any
+    switch (driverPath) {
+      case "@altimateai/drivers/postgres":
+        mod = await import("@altimateai/drivers/postgres")
+        break
+      case "@altimateai/drivers/redshift":
+        mod = await import("@altimateai/drivers/redshift")
+        break
+      case "@altimateai/drivers/snowflake":
+        mod = await import("@altimateai/drivers/snowflake")
+        break
+      case "@altimateai/drivers/bigquery":
+        mod = await import("@altimateai/drivers/bigquery")
+        break
+      case "@altimateai/drivers/mysql":
+        mod = await import("@altimateai/drivers/mysql")
+        break
+      case "@altimateai/drivers/sqlserver":
+        mod = await import("@altimateai/drivers/sqlserver")
+        break
+      case "@altimateai/drivers/databricks":
+        mod = await import("@altimateai/drivers/databricks")
+        break
+      case "@altimateai/drivers/duckdb":
+        mod = await import("@altimateai/drivers/duckdb")
+        break
+      case "@altimateai/drivers/oracle":
+        mod = await import("@altimateai/drivers/oracle")
+        break
+      case "@altimateai/drivers/sqlite":
+        mod = await import("@altimateai/drivers/sqlite")
+        break
+      default:
+        throw new Error(`No static import available for driver: ${driverPath}`)
+    }
     connector = await mod.connect(resolvedConfig)
   } catch (e) {
     // Clean up SSH tunnel if driver creation fails
@@ -201,6 +238,10 @@ export async function get(name: string): Promise<Connector> {
   const cached = connectors.get(name)
   if (cached) return cached
 
+  // If a connector is already being created, await the same Promise
+  const inflight = pending.get(name)
+  if (inflight) return inflight
+
   const config = configs.get(name)
   if (!config) {
     throw new Error(
@@ -209,38 +250,45 @@ export async function get(name: string): Promise<Connector> {
   }
 
   const startTime = Date.now()
-  try {
-    const connector = await createConnector(name, config)
-    await connector.connect()
-    connectors.set(name, connector)
+  const promise = (async () => {
     try {
-      Telemetry.track({
-        type: "warehouse_connect",
-        timestamp: Date.now(),
-        session_id: Telemetry.getContext().sessionId,
-        warehouse_type: config.type,
-        auth_method: detectAuthMethod(config),
-        success: true,
-        duration_ms: Date.now() - startTime,
-      })
-    } catch {}
-    return connector
-  } catch (e) {
-    try {
-      Telemetry.track({
-        type: "warehouse_connect",
-        timestamp: Date.now(),
-        session_id: Telemetry.getContext().sessionId,
-        warehouse_type: config?.type ?? "unknown",
-        auth_method: detectAuthMethod(config),
-        success: false,
-        duration_ms: Date.now() - startTime,
-        error: String(e).slice(0, 500),
-        error_category: categorizeConnectionError(e),
-      })
-    } catch {}
-    throw e
-  }
+      const connector = await createConnector(name, config)
+      await connector.connect()
+      connectors.set(name, connector)
+      try {
+        Telemetry.track({
+          type: "warehouse_connect",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          warehouse_type: config.type,
+          auth_method: detectAuthMethod(config),
+          success: true,
+          duration_ms: Date.now() - startTime,
+        })
+      } catch {}
+      return connector
+    } catch (e) {
+      try {
+        Telemetry.track({
+          type: "warehouse_connect",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          warehouse_type: config?.type ?? "unknown",
+          auth_method: detectAuthMethod(config),
+          success: false,
+          duration_ms: Date.now() - startTime,
+          error: String(e).slice(0, 500),
+          error_category: categorizeConnectionError(e),
+        })
+      } catch {}
+      throw e
+    } finally {
+      pending.delete(name)
+    }
+  })()
+
+  pending.set(name, promise)
+  return promise
 }
 
 /** Whether a one-time warehouse census has been sent this session. */
@@ -320,8 +368,8 @@ export async function add(
     existing[name] = sanitized
     fs.writeFileSync(globalPath, JSON.stringify(existing, null, 2), "utf-8")
 
-    // Update in-memory
-    configs.set(name, config)
+    // Update in-memory with sanitized config (no plaintext credentials)
+    configs.set(name, sanitized)
 
     // Clear cached connector
     const cached = connectors.get(name)
@@ -405,6 +453,7 @@ export function getConfig(name: string): ConnectionConfig | undefined {
 export function reset(): void {
   configs.clear()
   connectors.clear()
+  pending.clear()
   loaded = false
   censusSent = false
 }

@@ -245,11 +245,7 @@ register("altimate_core.equivalence", async (params) => {
 // 12. altimate_core.migration
 register("altimate_core.migration", async (params) => {
   try {
-    // analyzeMigration takes (sql, schema) but the bridge params have old_ddl/new_ddl
-    // The Python guard passes (old_ddl, new_ddl, dialect) but the napi binding
-    // takes (sql, schema). Looking at the TS types: analyzeMigration(sql, schema).
-    // The Python version constructs DDL differently. We need to combine the DDLs.
-    const combinedDdl = `${params.old_ddl}\n${params.new_ddl}`
+    // Build schema from old_ddl, analyze new_ddl against it
     const schema = core.Schema.fromDdl(
       params.old_ddl,
       params.dialect || undefined,

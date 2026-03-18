@@ -17,6 +17,7 @@ import type {
   SqlOptimizeResult,
   SqlOptimizeSuggestion,
   LineageCheckResult,
+  SchemaDiffResult,
 } from "../types"
 
 // ---------------------------------------------------------------------------
@@ -202,15 +203,32 @@ register("sql.fix", async (params) => {
     const schema = schemaOrEmpty(params.schema_path, params.schema_context)
     const raw = await core.fix(params.sql, schema)
     const result = JSON.parse(JSON.stringify(raw))
+
+    const suggestions = (result.fixes_applied ?? []).map((f: any) => ({
+      type: f.type ?? f.rule ?? "fix",
+      message: f.message ?? f.description ?? "",
+      confidence: f.confidence ?? "medium",
+      fixed_sql: f.fixed_sql ?? f.rewritten_sql,
+    }))
+
     return {
       success: result.fixed ?? true,
       original_sql: result.original_sql ?? params.sql,
       fixed_sql: result.fixed_sql ?? params.sql,
-      fixes_applied: result.fixes_applied ?? [],
-      error: result.error,
+      error_message: params.error_message ?? "",
+      suggestions,
+      suggestion_count: suggestions.length,
     }
   } catch (e) {
-    return { success: false, original_sql: params.sql, fixed_sql: params.sql, fixes_applied: [], error: String(e) }
+    return {
+      success: false,
+      original_sql: params.sql,
+      fixed_sql: params.sql,
+      error_message: params.error_message ?? "",
+      suggestions: [],
+      suggestion_count: 0,
+      error: String(e),
+    }
   }
 })
 
@@ -236,7 +254,7 @@ register("sql.autocomplete", async (params) => {
           .map((t: string) => `CREATE TABLE ${t} (id INT);`)
           .join("\n")
         const schema = core.Schema.fromDdl(ddl)
-        const raw = core.complete(params.prefix, 0, schema)
+        const raw = core.complete(params.prefix, params.prefix.length, schema)
         const result = JSON.parse(JSON.stringify(raw))
         for (const item of result.items ?? []) {
           suggestions.push({
@@ -358,18 +376,31 @@ register("sql.rewrite", async (params) => {
 // ---------------------------------------------------------------------------
 register("sql.schema_diff", async (params) => {
   try {
-    const oldSchemaData = params.old_schema ?? params.old_sql
-    const newSchemaData = params.new_schema ?? params.new_sql
-    const oldSchema = core.Schema.fromJson(JSON.stringify(oldSchemaData))
-    const newSchema = core.Schema.fromJson(JSON.stringify(newSchemaData))
+    const oldDdl = params.old_sql
+    const newDdl = params.new_sql
+    const oldSchema = core.Schema.fromDdl(oldDdl, params.dialect || undefined)
+    const newSchema = core.Schema.fromDdl(newDdl, params.dialect || undefined)
     const raw = core.diffSchemas(oldSchema, newSchema)
     const result = JSON.parse(JSON.stringify(raw))
+
+    const changes = result.changes ?? []
+    const hasBreaking = changes.some((c: any) => c.severity === "breaking")
+
     return {
       success: true,
-      data: result,
-    }
+      changes,
+      has_breaking_changes: hasBreaking,
+      summary: result.summary ?? {},
+      error: undefined,
+    } satisfies SchemaDiffResult
   } catch (e) {
-    return { success: false, data: {}, error: String(e) }
+    return {
+      success: false,
+      changes: [],
+      has_breaking_changes: false,
+      summary: {},
+      error: String(e),
+    } satisfies SchemaDiffResult
   }
 })
 

@@ -41,8 +41,14 @@ function ensureCleanup(): void {
     activeTunnels.clear()
   }
   process.once("exit", cleanup)
-  process.once("SIGINT", cleanup)
-  process.once("SIGTERM", cleanup)
+  process.once("SIGINT", () => {
+    cleanup()
+    process.exit(0)
+  })
+  process.once("SIGTERM", () => {
+    cleanup()
+    process.exit(0)
+  })
 }
 
 /**

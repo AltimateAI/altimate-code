@@ -354,6 +354,37 @@ export class SchemaCache {
     }
   }
 
+  /**
+   * List all columns for a given warehouse (no search filter).
+   * Used by PII detection to scan all cached columns.
+   */
+  listColumns(
+    warehouse: string,
+    limit: number = 10000,
+  ): SchemaSearchColumnResult[] {
+    const rows = this.db.prepare(
+      `SELECT warehouse, database_name, schema_name, table_name, column_name, data_type, nullable
+       FROM columns_cache
+       WHERE warehouse = ?
+       ORDER BY schema_name, table_name, column_name
+       LIMIT ?`,
+    ).all(warehouse, limit) as any[]
+
+    return rows.map((row) => {
+      const fqnParts = [row.database_name, row.schema_name, row.table_name, row.column_name].filter(Boolean)
+      return {
+        warehouse: row.warehouse,
+        database: row.database_name ?? undefined,
+        schema_name: row.schema_name,
+        table: row.table_name,
+        name: row.column_name,
+        data_type: row.data_type ?? undefined,
+        nullable: Boolean(row.nullable),
+        fqn: fqnParts.join("."),
+      }
+    })
+  }
+
   close(): void {
     try {
       this.db.close()
