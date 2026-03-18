@@ -34,6 +34,102 @@ import type { ConnectionConfig } from "@altimateai/drivers"
 import { Telemetry } from "../../../telemetry"
 
 // ---------------------------------------------------------------------------
+// dbt-first execution strategy
+// ---------------------------------------------------------------------------
+
+/** Cached dbt adapter (lazily created on first use). */
+let dbtAdapter: any | null | undefined = undefined
+let dbtConfigChecked = false
+
+/**
+ * Try to execute SQL via dbt's adapter (which uses profiles.yml for connection).
+ * Returns null if dbt is not available or not configured — caller should fall back
+ * to native driver.
+ *
+ * This is the preferred path when working in a dbt project: dbt already knows
+ * how to connect, so users don't need to configure a separate connection.
+ */
+async function tryExecuteViaDbt(
+  sql: string,
+  limit?: number,
+): Promise<SqlExecuteResult | null> {
+  // Only attempt dbt once — if it's not configured, don't retry on every query
+  if (dbtAdapter === null) return null
+
+  if (dbtAdapter === undefined) {
+    try {
+      // Check if dbt config exists
+      const { read: readDbtConfig } = await import(
+        "../../../../../dbt-tools/src/config"
+      )
+      const dbtConfig = await readDbtConfig()
+      if (!dbtConfig) {
+        dbtConfigChecked = true
+        dbtAdapter = null
+        return null
+      }
+
+      // Check if dbt_project.yml exists
+      const fs = await import("fs")
+      const path = await import("path")
+      if (
+        !fs.existsSync(path.join(dbtConfig.projectRoot, "dbt_project.yml"))
+      ) {
+        dbtAdapter = null
+        return null
+      }
+
+      // Create the adapter
+      const { create } = await import("../../../../../dbt-tools/src/adapter")
+      dbtAdapter = await create(dbtConfig)
+    } catch {
+      // dbt-tools not available or config invalid — fall back to native
+      dbtAdapter = null
+      return null
+    }
+  }
+
+  try {
+    const raw = limit
+      ? await dbtAdapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
+      : await dbtAdapter.immediatelyExecuteSQL(sql, "")
+
+    // Convert dbt adapter result to our SqlExecuteResult format
+    if (raw && raw.table) {
+      const columns = raw.table.column_names ?? raw.table.columns ?? []
+      const rows = raw.table.rows ?? []
+      const truncated = limit ? rows.length > limit : false
+      const trimmedRows = truncated ? rows.slice(0, limit) : rows
+      return {
+        columns,
+        rows: trimmedRows,
+        row_count: trimmedRows.length,
+        truncated,
+      }
+    }
+
+    // If raw result has a different shape, try to adapt
+    if (raw && Array.isArray(raw)) {
+      if (raw.length === 0) return { columns: [], rows: [], row_count: 0, truncated: false }
+      const columns = Object.keys(raw[0])
+      const rows = raw.map((r: any) => columns.map((c) => r[c]))
+      return { columns, rows, row_count: rows.length, truncated: false }
+    }
+
+    return null // Unknown result format — fall back to native
+  } catch {
+    // dbt execution failed — fall back to native driver silently
+    return null
+  }
+}
+
+/** Reset dbt adapter (for testing). */
+export function resetDbtAdapter(): void {
+  dbtAdapter = undefined
+  dbtConfigChecked = false
+}
+
+// ---------------------------------------------------------------------------
 // Telemetry helpers
 // ---------------------------------------------------------------------------
 
@@ -75,13 +171,20 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
   const startTime = Date.now()
   const warehouseType = getWarehouseType(params.warehouse)
   try {
+    // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
+    // dbt knows how to connect using profiles.yml — no separate connection config needed.
+    if (!params.warehouse) {
+      const dbtResult = await tryExecuteViaDbt(params.sql, params.limit)
+      if (dbtResult) return dbtResult
+    }
+
     const warehouseName = params.warehouse
     let result: SqlExecuteResult
     if (!warehouseName) {
       const warehouses = Registry.list().warehouses
       if (warehouses.length === 0) {
         throw new Error(
-          "No warehouse configured. Use warehouse.add or set ALTIMATE_CODE_CONN_* env vars.",
+          "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
         )
       }
       // Use the first warehouse as default
