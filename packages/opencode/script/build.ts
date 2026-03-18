@@ -199,6 +199,13 @@ for (const item of targets) {
     tsconfig: "./tsconfig.json",
     plugins: [solidPlugin],
     sourcemap: "external",
+    // Database drivers are loaded lazily at runtime via dynamic import().
+    // They must NOT be bundled into the binary — users install them on demand.
+    external: [
+      "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
+      "mysql2", "mssql", "oracledb", "duckdb", "better-sqlite3",
+      "keytar", "ssh2", "dockerode",
+    ],
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
