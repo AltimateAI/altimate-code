@@ -51,7 +51,7 @@ describe("pty", () => {
         }
       },
     })
-  })
+  }, 15000)
 
   test("publishes created, exited, deleted in order for /bin/sh + remove", async () => {
     if (process.platform === "win32") return

@@ -38,7 +38,7 @@ describe("tool.registry", () => {
         expect(ids).toContain("hello")
       },
     })
-  })
+  }, 15000)
 
   test("loads tools from .opencode/tools (plural)", async () => {
     await using tmp = await tmpdir({

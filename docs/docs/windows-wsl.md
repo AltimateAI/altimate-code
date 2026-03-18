@@ -17,7 +17,7 @@ altimate is supported on Windows through WSL (Windows Subsystem for Linux).
 
 3. Install altimate:
    ```bash
-   npm install -g @altimateai/altimate-code
+   npm install -g altimate-code
    ```
 
 4. Launch:

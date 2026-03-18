@@ -191,7 +191,7 @@ Ordered most-specific-first to prevent partial matches. Categories:
 | App IDs | `ai.opencode.desktop` -> `ai.altimate.code.desktop` |
 | Social | `x.com/altaborodin` -> `x.com/Altimateinc` |
 | Product name | `OpenCode` -> `Altimate Code` |
-| Install commands | `npm i -g opencode-ai` -> `npm i -g @altimateai/altimate-code` |
+| Install commands | `npm i -g opencode-ai` -> `npm i -g altimate-code` |
 | Homebrew | `anomalyco/tap/opencode` -> `AltimateAI/tap/altimate-code` |
 
 ### Adding a new branding rule

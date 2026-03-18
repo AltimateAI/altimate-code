@@ -26,7 +26,7 @@ await Bun.file(`./dist/${pkg.name}/package.json`).write(
     {
       name: pkg.name,
       bin: {
-        "altimate": "./bin/altimate",
+        altimate: "./bin/altimate",
         "altimate-code": "./bin/altimate-code",
       },
       scripts: {
@@ -51,6 +51,48 @@ const tasks = Object.entries(binaries).map(async ([name]) => {
 await Promise.all(tasks)
 await $`cd ./dist/${pkg.name} && bun pm pack && npm publish *.tgz --access public --tag ${Script.channel}`
 
+// Publish unscoped `altimate-code` wrapper package so users can `npm i -g altimate-code`
+const unscopedName = "altimate-code"
+const unscopedDir = `./dist/${unscopedName}`
+try {
+  await $`mkdir -p ${unscopedDir}`
+  await $`cp -r ./bin ${unscopedDir}/bin`
+  await $`cp ./script/postinstall.mjs ${unscopedDir}/postinstall.mjs`
+  await Bun.file(`${unscopedDir}/LICENSE`).write(await Bun.file("../../LICENSE").text())
+  await Bun.file(`${unscopedDir}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
+  await Bun.file(`${unscopedDir}/README.md`).write(await Bun.file("../../README.md").text())
+  await Bun.file(`${unscopedDir}/package.json`).write(
+    JSON.stringify(
+      {
+        name: unscopedName,
+        description: "The AI-native data engineering agent for the terminal",
+        repository: {
+          type: "git",
+          url: "git+https://github.com/AltimateAI/altimate-code.git",
+        },
+        homepage: "https://github.com/AltimateAI/altimate-code#readme",
+        bugs: "https://github.com/AltimateAI/altimate-code/issues",
+        bin: {
+          altimate: "./bin/altimate",
+          "altimate-code": "./bin/altimate-code",
+        },
+        scripts: {
+          postinstall: "bun ./postinstall.mjs || node ./postinstall.mjs",
+        },
+        version: version,
+        license: pkg.license,
+        optionalDependencies: binaries,
+      },
+      null,
+      2,
+    ),
+  )
+  await $`cd ${unscopedDir} && bun pm pack && npm publish *.tgz --access public --tag ${Script.channel}`
+} catch (e) {
+  console.error("Unscoped package publish failed:", e)
+  process.exit(1)
+}
+
 // Docker (non-fatal — requires buildx multi-platform setup)
 try {
   const image = "ghcr.io/altimateai/altimate-code"
@@ -65,10 +107,14 @@ try {
 // registries
 if (!Script.preview) {
   // Calculate SHA values
-  const arm64Sha = await $`sha256sum ./dist/altimate-code-linux-arm64.tar.gz | cut -d' ' -f1`.text().then((x) => x.trim())
+  const arm64Sha = await $`sha256sum ./dist/altimate-code-linux-arm64.tar.gz | cut -d' ' -f1`
+    .text()
+    .then((x) => x.trim())
   const x64Sha = await $`sha256sum ./dist/altimate-code-linux-x64.tar.gz | cut -d' ' -f1`.text().then((x) => x.trim())
   const macX64Sha = await $`sha256sum ./dist/altimate-code-darwin-x64.zip | cut -d' ' -f1`.text().then((x) => x.trim())
-  const macArm64Sha = await $`sha256sum ./dist/altimate-code-darwin-arm64.zip | cut -d' ' -f1`.text().then((x) => x.trim())
+  const macArm64Sha = await $`sha256sum ./dist/altimate-code-darwin-arm64.zip | cut -d' ' -f1`
+    .text()
+    .then((x) => x.trim())
 
   const [pkgver, _subver = ""] = Script.version.split(/(-.*)/, 2)
 

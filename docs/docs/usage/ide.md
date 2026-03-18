@@ -12,7 +12,7 @@ altimate integrates with VS Code and Cursor as an AI assistant.
 1. Install the altimate extension from the marketplace
 2. Ensure `altimate` is installed globally:
    ```bash
-   npm install -g @altimateai/altimate-code
+   npm install -g altimate-code
    ```
 3. The extension will auto-detect the CLI
 
