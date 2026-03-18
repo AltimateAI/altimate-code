@@ -7,15 +7,18 @@
 
 **The open-source data engineering harness.**
 
-99+ tools for building, validating, optimizing, and shipping data products.<br>
-Use in your terminal, CI pipeline, orchestration DAGs, or as the tool layer for your data agents.
+The intelligence layer for data engineering AI — 99+ deterministic tools for SQL analysis,
+column-level lineage, dbt, FinOps, and warehouse connectivity across every major cloud platform.
+
+Run standalone in your terminal, embed underneath Claude Code or Codex, or integrate
+into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 
 [![npm](https://img.shields.io/npm/v/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
 [![npm downloads](https://img.shields.io/npm/dm/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
 [![PyPI](https://img.shields.io/pypi/v/altimate-engine)](https://pypi.org/project/altimate-engine/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![CI](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml/badge.svg)](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml)
-[![Discord](https://img.shields.io/discord/YOUR_DISCORD_SERVER_ID?logo=discord&label=Discord&color=5865F2)](https://altimate.ai/discord)
+[![Slack](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://altimate.ai/slack)
 [![Docs](https://img.shields.io/badge/docs-altimateai.github.io-blue)](https://altimateai.github.io/altimate-code)
 
 </div>
@@ -44,8 +47,8 @@ altimate        # Launch the TUI
 
 Or set an environment variable directly:
 ```bash
-export ANTHROPIC_API_KEY= <Enter your Anthropic API Key>   # Anthropic Claude
-export OPENAI_API_KEY= <Enter your OpenAI API Key>          # OpenAI
+export ANTHROPIC_API_KEY=your_key   # Anthropic Claude
+export OPENAI_API_KEY=your_key      # OpenAI
 ```
 
 **Step 2: Auto-detect your data stack** (read-only, safe for production connections):
@@ -55,37 +58,29 @@ altimate /discover
 
 > **Zero Python setup required.** On first run, the CLI automatically downloads [`uv`](https://github.com/astral-sh/uv), creates an isolated Python environment, and installs the data engine with all warehouse drivers. No `pip install`, no virtualenv management.
 
-> **Note:** `altimate-code` still works as a backward-compatible alias.
-
 `/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more).
 
-## What's New
+## Why a specialized harness?
 
-- **v0.4.1** (March 2026) — env-based skill selection, session caching, tracing improvements
-- **v0.4.0** (Feb 2026) — data visualization skill, 99+ tools, training system
-- **v0.3.x** — [See full changelog →](CHANGELOG.md)
-
-## General agents vs altimate
+General AI coding agents can edit SQL files. They cannot *understand* your data stack.
+altimate gives any LLM a deterministic data engineering intelligence layer —
+no hallucinated SQL advice, no guessing at schema, no missed PII.
 
 | Capability | General coding agents | altimate |
 |---|---|---|
-| SQL anti-pattern detection | None | 19 rules with confidence scoring |
-| Column-level lineage | None | Automatic from SQL |
-| Schema-aware autocomplete | None | Indexes your warehouse metadata |
-| Cross-dialect translation | None | Snowflake, BigQuery, Databricks, Redshift |
-| FinOps analysis | None | Credit analysis, expensive queries, warehouse sizing |
-| PII detection | None | Automatic column scanning |
-| dbt integration | Basic file editing | Manifest parsing, test generation, model scaffolding |
+| SQL anti-pattern detection | None | 19 rules, confidence-scored |
+| Column-level lineage | None | Automatic from SQL, any dialect |
+| Schema-aware autocomplete | None | Live-indexed warehouse metadata |
+| Cross-dialect SQL translation | None | Snowflake ↔ BigQuery ↔ Databricks ↔ Redshift |
+| FinOps & cost analysis | None | Credits, expensive queries, right-sizing |
+| PII detection | None | 30+ regex patterns, 15 categories |
+| dbt integration | Basic file editing | Manifest parsing, test gen, model scaffolding, lineage |
 | Data visualization | None | Auto-generated charts from SQL results |
 | Observability | None | Local-first tracing of AI sessions and tool calls |
 
-> **Benchmark results:** 100% F1 score on SQL anti-pattern detection across 1,077 test queries (0 false positives, 0 false negatives). 100% edge-match on column-level lineage across 500 queries. [See methodology →](experiments/BENCHMARKS.md)
-
-## Why altimate?
-
-Data engineering has a precision problem. General AI assistants can *edit* SQL files. They cannot *understand* your data stack — not without first-class tools for analyzing it.
-
-altimate gives any LLM a deterministic SQL Intelligence Engine: 19 analysis rules built from years of data engineering in the weeds, achieving 100% F1 accuracy across 1,077 benchmark queries. The engine doesn't guess — it parses, traces, and measures.
+> **Benchmarked precision:** 100% F1 on SQL anti-pattern detection (1,077 queries, 19 rules, 0 false positives).
+> 100% edge-match on column-level lineage (500 queries, 13 categories).
+> [See methodology →](experiments/BENCHMARKS.md)
 
 **What the harness provides:**
 - **SQL Intelligence Engine** — deterministic SQL parsing and analysis (not LLM pattern matching). 19 rules, 100% F1, 0 false positives. Built for data engineers who've been burned by hallucinated SQL advice.
@@ -119,6 +114,8 @@ altimate is a fork of [OpenCode](https://github.com/anomalyco/opencode) rebuilt 
 ```
 
 ## Key Features
+
+All features are deterministic — they parse, trace, and measure. Not LLM pattern matching.
 
 ### SQL Anti-Pattern Detection
 19 rules with confidence scoring — catches SELECT *, cartesian joins, non-sargable predicates, correlated subqueries, and more. **100% accuracy** on 1,077 benchmark queries.
@@ -209,7 +206,7 @@ packages/
 
 ## Community & Contributing
 
-- **Discord**: [altimate.ai/discord](https://altimate.ai/discord) — Real-time chat for questions, showcases, and feature discussion
+- **Slack**: [altimate.ai/slack](https://altimate.ai/slack) — Real-time chat for questions, showcases, and feature discussion
 - **Issues**: [GitHub Issues](https://github.com/AltimateAI/altimate-code/issues) — Bug reports and feature requests
 - **Discussions**: [GitHub Discussions](https://github.com/AltimateAI/altimate-code/discussions) — Long-form questions and proposals
 - **Security**: See [SECURITY.md](./SECURITY.md) for responsible disclosure
@@ -217,6 +214,12 @@ packages/
 Contributions welcome — docs, SQL rules, warehouse connectors, and TUI improvements are all needed. The contributing guide covers setup, the vouch system, and the issue-first PR policy.
 
 **[Read CONTRIBUTING.md →](./CONTRIBUTING.md)**
+
+## What's New
+
+- **v0.4.1** (March 2026) — env-based skill selection, session caching, tracing improvements
+- **v0.4.0** (Feb 2026) — data visualization skill, 99+ tools, training system
+- **v0.3.x** — [See full changelog →](CHANGELOG.md)
 
 ## License
 
