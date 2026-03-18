@@ -51,14 +51,14 @@ export ANTHROPIC_API_KEY=your_key   # Anthropic Claude
 export OPENAI_API_KEY=your_key      # OpenAI
 ```
 
-**Step 2: Auto-detect your data stack** (read-only, safe for production connections):
+**Step 2 (optional): Auto-detect your data stack** (read-only, safe for production connections):
 ```bash
 altimate /discover
 ```
 
-> **Zero Python setup required.** On first run, the CLI automatically downloads [`uv`](https://github.com/astral-sh/uv), creates an isolated Python environment, and installs the data engine with all warehouse drivers. No `pip install`, no virtualenv management.
+`/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more). Skip this and start building — you can always run it later.
 
-`/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more).
+> **Zero Python setup required.** On first run, the CLI automatically downloads [`uv`](https://github.com/astral-sh/uv), creates an isolated Python environment, and installs the data engine with all warehouse drivers. No `pip install`, no virtualenv management.
 
 ## Why a specialized harness?
 
