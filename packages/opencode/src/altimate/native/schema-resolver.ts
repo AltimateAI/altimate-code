@@ -46,6 +46,7 @@ function flatToSchemaDefinition(flat: Record<string, any>): Record<string, any> 
 
     // Variant 2: array of column definitions
     if (Array.isArray(colsOrDef)) {
+      if (colsOrDef.length === 0) continue // skip empty tables
       const columns = colsOrDef.map((c: any) => ({
         name: c.name,
         type: c.type ?? c.data_type ?? "VARCHAR",
@@ -54,10 +55,13 @@ function flatToSchemaDefinition(flat: Record<string, any>): Record<string, any> 
     } else if (typeof colsOrDef === "object") {
       // Variant 3: already has a `columns` array
       if (Array.isArray(colsOrDef.columns)) {
+        if (colsOrDef.columns.length === 0) continue // skip empty tables
         tables[tableName] = colsOrDef
       } else {
         // Variant 1: flat map { "col_name": "TYPE", ... }
-        const columns = Object.entries(colsOrDef).map(([colName, colType]) => ({
+        const entries = Object.entries(colsOrDef)
+        if (entries.length === 0) continue // skip empty tables
+        const columns = entries.map(([colName, colType]) => ({
           name: colName,
           type: String(colType),
         }))
