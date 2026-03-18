@@ -17,7 +17,7 @@ Unlike general-purpose coding agents, altimate is built for data teams:
 ## Installation
 
 ```bash
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 ```
 
 After install, you'll see a welcome banner with quick-start commands. On upgrades, the banner also shows what changed since your previous version.

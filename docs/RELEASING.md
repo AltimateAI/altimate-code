@@ -9,6 +9,7 @@ The monorepo produces two publishable packages:
 | Package | Registry | Trigger |
 |---------|----------|---------|
 | `@altimateai/altimate-code` | npm | `v*` tag (e.g., `v0.3.0`) |
+| `altimate-code` | npm | Same `v*` tag (unscoped alias) |
 | `altimate-engine` | PyPI | Same `v*` tag (published alongside CLI) |
 
 Both packages are versioned and released together. The CLI embeds the expected engine version at build time and auto-installs it on end-user machines.
@@ -77,7 +78,7 @@ git push origin main v0.2.0
 The `v*` tag triggers `.github/workflows/release.yml` which:
 
 1. **Builds** all platform binaries (linux/darwin/windows, x64/arm64)
-2. **Publishes to npm** — platform-specific binary packages + wrapper package `altimate-code-ai`
+2. **Publishes to npm** — platform-specific binary packages + scoped wrapper `@altimateai/altimate-code` + unscoped wrapper `altimate-code`
 3. **Publishes to PyPI** — `altimate-engine` via OIDC trusted publishing
 4. **Creates GitHub Release** — with auto-generated release notes and binary attachments
 5. **Updates Homebrew tap** — pushes formula update to `AltimateAI/homebrew-tap`
@@ -89,8 +90,9 @@ The `v*` tag triggers `.github/workflows/release.yml` which:
 After the workflow completes:
 
 ```bash
-# npm
+# npm (both scoped and unscoped should show same version)
 npm info @altimateai/altimate-code version
+npm info altimate-code version
 
 # PyPI
 pip install altimate-engine==0.2.0

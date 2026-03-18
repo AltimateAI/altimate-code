@@ -90,7 +90,7 @@ Teach your AI teammate project-specific patterns, naming conventions, and best p
 
 ```bash
 # npm (recommended)
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 
 # Homebrew
 brew install AltimateAI/tap/altimate-code

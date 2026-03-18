@@ -15,7 +15,7 @@ altimate-review:
   image: node:22
   stage: review
   script:
-    - npm install -g @altimateai/altimate-code
+    - npm install -g altimate-code
     - altimate github  # Uses GitHub-compatible interface
   variables:
     ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY

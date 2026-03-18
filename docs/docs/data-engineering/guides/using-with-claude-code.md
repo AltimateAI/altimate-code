@@ -75,7 +75,7 @@ altimate:
 
 ## Setup
 
-1. Install altimate globally: `npm install -g @altimateai/altimate-code`
+1. Install altimate globally: `npm install -g altimate-code`
 2. Configure warehouse connections in your project
 3. Claude Code automatically discovers altimate's tools when the `/data` skill is invoked
 

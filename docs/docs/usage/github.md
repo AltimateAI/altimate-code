@@ -31,7 +31,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install altimate
-        run: npm install -g @altimateai/altimate-code
+        run: npm install -g altimate-code
       - name: Run agent
         run: altimate github
         env:
