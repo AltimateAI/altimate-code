@@ -6,14 +6,21 @@ beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
 afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 
 // ---------------------------------------------------------------------------
-// Import modules AFTER env var is set
+// Import registerAll functions — call them explicitly in beforeAll to guard
+// against Dispatcher.reset() in other test files clearing the shared handler map.
 // ---------------------------------------------------------------------------
 
-// These side-effect imports register handlers
-import "../../src/altimate/native/schema/register"
-import "../../src/altimate/native/finops/register"
-import "../../src/altimate/native/dbt/register"
-import "../../src/altimate/native/local/register"
+import { registerAll as registerSchema } from "../../src/altimate/native/schema/register"
+import { registerAll as registerFinops } from "../../src/altimate/native/finops/register"
+import { registerAll as registerDbt } from "../../src/altimate/native/dbt/register"
+import { registerAll as registerLocal } from "../../src/altimate/native/local/register"
+
+beforeAll(() => {
+  registerSchema()
+  registerFinops()
+  registerDbt()
+  registerLocal()
+})
 
 // Import SQL template exports for template generation tests
 import { SQL_TEMPLATES as CreditTemplates } from "../../src/altimate/native/finops/credit-analyzer"
