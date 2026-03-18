@@ -18,7 +18,7 @@ npm install -g altimate-code
 brew install AltimateAI/tap/altimate-code
 ```
 
-> **Zero setup.** One `npm install` and you're ready. No Python, no pip, no virtualenv.
+> **Zero additional setup.** One command install — no Python, no pip, no virtualenv.
 
 ---
 
