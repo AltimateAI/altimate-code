@@ -200,7 +200,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           conn.connectAsync((err: Error | null) => {
             if (err) reject(err)
             else resolve(conn)
-          })
+          }).catch(reject)
         } else {
           conn.connect((err: Error | null) => {
             if (err) reject(err)
