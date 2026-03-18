@@ -20,6 +20,10 @@ import type {
   SchemaDiffResult,
 } from "../types"
 
+/** Register all composite SQL handlers with the Dispatcher.
+ *  Exported so tests can re-register after Dispatcher.reset(). */
+export function registerAllSql(): void {
+
 // ---------------------------------------------------------------------------
 // sql.analyze — lint + semantics + safety
 // ---------------------------------------------------------------------------
@@ -432,3 +436,8 @@ register("lineage.check", async (params) => {
     } satisfies LineageCheckResult
   }
 })
+
+} // end registerAllSql
+
+// Auto-register on module load
+registerAllSql()

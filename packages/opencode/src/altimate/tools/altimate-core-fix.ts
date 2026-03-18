@@ -35,7 +35,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
 function formatFix(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
   const lines: string[] = []
-  if (data.fixed && data.fixed_sql) {
+  if (data.fixed_sql && data.fixed !== false) {
     lines.push("Fixed SQL:")
     lines.push(data.fixed_sql)
     const fixes = data.fixes_applied ?? data.changes ?? []

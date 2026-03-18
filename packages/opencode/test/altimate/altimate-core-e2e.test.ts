@@ -153,8 +153,11 @@ describeIf("altimate-core E2E", () => {
   beforeAll(async () => {
     process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
     D = await import("../../src/altimate/native/dispatcher")
-    await import("../../src/altimate/native/altimate-core")
-    await import("../../src/altimate/native/sql/register")
+    const core = await import("../../src/altimate/native/altimate-core")
+    const sql = await import("../../src/altimate/native/sql/register")
+    // Re-register handlers in case another test file called Dispatcher.reset()
+    core.registerAll()
+    sql.registerAllSql()
   })
 
   afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })

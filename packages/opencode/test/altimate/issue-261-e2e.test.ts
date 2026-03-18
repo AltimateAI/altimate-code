@@ -125,9 +125,11 @@ describeIf("Issue #261 E2E: Tool Regression Tests", () => {
   beforeAll(async () => {
     process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
     Dispatcher = await import("../../src/altimate/native/dispatcher")
-    // Trigger lazy registration
-    await import("../../src/altimate/native/altimate-core")
-    await import("../../src/altimate/native/sql/register")
+    const core = await import("../../src/altimate/native/altimate-core")
+    const sql = await import("../../src/altimate/native/sql/register")
+    // Re-register handlers in case another test file called Dispatcher.reset()
+    core.registerAll()
+    sql.registerAllSql()
   })
 
   afterAll(() => {
