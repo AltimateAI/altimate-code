@@ -8,6 +8,7 @@ copyright: "&copy; 2026 Altimate Inc. All rights reserved."
 
 theme:
   name: material
+  custom_dir: docs/overrides
   logo: assets/logo.png
   favicon: assets/images/favicon.png
   font:
@@ -52,7 +53,7 @@ extra:
       link: https://pypi.org/project/altimate-engine/
   analytics:
     provider: google
-    property: G-XXXXXXXXXX   # TODO: Replace with actual GA4 property ID
+    property: G-C89Y5E4JJT
   consent:
     title: Cookie consent
     description: >-
