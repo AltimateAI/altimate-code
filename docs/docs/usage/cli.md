@@ -95,6 +95,7 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_EXPERIMENTAL_OUTPUT_TOKEN_MAX` | Max output tokens |
 | `ALTIMATE_CLI_EXPERIMENTAL_PLAN_MODE` | Enable plan mode |
 | `ALTIMATE_CLI_ENABLE_EXA` | Enable Exa web search |
+| `ALTIMATE_SMOOTH_STREAMING` | Smoother TUI streaming — uses lightweight rendering during LLM output, then swaps to rich markdown after completion. Reduces text jumps and scroll jitter. |
 
 ## Non-interactive Usage
 
