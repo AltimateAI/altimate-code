@@ -351,13 +351,6 @@ export const RunCommand = cmd({
         describe: "enable session tracing (default: true, disable with --no-trace)",
         default: true,
       })
-      // altimate_change start - yolo mode (also available as global --yolo)
-      .option("yolo", {
-        type: "boolean",
-        describe: "auto-approve all permission prompts (explicit deny rules still enforced)",
-        default: false,
-      })
-      // altimate_change end
   },
   handler: async (args) => {
     let message = [...args.message, ...(args["--"] || [])]

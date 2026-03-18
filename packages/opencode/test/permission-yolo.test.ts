@@ -1,6 +1,10 @@
 import { describe, test, expect, afterEach } from "bun:test"
 import { PermissionNext } from "../src/permission/next"
+import { PermissionID } from "../src/permission/schema"
+import { SessionID } from "../src/session/schema"
+import { Instance } from "../src/project/instance"
 import { Flag } from "../src/flag/flag"
+import { tmpdir } from "./fixture/fixture"
 
 describe("yolo mode: Flag.ALTIMATE_CLI_YOLO dynamic getter", () => {
   const originalAltimate = process.env["ALTIMATE_CLI_YOLO"]
@@ -268,5 +272,213 @@ describe("yolo mode: edge cases and adversarial scenarios", () => {
     expect(rejected.message).toContain("rejected")
     expect(corrected.message).toContain("use a different approach")
     expect(rejected).not.toBeInstanceOf(PermissionNext.CorrectedError)
+  })
+})
+
+// ─── E2E: full ask → reply flow with yolo mode ────────────────────────────
+
+describe("yolo mode E2E: permission ask/reply flow", () => {
+  const originalYolo = process.env["ALTIMATE_CLI_YOLO"]
+
+  afterEach(() => {
+    if (originalYolo === undefined) delete process.env["ALTIMATE_CLI_YOLO"]
+    else process.env["ALTIMATE_CLI_YOLO"] = originalYolo
+  })
+
+  test("deny rules still throw DeniedError even when yolo env var is set", async () => {
+    process.env["ALTIMATE_CLI_YOLO"] = "true"
+    expect(Flag.ALTIMATE_CLI_YOLO).toBe(true)
+
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        await expect(
+          PermissionNext.ask({
+            sessionID: SessionID.make("ses_yolo_deny_test"),
+            permission: "bash",
+            patterns: ["DROP DATABASE production"],
+            metadata: {},
+            always: [],
+            ruleset: [
+              { permission: "bash", pattern: "*", action: "ask" },
+              { permission: "bash", pattern: "DROP DATABASE *", action: "deny" },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(PermissionNext.DeniedError)
+      },
+    })
+  })
+
+  test("allow rules skip ask entirely (no event published, no yolo needed)", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const result = await PermissionNext.ask({
+          sessionID: SessionID.make("ses_yolo_allow_test"),
+          permission: "bash",
+          patterns: ["dbt run"],
+          metadata: {},
+          always: [],
+          ruleset: [{ permission: "bash", pattern: "*", action: "allow" }],
+        })
+        expect(result).toBeUndefined()
+      },
+    })
+  })
+
+  test("ask rules wait for reply — yolo-style 'once' resolves them", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const askPromise = PermissionNext.ask({
+          id: PermissionID.make("per_yolo_e2e"),
+          sessionID: SessionID.make("ses_yolo_ask_test"),
+          permission: "bash",
+          patterns: ["echo hello"],
+          metadata: {},
+          always: [],
+          ruleset: [],
+        })
+
+        const pending = await PermissionNext.list()
+        expect(pending.some((p) => p.id === "per_yolo_e2e")).toBe(true)
+
+        await PermissionNext.reply({
+          requestID: PermissionID.make("per_yolo_e2e"),
+          reply: "once",
+        })
+
+        await expect(askPromise).resolves.toBeUndefined()
+      },
+    })
+  })
+
+  test("multiple simultaneous permissions all resolved by yolo-style replies", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const ask1 = PermissionNext.ask({
+          id: PermissionID.make("per_yolo_multi_1"),
+          sessionID: SessionID.make("ses_yolo_multi_test"),
+          permission: "bash",
+          patterns: ["dbt run"],
+          metadata: {},
+          always: [],
+          ruleset: [],
+        })
+        const ask2 = PermissionNext.ask({
+          id: PermissionID.make("per_yolo_multi_2"),
+          sessionID: SessionID.make("ses_yolo_multi_test"),
+          permission: "edit",
+          patterns: ["models/staging.sql"],
+          metadata: {},
+          always: [],
+          ruleset: [],
+        })
+        const ask3 = PermissionNext.ask({
+          id: PermissionID.make("per_yolo_multi_3"),
+          sessionID: SessionID.make("ses_yolo_multi_test"),
+          permission: "write",
+          patterns: ["output.csv"],
+          metadata: {},
+          always: [],
+          ruleset: [],
+        })
+
+        const pending = await PermissionNext.list()
+        expect(pending.filter((p) => p.sessionID === "ses_yolo_multi_test").length).toBe(3)
+
+        await PermissionNext.reply({ requestID: PermissionID.make("per_yolo_multi_1"), reply: "once" })
+        await PermissionNext.reply({ requestID: PermissionID.make("per_yolo_multi_2"), reply: "once" })
+        await PermissionNext.reply({ requestID: PermissionID.make("per_yolo_multi_3"), reply: "once" })
+
+        await expect(ask1).resolves.toBeUndefined()
+        await expect(ask2).resolves.toBeUndefined()
+        await expect(ask3).resolves.toBeUndefined()
+      },
+    })
+  })
+
+  test("mixed deny + ask: deny throws immediately, ask waits for reply", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const rules: PermissionNext.Ruleset = [
+          { permission: "bash", pattern: "*", action: "ask" },
+          { permission: "bash", pattern: "DROP *", action: "deny" },
+        ]
+
+        await expect(
+          PermissionNext.ask({
+            sessionID: SessionID.make("ses_yolo_mixed"),
+            permission: "bash",
+            patterns: ["DROP TABLE users"],
+            metadata: {},
+            always: [],
+            ruleset: rules,
+          }),
+        ).rejects.toBeInstanceOf(PermissionNext.DeniedError)
+
+        const askPromise = PermissionNext.ask({
+          id: PermissionID.make("per_yolo_mixed"),
+          sessionID: SessionID.make("ses_yolo_mixed"),
+          permission: "bash",
+          patterns: ["dbt run"],
+          metadata: {},
+          always: [],
+          ruleset: rules,
+        })
+
+        await PermissionNext.reply({
+          requestID: PermissionID.make("per_yolo_mixed"),
+          reply: "once",
+        })
+
+        await expect(askPromise).resolves.toBeUndefined()
+      },
+    })
+  })
+
+  test("config-driven permissions: yolo auto-approves 'ask' but can't touch 'deny'", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        permission: {
+          bash: {
+            "*": "ask",
+            "dbt *": "allow",
+            "DROP *": "deny",
+          },
+        },
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { Config } = await import("../src/config/config")
+        const config = await Config.get()
+        const ruleset = PermissionNext.fromConfig(config.permission ?? {})
+
+        expect(PermissionNext.evaluate("bash", "dbt run", ruleset).action).toBe("allow")
+        expect(PermissionNext.evaluate("bash", "DROP TABLE x", ruleset).action).toBe("deny")
+        expect(PermissionNext.evaluate("bash", "git status", ruleset).action).toBe("ask")
+
+        await expect(
+          PermissionNext.ask({
+            sessionID: SessionID.make("ses_yolo_config_test"),
+            permission: "bash",
+            patterns: ["DROP TABLE users"],
+            metadata: {},
+            always: [],
+            ruleset,
+          }),
+        ).rejects.toBeInstanceOf(PermissionNext.DeniedError)
+      },
+    })
   })
 })

@@ -5,6 +5,9 @@ import { useDirectory } from "../../context/directory"
 import { useConnected } from "../../component/dialog-model"
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../context/route"
+// altimate_change start - yolo mode visual indicator
+import { Flag } from "@/flag/flag"
+// altimate_change end
 
 export function Footer() {
   const { theme } = useTheme()
@@ -60,6 +63,13 @@ export function Footer() {
             </text>
           </Match>
           <Match when={connected()}>
+            {/* altimate_change start - yolo mode visual indicator */}
+            <Show when={Flag.ALTIMATE_CLI_YOLO}>
+              <text fg={theme.warning}>
+                <span style={{ fg: theme.warning }}>△</span> YOLO
+              </text>
+            </Show>
+            {/* altimate_change end */}
             <Show when={permissions().length > 0}>
               <text fg={theme.warning}>
                 <span style={{ fg: theme.warning }}>△</span> {permissions().length} Permission
