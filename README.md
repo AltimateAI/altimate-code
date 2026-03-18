@@ -57,7 +57,7 @@ altimate /discover
 
 `/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more). Skip this and start building — you can always run it later.
 
-> **No Python required.** All tools run natively in TypeScript via `@altimateai/altimate-core` napi-rs bindings. No pip, no virtualenv, no Python installation needed.
+> **Zero setup.** One `npm install` and you're ready. No Python, no pip, no virtualenv.
 
 ## Why a specialized harness?
 

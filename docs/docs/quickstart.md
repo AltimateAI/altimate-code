@@ -18,7 +18,7 @@ npm install -g altimate-code
 brew install AltimateAI/tap/altimate-code
 ```
 
-> **No Python required.** All tools run natively in TypeScript via `@altimateai/altimate-core` napi-rs bindings. No pip, no virtualenv, no Python installation needed.
+> **Zero setup.** One `npm install` and you're ready. No Python, no pip, no virtualenv.
 
 ---
 
