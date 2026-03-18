@@ -35,21 +35,23 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
 function formatFix(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
   const lines: string[] = []
-  if (data.fixed_sql) {
+  if (data.fixed_sql && data.fixed !== false) {
     lines.push("Fixed SQL:")
     lines.push(data.fixed_sql)
-    if (data.changes?.length) {
+    const fixes = data.fixes_applied ?? data.changes ?? []
+    if (fixes.length) {
       lines.push("\nChanges applied:")
-      for (const c of data.changes) {
-        lines.push(`  - ${c.description ?? c}`)
+      for (const c of fixes) {
+        lines.push(`  - ${c.description ?? c.message ?? c}`)
       }
     }
   } else {
     lines.push("Could not auto-fix the SQL.")
-    if (data.errors?.length) {
+    const unfixable = data.unfixable_errors ?? data.errors ?? []
+    if (unfixable.length) {
       lines.push("\nErrors found:")
-      for (const e of data.errors) {
-        lines.push(`  - ${e.message ?? e}`)
+      for (const e of unfixable) {
+        lines.push(`  - ${e.message ?? e.reason ?? e}`)
       }
     }
   }

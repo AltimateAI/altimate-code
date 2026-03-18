@@ -1901,7 +1901,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return args[argIndex]
     })
     const usesArgumentsPlaceholder = templateCommand.includes("$ARGUMENTS")
-    let template = withArgs.replaceAll("$ARGUMENTS", input.arguments)
+    // altimate_change start — allow $$ARGUMENTS to produce literal $ARGUMENTS in output
+    const ESCAPE_SENTINEL = "\x00ESCAPED_DOLLAR_ARGUMENTS\x00"
+    let template = withArgs.replaceAll("$$ARGUMENTS", ESCAPE_SENTINEL).replaceAll("$ARGUMENTS", input.arguments).replaceAll(ESCAPE_SENTINEL, "$ARGUMENTS")
+    // altimate_change end
 
     // If command doesn't explicitly handle arguments (no $N or $ARGUMENTS placeholders)
     // but user provided arguments, append them to the template

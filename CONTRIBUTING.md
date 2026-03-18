@@ -53,9 +53,17 @@ To run Altimate Code in the root of the opencode repo itself:
 bun dev .
 ```
 
+### Project structure
+
+- `packages/opencode`: Altimate Code core business logic & server.
+- `packages/opencode/src/cli/cmd/tui/`: The TUI code, written in SolidJS with [opentui](https://github.com/sst/opentui)
+- `packages/app`: The shared web UI components, written in SolidJS
+- `packages/desktop`: The native desktop app, built with Tauri (wraps `packages/app`)
+- `packages/plugin`: Source for `@altimateai/altimate-code-plugin`
+
 ### Building and running a local binary
 
-The easiest way to build and run a compiled binary locally:
+All build commands run from `packages/opencode/`.
 
 ```bash
 cd packages/opencode
@@ -68,30 +76,20 @@ cd packages/opencode
 
 # Pass flags to altimate-code
 ./script/local.sh -- --help
-```
 
-Or use the package.json scripts:
-
-```bash
-bun run build:local   # just build for current platform
+# Or use package.json scripts
+bun run build:local   # just build (current platform only)
 bun run local         # build + run
 ```
 
-The script handles platform detection, `NODE_PATH` setup for native modules
-like `@altimateai/altimate-core`, and binary resolution automatically.
+The script handles platform detection (including Rosetta 2), `NODE_PATH` setup
+for native modules like `@altimateai/altimate-core`, and binary resolution.
 
-To compile all platform targets (CI/release):
+To compile all 12 platform targets (CI/release):
 
 ```bash
 bun run build
 ```
-
-- Core pieces:
-  - `packages/opencode`: Altimate Code core business logic & server.
-  - `packages/opencode/src/cli/cmd/tui/`: The TUI code, written in SolidJS with [opentui](https://github.com/sst/opentui)
-  - `packages/app`: The shared web UI components, written in SolidJS
-  - `packages/desktop`: The native desktop app, built with Tauri (wraps `packages/app`)
-  - `packages/plugin`: Source for `@altimateai/altimate-code-plugin`
 
 ### Understanding bun dev vs opencode
 

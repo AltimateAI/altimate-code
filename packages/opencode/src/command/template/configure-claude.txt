@@ -1,0 +1,45 @@
+Configure the `/altimate` slash command for Claude Code (Anthropic's CLI).
+
+Your task: write a command file at `~/.claude/commands/altimate.md` so that users can type `/altimate` inside Claude Code to delegate tasks to Altimate Code.
+
+Step 1 — Find the binary path by running: `which altimate`
+
+Step 2 — Create directory `~/.claude/commands/` if it does not exist.
+
+Step 3 — Write the file `~/.claude/commands/altimate.md` with this exact content (replace BINARY_PATH with the path from Step 1):
+
+```
+---
+name: altimate
+description: "Run data engineering tasks using Altimate Code"
+---
+
+# Data Engineering Tasks
+
+Delegate data engineering tasks to Altimate Code, an AI agent with 40+ data engineering capabilities (SQL analysis, schema ops, lineage, dbt, FinOps, RBAC, etc.).
+
+## Usage
+
+Run this command to execute the task:
+
+` ` `bash
+BINARY_PATH run "$$ARGUMENTS"
+` ` `
+
+Pass the user's task directly — Altimate Code is itself an AI agent that knows its own tools, explores the codebase, picks the right tools, and returns results.
+
+## After Getting Results
+
+Once you have the output from Altimate Code:
+1. Parse and present the results clearly to the user
+2. Highlight key findings, warnings, or errors
+3. Save to a file if requested
+
+$$ARGUMENTS
+```
+
+IMPORTANT: The triple backticks in the bash block above have spaces between them to avoid conflicts with this template's own markdown. Remove those spaces when writing the actual file. The `$$ARGUMENTS` tokens above will appear as `$ARGUMENTS` in the written file — this is correct, as `$ARGUMENTS` is a Claude Code template variable.
+
+Step 4 — Read back the file to verify it was written correctly.
+
+Tell the user they can now use `/altimate` inside Claude Code.

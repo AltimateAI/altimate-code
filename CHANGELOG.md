@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.9] - 2026-03-18
+
+### Added
+
+- Script to build and run compiled binary locally (#262)
+
+### Fixed
+
+- Snowflake auth — support all auth methods (`password`, `keypair`, `externalbrowser`, `oauth`), fix field name mismatches (#268)
+- dbt tool regression — schema format mismatch, silent failures, wrong results (#263)
+- `altimate-dbt compile`, `execute`, and children commands fail with runtime errors (#255)
+- `Cannot find module @altimateai/altimate-core` on `npm install` (#259)
+- Dispatcher tests fail in CI due to shared module state (#257)
+
+### Changed
+
+- CI: parallel per-target builds — 12 jobs, ~5 min wall clock instead of ~20 min (#254)
+- CI: faster release — build parallel with test, lower compression, tighter timeouts (#251)
+- Docker E2E tests skip in CI unless explicitly opted in (#253)
+
 ## [0.4.1] - 2026-03-16
 ## [0.4.2] - 2026-03-18
 

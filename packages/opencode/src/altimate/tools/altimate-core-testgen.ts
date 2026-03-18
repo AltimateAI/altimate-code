@@ -39,7 +39,14 @@ function formatTestgen(data: Record<string, any>): string {
   const lines: string[] = [`Generated ${tests.length} test case(s):\n`]
   for (const test of tests) {
     lines.push(`--- ${test.name ?? test.description ?? "Test"} ---`)
+    if (test.description) lines.push(`  ${test.description}`)
     if (test.sql) lines.push(test.sql)
+    if (test.inputs?.length) {
+      for (const input of test.inputs) {
+        lines.push(`  Input: ${input.column} (${input.data_type}) = ${input.value}`)
+      }
+    }
+    if (test.expected) lines.push(`  Expected: ${test.expected}`)
     if (test.assertion) lines.push(`  Assert: ${test.assertion}`)
     if (test.category) lines.push(`  Category: ${test.category}`)
     lines.push("")

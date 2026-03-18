@@ -16,7 +16,8 @@ export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_p
         schema_context: args.schema_context,
       })
       const data = result.data as Record<string, any>
-      const findingCount = data.findings?.length ?? 0
+      const piiColumns = data.columns ?? data.findings ?? []
+      const findingCount = piiColumns.length
       return {
         title: `PII Classification: ${findingCount} finding(s)`,
         metadata: { success: result.success, finding_count: findingCount },
@@ -31,10 +32,20 @@ export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_p
 
 function formatClassifyPii(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (!data.findings?.length) return "No PII columns detected."
-  const lines = ["PII columns found:\n"]
-  for (const f of data.findings) {
-    lines.push(`  ${f.table}.${f.column}: ${f.category} (${f.confidence} confidence)`)
+  const piiColumns = data.columns ?? data.findings ?? []
+  if (!piiColumns.length) return "No PII columns detected."
+  const lines: string[] = []
+  if (data.risk_level) lines.push(`Risk level: ${data.risk_level}`)
+  if (data.pii_count != null) lines.push(`PII columns: ${data.pii_count} of ${data.total_columns}`)
+  lines.push("")
+  lines.push("PII columns found:")
+  for (const f of piiColumns) {
+    const classification = f.classification ?? f.category ?? "PII"
+    const confidence = f.confidence ?? "high"
+    const table = f.table ?? "unknown"
+    const column = f.column ?? "unknown"
+    lines.push(`  ${table}.${column}: ${classification} (${confidence} confidence)`)
+    if (f.suggested_masking) lines.push(`    Masking: ${f.suggested_masking}`)
   }
   return lines.join("\n")
 }

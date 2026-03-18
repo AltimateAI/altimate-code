@@ -131,11 +131,15 @@ register("altimate_core.transpile", async (params) => {
     // Post-process QUALIFY for targets that lack native support
     const targetLower = params.to_dialect.toLowerCase()
     if (QUALIFY_TARGETS.has(targetLower)) {
-      const translated =
-        (data.sql as string) || (data.translated_sql as string) || ""
-      if (translated && translated.toUpperCase().includes("QUALIFY")) {
-        const fixed = postprocessQualify(translated)
-        if ("sql" in data) {
+      // Rust returns transpiled_sql as string[] — use first element
+      const transpiled = Array.isArray(data.transpiled_sql)
+        ? (data.transpiled_sql as string[])[0]
+        : (data.transpiled_sql as string) || (data.sql as string) || (data.translated_sql as string) || ""
+      if (transpiled && transpiled.toUpperCase().includes("QUALIFY")) {
+        const fixed = postprocessQualify(transpiled)
+        if (Array.isArray(data.transpiled_sql)) {
+          ;(data.transpiled_sql as string[])[0] = fixed
+        } else if ("sql" in data) {
           data.sql = fixed
         } else {
           data.translated_sql = fixed
@@ -326,12 +330,14 @@ register("altimate_core.query_pii", async (params) => {
   }
 })
 
-// 19. altimate_core.resolve_term
+// 19. altimate_core.resolve_term — returns array, must wrap
 register("altimate_core.resolve_term", async (params) => {
   try {
     const schema = schemaOrEmpty(params.schema_path, params.schema_context)
     const raw = core.resolveTerm(params.term, schema)
-    return ok(true, toData(raw))
+    // Rust returns an array of matches — wrap for consistent object shape
+    const matches = Array.isArray(raw) ? JSON.parse(JSON.stringify(raw)) : []
+    return ok(matches.length > 0, { matches })
   } catch (e) {
     return fail(e)
   }

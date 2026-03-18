@@ -42,8 +42,8 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
 })
 
 function formatAnalysis(result: SqlAnalyzeResult): string {
-  if (!result.success) {
-    return `Analysis failed: ${result.error ?? "Unknown error"}`
+  if (result.error) {
+    return `Analysis failed: ${result.error}`
   }
 
   if (result.issues.length === 0) {

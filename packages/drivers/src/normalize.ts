@@ -27,8 +27,11 @@ const COMMON_ALIASES: AliasMap = {
 const SNOWFLAKE_ALIASES: AliasMap = {
   ...COMMON_ALIASES,
   private_key_path: ["privateKeyPath"],
-  private_key_passphrase: ["privateKeyPassphrase"],
+  private_key_passphrase: ["privateKeyPassphrase", "privateKeyPass"],
   private_key: ["privateKey"],
+  access_token: ["token"],
+  oauth_client_id: ["oauthClientId"],
+  oauth_client_secret: ["oauthClientSecret"],
 }
 
 const BIGQUERY_ALIASES: AliasMap = {

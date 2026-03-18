@@ -1,30 +1,26 @@
-fix: `altimate-dbt` compile, execute, and children commands — CLI fallbacks for dbt 1.11+ (#252)
+fix: harden auth field handling for all warehouse drivers (#267)
 
-The `@altimateai/dbt-integration` library's JSON output parsing breaks with
-newer dbt versions (1.11.x) where the log format changed. Three commands
-were affected:
+Add config field name normalization so LLM-generated, dbt, and SDK
+field names all resolve to canonical snake_case before reaching drivers.
 
-- `execute`: `dbt show` output no longer contains `data.preview` in the
-  expected format — `d[0].data` throws when the filter returns empty.
-- `compile`: `dbt compile` output no longer contains `data.compiled` —
-  same `o[0].data` pattern failure.
-- `children`: `nodeMetaMap.lookupByBaseName()` fails when the manifest
-  file-path resolution doesn't populate the model-name lookup map.
+- Add `normalizeConfig()` in `@altimateai/drivers` with per-driver alias
+  maps (Snowflake, BigQuery, Databricks, Redshift, PostgreSQL, MySQL,
+  SQL Server, Oracle) and common aliases (`username` → `user`,
+  `dbname` → `database`)
+- Call `normalizeConfig()` before both `resolveConfig()` and
+  `saveConnection()` in registry so credential store uses canonical names
+- Add Snowflake inline PEM support via `config.private_key`
+- Add BigQuery `credentials_json` (inline JSON) support
+- Add MySQL SSL construction from top-level `ssl_ca`/`ssl_cert`/`ssl_key`
+  fields at connection time (not during normalization, to preserve
+  credential store detection)
+- Expand `SENSITIVE_FIELDS` with `private_key`, `token`,
+  `credentials_json`, `keyfile_json`, `ssl_key`, `ssl_cert`, `ssl_ca`
+- Update `sensitiveKeys` in `project-scan.ts` to match
+- Fix `detectAuthMethod()` to recognize inline `private_key`
+- Update `warehouse_add` tool description with per-warehouse field docs
+- Add 72 unit tests for normalization logic
 
-Additionally, `tryExecuteViaDbt` in opencode incorrectly expected
-`raw.table` on `QueryExecutionResult`, which actually has `{ columnNames,
-columnTypes, data }` — causing the dbt-first execution path to always
-fall through to native drivers silently.
-
-Fixes:
-- Add try-catch in execute/compile/graph commands with fallback to direct
-  `dbt` CLI subprocess calls (`dbt show`, `dbt compile`, `dbt ls`)
-- New `dbt-cli.ts` module with resilient multi-format JSON output parsing
-  (handles `data.preview`, `data.rows`, `data.compiled`, `data.compiled_code`,
-  `result.node.compiled_code`)
-- Fix `tryExecuteViaDbt` to recognize `QueryExecutionResult` shape first,
-  then fall back to legacy `raw.table` format
-
-Closes #252
+Closes #267
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

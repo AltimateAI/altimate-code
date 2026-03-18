@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { isSensitiveField } from "../native/connections/credential-store"
 
 export const DbtProfilesTool = Tool.define("dbt_profiles", {
   description:
@@ -52,7 +53,7 @@ function formatConnections(connections: Array<{ name: string; type: string; conf
   for (const conn of connections) {
     lines.push(`${conn.name} (${conn.type})`)
     for (const [key, val] of Object.entries(conn.config)) {
-      if (key === "password" || key === "private_key_passphrase" || key === "access_token") {
+      if (isSensitiveField(key)) {
         lines.push(`  ${key}: ****`)
       } else {
         lines.push(`  ${key}: ${val}`)

@@ -276,21 +276,35 @@ my-dbt-project/
 
 ## Using with Claude Code
 
-altimate works as a standalone agent, but you can also invoke it from within Claude Code sessions. Claude Code can call altimate's tools when working on data projects:
+altimate works as a standalone agent, but you can also invoke it from within Claude Code sessions. Run `/configure-claude` inside altimate to set up the integration:
+
+```
+/configure-claude
+```
+
+This creates a `/altimate` command in Claude Code. You can then use it in any Claude Code session:
 
 ```bash
-# In Claude Code, use the /data skill to route to altimate
-/data "analyze the cost of our top 10 most expensive queries"
+# In Claude Code
+/altimate analyze the cost of our top 10 most expensive queries
 ```
+
+See [Using with Claude Code](data-engineering/guides/using-with-claude-code.md) for detailed workflows.
 
 ## Using with Codex
 
-If you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backend at no additional API cost:
+altimate integrates with Codex in two ways:
+
+**As a Codex CLI skill** — run `/configure-codex` inside altimate to install an `altimate` skill in Codex CLI. Restart Codex, and it can delegate data engineering tasks to altimate automatically.
+
+**As an LLM provider** — if you have a ChatGPT Plus/Pro subscription, you can use Codex as your LLM backend at no additional API cost:
 
 1. Run `/connect` in the TUI
 2. Select **Codex** as your provider
 3. Authenticate via browser OAuth
 4. Your subscription covers all usage — no API keys needed
+
+See [Using with Codex](data-engineering/guides/using-with-codex.md) for details.
 
 ## Verify your setup
 
