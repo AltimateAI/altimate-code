@@ -37,6 +37,15 @@ fi
 # --- Resolve binary ---
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
+
+# Detect Rosetta 2: if the shell runs under Rosetta on Apple Silicon,
+# uname -m reports x86_64 but bun builds a native arm64 binary.
+if [ "$OS" = "darwin" ] && [ "$ARCH" = "x86_64" ]; then
+  if sysctl -n sysctl.proc_translated 2>/dev/null | grep -q 1; then
+    ARCH="arm64"
+  fi
+fi
+
 case "$ARCH" in
   aarch64|arm64) ARCH="arm64" ;;
   x86_64)        ARCH="x64" ;;
