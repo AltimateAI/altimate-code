@@ -33,7 +33,7 @@ For the best experience — especially with file watching, shell tools, and dbt 
 
 3. Install altimate:
    ```bash
-   npm install -g @altimateai/altimate-code
+   npm install -g altimate-code
    ```
 
 4. Launch:

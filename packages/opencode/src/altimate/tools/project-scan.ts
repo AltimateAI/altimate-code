@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import { existsSync, readFileSync } from "fs"
 import path from "path"
 import { Telemetry } from "@/telemetry"
@@ -185,6 +185,42 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
         password: "REDSHIFT_PASSWORD",
       },
     },
+    {
+      type: "sqlserver",
+      signals: ["MSSQL_HOST", "SQLSERVER_HOST"],
+      configMap: {
+        host: ["MSSQL_HOST", "SQLSERVER_HOST"],
+        port: ["MSSQL_PORT", "SQLSERVER_PORT"],
+        database: ["MSSQL_DATABASE", "SQLSERVER_DATABASE"],
+        user: ["MSSQL_USER", "SQLSERVER_USER"],
+        password: ["SA_PASSWORD", "MSSQL_SA_PASSWORD", "MSSQL_PASSWORD", "SQLSERVER_PASSWORD"],
+      },
+    },
+    {
+      type: "oracle",
+      signals: ["ORACLE_HOST", "ORACLE_SID", "ORACLE_SERVICE_NAME"],
+      configMap: {
+        host: "ORACLE_HOST",
+        port: "ORACLE_PORT",
+        user: "ORACLE_USER",
+        password: "ORACLE_PASSWORD",
+        database: ["ORACLE_SID", "ORACLE_SERVICE_NAME", "ORACLE_DATABASE"],
+      },
+    },
+    {
+      type: "duckdb",
+      signals: ["DUCKDB_PATH", "DUCKDB_DATABASE"],
+      configMap: {
+        database: ["DUCKDB_PATH", "DUCKDB_DATABASE"],
+      },
+    },
+    {
+      type: "sqlite",
+      signals: ["SQLITE_PATH", "SQLITE_DATABASE"],
+      configMap: {
+        database: ["SQLITE_PATH", "SQLITE_DATABASE"],
+      },
+    },
   ]
 
   for (const wh of warehouses) {
@@ -225,6 +261,11 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
       redshift: "redshift",
       sqlite: "sqlite",
       sqlite3: "sqlite",
+      mssql: "sqlserver",
+      sqlserver: "sqlserver",
+      oracle: "oracle",
+      duckdb: "duckdb",
+      databricks: "databricks",
     }
     const dbType = schemeTypeMap[scheme] ?? "postgres"
     // Only add if we don't already have this type detected from other env vars
@@ -393,28 +434,28 @@ export const ProjectScanTool = Tool.define("project_scan", {
     ])
 
     // Run bridge-dependent detections with individual error handling
-    const engineHealth = await Bridge.call("ping", {} as any)
+    const engineHealth = await Dispatcher.call("ping", {} as any)
       .then((r) => ({ healthy: true, status: r.status }))
       .catch(() => ({ healthy: false, status: undefined as string | undefined }))
 
-    const existingConnections = await Bridge.call("warehouse.list", {})
+    const existingConnections = await Dispatcher.call("warehouse.list", {})
       .then((r) => r.warehouses)
       .catch(() => [] as Array<{ name: string; type: string; database?: string }>)
 
-    const dbtProfiles = await Bridge.call("dbt.profiles", {})
+    const dbtProfiles = await Dispatcher.call("dbt.profiles", {})
       .then((r) => r.connections ?? [])
       .catch(() => [] as Array<{ name: string; type: string; config: Record<string, unknown> }>)
 
     const dockerContainers = args.skip_docker
       ? []
-      : await Bridge.call("warehouse.discover", {} as any)
+      : await Dispatcher.call("warehouse.discover", {} as any)
           .then((r) => r.containers ?? [])
           .catch(() => [] as Array<{ name: string; db_type: string; host: string; port: number; database?: string }>)
 
-    const schemaCache = await Bridge.call("schema.cache_status", {}).catch(() => null)
+    const schemaCache = await Dispatcher.call("schema.cache_status", {}).catch(() => null)
 
     const dbtManifest = dbtProject.manifestPath
-      ? await Bridge.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => null)
+      ? await Dispatcher.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => null)
       : null
 
     // Deduplicate connections

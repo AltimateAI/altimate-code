@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreMigrationTool = Tool.define("altimate_core_migration", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreMigrationTool = Tool.define("altimate_core_migration", 
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.migration", {
+      const result = await Dispatcher.call("altimate_core.migration", {
         old_ddl: args.old_ddl,
         new_ddl: args.new_ddl,
         dialect: args.dialect ?? "",

@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SqlExplainResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SqlExplainResult } from "../native/types"
 
 export const SqlExplainTool = Tool.define("sql_explain", {
   description:
@@ -13,7 +13,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.explain", {
+      const result = await Dispatcher.call("sql.explain", {
         sql: args.sql,
         warehouse: args.warehouse,
         analyze: args.analyze,
@@ -37,7 +37,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
       return {
         title: "Explain: ERROR",
         metadata: { success: false, analyzed: false, warehouse_type: "unknown" },
-        output: `Failed to run EXPLAIN: ${msg}\n\nEnsure a warehouse connection is configured and the Python bridge is running.`,
+        output: `Failed to run EXPLAIN: ${msg}\n\nEnsure a warehouse connection is configured and the dispatcher is running.`,
       }
     }
   },

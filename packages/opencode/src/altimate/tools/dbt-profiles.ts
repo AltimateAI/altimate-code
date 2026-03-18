@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const DbtProfilesTool = Tool.define("dbt_profiles", {
   description:
@@ -10,7 +10,7 @@ export const DbtProfilesTool = Tool.define("dbt_profiles", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("dbt.profiles", {
+      const result = await Dispatcher.call("dbt.profiles", {
         path: args.path,
       })
 

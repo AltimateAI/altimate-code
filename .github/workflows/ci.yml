@@ -21,8 +21,7 @@ jobs:
     timeout-minutes: 2
     outputs:
       typescript: ${{ steps.filter.outputs.typescript }}
-      python: ${{ steps.filter.outputs.python }}
-      lint: ${{ steps.filter.outputs.lint }}
+      drivers: ${{ steps.filter.outputs.drivers }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -32,6 +31,7 @@ jobs:
           filters: |
             typescript:
               - 'packages/opencode/**'
+              - 'packages/drivers/**'
               - 'packages/plugin/**'
               - 'packages/sdk/**'
               - 'packages/util/**'
@@ -39,11 +39,17 @@ jobs:
               - 'bun.lock'
               - 'package.json'
               - 'tsconfig.json'
-            python:
-              - 'packages/altimate-engine/**'
-            lint:
-              - 'packages/altimate-engine/src/**'
+            drivers:
+              - 'packages/drivers/src/**'
+              - 'packages/opencode/src/altimate/native/connections/**'
+              - 'packages/opencode/test/altimate/drivers-e2e.test.ts'
+              - 'packages/opencode/test/altimate/drivers-docker-e2e.test.ts'
+              - 'packages/opencode/test/altimate/connections.test.ts'
 
+  # ---------------------------------------------------------------------------
+  # Main TypeScript tests — excludes driver E2E tests (separate job) and
+  # cloud credential tests (local-only).
+  # ---------------------------------------------------------------------------
   typescript:
     name: TypeScript
     needs: changes
@@ -76,6 +82,119 @@ jobs:
       - name: Run tests
         run: bun test
         working-directory: packages/opencode
+        # Cloud E2E tests (Snowflake, BigQuery, Databricks) auto-skip when
+        # ALTIMATE_CODE_CONN_* env vars are not set. Docker E2E tests auto-skip
+        # when Docker is not available. No exclusion needed — skipIf handles it.
+
+  # ---------------------------------------------------------------------------
+  # Driver E2E tests — only when driver code changes.
+  # Uses GitHub Actions services (no Docker-in-Docker).
+  # Cloud tests (Snowflake, BigQuery, Databricks) are NOT run here —
+  # they require real credentials and are run locally only.
+  # ---------------------------------------------------------------------------
+  driver-e2e:
+    name: Driver E2E
+    needs: changes
+    if: needs.changes.outputs.drivers == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: testpass123
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass123
+          MYSQL_DATABASE: testdb
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      mssql:
+        image: mcr.microsoft.com/azure-sql-edge:latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: TestPass123!
+        ports:
+          - 11433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'TestPass123!' -Q 'SELECT 1' || exit 1"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 20
+
+      redshift:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: testpass123
+          POSTGRES_DB: dev
+        ports:
+          - 15439:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run local driver E2E (DuckDB, SQLite, PostgreSQL)
+        run: bun test test/altimate/drivers-e2e.test.ts
+        working-directory: packages/opencode
+        env:
+          TEST_PG_HOST: 127.0.0.1
+          TEST_PG_PORT: "15432"
+          TEST_PG_PASSWORD: testpass123
+
+      - name: Run Docker driver E2E (MySQL, SQL Server, Redshift)
+        run: bun test test/altimate/drivers-docker-e2e.test.ts
+        working-directory: packages/opencode
+        env:
+          TEST_MYSQL_HOST: 127.0.0.1
+          TEST_MYSQL_PORT: "13306"
+          TEST_MYSQL_PASSWORD: testpass123
+          TEST_MSSQL_HOST: 127.0.0.1
+          TEST_MSSQL_PORT: "11433"
+          TEST_MSSQL_PASSWORD: "TestPass123!"
+          TEST_REDSHIFT_HOST: 127.0.0.1
+          TEST_REDSHIFT_PORT: "15439"
+          TEST_REDSHIFT_PASSWORD: testpass123
+
+      # Cloud tests NOT included — they require real credentials
+      # Run locally with:
+      #   ALTIMATE_CODE_CONN_SNOWFLAKE_TEST='...' bun test test/altimate/drivers-snowflake-e2e.test.ts
+      #   ALTIMATE_CODE_CONN_BIGQUERY_TEST='...' bun test test/altimate/drivers-bigquery-e2e.test.ts
+      #   ALTIMATE_CODE_CONN_DATABRICKS_TEST='...' bun test test/altimate/drivers-databricks-e2e.test.ts
 
   marker-guard:
     name: Marker Guard
@@ -102,56 +221,9 @@ jobs:
 
       - name: Check for missing altimate_change markers
         run: |
-          # Skip strict marker enforcement for upstream merge PRs — all changes come from upstream
           if [[ "${{ github.head_ref }}" == merge-upstream-* ]] || [[ "${{ github.head_ref }}" == upstream/merge-* ]]; then
             echo "Upstream merge PR detected — running marker check in non-strict mode"
             bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }}
           else
             bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }} --strict
           fi
-
-  lint:
-    name: Lint
-    needs: changes
-    if: needs.changes.outputs.lint == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-
-      - name: Install linter
-        run: pip install ruff==0.9.10
-
-      - name: Lint
-        run: ruff check src
-        working-directory: packages/altimate-engine
-
-  python:
-    name: Python ${{ matrix.python-version }}
-    needs: changes
-    if: needs.changes.outputs.python == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-          cache-dependency-path: packages/altimate-engine/pyproject.toml
-
-      - name: Install dependencies
-        run: pip install -e ".[dev,warehouses]"
-        working-directory: packages/altimate-engine
-
-      - name: Run tests
-        run: pytest
-        working-directory: packages/altimate-engine

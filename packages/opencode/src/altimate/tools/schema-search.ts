@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SchemaSearchResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SchemaSearchResult } from "../native/types"
 
 export const SchemaSearchTool = Tool.define("schema_search", {
   description:
@@ -13,7 +13,7 @@ export const SchemaSearchTool = Tool.define("schema_search", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.search", {
+      const result = await Dispatcher.call("schema.search", {
         query: args.query,
         warehouse: args.warehouse,
         limit: args.limit,
@@ -41,7 +41,7 @@ export const SchemaSearchTool = Tool.define("schema_search", {
       return {
         title: "Schema Search: ERROR",
         metadata: { matchCount: 0, tableCount: 0, columnCount: 0 },
-        output: `Failed to search schema: ${msg}\n\nEnsure schema_index has been run and the Python bridge is running.`,
+        output: `Failed to search schema: ${msg}\n\nEnsure schema_index has been run and the dispatcher is running.`,
       }
     }
   },

@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import { formatBytes, truncateQuery } from "./finops-formatting"
 
 function formatQueryHistory(summary: Record<string, unknown>, queries: unknown[]): string {
@@ -56,7 +56,7 @@ export const FinopsQueryHistoryTool = Tool.define("finops_query_history", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.query_history", {
+      const result = await Dispatcher.call("finops.query_history", {
         warehouse: args.warehouse,
         days: args.days,
         limit: args.limit,

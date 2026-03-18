@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SchemaDiffResult, ColumnChange } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SchemaDiffResult, ColumnChange } from "../native/types"
 
 export const SchemaDiffTool = Tool.define("schema_diff", {
   description:
@@ -21,7 +21,7 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.schema_diff", {
+      const result = await Dispatcher.call("sql.schema_diff", {
         old_sql: args.old_sql,
         new_sql: args.new_sql,
         dialect: args.dialect,
@@ -46,7 +46,7 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
       return {
         title: "Schema Diff: ERROR",
         metadata: { success: false, changeCount: 0, breakingCount: 0, hasBreakingChanges: false },
-        output: `Failed to diff schema: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to diff schema: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

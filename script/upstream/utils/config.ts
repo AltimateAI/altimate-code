@@ -199,22 +199,22 @@ const productNameRules: StringReplacement[] = [
 const npmInstallRules: StringReplacement[] = [
   {
     pattern: /bun i -g opencode-ai/g,
-    replacement: "bun i -g @altimateai/altimate-code",
+    replacement: "bun i -g altimate-code",
     description: "bun global install",
   },
   {
     pattern: /npm install -g opencode-ai/g,
-    replacement: "npm install -g @altimateai/altimate-code",
+    replacement: "npm install -g altimate-code",
     description: "npm global install",
   },
   {
     pattern: /npm i -g opencode-ai/g,
-    replacement: "npm i -g @altimateai/altimate-code",
+    replacement: "npm i -g altimate-code",
     description: "npm short global install",
   },
   {
     pattern: /npx opencode-ai/g,
-    replacement: "npx @altimateai/altimate-code",
+    replacement: "npx altimate-code",
     description: "npx invocation",
   },
 ]
@@ -259,8 +259,10 @@ export const defaultConfig: MergeConfig = {
     "github/index.ts",
     "install",
     "packages/altimate-engine/**",
+    "packages/drivers/**",
     "packages/opencode/src/altimate/**",
     "packages/opencode/src/bridge/**",
+    "packages/opencode/test/altimate/**",
     // Build and publish scripts have critical branding (binary name, user-agent,
     // engine version embedding, archive naming, altimate-code symlink)
     "packages/opencode/script/build.ts",

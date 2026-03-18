@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreTestgenTool = Tool.define("altimate_core_testgen", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreTestgenTool = Tool.define("altimate_core_testgen", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.testgen", {
+      const result = await Dispatcher.call("altimate_core.testgen", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

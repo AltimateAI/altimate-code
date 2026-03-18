@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SchemaInspectResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SchemaInspectResult } from "../native/types"
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
   description: "Inspect database schema — list columns, types, and constraints for a table.",
@@ -12,7 +12,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.inspect", {
+      const result = await Dispatcher.call("schema.inspect", {
         table: args.table,
         schema_name: args.schema_name,
         warehouse: args.warehouse,
@@ -28,7 +28,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       return {
         title: "Schema: ERROR",
         metadata: { columnCount: 0, rowCount: undefined },
-        output: `Failed to inspect schema: ${msg}\n\nEnsure the Python bridge is running and a warehouse connection is configured.`,
+        output: `Failed to inspect schema: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
       }
     }
   },

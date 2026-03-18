@@ -1,13 +1,13 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const WarehouseListTool = Tool.define("warehouse_list", {
   description: "List all configured warehouse connections. Shows connection name, type, and database.",
   parameters: z.object({}),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("warehouse.list", {})
+      const result = await Dispatcher.call("warehouse.list", {})
 
       if (result.warehouses.length === 0) {
         return {
@@ -32,7 +32,7 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
       return {
         title: "Warehouses: ERROR",
         metadata: { count: 0 },
-        output: `Failed to list warehouses: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to list warehouses: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

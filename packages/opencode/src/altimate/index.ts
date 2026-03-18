@@ -1,9 +1,10 @@
 // Barrel export for all Altimate custom code
 
-// Bridge
-export { Bridge } from "./bridge/client"
-export { ensureEngine, enginePythonPath } from "./bridge/engine"
-export * from "./bridge/protocol"
+// Protocol types
+export * from "./native/types"
+
+// Native dispatcher (all 73 methods implemented in TypeScript)
+export { Dispatcher } from "./native"
 
 // Telemetry
 export { Telemetry } from "./telemetry"
@@ -45,7 +46,7 @@ export * from "./tools/altimate-core-validate"
 export * from "./tools/dbt-lineage"
 export * from "./tools/dbt-manifest"
 export * from "./tools/dbt-profiles"
-export * from "./tools/dbt-run"
+
 export * from "./tools/finops-analyze-credits"
 export * from "./tools/finops-expensive-queries"
 export * from "./tools/finops-query-history"

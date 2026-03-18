@@ -66,7 +66,7 @@ export namespace Telemetry {
         error?: string
       }
     | {
-        type: "bridge_call"
+        type: "native_call"
         timestamp: number
         session_id: string
         method: string
@@ -147,6 +147,9 @@ export namespace Telemetry {
         error_message: string
         http_status?: number
       }
+    // DEPRECATED: Python engine eliminated. These event types are retained
+    // for backward compatibility with existing telemetry dashboards but
+    // are never fired by the native TypeScript implementation.
     | {
         type: "engine_started"
         timestamp: number
@@ -274,6 +277,59 @@ export namespace Telemetry {
         total_chars: number
         budget: number
         scopes_used: string[]
+      }
+    | {
+        type: "warehouse_connect"
+        timestamp: number
+        session_id: string
+        warehouse_type: string
+        auth_method: string
+        success: boolean
+        duration_ms: number
+        error?: string
+        error_category?: string
+      }
+    | {
+        type: "warehouse_query"
+        timestamp: number
+        session_id: string
+        warehouse_type: string
+        query_type: string
+        success: boolean
+        duration_ms: number
+        row_count: number
+        truncated: boolean
+        error?: string
+        error_category?: string
+      }
+    | {
+        type: "warehouse_introspection"
+        timestamp: number
+        session_id: string
+        warehouse_type: string
+        operation: string
+        success: boolean
+        duration_ms: number
+        result_count: number
+        error?: string
+      }
+    | {
+        type: "warehouse_discovery"
+        timestamp: number
+        session_id: string
+        source: string
+        connections_found: number
+        warehouse_types: string[]
+      }
+    | {
+        type: "warehouse_census"
+        timestamp: number
+        session_id: string
+        total_connections: number
+        warehouse_types: string[]
+        connection_sources: string[]
+        has_ssh_tunnel: boolean
+        has_keychain: boolean
       }
 
   const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep", "bash"])
@@ -453,6 +509,11 @@ export namespace Telemetry {
 
   export function getContext() {
     return { sessionId, projectId }
+  }
+
+  /** Returns true only after init() has completed and telemetry is enabled. */
+  export function isEnabled(): boolean {
+    return initDone && enabled
   }
 
   export function track(event: Event) {

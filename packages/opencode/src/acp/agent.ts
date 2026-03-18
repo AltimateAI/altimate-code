@@ -520,22 +520,24 @@ export namespace ACP {
     async initialize(params: InitializeRequest): Promise<InitializeResponse> {
       log.info("initialize", { protocolVersion: params.protocolVersion })
 
+      // altimate_change start — branding: altimate auth
       const authMethod: AuthMethod = {
-        description: "Run `opencode auth login` in the terminal",
-        name: "Login with opencode",
-        id: "opencode-login",
+        description: "Run `altimate auth login` in the terminal",
+        name: "Login with altimate",
+        id: "altimate-login",
       }
 
       // If client supports terminal-auth capability, use that instead.
       if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
         authMethod._meta = {
           "terminal-auth": {
-            command: "opencode",
+            command: "altimate",
             args: ["auth", "login"],
             label: "Altimate Code Login",
           },
         }
       }
+      // altimate_change end
 
       return {
         protocolVersion: 1,

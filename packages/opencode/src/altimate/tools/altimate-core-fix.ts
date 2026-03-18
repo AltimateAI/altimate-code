@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
   description:
@@ -13,7 +13,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.fix", {
+      const result = await Dispatcher.call("altimate_core.fix", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

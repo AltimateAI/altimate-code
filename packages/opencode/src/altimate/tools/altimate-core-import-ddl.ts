@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreImportDdlTool = Tool.define("altimate_core_import_ddl", {
   description:
@@ -11,7 +11,7 @@ export const AltimateCoreImportDdlTool = Tool.define("altimate_core_import_ddl",
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.import_ddl", {
+      const result = await Dispatcher.call("altimate_core.import_ddl", {
         ddl: args.ddl,
         dialect: args.dialect ?? "",
       })

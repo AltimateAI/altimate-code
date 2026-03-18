@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreFingerprintTool = Tool.define("altimate_core_fingerprint", {
   description:
@@ -11,7 +11,7 @@ export const AltimateCoreFingerprintTool = Tool.define("altimate_core_fingerprin
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.fingerprint", {
+      const result = await Dispatcher.call("altimate_core.fingerprint", {
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
       })

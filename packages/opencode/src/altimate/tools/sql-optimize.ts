@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../native/types"
 
 export const SqlOptimizeTool = Tool.define("sql_optimize", {
   description:
@@ -22,7 +22,7 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.optimize", {
+      const result = await Dispatcher.call("sql.optimize", {
         sql: args.sql,
         dialect: args.dialect,
         ...(args.schema_context ? { schema_context: args.schema_context } : {}),
@@ -47,7 +47,7 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
       return {
         title: "Optimize: ERROR",
         metadata: { success: false, suggestionCount: 0, antiPatternCount: 0, hasOptimizedSql: false, confidence: "unknown" },
-        output: `Failed to optimize SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to optimize SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

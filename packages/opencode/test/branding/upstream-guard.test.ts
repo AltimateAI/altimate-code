@@ -107,7 +107,7 @@ describe("upstream merge guards", () => {
 
   describe("keep ours directories exist on disk", () => {
     const keepOursDirs = [
-      "packages/altimate-engine",
+      "packages/drivers",
       "script/upstream",
     ]
 

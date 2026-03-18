@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreIntrospectionSqlTool = Tool.define("altimate_core_introspection_sql", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreIntrospectionSqlTool = Tool.define("altimate_core_intro
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.introspection_sql", {
+      const result = await Dispatcher.call("altimate_core.introspection_sql", {
         db_type: args.db_type,
         database: args.database,
         schema_name: args.schema_name,

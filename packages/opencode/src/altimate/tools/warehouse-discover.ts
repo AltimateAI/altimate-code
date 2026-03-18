@@ -1,14 +1,14 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const WarehouseDiscoverTool = Tool.define("warehouse_discover", {
   description:
-    "Discover database containers running in Docker. Detects PostgreSQL, MySQL/MariaDB, and SQL Server containers and extracts connection details from port mappings and environment variables.",
+    "Discover database containers running in Docker. Detects PostgreSQL, MySQL/MariaDB, SQL Server, and Oracle containers and extracts connection details from port mappings and environment variables.",
   parameters: z.object({}),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("warehouse.discover", {})
+      const result = await Dispatcher.call("warehouse.discover", {})
 
       if (result.error) {
         return {
@@ -22,7 +22,7 @@ export const WarehouseDiscoverTool = Tool.define("warehouse_discover", {
         return {
           title: "Discover: no containers found",
           metadata: { count: 0 },
-          output: "No supported database containers found running in Docker.\n\nSupported types: PostgreSQL, MySQL/MariaDB, SQL Server.\nEnsure Docker is running and containers have published ports.",
+          output: "No supported database containers found running in Docker.\n\nSupported types: PostgreSQL, MySQL/MariaDB, SQL Server, Oracle.\nEnsure Docker is running and containers have published ports.",
         }
       }
 

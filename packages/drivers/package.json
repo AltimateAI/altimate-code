@@ -1,0 +1,22 @@
+{
+  "name": "@altimateai/drivers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "files": ["src"],
+  "optionalDependencies": {
+    "pg": "^8.0.0",
+    "snowflake-sdk": "^1.0.0",
+    "@google-cloud/bigquery": "^8.0.0",
+    "@databricks/sql": "^1.0.0",
+    "mysql2": "^3.0.0",
+    "mssql": "^11.0.0",
+    "oracledb": "^6.0.0",
+    "duckdb": "^1.0.0",
+    "better-sqlite3": "^11.0.0"
+  }
+}

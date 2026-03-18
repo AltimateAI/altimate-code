@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const SqlFormatTool = Tool.define("sql_format", {
   description:
@@ -12,7 +12,7 @@ export const SqlFormatTool = Tool.define("sql_format", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.format", {
+      const result = await Dispatcher.call("sql.format", {
         sql: args.sql,
         dialect: args.dialect,
         indent: args.indent,
@@ -36,7 +36,7 @@ export const SqlFormatTool = Tool.define("sql_format", {
       return {
         title: "Format: ERROR",
         metadata: { success: false, statement_count: 0 },
-        output: `Failed to format SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to format SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

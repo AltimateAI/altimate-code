@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SqlExecuteResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SqlExecuteResult } from "../native/types"
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -12,7 +12,7 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.execute", {
+      const result = await Dispatcher.call("sql.execute", {
         sql: args.query,
         warehouse: args.warehouse,
         limit: args.limit,
@@ -29,7 +29,7 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       return {
         title: "SQL: ERROR",
         metadata: { rowCount: 0, truncated: false },
-        output: `Failed to execute SQL: ${msg}\n\nEnsure the Python bridge is running and a warehouse connection is configured.`,
+        output: `Failed to execute SQL: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
       }
     }
   },

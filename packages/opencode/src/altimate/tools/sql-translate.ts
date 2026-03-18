@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SqlTranslateResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SqlTranslateResult } from "../native/types"
 
 export const SqlTranslateTool = Tool.define("sql_translate", {
   description:
@@ -17,7 +17,7 @@ export const SqlTranslateTool = Tool.define("sql_translate", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.translate", {
+      const result = await Dispatcher.call("sql.translate", {
         sql: args.sql,
         source_dialect: args.source_dialect,
         target_dialect: args.target_dialect,
@@ -38,7 +38,7 @@ export const SqlTranslateTool = Tool.define("sql_translate", {
       return {
         title: `Translate: ERROR`,
         metadata: { success: false, source_dialect: args.source_dialect, target_dialect: args.target_dialect, warningCount: 0 },
-        output: `Failed to translate SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to translate SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

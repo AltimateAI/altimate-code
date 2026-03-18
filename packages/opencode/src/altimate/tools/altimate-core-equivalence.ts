@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalence", {
   description:
@@ -13,7 +13,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.equivalence", {
+      const result = await Dispatcher.call("altimate_core.equivalence", {
         sql1: args.sql1,
         sql2: args.sql2,
         schema_path: args.schema_path ?? "",

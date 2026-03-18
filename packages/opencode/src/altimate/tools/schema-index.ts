@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SchemaIndexResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SchemaIndexResult } from "../native/types"
 
 export const SchemaIndexTool = Tool.define("schema_index", {
   description:
@@ -11,7 +11,7 @@ export const SchemaIndexTool = Tool.define("schema_index", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.index", {
+      const result = await Dispatcher.call("schema.index", {
         warehouse: args.warehouse,
       })
 
@@ -29,7 +29,7 @@ export const SchemaIndexTool = Tool.define("schema_index", {
       return {
         title: "Schema Index: ERROR",
         metadata: { schemas: 0, tables: 0, columns: 0 },
-        output: `Failed to index warehouse schema: ${msg}\n\nEnsure the warehouse connection is configured in connections.json and the Python bridge is running.`,
+        output: `Failed to index warehouse schema: ${msg}\n\nEnsure the warehouse connection is configured in connections.json and the dispatcher is running.`,
       }
     }
   },

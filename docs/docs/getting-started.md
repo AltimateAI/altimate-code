@@ -19,7 +19,7 @@ altimate is the open-source data engineering harness — 99+ deterministic tools
 ## Step 1: Install
 
 ```bash
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 ```
 
 After install, you'll see a welcome banner with quick-start commands. On upgrades, the banner also shows what changed since your previous version.

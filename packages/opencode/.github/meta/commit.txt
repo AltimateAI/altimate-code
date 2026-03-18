@@ -1,14 +1,29 @@
-fix: address new Sentry findings — regex m flag and off-by-one budget check
+fix: address all 17 Sentry bot review comments on PR #221
 
-1. formatTrainingEntry regex: remove multiline `m` flag that could
-   match user content mid-string (memory/prompt.ts:82)
+CRITICAL (4):
+- Redshift describeTable: external_type -> data_type in svv_columns query
+- sql.fix handler: return correct SqlFixResult shape (error_message,
+  suggestions, suggestion_count)
+- sql.schema_diff: use Schema.fromDdl() not fromJson() for DDL strings,
+  return flat SchemaDiffResult (not wrapped in data)
+- DuckDB connect: verified correct (db.connect() is sync, no fix needed)
 
-2. Memory block budget check: change `<` to `<=` so blocks that fit
-   exactly into remaining budget are included (memory/prompt.ts:204)
+HIGH (5):
+- analyzeMigration: removed unused combinedDdl, clarified comment
+- Dynamic import: replaced import(variable) with static switch statement
+  for bundler compatibility (10 cases)
+- Race condition: added pending Map for in-flight connector creation,
+  concurrent callers await the same Promise
+- registry.add: cache sanitized config (not unsanitized with plaintext creds)
+- detectPiiLive: return success:false on error (not success:true)
 
-3 prior Sentry findings already fixed in earlier commits:
-   - projectDir cache (Map keyed by Instance.directory)
-   - injectTrainingOnly header-only return (itemCount guard)
-   - orphaned section headers (first-entry pre-check)
+MEDIUM (6):
+- Dispatcher error path: wrap Telemetry.track in try/catch to not mask errors
+- SSH tunnel: add process.exit(0) after SIGINT/SIGTERM cleanup
+- PII detector: add listColumns() to SchemaCache, use instead of search("")
+- sql.autocomplete: pass prefix.length as cursor position (not hardcoded 0)
+- SQL Server describeTable: query sys.objects (tables+views) not just sys.tables
+- Databricks INTERVAL syntax: DATE_SUB takes integer, not INTERVAL expression
+  (fixed in unused-resources.ts and credit-analyzer.ts)
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

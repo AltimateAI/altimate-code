@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SqlAutocompleteResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SqlAutocompleteResult } from "../native/types"
 
 export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
   description:
@@ -22,7 +22,7 @@ export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.autocomplete", {
+      const result = await Dispatcher.call("sql.autocomplete", {
         prefix: args.prefix,
         position: args.position,
         warehouse: args.warehouse,
@@ -48,7 +48,7 @@ export const SqlAutocompleteTool = Tool.define("sql_autocomplete", {
       return {
         title: "Complete: ERROR",
         metadata: { suggestion_count: 0, position: args.position ?? "any" },
-        output: `Failed to get completions: ${msg}\n\nEnsure schema_index has been run and the Python bridge is running.`,
+        output: `Failed to get completions: ${msg}\n\nEnsure schema_index has been run and the dispatcher is running.`,
       }
     }
   },

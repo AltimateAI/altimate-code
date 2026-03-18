@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const WarehouseTestTool = Tool.define("warehouse_test", {
   description: "Test connectivity to a named warehouse connection. Verifies the connection is reachable and credentials are valid.",
@@ -9,7 +9,7 @@ export const WarehouseTestTool = Tool.define("warehouse_test", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("warehouse.test", { name: args.name })
+      const result = await Dispatcher.call("warehouse.test", { name: args.name })
 
       if (result.connected) {
         return {
@@ -29,7 +29,7 @@ export const WarehouseTestTool = Tool.define("warehouse_test", {
       return {
         title: `Connection '${args.name}': ERROR`,
         metadata: { connected: false },
-        output: `Failed to test connection: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to test connection: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

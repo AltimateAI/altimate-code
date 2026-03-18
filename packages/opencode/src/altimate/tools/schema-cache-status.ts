@@ -1,14 +1,14 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SchemaCacheStatusResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SchemaCacheStatusResult } from "../native/types"
 
 export const SchemaCacheStatusTool = Tool.define("schema_cache_status", {
   description: "Show status of the local schema cache — which warehouses are indexed, how many tables/columns, when last refreshed.",
   parameters: z.object({}),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.cache_status", {})
+      const result = await Dispatcher.call("schema.cache_status", {})
 
       return {
         title: `Schema Cache: ${result.total_tables} tables, ${result.total_columns} columns`,
@@ -24,7 +24,7 @@ export const SchemaCacheStatusTool = Tool.define("schema_cache_status", {
       return {
         title: "Schema Cache Status: ERROR",
         metadata: { totalTables: 0, totalColumns: 0, warehouseCount: 0 },
-        output: `Failed to get cache status: ${msg}\n\nEnsure the Python bridge is running.`,
+        output: `Failed to get cache status: ${msg}\n\nEnsure the dispatcher is running.`,
       }
     }
   },

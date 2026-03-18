@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreExtractMetadataTool = Tool.define("altimate_core_extract_metadata", {
   description:
@@ -11,7 +11,7 @@ export const AltimateCoreExtractMetadataTool = Tool.define("altimate_core_extrac
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.metadata", {
+      const result = await Dispatcher.call("altimate_core.metadata", {
         sql: args.sql,
         dialect: args.dialect ?? "",
       })

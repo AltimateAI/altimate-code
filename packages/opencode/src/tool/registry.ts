@@ -44,7 +44,7 @@ import { WarehouseTestTool } from "../altimate/tools/warehouse-test"
 import { WarehouseAddTool } from "../altimate/tools/warehouse-add"
 import { WarehouseRemoveTool } from "../altimate/tools/warehouse-remove"
 import { WarehouseDiscoverTool } from "../altimate/tools/warehouse-discover"
-import { DbtRunTool } from "../altimate/tools/dbt-run"
+
 import { DbtManifestTool } from "../altimate/tools/dbt-manifest"
 import { DbtProfilesTool } from "../altimate/tools/dbt-profiles"
 import { DbtLineageTool } from "../altimate/tools/dbt-lineage"
@@ -218,7 +218,7 @@ export namespace ToolRegistry {
       WarehouseAddTool,
       WarehouseRemoveTool,
       WarehouseDiscoverTool,
-      DbtRunTool,
+
       DbtManifestTool,
       DbtProfilesTool,
       DbtLineageTool,

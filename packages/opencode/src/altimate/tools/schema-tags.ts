@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 function formatTags(tagSummary: unknown, tags: unknown[]): string {
   const lines: string[] = []
@@ -81,7 +81,7 @@ export const SchemaTagsTool = Tool.define("schema_tags", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.tags", {
+      const result = await Dispatcher.call("schema.tags", {
         warehouse: args.warehouse,
         object_name: args.object_name,
         tag_name: args.tag_name,
@@ -120,7 +120,7 @@ export const SchemaTagsListTool = Tool.define("schema_tags_list", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("schema.tags_list", {
+      const result = await Dispatcher.call("schema.tags_list", {
         warehouse: args.warehouse,
         limit: args.limit,
       })

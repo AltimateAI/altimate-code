@@ -604,10 +604,12 @@ export namespace Provider {
       })()
 
       if (!apiToken) {
+        // altimate_change start — branding: altimate auth
         throw new Error(
           "CLOUDFLARE_API_TOKEN (or CF_AIG_TOKEN) is required for Cloudflare AI Gateway. " +
-            "Set it via environment variable or run `opencode auth cloudflare-ai-gateway`.",
+            "Set it via environment variable or run `altimate auth cloudflare-ai-gateway`.",
         )
+        // altimate_change end
       }
 
       // Use official ai-gateway-provider package (v2.x for AI SDK v5 compatibility)

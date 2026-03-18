@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const WarehouseRemoveTool = Tool.define("warehouse_remove", {
   description: "Remove a warehouse connection. Deletes both the config entry and any stored keyring credentials.",
@@ -9,7 +9,7 @@ export const WarehouseRemoveTool = Tool.define("warehouse_remove", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("warehouse.remove", { name: args.name })
+      const result = await Dispatcher.call("warehouse.remove", { name: args.name })
 
       if (result.success) {
         return {

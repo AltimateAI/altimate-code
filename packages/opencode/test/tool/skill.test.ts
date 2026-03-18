@@ -263,6 +263,6 @@ Use this skill.
     } finally {
       process.env.OPENCODE_TEST_HOME = home
     }
-  })
+  }, 15000)
   // altimate_change end
 })

@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { LineageCheckResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { LineageCheckResult } from "../native/types"
 
 export const LineageCheckTool = Tool.define("lineage_check", {
   description:
@@ -20,7 +20,7 @@ export const LineageCheckTool = Tool.define("lineage_check", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("lineage.check", {
+      const result = await Dispatcher.call("lineage.check", {
         sql: args.sql,
         dialect: args.dialect,
         schema_context: args.schema_context,
@@ -45,7 +45,7 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       return {
         title: "Lineage: ERROR",
         metadata: { success: false },
-        output: `Failed to check lineage: ${msg}\n\nEnsure the Python bridge is running and altimate-core is initialized.`,
+        output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
       }
     }
   },

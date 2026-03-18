@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SqlAnalyzeResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SqlAnalyzeResult } from "../native/types"
 
 export const SqlAnalyzeTool = Tool.define("sql_analyze", {
   description:
@@ -16,7 +16,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.analyze", {
+      const result = await Dispatcher.call("sql.analyze", {
         sql: args.sql,
         dialect: args.dialect,
       })
@@ -35,7 +35,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       return {
         title: "Analyze: ERROR",
         metadata: { success: false, issueCount: 0, confidence: "unknown" },
-        output: `Failed to analyze SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

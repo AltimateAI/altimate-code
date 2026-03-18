@@ -813,14 +813,16 @@ function App() {
     })
   })
 
+  // altimate_change start — branding: altimate upgrade
   sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
     toast.show({
       variant: "info",
       title: "Update Available",
-      message: `Altimate Code v${evt.properties.version} is available. Run 'opencode upgrade' to update manually.`,
+      message: `Altimate Code v${evt.properties.version} is available. Run 'altimate upgrade' to update manually.`,
       duration: 10000,
     })
   })
+  // altimate_change end
 
   return (
     <box

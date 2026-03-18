@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreTranspileTool = Tool.define("altimate_core_transpile", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreTranspileTool = Tool.define("altimate_core_transpile", 
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.transpile", {
+      const result = await Dispatcher.call("altimate_core.transpile", {
         sql: args.sql,
         from_dialect: args.from_dialect,
         to_dialect: args.to_dialect,

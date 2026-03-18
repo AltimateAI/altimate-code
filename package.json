@@ -22,7 +22,9 @@
       "packages/plugin",
       "packages/script",
       "packages/util",
-      "packages/sdk/js"
+      "packages/sdk/js",
+      "packages/dbt-tools",
+      "packages/drivers"
     ],
     "catalog": {
       "@types/bun": "1.3.9",
@@ -71,16 +73,23 @@
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
+    "@types/pg": "8.18.0",
     "@typescript/native-preview": "catalog:",
     "husky": "9.1.7",
+    "mssql": "12.2.0",
+    "mysql2": "3.20.0",
+    "pg": "8.20.0",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
     "turbo": "2.8.13"
   },
   "dependencies": {
+    "@databricks/sql": "1.13.0",
+    "@google-cloud/bigquery": "8.1.1",
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/script": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",
+    "snowflake-sdk": "2.3.5",
     "typescript": "catalog:"
   },
   "repository": {

@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const WarehouseAddTool = Tool.define("warehouse_add", {
   description:
@@ -23,7 +23,7 @@ export const WarehouseAddTool = Tool.define("warehouse_add", {
     }
 
     try {
-      const result = await Bridge.call("warehouse.add", {
+      const result = await Dispatcher.call("warehouse.add", {
         name: args.name,
         config: args.config,
       })

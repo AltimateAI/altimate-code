@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
   description:
@@ -13,7 +13,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.policy", {
+      const result = await Dispatcher.call("altimate_core.policy", {
         sql: args.sql,
         policy_json: args.policy_json,
         schema_path: args.schema_path ?? "",

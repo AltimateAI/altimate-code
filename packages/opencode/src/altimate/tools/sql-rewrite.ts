@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { SqlRewriteResult, SqlRewriteRule } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { SqlRewriteResult, SqlRewriteRule } from "../native/types"
 
 export const SqlRewriteTool = Tool.define("sql_rewrite", {
   description:
@@ -22,7 +22,7 @@ export const SqlRewriteTool = Tool.define("sql_rewrite", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("sql.rewrite", {
+      const result = await Dispatcher.call("sql.rewrite", {
         sql: args.sql,
         dialect: args.dialect,
         ...(args.schema_context ? { schema_context: args.schema_context } : {}),
@@ -46,7 +46,7 @@ export const SqlRewriteTool = Tool.define("sql_rewrite", {
       return {
         title: "Rewrite: ERROR",
         metadata: { success: false, rewriteCount: 0, autoApplyCount: 0, hasRewrittenSql: false },
-        output: `Failed to rewrite SQL: ${msg}\n\nEnsure the Python bridge is running and altimate-engine is installed.`,
+        output: `Failed to rewrite SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
   },

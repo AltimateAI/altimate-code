@@ -31,7 +31,7 @@ hide:
 <div class="hero-install" markdown>
 
 ```bash
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 ```
 
 </div>

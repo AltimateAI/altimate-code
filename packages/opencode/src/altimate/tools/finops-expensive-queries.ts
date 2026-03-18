@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 import { formatBytes, truncateQuery } from "./finops-formatting"
 
 function formatExpensiveQueries(queries: unknown[]): string {
@@ -40,7 +40,7 @@ export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries"
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("finops.expensive_queries", {
+      const result = await Dispatcher.call("finops.expensive_queries", {
         warehouse: args.warehouse,
         days: args.days,
         limit: args.limit,

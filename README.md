@@ -14,8 +14,8 @@ Run standalone in your terminal, embed underneath Claude Code or Codex, or integ
 into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 
 [![npm](https://img.shields.io/npm/v/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
+[![npm](https://img.shields.io/npm/v/@altimateai/altimate-core)](https://www.npmjs.com/package/@altimateai/altimate-core)
 [![npm downloads](https://img.shields.io/npm/dm/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
-[![PyPI](https://img.shields.io/pypi/v/altimate-engine)](https://pypi.org/project/altimate-engine/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![CI](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml/badge.svg)](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml)
 [![Slack](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://altimate.ai/slack)
@@ -183,22 +183,27 @@ altimate ships with built-in skills for every common data engineering task — t
 ```
 altimate (TypeScript CLI)
         |
-   JSON-RPC 2.0 (stdio)
+   @altimateai/altimate-core (napi-rs → Rust)
+   SQL analysis, lineage, PII, safety — 45 functions, ~2ms per call
         |
-altimate-engine (Python)
-   SQL analysis, lineage, dbt, warehouse connections
+   Native Node.js drivers
+   10 warehouses: Snowflake, BigQuery, PostgreSQL, Databricks,
+   Redshift, MySQL, SQL Server, Oracle, DuckDB, SQLite
 ```
 
-The CLI handles AI interactions, TUI, and tool orchestration. The Python engine handles SQL parsing, analysis, lineage computation, and warehouse interactions via a JSON-RPC bridge.
+The CLI handles AI interactions, TUI, and tool orchestration. SQL analysis is powered by the Rust-based `@altimateai/altimate-core` engine via napi-rs bindings (no Python required). Database connectivity uses native Node.js drivers with lazy loading.
 
-**Zero-dependency bootstrap**: On first run the CLI downloads [`uv`](https://github.com/astral-sh/uv), creates an isolated Python environment, and installs the engine with all warehouse drivers automatically. No system Python required.
+**No Python dependency**: All 73 tool methods run natively in TypeScript. No pip, venv, or Python installation needed.
+
+**dbt-first**: When working in a dbt project, the CLI automatically uses dbt's connection from `profiles.yml` — no separate warehouse configuration needed.
 
 ### Monorepo structure
 
 ```
 packages/
-  opencode/            TypeScript CLI (upstream fork name preserved)
-  altimate-engine/     Python engine (SQL, lineage, warehouses)
+  altimate-code/       TypeScript CLI (main entry point)
+  drivers/             Shared database drivers (10 warehouses)
+  dbt-tools/           dbt integration (TypeScript)
   plugin/              Plugin system
   sdk/                 SDKs (includes VS Code extension)
   util/                Shared utilities

@@ -30,34 +30,35 @@ altimate --print-logs --log-level DEBUG
 3. If behind a proxy, set `HTTPS_PROXY` (see [Network](network.md))
 4. Try a different provider to isolate the issue
 
-### Python Bridge Errors
+### Tool Execution Errors
 
-**Symptoms:** "Failed to start Python bridge" or tool execution failures for data engineering tools.
+**Symptoms:** "No native handler" or tool execution failures for data engineering tools.
 
 **Solutions:**
 
-1. Check Python is available:
+1. Ensure `@altimateai/altimate-core` is installed (should be automatic):
    ```bash
-   python3 --version
+   npm ls @altimateai/altimate-core
    ```
-2. The bridge looks for Python in this order:
-   - `ALTIMATE_CLI_PYTHON` environment variable
-   - `.venv/bin/python` in the altimate-engine package directory
-   - `.venv/bin/python` in the current working directory
-   - `python3` in PATH
-3. Ensure required Python packages are installed:
+2. For database tools, ensure the required driver is installed:
    ```bash
-   pip install altimate-engine
+   # Example for Snowflake:
+   bun add snowflake-sdk
+   # Example for PostgreSQL:
+   bun add pg
    ```
+3. No Python installation is required — all tools run natively in TypeScript.
 
 ### Warehouse Connection Failed
 
-**Symptoms:** "Connection refused" or authentication errors.
+**Symptoms:** "Connection refused", authentication errors, or "No warehouse configured".
 
 **Solutions:**
 
-1. Test your warehouse credentials outside altimate
-2. Check that the warehouse hostname and port are reachable
+1. **If using dbt:** Run `altimate-dbt init` to set up the dbt integration. The CLI will use your `profiles.yml` automatically — no separate connection config needed.
+2. **If not using dbt:** Add a connection via the `warehouse_add` tool, `~/.altimate-code/connections.json`, or `ALTIMATE_CODE_CONN_*` env vars.
+3. Test connectivity: use the `warehouse_test` tool with your connection name.
+4. Check that the warehouse hostname and port are reachable
 3. Verify the role/user has the required permissions
 4. For Snowflake: ensure the warehouse is not suspended
 5. For BigQuery: check that the service account has the required IAM roles

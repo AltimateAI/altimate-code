@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreCompleteTool = Tool.define("altimate_core_complete", {
   description:
@@ -13,7 +13,7 @@ export const AltimateCoreCompleteTool = Tool.define("altimate_core_complete", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.complete", {
+      const result = await Dispatcher.call("altimate_core.complete", {
         sql: args.sql,
         cursor_pos: args.cursor_pos,
         schema_path: args.schema_path ?? "",

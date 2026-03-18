@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
-import type { DbtManifestResult } from "../bridge/protocol"
+import { Dispatcher } from "../native"
+import type { DbtManifestResult } from "../native/types"
 
 export const DbtManifestTool = Tool.define("dbt_manifest", {
   description:
@@ -11,7 +11,7 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("dbt.manifest", { path: args.path })
+      const result = await Dispatcher.call("dbt.manifest", { path: args.path })
 
       return {
         title: `Manifest: ${result.model_count} models, ${result.source_count} sources`,
@@ -29,7 +29,7 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
       return {
         title: "Manifest: ERROR",
         metadata: { model_count: 0, source_count: 0, test_count: 0, snapshot_count: 0, seed_count: 0 },
-        output: `Failed to parse manifest: ${msg}\n\nEnsure the manifest.json exists and the Python bridge is running.`,
+        output: `Failed to parse manifest: ${msg}\n\nEnsure the manifest.json exists and the dispatcher is running.`,
       }
     }
   },

@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreExportDdlTool = Tool.define("altimate_core_export_ddl", {
   description:
@@ -11,7 +11,7 @@ export const AltimateCoreExportDdlTool = Tool.define("altimate_core_export_ddl",
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.export_ddl", {
+      const result = await Dispatcher.call("altimate_core.export_ddl", {
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
       })

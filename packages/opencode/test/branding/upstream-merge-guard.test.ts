@@ -336,12 +336,12 @@ describe("Build and package branding", () => {
     expect(buildTs).not.toContain("--user-agent=opencode/")
   })
 
-  test("build.ts embeds ALTIMATE_ENGINE_VERSION", () => {
-    expect(buildTs).toContain("ALTIMATE_ENGINE_VERSION")
+  test("build.ts no longer embeds ALTIMATE_ENGINE_VERSION (Python eliminated)", () => {
+    expect(buildTs).not.toContain("ALTIMATE_ENGINE_VERSION: `'")
   })
 
-  test("build.ts reads engine version from pyproject.toml", () => {
-    expect(buildTs).toContain("altimate-engine/pyproject.toml")
+  test("build.ts no longer reads engine version (Python eliminated)", () => {
+    expect(buildTs).toContain("Python engine has been eliminated")
   })
 
   test("build.ts creates altimate-code backward-compat symlink", () => {
@@ -407,16 +407,16 @@ describe("Repository hygiene", () => {
     // This test mostly validates the .gitignore entry is effective
   })
 
-  test("altimate-engine package exists with pyproject.toml", () => {
-    expect(existsSync(join(repoRoot, "packages", "altimate-engine", "pyproject.toml"))).toBe(true)
+  test("altimate-engine deleted (Python bridge eliminated)", () => {
+    expect(existsSync(join(repoRoot, "packages", "altimate-engine", "pyproject.toml"))).toBe(false)
   })
 
-  test("altimate-engine has server.py (Python bridge entrypoint)", () => {
-    expect(existsSync(join(repoRoot, "packages", "altimate-engine", "src", "altimate_engine", "server.py"))).toBe(true)
+  test("native dispatcher exists (replaces Python bridge)", () => {
+    expect(existsSync(join(srcDir, "altimate", "native", "dispatcher.ts"))).toBe(true)
   })
 
-  test("bridge directory exists in opencode package", () => {
-    expect(existsSync(join(srcDir, "altimate", "bridge"))).toBe(true)
+  test("drivers package exists", () => {
+    expect(existsSync(join(repoRoot, "packages", "drivers", "src", "index.ts"))).toBe(true)
   })
 })
 
@@ -430,9 +430,10 @@ describe("Config integrity", () => {
   test("config.ts contains critical keepOurs patterns", () => {
     const criticalKeepOurs = [
       "packages/altimate-engine/**",
+      "packages/drivers/**",
       "script/upstream/**",
       "packages/opencode/src/altimate/**",
-      "packages/opencode/src/bridge/**",
+      "packages/opencode/test/altimate/**",
       "packages/opencode/script/build.ts",
       "packages/opencode/script/publish.ts",
       "packages/opencode/bin/**",

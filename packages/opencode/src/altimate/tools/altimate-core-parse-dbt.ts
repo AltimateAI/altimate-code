@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
   description:
@@ -10,7 +10,7 @@ export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.parse_dbt", {
+      const result = await Dispatcher.call("altimate_core.parse_dbt", {
         project_dir: args.project_dir,
       })
       const data = result.data as Record<string, any>

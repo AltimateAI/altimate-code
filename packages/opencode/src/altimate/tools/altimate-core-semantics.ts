@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.semantics", {
+      const result = await Dispatcher.call("altimate_core.semantics", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

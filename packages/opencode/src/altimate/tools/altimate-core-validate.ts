@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
   description:
@@ -12,7 +12,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.validate", {
+      const result = await Dispatcher.call("altimate_core.validate", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,

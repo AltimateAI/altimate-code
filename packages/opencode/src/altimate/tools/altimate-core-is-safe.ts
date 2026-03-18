@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreIsSafeTool = Tool.define("altimate_core_is_safe", {
   description:
@@ -10,7 +10,7 @@ export const AltimateCoreIsSafeTool = Tool.define("altimate_core_is_safe", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.is_safe", {
+      const result = await Dispatcher.call("altimate_core.is_safe", {
         sql: args.sql,
       })
       const data = result.data as Record<string, any>

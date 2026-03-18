@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Bridge } from "../bridge/client"
+import { Dispatcher } from "../native"
 
 export const AltimateCoreOptimizeContextTool = Tool.define("altimate_core_optimize_context", {
   description:
@@ -11,7 +11,7 @@ export const AltimateCoreOptimizeContextTool = Tool.define("altimate_core_optimi
   }),
   async execute(args, ctx) {
     try {
-      const result = await Bridge.call("altimate_core.optimize_context", {
+      const result = await Dispatcher.call("altimate_core.optimize_context", {
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
       })
