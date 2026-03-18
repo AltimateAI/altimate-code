@@ -1439,3 +1439,67 @@ describe("telemetry.memory", () => {
     }).not.toThrow()
   })
 })
+
+// ---------------------------------------------------------------------------
+// 14. Telemetry.isEnabled() state machine
+// ---------------------------------------------------------------------------
+describe("Telemetry.isEnabled()", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("returns false before init() is called", () => {
+    expect(Telemetry.isEnabled()).toBe(false)
+  })
+
+  test("returns false after init() when ALTIMATE_TELEMETRY_DISABLED=true", async () => {
+    const orig = process.env.ALTIMATE_TELEMETRY_DISABLED
+    try {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(false)
+    } finally {
+      if (orig !== undefined) process.env.ALTIMATE_TELEMETRY_DISABLED = orig
+      else delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    }
+  })
+
+  test("returns true after init() when telemetry is enabled", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    spyOn(global, "fetch").mockImplementation(async () => new Response("", { status: 200 }))
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(true)
+    } finally {
+      if (origEnv !== undefined) process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      else delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    }
+  })
+
+  test("returns false after shutdown()", async () => {
+    const origEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    spyOn(global, "fetch").mockImplementation(async () => new Response("", { status: 200 }))
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(true)
+      await Telemetry.shutdown()
+      expect(Telemetry.isEnabled()).toBe(false)
+    } finally {
+      if (origEnv !== undefined) process.env.ALTIMATE_TELEMETRY_DISABLED = origEnv
+      else delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    }
+  })
+})

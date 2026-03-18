@@ -80,8 +80,56 @@ export namespace Agent {
         "*.env.*": "ask",
         "*.env.example": "allow",
       },
+      // Safety defaults for bash commands.
+      // IMPORTANT: "*": "ask" must come FIRST because evaluation uses last-match-wins.
+      //
+      // "ask" = user sees prompt and can approve. Used for destructive file/git
+      //         commands that are common in legitimate workflows (rm -rf ./build,
+      //         git push --force after rebase, git clean in CI).
+      // "deny" = blocked entirely, no prompt. Used for database DDL that is
+      //          almost never intentional in an agent context.
+      //
+      // Users can override any of these in altimate-code.json.
+      bash: {
+        "*": "ask",
+        "rm -rf *": "ask",
+        "rm -fr *": "ask",
+        "git push --force *": "ask",
+        "git push -f *": "ask",
+        "git reset --hard *": "ask",
+        "git clean -f *": "ask",
+        "DROP DATABASE *": "deny",
+        "DROP SCHEMA *": "deny",
+        "TRUNCATE *": "deny",
+        "drop database *": "deny",
+        "drop schema *": "deny",
+        "truncate *": "deny",
+      },
     })
     const user = PermissionNext.fromConfig(cfg.permission ?? {})
+
+    // Safety deny rules that CANNOT be overridden by wildcard allows.
+    // Appended after user config so they always take precedence via last-match-wins.
+    // Users who need to override must use specific patterns like
+    // `"DROP DATABASE test_db": "allow"` — wildcard `bash: "allow"` won't work.
+    // Both UPPER and lowercase variants are included because Wildcard.match
+    // is case-sensitive on Linux/macOS.
+    const safetyDenials = PermissionNext.fromConfig({
+      bash: {
+        "DROP DATABASE *": "deny",
+        "DROP SCHEMA *": "deny",
+        "TRUNCATE *": "deny",
+        "drop database *": "deny",
+        "drop schema *": "deny",
+        "truncate *": "deny",
+        "Drop Database *": "deny",
+        "Drop Schema *": "deny",
+        "Truncate *": "deny",
+      },
+    })
+
+    // Combine user config with safety denials so every agent inherits them
+    const userWithSafety = PermissionNext.merge(user, safetyDenials)
 
     const result: Record<string, Info> = {
       // altimate_change start - replace default build agent with builder and add custom modes
@@ -96,7 +144,7 @@ export namespace Agent {
             question: "allow",
             plan_enter: "allow",
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -128,7 +176,7 @@ export namespace Agent {
             question: "allow", webfetch: "allow", websearch: "allow",
             training_save: "allow", training_list: "allow", training_remove: "allow",
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -160,7 +208,7 @@ export namespace Agent {
             question: "allow", webfetch: "allow", websearch: "allow",
             training_save: "allow", training_list: "allow", training_remove: "allow",
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -192,7 +240,7 @@ export namespace Agent {
             question: "allow",
             training_save: "allow", training_list: "allow", training_remove: "allow",
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -223,7 +271,7 @@ export namespace Agent {
             grep: "allow", glob: "allow", question: "allow",
             training_save: "allow", training_list: "allow", training_remove: "allow",
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -255,7 +303,7 @@ export namespace Agent {
             question: "allow", webfetch: "allow", websearch: "allow",
             task: "allow", training_save: "allow", training_list: "allow", training_remove: "allow",
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -276,7 +324,7 @@ export namespace Agent {
             schema_cache_status: "allow",
             warehouse_list: "allow", warehouse_discover: "allow",
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -300,7 +348,7 @@ export namespace Agent {
               [path.relative(Instance.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
             },
           }),
-          user,
+          userWithSafety,
         ),
         mode: "primary",
         native: true,
@@ -314,7 +362,7 @@ export namespace Agent {
             todoread: "deny",
             todowrite: "deny",
           }),
-          user,
+          userWithSafety,
         ),
         options: {},
         mode: "subagent",
@@ -339,7 +387,7 @@ export namespace Agent {
               ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
             },
           }),
-          user,
+          userWithSafety,
         ),
         description: `Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.`,
         prompt: PROMPT_EXPLORE,
@@ -358,7 +406,7 @@ export namespace Agent {
           PermissionNext.fromConfig({
             "*": "deny",
           }),
-          user,
+          userWithSafety,
         ),
         options: {},
       },
@@ -374,7 +422,7 @@ export namespace Agent {
           PermissionNext.fromConfig({
             "*": "deny",
           }),
-          user,
+          userWithSafety,
         ),
         prompt: PROMPT_TITLE,
       },
@@ -389,7 +437,7 @@ export namespace Agent {
           PermissionNext.fromConfig({
             "*": "deny",
           }),
-          user,
+          userWithSafety,
         ),
         prompt: PROMPT_SUMMARY,
       },
@@ -405,7 +453,7 @@ export namespace Agent {
         item = result[key] = {
           name: key,
           mode: "all",
-          permission: PermissionNext.merge(defaults, user),
+          permission: PermissionNext.merge(defaults, userWithSafety),
           options: {},
           native: false,
         }

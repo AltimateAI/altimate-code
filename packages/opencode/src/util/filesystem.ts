@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from "fs/promises"
 import { createWriteStream, existsSync, statSync } from "fs"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
-import { dirname, join, relative, resolve as pathResolve } from "path"
+import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { Glob } from "./glob"
@@ -146,7 +146,79 @@ export namespace Filesystem {
   }
 
   export function contains(parent: string, child: string) {
-    return !relative(parent, child).startsWith("..")
+    const rel = relative(parent, child)
+    // Block cross-drive paths on Windows where relative() returns an absolute path
+    if (isAbsolute(rel)) return false
+    return !rel.startsWith("..")
+  }
+
+  /**
+   * Symlink-aware containment check. Resolves both paths to their real
+   * filesystem location before comparing, preventing symlink escape attacks.
+   * For non-existent paths (write operations), walks up to the nearest
+   * existing ancestor and resolves from there.
+   * Falls back to lexical `contains()` if resolution fails entirely.
+   *
+   * Note: Like all application-level path checks, this is subject to TOCTOU
+   * races — a symlink could be created between check and use. Only OS-level
+   * sandboxing (Seatbelt, bubblewrap) can fully prevent this.
+   */
+  export function containsReal(parent: string, child: string): boolean {
+    let realParent: string
+    try {
+      realParent = realpathSync(parent)
+    } catch {
+      // Parent doesn't exist — fall back to lexical check
+      return contains(parent, child)
+    }
+
+    // Try resolving the child directly (exists on disk)
+    try {
+      const realChild = realpathSync(child)
+      const rel = relative(realParent, realChild)
+      return !isAbsolute(rel) && !rel.startsWith("..")
+    } catch {
+      // Child doesn't exist — walk up to find nearest existing ancestor
+    }
+
+    // SECURITY: If the raw child path contains '..' segments, reject it.
+    // realpathSync normalizes '..' lexically (before symlink resolution),
+    // but the OS kernel resolves symlinks THEN applies '..'. For example:
+    //   realpathSync("project/symlink/..") → project/  (lexical)
+    //   writeFile("project/symlink/../f")  → writes outside project (kernel)
+    // Since we can't trust realpathSync's resolution of paths with '..',
+    // any path containing '..' that couldn't be fully resolved above is denied.
+    const segments = child.split(/[/\\]/)
+    if (segments.includes("..")) return false
+
+    // Walk up the directory tree to find the nearest existing ancestor,
+    // then append the remaining segments. This handles write operations
+    // where the target directory hasn't been created yet.
+    //
+    // CRITICAL: realpathSync normalizes '..' lexically (before symlink resolution),
+    // but the OS kernel resolves symlinks THEN applies '..'. For example:
+    //   realpathSync("project/symlink/..") → project/  (lexical)
+    //   writeFile("project/symlink/../f")  → writes outside project (kernel)
+    // Therefore, if any trailing segment is '..', we MUST deny the access since
+    // we cannot predict where the OS will actually write.
+    let current = child
+    const trailing: string[] = []
+    while (true) {
+      try {
+        const realAncestor = realpathSync(current)
+        const realChild = trailing.length > 0 ? join(realAncestor, ...trailing) : realAncestor
+        const rel = relative(realParent, realChild)
+        return !isAbsolute(rel) && !rel.startsWith("..")
+      } catch {
+        const parent_ = dirname(current)
+        if (parent_ === current) {
+          // Reached filesystem root without finding an existing dir — fall back
+          return contains(parent, child)
+        }
+        trailing.unshift(basename(current))
+        current = parent_
+      }
+    }
   }
 
   export async function findUp(target: string, start: string, stop?: string) {

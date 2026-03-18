@@ -36,7 +36,9 @@ export function showWelcomeBannerIfNeeded(): void {
     // Remove marker first to avoid showing twice even if display fails
     fs.unlinkSync(markerPath)
 
-    const currentVersion = Installation.VERSION.replace(/^v/, "")
+    // altimate_change start — VERSION is already normalized (no "v" prefix)
+    const currentVersion = Installation.VERSION
+    // altimate_change end
     const isUpgrade = installedVersion === currentVersion && installedVersion !== "local"
 
     if (!isUpgrade) return

@@ -253,7 +253,9 @@ export const ProvidersLoginCommand = cmd({
   builder: (yargs) =>
     yargs
       .positional("url", {
-        describe: "opencode auth provider",
+        // altimate_change start — branding
+        describe: "altimate auth provider",
+        // altimate_change end
         type: "string",
       })
       .option("provider", {

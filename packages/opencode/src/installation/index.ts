@@ -270,7 +270,9 @@ export namespace Installation {
     await Process.text([process.execPath, "--version"], { nothrow: true })
   }
 
-  export const VERSION = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : "local"
+  // altimate_change start — normalize VERSION: strip "v" prefix from CI git tag
+  export const VERSION = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION.trim().replace(/^v/, "") : "local"
+  // altimate_change end
   export const CHANNEL = typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : "local"
   export const USER_AGENT = `altimate-code/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
 

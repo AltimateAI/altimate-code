@@ -33,11 +33,11 @@ By default, destructive operations like `bash`, `write`, and `edit` require conf
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
       "git status": "allow",
       "DROP *": "deny",
-      "rm *": "deny",
-      "*": "ask"
+      "rm *": "deny"
     }
   }
 }
@@ -51,11 +51,11 @@ Yes. Use pattern-based permissions to deny destructive SQL:
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "DROP *": "deny",
       "DELETE *": "deny",
       "TRUNCATE *": "deny",
-      "ALTER *": "deny",
-      "*": "ask"
+      "ALTER *": "deny"
     }
   }
 }
@@ -197,6 +197,89 @@ For additional safety:
 - **Deny destructive DDL/DML** via pattern-based permissions
 - Run against a **staging environment** before production
 - Use the `analyst` agent with restricted permissions for ad-hoc queries
+
+## What protections does Altimate Code have for file access?
+
+Altimate Code includes several layers of protection to keep the agent within your project:
+
+- **Project boundary enforcement** — File operations check that paths stay within your project directory (or git worktree for monorepos). Attempts to read or write outside the project trigger an `external_directory` permission prompt.
+- **Symlink-aware path resolution** — Symlinks inside the project that point outside are detected and blocked. This prevents an agent from reading or writing outside your project through symlinks.
+- **Path traversal blocking** — Paths containing `../` sequences that would escape the project are rejected with an "Access denied" error.
+- **Sensitive file protection** — Writing to credential files (`.env`, `.ssh/`, `.aws/`, private keys) triggers a confirmation prompt, even inside the project. See [below](#why-am-i-being-prompted-to-edit-env-files) for details.
+- **Bash command analysis** — The bash tool parses commands with tree-sitter to detect file operations (`rm`, `cp`, `mv`, etc.) targeting paths outside your project, and prompts for permission.
+- **Non-git project safety** — For projects outside a git repository, the boundary is strictly the working directory (not the entire filesystem).
+
+These protections operate at the application level. For additional isolation, you can run Altimate Code inside a Docker container or VM.
+
+## Why am I being prompted to edit `.env` files?
+
+Altimate Code prompts before modifying files that commonly contain credentials or security-sensitive configuration, even when they're inside your project. This includes:
+
+| Pattern | Examples |
+|---------|----------|
+| **Environment files** | `.env`, `.env.local`, `.env.production`, `.env.staging` |
+| **Credential files** | `credentials.json`, `service-account.json`, `.npmrc`, `.pypirc`, `.netrc`, `.pgpass` |
+| **Secret key directories** | `.ssh/`, `.aws/`, `.gnupg/`, `.gcloud/`, `.kube/`, `.docker/` |
+| **Private keys** | `*.pem`, `*.key`, `*.p12`, `*.pfx` |
+| **Version control** | `.git/config`, `.git/hooks/*` |
+
+When you see this prompt:
+
+- **"Allow once"** — approves this single edit
+- **"Allow always"** — approves edits to this specific file for the rest of the session (resets on restart)
+
+If you frequently edit `.env` files and find the prompts disruptive, click "Allow always" on the first prompt for each file — you won't be asked again for that file during your session.
+
+!!! tip
+    This protection does **not** block reading these files — only writing. The agent can still read your `.env` to understand configuration without prompting.
+
+## What commands are blocked or prompted by default?
+
+Altimate Code applies safe defaults so you don't have to configure anything for common protection:
+
+| Command | Default | Why |
+|---------|---------|-----|
+| `rm -rf *`, `rm -fr *` | **Prompted** | Recursive deletion can be destructive. You'll see what's being deleted. |
+| `git push --force *` | **Prompted** | Force-push can overwrite shared branch history. |
+| `git reset --hard *` | **Prompted** | Discards uncommitted changes permanently. |
+| `git clean -f *` | **Prompted** | Removes untracked files permanently. |
+| `DROP DATABASE *` | **Blocked** | Almost never intentional in an agent context. |
+| `DROP SCHEMA *` | **Blocked** | Almost never intentional in an agent context. |
+| `TRUNCATE *` | **Blocked** | Irreversible data deletion. |
+| All other commands | **Prompted** | You approve each command before it runs. |
+
+**"Prompted"** means you'll see the command and can approve or reject it. **"Blocked"** means the agent cannot run it at all — you must override in config.
+
+To override defaults, add rules in `altimate-code.json`. See [Permissions](configure/permissions.md) for the full configuration reference.
+
+## Best practices for staying safe
+
+1. **Review before approving.** The permission prompt shows you exactly what will happen — diffs for file edits, the full command for bash. Take a moment to read it.
+
+2. **Work on a branch.** Let the agent work on a feature branch so you can review changes before merging. Git gives you a full safety net — this is the single most effective protection.
+
+3. **Use per-agent permissions.** Give each agent only what it needs. The `analyst` agent doesn't need write access. See [Permissions](configure/permissions.md) for examples.
+
+4. **Use read-only database credentials for exploration.** When using the agent for analysis or ad-hoc queries, connect with a read-only database user.
+
+5. **Commit before large operations.** If the agent is about to make sweeping changes, commit your current state first. You can always `git stash` or revert.
+
+6. **Block truly dangerous database operations.** The defaults block `DROP DATABASE`, `DROP SCHEMA`, and `TRUNCATE`. You can extend this:
+
+    ```json
+    {
+      "permission": {
+        "bash": {
+          "*": "ask",
+          "DROP *": "deny",
+          "DELETE FROM *": "deny",
+          "TRUNCATE *": "deny"
+        }
+      }
+    }
+    ```
+
+7. **Use Docker for sensitive environments.** If you're working with production systems or sensitive data, running Altimate Code in a container provides OS-level isolation on top of the permission system.
 
 ## Where should I report security vulnerabilities?
 

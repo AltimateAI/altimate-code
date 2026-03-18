@@ -11,7 +11,7 @@ import { FileTime } from "../file/time"
 import { Filesystem } from "../util/filesystem"
 import { Instance } from "../project/instance"
 import { trimDiff } from "./edit"
-import { assertExternalDirectory } from "./external-directory"
+import { assertExternalDirectory, assertSensitiveWrite } from "./external-directory"
 
 const MAX_DIAGNOSTICS_PER_FILE = 20
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
@@ -25,6 +25,7 @@ export const WriteTool = Tool.define("write", {
   async execute(params, ctx) {
     const filepath = path.isAbsolute(params.filePath) ? params.filePath : path.join(Instance.directory, params.filePath)
     await assertExternalDirectory(ctx, filepath)
+    await assertSensitiveWrite(ctx, filepath)
 
     const exists = await Filesystem.exists(filepath)
     const contentOld = exists ? await Filesystem.readText(filepath) : ""
