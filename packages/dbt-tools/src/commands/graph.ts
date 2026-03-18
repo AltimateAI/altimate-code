@@ -1,11 +1,11 @@
 import type { DBTProjectIntegrationAdapter } from "@altimateai/dbt-integration"
 import { execDbtLs } from "../dbt-cli"
 
-export function children(adapter: DBTProjectIntegrationAdapter, args: string[]) {
+export async function children(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
   try {
-    return adapter.getChildrenModels({ table: model })
+    return await adapter.getChildrenModels({ table: model })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     if (msg.includes("nodeMetaMap has no entries") || msg.includes("graphMetaMap")) {
@@ -15,11 +15,11 @@ export function children(adapter: DBTProjectIntegrationAdapter, args: string[]) 
   }
 }
 
-export function parents(adapter: DBTProjectIntegrationAdapter, args: string[]) {
+export async function parents(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
   try {
-    return adapter.getParentModels({ table: model })
+    return await adapter.getParentModels({ table: model })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     if (msg.includes("nodeMetaMap has no entries") || msg.includes("graphMetaMap")) {
