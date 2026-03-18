@@ -18,6 +18,7 @@ const SENSITIVE_FIELDS = new Set([
   "privateKey",
   "private_key_passphrase",
   "privateKeyPassphrase",
+  "privateKeyPass",
   "access_token",
   "token",
   "oauth_client_secret",

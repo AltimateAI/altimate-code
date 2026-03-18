@@ -109,6 +109,7 @@ describe("CredentialStore", () => {
     expect(CredentialStore.isSensitiveField("privateKey")).toBe(true)
     expect(CredentialStore.isSensitiveField("private_key_passphrase")).toBe(true)
     expect(CredentialStore.isSensitiveField("privateKeyPassphrase")).toBe(true)
+    expect(CredentialStore.isSensitiveField("privateKeyPass")).toBe(true)
     expect(CredentialStore.isSensitiveField("access_token")).toBe(true)
     expect(CredentialStore.isSensitiveField("token")).toBe(true)
     expect(CredentialStore.isSensitiveField("oauth_client_secret")).toBe(true)
