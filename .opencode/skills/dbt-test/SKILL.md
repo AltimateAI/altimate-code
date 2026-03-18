@@ -7,7 +7,7 @@ description: Add schema tests, unit tests, and data quality checks to dbt models
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** bash (runs `altimate-dbt` commands), read, glob, write, edit
+**Tools used:** bash (runs `altimate-dbt` commands), read, glob, write, edit, altimate_core_testgen, altimate_core_validate
 
 ## When to Use This Skill
 
@@ -52,13 +52,27 @@ read <yaml_file>
 
 ### 3. Generate Tests
 
-Apply test rules based on column patterns — see [references/schema-test-patterns.md](references/schema-test-patterns.md).
+**Auto-generate with `altimate_core_testgen`:** Pass the compiled SQL and schema to generate boundary-value, NULL-handling, and edge-case test assertions automatically. This produces executable test SQL covering cases you might miss manually.
+
+```
+altimate_core_testgen(sql: <compiled_sql>, schema_context: <schema_object>)
+```
+
+Review the generated tests — keep what makes sense, discard trivial ones. Then apply test rules based on column patterns — see [references/schema-test-patterns.md](references/schema-test-patterns.md).
 
 ### 4. Write YAML
 
 Merge into existing schema.yml (don't duplicate). Use `edit` for existing files, `write` for new ones.
 
-### 5. Run Tests
+### 5. Validate SQL
+
+Before running, validate the compiled model SQL to catch syntax and schema errors early:
+
+```
+altimate_core_validate(sql: <compiled_sql>, schema_context: <schema_object>)
+```
+
+### 6. Run Tests
 
 ```bash
 altimate-dbt test --model <name>          # run tests for this model

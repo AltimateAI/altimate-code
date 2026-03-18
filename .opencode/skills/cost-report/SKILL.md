@@ -7,7 +7,7 @@ description: Analyze Snowflake query costs and identify optimization opportuniti
 
 ## Requirements
 **Agent:** any (read-only analysis)
-**Tools used:** sql_execute, sql_analyze, finops_analyze_credits, finops_expensive_queries, finops_warehouse_advice
+**Tools used:** sql_execute, sql_analyze, finops_analyze_credits, finops_expensive_queries, finops_warehouse_advice, finops_unused_resources, finops_query_history
 
 Analyze Snowflake warehouse query costs, identify the most expensive queries, detect anti-patterns, and recommend optimizations.
 
@@ -60,7 +60,17 @@ Analyze Snowflake warehouse query costs, identify the most expensive queries, de
 
 5. **Warehouse analysis** - Run `finops_warehouse_advice` to check if warehouses used by the top offenders are right-sized.
 
-6. **Output the final report** as a structured markdown document:
+6. **Unused resource detection** - Run `finops_unused_resources` to find:
+   - **Stale tables**: Tables not accessed in the last 30+ days (candidates for archival/drop)
+   - **Idle warehouses**: Warehouses with no query activity (candidates for suspension/removal)
+
+   Include findings in the report under a "Waste Detection" section.
+
+7. **Query history enrichment** - Run `finops_query_history` to fetch recent execution patterns:
+   - Identify frequently-run expensive queries (high frequency × high cost = top optimization target)
+   - Find queries that could benefit from result caching or materialization
+
+8. **Output the final report** as a structured markdown document:
 
    ```
    # Snowflake Cost Report (Last 30 Days)
@@ -99,10 +109,20 @@ Analyze Snowflake warehouse query costs, identify the most expensive queries, de
 
    ...
 
+   ## Waste Detection
+   ### Unused Tables
+   | Table | Last Accessed | Size | Recommendation |
+   |-------|--------------|------|----------------|
+
+   ### Idle Warehouses
+   | Warehouse | Last Query | Size | Recommendation |
+   |-----------|-----------|------|----------------|
+
    ## Recommendations
    1. Top priority optimizations
    2. Warehouse sizing suggestions
-   3. Scheduling recommendations
+   3. Unused resource cleanup
+   4. Scheduling recommendations
    ```
 
 ## Usage
@@ -111,4 +131,4 @@ The user invokes this skill with:
 - `/cost-report` -- Analyze the last 30 days
 - `/cost-report 7` -- Analyze the last 7 days (adjust the DATEADD interval)
 
-Use the tools: `sql_execute`, `sql_analyze`, `finops_analyze_credits`, `finops_expensive_queries`, `finops_warehouse_advice`.
+Use the tools: `sql_execute`, `sql_analyze`, `finops_analyze_credits`, `finops_expensive_queries`, `finops_warehouse_advice`, `finops_unused_resources`, `finops_query_history`.

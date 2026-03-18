@@ -7,7 +7,7 @@ description: Create and modify dbt models — staging, intermediate, marts, incr
 
 ## Requirements
 **Agent:** builder or migrator (requires file write access)
-**Tools used:** bash (runs `altimate-dbt` commands), read, glob, write, edit
+**Tools used:** bash (runs `altimate-dbt` commands), read, glob, write, edit, schema_search, dbt_profiles, sql_analyze, altimate_core_validate, altimate_core_column_lineage
 
 ## When to Use This Skill
 
@@ -41,11 +41,15 @@ altimate-dbt parents --model <upstream>     # understand what feeds this model
 altimate-dbt children --model <downstream>  # understand what consumes it
 ```
 
+**Check warehouse connection:** Run `dbt_profiles` to discover available profiles and map them to warehouse connections. This tells you which adapter (Snowflake, BigQuery, Postgres, etc.) and target the project uses — essential for dialect-aware SQL.
+
+
 ### 2. Discover — Understand the Data Before Writing
 
 **Never write SQL without deeply understanding your data first.** The #1 cause of wrong results is writing SQL blind — assuming grain, relationships, column names, or values without checking.
 
-**Step 2a: Read all documentation and schema definitions**
+**Step 2a: Search for relevant tables and columns**
+- Use `schema_search` with natural-language queries to find tables/columns in large warehouses (e.g., `schema_search(query: "customer orders")` returns matching tables and columns from the indexed schema cache)
 - Read `sources.yml`, `schema.yml`, and any YAML files that describe the source/parent models
 - These contain column descriptions, data types, tests, and business context
 - Pay special attention to: primary keys, unique constraints, relationships between tables, and what each column represents

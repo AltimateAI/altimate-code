@@ -67,9 +67,6 @@ import { SchemaTagsTool, SchemaTagsListTool } from "../altimate/tools/schema-tag
 import { SqlRewriteTool } from "../altimate/tools/sql-rewrite"
 import { SchemaDiffTool } from "../altimate/tools/schema-diff"
 import { AltimateCoreValidateTool } from "../altimate/tools/altimate-core-validate"
-import { AltimateCoreLintTool } from "../altimate/tools/altimate-core-lint"
-import { AltimateCoreSafetyTool } from "../altimate/tools/altimate-core-safety"
-import { AltimateCoreTranspileTool } from "../altimate/tools/altimate-core-transpile"
 import { AltimateCoreCheckTool } from "../altimate/tools/altimate-core-check"
 import { AltimateCoreFixTool } from "../altimate/tools/altimate-core-fix"
 import { AltimateCorePolicyTool } from "../altimate/tools/altimate-core-policy"
@@ -78,7 +75,6 @@ import { AltimateCoreTestgenTool } from "../altimate/tools/altimate-core-testgen
 import { AltimateCoreEquivalenceTool } from "../altimate/tools/altimate-core-equivalence"
 import { AltimateCoreMigrationTool } from "../altimate/tools/altimate-core-migration"
 import { AltimateCoreSchemaDiffTool } from "../altimate/tools/altimate-core-schema-diff"
-import { AltimateCoreRewriteTool } from "../altimate/tools/altimate-core-rewrite"
 import { AltimateCoreCorrectTool } from "../altimate/tools/altimate-core-correct"
 import { AltimateCoreGradeTool } from "../altimate/tools/altimate-core-grade"
 import { AltimateCoreClassifyPiiTool } from "../altimate/tools/altimate-core-classify-pii"
@@ -86,19 +82,18 @@ import { AltimateCoreQueryPiiTool } from "../altimate/tools/altimate-core-query-
 import { AltimateCoreResolveTermTool } from "../altimate/tools/altimate-core-resolve-term"
 import { AltimateCoreColumnLineageTool } from "../altimate/tools/altimate-core-column-lineage"
 import { AltimateCoreTrackLineageTool } from "../altimate/tools/altimate-core-track-lineage"
-import { AltimateCoreFormatTool } from "../altimate/tools/altimate-core-format"
 import { AltimateCoreExtractMetadataTool } from "../altimate/tools/altimate-core-extract-metadata"
 import { AltimateCoreCompareTool } from "../altimate/tools/altimate-core-compare"
 import { AltimateCoreCompleteTool } from "../altimate/tools/altimate-core-complete"
 import { AltimateCoreOptimizeContextTool } from "../altimate/tools/altimate-core-optimize-context"
-import { AltimateCoreOptimizeForQueryTool } from "../altimate/tools/altimate-core-optimize-for-query"
 import { AltimateCorePruneSchemaTool } from "../altimate/tools/altimate-core-prune-schema"
 import { AltimateCoreImportDdlTool } from "../altimate/tools/altimate-core-import-ddl"
 import { AltimateCoreExportDdlTool } from "../altimate/tools/altimate-core-export-ddl"
 import { AltimateCoreFingerprintTool } from "../altimate/tools/altimate-core-fingerprint"
 import { AltimateCoreIntrospectionSqlTool } from "../altimate/tools/altimate-core-introspection-sql"
 import { AltimateCoreParseDbtTool } from "../altimate/tools/altimate-core-parse-dbt"
-import { AltimateCoreIsSafeTool } from "../altimate/tools/altimate-core-is-safe"
+import { AltimateCoreRewriteTool } from "../altimate/tools/altimate-core-rewrite"
+import { ToolLookupTool } from "../altimate/tools/tool-lookup"
 import { ProjectScanTool } from "../altimate/tools/project-scan"
 import { DatamateManagerTool } from "../altimate/tools/datamate"
 import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
@@ -242,11 +237,9 @@ export namespace ToolRegistry {
       SchemaTagsTool,
       SchemaTagsListTool,
       SqlRewriteTool,
+      AltimateCoreRewriteTool,
       SchemaDiffTool,
       AltimateCoreValidateTool,
-      AltimateCoreLintTool,
-      AltimateCoreSafetyTool,
-      AltimateCoreTranspileTool,
       AltimateCoreCheckTool,
       AltimateCoreFixTool,
       AltimateCorePolicyTool,
@@ -255,7 +248,6 @@ export namespace ToolRegistry {
       AltimateCoreEquivalenceTool,
       AltimateCoreMigrationTool,
       AltimateCoreSchemaDiffTool,
-      AltimateCoreRewriteTool,
       AltimateCoreCorrectTool,
       AltimateCoreGradeTool,
       AltimateCoreClassifyPiiTool,
@@ -263,19 +255,17 @@ export namespace ToolRegistry {
       AltimateCoreResolveTermTool,
       AltimateCoreColumnLineageTool,
       AltimateCoreTrackLineageTool,
-      AltimateCoreFormatTool,
       AltimateCoreExtractMetadataTool,
       AltimateCoreCompareTool,
       AltimateCoreCompleteTool,
       AltimateCoreOptimizeContextTool,
-      AltimateCoreOptimizeForQueryTool,
       AltimateCorePruneSchemaTool,
       AltimateCoreImportDdlTool,
       AltimateCoreExportDdlTool,
       AltimateCoreFingerprintTool,
       AltimateCoreIntrospectionSqlTool,
       AltimateCoreParseDbtTool,
-      AltimateCoreIsSafeTool,
+      ToolLookupTool,
       ProjectScanTool,
       DatamateManagerTool,
       FeedbackSubmitTool,
@@ -288,6 +278,11 @@ export namespace ToolRegistry {
       // altimate_change end
       ...custom,
     ]
+  }
+
+  /** All tool infos without model/provider filtering. */
+  export async function allInfos(): Promise<Tool.Info[]> {
+    return all()
   }
 
   export async function ids() {

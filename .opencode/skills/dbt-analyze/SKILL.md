@@ -7,7 +7,7 @@ description: Analyze downstream impact of dbt model changes using column-level l
 
 ## Requirements
 **Agent:** any (read-only analysis)
-**Tools used:** bash (runs `altimate-dbt` commands), read, glob, dbt_manifest, lineage_check, sql_analyze
+**Tools used:** bash (runs `altimate-dbt` commands), read, glob, dbt_manifest, lineage_check, dbt_lineage, sql_analyze, altimate_core_extract_metadata
 
 ## When to Use This Skill
 
@@ -45,9 +45,18 @@ For the full downstream tree, recursively call `children` on each downstream mod
 
 ### 3. Run Column-Level Lineage
 
-Use the `lineage_check` tool on the changed model's SQL to understand:
+**With manifest (preferred):** Use `dbt_lineage` to compute column-level lineage for a dbt model. This reads the manifest.json, extracts compiled SQL and upstream schemas, and traces column flow via the Rust engine. More accurate than raw SQL lineage because it resolves `ref()` and `source()` to actual schemas.
+
+```
+dbt_lineage(model: <model_name>)
+```
+
+**Without manifest (fallback):** Use `lineage_check` on the raw SQL to understand:
 - Which source columns flow to which output columns
 - Which columns were added, removed, or renamed
+
+**Extract structural metadata:** Use `altimate_core_extract_metadata` on the SQL to get tables referenced, columns used, CTEs, subqueries — useful for mapping the full dependency surface.
+
 
 ### 4. Cross-Reference with Downstream
 

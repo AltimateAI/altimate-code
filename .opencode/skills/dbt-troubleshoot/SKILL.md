@@ -7,7 +7,7 @@ description: Debug dbt errors — compilation failures, runtime database errors,
 
 ## Requirements
 **Agent:** any (read-only diagnosis), builder (if applying fixes)
-**Tools used:** bash (runs `altimate-dbt` commands), read, glob, edit, altimate_core_semantics, altimate_core_column_lineage, altimate_core_correct
+**Tools used:** bash (runs `altimate-dbt` commands), read, glob, edit, altimate_core_semantics, altimate_core_column_lineage, altimate_core_correct, altimate_core_fix, sql_fix
 
 ## When to Use This Skill
 
@@ -80,6 +80,19 @@ altimate_core_column_lineage --sql <compiled_sql>
 # Auto-suggest fixes for SQL errors
 altimate_core_correct --sql <compiled_sql>
 ```
+
+**Quick-fix tools** — use these when the error type is clear:
+
+```
+# Schema-based fix: fuzzy-matches table/column names against schema to fix typos and wrong references
+altimate_core_fix(sql: <compiled_sql>, schema_context: <schema_object>)
+
+# Error-message fix: given a failing query + database error, analyzes root cause and proposes corrections
+sql_fix(sql: <compiled_sql>, error_message: <error_message>, dialect: <dialect>)
+```
+
+`altimate_core_fix` is best for compilation errors (wrong names, missing objects). `sql_fix` is best for runtime errors (the database told you what's wrong). Use `altimate_core_correct` for iterative multi-round correction when the first fix doesn't resolve the issue.
+
 
 Common findings:
 - **Wrong join type**: `INNER JOIN` dropping rows that should appear → switch to `LEFT JOIN`

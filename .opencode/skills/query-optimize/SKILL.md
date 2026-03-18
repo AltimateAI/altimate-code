@@ -7,7 +7,7 @@ description: Analyze and optimize SQL queries for better performance
 
 ## Requirements
 **Agent:** any (read-only analysis)
-**Tools used:** sql_optimize, sql_analyze, read, glob, schema_inspect, warehouse_list
+**Tools used:** sql_optimize, sql_analyze, sql_explain, altimate_core_equivalence, read, glob, schema_inspect, warehouse_list
 
 Analyze SQL queries for performance issues and suggest concrete optimizations including rewritten SQL.
 
@@ -27,7 +27,17 @@ Analyze SQL queries for performance issues and suggest concrete optimizations in
 4. **Run detailed analysis**:
    - Call `sql_analyze` with the same SQL and dialect to get the full anti-pattern breakdown with recommendations
 
-5. **Present findings** in a structured format:
+5. **Get execution plan** (if warehouse connected):
+   - Call `sql_explain` to run EXPLAIN on the query and get the execution plan
+   - Look for: full table scans, sort operations on large datasets, inefficient join strategies, missing partition pruning
+   - Include key findings in the report under "Execution Plan Insights"
+
+6. **Verify rewrites preserve correctness**:
+   - If `sql_optimize` produced a rewritten query, call `altimate_core_equivalence` to verify the original and optimized queries produce the same result set
+   - If not equivalent, flag the difference and present both versions for the user to decide
+   - This prevents "optimization" that silently changes query semantics
+
+7. **Present findings** in a structured format:
 
 ```
 Query Optimization Report
@@ -62,9 +72,9 @@ Anti-Pattern Details:
     -> Consider selecting only the columns you need.
 ```
 
-6. **If schema context is available**, mention that the optimization used real table schemas for more accurate suggestions (e.g., expanding SELECT * to actual columns).
+8. **If schema context is available**, mention that the optimization used real table schemas for more accurate suggestions (e.g., expanding SELECT * to actual columns).
 
-7. **If no issues are found**, confirm the query looks well-optimized and briefly explain why (no anti-patterns, proper use of limits, explicit columns, etc.).
+9. **If no issues are found**, confirm the query looks well-optimized and briefly explain why (no anti-patterns, proper use of limits, explicit columns, etc.).
 
 ## Usage
 
@@ -73,4 +83,4 @@ The user invokes this skill with SQL or a file path:
 - `/query-optimize models/staging/stg_orders.sql` -- Optimize SQL from a file
 - `/query-optimize` -- Optimize the most recently discussed SQL in the conversation
 
-Use the tools: `sql_optimize`, `sql_analyze`, `read` (for file-based SQL), `glob` (to find SQL files), `schema_inspect` (for schema context), `warehouse_list` (to check connections).
+Use the tools: `sql_optimize`, `sql_analyze`, `sql_explain` (execution plans), `altimate_core_equivalence` (rewrite verification), `read` (for file-based SQL), `glob` (to find SQL files), `schema_inspect` (for schema context), `warehouse_list` (to check connections).
