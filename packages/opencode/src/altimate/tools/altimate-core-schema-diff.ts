@@ -21,9 +21,10 @@ export const AltimateCoreSchemaDiffTool = Tool.define("altimate_core_schema_diff
       })
       const data = result.data as Record<string, any>
       const changeCount = data.changes?.length ?? 0
+      const hasBreaking = data.has_breaking_changes ?? data.has_breaking ?? false
       return {
-        title: `Schema Diff: ${changeCount} change(s)${data.has_breaking ? " (BREAKING)" : ""}`,
-        metadata: { success: result.success, change_count: changeCount, has_breaking: data.has_breaking },
+        title: `Schema Diff: ${changeCount} change(s)${hasBreaking ? " (BREAKING)" : ""}`,
+        metadata: { success: result.success, change_count: changeCount, has_breaking: hasBreaking },
         output: formatSchemaDiff(data),
       }
     } catch (e) {
@@ -37,10 +38,31 @@ function formatSchemaDiff(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
   if (!data.changes?.length) return "Schemas are identical."
   const lines: string[] = []
-  if (data.has_breaking) lines.push("WARNING: Breaking changes detected!\n")
+  const hasBreaking = data.has_breaking_changes ?? data.has_breaking ?? false
+  if (hasBreaking) lines.push("WARNING: Breaking changes detected!\n")
+
+  // Rust SchemaChange uses tagged enum: { type: "column_added", table: "...", ... }
+  const breakingTypes = new Set(["table_removed", "column_removed", "column_type_changed"])
   for (const c of data.changes) {
-    const marker = c.breaking ? "BREAKING" : c.severity ?? "info"
-    lines.push(`  [${marker}] ${c.type}: ${c.description ?? c.message}`)
+    const isBreaking = breakingTypes.has(c.type) ||
+      (c.type === "nullability_changed" && c.old_nullable && !c.new_nullable)
+    const marker = isBreaking ? "BREAKING" : "info"
+    const desc = formatChange(c)
+    lines.push(`  [${marker}] ${desc}`)
   }
+
+  if (data.summary) lines.push(`\nSummary: ${data.summary}`)
   return lines.join("\n")
+}
+
+function formatChange(c: Record<string, any>): string {
+  switch (c.type) {
+    case "table_added": return `Table '${c.table}' added`
+    case "table_removed": return `Table '${c.table}' removed`
+    case "column_added": return `Column '${c.table}.${c.column}' added (${c.data_type})`
+    case "column_removed": return `Column '${c.table}.${c.column}' removed`
+    case "column_type_changed": return `Column '${c.table}.${c.column}' type changed: ${c.old_type} → ${c.new_type}`
+    case "nullability_changed": return `Column '${c.table}.${c.column}' nullability: ${c.old_nullable ? "nullable" : "not null"} → ${c.new_nullable ? "nullable" : "not null"}`
+    default: return `${c.type}: ${c.description ?? c.message ?? JSON.stringify(c)}`
+  }
 }
