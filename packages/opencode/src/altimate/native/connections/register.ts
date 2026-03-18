@@ -101,8 +101,10 @@ async function tryExecuteViaDbt(
       const allRows = raw.data.map((row: Record<string, unknown>) =>
         columns.map((c) => row[c]),
       )
-      const truncated = limit ? allRows.length > limit : false
-      const rows = truncated ? allRows.slice(0, limit) : allRows
+      // The adapter already applies the limit, so allRows.length <= limit.
+      // We report truncated=true when exactly limit rows were returned (likely more exist).
+      const truncated = limit ? allRows.length >= limit : false
+      const rows = allRows
       return {
         columns,
         rows,

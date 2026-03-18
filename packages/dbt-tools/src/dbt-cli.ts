@@ -261,12 +261,12 @@ export async function execDbtShow(sql: string, limit?: number) {
       rows = preview
     }
 
-    if (rows.length > 0) {
-      const columnNames = rows[0] ? Object.keys(rows[0]) : []
-      const compiledSql = (sqlLine as any)?.data?.sql ?? (sqlLine as any)?.data?.compiled_sql ?? (sqlLine as any)?.result?.sql ?? sql
-      return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
-    }
-    // Empty or unparseable — fall through to Tier 2
+    // Return the result — even if empty. An empty preview means the query returned
+    // zero rows, which is a valid result. Do NOT fall through to Tier 2, which could
+    // match spurious log metadata as row data.
+    const columnNames = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : []
+    const compiledSql = (sqlLine as any)?.data?.sql ?? (sqlLine as any)?.data?.compiled_sql ?? (sqlLine as any)?.result?.sql ?? sql
+    return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
   }
 
   // --- Tier 2: heuristic deep scan ---
@@ -281,23 +281,27 @@ export async function execDbtShow(sql: string, limit?: number) {
   }
 
   // --- Tier 3: plain text fallback (ASCII table) ---
-  const plainArgs = ["show", "--inline", sql]
-  if (limit !== undefined) plainArgs.push("--limit", String(limit))
-  const { stdout: plainOut } = await run(plainArgs)
-  const table = parseAsciiTable(plainOut)
-  if (table) {
-    return {
-      columnNames: table.columnNames,
-      columnTypes: table.columnNames.map(() => "string"),
-      data: table.data,
-      rawSql: sql,
-      compiledSql: sql,
+  try {
+    const plainArgs = ["show", "--inline", sql]
+    if (limit !== undefined) plainArgs.push("--limit", String(limit))
+    const { stdout: plainOut } = await run(plainArgs)
+    const table = parseAsciiTable(plainOut)
+    if (table) {
+      return {
+        columnNames: table.columnNames,
+        columnTypes: table.columnNames.map(() => "string"),
+        data: table.data,
+        rawSql: sql,
+        compiledSql: sql,
+      }
     }
+  } catch {
+    // Plain text dbt show also failed — fall through to error below
   }
 
   throw new Error(
     "Could not parse dbt show output in any format (JSON, heuristic, or plain text). " +
-      `Got ${lines.length} JSON lines. Plain text length: ${plainOut.length}.`,
+      `Got ${lines.length} JSON lines.`,
   )
 }
 
@@ -326,14 +330,27 @@ export async function execDbtCompile(model: string): Promise<{ sql: string }> {
   }
 
   // --- Tier 3: read compiled SQL from manifest.json (more reliable than stdout) ---
-  // dbt compile writes compiled_code to target/manifest.json even when stdout is logs
-  await run(["compile", "--select", model]).catch(() => {})
+  // dbt compile writes compiled_code to target/manifest.json even when stdout is logs.
+  // We run compile without JSON flags so it writes to manifest, then read the artifact.
+  try {
+    await run(["compile", "--select", model])
+  } catch {
+    // Compile may fail (e.g., dbt not found, project errors) — continue to manifest check
+    // since a prior successful compile may have left a usable manifest
+  }
   const fromManifest = readCompiledFromManifest(model)
   if (fromManifest) return { sql: fromManifest }
 
   // Last resort: return stdout (may contain logs mixed with SQL)
-  const { stdout: plainOut } = await run(["compile", "--select", model])
-  return { sql: plainOut.trim() }
+  try {
+    const { stdout: plainOut } = await run(["compile", "--select", model])
+    return { sql: plainOut.trim() }
+  } catch (e) {
+    throw new Error(
+      `Could not compile model '${model}' in any format (JSON, heuristic, or manifest). ` +
+        `Last error: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
 }
 
 /**
@@ -364,8 +381,15 @@ export async function execDbtCompileInline(
   }
 
   // --- Tier 3: plain text fallback ---
-  const { stdout: plainOut } = await run(["compile", "--inline", sql])
-  return { sql: plainOut.trim() }
+  try {
+    const { stdout: plainOut } = await run(["compile", "--inline", sql])
+    return { sql: plainOut.trim() }
+  } catch (e) {
+    throw new Error(
+      `Could not compile inline SQL in any format (JSON, heuristic, or plain text). ` +
+        `Last error: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
 }
 
 /** Shared: extract compiled SQL from known dbt JSON output formats. */
