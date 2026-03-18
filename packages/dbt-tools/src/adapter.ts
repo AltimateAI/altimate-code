@@ -1,4 +1,6 @@
 import type { Config } from "./config"
+import { bufferLog } from "./log-buffer"
+export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
   DEFAULT_CONFIGURATION_VALUES,
@@ -55,23 +57,6 @@ function configuration(cfg: Config): DBTConfiguration {
   }
 }
 
-// Buffer of recent dbt log messages — keeps the last N entries in memory so
-// errors can be retrieved for diagnostics without writing to stdout/stderr
-// which would corrupt the TUI display (see #249).
-const DBT_LOG_BUFFER_SIZE = 100
-const dbtLogBuffer: string[] = []
-
-function bufferLog(msg: string): void {
-  dbtLogBuffer.push(msg)
-  if (dbtLogBuffer.length > DBT_LOG_BUFFER_SIZE) {
-    dbtLogBuffer.shift()
-  }
-}
-
-/** Retrieve recent dbt log messages (for diagnostics / error reporting). */
-export function getRecentDbtLogs(): string[] {
-  return [...dbtLogBuffer]
-}
 
 function terminal(): DBTTerminal {
   return {

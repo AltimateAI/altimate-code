@@ -92,7 +92,18 @@ function output(result: unknown) {
 }
 
 function bail(err: unknown): never {
-  const result = diagnose(err instanceof Error ? err : new Error(String(err)))
+  const result: Record<string, unknown> = diagnose(err instanceof Error ? err : new Error(String(err)))
+  // Include buffered dbt logs for diagnostics (see #249 — logs are buffered
+  // in-memory instead of written to stderr to avoid TUI corruption).
+  try {
+    const { getRecentDbtLogs } = require("./log-buffer") as typeof import("./log-buffer")
+    const logs = getRecentDbtLogs()
+    if (logs.length > 0) {
+      result.logs = logs
+    }
+  } catch {
+    // log-buffer might not have been loaded yet
+  }
   console.log(JSON.stringify(result, null, 2))
   process.exit(1)
 }
