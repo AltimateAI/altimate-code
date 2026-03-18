@@ -9,7 +9,8 @@
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node --format esm && bun run script/copy-python.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test --timeout 30000"
+    "test": "bun test test/cli.test.ts test/config.test.ts test/dbt-cli.test.ts test/dbt-resolve.test.ts --timeout 30000",
+    "test:e2e": "bun test test/e2e/ --timeout 300000"
   },
   "dependencies": {
     "@altimateai/dbt-integration": "^0.2.2"

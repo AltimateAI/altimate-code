@@ -16,6 +16,16 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     )
   }
 
+  // Suppress snowflake-sdk's Winston console logging — it writes JSON log
+  // lines to stdout which corrupt the TUI display (see #249).
+  if (typeof snowflake.configure === "function") {
+    try {
+      snowflake.configure({ logLevel: "OFF" })
+    } catch {
+      // Older SDK versions may not support this option; ignore.
+    }
+  }
+
   let connection: any
 
   function executeQuery(sql: string): Promise<{ columns: string[]; rows: any[][] }> {
@@ -48,43 +58,165 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         role: config.role,
       }
 
-      // Key-pair auth
-      if (config.private_key_path) {
-        const keyPath = config.private_key_path as string
-        if (!fs.existsSync(keyPath)) {
-          throw new Error(`Snowflake private key file not found: ${keyPath}`)
-        }
-        const keyContent = fs.readFileSync(keyPath, "utf-8")
+      // ---------------------------------------------------------------
+      // Normalize field names: accept snake_case (dbt), camelCase (SDK),
+      // and common LLM-generated variants so auth "just works".
+      // ---------------------------------------------------------------
+      const keyPath = (config.private_key_path ?? config.privateKeyPath) as string | undefined
+      const inlineKey = (config.private_key ?? config.privateKey) as string | undefined
+      const keyPassphrase = (config.private_key_passphrase ?? config.privateKeyPassphrase ?? config.privateKeyPass) as string | undefined
+      const oauthToken = (config.token ?? config.access_token) as string | undefined
+      const oauthClientId = (config.oauth_client_id ?? config.oauthClientId) as string | undefined
+      const oauthClientSecret = (config.oauth_client_secret ?? config.oauthClientSecret) as string | undefined
+      const authenticator = (config.authenticator as string | undefined)?.trim()
+      const authUpper = authenticator?.toUpperCase()
+      const passcode = config.passcode as string | undefined
 
-        // If key is encrypted (has ENCRYPTED in header or passphrase provided),
-        // decrypt it using Node crypto — snowflake-sdk expects unencrypted PEM.
+      // ---------------------------------------------------------------
+      // 1. Key-pair auth (SNOWFLAKE_JWT)
+      //    Accepts: private_key_path (file), private_key (inline PEM or
+      //    file path auto-detected), privateKey, privateKeyPath.
+      // ---------------------------------------------------------------
+      // Resolve private_key: could be a file path or PEM content
+      let resolvedKeyPath = keyPath
+      let resolvedInlineKey = inlineKey
+      if (!resolvedKeyPath && resolvedInlineKey && !resolvedInlineKey.includes("-----BEGIN")) {
+        // Looks like a file path, not PEM content
+        if (fs.existsSync(resolvedInlineKey)) {
+          resolvedKeyPath = resolvedInlineKey
+          resolvedInlineKey = undefined
+        } else {
+          throw new Error(
+            `Snowflake private key: '${resolvedInlineKey}' is not a valid file path or PEM content. ` +
+            `Use 'private_key_path' for file paths or provide PEM content starting with '-----BEGIN PRIVATE KEY-----'.`,
+          )
+        }
+      }
+
+      if (resolvedKeyPath || resolvedInlineKey) {
+        let keyContent: string
+        if (resolvedKeyPath) {
+          if (!fs.existsSync(resolvedKeyPath)) {
+            throw new Error(`Snowflake private key file not found: ${resolvedKeyPath}`)
+          }
+          keyContent = fs.readFileSync(resolvedKeyPath, "utf-8")
+        } else {
+          keyContent = resolvedInlineKey!
+          // Normalize escaped newlines from env vars / JSON configs
+          if (keyContent.includes("\\n")) {
+            keyContent = keyContent.replace(/\\n/g, "\n")
+          }
+        }
+
+        // If key is encrypted, decrypt using Node crypto —
+        // snowflake-sdk expects unencrypted PKCS#8 PEM.
         let privateKey: string
-        if (config.private_key_passphrase || keyContent.includes("ENCRYPTED")) {
+        if (keyPassphrase || keyContent.includes("ENCRYPTED")) {
           const crypto = await import("crypto")
-          const keyObject = crypto.createPrivateKey({
-            key: keyContent,
-            format: "pem",
-            passphrase: (config.private_key_passphrase as string) || undefined,
-          })
-          privateKey = keyObject
-            .export({ type: "pkcs8", format: "pem" })
-            .toString()
+          try {
+            const keyObject = crypto.createPrivateKey({
+              key: keyContent,
+              format: "pem",
+              passphrase: keyPassphrase || undefined,
+            })
+            privateKey = keyObject
+              .export({ type: "pkcs8", format: "pem" })
+              .toString()
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            throw new Error(
+              `Snowflake: Failed to decrypt private key. Verify the passphrase and key format (must be PEM/PKCS#8). ${msg}`,
+            )
+          }
         } else {
           privateKey = keyContent
         }
 
         options.authenticator = "SNOWFLAKE_JWT"
         options.privateKey = privateKey
+
+      // ---------------------------------------------------------------
+      // 2. External browser SSO
+      //    Interactive — opens user's browser for IdP login. Requires
+      //    connectAsync() instead of connect().
+      // ---------------------------------------------------------------
+      } else if (authUpper === "EXTERNALBROWSER") {
+        options.authenticator = "EXTERNALBROWSER"
+
+      // ---------------------------------------------------------------
+      // 3. Okta native SSO (authenticator is an Okta URL)
+      // ---------------------------------------------------------------
+      } else if (authenticator && /^https?:\/\/.+\.okta\.com/i.test(authenticator)) {
+        options.authenticator = authenticator
+        if (config.password) options.password = config.password
+
+      // ---------------------------------------------------------------
+      // 4. OAuth token auth
+      //    Triggered by: authenticator="oauth", OR token/access_token
+      //    present without a password.
+      // ---------------------------------------------------------------
+      } else if (authUpper === "OAUTH" || (oauthToken && !config.password)) {
+        if (!oauthToken) {
+          throw new Error(
+            "Snowflake OAuth authenticator specified but no token provided (expected 'token' or 'access_token')",
+          )
+        }
+        options.authenticator = "OAUTH"
+        options.token = oauthToken
+
+      // ---------------------------------------------------------------
+      // 5. JWT / Programmatic access token (pre-generated)
+      //    The Node.js snowflake-sdk only accepts pre-generated tokens
+      //    via the OAUTH authenticator. SNOWFLAKE_JWT expects a privateKey
+      //    for self-signing, and PROGRAMMATIC_ACCESS_TOKEN is not recognized.
+      //    Alias both to OAUTH so the token is passed correctly.
+      // ---------------------------------------------------------------
+      } else if (authUpper === "JWT" || authUpper === "PROGRAMMATIC_ACCESS_TOKEN") {
+        if (!oauthToken) {
+          throw new Error(`Snowflake ${authenticator} authenticator specified but no token provided (expected 'token' or 'access_token')`)
+        }
+        options.authenticator = "OAUTH"
+        options.token = oauthToken
+
+      // ---------------------------------------------------------------
+      // 7. Username + password + MFA
+      // ---------------------------------------------------------------
+      } else if (authUpper === "USERNAME_PASSWORD_MFA") {
+        if (!config.password) {
+          throw new Error("Snowflake USERNAME_PASSWORD_MFA authenticator requires 'password'")
+        }
+        options.authenticator = "USERNAME_PASSWORD_MFA"
+        options.password = config.password
+        if (passcode) options.passcode = passcode
+
+      // ---------------------------------------------------------------
+      // 8. Plain password auth (default)
+      // ---------------------------------------------------------------
       } else if (config.password) {
         options.password = config.password
       }
 
+      // Use connectAsync for browser-based auth (SSO/Okta), connect for everything else
+      const isOktaUrl = authenticator && /^https?:\/\/.+\.okta\.com/i.test(authenticator)
+      const useBrowserAuth = authUpper === "EXTERNALBROWSER" || isOktaUrl
+
       connection = await new Promise<any>((resolve, reject) => {
         const conn = snowflake.createConnection(options)
-        conn.connect((err: Error | null) => {
-          if (err) reject(err)
-          else resolve(conn)
-        })
+        if (useBrowserAuth) {
+          if (typeof conn.connectAsync !== "function") {
+            reject(new Error("Snowflake browser/SSO auth requires snowflake-sdk with connectAsync support. Upgrade snowflake-sdk."))
+            return
+          }
+          conn.connectAsync((err: Error | null) => {
+            if (err) reject(err)
+            else resolve(conn)
+          }).catch(reject)
+        } else {
+          conn.connect((err: Error | null) => {
+            if (err) reject(err)
+            else resolve(conn)
+          })
+        }
       })
     },
 

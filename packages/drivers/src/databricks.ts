@@ -21,7 +21,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   return {
     async connect() {
       const DBSQLClient = databricksModule.DBSQLClient ?? databricksModule
-      client = new DBSQLClient()
+
+      // Suppress @databricks/sql Winston console logging — it writes JSON
+      // log lines to stdout which corrupt the TUI display (see #249).
+      // Use a no-op logger that satisfies the interface but discards all output.
+      const logger = { log: () => {}, setLevel: () => {} }
+      client = new DBSQLClient({ logger })
       const connectionOptions: Record<string, unknown> = {
         host: config.server_hostname,
         path: config.http_path,

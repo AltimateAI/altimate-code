@@ -94,7 +94,26 @@ async function tryExecuteViaDbt(
       ? await dbtAdapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
       : await dbtAdapter.immediatelyExecuteSQL(sql, "")
 
-    // Convert dbt adapter result to our SqlExecuteResult format
+    // QueryExecutionResult has: { columnNames, columnTypes, data, rawSql, compiledSql }
+    // where data is Record<string, unknown>[] (array of row objects)
+    if (raw && raw.columnNames && Array.isArray(raw.data)) {
+      const columns: string[] = raw.columnNames
+      const allRows = raw.data.map((row: Record<string, unknown>) =>
+        columns.map((c) => row[c]),
+      )
+      // The adapter already applies the limit, so allRows.length <= limit.
+      // We report truncated=true when exactly limit rows were returned (likely more exist).
+      const truncated = limit ? allRows.length >= limit : false
+      const rows = allRows
+      return {
+        columns,
+        rows,
+        row_count: rows.length,
+        truncated,
+      }
+    }
+
+    // Legacy format: raw.table with column_names/rows arrays
     if (raw && raw.table) {
       const columns = raw.table.column_names ?? raw.table.columns ?? []
       const rows = raw.table.rows ?? []
@@ -108,7 +127,7 @@ async function tryExecuteViaDbt(
       }
     }
 
-    // If raw result has a different shape, try to adapt
+    // Array of objects (e.g. from direct query)
     if (raw && Array.isArray(raw)) {
       if (raw.length === 0) return { columns: [], rows: [], row_count: 0, truncated: false }
       const columns = Object.keys(raw[0])

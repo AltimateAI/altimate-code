@@ -9,6 +9,8 @@
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000",
     "build": "bun run script/build.ts",
+    "build:local": "bun run script/build.ts --single --skip-install",
+    "local": "./script/local.sh",
     "dev": "bun run --conditions=browser ./src/index.ts",
     "db": "bun drizzle-kit"
   },

@@ -20,6 +20,10 @@ import type {
   SchemaDiffResult,
 } from "../types"
 
+/** Register all composite SQL handlers with the Dispatcher.
+ *  Exported so tests can re-register after Dispatcher.reset(). */
+export function registerAllSql(): void {
+
 // ---------------------------------------------------------------------------
 // sql.analyze — lint + semantics + safety
 // ---------------------------------------------------------------------------
@@ -362,8 +366,10 @@ register("sql.rewrite", async (params) => {
       rewritten_sql: result.suggestions?.[0]?.rewritten_sql ?? null,
       rewrites_applied: result.suggestions?.map((s: any) => ({
         rule: s.rule,
-        description: s.explanation,
-        rewritten_sql: s.rewritten_sql,
+        original_fragment: params.sql,
+        rewritten_fragment: s.rewritten_sql ?? params.sql,
+        explanation: s.explanation ?? s.improvement ?? "",
+        can_auto_apply: (s.confidence ?? 0) >= 0.7,
       })) ?? [],
     }
   } catch (e) {
@@ -430,3 +436,8 @@ register("lineage.check", async (params) => {
     } satisfies LineageCheckResult
   }
 })
+
+} // end registerAllSql
+
+// Auto-register on module load
+registerAllSql()

@@ -14,8 +14,16 @@ const SERVICE_NAME = "altimate-code"
 
 const SENSITIVE_FIELDS = new Set([
   "password",
+  "private_key",
+  "privateKey",
   "private_key_passphrase",
+  "privateKeyPassphrase",
+  "privateKeyPass",
   "access_token",
+  "token",
+  "oauth_client_secret",
+  "oauthClientSecret",
+  "passcode",
   "ssh_password",
   "connection_string",
 ])

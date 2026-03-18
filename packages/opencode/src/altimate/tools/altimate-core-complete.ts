@@ -20,7 +20,7 @@ export const AltimateCoreCompleteTool = Tool.define("altimate_core_complete", {
         schema_context: args.schema_context,
       })
       const data = result.data as Record<string, any>
-      const count = data.suggestions?.length ?? 0
+      const count = data.items?.length ?? data.suggestions?.length ?? 0
       return {
         title: `Complete: ${count} suggestion(s)`,
         metadata: { success: result.success, suggestion_count: count },
@@ -35,9 +35,10 @@ export const AltimateCoreCompleteTool = Tool.define("altimate_core_complete", {
 
 function formatComplete(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (!data.suggestions?.length) return "No completions available."
+  const items = data.items ?? data.suggestions ?? []
+  if (!items.length) return "No completions available."
   const lines = ["Suggestions:\n"]
-  for (const s of data.suggestions) {
+  for (const s of items) {
     lines.push(`  ${s.label ?? s.text} (${s.kind ?? s.type ?? "unknown"})`)
   }
   return lines.join("\n")

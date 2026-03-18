@@ -105,10 +105,35 @@ describe("CredentialStore", () => {
 
   test("isSensitiveField identifies sensitive fields", () => {
     expect(CredentialStore.isSensitiveField("password")).toBe(true)
+    expect(CredentialStore.isSensitiveField("private_key")).toBe(true)
+    expect(CredentialStore.isSensitiveField("privateKey")).toBe(true)
+    expect(CredentialStore.isSensitiveField("private_key_passphrase")).toBe(true)
+    expect(CredentialStore.isSensitiveField("privateKeyPassphrase")).toBe(true)
+    expect(CredentialStore.isSensitiveField("privateKeyPass")).toBe(true)
     expect(CredentialStore.isSensitiveField("access_token")).toBe(true)
+    expect(CredentialStore.isSensitiveField("token")).toBe(true)
+    expect(CredentialStore.isSensitiveField("oauth_client_secret")).toBe(true)
+    expect(CredentialStore.isSensitiveField("oauthClientSecret")).toBe(true)
+    expect(CredentialStore.isSensitiveField("passcode")).toBe(true)
     expect(CredentialStore.isSensitiveField("connection_string")).toBe(true)
     expect(CredentialStore.isSensitiveField("host")).toBe(false)
     expect(CredentialStore.isSensitiveField("port")).toBe(false)
+    expect(CredentialStore.isSensitiveField("authenticator")).toBe(false)
+  })
+
+  test("saveConnection strips inline private_key as sensitive", async () => {
+    const config = { type: "snowflake", private_key: "-----BEGIN PRIVATE KEY-----\nMIIE..." } as any
+    const { sanitized, warnings } = await CredentialStore.saveConnection("sf_keypair", config)
+    expect(sanitized.private_key).toBeUndefined()
+    expect(warnings.length).toBeGreaterThan(0)
+  })
+
+  test("saveConnection strips OAuth credentials as sensitive", async () => {
+    const config = { type: "snowflake", authenticator: "oauth", token: "access-token-123", oauth_client_secret: "secret" } as any
+    const { sanitized } = await CredentialStore.saveConnection("sf_oauth", config)
+    expect(sanitized.token).toBeUndefined()
+    expect(sanitized.oauth_client_secret).toBeUndefined()
+    expect(sanitized.authenticator).toBe("oauth")
   })
 })
 
@@ -162,6 +187,44 @@ myproject:
     } finally {
       fs.rmSync(tmpDir, { recursive: true })
       delete process.env.TEST_DBT_PASSWORD
+    }
+  })
+
+  test("parses Snowflake private_key from dbt profile", async () => {
+    const fs = await import("fs")
+    const os = await import("os")
+    const path = await import("path")
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dbt-test-"))
+    const profilesPath = path.join(tmpDir, "profiles.yml")
+
+    fs.writeFileSync(
+      profilesPath,
+      `
+snowflake_keypair:
+  outputs:
+    prod:
+      type: snowflake
+      account: abc123
+      user: svc_user
+      private_key: "-----BEGIN PRIVATE KEY-----\\nMIIEvQ..."
+      private_key_passphrase: "my-passphrase"
+      database: ANALYTICS
+      warehouse: COMPUTE_WH
+      schema: PUBLIC
+      role: TRANSFORMER
+`,
+    )
+
+    try {
+      const connections = await parseDbtProfiles(profilesPath)
+      expect(connections).toHaveLength(1)
+      expect(connections[0].type).toBe("snowflake")
+      expect(connections[0].config.private_key).toBe("-----BEGIN PRIVATE KEY-----\nMIIEvQ...")
+      expect(connections[0].config.private_key_passphrase).toBe("my-passphrase")
+      expect(connections[0].config.password).toBeUndefined()
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true })
     }
   })
 

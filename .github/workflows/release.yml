@@ -48,16 +48,30 @@ jobs:
         working-directory: packages/opencode
 
   build:
-    name: Build (${{ matrix.os }})
-    needs: test
+    name: Build (${{ matrix.name }})
+    # Runs in PARALLEL with test — publish waits for both
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, darwin, win32]
+        include:
+          # Each target builds ONE binary in parallel (~5 min each)
+          # Index matches allTargets array in build.ts
+          - { index: 0,  name: "linux-arm64" }
+          - { index: 1,  name: "linux-x64" }
+          - { index: 2,  name: "linux-x64-baseline" }
+          - { index: 3,  name: "linux-arm64-musl" }
+          - { index: 4,  name: "linux-x64-musl" }
+          - { index: 5,  name: "linux-x64-baseline-musl" }
+          - { index: 6,  name: "darwin-arm64" }
+          - { index: 7,  name: "darwin-x64" }
+          - { index: 8,  name: "darwin-x64-baseline" }
+          - { index: 9,  name: "win32-arm64" }
+          - { index: 10, name: "win32-x64" }
+          - { index: 11, name: "win32-x64-baseline" }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -76,8 +90,8 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build ${{ matrix.os }} targets
-        run: bun run packages/opencode/script/build.ts --targets=${{ matrix.os }}
+      - name: Build ${{ matrix.name }}
+        run: bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }}
         env:
           OPENCODE_VERSION: ${{ github.ref_name }}
           OPENCODE_CHANNEL: latest
@@ -85,11 +99,12 @@ jobs:
           GH_REPO: ${{ env.GH_REPO }}
           MODELS_DEV_API_JSON: test/tool/fixtures/models-api.json
 
-      - name: Upload build artifacts
+      - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-${{ matrix.name }}
           path: packages/opencode/dist/
+          compression-level: 1
 
   publish-npm:
     name: Publish to npm
@@ -124,7 +139,7 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: dist-*
+          pattern: "dist-*"
           path: packages/opencode/dist/
           merge-multiple: true
 
@@ -228,7 +243,7 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: dist-*
+          pattern: "dist-*"
           path: packages/opencode/dist/
           merge-multiple: true
 

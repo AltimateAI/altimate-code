@@ -65,6 +65,46 @@ describe("Schema Resolution", () => {
     })
     expect(schema.tableNames()).toContain("orders")
   })
+
+  test("resolveSchema from flat format (tool-style schema_context)", () => {
+    // This is the format most tools pass: { "table_name": { "col": "TYPE" } }
+    const ctx = {
+      customers: { customer_id: "INTEGER", name: "VARCHAR", email: "VARCHAR" },
+      orders: { order_id: "INTEGER", customer_id: "INTEGER", amount: "DECIMAL" },
+    }
+    const schema = resolveSchema(undefined, ctx)
+    expect(schema).not.toBeNull()
+    const tables = schema!.tableNames().sort()
+    expect(tables).toContain("customers")
+    expect(tables).toContain("orders")
+    expect(schema!.columnNames("customers")).toContain("customer_id")
+    expect(schema!.columnNames("customers")).toContain("email")
+    expect(schema!.columnNames("orders")).toContain("amount")
+  })
+
+  test("resolveSchema from array-of-columns format (lineage_check style)", () => {
+    // This is the format lineage_check uses: { "table": [{ name, data_type }] }
+    const ctx = {
+      users: [
+        { name: "id", data_type: "INT" },
+        { name: "email", data_type: "VARCHAR" },
+      ],
+    }
+    const schema = resolveSchema(undefined, ctx)
+    expect(schema).not.toBeNull()
+    expect(schema!.tableNames()).toContain("users")
+    expect(schema!.columnNames("users")).toContain("id")
+    expect(schema!.columnNames("users")).toContain("email")
+  })
+
+  test("schemaOrEmpty handles flat format without falling back to empty", () => {
+    const schema = schemaOrEmpty(undefined, {
+      products: { id: "INT", name: "VARCHAR", price: "DECIMAL" },
+    })
+    const tables = schema.tableNames()
+    expect(tables).toContain("products")
+    expect(tables).not.toContain("_empty_")
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,30 @@
-fix: comprehensive XSS hardening for trace viewer HTML
+fix: `altimate-dbt` compile, execute, and children commands — CLI fallbacks for dbt 1.11+ (#252)
 
-Systematically escape all user-controllable fields in `viewer.ts`:
+The `@altimateai/dbt-integration` library's JSON output parsing breaks with
+newer dbt versions (1.11.x) where the log format changed. Three commands
+were affected:
 
-- Escape `span.kind` and `span.status` in detail panel, waterfall, tree, and log views
-- Escape `span.spanId` in `data-sid` attributes
-- Coerce all numeric fields with `Number()` to prevent string injection via `.toLocaleString()`
-- Add single-quote escaping (`&#x27;`) to the `e()` function for defense-in-depth
+- `execute`: `dbt show` output no longer contains `data.preview` in the
+  expected format — `d[0].data` throws when the filter returns empty.
+- `compile`: `dbt compile` output no longer contains `data.compiled` —
+  same `o[0].data` pattern failure.
+- `children`: `nodeMetaMap.lookupByBaseName()` fails when the manifest
+  file-path resolution doesn't populate the model-name lookup map.
+
+Additionally, `tryExecuteViaDbt` in opencode incorrectly expected
+`raw.table` on `QueryExecutionResult`, which actually has `{ columnNames,
+columnTypes, data }` — causing the dbt-first execution path to always
+fall through to native drivers silently.
+
+Fixes:
+- Add try-catch in execute/compile/graph commands with fallback to direct
+  `dbt` CLI subprocess calls (`dbt show`, `dbt compile`, `dbt ls`)
+- New `dbt-cli.ts` module with resilient multi-format JSON output parsing
+  (handles `data.preview`, `data.rows`, `data.compiled`, `data.compiled_code`,
+  `result.node.compiled_code`)
+- Fix `tryExecuteViaDbt` to recognize `QueryExecutionResult` shape first,
+  then fall back to legacy `raw.table` format
+
+Closes #252
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

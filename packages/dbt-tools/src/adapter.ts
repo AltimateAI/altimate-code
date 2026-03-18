@@ -1,4 +1,6 @@
 import type { Config } from "./config"
+import { bufferLog } from "./log-buffer"
+export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
   DEFAULT_CONFIGURATION_VALUES,
@@ -55,17 +57,18 @@ function configuration(cfg: Config): DBTConfiguration {
   }
 }
 
+
 function terminal(): DBTTerminal {
   return {
     show: async () => {},
-    log: (msg: string) => console.error("[dbt]", msg),
+    log: (msg: string) => bufferLog(`[dbt] ${msg}`),
     trace: () => {},
     debug: () => {},
-    info: (_name: string, msg: string) => console.error("[dbt]", msg),
-    warn: (_name: string, msg: string) => console.error("[dbt:warn]", msg),
+    info: (_name: string, msg: string) => bufferLog(`[dbt] ${msg}`),
+    warn: (_name: string, msg: string) => bufferLog(`[dbt:warn] ${msg}`),
     error: (_name: string, msg: string, e: unknown) => {
       const err = e instanceof Error ? e.message : String(e)
-      console.error("[dbt:error]", msg, err)
+      bufferLog(`[dbt:error] ${msg} ${err}`)
     },
     dispose: () => {},
   }

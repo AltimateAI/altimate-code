@@ -36,7 +36,11 @@ function formatResolveTerm(data: Record<string, any>, term: string): string {
   if (!data.matches?.length) return `No schema elements match "${term}".`
   const lines = [`Matches for "${term}":\n`]
   for (const m of data.matches) {
-    lines.push(`  ${m.fqn ?? `${m.table}.${m.column}`} (${m.score ?? m.confidence} match)`)
+    const col = m.matched_column
+    const loc = col ? `${col.table}.${col.column}` : (m.fqn ?? `${m.table}.${m.column}`)
+    const score = m.confidence ?? m.score ?? "?"
+    const source = m.source ? ` [${m.source}]` : ""
+    lines.push(`  ${loc} (${score} confidence)${source}`)
   }
   return lines.join("\n")
 }

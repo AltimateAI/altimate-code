@@ -142,7 +142,12 @@ if (targetsFlag) {
   }
 }
 
-const targets = singleFlag
+// --target-index=N builds a single target by index (for parallel CI matrix)
+const targetIndexFlag = process.argv.find(a => a.startsWith('--target-index='))?.split('=')[1]
+
+const targets = targetIndexFlag !== undefined
+  ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
+  : singleFlag
   ? allTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
         return false
@@ -199,11 +204,25 @@ for (const item of targets) {
     tsconfig: "./tsconfig.json",
     plugins: [solidPlugin],
     sourcemap: "external",
-    // Database drivers are loaded lazily at runtime via dynamic import().
-    // They must NOT be bundled into the binary — users install them on demand.
+    // Packages excluded from the compiled binary — resolved from node_modules
+    // at runtime. Bun compiled binaries resolve externals via standard Node
+    // resolution from the binary's location, walking up to the wrapper
+    // package's node_modules.
+    //
+    // IMPORTANT: Without code splitting, Bun inlines dynamic import() targets
+    // into the main chunk. Any external require() in those targets will fail
+    // at startup — not when the import() is called. Only mark packages as
+    // external when they truly cannot be bundled (e.g. NAPI native addons).
     external: [
+      // NAPI native module — cannot be embedded in Bun single-file executable.
+      // The JS loader dynamically require()s platform-specific .node binaries
+      // (e.g. @altimateai/altimate-core-darwin-arm64).
+      // Must be installed as a dependency of the published wrapper package.
+      "@altimateai/altimate-core",
+      // Database drivers — native addons, users install on demand per warehouse
       "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
       "mysql2", "mssql", "oracledb", "duckdb", "better-sqlite3",
+      // Optional infra packages — native addons or heavy optional deps
       "keytar", "ssh2", "dockerode",
     ],
     compile: {

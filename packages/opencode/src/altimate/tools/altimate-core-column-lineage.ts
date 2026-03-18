@@ -35,10 +35,26 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
 
 function formatColumnLineage(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (!data.column_lineage?.length) return "No column lineage edges found."
-  const lines = ["Column lineage:\n"]
-  for (const edge of data.column_lineage) {
-    lines.push(`  ${edge.source} -> ${edge.target}${edge.transform ? ` (${edge.transform})` : ""}`)
+  if (!data.column_lineage?.length && !data.column_dict) return "No column lineage edges found."
+  const lines: string[] = []
+
+  // column_dict: output columns -> source columns mapping
+  if (data.column_dict && Object.keys(data.column_dict).length > 0) {
+    lines.push("Column Mappings:")
+    for (const [target, sources] of Object.entries(data.column_dict)) {
+      const srcList = Array.isArray(sources) ? (sources as string[]).join(", ") : JSON.stringify(sources)
+      lines.push(`  ${target} ← ${srcList}`)
+    }
+    lines.push("")
   }
-  return lines.join("\n")
+
+  if (data.column_lineage?.length) {
+    lines.push("Lineage Edges:")
+    for (const edge of data.column_lineage) {
+      const transform = edge.lens_type ?? edge.transform_type ?? edge.transform ?? ""
+      lines.push(`  ${edge.source} → ${edge.target}${transform ? ` (${transform})` : ""}`)
+    }
+  }
+
+  return lines.length ? lines.join("\n") : "No column lineage edges found."
 }

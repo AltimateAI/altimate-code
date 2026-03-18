@@ -18,9 +18,11 @@ export const AltimateCoreGradeTool = Tool.define("altimate_core_grade", {
         schema_context: args.schema_context,
       })
       const data = result.data as Record<string, any>
+      const grade = data.overall_grade ?? data.grade
+      const score = data.scores?.overall != null ? Math.round(data.scores.overall * 100) : data.score
       return {
-        title: `Grade: ${data.grade ?? "?"}`,
-        metadata: { success: result.success, grade: data.grade, score: data.score },
+        title: `Grade: ${grade ?? "?"}`,
+        metadata: { success: result.success, grade, score },
         output: formatGrade(data),
       }
     } catch (e) {
@@ -33,8 +35,20 @@ export const AltimateCoreGradeTool = Tool.define("altimate_core_grade", {
 function formatGrade(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
   const lines: string[] = []
-  lines.push(`Grade: ${data.grade}`)
-  if (data.score != null) lines.push(`Score: ${data.score}/100`)
+  const grade = data.overall_grade ?? data.grade
+  lines.push(`Grade: ${grade}`)
+  const scores = data.scores
+  if (scores) {
+    const overall = scores.overall != null ? Math.round(scores.overall * 100) : null
+    if (overall != null) lines.push(`Score: ${overall}/100`)
+    lines.push("\nCategory scores:")
+    if (scores.syntax != null) lines.push(`  syntax: ${Math.round(scores.syntax * 100)}/100`)
+    if (scores.style != null) lines.push(`  style: ${Math.round(scores.style * 100)}/100`)
+    if (scores.safety != null) lines.push(`  safety: ${Math.round(scores.safety * 100)}/100`)
+    if (scores.complexity != null) lines.push(`  complexity: ${Math.round(scores.complexity * 100)}/100`)
+  } else if (data.score != null) {
+    lines.push(`Score: ${data.score}/100`)
+  }
   if (data.categories) {
     lines.push("\nCategory scores:")
     for (const [cat, score] of Object.entries(data.categories)) {

@@ -5,9 +5,55 @@ const fs = require("fs")
 const path = require("path")
 const os = require("os")
 
+// Resolve script location early — needed by both run() and findBinary().
+const scriptPath = fs.realpathSync(__filename)
+const scriptDir = path.dirname(scriptPath)
+
+// Collect ALL node_modules directories walking upward from startDir.
+// Bun's single-file executable uses a virtual filesystem (/$bunfs/root/) without
+// node_modules. External packages are resolved via NODE_PATH instead.
+// We collect every node_modules in the hierarchy (not just the first) to handle
+// pnpm strict layouts, hoisted monorepos, and npm flat installs alike.
+function findAllNodeModules(startDir) {
+  const paths = []
+  let current = startDir
+  for (;;) {
+    const modules = path.join(current, "node_modules")
+    if (fs.existsSync(modules)) paths.push(modules)
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return paths
+}
+
 function run(target) {
+  // Resolve NODE_PATH so the compiled Bun binary can find external packages
+  // installed alongside the wrapper (e.g. @altimateai/altimate-core NAPI module).
+  // Search from BOTH the binary's location AND the wrapper script's location
+  // to cover npm flat installs, pnpm isolated stores, and hoisted monorepos.
+  const env = { ...process.env }
+  try {
+    const resolvedTarget = fs.realpathSync(target)
+    const targetDir = path.dirname(path.dirname(resolvedTarget))
+
+    const targetModules = findAllNodeModules(targetDir)
+    const scriptModules = findAllNodeModules(scriptDir)
+    const allPaths = [...new Set([...scriptModules, ...targetModules])]
+
+    if (allPaths.length > 0) {
+      const sep = process.platform === "win32" ? ";" : ":"
+      const joined = allPaths.join(sep)
+      env.NODE_PATH = env.NODE_PATH ? joined + sep + env.NODE_PATH : joined
+    }
+  } catch {
+    // realpathSync failed (e.g. target doesn't exist) — continue without
+    // NODE_PATH; spawnSync will report the missing binary via result.error.
+  }
+
   const result = childProcess.spawnSync(target, process.argv.slice(2), {
     stdio: "inherit",
+    env,
   })
   if (result.error) {
     console.error(result.error.message)
@@ -21,9 +67,6 @@ const envPath = process.env.ALTIMATE_CODE_BIN_PATH
 if (envPath) {
   run(envPath)
 }
-
-const scriptPath = fs.realpathSync(__filename)
-const scriptDir = path.dirname(scriptPath)
 
 //
 const cached = path.join(scriptDir, ".altimate-code")

@@ -9,8 +9,14 @@ import { createConnection } from "net"
 
 const HAS_CI_SERVICES = !!(process.env.TEST_MYSQL_HOST || process.env.TEST_MSSQL_HOST || process.env.TEST_REDSHIFT_HOST)
 
+// Only run Docker tests when explicitly opted in via DRIVER_E2E_DOCKER=1
+// or when CI services are configured. This prevents the TypeScript CI job
+// (which has Docker but no test databases) from trying to start containers.
+const DOCKER_OPT_IN = process.env.DRIVER_E2E_DOCKER === "1"
+
 function isDockerAvailable(): boolean {
-  if (HAS_CI_SERVICES) return true // CI services replace Docker
+  if (HAS_CI_SERVICES) return true
+  if (!DOCKER_OPT_IN) return false // Skip unless explicitly opted in
   try {
     execSync("docker info", { stdio: "ignore", timeout: 3000 })
     return true

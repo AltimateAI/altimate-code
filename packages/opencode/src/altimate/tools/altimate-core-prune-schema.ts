@@ -32,6 +32,19 @@ export const AltimateCorePruneSchemaTool = Tool.define("altimate_core_prune_sche
 
 function formatPruneSchema(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (data.pruned) return JSON.stringify(data.pruned, null, 2)
-  return JSON.stringify(data, null, 2)
+  const lines: string[] = []
+  if (data.tables_pruned != null) {
+    lines.push(`Pruned ${data.tables_pruned} of ${data.total_tables} tables to ${data.relevant_tables?.length ?? "?"} relevant.`)
+  }
+  if (data.relevant_tables?.length) {
+    lines.push(`Relevant tables: ${data.relevant_tables.join(", ")}`)
+  }
+  if (data.pruned_schema_yaml) {
+    lines.push("")
+    lines.push(data.pruned_schema_yaml)
+  } else if (data.pruned) {
+    lines.push("")
+    lines.push(JSON.stringify(data.pruned, null, 2))
+  }
+  return lines.length > 0 ? lines.join("\n") : JSON.stringify(data, null, 2)
 }

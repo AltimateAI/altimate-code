@@ -22,6 +22,7 @@ jobs:
     outputs:
       typescript: ${{ steps.filter.outputs.typescript }}
       drivers: ${{ steps.filter.outputs.drivers }}
+      dbt-tools: ${{ steps.filter.outputs.dbt-tools }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -45,6 +46,8 @@ jobs:
               - 'packages/opencode/test/altimate/drivers-e2e.test.ts'
               - 'packages/opencode/test/altimate/drivers-docker-e2e.test.ts'
               - 'packages/opencode/test/altimate/connections.test.ts'
+            dbt-tools:
+              - 'packages/dbt-tools/**'
 
   # ---------------------------------------------------------------------------
   # Main TypeScript tests — excludes driver E2E tests (separate job) and
@@ -195,6 +198,84 @@ jobs:
       #   ALTIMATE_CODE_CONN_SNOWFLAKE_TEST='...' bun test test/altimate/drivers-snowflake-e2e.test.ts
       #   ALTIMATE_CODE_CONN_BIGQUERY_TEST='...' bun test test/altimate/drivers-bigquery-e2e.test.ts
       #   ALTIMATE_CODE_CONN_DATABRICKS_TEST='...' bun test test/altimate/drivers-databricks-e2e.test.ts
+
+  # ---------------------------------------------------------------------------
+  # dbt-tools unit tests — fast (< 5s), run on PRs when dbt-tools changes.
+  # ---------------------------------------------------------------------------
+  dbt-tools:
+    name: dbt-tools
+    needs: changes
+    if: needs.changes.outputs.dbt-tools == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run dbt-tools unit tests
+        run: bun run test
+        working-directory: packages/dbt-tools
+
+  # ---------------------------------------------------------------------------
+  # dbt-tools E2E — slow (~3 min), only on push to main.
+  # Tests dbt CLI fallbacks against real dbt versions (1.8, 1.10, 1.11) and
+  # real Python environments (venv, uv, system).
+  # ---------------------------------------------------------------------------
+  dbt-tools-e2e:
+    name: "dbt-tools E2E"
+    needs: changes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Cache dbt venvs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: packages/dbt-tools/test/.dbt-venvs
+          key: dbt-venvs-${{ runner.os }}-1.8-1.10-1.11
+
+      - name: Cache Python env scenarios
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: packages/dbt-tools/test/.dbt-resolve-envs
+          key: dbt-resolve-envs-${{ runner.os }}-v1
+
+      - name: Set up dbt versions
+        run: ./test/e2e/setup-versions.sh 1.8 1.10 1.11
+        working-directory: packages/dbt-tools
+
+      - name: Set up Python env scenarios
+        run: ./test/e2e/setup-resolve.sh venv uv system
+        working-directory: packages/dbt-tools
+
+      - name: Run dbt-tools E2E tests
+        run: bun run test:e2e
+        working-directory: packages/dbt-tools
+        env:
+          DBT_E2E_VERSIONS: "1.8,1.10,1.11"
+          DBT_RESOLVE_SCENARIOS: "venv,uv,system"
 
   marker-guard:
     name: Marker Guard
