@@ -17,11 +17,6 @@ import PROMPT_TITLE from "./prompt/title.txt"
 // altimate_change start - import custom agent mode prompts
 import PROMPT_BUILDER from "../altimate/prompts/builder.txt"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
-import PROMPT_VALIDATOR from "../altimate/prompts/validator.txt"
-import PROMPT_MIGRATOR from "../altimate/prompts/migrator.txt"
-import PROMPT_EXECUTIVE from "../altimate/prompts/executive.txt"
-import PROMPT_RESEARCHER from "../altimate/prompts/researcher.txt"
-import PROMPT_TRAINER from "../altimate/prompts/trainer.txt"
 // altimate_change end
 import { PermissionNext } from "@/permission/next"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -126,13 +121,26 @@ export namespace Agent {
         "Drop Schema *": "deny",
         "Truncate *": "deny",
       },
+      // altimate_change start - SQL write safety denials
+      sql_execute_write: {
+        "DROP DATABASE *": "deny",
+        "DROP SCHEMA *": "deny",
+        "TRUNCATE *": "deny",
+        "drop database *": "deny",
+        "drop schema *": "deny",
+        "truncate *": "deny",
+        "Drop Database *": "deny",
+        "Drop Schema *": "deny",
+        "Truncate *": "deny",
+      },
+      // altimate_change end
     })
 
     // Combine user config with safety denials so every agent inherits them
     const userWithSafety = PermissionNext.merge(user, safetyDenials)
 
     const result: Record<string, Info> = {
-      // altimate_change start - replace default build agent with builder and add custom modes
+      // altimate_change start - 3 modes: builder, analyst, plan
       builder: {
         name: "builder",
         description: "Create and modify dbt models, SQL, and data pipelines. Full read/write access.",
@@ -143,6 +151,7 @@ export namespace Agent {
           PermissionNext.fromConfig({
             question: "allow",
             plan_enter: "allow",
+            sql_execute_write: "ask",
           }),
           userWithSafety,
         ),
@@ -151,178 +160,45 @@ export namespace Agent {
       },
       analyst: {
         name: "analyst",
-        description: "Read-only data exploration. Cannot modify files or run destructive SQL.",
+        description: "Read-only data exploration and analysis. Cannot modify files or run destructive SQL.",
         prompt: PROMPT_ANALYST,
         options: {},
         permission: PermissionNext.merge(
           defaults,
           PermissionNext.fromConfig({
             "*": "deny",
+            // SQL read tools
             sql_execute: "allow", sql_validate: "allow", sql_analyze: "allow",
             sql_translate: "allow", sql_optimize: "allow", lineage_check: "allow",
+            sql_explain: "allow", sql_format: "allow", sql_fix: "allow",
+            sql_autocomplete: "allow", sql_diff: "allow",
+            // SQL writes denied
+            sql_execute_write: "deny",
+            // Warehouse/schema/finops
             warehouse_list: "allow", warehouse_test: "allow", warehouse_discover: "allow",
             schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
-            schema_cache_status: "allow", sql_explain: "allow", sql_format: "allow",
-            sql_fix: "allow", sql_autocomplete: "allow", sql_diff: "allow",
+            schema_cache_status: "allow", schema_detect_pii: "allow",
+            schema_tags: "allow", schema_tags_list: "allow",
             finops_query_history: "allow", finops_analyze_credits: "allow",
             finops_expensive_queries: "allow", finops_warehouse_advice: "allow",
             finops_unused_resources: "allow", finops_role_grants: "allow",
             finops_role_hierarchy: "allow", finops_user_roles: "allow",
-            schema_detect_pii: "allow", schema_tags: "allow", schema_tags_list: "allow",
+            // Core tools
             altimate_core_validate: "allow", altimate_core_check: "allow",
             altimate_core_rewrite: "allow",
-            tool_lookup: "allow",
+            // Read-only file access
             read: "allow", grep: "allow", glob: "allow",
-            question: "allow", webfetch: "allow", websearch: "allow",
+            webfetch: "allow", websearch: "allow",
+            question: "allow", tool_lookup: "allow",
+            // Bash: last-match-wins — "*": "deny" MUST come first, then specific allows override
+            bash: {
+              "*": "deny",
+              "ls *": "allow", "grep *": "allow", "cat *": "allow",
+              "head *": "allow", "tail *": "allow", "find *": "allow", "wc *": "allow",
+              "dbt list *": "allow", "dbt ls *": "allow", "dbt debug *": "allow",
+            },
+            // Training
             training_save: "allow", training_list: "allow", training_remove: "allow",
-          }),
-          userWithSafety,
-        ),
-        mode: "primary",
-        native: true,
-      },
-      executive: {
-        name: "executive",
-        description: "Read-only data exploration with output calibrated for non-technical executives. No SQL or jargon — findings expressed as business impact.",
-        prompt: PROMPT_EXECUTIVE,
-        options: { audience: "executive" },
-        permission: PermissionNext.merge(
-          defaults,
-          PermissionNext.fromConfig({
-            "*": "deny",
-            sql_execute: "allow", sql_validate: "allow", sql_analyze: "allow",
-            sql_translate: "allow", sql_optimize: "allow", lineage_check: "allow",
-            warehouse_list: "allow", warehouse_test: "allow", warehouse_discover: "allow",
-            schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
-            schema_cache_status: "allow", sql_explain: "allow", sql_format: "allow",
-            sql_fix: "allow", sql_autocomplete: "allow", sql_diff: "allow",
-            finops_query_history: "allow", finops_analyze_credits: "allow",
-            finops_expensive_queries: "allow", finops_warehouse_advice: "allow",
-            finops_unused_resources: "allow", finops_role_grants: "allow",
-            finops_role_hierarchy: "allow", finops_user_roles: "allow",
-            schema_detect_pii: "allow", schema_tags: "allow", schema_tags_list: "allow",
-            altimate_core_validate: "allow", altimate_core_check: "allow",
-            altimate_core_rewrite: "allow",
-            tool_lookup: "allow",
-            read: "allow", grep: "allow", glob: "allow",
-            question: "allow", webfetch: "allow", websearch: "allow",
-            training_save: "allow", training_list: "allow", training_remove: "allow",
-          }),
-          userWithSafety,
-        ),
-        mode: "primary",
-        native: true,
-      },
-      validator: {
-        name: "validator",
-        description: "Test, lint, and verify data integrity. Cannot modify files.",
-        prompt: PROMPT_VALIDATOR,
-        options: {},
-        permission: PermissionNext.merge(
-          defaults,
-          PermissionNext.fromConfig({
-            "*": "deny",
-            sql_validate: "allow", sql_execute: "allow", sql_analyze: "allow",
-            sql_translate: "allow", sql_optimize: "allow", lineage_check: "allow",
-            warehouse_list: "allow", warehouse_test: "allow", warehouse_discover: "allow",
-            schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
-            schema_cache_status: "allow", sql_explain: "allow", sql_format: "allow",
-            sql_fix: "allow", sql_autocomplete: "allow", sql_diff: "allow",
-            finops_query_history: "allow", finops_analyze_credits: "allow",
-            finops_expensive_queries: "allow", finops_warehouse_advice: "allow",
-            finops_unused_resources: "allow", finops_role_grants: "allow",
-            finops_role_hierarchy: "allow", finops_user_roles: "allow",
-            schema_detect_pii: "allow", schema_tags: "allow", schema_tags_list: "allow",
-            altimate_core_validate: "allow", altimate_core_check: "allow",
-            altimate_core_rewrite: "allow",
-            tool_lookup: "allow",
-            read: "allow", grep: "allow", glob: "allow", bash: "allow",
-            question: "allow",
-            training_save: "allow", training_list: "allow", training_remove: "allow",
-          }),
-          userWithSafety,
-        ),
-        mode: "primary",
-        native: true,
-      },
-      migrator: {
-        name: "migrator",
-        description: "Cross-warehouse SQL migration and dialect conversion.",
-        prompt: PROMPT_MIGRATOR,
-        options: {},
-        permission: PermissionNext.merge(
-          defaults,
-          PermissionNext.fromConfig({
-            sql_execute: "allow", sql_validate: "allow", sql_translate: "allow",
-            sql_optimize: "allow", lineage_check: "allow",
-            warehouse_list: "allow", warehouse_test: "allow",
-            schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
-            schema_cache_status: "allow", sql_explain: "allow", sql_format: "allow",
-            sql_fix: "allow", sql_autocomplete: "allow", sql_diff: "allow",
-            finops_query_history: "allow", finops_analyze_credits: "allow",
-            finops_expensive_queries: "allow", finops_warehouse_advice: "allow",
-            finops_unused_resources: "allow", finops_role_grants: "allow",
-            finops_role_hierarchy: "allow", finops_user_roles: "allow",
-            schema_detect_pii: "allow", schema_tags: "allow", schema_tags_list: "allow",
-            altimate_core_validate: "allow", altimate_core_check: "allow",
-            altimate_core_rewrite: "allow",
-            tool_lookup: "allow",
-            read: "allow", write: "allow", edit: "allow",
-            grep: "allow", glob: "allow", question: "allow",
-            training_save: "allow", training_list: "allow", training_remove: "allow",
-          }),
-          userWithSafety,
-        ),
-        mode: "primary",
-        native: true,
-      },
-      researcher: {
-        name: "researcher",
-        description: "Deep research mode. Thorough multi-step investigation with structured reports. Use for complex analytical questions.",
-        prompt: PROMPT_RESEARCHER,
-        options: {},
-        permission: PermissionNext.merge(
-          defaults,
-          PermissionNext.fromConfig({
-            "*": "deny",
-            sql_execute: "allow", sql_validate: "allow", sql_analyze: "allow",
-            sql_translate: "allow", sql_optimize: "allow", lineage_check: "allow",
-            warehouse_list: "allow", warehouse_test: "allow", warehouse_discover: "allow",
-            schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
-            schema_cache_status: "allow", sql_explain: "allow", sql_format: "allow",
-            sql_fix: "allow", sql_autocomplete: "allow", sql_diff: "allow",
-            finops_query_history: "allow", finops_analyze_credits: "allow",
-            finops_expensive_queries: "allow", finops_warehouse_advice: "allow",
-            finops_unused_resources: "allow", finops_role_grants: "allow",
-            finops_role_hierarchy: "allow", finops_user_roles: "allow",
-            schema_detect_pii: "allow", schema_tags: "allow", schema_tags_list: "allow",
-            altimate_core_validate: "allow", altimate_core_check: "allow",
-            altimate_core_rewrite: "allow",
-            tool_lookup: "allow",
-            read: "allow", grep: "allow", glob: "allow", bash: "allow",
-            question: "allow", webfetch: "allow", websearch: "allow",
-            task: "allow", training_save: "allow", training_list: "allow", training_remove: "allow",
-          }),
-          userWithSafety,
-        ),
-        mode: "primary",
-        native: true,
-      },
-      trainer: {
-        name: "trainer",
-        description: "Teach your AI teammate. Scan for patterns, validate training against code, curate knowledge. Read-only.",
-        prompt: PROMPT_TRAINER,
-        options: {},
-        permission: PermissionNext.merge(
-          defaults,
-          PermissionNext.fromConfig({
-            "*": "deny",
-            read: "allow", grep: "allow", glob: "allow", bash: "allow",
-            question: "allow",
-            training_save: "allow", training_list: "allow", training_remove: "allow",
-            schema_inspect: "allow", schema_index: "allow", schema_search: "allow",
-            schema_cache_status: "allow",
-            warehouse_list: "allow", warehouse_discover: "allow",
           }),
           userWithSafety,
         ),
@@ -469,7 +345,8 @@ export namespace Agent {
       item.name = value.name ?? item.name
       item.steps = value.steps ?? item.steps
       item.options = mergeDeep(item.options, value.options ?? {})
-      item.permission = PermissionNext.merge(item.permission, PermissionNext.fromConfig(value.permission ?? {}))
+      // Re-apply safety denials AFTER user config so they cannot be overridden
+      item.permission = PermissionNext.merge(item.permission, PermissionNext.fromConfig(value.permission ?? {}), safetyDenials)
     }
 
     // Ensure Truncate.GLOB is allowed unless explicitly configured

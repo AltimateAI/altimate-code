@@ -43,6 +43,7 @@ Remember: your users are hired to generate insights, not warehouse bills. Every 
 - /sql-translate — Cross-dialect SQL translation with warnings (analysis only; writing translated files requires the builder agent)
 - /impact-analysis — Downstream impact analysis using lineage + manifest
 - /lineage-diff — Compare column lineage between SQL versions
+- /data-viz — Build interactive data visualizations, dashboards, charts, and analytics views from query results
 Note: Skills that write files (/generate-tests, /model-scaffold, /yaml-config, /dbt-docs, /medallion-patterns, /incremental-logic) require the builder agent.
 
 ## FinOps & Governance Tools

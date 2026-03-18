@@ -20,9 +20,6 @@ test("returns default native agents when no config", async () => {
       const names = agents.map((a) => a.name)
       expect(names).toContain("builder")
       expect(names).toContain("analyst")
-      expect(names).toContain("executive")
-      expect(names).toContain("validator")
-      expect(names).toContain("migrator")
       expect(names).toContain("plan")
       expect(names).toContain("general")
       expect(names).toContain("explore")
@@ -681,11 +678,6 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
       agent: {
         builder: { disable: true },
         analyst: { disable: true },
-        executive: { disable: true },
-        validator: { disable: true },
-        migrator: { disable: true },
-        researcher: { disable: true },
-        trainer: { disable: true },
         plan: { disable: true },
       },
     },
@@ -695,6 +687,126 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
     fn: async () => {
       // all primary agents are disabled, no primary-capable agents remain
       await expect(Agent.defaultAgent()).rejects.toThrow("no primary visible agent found")
+    },
+  })
+})
+
+// --- SQL write access control tests ---
+
+test("analyst denies sql_execute_write", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const analyst = await Agent.get("analyst")
+      expect(analyst).toBeDefined()
+      expect(evalPerm(analyst, "sql_execute_write")).toBe("deny")
+    },
+  })
+})
+
+test("analyst denies bash dbt deps", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const analyst = await Agent.get("analyst")
+      expect(analyst).toBeDefined()
+      // dbt deps writes dbt_packages/ — must be denied for read-only analyst
+      expect(PermissionNext.evaluate("bash", "dbt deps", analyst!.permission).action).toBe("deny")
+      // dbt list/ls/debug should still be allowed
+      expect(PermissionNext.evaluate("bash", "dbt list --output json", analyst!.permission).action).toBe("allow")
+      expect(PermissionNext.evaluate("bash", "dbt ls", analyst!.permission).action).toBe("allow")
+      expect(PermissionNext.evaluate("bash", "dbt debug", analyst!.permission).action).toBe("allow")
+    },
+  })
+})
+
+test("builder allows sql_execute_write with ask", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
+      expect(evalPerm(builder, "sql_execute_write")).toBe("ask")
+    },
+  })
+})
+
+test("safety denials on sql_execute_write cannot be overridden by user config", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      agent: {
+        builder: {
+          permission: {
+            sql_execute_write: "allow",
+          },
+        },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
+      // User tried to allow all sql_execute_write, but safety denials must survive
+      expect(PermissionNext.evaluate("sql_execute_write", "DROP DATABASE production", builder!.permission).action).toBe("deny")
+      expect(PermissionNext.evaluate("sql_execute_write", "DROP SCHEMA public", builder!.permission).action).toBe("deny")
+      expect(PermissionNext.evaluate("sql_execute_write", "TRUNCATE users", builder!.permission).action).toBe("deny")
+      // Non-destructive writes should be allowed by the user override
+      expect(PermissionNext.evaluate("sql_execute_write", "INSERT INTO users VALUES (1)", builder!.permission).action).toBe("allow")
+    },
+  })
+})
+
+test("safety denials on bash cannot be overridden by user config", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      agent: {
+        builder: {
+          permission: {
+            bash: "allow",
+          },
+        },
+      },
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
+      // User tried to allow all bash, but DROP DATABASE must still be denied
+      expect(PermissionNext.evaluate("bash", "DROP DATABASE production", builder!.permission).action).toBe("deny")
+      expect(PermissionNext.evaluate("bash", "TRUNCATE users", builder!.permission).action).toBe("deny")
+    },
+  })
+})
+
+test("builder prompt contains /data-viz skill", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const builder = await Agent.get("builder")
+      expect(builder).toBeDefined()
+      expect(builder!.prompt).toContain("/data-viz")
+      expect(builder!.prompt).toContain("visualize")
+      expect(builder!.prompt).toContain("dashboard")
+    },
+  })
+})
+
+test("analyst prompt contains /data-viz skill", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const analyst = await Agent.get("analyst")
+      expect(analyst).toBeDefined()
+      expect(analyst!.prompt).toContain("/data-viz")
     },
   })
 })

@@ -2,6 +2,9 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
+// altimate_change start - SQL write access control
+import { classifyAndCheck } from "./sql-classify"
+// altimate_change end
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -11,6 +14,22 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     limit: z.number().optional().default(100).describe("Max rows to return"),
   }),
   async execute(args, ctx) {
+    // altimate_change start - SQL write access control
+    // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
+    const { queryType, blocked } = classifyAndCheck(args.query)
+    if (blocked) {
+      throw new Error("DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.")
+    }
+    if (queryType === "write") {
+      await ctx.ask({
+        permission: "sql_execute_write",
+        patterns: [args.query.slice(0, 200)],
+        always: ["*"],
+        metadata: { queryType },
+      })
+    }
+    // altimate_change end
+
     try {
       const result = await Dispatcher.call("sql.execute", {
         sql: args.query,

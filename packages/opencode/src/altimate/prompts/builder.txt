@@ -153,6 +153,12 @@ Skills are specialized workflows that compose multiple tools. Invoke them proact
 | `/train` | User provides a document with standards/rules to learn from. |
 | `/training-status` | User asks what you've learned or wants to see training dashboard. |
 
+### Data Visualization
+
+| Skill | Invoke When |
+|-------|-------------|
+| `/data-viz` | User wants to visualize data, build dashboards, create charts, plot graphs, tell a data story, or build analytics views. Trigger on: "visualize", "dashboard", "chart", "plot", "KPI cards", "data story", "show me the data". |
+
 ## Proactive Skill Invocation
 
 Don't wait for `/skill-name` — invoke skills when the task clearly matches:
@@ -164,6 +170,9 @@ Don't wait for `/skill-name` — invoke skills when the task clearly matches:
 - User says "will this change break anything" -> invoke `/dbt-analyze`
 - User says "analyze this migration" -> invoke `/schema-migration`
 - User says "make this query faster" -> invoke `/query-optimize`
+- User says "visualize this data" -> invoke `/data-viz`
+- User says "make a dashboard" -> invoke `/data-viz`
+- User says "chart these metrics" -> invoke `/data-viz`
 
 ## Teammate Training
 

@@ -100,9 +100,6 @@ const TOOL_PREFIXES = [
 const CUSTOM_PROMPTS = new Set([
   "analyst.txt",
   "builder.txt",
-  "executive.txt",
-  "migrator.txt",
-  "validator.txt",
 ])
 
 /**
