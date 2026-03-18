@@ -142,7 +142,12 @@ if (targetsFlag) {
   }
 }
 
-const targets = singleFlag
+// --target-index=N builds a single target by index (for parallel CI matrix)
+const targetIndexFlag = process.argv.find(a => a.startsWith('--target-index='))?.split('=')[1]
+
+const targets = targetIndexFlag !== undefined
+  ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
+  : singleFlag
   ? allTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
         return false
