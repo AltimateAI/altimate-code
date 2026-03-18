@@ -104,6 +104,23 @@ export namespace Skill {
         })
     }
 
+    // altimate_change start - scan ~/.altimate/builtin/ for release-managed builtin skills
+    // This path is fully owned by postinstall (wipe-and-replace on every release).
+    // Kept separate from user-editable skill dirs so users never accidentally modify builtins.
+    if (!Flag.OPENCODE_DISABLE_EXTERNAL_SKILLS) {
+      const builtinDir = path.join(Global.Path.home, ".altimate", "builtin")
+      if (await Filesystem.isDir(builtinDir)) {
+        const matches = await Glob.scan(SKILL_PATTERN, {
+          cwd: builtinDir,
+          absolute: true,
+          include: "file",
+          symlink: true,
+        })
+        await Promise.all(matches.map(addSkill))
+      }
+    }
+    // altimate_change end
+
     // Scan external skill directories (.claude/skills/, .agents/skills/, etc.)
     // Load global (home) first, then project-level (so project-level overwrites)
     if (!Flag.OPENCODE_DISABLE_EXTERNAL_SKILLS) {

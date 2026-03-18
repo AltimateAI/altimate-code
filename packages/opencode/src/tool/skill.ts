@@ -9,9 +9,9 @@ import { iife } from "@/util/iife"
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
+// altimate_change end
 
 const MAX_DISPLAY_SKILLS = 50
-// altimate_change end
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const list = await Skill.available(ctx?.agent)
