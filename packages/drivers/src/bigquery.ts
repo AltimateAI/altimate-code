@@ -7,7 +7,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let BigQueryModule: any
   try {
-    // @ts-expect-error — optional dependency, loaded at runtime
     BigQueryModule = await import("@google-cloud/bigquery")
   } catch {
     throw new Error(

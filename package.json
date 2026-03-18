@@ -85,6 +85,7 @@
   },
   "dependencies": {
     "@databricks/sql": "1.13.0",
+    "@google-cloud/bigquery": "8.1.1",
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/script": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",

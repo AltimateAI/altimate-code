@@ -15,7 +15,7 @@ Altimate Code connects to 10 databases natively via TypeScript drivers. No Pytho
 | SQL Server | `mssql` | Password, Azure AD | ✅ Docker | Uses `tedious` TDS protocol |
 | Redshift | `pg` (wire-compat) | Password | ✅ Docker (PG wire) | Uses SVV system views |
 | Snowflake | `snowflake-sdk` | Password, Key-Pair (unencrypted + encrypted), OAuth | ✅ Live account | 37 E2E tests, key-pair with passphrase support |
-| BigQuery | `@google-cloud/bigquery` | Service Account, ADC | ❌ Needs credentials | REST/gRPC API |
+| BigQuery | `@google-cloud/bigquery` | Service Account, ADC | ✅ Live account | 25 E2E tests, UNNEST/STRUCT/DATE types |
 | Databricks | `@databricks/sql` | PAT, OAuth | ✅ Live account | 24 E2E tests, Unity Catalog support |
 | Oracle | `oracledb` (thin) | Password | ❌ Needs Oracle 12.1+ | Thin mode only, no Instant Client |
 
@@ -181,10 +181,14 @@ These features work based on SDK documentation but haven't been verified with au
 - ❌ OAuth/external browser auth (requires interactive browser)
 - ❌ Multi-cluster warehouse auto-scaling
 
-### BigQuery
-- Application Default Credentials (ADC)
-- Location-specific query execution
-- Dry run / cost estimation
+### BigQuery (partially tested — 25 E2E tests pass)
+- ✅ Service Account JSON key authentication
+- ✅ Schema introspection (datasets, tables, columns)
+- ✅ BigQuery types (UNNEST, STRUCT, DATE/DATETIME/TIMESTAMP, STRING_AGG)
+- ✅ Adversarial inputs (injection blocked, invalid SQL)
+- ❌ Application Default Credentials (ADC)
+- ❌ Location-specific query execution
+- ❌ Dry run / cost estimation
 
 ### Databricks (partially tested — 24 E2E tests pass)
 - ✅ Personal Access Token (PAT) authentication
