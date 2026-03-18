@@ -199,12 +199,18 @@ for (const item of targets) {
     tsconfig: "./tsconfig.json",
     plugins: [solidPlugin],
     sourcemap: "external",
-    // Database drivers are loaded lazily at runtime via dynamic import().
-    // They must NOT be bundled into the binary — users install them on demand.
+    // Packages that must NOT be bundled into the compiled binary.
+    // They are loaded lazily via dynamic import() at runtime.
     external: [
+      // altimate-core napi binary — ~50MB per platform, loaded on first tool call
+      "@altimateai/altimate-core",
+      // dbt integration — heavy transitive deps (electron, aws-sdk, etc.)
+      "@altimateai/dbt-integration",
+      // Database drivers — users install on demand
       "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
       "mysql2", "mssql", "oracledb", "duckdb", "better-sqlite3",
-      "keytar", "ssh2", "dockerode",
+      // Optional infra packages
+      "keytar", "ssh2", "dockerode", "yaml",
     ],
     compile: {
       autoloadBunfig: false,
