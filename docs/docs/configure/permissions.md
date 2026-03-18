@@ -111,17 +111,11 @@ altimate
 
 Auto-approve all permission prompts without asking. Useful for CI/CD pipelines, benchmarks, scripted workflows, and trusted environments.
 
-**Global flag (works with any subcommand):**
+**CLI flag (works with any subcommand):**
 
 ```bash
 altimate-code --yolo run "build all dbt models"
 altimate-code --yolo                              # launches TUI in yolo mode
-```
-
-**Subcommand flag:**
-
-```bash
-altimate-code run --yolo "analyze my queries"
 ```
 
 **Environment variable:**
@@ -131,7 +125,11 @@ export ALTIMATE_CLI_YOLO=true
 altimate-code run "analyze my queries"
 ```
 
-**Safety:** Explicit `deny` rules in your config are still enforced — yolo mode only auto-approves permissions that would normally prompt you. If you've denied `rm *` or `DROP *`, those remain blocked.
+The fallback `OPENCODE_YOLO` env var is also supported. When both are set, `ALTIMATE_CLI_YOLO` takes precedence — setting it to `false` disables yolo even if `OPENCODE_YOLO=true`.
+
+**Safety:** Explicit `deny` rules in your config are still enforced. Deny rules throw an error *before* any permission prompt is created, so yolo mode never sees them. If you've denied `rm *` or `DROP *`, those remain blocked even with `--yolo`.
+
+When yolo mode is active in the TUI, a `△ YOLO` indicator appears in the footer status bar.
 
 ## Recommended Configurations
 
