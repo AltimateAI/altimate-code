@@ -8,7 +8,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let snowflake: any
   try {
-    // @ts-expect-error — optional dependency, loaded at runtime
     snowflake = await import("snowflake-sdk")
     snowflake = snowflake.default || snowflake
   } catch {
@@ -55,12 +54,27 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         if (!fs.existsSync(keyPath)) {
           throw new Error(`Snowflake private key file not found: ${keyPath}`)
         }
-        const privateKey = fs.readFileSync(keyPath, "utf-8")
+        const keyContent = fs.readFileSync(keyPath, "utf-8")
+
+        // If key is encrypted (has ENCRYPTED in header or passphrase provided),
+        // decrypt it using Node crypto — snowflake-sdk expects unencrypted PEM.
+        let privateKey: string
+        if (config.private_key_passphrase || keyContent.includes("ENCRYPTED")) {
+          const crypto = await import("crypto")
+          const keyObject = crypto.createPrivateKey({
+            key: keyContent,
+            format: "pem",
+            passphrase: (config.private_key_passphrase as string) || undefined,
+          })
+          privateKey = keyObject
+            .export({ type: "pkcs8", format: "pem" })
+            .toString()
+        } else {
+          privateKey = keyContent
+        }
+
         options.authenticator = "SNOWFLAKE_JWT"
         options.privateKey = privateKey
-        if (config.private_key_passphrase) {
-          options.privateKeyPass = config.private_key_passphrase
-        }
       } else if (config.password) {
         options.password = config.password
       }

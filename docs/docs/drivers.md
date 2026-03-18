@@ -14,7 +14,7 @@ Altimate Code connects to 10 databases natively via TypeScript drivers. No Pytho
 | MySQL | `mysql2` | Password | ✅ Docker | Parameterized introspection |
 | SQL Server | `mssql` | Password, Azure AD | ✅ Docker | Uses `tedious` TDS protocol |
 | Redshift | `pg` (wire-compat) | Password | ✅ Docker (PG wire) | Uses SVV system views |
-| Snowflake | `snowflake-sdk` | Password, Key-Pair, OAuth | ❌ Needs credentials | Key-pair auth with PEM support |
+| Snowflake | `snowflake-sdk` | Password, Key-Pair (unencrypted + encrypted), OAuth | ✅ Live account | 37 E2E tests, key-pair with passphrase support |
 | BigQuery | `@google-cloud/bigquery` | Service Account, ADC | ❌ Needs credentials | REST/gRPC API |
 | Databricks | `@databricks/sql` | PAT, OAuth | ❌ Needs credentials | Thrift API to SQL warehouses |
 | Oracle | `oracledb` (thin) | Password | ❌ Needs Oracle 12.1+ | Thin mode only, no Instant Client |
@@ -170,11 +170,16 @@ Use the `warehouse_discover` tool or run project scan to find available connecti
 
 These features work based on SDK documentation but haven't been verified with automated E2E tests:
 
-### Snowflake
-- Key-pair authentication (PEM file loading)
-- OAuth/external browser auth
-- Multi-cluster warehouse selection
-- SHOW SCHEMAS/TABLES introspection commands
+### Snowflake (partially tested — 37 E2E tests pass)
+- ✅ Password authentication
+- ✅ Key-pair with unencrypted PEM
+- ✅ Key-pair with encrypted PEM + passphrase
+- ✅ Schema introspection (SHOW SCHEMAS/TABLES/DESCRIBE)
+- ✅ DDL/DML (CREATE, INSERT, UPDATE, DELETE, DROP)
+- ✅ Snowflake types (VARIANT, ARRAY, OBJECT, BOOLEAN, DATE)
+- ✅ Adversarial SQL injection blocked (multi-statement protection)
+- ❌ OAuth/external browser auth (requires interactive browser)
+- ❌ Multi-cluster warehouse auto-scaling
 
 ### BigQuery
 - Application Default Credentials (ADC)
