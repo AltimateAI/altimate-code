@@ -51,12 +51,14 @@ altimate --print-logs --log-level DEBUG
 
 ### Warehouse Connection Failed
 
-**Symptoms:** "Connection refused" or authentication errors.
+**Symptoms:** "Connection refused", authentication errors, or "No warehouse configured".
 
 **Solutions:**
 
-1. Test your warehouse credentials outside altimate
-2. Check that the warehouse hostname and port are reachable
+1. **If using dbt:** Run `altimate-dbt init` to set up the dbt integration. The CLI will use your `profiles.yml` automatically — no separate connection config needed.
+2. **If not using dbt:** Add a connection via the `warehouse_add` tool, `~/.altimate-code/connections.json`, or `ALTIMATE_CODE_CONN_*` env vars.
+3. Test connectivity: use the `warehouse_test` tool with your connection name.
+4. Check that the warehouse hostname and port are reachable
 3. Verify the role/user has the required permissions
 4. For Snowflake: ensure the warehouse is not suspended
 5. For BigQuery: check that the service account has the required IAM roles

@@ -75,9 +75,16 @@ bun add oracledb                  # Oracle (thin mode)
 export ALTIMATE_CODE_CONN_MYDB='{"type":"postgres","host":"localhost","port":5432,"database":"mydb","user":"admin","password":"secret"}'
 ```
 
-### Via dbt Profiles
+### Via dbt Profiles (Recommended for dbt Users)
 
-Connections are auto-discovered from `~/.dbt/profiles.yml`. Jinja `{{ env_var() }}` patterns are resolved automatically. Discovered connections are named `dbt_{profile}_{target}`.
+**dbt-first execution**: When working in a dbt project, `sql.execute` automatically uses dbt's own adapter to connect via `profiles.yml` — no separate connection configuration needed. If dbt is not configured or fails, it falls back to native drivers silently.
+
+Connections are also auto-discovered from `~/.dbt/profiles.yml` for the `warehouse.list` and `warehouse.discover` tools. Jinja `{{ env_var() }}` patterns are resolved automatically. Discovered connections are named `dbt_{profile}_{target}`.
+
+To set up dbt integration:
+```bash
+altimate-dbt init --project-root /path/to/dbt/project --python-path $(which python3)
+```
 
 ## Auth Methods by Database
 
@@ -208,3 +215,78 @@ These features work based on SDK documentation but haven't been verified with au
 - SSH tunnel with password authentication
 - SSH tunnel with passphrase-protected keys
 - Credential store with keytar (OS keychain)
+
+---
+
+## Architecture
+
+### How SQL Execution Works
+
+```
+User calls sql.execute("SELECT * FROM orders")
+        │
+        ▼
+   ┌─────────────────────────┐
+   │  1. dbt adapter (first) │ ← Uses profiles.yml, no separate config
+   │     If dbt configured   │
+   └──────────┬──────────────┘
+              │ (fails or not configured)
+              ▼
+   ┌─────────────────────────┐
+   │  2. Native driver       │ ← Uses connections.json or env vars
+   │     pg / snowflake-sdk  │
+   │     / mysql2 / etc.     │
+   └──────────┬──────────────┘
+              │ (no connection configured)
+              ▼
+   ┌─────────────────────────┐
+   │  3. Error               │ ← Clear message with setup instructions
+   └─────────────────────────┘
+```
+
+### Dispatcher Pattern
+
+All 73 tool methods route through a central `Dispatcher` that maps method names to native TypeScript handlers. There is no Python bridge — every call executes in-process.
+
+### Shared Driver Package
+
+Database drivers live in `packages/drivers/` (`@altimateai/drivers`) — a workspace package shared across the monorepo. Each driver:
+- Lazy-loads its npm package via dynamic `import()` (no startup cost)
+- Uses parameterized queries for schema introspection (SQL injection safe)
+- Implements a common `Connector` interface: `connect()`, `execute()`, `listSchemas()`, `listTables()`, `describeTable()`, `close()`
+
+## Credential Security
+
+Credentials are handled with a 3-tier fallback:
+
+1. **OS Keychain** (via `keytar`) — preferred, secure. Credentials stored in macOS Keychain, Linux Secret Service, or Windows Credential Vault.
+2. **Environment variables** (`ALTIMATE_CODE_CONN_*`) — for CI/headless environments. Pass full connection JSON.
+3. **Refuse** — if keytar is unavailable and no env var set, credentials are NOT stored in plaintext. The CLI warns and tells you to use env vars.
+
+Sensitive fields (`password`, `private_key_passphrase`, `access_token`, `ssh_password`, `connection_string`) are always stripped from `connections.json` on disk.
+
+## Telemetry
+
+The following anonymized telemetry events are tracked to understand usage patterns (no SQL content, passwords, or file paths are ever sent):
+
+| Event | When | Key Fields |
+|-------|------|------------|
+| `warehouse_connect` | Connection attempt | warehouse_type, auth_method, success, error_category |
+| `warehouse_query` | SQL execution | warehouse_type, query_type (SELECT/INSERT/DDL), row_count |
+| `warehouse_introspection` | Schema indexing | operation, result_count |
+| `warehouse_discovery` | Auto-discovery | source (docker/dbt/env), connections_found |
+| `warehouse_census` | Once per session | total_connections, warehouse_types |
+
+Telemetry can be disabled:
+```bash
+export ALTIMATE_TELEMETRY_DISABLED=true
+```
+
+Or in config:
+```json
+{
+  "telemetry": { "disabled": true }
+}
+```
+
+Telemetry failures **never** affect functionality — every tracking call is wrapped in try/catch.

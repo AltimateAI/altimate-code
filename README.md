@@ -148,11 +148,14 @@ The CLI handles AI interactions, TUI, and tool orchestration. SQL analysis is po
 
 **No Python dependency**: All 73 tool methods run natively in TypeScript. No pip, venv, or Python installation needed.
 
+**dbt-first**: When working in a dbt project, the CLI automatically uses dbt's connection from `profiles.yml` — no separate warehouse configuration needed.
+
 ### Monorepo structure
 
 ```
 packages/
   altimate-code/       TypeScript CLI (main entry point)
+  drivers/             Shared database drivers (10 warehouses)
   dbt-tools/           dbt integration (TypeScript)
   plugin/              Plugin system
   sdk/js/              JavaScript SDK
