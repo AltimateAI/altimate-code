@@ -10,7 +10,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     mysql = await import("mysql2/promise")
     mysql = mysql.default || mysql
   } catch {
-    throw new Error("MySQL driver not installed. Run: bun add mysql2")
+    throw new Error("MySQL driver not installed. Run: npm install mysql2")
   }
 
   let pool: any

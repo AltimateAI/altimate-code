@@ -12,7 +12,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     snowflake = snowflake.default || snowflake
   } catch {
     throw new Error(
-      "Snowflake driver not installed. Run: bun add snowflake-sdk",
+      "Snowflake driver not installed. Run: npm install snowflake-sdk",
     )
   }
 

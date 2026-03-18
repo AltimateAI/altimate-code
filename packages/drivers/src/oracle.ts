@@ -12,7 +12,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     oracledb = oracledb.default || oracledb
   } catch {
     throw new Error(
-      "Oracle driver not installed. Run: bun add oracledb",
+      "Oracle driver not installed. Run: npm install oracledb",
     )
   }
 

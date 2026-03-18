@@ -9,7 +9,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   try {
     pg = await import("pg")
   } catch {
-    throw new Error("PostgreSQL driver not installed. Run: bun add pg @types/pg")
+    throw new Error("PostgreSQL driver not installed. Run: npm install pg @types/pg")
   }
 
   const Pool = pg.default?.Pool ?? pg.Pool

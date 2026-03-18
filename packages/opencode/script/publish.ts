@@ -19,6 +19,22 @@ const runtimeDependencies: Record<string, string> = {
   "@altimateai/altimate-core": altimateCoreDep,
 }
 
+const driverPeerDependencies: Record<string, string> = {
+  "pg": ">=8",
+  "snowflake-sdk": ">=1",
+  "@google-cloud/bigquery": ">=8",
+  "@databricks/sql": ">=1",
+  "mysql2": ">=3",
+  "mssql": ">=11",
+  "oracledb": ">=6",
+  "duckdb": ">=1",
+  "better-sqlite3": ">=11",
+}
+
+const driverPeerDependenciesMeta: Record<string, { optional: true }> = Object.fromEntries(
+  Object.keys(driverPeerDependencies).map((k) => [k, { optional: true as const }]),
+)
+
 const binaries: Record<string, string> = {}
 for (const filepath of new Bun.Glob("**/package.json").scanSync({ cwd: "./dist" })) {
   const pkg = await Bun.file(`./dist/${filepath}`).json()
@@ -48,6 +64,8 @@ await Bun.file(`./dist/${pkg.name}/package.json`).write(
       license: pkg.license,
       dependencies: runtimeDependencies,
       optionalDependencies: binaries,
+      peerDependencies: driverPeerDependencies,
+      peerDependenciesMeta: driverPeerDependenciesMeta,
     },
     null,
     2,
@@ -96,6 +114,8 @@ try {
         license: pkg.license,
         dependencies: runtimeDependencies,
         optionalDependencies: binaries,
+        peerDependencies: driverPeerDependencies,
+        peerDependenciesMeta: driverPeerDependenciesMeta,
       },
       null,
       2,

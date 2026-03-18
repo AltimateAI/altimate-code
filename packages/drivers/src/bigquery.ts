@@ -10,7 +10,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     BigQueryModule = await import("@google-cloud/bigquery")
   } catch {
     throw new Error(
-      "BigQuery driver not installed. Run: bun add @google-cloud/bigquery",
+      "BigQuery driver not installed. Run: npm install @google-cloud/bigquery",
     )
   }
 

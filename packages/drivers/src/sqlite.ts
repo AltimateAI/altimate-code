@@ -13,7 +13,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     Database = mod.default || mod
   } catch {
     throw new Error(
-      "SQLite driver not installed. Run: bun add better-sqlite3",
+      "SQLite driver not installed. Run: npm install better-sqlite3",
     )
   }
 

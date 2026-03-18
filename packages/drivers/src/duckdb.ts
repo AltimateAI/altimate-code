@@ -11,7 +11,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     duckdb = await import("duckdb")
     duckdb = duckdb.default || duckdb
   } catch {
-    throw new Error("DuckDB driver not installed. Run: bun add duckdb")
+    throw new Error("DuckDB driver not installed. Run: npm install duckdb")
   }
 
   const dbPath = (config.path as string) ?? ":memory:"

@@ -12,7 +12,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     mssql = mssql.default || mssql
   } catch {
     throw new Error(
-      "SQL Server driver not installed. Run: bun add mssql",
+      "SQL Server driver not installed. Run: npm install mssql",
     )
   }
 

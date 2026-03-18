@@ -11,7 +11,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     pg = await import("pg")
   } catch {
     throw new Error(
-      "Redshift driver not installed (uses pg). Run: bun add pg @types/pg",
+      "Redshift driver not installed (uses pg). Run: npm install pg @types/pg",
     )
   }
 

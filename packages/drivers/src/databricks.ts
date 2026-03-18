@@ -11,7 +11,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     databricksModule = databricksModule.default || databricksModule
   } catch {
     throw new Error(
-      "Databricks driver not installed. Run: bun add @databricks/sql",
+      "Databricks driver not installed. Run: npm install @databricks/sql",
     )
   }
 
