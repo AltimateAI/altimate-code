@@ -15,9 +15,9 @@ hide:
   <img src="assets/images/altimate-code-banner.png" alt="altimate-code" />
 </p>
 
-<p class="hero-tagline">The data engineering agent for<br/>dbt, SQL, and cloud warehouses.</p>
+<p class="hero-tagline">The open-source data engineering harness.</p>
 
-<p class="hero-description">An AI-powered CLI with 99+ specialized tools — SQL analysis, schema inspection, column-level lineage, FinOps, data visualization, PII detection, and RBAC. Connects to your warehouse, understands your data, and helps you ship faster.</p>
+<p class="hero-description">99+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across any platform — independent of a single warehouse provider.</p>
 
 <p class="hero-actions" markdown>
 
@@ -38,8 +38,8 @@ npm install -g @altimateai/altimate-code
 
 ---
 
-<h2 class="section-heading">Built for data teams</h2>
-<p class="section-sub">Unlike general-purpose coding agents, every tool is purpose-built for data engineering workflows.</p>
+<h2 class="section-heading">Purpose-built for the data product lifecycle</h2>
+<p class="section-sub">Every tool covers a specific stage — build, validate, optimize, or ship. Not general-purpose AI on top of SQL files.</p>
 
 <div class="grid cards" markdown>
 
@@ -78,6 +78,39 @@ npm install -g @altimateai/altimate-code
     ---
 
     Manifest parsing, test generation, model scaffolding, incremental model detection, and lineage-aware refactoring.
+
+</div>
+
+---
+
+<h2 class="section-heading">Use anywhere in your stack</h2>
+<p class="section-sub">Run interactively, automate in CI, embed in DAGs, or mount as the tool layer for your AI agents.</p>
+
+<div class="grid cards" markdown>
+
+-   :material-console:{ .lg .middle } **Terminal**
+
+    ---
+
+    Interactive TUI with 99+ tools, autocomplete for skills, and persistent memory across sessions.
+
+-   :material-pipe-disconnected:{ .lg .middle } **CI Pipeline**
+
+    ---
+
+    Headless mode for automated validation, schema diffing, and anti-pattern checks in GitHub Actions or any CI system.
+
+-   :material-graph:{ .lg .middle } **Orchestration DAGs**
+
+    ---
+
+    Call the harness from Airflow, Dagster, or Prefect tasks to add data quality gates and lineage checks to your pipelines.
+
+-   :material-robot-outline:{ .lg .middle } **Data Agent Harness**
+
+    ---
+
+    Mount altimate as the tool layer underneath Claude Code, Codex, or any AI agent — giving it deterministic, warehouse-aware capabilities.
 
 </div>
 
@@ -151,8 +184,8 @@ npm install -g @altimateai/altimate-code
 
 ---
 
-<h2 class="section-heading">Connects to your warehouse</h2>
-<p class="section-sub">First-class support for 8 data platforms.</p>
+<h2 class="section-heading">Evaluate across any platform</h2>
+<p class="section-sub">First-class support for 8 warehouses. Migrate, compare, and translate across platforms — not locked to one vendor.</p>
 
 <div class="pill-grid" markdown>
 
@@ -171,8 +204,8 @@ npm install -g @altimateai/altimate-code
 
 <div class="doc-links" markdown>
 
-**Documentation** — [Getting Started](getting-started.md) | [Data Engineering](data-engineering/agent-modes.md) | [Configuration](configure/config.md)
+**Documentation** — [Getting Started](getting-started.md) | [Guides](data-engineering/guides/cost-optimization.md) | [Tools](data-engineering/tools/sql-tools.md) | [Configuration](configure/config.md)
 
-**Develop & Extend** — [SDK](develop/sdk.md) | [Plugins](develop/plugins.md) | [Server API](develop/server.md)
+**Extend** — [SDK](develop/sdk.md) | [Plugins](develop/plugins.md) | [Server API](develop/server.md)
 
 </div>

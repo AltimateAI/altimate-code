@@ -1,5 +1,5 @@
 ---
-description: "Install altimate-code and run your first SQL analysis in 5 minutes. The data engineering AI harness for dbt, Snowflake, BigQuery, and Databricks."
+description: "Install altimate-code and run your first SQL analysis in 5 minutes. The open-source data engineering harness — 99+ tools for building, validating, optimizing, and shipping data products."
 ---
 
 # Quickstart — 5 Minutes to Your First Result
@@ -77,16 +77,24 @@ altimate /discover
 
 ## Step 4 — Build Your First Artifact (2.5 minutes)
 
-In the TUI, paste this prompt:
+In the TUI, try these prompts or describe your own use case:
 
 ```
+
 Look at my snowflake account and do a comprehensive Analysis our Snowflake credit consumption over the last 30 days. After doing this generate a dashboard for my consumption.
+
+```
+
+```
+
+Build me a real time, interactive dashboard for my macbook system metrics and health. Use python, iceberg, dbt for various time slices.
+
 ```
 
 ---
 
 ## What's Next
 
-- [Full Setup Guide](getting-started.md) — All warehouse configs, LLM providers, advanced setup
+- [Full Setup](getting-started.md) — All warehouse configs, LLM providers, advanced setup
 - [Agent Modes](data-engineering/agent-modes.md) — Choose the right agent for your task
-- [CI & Headless Mode](data-engineering/guides/ci-headless.md) — Run altimate in automated pipelines
+- [CI & Automation](data-engineering/guides/ci-headless.md) — Run altimate in automated pipelines
