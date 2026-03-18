@@ -268,6 +268,10 @@ export const defaultConfig: MergeConfig = {
     "packages/opencode/script/build.ts",
     "packages/opencode/script/publish.ts",
     "packages/opencode/script/bump-version.ts",
+    // postinstall copies builtin skills to ~/.altimate/builtin/ — our addition
+    "packages/opencode/script/postinstall.mjs",
+    // Builtin skills shipped to customers — fully owned by Altimate
+    ".opencode/skills/**",
     // Bin wrappers are Altimate-branded
     "packages/opencode/bin/**",
     "experiments/**",
