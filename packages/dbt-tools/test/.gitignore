@@ -1,1 +1,2 @@
 .dbt-venvs/
+.dbt-resolve-envs/
