@@ -51,7 +51,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async connect() {
       const options: Record<string, unknown> = {
         account: config.account,
-        username: config.user,
+        username: config.user ?? config.username,
         database: config.database,
         schema: config.schema,
         warehouse: config.warehouse,

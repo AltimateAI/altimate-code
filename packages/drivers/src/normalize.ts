@@ -151,7 +151,7 @@ function normalizeSnowflakePrivateKey(config: ConnectionConfig): ConnectionConfi
  */
 export function normalizeConfig(config: ConnectionConfig): ConnectionConfig {
   const type = config.type?.toLowerCase()
-  if (!type) return config
+  if (!type) return { ...config }
 
   const aliases = DRIVER_ALIASES[type]
   let result = aliases ? applyAliases(config, aliases) : { ...config }
