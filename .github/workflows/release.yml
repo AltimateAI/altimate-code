@@ -13,10 +13,12 @@ env:
   GH_REPO: AltimateAI/altimate-code
 
 jobs:
+  # Test and Build run IN PARALLEL (not sequential).
+  # Publish only runs if BOTH succeed.
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -49,9 +51,9 @@ jobs:
 
   build:
     name: Build (${{ matrix.os }})
-    needs: test
+    # Runs in PARALLEL with test (no `needs: test`)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -90,12 +92,13 @@ jobs:
         with:
           name: dist-${{ matrix.os }}
           path: packages/opencode/dist/
+          compression-level: 1
 
   publish-npm:
     name: Publish to npm
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -116,10 +119,8 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Free disk space for artifact download + npm publish
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-          df -h /
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
 
       - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -133,22 +134,6 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # TODO: Uncomment when AUR publishing is enabled (see publish.ts for setup steps)
-      # - name: Configure SSH for AUR
-      #   if: ${{ !contains(github.ref_name, '-') }}
-      #   run: |
-      #     mkdir -p ~/.ssh
-      #     echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
-      #     chmod 600 ~/.ssh/aur
-      #     ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-      #     cat >> ~/.ssh/config << 'EOF'
-      #     Host aur.archlinux.org
-      #       IdentityFile ~/.ssh/aur
-      #       User aur
-      #     EOF
-      #   env:
-      #     AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-
       - name: Publish to npm
         run: bun run packages/opencode/script/publish.ts
         env:
@@ -161,14 +146,11 @@ jobs:
           GH_REPO: ${{ env.GH_REPO }}
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
-  # Python engine (publish-engine) job removed — engine eliminated.
-  # All methods now run natively in TypeScript.
-
   github-release:
     name: Create GitHub Release
     needs: [build, publish-npm]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -179,48 +161,28 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
-          # Validate tag format to prevent injection
           if ! echo "$CURRENT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$'; then
             echo "::error::Invalid tag format: $CURRENT_TAG"
             exit 1
           fi
-
-          # Get the previous tag
           PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | head -2 | tail -1)
-
-          # Generate changelog from commits between tags
           echo "## What's Changed" > notes.md
           echo "" >> notes.md
-
           if [ -n "$PREV_TAG" ]; then
-            # Categorize commits
             echo "### Features" >> notes.md
             git log "${PREV_TAG}".."${CURRENT_TAG}" --pretty=format:"- %s (%h)" --grep="^feat" >> notes.md || true
-            echo "" >> notes.md
-            echo "" >> notes.md
-
+            echo -e "\n" >> notes.md
             echo "### Bug Fixes" >> notes.md
             git log "${PREV_TAG}".."${CURRENT_TAG}" --pretty=format:"- %s (%h)" --grep="^fix" >> notes.md || true
-            echo "" >> notes.md
-            echo "" >> notes.md
-
+            echo -e "\n" >> notes.md
             echo "### Other Changes" >> notes.md
             git log "${PREV_TAG}".."${CURRENT_TAG}" --pretty=format:"- %s (%h)" --invert-grep --grep="^feat" --grep="^fix" >> notes.md || true
             echo "" >> notes.md
           else
             echo "Initial release" >> notes.md
           fi
-
-          echo "" >> notes.md
-          echo "### Install" >> notes.md
-          echo '```bash' >> notes.md
-          echo "npm install -g @altimateai/altimate-code@${CURRENT_TAG#v}" >> notes.md
-          echo "# or" >> notes.md
-          echo "brew install AltimateAI/tap/altimate-code" >> notes.md
-          echo '```' >> notes.md
-
-          echo "" >> notes.md
-          echo "**Full Changelog**: https://github.com/${GH_REPO}/compare/${PREV_TAG}...${CURRENT_TAG}" >> notes.md
+          echo -e "\n### Install\n\`\`\`bash\nnpm install -g @altimateai/altimate-code@${CURRENT_TAG#v}\n# or\nbrew install AltimateAI/tap/altimate-code\n\`\`\`" >> notes.md
+          echo -e "\n**Full Changelog**: https://github.com/${GH_REPO}/compare/${PREV_TAG}...${CURRENT_TAG}" >> notes.md
         env:
           GH_REPO: ${{ env.GH_REPO }}
           CURRENT_TAG: ${{ github.ref_name }}
