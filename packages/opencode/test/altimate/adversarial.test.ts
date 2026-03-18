@@ -5,7 +5,24 @@
  * concurrent access, and error recovery paths.
  */
 
-import { describe, expect, test, beforeEach, beforeAll, afterAll } from "bun:test"
+import { describe, expect, test, beforeEach, beforeAll, afterAll, mock } from "bun:test"
+
+// Mock DuckDB driver so tests don't require the native duckdb package
+mock.module("@altimateai/drivers/duckdb", () => ({
+  connect: async (config: any) => ({
+    execute: async (sql: string) => ({
+      columns: [],
+      rows: [],
+      row_count: 0,
+      truncated: false,
+    }),
+    connect: async () => {},
+    close: async () => {},
+    schemas: async () => [],
+    tables: async () => [],
+    columns: async () => [],
+  }),
+}))
 
 // Disable telemetry via env var instead of mock.module
 beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })

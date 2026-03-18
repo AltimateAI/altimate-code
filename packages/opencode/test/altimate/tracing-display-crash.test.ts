@@ -100,7 +100,7 @@ describe("flushSync — crash recovery", () => {
       prompt: "This will crash",
     })
     // Wait for initial snapshot
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -152,7 +152,7 @@ describe("flushSync — crash recovery", () => {
   test("flushSync with null error uses default message", async () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-null-err", { prompt: "test" })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.flushSync()
 
@@ -169,7 +169,7 @@ describe("flushSync — crash recovery", () => {
       model: "anthropic/claude-sonnet-4-20250514",
       agent: "builder",
     })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -182,7 +182,7 @@ describe("flushSync — crash recovery", () => {
       tokens: { input: 1000, output: 200, reasoning: 50, cache: { read: 100, write: 25 } },
     })
     // Wait for logStepFinish snapshot
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.logStepStart({ id: "2" })
     // Crash mid-generation
@@ -211,7 +211,7 @@ describe("Initial snapshot from startTrace", () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-initial", { prompt: "hello" })
 
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     const filePath = tracer.getTracePath()!
     const exists = await fs.stat(filePath).then(() => true).catch(() => false)
@@ -236,7 +236,7 @@ describe("Initial snapshot from startTrace", () => {
       agent: "builder",
       tags: ["test"],
     })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     const trace: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
     expect(trace.metadata.title).toBe("My Task")
@@ -482,7 +482,7 @@ describe("flushSync — multiple calls", () => {
   test("calling flushSync multiple times doesn't crash", async () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-multi-flush", { prompt: "test" })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.flushSync("crash 1")
     tracer.flushSync("crash 2")
@@ -496,7 +496,7 @@ describe("flushSync — multiple calls", () => {
   test("flushSync then endTrace — endTrace overwrites crashed status", async () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-flush-then-end", { prompt: "test" })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.flushSync("early crash")
 
@@ -633,7 +633,7 @@ describe("Crash recovery — data integrity", () => {
   test("flushSync after multiple tool calls preserves all tools", async () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-multi-tool-crash", { prompt: "test" })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.logStepStart({ id: "1" })
     for (let i = 0; i < 5; i++) {
@@ -643,7 +643,7 @@ describe("Crash recovery — data integrity", () => {
       })
     }
     // Wait for snapshots to settle
-    await new Promise((r) => setTimeout(r, 300))
+    await new Promise((r) => setTimeout(r, 50))
 
     // Crash mid-generation
     tracer.flushSync("SIGKILL")
@@ -661,7 +661,7 @@ describe("Crash recovery — data integrity", () => {
       title: "Crashed but viewable",
       prompt: "This crashed",
     })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     tracer.logStepStart({ id: "1" })
     tracer.flushSync("process killed")
 

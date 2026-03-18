@@ -323,20 +323,22 @@ describe("Connection dispatcher registration", () => {
 // DuckDB driver (in-memory, actual queries)
 // ---------------------------------------------------------------------------
 
-describe("DuckDB driver (in-memory)", () => {
+// altimate_change start - check DuckDB availability synchronously to avoid flaky async race conditions
+let duckdbAvailable = false
+try {
+  require.resolve("duckdb")
+  duckdbAvailable = true
+} catch {
+  // DuckDB native driver not installed — skip all tests in this block
+}
+
+describe.skipIf(!duckdbAvailable)("DuckDB driver (in-memory)", () => {
   let connector: any
 
   beforeEach(async () => {
-    try {
-      const { connect } = await import(
-        "@altimateai/drivers/duckdb"
-      )
-      connector = await connect({ type: "duckdb", path: ":memory:" })
-      await connector.connect()
-    } catch (e) {
-      // DuckDB might not be installed in test env
-      connector = null
-    }
+    const { connect } = await import("@altimateai/drivers/duckdb")
+    connector = await connect({ type: "duckdb", path: ":memory:" })
+    await connector.connect()
   })
 
   afterEach(async () => {
@@ -346,8 +348,6 @@ describe("DuckDB driver (in-memory)", () => {
   })
 
   test("execute SELECT 1", async () => {
-    if (!connector) return // skip if duckdb not installed
-
     const result = await connector.execute("SELECT 1 AS num")
     expect(result.columns).toEqual(["num"])
     expect(result.rows).toEqual([[1]])
@@ -356,8 +356,6 @@ describe("DuckDB driver (in-memory)", () => {
   })
 
   test("execute with limit truncation", async () => {
-    if (!connector) return
-
     // Generate 5 rows, limit to 3
     const result = await connector.execute(
       "SELECT * FROM generate_series(1, 5)",
@@ -368,15 +366,11 @@ describe("DuckDB driver (in-memory)", () => {
   })
 
   test("listSchemas returns schemas", async () => {
-    if (!connector) return
-
     const schemas = await connector.listSchemas()
     expect(schemas).toContain("main")
   })
 
   test("listTables and describeTable", async () => {
-    if (!connector) return
-
     await connector.execute(
       "CREATE TABLE test_table (id INTEGER NOT NULL, name VARCHAR, active BOOLEAN)",
     )
@@ -394,3 +388,4 @@ describe("DuckDB driver (in-memory)", () => {
     expect(columns[1].nullable).toBe(true)
   })
 })
+// altimate_change end

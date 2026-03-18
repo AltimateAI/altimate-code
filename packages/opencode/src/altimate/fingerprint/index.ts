@@ -19,6 +19,11 @@ export namespace Fingerprint {
     return cached
   }
 
+  /** Reset the fingerprint cache (exported for testing) */
+  export function reset(): void {
+    cached = undefined
+  }
+
   export async function refresh(): Promise<Result> {
     const previousCwd = cached?.cwd ?? process.cwd()
     cached = undefined

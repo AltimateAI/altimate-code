@@ -56,7 +56,7 @@ describe("buildTraceFile — snapshot isolation", () => {
     })
 
     // Wait for snapshot to write
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     // Read the snapshot
     const snap1 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
@@ -84,7 +84,7 @@ describe("buildTraceFile — snapshot isolation", () => {
     })
 
     // Wait for snapshot
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap1 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
     const span1Count = snap1.spans.length
 
@@ -96,7 +96,7 @@ describe("buildTraceFile — snapshot isolation", () => {
     })
 
     // Wait for second snapshot
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap2 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
 
     // Second snapshot should have more spans
@@ -111,7 +111,7 @@ describe("buildTraceFile — snapshot isolation", () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-running", { prompt: "test" })
     // Wait for initial snapshot to complete
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -121,13 +121,13 @@ describe("buildTraceFile — snapshot isolation", () => {
     })
 
     // Wait for snapshot — should show "running" since generation is in progress
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
     expect(snap.summary.status).toBe("running")
 
     // After finishing generation, should show "completed"
     tracer.logStepFinish(ZERO_STEP)
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap2 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
     expect(snap2.summary.status).toBe("completed")
 
@@ -155,7 +155,7 @@ describe("snapshot — debouncing and atomicity", () => {
     }
 
     // Wait for all snapshots to settle
-    await new Promise((r) => setTimeout(r, 500))
+    await new Promise((r) => setTimeout(r, 100))
 
     // Check for leftover .tmp files
     const files = await fs.readdir(tmpDir)
@@ -182,7 +182,7 @@ describe("snapshot — debouncing and atomicity", () => {
     })
 
     // Should not crash — snapshot failure is silently swallowed
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     tracer.logStepFinish(ZERO_STEP)
     // endTrace will also fail to write, but should return undefined gracefully
@@ -231,7 +231,7 @@ describe("snapshot — debouncing and atomicity", () => {
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
 
-    await new Promise((r) => setTimeout(r, 300))
+    await new Promise((r) => setTimeout(r, 50))
 
     // The file may have been overwritten by a snapshot, but the spans
     // array was already mutated (spans are still pushed to the array
@@ -485,7 +485,7 @@ describe("Live trace viewer — /api/trace", () => {
 
     try {
       // startTrace writes initial snapshot — file should exist immediately
-      await new Promise((r) => setTimeout(r, 200))
+      await new Promise((r) => setTimeout(r, 50))
       const r1 = await fetch(`http://localhost:${server.port}/api/trace`)
       expect(r1.status).toBe(200)
       const data1 = await r1.json() as TraceFile
@@ -497,7 +497,7 @@ describe("Live trace viewer — /api/trace", () => {
         tool: "bash", callID: "c1",
         state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
       })
-      await new Promise((r) => setTimeout(r, 300))
+      await new Promise((r) => setTimeout(r, 50))
 
       const r2 = await fetch(`http://localhost:${server.port}/api/trace`)
       expect(r2.status).toBe(200)
@@ -509,7 +509,7 @@ describe("Live trace viewer — /api/trace", () => {
         tool: "read", callID: "c2",
         state: { status: "completed", input: {}, output: "content", time: { start: 3, end: 4 } },
       })
-      await new Promise((r) => setTimeout(r, 300))
+      await new Promise((r) => setTimeout(r, 50))
 
       const r3 = await fetch(`http://localhost:${server.port}/api/trace`)
       const data3 = await r3.json() as TraceFile
@@ -564,7 +564,7 @@ describe("Snapshot with non-serializable data in spans", () => {
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
     // Wait for the tool snapshot to settle first
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     // Now add attributes (after snapshot)
     tracer.setSpanAttributes({
@@ -577,7 +577,7 @@ describe("Snapshot with non-serializable data in spans", () => {
       tool: "read", callID: "c2",
       state: { status: "completed", input: {}, output: "ok", time: { start: 3, end: 4 } },
     })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     const snap = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
     // The first tool span should now have the attributes (from the second snapshot)
@@ -593,12 +593,12 @@ describe("Snapshot with non-serializable data in spans", () => {
   test("snapshot handles span with undefined output gracefully", async () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-undef-output", { prompt: "test" })
-    await new Promise((r) => setTimeout(r, 200)) // wait for initial snapshot
+    await new Promise((r) => setTimeout(r, 50)) // wait for initial snapshot
     tracer.logStepStart({ id: "1" })
     // Generation with no text and no tool calls — output will be undefined
     tracer.logStepFinish(ZERO_STEP)
 
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
 
     const snap = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
     // undefined output becomes null or is omitted in JSON

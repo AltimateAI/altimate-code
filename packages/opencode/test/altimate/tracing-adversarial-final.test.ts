@@ -223,7 +223,7 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
   test("snapshot mid-generation shows 'running', endTrace shows 'completed'", async () => {
     const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-run-complete", { prompt: "test" })
-    await new Promise((r) => setTimeout(r, 200)) // wait for initial snapshot
+    await new Promise((r) => setTimeout(r, 50)) // wait for initial snapshot
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
       tool: "bash", callID: "c1",
@@ -231,7 +231,7 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
     })
 
     // Wait for snapshot — should be "running"
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
     expect(snap.summary.status).toBe("running")
 
@@ -294,7 +294,7 @@ describe("Worker race — events after endTrace", () => {
     }
 
     // Wait for endTrace to complete
-    await new Promise((r) => setTimeout(r, 300))
+    await new Promise((r) => setTimeout(r, 50))
 
     // Verify the late event was NOT added to the trace
     const filePath = path.join(tmpDir, "race-session.json")
@@ -403,7 +403,7 @@ describe("buildTraceFile — status transitions", () => {
     const path1 = tracer.getTracePath()!
 
     // Wait for initial snapshot — should be "completed" (no active generation)
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap0 = JSON.parse(await fs.readFile(path1, "utf-8")) as TraceFile
     expect(snap0.summary.status).toBe("completed")
 
@@ -413,13 +413,13 @@ describe("buildTraceFile — status transitions", () => {
       tool: "bash", callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap1 = JSON.parse(await fs.readFile(path1, "utf-8")) as TraceFile
     expect(snap1.summary.status).toBe("running")
 
     // Finish generation — should go back to "completed"
     tracer.logStepFinish(ZERO_STEP)
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap2 = JSON.parse(await fs.readFile(path1, "utf-8")) as TraceFile
     expect(snap2.summary.status).toBe("completed")
 
@@ -429,7 +429,7 @@ describe("buildTraceFile — status transitions", () => {
       tool: "read", callID: "c2",
       state: { status: "completed", input: {}, output: "ok", time: { start: 3, end: 4 } },
     })
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 50))
     const snap3 = JSON.parse(await fs.readFile(path1, "utf-8")) as TraceFile
     expect(snap3.summary.status).toBe("running")
 
@@ -501,7 +501,7 @@ describe("Snapshot debounce under load", () => {
     }
 
     // Wait for all snapshots to settle
-    await new Promise((r) => setTimeout(r, 500))
+    await new Promise((r) => setTimeout(r, 100))
 
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))

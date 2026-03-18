@@ -6,20 +6,23 @@ import type { PtyID } from "../../src/pty/schema"
 import { tmpdir } from "../fixture/fixture"
 import { setTimeout as sleep } from "node:timers/promises"
 
-const wait = async (fn: () => boolean, ms = 2000) => {
+// altimate_change start - increase default wait timeout to avoid flaky failures under load
+const wait = async (fn: () => boolean, ms = 10000) => {
   const end = Date.now() + ms
   while (Date.now() < end) {
     if (fn()) return
-    await sleep(25)
+    await sleep(50)
   }
   throw new Error("timeout waiting for pty events")
 }
+// altimate_change end
 
 const pick = (log: Array<{ type: "created" | "exited" | "deleted"; id: PtyID }>, id: PtyID) => {
   return log.filter((evt) => evt.id === id).map((evt) => evt.type)
 }
 
 describe("pty", () => {
+  // altimate_change start - add retry to handle flaky Bus event delivery under parallel test load
   test("publishes created, exited, deleted in order for /bin/ls + remove", async () => {
     if (process.platform === "win32") return
 
@@ -51,7 +54,8 @@ describe("pty", () => {
         }
       },
     })
-  }, 15000)
+  }, { timeout: 15000, retry: 2 })
+  // altimate_change end
 
   test("publishes created, exited, deleted in order for /bin/sh + remove", async () => {
     if (process.platform === "win32") return

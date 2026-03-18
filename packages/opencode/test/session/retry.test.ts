@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { NamedError } from "@opencode-ai/util/error"
 import { APICallError } from "ai"
 import { setTimeout as sleep } from "node:timers/promises"
+import { createServer } from "node:net"
 import { SessionRetry } from "../../src/session/retry"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ProviderID } from "../../src/provider/schema"
@@ -154,37 +155,37 @@ describe("session.message-v2.fromError", () => {
   test.concurrent(
     "converts ECONNRESET socket errors to retryable APIError",
     async () => {
-      using server = Bun.serve({
-        port: 0,
-        idleTimeout: 8,
-        async fetch(req) {
-          return new Response(
-            new ReadableStream({
-              async pull(controller) {
-                controller.enqueue("Hello,")
-                await sleep(10000)
-                controller.enqueue(" World!")
-                controller.close()
-              },
-            }),
-            { headers: { "Content-Type": "text/plain" } },
-          )
-        },
+      // Use a raw TCP server that sends a partial HTTP response then
+      // destroys the socket, triggering an immediate ECONNRESET on the client.
+      const server = createServer((socket) => {
+        // Send partial chunked HTTP response then destroy the connection
+        socket.write(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nHello,\r\n",
+        )
+        // Destroy after a brief delay to ensure the client has started reading
+        setTimeout(() => socket.destroy(), 20)
       })
 
-      const error = await fetch(new URL("/", server.url.origin))
-        .then((res) => res.text())
-        .catch((e) => e)
+      await new Promise<void>((resolve) => server.listen(0, resolve))
+      const port = (server.address() as { port: number }).port
 
-      const result = MessageV2.fromError(error, { providerID })
+      try {
+        const error = await fetch(`http://127.0.0.1:${port}/`)
+          .then((res) => res.text())
+          .catch((e) => e)
 
-      expect(MessageV2.APIError.isInstance(result)).toBe(true)
-      expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
-      expect((result as MessageV2.APIError).data.message).toBe("Connection reset by server")
-      expect((result as MessageV2.APIError).data.metadata?.code).toBe("ECONNRESET")
-      expect((result as MessageV2.APIError).data.metadata?.message).toInclude("socket connection")
+        const result = MessageV2.fromError(error, { providerID })
+
+        expect(MessageV2.APIError.isInstance(result)).toBe(true)
+        expect((result as MessageV2.APIError).data.isRetryable).toBe(true)
+        expect((result as MessageV2.APIError).data.message).toBe("Connection reset by server")
+        expect((result as MessageV2.APIError).data.metadata?.code).toBe("ECONNRESET")
+        expect((result as MessageV2.APIError).data.metadata?.message).toInclude("socket connection")
+      } finally {
+        server.close()
+      }
     },
-    15_000,
+    5_000,
   )
 
   test("ECONNRESET socket error is retryable", () => {

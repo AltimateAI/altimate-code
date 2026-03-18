@@ -11,11 +11,44 @@
  * Set DBT_TEST_PROJECT_ROOT env var to override the project path.
  */
 
-import { describe, expect, test, beforeAll, afterAll, beforeEach } from "bun:test"
+import { describe, expect, test, beforeAll, afterAll, beforeEach, mock } from "bun:test"
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
 import type { Connector } from "@altimateai/drivers/types"
+
+// Mock DuckDB driver so tests don't require the native duckdb package
+mock.module("@altimateai/drivers/duckdb", () => ({
+  connect: async (config: any) => ({
+    execute: async (sql: string) => {
+      // Simple mock: parse SELECT literals
+      const match = sql.match(/SELECT\s+'([^']+)'\s+AS\s+(\w+)/i)
+      if (match) {
+        return {
+          columns: [{ name: match[2], type: "varchar" }],
+          rows: [[match[1]]],
+          row_count: 1,
+          truncated: false,
+        }
+      }
+      const numMatch = sql.match(/SELECT\s+(\d+)\s+AS\s+(\w+)/i)
+      if (numMatch) {
+        return {
+          columns: [{ name: numMatch[2], type: "integer" }],
+          rows: [[Number(numMatch[1])]],
+          row_count: 1,
+          truncated: false,
+        }
+      }
+      return { columns: [], rows: [], row_count: 0, truncated: false }
+    },
+    connect: async () => {},
+    close: async () => {},
+    schemas: async () => [],
+    tables: async () => [],
+    columns: async () => [],
+  }),
+}))
 
 // ---------------------------------------------------------------------------
 // Detect dbt project for testing

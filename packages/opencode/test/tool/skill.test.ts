@@ -12,6 +12,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 // altimate_change start - imports for env fingerprint skill selection tests
 import { resetSkillSelectorCache, selectSkillsWithLLM, type SkillSelectorDeps } from "../../src/altimate/skill-selector"
 import type { Skill } from "../../src/skill"
+import { Fingerprint } from "../../src/altimate/fingerprint/index"
 // altimate_change end
 
 const baseCtx: Omit<Tool.Context, "ask"> = {
@@ -42,9 +43,10 @@ function seedCache(skillNames: string[]) {
 // altimate_change end
 
 describe("tool.skill", () => {
-  // altimate_change start - reset skill selector cache between tests
+  // altimate_change start - reset skill selector and fingerprint caches between tests
   afterEach(() => {
     resetSkillSelectorCache()
+    Fingerprint.reset()
   })
   // altimate_change end
 

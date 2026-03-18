@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { describe, expect, test, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, beforeAll, beforeEach, afterEach, afterAll } from "bun:test"
 import path from "path"
 import os from "os"
 import fsp from "fs/promises"
@@ -43,26 +43,30 @@ async function createFile(filePath: string, content = "") {
 // ---------------------------------------------------------------------------
 
 describe("detectGit", () => {
-  test("detects a git repository in the current repo", async () => {
-    const result = await detectGit()
-    expect(result.isRepo).toBe(true)
+  // Cache the result for tests that run against the current repo
+  let currentRepoResult: GitInfo
+
+  beforeAll(async () => {
+    currentRepoResult = await detectGit()
   })
 
-  test("branch is a non-empty string or undefined (detached HEAD)", async () => {
-    const result = await detectGit()
+  test("detects a git repository in the current repo", () => {
+    expect(currentRepoResult.isRepo).toBe(true)
+  })
+
+  test("branch is a non-empty string or undefined (detached HEAD)", () => {
     // In CI, GitHub Actions checks out in detached HEAD → branch is undefined
     // Locally, branch is a non-empty string
-    if (result.branch !== undefined) {
-      expect(typeof result.branch).toBe("string")
-      expect(result.branch.length).toBeGreaterThan(0)
+    if (currentRepoResult.branch !== undefined) {
+      expect(typeof currentRepoResult.branch).toBe("string")
+      expect(currentRepoResult.branch.length).toBeGreaterThan(0)
     }
   })
 
-  test("returns a remote URL when origin exists", async () => {
-    const result = await detectGit()
+  test("returns a remote URL when origin exists", () => {
     // The altimate-code repo should have an origin remote
-    expect(result.remoteUrl).toBeDefined()
-    expect(result.remoteUrl!.length).toBeGreaterThan(0)
+    expect(currentRepoResult.remoteUrl).toBeDefined()
+    expect(currentRepoResult.remoteUrl!.length).toBeGreaterThan(0)
   })
 
   test("returns isRepo true for an initialized git directory", async () => {
@@ -115,7 +119,7 @@ describe("detectGit", () => {
     }
   })
 
-  afterEach(async () => {
+  afterAll(async () => {
     await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
   })
 })
@@ -125,7 +129,7 @@ describe("detectGit", () => {
 // ---------------------------------------------------------------------------
 
 describe("detectDbtProject", () => {
-  afterEach(async () => {
+  afterAll(async () => {
     await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
   })
 
@@ -648,6 +652,14 @@ describe("DATA_TOOL_NAMES", () => {
 // ---------------------------------------------------------------------------
 
 describe("detectDataTools", () => {
+  // Cache the expensive detectDataTools(false) result - it spawns 9 subprocesses
+  // and the result is deterministic for the duration of the test run
+  let cachedResult: DataToolInfo[]
+
+  beforeAll(async () => {
+    cachedResult = await detectDataTools(false)
+  })
+
   test("returns empty array when skip is true", async () => {
     const result = await detectDataTools(true)
     expect(result).toEqual([])
@@ -660,18 +672,16 @@ describe("detectDataTools", () => {
     expect(result2).toEqual([])
   })
 
-  test("skip=false returns one entry per tool", async () => {
-    const result = await detectDataTools(false)
-    expect(result.length).toBe(DATA_TOOL_NAMES.length)
-    const names = result.map((t) => t.name)
+  test("skip=false returns one entry per tool", () => {
+    expect(cachedResult.length).toBe(DATA_TOOL_NAMES.length)
+    const names = cachedResult.map((t) => t.name)
     for (const toolName of DATA_TOOL_NAMES) {
       expect(names).toContain(toolName)
     }
   })
 
-  test("each entry has correct shape", async () => {
-    const result = await detectDataTools(false)
-    for (const tool of result) {
+  test("each entry has correct shape", () => {
+    for (const tool of cachedResult) {
       expect(typeof tool.name).toBe("string")
       expect(typeof tool.installed).toBe("boolean")
       if (tool.installed) {
@@ -680,19 +690,17 @@ describe("detectDataTools", () => {
     }
   })
 
-  test("marks missing tools as not installed", async () => {
-    const result = await detectDataTools(false)
+  test("marks missing tools as not installed", () => {
     // At least some tools should be not-installed on a typical dev machine
-    const notInstalled = result.filter((t) => !t.installed)
+    const notInstalled = cachedResult.filter((t) => !t.installed)
     expect(notInstalled.length).toBeGreaterThan(0)
     for (const tool of notInstalled) {
       expect(tool.installed).toBe(false)
     }
   })
 
-  test("installed tools have a parseable version", async () => {
-    const result = await detectDataTools(false)
-    const installed = result.filter((t) => t.installed)
+  test("installed tools have a parseable version", () => {
+    const installed = cachedResult.filter((t) => t.installed)
     for (const tool of installed) {
       // version should be a string matching semver-like pattern
       if (tool.version) {
@@ -701,10 +709,9 @@ describe("detectDataTools", () => {
     }
   })
 
-  test("handles ENOENT gracefully for missing executables", async () => {
-    // This should not throw — ENOENT is caught internally
-    const result = await detectDataTools(false)
-    expect(Array.isArray(result)).toBe(true)
+  test("handles ENOENT gracefully for missing executables", () => {
+    // This is validated by the cached result not throwing
+    expect(Array.isArray(cachedResult)).toBe(true)
   })
 })
 
@@ -713,7 +720,7 @@ describe("detectDataTools", () => {
 // ---------------------------------------------------------------------------
 
 describe("detectConfigFiles", () => {
-  afterEach(async () => {
+  afterAll(async () => {
     await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
   })
 
@@ -788,12 +795,18 @@ describe("detectConfigFiles", () => {
 // ---------------------------------------------------------------------------
 
 describe("return type contracts", () => {
-  test("detectGit returns GitInfo shape", async () => {
-    const result: GitInfo = await detectGit()
-    expect(typeof result.isRepo).toBe("boolean")
-    if (result.isRepo) {
-      expect(result.branch === undefined || typeof result.branch === "string").toBe(true)
-      expect(result.remoteUrl === undefined || typeof result.remoteUrl === "string").toBe(true)
+  // Cache detectGit result - it spawns 3 git subprocesses
+  let gitResult: GitInfo
+
+  beforeAll(async () => {
+    gitResult = await detectGit()
+  })
+
+  test("detectGit returns GitInfo shape", () => {
+    expect(typeof gitResult.isRepo).toBe("boolean")
+    if (gitResult.isRepo) {
+      expect(gitResult.branch === undefined || typeof gitResult.branch === "string").toBe(true)
+      expect(gitResult.remoteUrl === undefined || typeof gitResult.remoteUrl === "string").toBe(true)
     }
   })
 

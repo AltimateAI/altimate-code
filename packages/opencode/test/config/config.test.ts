@@ -1,4 +1,4 @@
-import { test, expect, describe, mock, afterEach, spyOn } from "bun:test"
+import { test, expect, describe, mock, afterEach, beforeEach, spyOn } from "bun:test"
 import { Config } from "../../src/config/config"
 import { Instance } from "../../src/project/instance"
 import { Auth } from "../../src/auth"
@@ -15,7 +15,21 @@ import { BunProc } from "../../src/bun"
 // Get managed config directory from environment (set in preload.ts)
 const managedConfigDir = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR!
 
+// Prevent real `bun install` from running during config tests.
+// Without this, background dependency installs hold the global "bun-install"
+// write lock and cause subsequent tests to time out.
+let bunRunSpy: ReturnType<typeof spyOn>
+
+beforeEach(() => {
+  bunRunSpy = spyOn(BunProc, "run").mockImplementation(async () => ({
+    code: 0,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.alloc(0),
+  }))
+})
+
 afterEach(async () => {
+  bunRunSpy.mockRestore()
   await fs.rm(managedConfigDir, { force: true, recursive: true }).catch(() => {})
 })
 
@@ -772,7 +786,8 @@ test("serializes concurrent config dependency installs", async () => {
   const seen: string[] = []
   let active = 0
   let max = 0
-  const run = spyOn(BunProc, "run").mockImplementation(async (_cmd, opts) => {
+  // Override the global beforeEach mock with custom tracking logic
+  bunRunSpy.mockImplementation(async (_cmd: unknown, opts?: { cwd?: string }) => {
     active++
     max = Math.max(max, active)
     seen.push(opts?.cwd ?? "")
@@ -785,11 +800,7 @@ test("serializes concurrent config dependency installs", async () => {
     }
   })
 
-  try {
-    await Promise.all(dirs.map((dir) => Config.installDependencies(dir)))
-  } finally {
-    run.mockRestore()
-  }
+  await Promise.all(dirs.map((dir) => Config.installDependencies(dir)))
 
   expect(max).toBe(1)
   expect(seen.toSorted()).toEqual(dirs.toSorted())
