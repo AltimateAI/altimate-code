@@ -15,15 +15,8 @@ process.chdir(dir)
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 
-// Read engine version from pyproject.toml
-const enginePyprojectPath = path.resolve(dir, "../altimate-engine/pyproject.toml")
-const enginePyproject = await Bun.file(enginePyprojectPath).text()
-const engineVersionMatch = enginePyproject.match(/^version\s*=\s*"([^"]+)"/m)
-if (!engineVersionMatch) {
-  throw new Error("Could not read engine version from altimate-engine/pyproject.toml")
-}
-const engineVersion = engineVersionMatch[1]
-console.log(`Engine version: ${engineVersion}`)
+// Python engine has been eliminated — all methods run natively in TypeScript.
+// ALTIMATE_ENGINE_VERSION is no longer needed at runtime.
 
 // Read CHANGELOG.md for bundling
 const changelogPath = path.resolve(dir, "../../CHANGELOG.md")
@@ -220,7 +213,7 @@ for (const item of targets) {
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
-      ALTIMATE_ENGINE_VERSION: `'${engineVersion}'`,
+      // ALTIMATE_ENGINE_VERSION removed — Python engine eliminated
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
       OPENCODE_CHANGELOG: JSON.stringify(changelog),

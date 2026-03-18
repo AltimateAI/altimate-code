@@ -147,6 +147,9 @@ export namespace Telemetry {
         error_message: string
         http_status?: number
       }
+    // DEPRECATED: Python engine eliminated. These event types are retained
+    // for backward compatibility with existing telemetry dashboards but
+    // are never fired by the native TypeScript implementation.
     | {
         type: "engine_started"
         timestamp: number
