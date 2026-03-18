@@ -1,15 +1,32 @@
 import type { DBTProjectIntegrationAdapter } from "@altimateai/dbt-integration"
+import { execDbtLs } from "../dbt-cli"
 
 export function children(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
-  return adapter.getChildrenModels({ table: model })
+  try {
+    return adapter.getChildrenModels({ table: model })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes("nodeMetaMap has no entries") || msg.includes("graphMetaMap")) {
+      return execDbtLs(model, "children")
+    }
+    throw e
+  }
 }
 
 export function parents(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
-  return adapter.getParentModels({ table: model })
+  try {
+    return adapter.getParentModels({ table: model })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes("nodeMetaMap has no entries") || msg.includes("graphMetaMap")) {
+      return execDbtLs(model, "parents")
+    }
+    throw e
+  }
 }
 
 function flag(args: string[], name: string): string | undefined {
