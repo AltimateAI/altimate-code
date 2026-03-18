@@ -75,6 +75,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         if (fs.existsSync(resolvedInlineKey)) {
           resolvedKeyPath = resolvedInlineKey
           resolvedInlineKey = undefined
+        } else {
+          throw new Error(
+            `Snowflake private key: '${resolvedInlineKey}' is not a valid file path or PEM content. ` +
+            `Use 'private_key_path' for file paths or provide PEM content starting with '-----BEGIN PRIVATE KEY-----'.`,
+          )
         }
       }
 
@@ -148,27 +153,19 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
         options.authenticator = "OAUTH"
         options.token = oauthToken
-        if (oauthClientId) options.oauthClientId = oauthClientId
-        if (oauthClientSecret) options.oauthClientSecret = oauthClientSecret
 
       // ---------------------------------------------------------------
-      // 5. JWT token auth (non-key-pair JWT)
+      // 5. JWT / Programmatic access token (pre-generated)
+      //    The Node.js snowflake-sdk only accepts pre-generated tokens
+      //    via the OAUTH authenticator. SNOWFLAKE_JWT expects a privateKey
+      //    for self-signing, and PROGRAMMATIC_ACCESS_TOKEN is not recognized.
+      //    Alias both to OAUTH so the token is passed correctly.
       // ---------------------------------------------------------------
-      } else if (authUpper === "JWT") {
+      } else if (authUpper === "JWT" || authUpper === "PROGRAMMATIC_ACCESS_TOKEN") {
         if (!oauthToken) {
-          throw new Error("Snowflake JWT authenticator specified but no token provided (expected 'token' or 'access_token')")
+          throw new Error(`Snowflake ${authenticator} authenticator specified but no token provided (expected 'token' or 'access_token')`)
         }
-        options.authenticator = "SNOWFLAKE_JWT"
-        options.token = oauthToken
-
-      // ---------------------------------------------------------------
-      // 6. Programmatic access token
-      // ---------------------------------------------------------------
-      } else if (authUpper === "PROGRAMMATIC_ACCESS_TOKEN") {
-        if (!oauthToken) {
-          throw new Error("Snowflake PROGRAMMATIC_ACCESS_TOKEN authenticator specified but no token provided (expected 'token' or 'access_token')")
-        }
-        options.authenticator = "PROGRAMMATIC_ACCESS_TOKEN"
+        options.authenticator = "OAUTH"
         options.token = oauthToken
 
       // ---------------------------------------------------------------
