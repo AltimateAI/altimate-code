@@ -19,8 +19,9 @@
  */
 
 import { execFile } from "child_process"
-import { dirname, join } from "path"
+import { join } from "path"
 import { readFileSync } from "fs"
+import { resolveDbt, buildDbtEnv, type ResolvedDbt } from "./dbt-resolve"
 
 /** Options for running dbt CLI commands in the correct environment. */
 export interface DbtCliOptions {
@@ -33,20 +34,30 @@ export interface DbtCliOptions {
 /** Module-level options, set once via `configure()`. */
 let globalOptions: DbtCliOptions = {}
 
+/** Cached resolved dbt binary (resolved once on first use). */
+let resolvedDbt: ResolvedDbt | undefined
+
 /** Configure the Python/project environment for all dbt CLI calls. */
 export function configure(opts: DbtCliOptions): void {
   globalOptions = opts
+  resolvedDbt = undefined // Reset cache on reconfigure
+}
+
+/** Get or resolve the dbt binary path. */
+function getDbt(): ResolvedDbt {
+  if (!resolvedDbt) {
+    resolvedDbt = resolveDbt(globalOptions.pythonPath, globalOptions.projectRoot)
+  }
+  return resolvedDbt
 }
 
 function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
-  const binDir = globalOptions.pythonPath ? dirname(globalOptions.pythonPath) : undefined
-  const env = binDir
-    ? { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
-    : process.env
+  const dbt = getDbt()
+  const env = buildDbtEnv(dbt)
   const cwd = globalOptions.projectRoot ?? process.cwd()
 
   return new Promise((resolve, reject) => {
-    execFile("dbt", args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024, env, cwd }, (err, stdout, stderr) => {
+    execFile(dbt.path, args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024, env, cwd }, (err, stdout, stderr) => {
       if (err) reject(err)
       else resolve({ stdout, stderr })
     })

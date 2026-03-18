@@ -14,7 +14,40 @@ function find(start: string): string | null {
   }
 }
 
-function python(): string {
+/**
+ * Discover the Python binary, checking multiple environment managers.
+ *
+ * Priority:
+ *  1. Project-local .venv/bin/python (uv, pdm, venv, poetry in-project)
+ *  2. VIRTUAL_ENV/bin/python (activated venv)
+ *  3. CONDA_PREFIX/bin/python (conda)
+ *  4. `which python3` / `which python` (system PATH)
+ *  5. Fallback "python3" (hope for the best)
+ */
+function python(projectRoot?: string): string {
+  // Check project-local venvs first (most reliable for dbt projects)
+  if (projectRoot) {
+    for (const venvDir of [".venv", "venv", "env"]) {
+      const py = join(projectRoot, venvDir, "bin", "python")
+      if (existsSync(py)) return py
+    }
+  }
+
+  // Check VIRTUAL_ENV (set by activate scripts)
+  const virtualEnv = process.env.VIRTUAL_ENV
+  if (virtualEnv) {
+    const py = join(virtualEnv, "bin", "python")
+    if (existsSync(py)) return py
+  }
+
+  // Check CONDA_PREFIX (set by conda activate)
+  const condaPrefix = process.env.CONDA_PREFIX
+  if (condaPrefix) {
+    const py = join(condaPrefix, "bin", "python")
+    if (existsSync(py)) return py
+  }
+
+  // Fall back to PATH-based discovery
   for (const cmd of ["python3", "python"]) {
     try {
       return execFileSync("which", [cmd], { encoding: "utf-8" }).trim()
@@ -35,7 +68,7 @@ export async function init(args: string[]) {
 
   const cfg: Config = {
     projectRoot: project,
-    pythonPath: py ?? python(),
+    pythonPath: py ?? python(project),
     dbtIntegration: "corecommand",
     queryLimit: 500,
   }
