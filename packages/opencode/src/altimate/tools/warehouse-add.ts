@@ -10,7 +10,15 @@ export const WarehouseAddTool = Tool.define("warehouse_add", {
     config: z
       .record(z.string(), z.unknown())
       .describe(
-        'Connection configuration. Must include "type" (postgres, snowflake, duckdb, etc). Example: {"type": "postgres", "host": "localhost", "port": 5432, "database": "mydb", "user": "admin", "password": "secret"}',
+        'Connection configuration. Must include "type" (postgres, snowflake, duckdb, etc). ' +
+        'Snowflake auth methods: ' +
+        '(1) Password: {"type":"snowflake","account":"xy12345","user":"admin","password":"secret","warehouse":"WH","database":"db","schema":"public","role":"ROLE"}. ' +
+        '(2) Key-pair (file): {"type":"snowflake","account":"xy12345","user":"admin","private_key_path":"/path/to/rsa_key.p8","private_key_passphrase":"optional","warehouse":"WH","database":"db","schema":"public","role":"ROLE"}. ' +
+        '(3) Key-pair (inline): use "private_key" instead of "private_key_path" with PEM content. ' +
+        '(4) OAuth: {"type":"snowflake","account":"xy12345","authenticator":"oauth","token":"<access_token>","warehouse":"WH","database":"db","schema":"public"}. ' +
+        '(5) SSO: {"type":"snowflake","account":"xy12345","user":"admin","authenticator":"externalbrowser","warehouse":"WH","database":"db","schema":"public","role":"ROLE"}. ' +
+        'IMPORTANT: For private key file paths, always use "private_key_path" (not "private_key"). ' +
+        'Postgres: {"type":"postgres","host":"localhost","port":5432,"database":"mydb","user":"admin","password":"secret"}.',
       ),
   }),
   async execute(args, ctx) {

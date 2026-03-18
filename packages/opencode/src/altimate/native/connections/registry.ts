@@ -209,7 +209,10 @@ async function createConnector(
 export function detectAuthMethod(config: ConnectionConfig | null | undefined): string {
   if (!config || typeof config !== "object") return "unknown"
   if (config.connection_string) return "connection_string"
-  if (config.private_key_path) return "key_pair"
+  if (config.private_key_path || config.privateKeyPath || config.private_key || config.privateKey) return "key_pair"
+  const auth = typeof config.authenticator === "string" ? config.authenticator.toUpperCase() : ""
+  if (auth === "EXTERNALBROWSER" || (typeof config.authenticator === "string" && /^https?:\/\/.+\.okta\.com/i.test(config.authenticator))) return "sso"
+  if (auth === "OAUTH") return "oauth"
   if (config.access_token || config.token) return "token"
   if (config.password) return "password"
   const t = typeof config.type === "string" ? config.type.toLowerCase() : ""
