@@ -313,12 +313,17 @@ export function Session() {
     dialog.clear()
   }
 
+  // altimate_change start - smooth streaming: reduce scroll lag
   function toBottom() {
-    setTimeout(() => {
-      if (!scroll || scroll.isDestroyed) return
-      scroll.scrollTo(scroll.scrollHeight)
-    }, 50)
+    setTimeout(
+      () => {
+        if (!scroll || scroll.isDestroyed) return
+        scroll.scrollTo(scroll.scrollHeight)
+      },
+      Flag.ALTIMATE_SMOOTH_STREAMING ? 0 : 50,
+    )
   }
+  // altimate_change end
 
   const local = useLocal()
 
@@ -1456,25 +1461,37 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
+  // altimate_change start - smooth streaming: memoize trim
+  const trimmed = createMemo(() => props.part.text.trim())
+  // altimate_change end
+  // altimate_change start - smooth streaming: use <code> during streaming to avoid layout jumps
+  const isStreaming = createMemo(() => Flag.ALTIMATE_SMOOTH_STREAMING && !props.message.time.completed)
+  // altimate_change end
   return (
-    <Show when={props.part.text.trim()}>
+    <Show when={trimmed()}>
       <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
         <Switch>
-          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
-            <markdown
-              syntaxStyle={syntax()}
-              streaming={true}
-              content={props.part.text.trim()}
-              conceal={ctx.conceal()}
-            />
-          </Match>
-          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+          <Match when={isStreaming()}>
             <code
               filetype="markdown"
               drawUnstyledText={false}
               streaming={true}
               syntaxStyle={syntax()}
-              content={props.part.text.trim()}
+              content={trimmed()}
+              conceal={ctx.conceal()}
+              fg={theme.text}
+            />
+          </Match>
+          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+            <markdown syntaxStyle={syntax()} streaming={false} content={trimmed()} conceal={ctx.conceal()} />
+          </Match>
+          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+            <code
+              filetype="markdown"
+              drawUnstyledText={false}
+              streaming={false}
+              syntaxStyle={syntax()}
+              content={trimmed()}
               conceal={ctx.conceal()}
               fg={theme.text}
             />
