@@ -9,8 +9,8 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | Agent | Description |
 |-------|------------|
 | `general` | Default general-purpose coding agent |
-| `plan` | Planning agent — analyzes before acting |
-| `build` | Build-focused agent — prioritizes code generation |
+| `plan` | Planning agent that analyzes before acting |
+| `build` | Build-focused agent that prioritizes code generation |
 | `explore` | Read-only exploration agent |
 
 ### Data Engineering

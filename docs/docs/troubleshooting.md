@@ -47,7 +47,7 @@ altimate --print-logs --log-level DEBUG
    # Example for PostgreSQL:
    bun add pg
    ```
-3. No Python installation is required — all tools run natively in TypeScript.
+3. No Python installation is required. All tools run natively in TypeScript.
 
 ### Warehouse Connection Failed
 
@@ -55,7 +55,7 @@ altimate --print-logs --log-level DEBUG
 
 **Solutions:**
 
-1. **If using dbt:** Run `altimate-dbt init` to set up the dbt integration. The CLI will use your `profiles.yml` automatically — no separate connection config needed.
+1. **If using dbt:** Run `altimate-dbt init` to set up the dbt integration. The CLI will use your `profiles.yml` automatically, so no separate connection config is needed.
 2. **If not using dbt:** Add a connection via the `warehouse_add` tool, `~/.altimate-code/connections.json`, or `ALTIMATE_CODE_CONN_*` env vars.
 3. Test connectivity: use the `warehouse_test` tool with your connection name.
 4. Check that the warehouse hostname and port are reachable
@@ -69,7 +69,7 @@ altimate --print-logs --log-level DEBUG
 
 **Solutions:**
 
-1. Check the log files — MCP initialization errors are now logged with the server name and error message:
+1. Check the log files. MCP initialization errors are now logged with the server name and error message:
    ```
    WARN failed to initialize MCP server { key: "my-tools", error: "..." }
    ```
@@ -139,5 +139,5 @@ Then share `debug.log` when reporting issues.
 
 ## Getting Help
 
-- [GitHub Issues](https://github.com/AltimateAI/altimate-code/issues) — Report bugs and request features
+- [GitHub Issues](https://github.com/AltimateAI/altimate-code/issues): Report bugs and request features
 - Check [existing issues](https://github.com/AltimateAI/altimate-code/issues) before filing new ones

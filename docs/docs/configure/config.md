@@ -149,7 +149,7 @@ Control how context is managed when conversations grow long:
 |-------|---------|-------------|
 | `auto` | `true` | Auto-compact when context is full |
 | `prune` | `true` | Prune old tool outputs |
-| `reserved` | — | Token buffer to reserve |
+| `reserved` | (none) | Token buffer to reserve |
 
 !!! info
     Compaction automatically summarizes older messages to free up context window space, allowing longer conversations without losing important context. See [Context Management](context-management.md) for full details.

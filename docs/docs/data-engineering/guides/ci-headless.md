@@ -51,7 +51,7 @@ SNOWFLAKE_WAREHOUSE=compute_wh
 
 | Code | Meaning |
 |---|---|
-| `0` | Success — task completed |
+| `0` | Success (task completed) |
 | `1` | Task completed but result indicates issues (e.g., anti-patterns found) |
 | `2` | Configuration error (missing API key, bad connection) |
 | `3` | Tool execution error (warehouse unreachable, query failed) |
@@ -66,7 +66,7 @@ altimate run "validate models in models/staging/ for anti-patterns" || exit 1
 
 ## Worked Examples
 
-### Example 1 — Nightly Cost Check (GitHub Actions)
+### Example 1: Nightly Cost Check (GitHub Actions)
 
 ```yaml
 # .github/workflows/cost-check.yml
@@ -105,7 +105,7 @@ jobs:
           path: cost-report.json
 ```
 
-### Example 2 — Post-Deploy SQL Validation
+### Example 2: Post-Deploy SQL Validation
 
 Add to your dbt deployment workflow to catch anti-patterns before they reach production:
 
@@ -120,7 +120,7 @@ Add to your dbt deployment workflow to catch anti-patterns before they reach pro
             --output json
 ```
 
-### Example 3 — Automated Test Generation (Pre-commit)
+### Example 3: Automated Test Generation (Pre-commit)
 
 ```bash
 #!/bin/bash

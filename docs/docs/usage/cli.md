@@ -130,7 +130,7 @@ altimate run --no-trace "quick question"
 
 ## Tracing
 
-Every `run` command automatically saves a trace file with the full session details — generations, tool calls, tokens, cost, and timing. See [Tracing](../configure/tracing.md) for configuration options.
+Every `run` command automatically saves a trace file with the full session details, including generations, tool calls, tokens, cost, and timing. See [Tracing](../configure/tracing.md) for configuration options.
 
 ```bash
 # List recent traces

@@ -18,9 +18,9 @@ Run SQL queries against your connected warehouse.
 ```
 
 **Parameters:**
-- `query` (required) — SQL to execute
-- `warehouse` (optional) — Connection name from config. Uses default if omitted
-- `limit` (optional, default: 100) — Max rows returned
+- `query` (required): SQL to execute
+- `warehouse` (optional): Connection name from config. Uses default if omitted
+- `limit` (optional, default: 100): Max rows returned
 
 ---
 
@@ -167,7 +167,7 @@ Diagnose and auto-fix SQL errors.
     --error "SQL compilation error: Object 'ANALYTICS.PUBLIC.USERSS' does not exist" \
     "SELECT * FROM analytics.public.userss"
 
-Diagnosis: Typo in table name — 'userss' should be 'users'
+Diagnosis: Typo in table name. 'userss' should be 'users'
 
 Fixed SQL:
   SELECT * FROM analytics.public.users
@@ -222,12 +222,12 @@ Rewritten SQL:
 
 ### Rewrite strategies
 
-1. **Predicate pushdown** — Move filters closer to data source
-2. **SELECT pruning** — Replace `*` with explicit columns
-3. **Function elimination** — Replace non-sargable functions with range predicates
-4. **JOIN reordering** — Smaller tables first
-5. **Subquery flattening** — Convert to JOINs where possible
-6. **UNION ALL promotion** — Replace UNION with UNION ALL when safe
+1. **Predicate pushdown.** Move filters closer to data source
+2. **SELECT pruning.** Replace `*` with explicit columns
+3. **Function elimination.** Replace non-sargable functions with range predicates
+4. **JOIN reordering.** Smaller tables first
+5. **Subquery flattening.** Convert to JOINs where possible
+6. **UNION ALL promotion.** Replace UNION with UNION ALL when safe
 
 ---
 
@@ -260,6 +260,6 @@ Schema-aware SQL completion.
 > sql_autocomplete --prefix "SELECT o.order_id, o.amo" --table_context ["orders"]
 
 Suggestions:
-  1. o.amount (DECIMAL) — orders.amount
-  2. o.amount_usd (DECIMAL) — orders.amount_usd
+  1. o.amount (DECIMAL), from orders.amount
+  2. o.amount_usd (DECIMAL), from orders.amount_usd
 ```

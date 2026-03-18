@@ -12,6 +12,6 @@ altimate has 50+ specialized tools organized by function.
 | [Warehouse Tools](warehouse-tools.md) | 6 tools | Environment scanning, connection management, discovery, testing |
 | [Altimate Memory](memory-tools.md) | 3 tools | Persistent cross-session memory for warehouse config, conventions, and preferences |
 | [Training](../training/index.md) | 3 tools + 3 skills | Correct the agent once, it remembers forever, your team inherits it |
-| `tool_lookup` | 1 tool | Runtime introspection — discover tool schemas and parameters dynamically |
+| `tool_lookup` | 1 tool | Runtime introspection that discovers tool schemas and parameters dynamically |
 
 All tools are available in the interactive TUI. The agent automatically selects the right tools based on your request.

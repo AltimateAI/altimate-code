@@ -69,7 +69,7 @@ Available models: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-2025
 Uses the standard AWS credential chain. Set `AWS_PROFILE` or provide credentials directly.
 
 !!! note
-    If you have AWS SSO or IAM roles configured, Bedrock will use your default credential chain automatically — no explicit keys needed.
+    If you have AWS SSO or IAM roles configured, Bedrock will use your default credential chain automatically, so no explicit keys are needed.
 
 ## Azure OpenAI
 
@@ -143,7 +143,7 @@ If `location` is not set, it defaults to `us-central1`.
 }
 ```
 
-No API key needed — runs entirely on your local machine.
+No API key needed. Runs entirely on your local machine.
 
 !!! info
     Make sure Ollama is running before starting altimate. Install it from [ollama.com](https://ollama.com) and pull your desired model with `ollama pull llama3.1`.

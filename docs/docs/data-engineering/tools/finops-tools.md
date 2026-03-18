@@ -27,11 +27,11 @@ Summary:
 ```
 
 **Parameters:**
-- `warehouse` (required) — Connection name
-- `days` (optional, default: 7) — Lookback period
-- `limit` (optional, default: 100) — Max queries returned
-- `user` (optional) — Filter by username
-- `warehouse_filter` (optional) — Filter by compute warehouse name
+- `warehouse` (required): Connection name
+- `days` (optional, default: 7): Lookback period
+- `limit` (optional, default: 100): Max queries returned
+- `user` (optional): Filter by username
+- `warehouse_filter` (optional): Filter by compute warehouse name
 
 **Data sources by warehouse:**
 - Snowflake: `QUERY_HISTORY` function
@@ -63,9 +63,9 @@ By Warehouse:
   DEV_WH (XS):           47.4 credits (6%)
 
 Recommendations:
-  1. TRANSFORM_WH runs at 23% utilization — consider downsizing to L
-  2. 340 queries on ANALYTICS_WH scan >1GB but return <100 rows — add filters
-  3. DEV_WH has 0 queries between 2am-8am — enable auto-suspend
+  1. TRANSFORM_WH runs at 23% utilization, consider downsizing to L
+  2. 340 queries on ANALYTICS_WH scan >1GB but return <100 rows, add filters
+  3. DEV_WH has 0 queries between 2am-8am, enable auto-suspend
 ```
 
 ---
@@ -92,7 +92,7 @@ Top 5 Expensive Queries:
 3. 23.7 credits | 312 executions | ANALYTICS_WH
    SELECT COUNT(DISTINCT user_id) FROM events WHERE ...
    Anti-patterns: None
-   Suggestion: Pre-aggregate in a materialized view — saves ~23 credits/week
+   Suggestion: Pre-aggregate in a materialized view, which saves ~23 credits/week
 
 4. 18.2 credits | 7 executions | TRANSFORM_WH
    INSERT INTO daily_agg SELECT ... FROM raw_events
@@ -153,14 +153,14 @@ Find tables and warehouses that are costing money but not being used.
 > finops_unused_resources prod-snowflake --days 30
 
 Unused Tables (no reads in 30 days):
-  1. RAW.LEGACY_EVENTS — 450GB, last accessed 2025-11-03
-  2. STAGING.STG_OLD_USERS — 12GB, last accessed 2025-12-15
-  3. ANALYTICS.TMP_MIGRATION_2024 — 89GB, last accessed 2025-08-22
+  1. RAW.LEGACY_EVENTS (450GB, last accessed 2025-11-03)
+  2. STAGING.STG_OLD_USERS (12GB, last accessed 2025-12-15)
+  3. ANALYTICS.TMP_MIGRATION_2024 (89GB, last accessed 2025-08-22)
   Total storage: 551GB → ~$23/month in storage costs
 
 Idle Warehouses (no queries in 7+ days):
-  1. MIGRATION_WH (Medium) — last query 2026-02-10
-  2. TEST_WH (Small) — last query 2026-01-28
+  1. MIGRATION_WH (Medium), last query 2026-02-10
+  2. TEST_WH (Small), last query 2026-01-28
 
 Recommendations:
   1. Archive or drop the 3 unused tables → save $23/month

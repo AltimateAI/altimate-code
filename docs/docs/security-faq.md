@@ -150,7 +150,7 @@ MCP (Model Context Protocol) servers extend Altimate Code with additional tools.
 - **MCP tool calls go through the permission system.** You can set MCP tools to `"ask"` or `"deny"` like any other tool.
 
 !!! warning
-    Third-party MCP servers are not reviewed or audited by Altimate. Treat them like any other third-party dependency — review the source, check for updates, and limit their access.
+    Third-party MCP servers are not reviewed or audited by Altimate. Treat them like any other third-party dependency: review the source, check for updates, and limit their access.
 
 ## How does the SQL analysis engine work?
 
@@ -233,7 +233,7 @@ When you see this prompt:
 - **"Allow once"** approves this single edit
 - **"Allow always"** approves edits to this specific file for the rest of the session (resets on restart)
 
-If you frequently edit `.env` files and find the prompts disruptive, click "Allow always" on the first prompt for each file — you won't be asked again for that file during your session.
+If you frequently edit `.env` files and find the prompts disruptive, click "Allow always" on the first prompt for each file. You won't be asked again for that file during your session.
 
 !!! tip
     This protection does **not** block reading these files, only writing. The agent can still read your `.env` to understand configuration without prompting.
@@ -253,7 +253,7 @@ Altimate Code applies safe defaults so you don't have to configure anything for 
 | `TRUNCATE *` | **Blocked** | Irreversible data deletion. |
 | All other commands | **Prompted** | You approve each command before it runs. |
 
-**"Prompted"** means you'll see the command and can approve or reject it. **"Blocked"** means the agent cannot run it at all — you must override in config.
+**"Prompted"** means you'll see the command and can approve or reject it. **"Blocked"** means the agent cannot run it at all; you must override in config.
 
 To override defaults, add rules in `altimate-code.json`. See [Permissions](configure/permissions.md) for the full configuration reference.
 

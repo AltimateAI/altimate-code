@@ -4,7 +4,7 @@ description: "Install altimate-code and run your first SQL analysis. The open-so
 
 # Quickstart
 
-> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider — or use Codex (built-in, no key required).
+> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider, or use Codex (built-in, no key required).
 
 ---
 
@@ -97,6 +97,6 @@ Build me a real time, interactive dashboard for my macbook system metrics and he
 
 ## What's Next
 
-- [Full Setup](getting-started.md) — All warehouse configs, LLM providers, advanced setup
-- [Agent Modes](data-engineering/agent-modes.md) — Choose the right agent for your task
-- [CI & Automation](data-engineering/guides/ci-headless.md) — Run altimate in automated pipelines
+- [Full Setup](getting-started.md): All warehouse configs, LLM providers, advanced setup
+- [Agent Modes](data-engineering/agent-modes.md): Choose the right agent for your task
+- [CI & Automation](data-engineering/guides/ci-headless.md): Run altimate in automated pipelines

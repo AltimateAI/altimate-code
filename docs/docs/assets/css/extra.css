@@ -92,7 +92,7 @@
 /* --- Feature cards --- */
 .grid.cards > ul > li {
   border-radius: 8px;
-  padding: 0.8rem !important;
+  padding: 1rem !important;
   transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
 
@@ -112,15 +112,18 @@
 
 /* --- Pill grid (LLM providers, warehouses) --- */
 .pill-grid {
-  max-width: 600px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: 640px;
+  margin: 1rem auto;
+  padding: 0 1rem;
+  box-sizing: border-box;
 }
 
 .pill-grid ul {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 0.45rem;
+  gap: 0.6rem 0.75rem;
   list-style: none;
   padding: 0;
   margin: 0;
@@ -129,14 +132,14 @@
 .pill-grid ul li {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.4rem 0.85rem;
+  gap: 0.4rem;
+  padding: 0.5rem 1.15rem;
   border-radius: 100px;
   font-size: 0.8rem;
   border: 1px solid var(--md-default-fg-color--lightest);
   color: var(--md-default-fg-color--light);
   white-space: nowrap;
-  margin: 0;
+  flex-shrink: 0;
 }
 
 .pill-grid ul li .twemoji {
@@ -145,6 +148,30 @@
 
 [data-md-color-scheme="slate"] .pill-grid ul li {
   border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Responsive pill sizing */
+@media (max-width: 768px) {
+  .pill-grid {
+    max-width: 100%;
+    padding: 0 0.75rem;
+  }
+
+  .pill-grid ul {
+    gap: 0.5rem 0.6rem;
+  }
+
+  .pill-grid ul li {
+    padding: 0.45rem 0.9rem;
+    font-size: 0.75rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .pill-grid ul li {
+    padding: 0.4rem 0.8rem;
+    font-size: 0.72rem;
+  }
 }
 
 /* --- Doc links footer --- */

@@ -70,9 +70,9 @@ You: Are our warehouses the right size?
 ```
 
 Common findings:
-- **Over-provisioned warehouses** — Utilization below 30% means you're paying for idle compute
-- **Missing auto-suspend** — Warehouses running 24/7 when only used during business hours
-- **Wrong size for workload** — Small queries on XL warehouses waste credits
+- **Over-provisioned warehouses.** Utilization below 30% means you're paying for idle compute.
+- **Missing auto-suspend.** Warehouses running 24/7 when only used during business hours.
+- **Wrong size for workload.** Small queries on XL warehouses waste credits.
 
 ## Step 4: Clean up unused resources
 

@@ -14,10 +14,10 @@ Running: dbt run --select stg_orders
 ```
 
 **Parameters:**
-- `command` (optional, default: "run") — dbt command: `run`, `test`, `build`, `compile`, `seed`, `snapshot`
-- `select` (optional) — Model selection syntax (`stg_orders`, `+fct_revenue`, `tag:daily`)
-- `args` (optional) — Additional CLI arguments
-- `project_dir` (optional) — Path to dbt project root
+- `command` (optional, default: "run"): dbt command: `run`, `test`, `build`, `compile`, `seed`, `snapshot`
+- `select` (optional): Model selection syntax (`stg_orders`, `+fct_revenue`, `tag:daily`)
+- `args` (optional): Additional CLI arguments
+- `project_dir` (optional): Path to dbt project root
 
 ### Examples
 

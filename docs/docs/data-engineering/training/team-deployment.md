@@ -1,10 +1,10 @@
 # Deploying Team Training
 
-Get every teammate's AI automatically applying the same SQL conventions, naming standards, and anti-pattern rules. Achieved by committing `.altimate-code/memory/` to git — teammates inherit your training on `git pull`.
+Get every teammate's AI automatically applying the same SQL conventions, naming standards, and anti-pattern rules. Achieved by committing `.altimate-code/memory/` to git so that teammates inherit your training on `git pull`.
 
 ---
 
-## Step 1 — Create Your First Team Training Entries
+## Step 1: Create Your First Team Training Entries
 
 Use the `/teach` or `/train` skills to save project-specific conventions:
 
@@ -26,7 +26,7 @@ This shows all active training entries, their scope (global vs project), and whe
 
 ---
 
-## Step 2 — Locate the Training Files
+## Step 2: Locate the Training Files
 
 Training is stored in `.altimate-code/memory/` in your project root. Each entry is a markdown file with YAML frontmatter:
 
@@ -40,11 +40,11 @@ Training is stored in `.altimate-code/memory/` in your project root. Each entry 
 
 **Global vs. project scope:**
 - **Project scope** (`.altimate-code/memory/`): Applies when working in this project. Commit to git to share with team.
-- **Global scope** (`~/.altimate-code/memory/`): Applies across all projects. Do not commit — this is personal.
+- **Global scope** (`~/.altimate-code/memory/`): Applies across all projects. Do not commit, as this is personal.
 
 ---
 
-## Step 3 — Commit to Git
+## Step 3: Commit to Git
 
 ```bash
 git add .altimate-code/memory/
@@ -52,11 +52,11 @@ git commit -m "Add team SQL conventions and naming standards"
 git push
 ```
 
-Teammates who `git pull` automatically inherit all training entries. No additional setup required — the tool reads from `.altimate-code/memory/` on startup.
+Teammates who `git pull` automatically inherit all training entries. No additional setup is required because the tool reads from `.altimate-code/memory/` on startup.
 
 ---
 
-## Step 4 — Verify a Teammate Got the Training
+## Step 4: Verify a Teammate Got the Training
 
 After a teammate pulls, they can run:
 
@@ -85,4 +85,4 @@ Use project scope for team standards. Use global scope only for personal prefere
 
 ## Limitations
 
-Training is as good as the corrections you save. The system doesn't infer conventions from your existing codebase — you teach it explicitly. For the full description of how training works, see [Training Overview](index.md).
+Training is as good as the corrections you save. The system doesn't infer conventions from your existing codebase; you teach it explicitly. For the full description of how training works, see [Training Overview](index.md).

@@ -3,7 +3,7 @@
 # Generated: 2026-03-18 | Version: v0.4.2
 # Source: https://docs.altimate.sh
 
-> altimate-code is an open-source data engineering harness — 50+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the tool layer for your data agents. Includes a deterministic SQL Intelligence Engine (100% F1 across 1,077 queries), column-level lineage, FinOps analysis, PII detection, and dbt integration. Works with any LLM provider. Local-first, MIT-licensed.
+> altimate-code is an open-source data engineering harness with 50+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the tool layer for your data agents. Includes a deterministic SQL Intelligence Engine (100% F1 across 1,077 queries), column-level lineage, FinOps analysis, PII detection, and dbt integration. Works with any LLM provider. Local-first, MIT-licensed.
 
 ## Get Started
 
@@ -13,7 +13,7 @@
 
 ## Data Engineering
 
-- [Agent Modes](https://docs.altimate.sh/data-engineering/agent-modes/): 7 specialized agents — Builder (full read/write), Analyst (read-only enforced), Validator, Migrator, Researcher, Trainer, Executive — each with scoped permissions and purpose-built tool access.
+- [Agent Modes](https://docs.altimate.sh/data-engineering/agent-modes/): 7 specialized agents (Builder, Analyst, Validator, Migrator, Researcher, Trainer, Executive), each with scoped permissions and purpose-built tool access. Builder has full read/write; Analyst has read-only enforced.
 - [Training Overview](https://docs.altimate.sh/data-engineering/training/): How to teach altimate project-specific patterns, naming conventions, and corrections that persist across sessions and team members.
 - [Team Deployment](https://docs.altimate.sh/data-engineering/training/team-deployment/): How to commit training to git so your entire team inherits SQL conventions automatically.
 - [SQL Tools](https://docs.altimate.sh/data-engineering/tools/sql-tools/): 9 SQL analysis tools with 19 anti-pattern rules. 100% F1 accuracy on 1,077 benchmark queries.
@@ -33,7 +33,7 @@
 - [Providers](https://docs.altimate.sh/configure/providers/): 17 LLM provider configurations with JSON examples: Anthropic, OpenAI, Google Gemini, Vertex AI, Amazon Bedrock, Azure OpenAI, Mistral, Groq, Ollama, and more.
 - [Agent Skills](https://docs.altimate.sh/configure/skills/): How to configure, discover, and add custom skills.
 - [Permissions](https://docs.altimate.sh/configure/permissions/): Permission levels, pattern matching, per-agent restrictions, deny rules for destructive SQL.
-- [Tracing](https://docs.altimate.sh/configure/tracing/): Local-first observability — trace schema, span types, live viewing, remote OTLP exporters, crash recovery.
+- [Tracing](https://docs.altimate.sh/configure/tracing/): Local-first observability covering trace schema, span types, live viewing, remote OTLP exporters, and crash recovery.
 - [Telemetry](https://docs.altimate.sh/configure/telemetry/): 25 anonymized event types, privacy guarantees, opt-out instructions.
 
 ## Reference

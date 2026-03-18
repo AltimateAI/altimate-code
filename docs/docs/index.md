@@ -17,7 +17,7 @@ hide:
 
 <p class="hero-tagline">The open-source data engineering harness.</p>
 
-<p class="hero-description">50+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across any platform — independent of a single warehouse provider.</p>
+<p class="hero-description">50+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across any platform, independent of a single warehouse provider.</p>
 
 <p class="hero-actions" markdown>
 
@@ -110,7 +110,7 @@ npm install -g altimate-code
 
     ---
 
-    Mount altimate as the tool layer underneath Claude Code, Codex, or any AI agent — giving it deterministic, warehouse-aware capabilities.
+    Mount altimate as the tool layer underneath Claude Code, Codex, or any AI agent, giving it deterministic, warehouse-aware capabilities.
 
 </div>
 
@@ -161,7 +161,7 @@ npm install -g altimate-code
 
     ---
 
-    Business-friendly reporting. No SQL jargon — translates technical findings into impact and recommendations.
+    Business-friendly reporting. No SQL jargon. Translates technical findings into impact and recommendations.
 
 </div>
 

@@ -71,7 +71,7 @@ altimate ships with built-in skills for common data engineering tasks. Type `/` 
 
 | Skill | Description |
 |-------|-------------|
-| `/sql-review` | SQL quality gate — lint 26 anti-patterns, validate syntax, check safety |
+| `/sql-review` | SQL quality gate that lints 26 anti-patterns, validates syntax, and checks safety |
 | `/sql-translate` | Cross-dialect SQL translation |
 | `/schema-migration` | Schema migration planning and execution |
 | `/pii-audit` | PII detection and compliance audits |

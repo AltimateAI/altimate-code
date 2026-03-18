@@ -44,12 +44,12 @@ The server uses HTTP Basic Authentication when credentials are set.
 
 The server exposes REST endpoints for:
 
-- **Sessions** — Create, list, delete sessions
-- **Messages** — Send messages, stream responses
-- **Models** — List available models
-- **Agents** — List and switch agents
-- **Tools** — Execute tools programmatically
-- **Export/Import** — Session data management
+- **Sessions**: Create, list, delete sessions
+- **Messages**: Send messages, stream responses
+- **Models**: List available models
+- **Agents**: List and switch agents
+- **Tools**: Execute tools programmatically
+- **Export/Import**: Session data management
 
 Use the [SDK](sdk.md) for a typed client, or call the API directly.
 

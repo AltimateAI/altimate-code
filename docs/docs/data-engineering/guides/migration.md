@@ -127,8 +127,8 @@ WHERE RLIKE(email, '^[a-z]+@.*$');
 
 ## Best practices
 
-1. **Translate in batches** — Start with staging models, then intermediate, then marts
-2. **Verify lineage** — Always check that column lineage is preserved after translation
-3. **Test with LIMIT** — Run translated queries with `LIMIT 10` on the target warehouse first
-4. **Check data types** — Type mappings may lose precision (e.g., `NUMBER(38,0)` → `INT64`)
-5. **Handle NULL semantics** — Some warehouses handle NULLs differently in comparisons
+1. **Translate in batches.** Start with staging models, then intermediate, then marts.
+2. **Verify lineage.** Always check that column lineage is preserved after translation.
+3. **Test with LIMIT.** Run translated queries with `LIMIT 10` on the target warehouse first.
+4. **Check data types.** Type mappings may lose precision (e.g., `NUMBER(38,0)` to `INT64`).
+5. **Handle NULL semantics.** Some warehouses handle NULLs differently in comparisons.

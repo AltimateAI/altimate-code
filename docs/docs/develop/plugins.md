@@ -56,9 +56,9 @@ Add plugins to your `altimate-code.json` config file:
 
 Plugins can be specified as:
 
-- **npm package name** — installed from the registry (e.g., `"npm-published-plugin"`)
-- **Relative path** — a local directory (e.g., `"./path/to/local-plugin"`)
-- **Scoped package** — with an org prefix (e.g., `"@altimateai/altimate-code-plugin-example"`)
+- **npm package name**: installed from the registry (e.g., `"npm-published-plugin"`)
+- **Relative path**: a local directory (e.g., `"./path/to/local-plugin"`)
+- **Scoped package**: with an org prefix (e.g., `"@altimateai/altimate-code-plugin-example"`)
 
 ## Plugin Hooks
 
@@ -70,7 +70,7 @@ Plugins can listen to lifecycle events. Each hook receives a context object with
 | `onSessionEnd` | A session is closed or expires | `session.id`, `session.duration`, `session.messageCount` |
 | `onMessage` | User sends a message to the agent | `message.content`, `message.sessionId`, `message.agent` |
 | `onResponse` | Agent generates a response | `response.content`, `response.sessionId`, `response.toolCalls` |
-| `onToolCall` | Before a tool is executed | `call.name`, `call.parameters`, `call.sessionId` — return `false` to cancel |
+| `onToolCall` | Before a tool is executed | `call.name`, `call.parameters`, `call.sessionId` (return `false` to cancel) |
 | `onToolResult` | After a tool finishes executing | `result.toolName`, `result.output`, `result.duration`, `result.error` |
 | `onFileEdit` | A file is modified via the agent | `edit.filePath`, `edit.oldContent`, `edit.newContent`, `edit.sessionId` |
 | `onFileWrite` | A new file is created via the agent | `write.filePath`, `write.content`, `write.sessionId` |
@@ -92,7 +92,7 @@ Hooks fire in this order during a typical interaction:
 
 ## Example: SQL Anti-Pattern Plugin
 
-This example creates a data-engineering-specific plugin that checks for `CROSS JOIN` without a `WHERE` clause in Snowflake SQL — a common anti-pattern that can cause massive result sets and runaway costs.
+This example creates a data-engineering-specific plugin that checks for `CROSS JOIN` without a `WHERE` clause in Snowflake SQL. This is a common anti-pattern that can cause massive result sets and runaway costs.
 
 ### Plugin File
 

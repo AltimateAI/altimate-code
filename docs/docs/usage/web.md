@@ -28,7 +28,7 @@ Configure the web server in `altimate-code.json`:
 | `hostname` | `localhost` | Bind address |
 | `cors` | `[]` | Allowed CORS origins |
 | `mdns` | `false` | Enable mDNS discovery |
-| `mdnsDomain` | — | Custom mDNS domain |
+| `mdnsDomain` | (none) | Custom mDNS domain |
 
 ## Authentication
 

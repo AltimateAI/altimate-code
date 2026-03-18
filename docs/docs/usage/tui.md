@@ -10,9 +10,9 @@ altimate
 
 The TUI has three main areas:
 
-- **Message area** — shows the conversation with the AI assistant
-- **Input area** — where you type messages and commands
-- **Sidebar** — shows session info, tool calls, and file changes (toggle with leader key + `s`)
+- **Message area**: shows the conversation with the AI assistant
+- **Input area**: where you type messages and commands
+- **Sidebar**: shows session info, tool calls, and file changes (toggle with leader key + `s`)
 
 ## Input Shortcuts
 
@@ -41,9 +41,9 @@ The leader key (default: `Ctrl+X`) gives access to all TUI keybindings. Press le
 
 ## Scrolling
 
-- **Page up/down** — scroll messages
-- **Home/End** — jump to first/last message
-- **Mouse scroll** — scroll with mouse wheel
+- **Page up/down**: scroll messages
+- **Home/End**: jump to first/last message
+- **Mouse scroll**: scroll with mouse wheel
 
 Configure scroll speed:
 

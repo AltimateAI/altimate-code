@@ -2,7 +2,7 @@
 
 ## Overview
 
-Altimate Code connects to 10 databases natively via TypeScript drivers. No Python dependency required. Drivers are loaded lazily — only the driver you need is imported at runtime.
+Altimate Code connects to 10 databases natively via TypeScript drivers. No Python dependency required. Drivers are loaded lazily, so only the driver you need is imported at runtime.
 
 ## Support Matrix
 
@@ -21,7 +21,7 @@ Altimate Code connects to 10 databases natively via TypeScript drivers. No Pytho
 
 ## Installation
 
-Drivers are `optionalDependencies` — install only what you need:
+Drivers are `optionalDependencies`, so install only what you need:
 
 ```bash
 # Embedded databases (no external service needed)
@@ -77,7 +77,7 @@ export ALTIMATE_CODE_CONN_MYDB='{"type":"postgres","host":"localhost","port":543
 
 ### Via dbt Profiles (Recommended for dbt Users)
 
-**dbt-first execution**: When working in a dbt project, `sql.execute` automatically uses dbt's own adapter to connect via `profiles.yml` — no separate connection configuration needed. If dbt is not configured or fails, it falls back to native drivers silently.
+**dbt-first execution**: When working in a dbt project, `sql.execute` automatically uses dbt's own adapter to connect via `profiles.yml`, so no separate connection configuration is needed. If dbt is not configured or fails, it falls back to native drivers silently.
 
 Connections are also auto-discovered from `~/.dbt/profiles.yml` for the `warehouse.list` and `warehouse.discover` tools. Jinja `{{ env_var() }}` patterns are resolved automatically. Discovered connections are named `dbt_{profile}_{target}`.
 
@@ -161,15 +161,15 @@ Connect through a bastion host by adding SSH config to any connection:
 
 SSH auth types: `"key"` (default) or `"password"` (set `ssh_password`).
 
-> **Note:** SSH tunneling cannot be used with `connection_string` — use explicit `host`/`port` instead.
+> **Note:** SSH tunneling cannot be used with `connection_string`. Use explicit `host`/`port` instead.
 
 ## Auto-Discovery
 
 The CLI auto-discovers connections from:
 
-1. **Docker containers** — detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle containers
-2. **dbt profiles** — parses `~/.dbt/profiles.yml` for all supported adapters
-3. **Environment variables** — detects `SNOWFLAKE_ACCOUNT`, `PGHOST`, `MYSQL_HOST`, `MSSQL_HOST`, `ORACLE_HOST`, `DUCKDB_PATH`, `SQLITE_PATH`, etc.
+1. **Docker containers**: detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle containers
+2. **dbt profiles**: parses `~/.dbt/profiles.yml` for all supported adapters
+3. **Environment variables**: detects `SNOWFLAKE_ACCOUNT`, `PGHOST`, `MYSQL_HOST`, `MSSQL_HOST`, `ORACLE_HOST`, `DUCKDB_PATH`, `SQLITE_PATH`, etc.
 
 Use the `warehouse_discover` tool or run project scan to find available connections.
 
@@ -177,7 +177,7 @@ Use the `warehouse_discover` tool or run project scan to find available connecti
 
 These features work based on SDK documentation but haven't been verified with automated E2E tests:
 
-### Snowflake (partially tested — 37 E2E tests pass)
+### Snowflake (partially tested, 37 E2E tests pass)
 - ✅ Password authentication
 - ✅ Key-pair with unencrypted PEM
 - ✅ Key-pair with encrypted PEM + passphrase
@@ -188,7 +188,7 @@ These features work based on SDK documentation but haven't been verified with au
 - ❌ OAuth/external browser auth (requires interactive browser)
 - ❌ Multi-cluster warehouse auto-scaling
 
-### BigQuery (partially tested — 25 E2E tests pass)
+### BigQuery (partially tested, 25 E2E tests pass)
 - ✅ Service Account JSON key authentication
 - ✅ Schema introspection (datasets, tables, columns)
 - ✅ BigQuery types (UNNEST, STRUCT, DATE/DATETIME/TIMESTAMP, STRING_AGG)
@@ -197,7 +197,7 @@ These features work based on SDK documentation but haven't been verified with au
 - ❌ Location-specific query execution
 - ❌ Dry run / cost estimation
 
-### Databricks (partially tested — 24 E2E tests pass)
+### Databricks (partially tested, 24 E2E tests pass)
 - ✅ Personal Access Token (PAT) authentication
 - ✅ Unity Catalog (SHOW CATALOGS, SHOW SCHEMAS)
 - ✅ Schema introspection (listSchemas, listTables, describeTable)
@@ -246,11 +246,11 @@ User calls sql.execute("SELECT * FROM orders")
 
 ### Dispatcher Pattern
 
-All 73 tool methods route through a central `Dispatcher` that maps method names to native TypeScript handlers. There is no Python bridge — every call executes in-process.
+All 73 tool methods route through a central `Dispatcher` that maps method names to native TypeScript handlers. There is no Python bridge; every call executes in-process.
 
 ### Shared Driver Package
 
-Database drivers live in `packages/drivers/` (`@altimateai/drivers`) — a workspace package shared across the monorepo. Each driver:
+Database drivers live in `packages/drivers/` (`@altimateai/drivers`), a workspace package shared across the monorepo. Each driver:
 - Lazy-loads its npm package via dynamic `import()` (no startup cost)
 - Uses parameterized queries for schema introspection (SQL injection safe)
 - Implements a common `Connector` interface: `connect()`, `execute()`, `listSchemas()`, `listTables()`, `describeTable()`, `close()`
@@ -259,9 +259,9 @@ Database drivers live in `packages/drivers/` (`@altimateai/drivers`) — a works
 
 Credentials are handled with a 3-tier fallback:
 
-1. **OS Keychain** (via `keytar`) — preferred, secure. Credentials stored in macOS Keychain, Linux Secret Service, or Windows Credential Vault.
-2. **Environment variables** (`ALTIMATE_CODE_CONN_*`) — for CI/headless environments. Pass full connection JSON.
-3. **Refuse** — if keytar is unavailable and no env var set, credentials are NOT stored in plaintext. The CLI warns and tells you to use env vars.
+1. **OS Keychain** (via `keytar`): preferred and secure. Credentials stored in macOS Keychain, Linux Secret Service, or Windows Credential Vault.
+2. **Environment variables** (`ALTIMATE_CODE_CONN_*`): for CI/headless environments. Pass full connection JSON.
+3. **Refuse**: if keytar is unavailable and no env var set, credentials are NOT stored in plaintext. The CLI warns and tells you to use env vars.
 
 Sensitive fields (`password`, `private_key_passphrase`, `access_token`, `ssh_password`, `connection_string`) are always stripped from `connections.json` on disk.
 
@@ -289,4 +289,4 @@ Or in config:
 }
 ```
 
-Telemetry failures **never** affect functionality — every tracking call is wrapped in try/catch.
+Telemetry failures **never** affect functionality because every tracking call is wrapped in try/catch.

@@ -23,9 +23,9 @@ Table: ANALYTICS.PUBLIC.ORDERS
 ```
 
 **Parameters:**
-- `table` (required) — Table name (schema-qualified: `schema.table` or just `table`)
-- `schema_name` (optional) — Schema to search in
-- `warehouse` (optional) — Connection name
+- `table` (required): Table name (schema-qualified: `schema.table` or just `table`)
+- `schema_name` (optional): Schema to search in
+- `warehouse` (optional): Connection name
 
 ---
 
@@ -50,13 +50,13 @@ Run this once per warehouse (or periodically to refresh). Enables `schema_search
 
 ## schema_search
 
-Search indexed metadata by keyword — finds tables, columns, and schemas.
+Search indexed metadata by keyword to find tables, columns, and schemas.
 
 ```
 > schema_search "revenue" --warehouse prod-snowflake
 
 Tables:
-  1. ANALYTICS.MARTS.FCT_REVENUE (42 columns) — "Monthly revenue fact table"
+  1. ANALYTICS.MARTS.FCT_REVENUE (42 columns), "Monthly revenue fact table"
   2. ANALYTICS.STAGING.STG_REVENUE_EVENTS (18 columns)
 
 Columns:
@@ -66,9 +66,9 @@ Columns:
 ```
 
 **Parameters:**
-- `query` (required) — Search term
-- `warehouse` (optional) — Limit to one connection
-- `limit` (optional) — Max results
+- `query` (required): Search term
+- `warehouse` (optional): Limit to one connection
+- `limit` (optional): Max results
 
 ---
 
@@ -84,7 +84,7 @@ Check cache freshness across all warehouses.
 ├─────────────────┼──────────┼────────┼─────────┼─────────────────────┤
 │ prod-snowflake  │ 12       │ 847    │ 15,293  │ 2026-02-26 14:30:00 │
 │ dev-duckdb      │ 2        │ 23     │ 156     │ 2026-02-25 09:15:00 │
-│ bigquery-prod   │ —        │ —      │ —       │ Never               │
+│ bigquery-prod   │ n/a      │ n/a    │ n/a     │ Never               │
 └─────────────────┴──────────┴────────┴─────────┴─────────────────────┘
 ```
 
@@ -149,8 +149,8 @@ Compare schema changes between two SQL versions to understand migration impact.
     --new_sql "CREATE TABLE orders (id INT, amount DECIMAL(12,2), status TEXT, created_at TIMESTAMP)"
 
 Schema Changes:
-  ~ Modified: amount (FLOAT → DECIMAL(12,2)) — severity: medium
-  + Added: created_at (TIMESTAMP) — severity: low
+  ~ Modified: amount (FLOAT → DECIMAL(12,2)), severity: medium
+  + Added: created_at (TIMESTAMP), severity: low
 
 Impact: Type change on 'amount' may affect downstream consumers expecting FLOAT
 ```
