@@ -182,9 +182,10 @@ export async function syncSchema(params: LocalSchemaSyncParams): Promise<LocalSc
         "warehouse VARCHAR, synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
         "tables_synced INTEGER, columns_synced INTEGER)",
       )
+      const { escapeSqlString } = await import("@altimateai/drivers")
       await localConnector.execute(
         `INSERT INTO _altimate_meta.sync_log (warehouse, tables_synced, columns_synced) ` +
-        `VALUES ('${params.warehouse}', ${tablesSynced}, ${columnsSynced})`,
+        `VALUES ('${escapeSqlString(params.warehouse)}', ${Number(tablesSynced)}, ${Number(columnsSynced)})`,
       )
     } catch {
       // Non-fatal

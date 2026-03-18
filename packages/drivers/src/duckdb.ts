@@ -30,15 +30,23 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   return {
     async connect() {
       db = await new Promise<any>((resolve, reject) => {
+        let resolved = false
         const instance = new duckdb.Database(
           dbPath,
           (err: Error | null) => {
+            if (resolved) return // Already resolved via timeout
+            resolved = true
             if (err) reject(err)
             else resolve(instance)
           },
         )
-        // Bun: native callback may not fire; fall back to sync return
-        setTimeout(() => resolve(instance), 500)
+        // Bun: native callback may not fire; fall back after 2s
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true
+            resolve(instance)
+          }
+        }, 2000)
       })
       connection = db.connect()
     },
