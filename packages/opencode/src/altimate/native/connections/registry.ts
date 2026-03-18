@@ -377,8 +377,10 @@ export async function add(
     existing[name] = sanitized
     fs.writeFileSync(globalPath, JSON.stringify(existing, null, 2), "utf-8")
 
-    // Update in-memory with sanitized config (no plaintext credentials)
-    configs.set(name, sanitized)
+    // In-memory: keep original config (with credentials) so the current
+    // session can connect even when keytar is unavailable. Only the disk
+    // file uses the sanitized version (credentials stripped).
+    configs.set(name, config)
 
     // Clear cached connector
     const cached = connectors.get(name)
