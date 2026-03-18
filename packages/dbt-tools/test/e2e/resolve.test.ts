@@ -21,13 +21,13 @@ import { describe, test, expect } from "bun:test"
 import { existsSync, readFileSync, realpathSync } from "fs"
 import { execFileSync } from "child_process"
 import { join, resolve, dirname } from "path"
-import { resolveDbt, validateDbt, buildDbtEnv } from "../src/dbt-resolve"
+import { resolveDbt, validateDbt, buildDbtEnv } from "../../src/dbt-resolve"
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const ENVS_DIR = resolve(import.meta.dir, ".dbt-resolve-envs")
+const ENVS_DIR = resolve(import.meta.dir, "../.dbt-resolve-envs")
 const SKIP = process.env.DBT_RESOLVE_E2E_SKIP === "1"
 const FILTER = process.env.DBT_RESOLVE_SCENARIOS?.split(",").map((s) => s.trim())
 
@@ -299,7 +299,7 @@ describe.skipIf(SKIP || available.length === 0)("dbt resolver e2e", () => {
           const projectRoot = scenario.getProjectRoot()
           if (!projectRoot || !existsSync(join(projectRoot, "dbt_project.yml"))) {
             // Use the fixture project for scenarios without their own project
-            const fixtureDir = resolve(import.meta.dir, "fixture")
+            const fixtureDir = resolve(import.meta.dir, "../fixture")
             if (!existsSync(join(fixtureDir, "dbt_project.yml"))) return
           }
 

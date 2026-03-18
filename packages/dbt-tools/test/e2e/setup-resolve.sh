@@ -17,7 +17,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENVS_DIR="$SCRIPT_DIR/.dbt-resolve-envs"
+ENVS_DIR="$SCRIPT_DIR/../.dbt-resolve-envs"
 # Use a fast, pinned version for all scenarios
 DBT_SPEC="dbt-duckdb>=1.8,<1.9"
 # Timeout per scenario (seconds)

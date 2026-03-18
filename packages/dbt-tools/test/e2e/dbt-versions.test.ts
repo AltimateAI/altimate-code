@@ -26,8 +26,8 @@ import { tmpdir } from "os"
 // Configuration
 // ---------------------------------------------------------------------------
 
-const FIXTURE_DIR = resolve(import.meta.dir, "fixture")
-const VENVS_DIR = resolve(import.meta.dir, ".dbt-venvs")
+const FIXTURE_DIR = resolve(import.meta.dir, "../fixture")
+const VENVS_DIR = resolve(import.meta.dir, "../.dbt-venvs")
 const SKIP = process.env.DBT_E2E_SKIP === "1"
 
 /** Timeout for dbt commands (seed + build can be slow on first run) */
@@ -143,7 +143,7 @@ function altDbt(
   args: string[],
   timeout = TEST_TIMEOUT,
 ): any {
-  const entry = resolve(import.meta.dir, "../src/index.ts")
+  const entry = resolve(import.meta.dir, "../../src/index.ts")
   const result = Bun.spawnSync(["bun", entry, ...args], {
     cwd: projectRoot,
     env: {
@@ -241,7 +241,7 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
           "dbt-cli.ts execDbtShow parses real output",
           async () => {
             // Directly test our fallback parser against real dbt output
-            const { execDbtShow } = await import("../src/dbt-cli")
+            const { execDbtShow } = await import("../../src/dbt-cli")
 
             // Temporarily override PATH so our dbt-cli.ts finds the right dbt
             const origPath = process.env.PATH
@@ -272,7 +272,7 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
         test(
           "execDbtShow with ref query against seeded data",
           async () => {
-            const { execDbtShow } = await import("../src/dbt-cli")
+            const { execDbtShow } = await import("../../src/dbt-cli")
 
             const origPath = process.env.PATH
             process.env.PATH = `${join(version.dbtPath, "..")}:${origPath}`
@@ -322,7 +322,7 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
         test(
           "execDbtCompile returns compiled SQL for model",
           async () => {
-            const { execDbtCompile } = await import("../src/dbt-cli")
+            const { execDbtCompile } = await import("../../src/dbt-cli")
 
             const origPath = process.env.PATH
             process.env.PATH = `${join(version.dbtPath, "..")}:${origPath}`
@@ -353,7 +353,7 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
         test(
           "execDbtCompileInline returns compiled SQL",
           async () => {
-            const { execDbtCompileInline } = await import("../src/dbt-cli")
+            const { execDbtCompileInline } = await import("../../src/dbt-cli")
 
             const origPath = process.env.PATH
             process.env.PATH = `${join(version.dbtPath, "..")}:${origPath}`
@@ -400,7 +400,7 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
         test(
           "execDbtLs finds children of stg_customers",
           async () => {
-            const { execDbtLs } = await import("../src/dbt-cli")
+            const { execDbtLs } = await import("../../src/dbt-cli")
 
             const origPath = process.env.PATH
             process.env.PATH = `${join(version.dbtPath, "..")}:${origPath}`
@@ -431,7 +431,7 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
         test(
           "execDbtLs finds parents of customers",
           async () => {
-            const { execDbtLs } = await import("../src/dbt-cli")
+            const { execDbtLs } = await import("../../src/dbt-cli")
 
             const origPath = process.env.PATH
             process.env.PATH = `${join(version.dbtPath, "..")}:${origPath}`
@@ -461,7 +461,7 @@ describe.skipIf(!HAS_DBT)("altimate-dbt e2e", () => {
         test(
           "execDbtLs children of leaf model returns empty",
           async () => {
-            const { execDbtLs } = await import("../src/dbt-cli")
+            const { execDbtLs } = await import("../../src/dbt-cli")
 
             const origPath = process.env.PATH
             process.env.PATH = `${join(version.dbtPath, "..")}:${origPath}`

@@ -17,7 +17,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENVS_DIR="$SCRIPT_DIR/.dbt-venvs"
+VENVS_DIR="$SCRIPT_DIR/../.dbt-venvs"
 
 DEFAULT_VERSIONS=("1.7" "1.8" "1.9" "1.10" "1.11")
 
