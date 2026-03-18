@@ -9,8 +9,16 @@ import { iife } from "@/util/iife"
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
+import { Telemetry } from "../altimate/telemetry"
+import os from "os"
 
 const MAX_DISPLAY_SKILLS = 50
+
+function classifySkillSource(location: string): "builtin" | "global" | "project" {
+  if (location.includes("node_modules") || location.includes(".altimate/builtin")) return "builtin"
+  if (location.startsWith(os.homedir())) return "global"
+  return "project"
+}
 // altimate_change end
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
@@ -83,6 +91,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
     description,
     parameters,
     async execute(params: z.infer<typeof parameters>, ctx) {
+      const startTime = Date.now()
       // altimate_change start - use upstream Skill.get() for exact name lookup
       const skill = await Skill.get(params.name)
 
@@ -121,6 +130,20 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         }
         return arr
       }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
+
+      try {
+        Telemetry.track({
+          type: "skill_used",
+          timestamp: Date.now(),
+          session_id: ctx.sessionID,
+          message_id: ctx.messageID,
+          skill_name: skill.name,
+          skill_source: classifySkillSource(skill.location),
+          duration_ms: Date.now() - startTime,
+        })
+      } catch {
+        // Telemetry must never break skill loading
+      }
 
       return {
         title: `Loaded skill: ${skill.name}`,

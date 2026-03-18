@@ -333,6 +333,15 @@ export namespace Telemetry {
         has_keychain: boolean
       }
     | {
+        type: "skill_used"
+        timestamp: number
+        session_id: string
+        message_id: string
+        skill_name: string
+        skill_source: "builtin" | "global" | "project"
+        duration_ms: number
+      }
+    | {
         type: "core_failure"
         timestamp: number
         session_id: string

@@ -7,7 +7,6 @@ import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mssql: any
   try {
-    // @ts-expect-error — optional dependency, loaded at runtime
     mssql = await import("mssql")
     mssql = mssql.default || mssql
   } catch {
