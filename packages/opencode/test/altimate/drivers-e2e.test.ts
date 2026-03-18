@@ -480,8 +480,11 @@ describe("SQLite Driver E2E", () => {
 // PostgreSQL E2E (Docker-based)
 // ---------------------------------------------------------------------------
 
-const PG_PORT = 15432
-const PG_PASSWORD = "testpass123"
+const PG_PORT = Number(process.env.TEST_PG_PORT) || 15432
+const PG_PASSWORD = process.env.TEST_PG_PASSWORD || "testpass123"
+const PG_HOST = process.env.TEST_PG_HOST || "127.0.0.1"
+// If TEST_PG_HOST is set, assume CI services are pre-started (no Docker needed)
+const PG_USE_CI_SERVICE = !!process.env.TEST_PG_HOST
 const PG_CONTAINER = "altimate-test-pg"
 
 describe("PostgreSQL Driver E2E", () => {
@@ -489,31 +492,34 @@ describe("PostgreSQL Driver E2E", () => {
   let pgStarted = false
 
   beforeAll(async () => {
-    if (!dockerAvailable) return
-
-    // Clean up any leftover container
-    try {
-      execSync(`docker rm -f ${PG_CONTAINER}`, { stdio: "ignore" })
-    } catch {}
-
-    try {
-      execSync(
-        `docker run -d --name ${PG_CONTAINER} -p ${PG_PORT}:5432 -e POSTGRES_PASSWORD=${PG_PASSWORD} postgres:16-alpine`,
-        { stdio: "ignore", timeout: 30000 },
-      )
-      await waitForPort(PG_PORT, 30000)
-      // Give PG a moment to fully initialize after port is open
-      await new Promise((r) => setTimeout(r, 2000))
+    if (PG_USE_CI_SERVICE) {
+      // CI: services are pre-started, just connect
       pgStarted = true
-    } catch (e) {
-      console.error("Failed to start PostgreSQL container:", e)
-      return
+    } else if (dockerAvailable) {
+      // Local: start a Docker container
+      try {
+        execSync(`docker rm -f ${PG_CONTAINER}`, { stdio: "ignore" })
+      } catch {}
+      try {
+        execSync(
+          `docker run -d --name ${PG_CONTAINER} -p ${PG_PORT}:5432 -e POSTGRES_PASSWORD=${PG_PASSWORD} postgres:16-alpine`,
+          { stdio: "ignore", timeout: 30000 },
+        )
+        await waitForPort(PG_PORT, 30000)
+        await new Promise((r) => setTimeout(r, 2000))
+        pgStarted = true
+      } catch (e) {
+        console.error("Failed to start PostgreSQL container:", e)
+        return
+      }
+    } else {
+      return // No Docker, no CI service — skip
     }
 
     const mod = await import("@altimateai/drivers/postgres")
     connector = await mod.connect({
       type: "postgres",
-      host: "127.0.0.1",
+      host: PG_HOST,
       port: PG_PORT,
       user: "postgres",
       password: PG_PASSWORD,
