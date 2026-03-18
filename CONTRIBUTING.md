@@ -53,21 +53,38 @@ To run Altimate Code in the root of the opencode repo itself:
 bun dev .
 ```
 
-### Building a "localcode"
+### Building and running a local binary
 
-To compile a standalone executable:
-
-```bash
-./packages/opencode/script/build.ts --single
-```
-
-Then run it with:
+The easiest way to build and run a compiled binary locally:
 
 ```bash
-./packages/opencode/dist/opencode-<platform>/bin/opencode
+cd packages/opencode
+
+# Build for current platform + run
+./script/local.sh
+
+# Run without rebuilding (fast iteration)
+./script/local.sh --skip-build
+
+# Pass flags to altimate-code
+./script/local.sh -- --help
 ```
 
-Replace `<platform>` with your platform (e.g., `darwin-arm64`, `linux-x64`).
+Or use the package.json scripts:
+
+```bash
+bun run build:local   # just build for current platform
+bun run local         # build + run
+```
+
+The script handles platform detection, `NODE_PATH` setup for native modules
+like `@altimateai/altimate-core`, and binary resolution automatically.
+
+To compile all platform targets (CI/release):
+
+```bash
+bun run build
+```
 
 - Core pieces:
   - `packages/opencode`: Altimate Code core business logic & server.
