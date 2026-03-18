@@ -4,6 +4,7 @@ import type { Agent } from "../agent/agent"
 import type { PermissionNext } from "../permission/next"
 import type { SessionID, MessageID } from "../session/schema"
 import { Truncate } from "./truncation"
+import { Telemetry } from "../altimate/telemetry"
 
 export namespace Tool {
   interface Metadata {
@@ -67,8 +68,89 @@ export namespace Tool {
               { cause: error },
             )
           }
-          const result = await execute(args, ctx)
-          // skip truncation for tools that handle it themselves
+          const startTime = Date.now()
+          let result: Awaited<ReturnType<typeof execute>>
+          try {
+            result = await execute(args, ctx)
+          } catch (error) {
+            // Telemetry must never prevent the original error from propagating
+            try {
+              const errorMsg = error instanceof Error ? error.message : String(error)
+              Telemetry.track({
+                type: "tool_call",
+                timestamp: Date.now(),
+                session_id: ctx.sessionID,
+                message_id: ctx.messageID,
+                tool_name: id,
+                tool_type: "standard",
+                tool_category: Telemetry.categorizeToolName(id, "standard"),
+                status: "error",
+                duration_ms: Date.now() - startTime,
+                sequence_index: 0,
+                previous_tool: null,
+                input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
+                error: errorMsg.slice(0, 500),
+              })
+              Telemetry.track({
+                type: "core_failure",
+                timestamp: Date.now(),
+                session_id: ctx.sessionID,
+                tool_name: id,
+                tool_category: Telemetry.categorizeToolName(id, "standard"),
+                error_class: Telemetry.classifyError(errorMsg),
+                error_message: errorMsg.slice(0, 500),
+                input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
+                masked_args: Telemetry.maskArgs(args as Record<string, unknown>),
+                duration_ms: Date.now() - startTime,
+              })
+            } catch {
+              // Telemetry failure must never mask the original tool error
+            }
+            throw error
+          }
+          // Telemetry runs after execute() succeeds — wrapped so it never breaks the tool
+          try {
+            const isSoftFailure = result.metadata?.success === false
+            const durationMs = Date.now() - startTime
+            Telemetry.track({
+              type: "tool_call",
+              timestamp: Date.now(),
+              session_id: ctx.sessionID,
+              message_id: ctx.messageID,
+              tool_name: id,
+              tool_type: "standard",
+              tool_category: Telemetry.categorizeToolName(id, "standard"),
+              status: isSoftFailure ? "error" : "success",
+              duration_ms: durationMs,
+              sequence_index: 0,
+              previous_tool: null,
+              ...(isSoftFailure && {
+                input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
+              }),
+            })
+            if (isSoftFailure) {
+              const errorMsg =
+                typeof result.metadata?.error === "string"
+                  ? result.metadata.error
+                  : result.output?.slice(0, 500) || "unknown error"
+              Telemetry.track({
+                type: "core_failure",
+                timestamp: Date.now(),
+                session_id: ctx.sessionID,
+                tool_name: id,
+                tool_category: Telemetry.categorizeToolName(id, "standard"),
+                error_class: Telemetry.classifyError(errorMsg),
+                error_message: errorMsg.slice(0, 500),
+                input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
+                masked_args: Telemetry.maskArgs(args as Record<string, unknown>),
+                duration_ms: durationMs,
+              })
+            }
+          } catch {
+            // Telemetry must never break tool execution
+          }
+          // Truncation runs after telemetry so I/O errors from
+          // Truncate.output() are not misattributed as tool failures.
           if (result.metadata.truncated !== undefined) {
             return result
           }

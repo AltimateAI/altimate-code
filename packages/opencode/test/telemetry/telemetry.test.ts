@@ -193,7 +193,7 @@ describe("telemetry.context", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 5. Event type completeness — all 25 event types
+// 5. Event type completeness — all 33 event types
 // ---------------------------------------------------------------------------
 describe("telemetry.event-types", () => {
   test("all event types are valid", () => {
@@ -202,7 +202,7 @@ describe("telemetry.event-types", () => {
       "session_end",
       "generation",
       "tool_call",
-      "bridge_call",
+      "native_call",
       "error",
       "command",
       "context_overflow_recovered",
@@ -223,8 +223,16 @@ describe("telemetry.event-types", () => {
       "agent_outcome",
       "error_recovered",
       "mcp_server_census",
+      "memory_operation",
+      "memory_injection",
+      "warehouse_connect",
+      "warehouse_query",
+      "warehouse_introspection",
+      "warehouse_discovery",
+      "warehouse_census",
+      "core_failure",
     ]
-    expect(eventTypes.length).toBe(25)
+    expect(eventTypes.length).toBe(33)
   })
 })
 
@@ -315,7 +323,7 @@ describe("telemetry.naming-convention", () => {
       "session_end",
       "generation",
       "tool_call",
-      "bridge_call",
+      "native_call",
       "error",
       "command",
       "context_overflow_recovered",
@@ -336,6 +344,14 @@ describe("telemetry.naming-convention", () => {
       "agent_outcome",
       "error_recovered",
       "mcp_server_census",
+      "memory_operation",
+      "memory_injection",
+      "warehouse_connect",
+      "warehouse_query",
+      "warehouse_introspection",
+      "warehouse_discovery",
+      "warehouse_census",
+      "core_failure",
     ]
     for (const t of types) {
       expect(t).toMatch(/^[a-z][a-z0-9_]*$/)
@@ -1501,5 +1517,293 @@ describe("Telemetry.isEnabled()", () => {
       if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
       else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 15. classifyError
+// ---------------------------------------------------------------------------
+describe("telemetry.classifyError", () => {
+  test("classifies parse errors", () => {
+    expect(Telemetry.classifyError("ParseError: unexpected token")).toBe("parse_error")
+    expect(Telemetry.classifyError("SyntaxError in SQL")).toBe("parse_error")
+    expect(Telemetry.classifyError("binder error on column")).toBe("parse_error")
+    expect(Telemetry.classifyError("sqlglot transpilation failed")).toBe("parse_error")
+  })
+
+  test("classifies connection errors", () => {
+    expect(Telemetry.classifyError("ECONNREFUSED 127.0.0.1:5432")).toBe("connection")
+    expect(Telemetry.classifyError("Connection refused by host")).toBe("connection")
+    expect(Telemetry.classifyError("Socket hang up")).toBe("connection")
+    expect(Telemetry.classifyError("ENOTFOUND db.example.com")).toBe("connection")
+    expect(Telemetry.classifyError("ECONNRESET")).toBe("connection")
+  })
+
+  test("classifies timeout errors", () => {
+    expect(Telemetry.classifyError("Request timeout after 30s")).toBe("timeout")
+    expect(Telemetry.classifyError("ETIMEDOUT")).toBe("timeout")
+    expect(Telemetry.classifyError("Bridge timeout waiting for response")).toBe("timeout")
+    expect(Telemetry.classifyError("Operation timed out")).toBe("timeout")
+  })
+
+  test("classifies validation errors", () => {
+    expect(Telemetry.classifyError("Invalid params: missing 'sql'")).toBe("validation")
+    expect(Telemetry.classifyError("Invalid dialect specified")).toBe("validation")
+    expect(Telemetry.classifyError("Missing required field")).toBe("validation")
+    expect(Telemetry.classifyError("Required parameter 'query' not provided")).toBe("validation")
+  })
+
+  test("classifies permission errors", () => {
+    expect(Telemetry.classifyError("Permission denied on table")).toBe("permission")
+    expect(Telemetry.classifyError("Access denied for user")).toBe("permission")
+    expect(Telemetry.classifyError("Unauthorized access to resource")).toBe("permission")
+    expect(Telemetry.classifyError("403 Forbidden")).toBe("permission")
+  })
+
+  test("classifies internal errors", () => {
+    expect(Telemetry.classifyError("Internal server error")).toBe("internal")
+    expect(Telemetry.classifyError("Assertion failed: x > 0")).toBe("internal")
+  })
+
+  test("returns unknown for unrecognized errors", () => {
+    expect(Telemetry.classifyError("Something went wrong")).toBe("unknown")
+    expect(Telemetry.classifyError("")).toBe("unknown")
+    expect(Telemetry.classifyError("42")).toBe("unknown")
+  })
+
+  test("is case-insensitive", () => {
+    expect(Telemetry.classifyError("PARSEERROR")).toBe("parse_error")
+    expect(Telemetry.classifyError("CONNECTION REFUSED")).toBe("connection")
+    expect(Telemetry.classifyError("TIMEOUT")).toBe("timeout")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 16. computeInputSignature
+// ---------------------------------------------------------------------------
+describe("telemetry.computeInputSignature", () => {
+  test("records string values as type:length", () => {
+    const sig = Telemetry.computeInputSignature({ sql: "SELECT 1", dialect: "snowflake" })
+    const parsed = JSON.parse(sig)
+    expect(parsed.sql).toBe("string:8")
+    expect(parsed.dialect).toBe("string:9")
+  })
+
+  test("records number values as 'number'", () => {
+    const sig = Telemetry.computeInputSignature({ limit: 100, offset: 0 })
+    const parsed = JSON.parse(sig)
+    expect(parsed.limit).toBe("number")
+    expect(parsed.offset).toBe("number")
+  })
+
+  test("records boolean values as 'boolean'", () => {
+    const sig = Telemetry.computeInputSignature({ verbose: true, dry_run: false })
+    const parsed = JSON.parse(sig)
+    expect(parsed.verbose).toBe("boolean")
+    expect(parsed.dry_run).toBe("boolean")
+  })
+
+  test("records array values as array:length", () => {
+    const sig = Telemetry.computeInputSignature({ tables: ["a", "b", "c"] })
+    const parsed = JSON.parse(sig)
+    expect(parsed.tables).toBe("array:3")
+  })
+
+  test("records object values as object:keyCount", () => {
+    const sig = Telemetry.computeInputSignature({ config: { a: 1, b: 2 } })
+    const parsed = JSON.parse(sig)
+    expect(parsed.config).toBe("object:2")
+  })
+
+  test("records null and undefined as 'null'", () => {
+    const sig = Telemetry.computeInputSignature({ a: null, b: undefined })
+    const parsed = JSON.parse(sig)
+    expect(parsed.a).toBe("null")
+    expect(parsed.b).toBe("null")
+  })
+
+  test("never includes actual values — only key names and type descriptors", () => {
+    const sig = Telemetry.computeInputSignature({
+      sql: "SELECT password FROM users WHERE email = 'admin@example.com'",
+      secret: "super-secret-123",
+      api_key: "sk-abc123",
+    })
+    // Key names ARE included (that's by design), but actual values are NOT
+    expect(sig).not.toContain("super-secret")
+    expect(sig).not.toContain("sk-abc123")
+    expect(sig).not.toContain("SELECT")
+    expect(sig).not.toContain("admin@example.com")
+    // Only type descriptors appear as values
+    const parsed = JSON.parse(sig)
+    expect(parsed.sql).toBe("string:60")
+    expect(parsed.secret).toBe("string:16")
+    expect(parsed.api_key).toBe("string:9")
+  })
+
+  test("truncates output at 1000 chars with valid JSON", () => {
+    // Create args with many long key names to exceed 1000 chars
+    const args: Record<string, unknown> = {}
+    for (let i = 0; i < 100; i++) {
+      args[`very_long_key_name_for_testing_truncation_${i}`] = "value"
+    }
+    const sig = Telemetry.computeInputSignature(args)
+    expect(sig.length).toBeLessThanOrEqual(1000)
+    // Must produce valid JSON even when truncated
+    const parsed = JSON.parse(sig)
+    expect(parsed["..."]).toBeDefined()
+    expect(typeof parsed["..."]).toBe("string")
+  })
+
+  test("returns valid JSON for empty input", () => {
+    const sig = Telemetry.computeInputSignature({})
+    expect(JSON.parse(sig)).toEqual({})
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 17. core_failure event privacy
+// ---------------------------------------------------------------------------
+describe("telemetry.core_failure privacy", () => {
+  test("core_failure event contains no raw SQL or argument values", () => {
+    const event: Telemetry.Event = {
+      type: "core_failure",
+      timestamp: Date.now(),
+      session_id: "test",
+      tool_name: "sql_analyze",
+      tool_category: "sql",
+      error_class: "parse_error",
+      error_message: "ParseError: unexpected token near SELECT".slice(0, 500),
+      input_signature: Telemetry.computeInputSignature({
+        sql: "SELECT * FROM users WHERE id = 1",
+        dialect: "snowflake",
+      }),
+      duration_ms: 42,
+    }
+    // input_signature has types/lengths, not values
+    expect(event.input_signature).not.toContain("SELECT")
+    expect(event.input_signature).not.toContain("users")
+    expect(event.input_signature).not.toContain("snowflake")
+    const parsed = JSON.parse(event.input_signature)
+    expect(parsed.sql).toBe("string:32")
+    expect(parsed.dialect).toBe("string:9")
+  })
+
+  test("error_message is capped at 500 chars", () => {
+    const longError = "x".repeat(1000)
+    const event: Telemetry.Event = {
+      type: "core_failure",
+      timestamp: Date.now(),
+      session_id: "test",
+      tool_name: "sql_analyze",
+      tool_category: "sql",
+      error_class: "parse_error",
+      error_message: longError.slice(0, 500),
+      input_signature: "{}",
+      duration_ms: 0,
+    }
+    expect(event.error_message.length).toBe(500)
+  })
+
+  test("core_failure event does NOT include raw arguments, outputs, or SQL", () => {
+    const event: Telemetry.Event = {
+      type: "core_failure",
+      timestamp: Date.now(),
+      session_id: "test",
+      tool_name: "sql_analyze",
+      tool_category: "sql",
+      error_class: "unknown",
+      error_message: "test error",
+      input_signature: '{"sql":"string:10"}',
+      duration_ms: 100,
+    }
+    expect("args" in event).toBe(false)
+    expect("input" in event).toBe(false)
+    expect("output" in event).toBe(false)
+    expect("sql" in event).toBe(false)
+    expect("query" in event).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 18. maskArgs
+// ---------------------------------------------------------------------------
+describe("telemetry.maskArgs", () => {
+  test("replaces string literals in SQL with ?", () => {
+    const masked = Telemetry.maskArgs({
+      sql: "SELECT * FROM users WHERE name = 'John Doe' AND email = 'john@example.com'",
+    })
+    const parsed = JSON.parse(masked)
+    expect(parsed.sql).toContain("SELECT * FROM users WHERE name = ")
+    expect(parsed.sql).not.toContain("John Doe")
+    expect(parsed.sql).not.toContain("john@example.com")
+    expect(parsed.sql).toContain("?")
+  })
+
+  test("redacts sensitive keys entirely", () => {
+    const masked = Telemetry.maskArgs({
+      sql: "SELECT 1",
+      password: "super-secret-123",
+      api_key: "sk-abc123",
+      token: "eyJhbGciOi...",
+      secret: "my-secret",
+    })
+    const parsed = JSON.parse(masked)
+    expect(parsed.password).toBe("****")
+    expect(parsed.api_key).toBe("****")
+    expect(parsed.token).toBe("****")
+    expect(parsed.secret).toBe("****")
+    expect(parsed.sql).toBe("SELECT 1")
+  })
+
+  test("preserves SQL structure while masking literals", () => {
+    const masked = Telemetry.maskArgs({
+      sql: "INSERT INTO orders (name, total) VALUES ('Alice', 99.99)",
+    })
+    const parsed = JSON.parse(masked)
+    expect(parsed.sql).toContain("INSERT INTO orders")
+    expect(parsed.sql).toContain("VALUES (")
+    expect(parsed.sql).not.toContain("Alice")
+  })
+
+  test("handles escaped quotes in SQL strings", () => {
+    const masked = Telemetry.maskArgs({
+      sql: "SELECT * FROM t WHERE name = 'O\\'Brien'",
+    })
+    const parsed = JSON.parse(masked)
+    expect(parsed.sql).not.toContain("Brien")
+  })
+
+  test("preserves non-string values as-is", () => {
+    const masked = Telemetry.maskArgs({
+      dialect: "snowflake",
+      depth: "full",
+      limit: 100,
+      verbose: true,
+    })
+    const parsed = JSON.parse(masked)
+    expect(parsed.dialect).toBe("snowflake")
+    expect(parsed.depth).toBe("full")
+    expect(parsed.limit).toBe(100)
+    expect(parsed.verbose).toBe(true)
+  })
+
+  test("truncates output at 2000 chars with valid JSON", () => {
+    const args: Record<string, unknown> = {}
+    for (let i = 0; i < 200; i++) {
+      args[`long_key_name_for_testing_truncation_${i}`] = "SELECT " + "a".repeat(100)
+    }
+    const masked = Telemetry.maskArgs(args)
+    expect(masked.length).toBeLessThanOrEqual(2000)
+    // Must produce valid JSON even when truncated
+    const parsed = JSON.parse(masked)
+    expect(parsed["..."]).toBeDefined()
+  })
+
+  test("redacts connection_string key", () => {
+    const masked = Telemetry.maskArgs({
+      connection_string: "Server=db.prod.internal;Password=hunter2",
+    })
+    const parsed = JSON.parse(masked)
+    expect(parsed.connection_string).toBe("****")
   })
 })

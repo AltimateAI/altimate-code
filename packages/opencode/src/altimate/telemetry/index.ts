@@ -63,6 +63,7 @@ export namespace Telemetry {
         duration_ms: number
         sequence_index: number
         previous_tool: string | null
+        input_signature?: string
         error?: string
       }
     | {
@@ -331,6 +332,141 @@ export namespace Telemetry {
         has_ssh_tunnel: boolean
         has_keychain: boolean
       }
+    | {
+        type: "core_failure"
+        timestamp: number
+        session_id: string
+        tool_name: string
+        tool_category: string
+        error_class:
+          | "parse_error"
+          | "connection"
+          | "timeout"
+          | "validation"
+          | "internal"
+          | "permission"
+          | "unknown"
+        error_message: string
+        input_signature: string
+        masked_args?: string
+        duration_ms: number
+      }
+
+  const ERROR_PATTERNS: Array<{
+    class: Telemetry.Event & { type: "core_failure" } extends { error_class: infer C } ? C : never
+    keywords: string[]
+  }> = [
+    { class: "parse_error", keywords: ["parse", "syntax", "binder", "unexpected token", "sqlglot"] },
+    {
+      class: "connection",
+      keywords: ["econnrefused", "connection", "socket", "enotfound", "econnreset"],
+    },
+    { class: "timeout", keywords: ["timeout", "etimedout", "bridge timeout", "timed out"] },
+    { class: "validation", keywords: ["invalid params", "invalid", "missing", "required"] },
+    { class: "permission", keywords: ["permission", "denied", "unauthorized", "forbidden"] },
+    { class: "internal", keywords: ["internal", "assertion"] },
+  ]
+
+  export function classifyError(
+    message: string,
+  ): Telemetry.Event & { type: "core_failure" } extends { error_class: infer C } ? C : never {
+    const lower = message.toLowerCase()
+    for (const { class: cls, keywords } of ERROR_PATTERNS) {
+      if (keywords.some((kw) => lower.includes(kw))) return cls
+    }
+    return "unknown"
+  }
+
+  export function computeInputSignature(args: Record<string, unknown>): string {
+    const sig: Record<string, string> = {}
+    for (const [k, v] of Object.entries(args)) {
+      if (v === null || v === undefined) {
+        sig[k] = "null"
+      } else if (typeof v === "string") {
+        sig[k] = `string:${v.length}`
+      } else if (typeof v === "number") {
+        sig[k] = "number"
+      } else if (typeof v === "boolean") {
+        sig[k] = "boolean"
+      } else if (Array.isArray(v)) {
+        sig[k] = `array:${v.length}`
+      } else if (typeof v === "object") {
+        sig[k] = `object:${Object.keys(v).length}`
+      } else {
+        sig[k] = typeof v
+      }
+    }
+    const result = JSON.stringify(sig)
+    if (result.length <= 1000) return result
+    // Drop keys from the end until the JSON fits, preserving valid JSON structure
+    const keys = Object.keys(sig)
+    while (keys.length > 0) {
+      keys.pop()
+      const truncated: Record<string, string> = {}
+      for (const k of keys) truncated[k] = sig[k]
+      truncated["..."] = `${Object.keys(sig).length - keys.length} more`
+      const out = JSON.stringify(truncated)
+      if (out.length <= 1000) return out
+    }
+    return JSON.stringify({ "...": `${Object.keys(sig).length} keys` })
+  }
+
+  // Mirrors altimate-sdk (Rust) SENSITIVE_KEYS — keep in sync.
+  const SENSITIVE_KEYS: string[] = [
+    "key", "api_key", "apikey", "token", "access_token", "refresh_token",
+    "secret", "secret_key", "password", "passwd", "pwd",
+    "credential", "credentials", "authorization", "auth",
+    "signature", "sig", "private_key", "connection_string",
+  ]
+
+  function isSensitiveKey(key: string): boolean {
+    const lower = key.toLowerCase()
+    return SENSITIVE_KEYS.some(
+      (k) => lower === k || lower.endsWith(`_${k}`) || lower.startsWith(`${k}_`),
+    )
+  }
+
+  // Mirrors altimate-sdk mask_string: replace '...' → ?, collapse whitespace.
+  function maskString(s: string): string {
+    return s.replace(/'(?:[^'\\]|\\.)*'/g, "?").replace(/\s+/g, " ").trim()
+  }
+
+  function maskValue(value: unknown, key?: string): unknown {
+    if (key && isSensitiveKey(key)) return "****"
+    if (typeof value === "string") return maskString(value)
+    if (Array.isArray(value)) return value.map((v) => maskValue(v, key))
+    if (value !== null && typeof value === "object") {
+      const masked: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        masked[k] = maskValue(v, k)
+      }
+      return masked
+    }
+    return value
+  }
+
+  /** PII-mask tool arguments for failure telemetry.
+   *  Mirrors altimate-sdk mask_value: sensitive keys → "****",
+   *  string literals in SQL → ?, whitespace collapsed. Truncates to 2000 chars. */
+  export function maskArgs(args: Record<string, unknown>): string {
+    const masked: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(args)) {
+      masked[k] = maskValue(v, k)
+    }
+    const result = JSON.stringify(masked)
+    if (result.length <= 2000) return result
+    // Drop keys from the end until valid JSON fits, same approach as computeInputSignature
+    const keys = Object.keys(masked)
+    while (keys.length > 0) {
+      keys.pop()
+      const truncated: Record<string, unknown> = {}
+      for (const k of keys) truncated[k] = masked[k]
+      truncated["..."] = `${Object.keys(masked).length - keys.length} more`
+      const out = JSON.stringify(truncated)
+      if (out.length <= 2000) return out
+    }
+    return JSON.stringify({ "...": `${Object.keys(masked).length} keys` })
+  }
 
   const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep", "bash"])
 

@@ -13,7 +13,7 @@ We collect the following categories of events:
 | `session_forked` | A session is forked from an existing one |
 | `generation` | An AI model generation completes (model ID, token counts, duration — no prompt content) |
 | `tool_call` | A tool is invoked (tool name and category — no arguments or output) |
-| `bridge_call` | A Python engine RPC call completes (method name and duration — no arguments) |
+| `native_call` | A native engine call completes (method name and duration — no arguments) |
 | `command` | A CLI command is executed (command name only) |
 | `error` | An unhandled error occurs (error type and truncated message — no stack traces) |
 | `auth_login` | Authentication succeeds or fails (provider and method — no credentials) |
@@ -33,6 +33,7 @@ We collect the following categories of events:
 | `error_recovered` | Successful recovery from a transient error (error type, strategy, attempt count) |
 | `mcp_server_census` | MCP server capabilities after connect (tool and resource counts — no tool names) |
 | `context_overflow_recovered` | Context overflow is handled (strategy) |
+| `core_failure` | A tool failure occurs — error category, error message (truncated to 500 chars), and PII-masked arguments (string literals in SQL replaced with `?`, sensitive keys like `password`/`token`/`secret` fully redacted) |
 
 Each event includes a timestamp, anonymous session ID, and the CLI version.
 
@@ -113,7 +114,7 @@ Event type names use **snake_case** with a `domain_action` pattern:
 
 ### Adding a New Event
 
-1. **Define the type** — Add a new variant to the `Telemetry.Event` union in `packages/altimate-code/src/telemetry/index.ts`
+1. **Define the type** — Add a new variant to the `Telemetry.Event` union in `packages/opencode/src/altimate/telemetry/index.ts`
 2. **Emit the event** — Call `Telemetry.track()` at the appropriate location
 3. **Update docs** — Add a row to the event table above
 
