@@ -37,7 +37,8 @@ import { Telemetry } from "../../../telemetry"
 // Telemetry helpers
 // ---------------------------------------------------------------------------
 
-function detectQueryType(sql: string): string {
+export function detectQueryType(sql: string | null | undefined): string {
+  if (!sql || typeof sql !== "string") return "OTHER"
   const trimmed = sql.trim().toUpperCase()
   if (trimmed.startsWith("SELECT") || trimmed.startsWith("WITH")) return "SELECT"
   if (trimmed.startsWith("INSERT")) return "INSERT"
@@ -48,7 +49,7 @@ function detectQueryType(sql: string): string {
   return "OTHER"
 }
 
-function categorizeQueryError(e: unknown): string {
+export function categorizeQueryError(e: unknown): string {
   const msg = String(e).toLowerCase()
   if (msg.includes("syntax")) return "syntax_error"
   if (msg.includes("permission") || msg.includes("denied") || msg.includes("access")) return "permission_denied"

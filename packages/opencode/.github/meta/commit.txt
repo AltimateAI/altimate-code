@@ -1,39 +1,21 @@
-feat: add warehouse telemetry — connect, query, introspection, discovery, census
+test: adversarial telemetry safety tests + defensive helper fixes
 
-Add 5 telemetry event types for data moat insights:
+14 adversarial tests that mock Telemetry.track to ALWAYS THROW,
+then verify every driver operation still succeeds:
+- warehouse.list with throwing census telemetry
+- warehouse.test with throwing connect telemetry
+- warehouse.add with throwing telemetry
+- warehouse.discover with throwing telemetry
+- 10 sequential operations with throwing telemetry
+- Telemetry.getContext() throwing
+- Helper functions with null/undefined/bizarre input
 
-warehouse_connect — every connection attempt:
-  - warehouse_type, auth_method (password/key_pair/token/file/connection_string)
-  - success/failure, duration_ms
-  - error_category (auth_failed/network_error/driver_missing/config_error/timeout)
+Defensive fixes to helper functions:
+- detectAuthMethod: handles null, undefined, non-object input
+- detectQueryType: handles null, undefined, non-string input
+- Both return safe defaults instead of crashing
 
-warehouse_query — every SQL execution:
-  - warehouse_type, query_type (SELECT/INSERT/UPDATE/DELETE/DDL/SHOW)
-  - success/failure, duration_ms, row_count, truncated
-  - error_category (syntax_error/permission_denied/timeout/connection_lost)
-
-warehouse_introspection — schema discovery operations:
-  - operation (index_warehouse), result_count
-
-warehouse_discovery — auto-discovery runs:
-  - source (docker/dbt_profiles/env), connections_found, warehouse_types
-
-warehouse_census — one-time per session:
-  - total_connections, warehouse_types[], connection_sources[]
-  - has_ssh_tunnel, has_keychain
-
-Safety: every Telemetry.track() wrapped in try/catch — telemetry
-failures never break user operations.
-
-Data moat value:
-- Popular connectors (warehouse_type frequency)
-- Auth method adoption (password vs key-pair vs token)
-- Failure patterns (error_category distribution)
-- Query patterns (SELECT vs DDL vs DML ratios)
-- Schema usage (introspection frequency per warehouse)
-- Connection sources (config vs env vs dbt)
-
-41 new tests covering auth detection, error categorization, census
-deduplication, query type detection, and safety guarantees.
+These tests guarantee the previous incident (bad telemetry breaking
+drivers) cannot happen again.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

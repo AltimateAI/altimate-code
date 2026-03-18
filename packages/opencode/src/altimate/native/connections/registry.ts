@@ -169,17 +169,18 @@ async function createConnector(
 // Telemetry helpers
 // ---------------------------------------------------------------------------
 
-function detectAuthMethod(config: ConnectionConfig): string {
+export function detectAuthMethod(config: ConnectionConfig | null | undefined): string {
+  if (!config || typeof config !== "object") return "unknown"
   if (config.connection_string) return "connection_string"
   if (config.private_key_path) return "key_pair"
   if (config.access_token || config.token) return "token"
   if (config.password) return "password"
-  const t = config.type?.toLowerCase()
+  const t = typeof config.type === "string" ? config.type.toLowerCase() : ""
   if (t === "duckdb" || t === "sqlite") return "file"
   return "unknown"
 }
 
-function categorizeConnectionError(e: unknown): string {
+export function categorizeConnectionError(e: unknown): string {
   const msg = String(e).toLowerCase()
   if (msg.includes("not installed") || msg.includes("cannot find module")) return "driver_missing"
   if (msg.includes("password") || msg.includes("authentication") || msg.includes("unauthorized") || msg.includes("jwt")) return "auth_failed"
