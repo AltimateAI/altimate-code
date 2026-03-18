@@ -16,6 +16,7 @@ export interface SqlExecuteResult {
   rows: any[][]
   row_count: number
   truncated: boolean
+  error?: string
 }
 
 // --- SQL Analyze ---

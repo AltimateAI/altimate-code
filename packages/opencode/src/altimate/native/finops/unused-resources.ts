@@ -111,7 +111,7 @@ SELECT
     last_altered,
     created
 FROM system.information_schema.tables
-WHERE last_altered < DATE_SUB(CURRENT_TIMESTAMP(), {days})
+WHERE last_altered < DATE_SUB(CURRENT_DATE(), {days})
 ORDER BY last_altered ASC
 LIMIT {limit}
 `

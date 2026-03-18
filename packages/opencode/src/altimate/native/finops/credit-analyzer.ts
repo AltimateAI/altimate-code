@@ -174,7 +174,7 @@ SELECT
     0 as credits_used,
     start_time
 FROM system.query.history
-WHERE start_time >= DATE_SUB(CURRENT_TIMESTAMP(), {days})
+WHERE start_time >= DATE_SUB(CURRENT_DATE(), {days})
   AND status = 'FINISHED'
   AND read_bytes > 0
 ORDER BY read_bytes DESC

@@ -104,7 +104,7 @@ SELECT
     rows_produced,
     0 as credits_used_cloud_services
 FROM system.query.history
-WHERE start_time >= DATE_SUB(CURRENT_TIMESTAMP(), {days})
+WHERE start_time >= DATE_SUB(CURRENT_DATE(), {days})
 ORDER BY start_time DESC
 LIMIT {limit}
 `
