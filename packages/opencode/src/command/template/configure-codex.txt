@@ -1,0 +1,26 @@
+Configure Codex CLI to use Altimate Code as a skill.
+
+Your task: create a skill at `~/.codex/skills/altimate/` so that Codex can delegate data engineering tasks to Altimate Code.
+
+Step 1 — Find the binary path by running: `which altimate`
+
+Step 2 — Create the skill directory: `~/.codex/skills/altimate/`
+
+Step 3 — Write the file `~/.codex/skills/altimate/SKILL.md` with this content:
+
+Frontmatter (YAML):
+- name: altimate
+- description: "Delegate data engineering tasks to Altimate Code, an AI agent with 40+ data engineering capabilities including SQL analysis, schema operations, lineage, dbt, FinOps, and RBAC. Use when the user asks about data warehouse operations, SQL queries, dbt models, data lineage, schema management, or any data engineering task."
+
+Body (Markdown):
+- Title: "# Altimate Code"
+- Explain that Altimate Code is an external AI agent specialized in data engineering
+- Provide a "## Usage" section instructing Codex to run: `BINARY_PATH run "<user's request>"` (replace BINARY_PATH with the path found in Step 1)
+- Explain that Altimate Code handles tool selection autonomously — just pass the user's request as-is
+- Add a "## After Getting Results" section: parse output, highlight findings/warnings/errors, save to file if requested
+
+Keep the SKILL.md concise (under 50 lines) per Codex skill best practices.
+
+Step 4 — Read back the file to verify it was written correctly.
+
+Tell the user: the `altimate` skill is now installed in Codex. They should restart Codex to pick it up.

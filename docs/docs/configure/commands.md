@@ -2,7 +2,7 @@
 
 ## Built-in Commands
 
-altimate ships with four built-in slash commands:
+altimate ships with six built-in slash commands:
 
 | Command | Description |
 |---------|-------------|
@@ -10,6 +10,8 @@ altimate ships with four built-in slash commands:
 | `/discover` | Scan your data stack and set up warehouse connections. Detects dbt projects, warehouse connections from profiles/Docker/env vars, installed tools, and config files. Walks you through adding and testing new connections, then indexes schemas. |
 | `/review` | Review changes — accepts `commit`, `branch`, or `pr` as an argument (defaults to uncommitted changes). |
 | `/feedback` | Submit product feedback as a GitHub issue. Guides you through title, category, description, and optional session context. |
+| `/configure-claude` | Configure altimate as a `/altimate` slash command in [Claude Code](https://claude.com/claude-code). Writes `~/.claude/commands/altimate.md` so you can invoke altimate from within Claude Code sessions. |
+| `/configure-codex` | Configure altimate as a skill in [Codex CLI](https://developers.openai.com/codex). Creates `~/.codex/skills/altimate/SKILL.md` so Codex can delegate data engineering tasks to altimate. |
 
 ### `/discover`
 
@@ -46,6 +48,31 @@ Submit product feedback directly from the CLI. The agent walks you through:
 ```
 
 Requires the `gh` CLI to be installed and authenticated (`gh auth login`).
+
+### `/configure-claude`
+
+Set up altimate as a tool inside Claude Code:
+
+```
+/configure-claude
+```
+
+This creates `~/.claude/commands/altimate.md`, which registers a `/altimate` slash command in Claude Code. After running this, you can use `/altimate` in any Claude Code session to delegate data engineering tasks:
+
+```
+# In Claude Code
+/altimate analyze the cost of our top 10 most expensive queries
+```
+
+### `/configure-codex`
+
+Set up altimate as a skill inside Codex CLI:
+
+```
+/configure-codex
+```
+
+This creates `~/.codex/skills/altimate/SKILL.md`. Restart Codex after running this command. Codex will then automatically invoke altimate when you ask about data engineering tasks.
 
 ## Custom Commands
 
@@ -109,3 +136,14 @@ Commands are loaded from:
 2. `~/.config/altimate-code/commands/` globally
 
 Press leader + `/` to see all available commands.
+
+## External CLI integration
+
+The `/configure-claude` and `/configure-codex` commands write integration files to external CLI tools:
+
+| Command | File created | Purpose |
+|---------|-------------|---------|
+| `/configure-claude` | `~/.claude/commands/altimate.md` | Registers `/altimate` slash command in Claude Code |
+| `/configure-codex` | `~/.codex/skills/altimate/SKILL.md` | Registers altimate as a Codex CLI skill |
+
+These files allow you to invoke altimate's data engineering capabilities from within other AI coding agents.

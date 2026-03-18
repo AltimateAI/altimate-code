@@ -4,11 +4,11 @@ altimate can work alongside Claude Code. While Claude Code handles general codin
 
 ## How it works
 
-Claude Code can invoke altimate as a tool when working on data projects. The `/data` skill routes data engineering tasks to altimate's specialized tools.
+Claude Code can invoke altimate as a tool when working on data projects. The `/altimate` command routes data engineering tasks to altimate's specialized tools.
 
 ```
 # In Claude Code
-/data "analyze the cost of our Snowflake warehouse"
+/altimate analyze the cost of our Snowflake warehouse
 ```
 
 This gives Claude Code access to:
@@ -29,7 +29,7 @@ When Claude Code reviews a PR that includes SQL changes:
 Claude Code: I see changes to models/marts/fct_revenue.sql. Let me check
              for data engineering concerns.
 
-> /data "analyze fct_revenue.sql for anti-patterns and estimate cost"
+> /altimate analyze fct_revenue.sql for anti-patterns and estimate cost
 
 altimate:
   sql_analyze: No anti-patterns detected ✓
@@ -45,7 +45,7 @@ You (in Claude Code): Set up a new dbt model for our customer metrics
 Claude Code: I'll create the model structure. Let me use altimate
              to inspect the source tables first.
 
-> /data "inspect the raw.customers and raw.orders tables"
+> /altimate inspect the raw.customers and raw.orders tables
 
 altimate:
   schema_inspect raw.customers → 12 columns
@@ -62,7 +62,7 @@ You (in Claude Code): This query is slow, can you optimize it?
 
 Claude Code: Let me analyze it with altimate's SQL tools.
 
-> /data "analyze and optimize: SELECT * FROM events WHERE YEAR(event_date) = 2026"
+> /altimate analyze and optimize: SELECT * FROM events WHERE YEAR(event_date) = 2026
 
 altimate:
   sql_analyze:
@@ -77,7 +77,15 @@ altimate:
 
 1. Install altimate globally: `npm install -g altimate-code`
 2. Configure warehouse connections in your project
-3. Claude Code automatically discovers altimate's tools when the `/data` skill is invoked
+3. Run `/configure-claude` inside altimate to set up the integration:
+
+```bash
+altimate
+# then in the TUI:
+/configure-claude
+```
+
+This creates `~/.claude/commands/altimate.md`. You can now use `/altimate` in any Claude Code session.
 
 ## When to use which
 
