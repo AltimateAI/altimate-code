@@ -10,8 +10,13 @@ process.chdir(dir)
 // NAPI native modules that must be installed alongside the CLI binary.
 // These cannot be embedded in Bun's single-file executable — the JS loader
 // dynamically require()s platform-specific .node binaries at runtime.
+const altimateCoreDep = pkg.dependencies["@altimateai/altimate-core"]
+if (!altimateCoreDep) {
+  console.error("Missing required dependency: @altimateai/altimate-core in package.json")
+  process.exit(1)
+}
 const runtimeDependencies: Record<string, string> = {
-  "@altimateai/altimate-core": pkg.dependencies["@altimateai/altimate-core"],
+  "@altimateai/altimate-core": altimateCoreDep,
 }
 
 const binaries: Record<string, string> = {}
