@@ -55,17 +55,35 @@ function configuration(cfg: Config): DBTConfiguration {
   }
 }
 
+// Buffer of recent dbt log messages — keeps the last N entries in memory so
+// errors can be retrieved for diagnostics without writing to stdout/stderr
+// which would corrupt the TUI display (see #249).
+const DBT_LOG_BUFFER_SIZE = 100
+const dbtLogBuffer: string[] = []
+
+function bufferLog(msg: string): void {
+  dbtLogBuffer.push(msg)
+  if (dbtLogBuffer.length > DBT_LOG_BUFFER_SIZE) {
+    dbtLogBuffer.shift()
+  }
+}
+
+/** Retrieve recent dbt log messages (for diagnostics / error reporting). */
+export function getRecentDbtLogs(): string[] {
+  return [...dbtLogBuffer]
+}
+
 function terminal(): DBTTerminal {
   return {
     show: async () => {},
-    log: (msg: string) => console.error("[dbt]", msg),
+    log: (msg: string) => bufferLog(`[dbt] ${msg}`),
     trace: () => {},
     debug: () => {},
-    info: (_name: string, msg: string) => console.error("[dbt]", msg),
-    warn: (_name: string, msg: string) => console.error("[dbt:warn]", msg),
+    info: (_name: string, msg: string) => bufferLog(`[dbt] ${msg}`),
+    warn: (_name: string, msg: string) => bufferLog(`[dbt:warn] ${msg}`),
     error: (_name: string, msg: string, e: unknown) => {
       const err = e instanceof Error ? e.message : String(e)
-      console.error("[dbt:error]", msg, err)
+      bufferLog(`[dbt:error] ${msg} ${err}`)
     },
     dispose: () => {},
   }

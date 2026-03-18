@@ -21,6 +21,7 @@ import fsSync from "fs"
 import path from "path"
 import { Global } from "../../global"
 import { randomUUIDv7 } from "bun"
+import { Log } from "../../util/log"
 
 // ---------------------------------------------------------------------------
 // Trace data types — v2 schema
@@ -666,7 +667,7 @@ export class Tracer {
       .then(() => fs.writeFile(tmpPath, JSON.stringify(trace, null, 2)))
       .then(() => fs.rename(tmpPath, filePath))
       .catch((err) => {
-        console.debug(`[tracing] failed to write trace snapshot: ${err}`)
+        Log.Default.debug(`[tracing] failed to write trace snapshot: ${err}`)
         fs.unlink(tmpPath).catch(() => {})
       })
       .finally(() => {
@@ -781,7 +782,7 @@ export class Tracer {
       let timer: ReturnType<typeof setTimeout>
       const timeout = new Promise<undefined>((resolve) => {
         timer = setTimeout(() => {
-          console.warn(`[tracing] Exporter "${name}" timed out after ${EXPORTER_TIMEOUT_MS}ms`)
+          Log.Default.warn(`[tracing] Exporter "${name}" timed out after ${EXPORTER_TIMEOUT_MS}ms`)
           resolve(undefined)
         }, EXPORTER_TIMEOUT_MS)
       })
