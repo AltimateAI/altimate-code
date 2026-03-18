@@ -1,13 +1,9 @@
-import { describe, expect, test, beforeEach, mock } from "bun:test"
+import { describe, expect, test, beforeEach, beforeAll, afterAll, mock } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-// Mock Telemetry to avoid side effects
-mock.module("../../src/altimate/telemetry", () => ({
-  Telemetry: {
-    track: mock(() => {}),
-    getContext: () => ({ sessionId: "test-session" }),
-  },
-}))
+// Disable telemetry via env var instead of mock.module
+beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
+afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 
 describe("Dispatcher", () => {
   beforeEach(() => {
@@ -65,13 +61,13 @@ describe("Dispatcher", () => {
     test("tracks telemetry on success", async () => {
       Dispatcher.register("ping", async () => ({ status: "ok" }))
       await Dispatcher.call("ping", {} as any)
-      // Telemetry is mocked — just verify no crash
+      // Telemetry is disabled — just verify no crash
     })
 
     test("tracks telemetry on error", async () => {
       Dispatcher.register("ping", async () => { throw new Error("fail") })
       await expect(Dispatcher.call("ping", {} as any)).rejects.toThrow("fail")
-      // Telemetry is mocked — just verify no crash
+      // Telemetry is disabled — just verify no crash
     })
   })
 })

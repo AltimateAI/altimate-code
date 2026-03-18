@@ -23,10 +23,10 @@ export function reset(): void {
 }
 
 /** Lazy registration hook — set by native/index.ts */
-let _ensureRegistered: (() => void) | null = null
+let _ensureRegistered: (() => Promise<void>) | null = null
 
 /** Called by native/index.ts to set the lazy registration function. */
-export function setRegistrationHook(fn: () => void): void {
+export function setRegistrationHook(fn: () => Promise<void>): void {
   _ensureRegistered = fn
 }
 
@@ -39,7 +39,7 @@ export async function call<M extends BridgeMethod>(
   if (_ensureRegistered) {
     const fn = _ensureRegistered
     _ensureRegistered = null
-    fn()
+    await fn()
   }
 
   const native = nativeHandlers.get(method as string)

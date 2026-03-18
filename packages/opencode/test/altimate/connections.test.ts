@@ -1,36 +1,9 @@
-import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test"
+import { describe, expect, test, beforeEach, beforeAll, afterAll, afterEach } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-// ---------------------------------------------------------------------------
-// Mocks — must be set up before imports that trigger registration
-// ---------------------------------------------------------------------------
-
-// Mock Telemetry
-mock.module("../../src/altimate/telemetry", () => ({
-  Telemetry: {
-    track: mock(() => {}),
-    getContext: () => ({ sessionId: "test-session" }),
-  },
-}))
-
-// Mock Log
-const mockWarn = mock(() => {})
-const mockError = mock(() => {})
-mock.module("../../src/util/log", () => ({
-  Log: {
-    Default: {
-      warn: mockWarn,
-      error: mockError,
-      info: mock(() => {}),
-      debug: mock(() => {}),
-    },
-  },
-}))
-
-// Mock keytar (not available in test environment)
-mock.module("keytar", () => {
-  throw new Error("keytar not available")
-})
+// Disable telemetry via env var instead of mock.module
+beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
+afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 
 // ---------------------------------------------------------------------------
 // Import modules under test
@@ -102,7 +75,7 @@ describe("ConnectionRegistry", () => {
 })
 
 // ---------------------------------------------------------------------------
-// CredentialStore (with keytar mocked as unavailable)
+// CredentialStore (keytar not available in test environment)
 // ---------------------------------------------------------------------------
 
 describe("CredentialStore", () => {

@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeAll, beforeEach, mock } from "bun:test"
+import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { resolveSchema, schemaOrEmpty } from "../../src/altimate/native/schema-resolver"
 import {
@@ -7,23 +7,9 @@ import {
   registerAll,
 } from "../../src/altimate/native/altimate-core"
 
-// Mock Telemetry
-mock.module("../../src/altimate/telemetry", () => ({
-  Telemetry: {
-    track: mock(() => {}),
-    getContext: () => ({ sessionId: "test-session" }),
-  },
-}))
-
-// Mock Log
-mock.module("../../src/util/log", () => ({
-  Log: {
-    Default: {
-      warn: mock(() => {}),
-      error: mock(() => {}),
-    },
-  },
-}))
+// Disable telemetry via env var instead of mock.module
+beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
+afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 
 // Import altimate-core registration (side-effect)
 import "../../src/altimate/native/altimate-core"

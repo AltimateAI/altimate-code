@@ -5,19 +5,11 @@
  * concurrent access, and error recovery paths.
  */
 
-import { describe, expect, test, beforeEach, mock, beforeAll } from "bun:test"
+import { describe, expect, test, beforeEach, beforeAll, afterAll } from "bun:test"
 
-// Mock Telemetry
-mock.module("../../src/altimate/telemetry", () => ({
-  Telemetry: {
-    track: () => {},
-    getContext: () => ({ sessionId: "adversarial-test" }),
-  },
-}))
-
-mock.module("../../src/util/log", () => ({
-  Log: { Default: { warn: () => {}, error: () => {}, info: () => {}, debug: () => {} } },
-}))
+// Disable telemetry via env var instead of mock.module
+beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
+afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import * as Registry from "../../src/altimate/native/connections/registry"

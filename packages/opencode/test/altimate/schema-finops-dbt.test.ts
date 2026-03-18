@@ -1,94 +1,12 @@
-import { describe, expect, test, beforeEach, mock } from "bun:test"
+import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-// Mock Telemetry
-mock.module("../../src/altimate/telemetry", () => ({
-  Telemetry: {
-    track: mock(() => {}),
-    getContext: () => ({ sessionId: "test-session" }),
-  },
-}))
-
-// Mock Log
-mock.module("../../src/util/log", () => ({
-  Log: {
-    Default: {
-      warn: mock(() => {}),
-      error: mock(() => {}),
-    },
-  },
-}))
-
-// Mock altimate-core for tests that need it
-mock.module("@altimateai/altimate-core", () => ({
-  Schema: {
-    fromJson: () => ({}),
-    fromDdl: () => ({}),
-  },
-  classifyPii: () => ({ findings: [] }),
-  columnLineage: () => ({ edges: [] }),
-  transpile: () => ({ success: true, sql: "SELECT 1" }),
-  validate: async () => ({ valid: true }),
-  lint: () => ({ clean: true }),
-  scanSql: () => ({ safe: true }),
-  explain: async () => ({}),
-  fix: async () => ({}),
-  checkPolicy: async () => ({}),
-  checkSemantics: async () => ({}),
-  generateTests: () => ({}),
-  checkEquivalence: async () => ({}),
-  analyzeMigration: () => ({}),
-  diffSchemas: () => ({}),
-  rewrite: () => ({}),
-  correct: async () => ({}),
-  evaluate: async () => ({}),
-  checkQueryPii: () => ({}),
-  resolveTerm: () => ({}),
-  trackLineage: () => ({}),
-  formatSql: () => ({ success: true }),
-  extractMetadata: () => ({}),
-  compareQueries: () => ({}),
-  complete: () => ({}),
-  optimizeContext: () => ({}),
-  optimizeForQuery: () => ({}),
-  pruneSchema: () => ({}),
-  importDdl: () => ({ toJson: () => ({}) }),
-  exportDdl: () => "",
-  schemaFingerprint: () => "abc",
-  introspectionSql: () => ({}),
-  parseDbtProject: () => ({}),
-  isSafe: () => true,
-}))
-
-// Mock ConnectionRegistry
-mock.module("../../src/altimate/native/connections/registry", () => ({
-  get: mock(() => Promise.reject(new Error("No test connection"))),
-  list: () => ({ warehouses: [] }),
-  getConfig: () => undefined,
-  test: mock(() => Promise.resolve({ connected: false })),
-  add: mock(() => Promise.resolve({ success: true, name: "test", type: "test" })),
-  remove: mock(() => Promise.resolve({ success: true })),
-  load: () => {},
-  reset: () => {},
-  setConfigs: () => {},
-  reload: mock(() => Promise.resolve()),
-}))
-
-// Mock credential-store to avoid keychain access
-mock.module("../../src/altimate/native/connections/credential-store", () => ({
-  resolveConfig: async (_name: string, config: any) => config,
-  saveConnection: async (_name: string, config: any) => config,
-}))
-
-// Mock ssh-tunnel
-mock.module("../../src/altimate/native/connections/ssh-tunnel", () => ({
-  startTunnel: async () => ({ localPort: 0 }),
-  extractSshConfig: () => null,
-  closeTunnel: () => {},
-}))
+// Disable telemetry via env var instead of mock.module
+beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
+afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 
 // ---------------------------------------------------------------------------
-// Import modules AFTER mocks are set up
+// Import modules AFTER env var is set
 // ---------------------------------------------------------------------------
 
 // These side-effect imports register handlers

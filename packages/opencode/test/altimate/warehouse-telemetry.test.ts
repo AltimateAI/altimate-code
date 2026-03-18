@@ -1,43 +1,31 @@
 // @ts-nocheck
-import { describe, expect, test, beforeEach, afterEach, mock, spyOn } from "bun:test"
+import { describe, expect, test, beforeEach, afterAll, spyOn } from "bun:test"
 
 // ---------------------------------------------------------------------------
-// Mocks — must be set up before imports that trigger registration
+// Intercept Telemetry.track via spyOn (no mock.module)
 // ---------------------------------------------------------------------------
+
+import { Telemetry } from "../../src/altimate/telemetry"
+import * as Registry from "../../src/altimate/native/connections/registry"
 
 const trackedEvents: any[] = []
-const mockTrack = mock((...args: any[]) => {
-  trackedEvents.push(args[0])
+
+// Spy on Telemetry.track to capture events — works because registry.ts
+// accesses the same Telemetry namespace object via ESM live bindings.
+const trackSpy = spyOn(Telemetry, "track").mockImplementation((event: any) => {
+  trackedEvents.push(event)
 })
 
-mock.module("../../src/altimate/telemetry", () => ({
-  Telemetry: {
-    track: mockTrack,
-    getContext: () => ({ sessionId: "test-session-123" }),
-  },
+// Spy on Telemetry.getContext to return deterministic session ID
+const getContextSpy = spyOn(Telemetry, "getContext").mockImplementation(() => ({
+  sessionId: "test-session-123",
+  projectId: "test-project",
 }))
 
-mock.module("../../src/util/log", () => ({
-  Log: {
-    Default: {
-      warn: mock(() => {}),
-      error: mock(() => {}),
-      info: mock(() => {}),
-      debug: mock(() => {}),
-    },
-  },
-}))
-
-mock.module("keytar", () => {
-  throw new Error("keytar not available")
+afterAll(() => {
+  trackSpy.mockRestore()
+  getContextSpy.mockRestore()
 })
-
-// ---------------------------------------------------------------------------
-// Imports
-// ---------------------------------------------------------------------------
-
-import * as Registry from "../../src/altimate/native/connections/registry"
-import { Telemetry } from "../../src/altimate/telemetry"
 
 // ---------------------------------------------------------------------------
 // detectQueryType helper (replicated for unit testing since not exported)
@@ -81,7 +69,7 @@ describe("warehouse telemetry: detectAuthMethod", () => {
   beforeEach(() => {
     Registry.reset()
     trackedEvents.length = 0
-    mockTrack.mockClear()
+    trackSpy.mockClear()
   })
 
   // Use an unsupported driver type to force a failure at createConnector level,
@@ -191,7 +179,7 @@ describe("warehouse telemetry: warehouse_connect", () => {
   beforeEach(() => {
     Registry.reset()
     trackedEvents.length = 0
-    mockTrack.mockClear()
+    trackSpy.mockClear()
   })
 
   test("tracks failed connection with error details", async () => {
@@ -301,7 +289,7 @@ describe("warehouse telemetry: warehouse_census", () => {
   beforeEach(() => {
     Registry.reset()
     trackedEvents.length = 0
-    mockTrack.mockClear()
+    trackSpy.mockClear()
   })
 
   test("fires census on first list() call with connections", () => {
@@ -460,12 +448,11 @@ describe("warehouse telemetry: safety", () => {
   beforeEach(() => {
     Registry.reset()
     trackedEvents.length = 0
-    mockTrack.mockClear()
+    trackSpy.mockClear()
   })
 
   test("list() works even if telemetry.track throws", () => {
-    const originalImpl = mockTrack.getMockImplementation()
-    mockTrack.mockImplementation(() => {
+    trackSpy.mockImplementation(() => {
       throw new Error("telemetry is broken!")
     })
 
@@ -478,13 +465,12 @@ describe("warehouse telemetry: safety", () => {
     expect(result.warehouses).toHaveLength(1)
     expect(result.warehouses[0].type).toBe("postgres")
 
-    // Restore
-    mockTrack.mockImplementation(originalImpl || ((...args: any[]) => { trackedEvents.push(args[0]) }))
+    // Restore spy to capture events again
+    trackSpy.mockImplementation((event: any) => { trackedEvents.push(event) })
   })
 
   test("get() connection failure still throws original error, not telemetry error", async () => {
-    const originalImpl = mockTrack.getMockImplementation()
-    mockTrack.mockImplementation(() => {
+    trackSpy.mockImplementation(() => {
       throw new Error("telemetry is broken!")
     })
 
@@ -502,7 +488,8 @@ describe("warehouse telemetry: safety", () => {
       expect(String(e)).toContain("Unsupported database type")
     }
 
-    mockTrack.mockImplementation(originalImpl || ((...args: any[]) => { trackedEvents.push(args[0]) }))
+    // Restore spy to capture events again
+    trackSpy.mockImplementation((event: any) => { trackedEvents.push(event) })
   })
 })
 
@@ -514,7 +501,7 @@ describe("warehouse telemetry: event structure", () => {
   beforeEach(() => {
     Registry.reset()
     trackedEvents.length = 0
-    mockTrack.mockClear()
+    trackSpy.mockClear()
   })
 
   test("warehouse_connect event has all required fields on failure", async () => {

@@ -3,12 +3,16 @@ import { execSync } from "child_process"
 import { createConnection } from "net"
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Fast skip: only run when CI services are configured or Docker is available
+// This avoids the 5s Docker detection timeout during regular `bun test`
 // ---------------------------------------------------------------------------
 
+const HAS_CI_SERVICES = !!(process.env.TEST_MYSQL_HOST || process.env.TEST_MSSQL_HOST || process.env.TEST_REDSHIFT_HOST)
+
 function isDockerAvailable(): boolean {
+  if (HAS_CI_SERVICES) return true // CI services replace Docker
   try {
-    execSync("docker info", { stdio: "ignore", timeout: 5000 })
+    execSync("docker info", { stdio: "ignore", timeout: 3000 })
     return true
   } catch {
     return false

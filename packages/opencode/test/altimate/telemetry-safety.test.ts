@@ -8,31 +8,34 @@
  * Background: bad telemetry code previously broke drivers.
  */
 
-import { describe, expect, test, beforeEach, mock } from "bun:test"
+import { describe, expect, test, beforeEach, afterAll, spyOn } from "bun:test"
+
+// ---------------------------------------------------------------------------
+// Intercept Telemetry.track via spyOn (no mock.module)
+// ---------------------------------------------------------------------------
+
+import { Telemetry } from "../../src/altimate/telemetry"
 
 // Track all telemetry calls for verification
 const telemetryCalls: Array<{ type: string; threw: boolean }> = []
 let shouldThrow = false
 
-// Mock Telemetry — can toggle between working and throwing mode
-mock.module("../../src/altimate/telemetry", () => ({
-  Telemetry: {
-    track: (event: any) => {
-      telemetryCalls.push({ type: event?.type ?? "unknown", threw: shouldThrow })
-      if (shouldThrow) {
-        throw new Error(`TELEMETRY EXPLOSION: ${event?.type}`)
-      }
-    },
-    getContext: () => {
-      if (shouldThrow) throw new Error("getContext EXPLOSION")
-      return { sessionId: "test-session" }
-    },
-  },
-}))
+const trackSpy = spyOn(Telemetry, "track").mockImplementation((event: any) => {
+  telemetryCalls.push({ type: event?.type ?? "unknown", threw: shouldThrow })
+  if (shouldThrow) {
+    throw new Error(`TELEMETRY EXPLOSION: ${event?.type}`)
+  }
+})
 
-mock.module("../../src/util/log", () => ({
-  Log: { Default: { warn: () => {}, error: () => {}, info: () => {}, debug: () => {} } },
-}))
+const getContextSpy = spyOn(Telemetry, "getContext").mockImplementation(() => {
+  if (shouldThrow) throw new Error("getContext EXPLOSION")
+  return { sessionId: "test-session", projectId: "test-project" }
+})
+
+afterAll(() => {
+  trackSpy.mockRestore()
+  getContextSpy.mockRestore()
+})
 
 // Import modules under test
 import * as Registry from "../../src/altimate/native/connections/registry"

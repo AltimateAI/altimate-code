@@ -33,8 +33,9 @@ function isBetterSqlite3Available(): boolean {
 }
 
 function isDockerAvailable(): boolean {
+  if (process.env.TEST_PG_HOST) return true // CI services replace Docker
   try {
-    execSync("docker info", { stdio: "ignore", timeout: 5000 })
+    execSync("docker info", { stdio: "ignore", timeout: 3000 })
     return true
   } catch {
     return false

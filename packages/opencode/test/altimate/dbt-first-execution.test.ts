@@ -89,8 +89,7 @@ describe("dbt Profiles Auto-Discovery", () => {
   })
 
   test("dbt.profiles dispatcher method returns connections", async () => {
-    // Import to ensure handlers are registered
-    await import("../../src/altimate/native/connections/register")
+    // Lazy registration fires on first Dispatcher.call()
     const { Dispatcher } = await import("../../src/altimate/native")
     const r = await Dispatcher.call("dbt.profiles", {})
     expect(r.success).toBe(true)
