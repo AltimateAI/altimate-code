@@ -556,10 +556,16 @@ describe("normalizeConfig — MySQL SSL fields", () => {
 describe("isSensitiveField — expanded set", () => {
   const expectedSensitive = [
     "password",
-    "private_key_passphrase",
     "private_key",
+    "privateKey",
+    "private_key_passphrase",
+    "privateKeyPassphrase",
+    "privateKeyPass",
     "access_token",
     "token",
+    "oauth_client_secret",
+    "oauthClientSecret",
+    "passcode",
     "ssh_password",
     "connection_string",
     "credentials_json",

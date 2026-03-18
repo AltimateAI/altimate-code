@@ -231,6 +231,7 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
       "password", "access_token", "token", "connection_string",
       "private_key_path", "private_key", "private_key_passphrase",
       "credentials_json", "keyfile_json", "ssl_key", "ssl_cert", "ssl_ca",
+      "oauth_client_secret", "passcode",
     ])
     const config: Record<string, string> = {}
     for (const [key, envNames] of Object.entries(wh.configMap)) {
