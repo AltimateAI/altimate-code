@@ -74,3 +74,51 @@ describe("publish package validation", () => {
     expect(wrapper).toContain('"@altimateai"')
   })
 })
+
+describe("unscoped package (altimate-code)", () => {
+  const publishScript = fs.readFileSync(path.join(REPO_PKG_DIR, "script/publish.ts"), "utf-8")
+
+  test("publish.ts creates unscoped altimate-code wrapper package", () => {
+    expect(publishScript).toContain('const unscopedName = "altimate-code"')
+    expect(publishScript).toContain("`./dist/${unscopedName}`")
+  })
+
+  test("unscoped package gets same bin entries as scoped package", () => {
+    // Both scoped and unscoped packages should register the same bin commands
+    // Keys may be quoted or unquoted in the source
+    expect(publishScript).toContain('./bin/altimate"')
+    expect(publishScript).toContain('"altimate-code": "./bin/altimate-code"')
+  })
+
+  test("unscoped package gets postinstall, bin, LICENSE, CHANGELOG, and README", () => {
+    expect(publishScript).toContain("cp -r ./bin ${unscopedDir}/bin")
+    expect(publishScript).toContain("cp ./script/postinstall.mjs ${unscopedDir}/postinstall.mjs")
+    expect(publishScript).toContain("${unscopedDir}/LICENSE")
+    expect(publishScript).toContain("${unscopedDir}/CHANGELOG.md")
+    expect(publishScript).toContain("${unscopedDir}/README.md")
+  })
+
+  test("unscoped package includes npm metadata for discoverability", () => {
+    expect(publishScript).toContain("github.com/AltimateAI/altimate-code")
+    expect(publishScript).toContain("homepage")
+    expect(publishScript).toContain("bugs")
+    expect(publishScript).toContain("repository")
+  })
+
+  test("unscoped package publish has error handling", () => {
+    // The unscoped publish block should be wrapped in try/catch
+    const unscopedSection = publishScript.substring(publishScript.indexOf("const unscopedName"))
+    expect(unscopedSection).toContain("try {")
+    expect(unscopedSection).toContain("catch (e)")
+    expect(unscopedSection).toContain("Unscoped package publish failed")
+  })
+
+  test("unscoped package uses optionalDependencies for platform binaries", () => {
+    // The unscoped package includes platform binaries directly so it works standalone
+    expect(publishScript).toContain("optionalDependencies: binaries")
+  })
+
+  test("unscoped package is published with --access public", () => {
+    expect(publishScript).toContain("${unscopedDir} && bun pm pack && npm publish *.tgz --access public")
+  })
+})
