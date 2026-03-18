@@ -57,7 +57,7 @@ altimate /discover
 
 `/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more). Skip this and start building — you can always run it later.
 
-> **Zero additional setup.** One command install — no Python, no pip, no virtualenv.
+> **Zero additional setup.** One command install.
 
 ## Why a specialized harness?
 
