@@ -31,14 +31,51 @@ import type {
   DbtProfilesResult,
 } from "../types"
 import type { ConnectionConfig } from "@altimateai/drivers"
+import { Telemetry } from "../../../telemetry"
+
+// ---------------------------------------------------------------------------
+// Telemetry helpers
+// ---------------------------------------------------------------------------
+
+function detectQueryType(sql: string): string {
+  const trimmed = sql.trim().toUpperCase()
+  if (trimmed.startsWith("SELECT") || trimmed.startsWith("WITH")) return "SELECT"
+  if (trimmed.startsWith("INSERT")) return "INSERT"
+  if (trimmed.startsWith("UPDATE")) return "UPDATE"
+  if (trimmed.startsWith("DELETE")) return "DELETE"
+  if (trimmed.startsWith("CREATE") || trimmed.startsWith("ALTER") || trimmed.startsWith("DROP")) return "DDL"
+  if (trimmed.startsWith("SHOW") || trimmed.startsWith("DESCRIBE") || trimmed.startsWith("EXPLAIN")) return "SHOW"
+  return "OTHER"
+}
+
+function categorizeQueryError(e: unknown): string {
+  const msg = String(e).toLowerCase()
+  if (msg.includes("syntax")) return "syntax_error"
+  if (msg.includes("permission") || msg.includes("denied") || msg.includes("access")) return "permission_denied"
+  if (msg.includes("timeout")) return "timeout"
+  if (msg.includes("connection") || msg.includes("closed") || msg.includes("terminated")) return "connection_lost"
+  return "other"
+}
+
+function getWarehouseType(warehouseName?: string): string {
+  if (!warehouseName) {
+    const warehouses = Registry.list().warehouses
+    if (warehouses.length > 0) return warehouses[0].type
+    return "unknown"
+  }
+  return Registry.getConfig(warehouseName)?.type ?? "unknown"
+}
 
 /** Register all connection-related handlers. Exported for test re-registration. */
 export function registerAll(): void {
 
 // --- sql.execute ---
 register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResult> => {
+  const startTime = Date.now()
+  const warehouseType = getWarehouseType(params.warehouse)
   try {
     const warehouseName = params.warehouse
+    let result: SqlExecuteResult
     if (!warehouseName) {
       const warehouses = Registry.list().warehouses
       if (warehouses.length === 0) {
@@ -48,11 +85,41 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       }
       // Use the first warehouse as default
       const connector = await Registry.get(warehouses[0].name)
-      return connector.execute(params.sql, params.limit)
+      result = await connector.execute(params.sql, params.limit)
+    } else {
+      const connector = await Registry.get(warehouseName)
+      result = await connector.execute(params.sql, params.limit)
     }
-    const connector = await Registry.get(warehouseName)
-    return connector.execute(params.sql, params.limit)
+    try {
+      Telemetry.track({
+        type: "warehouse_query",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        warehouse_type: warehouseType,
+        query_type: detectQueryType(params.sql),
+        success: true,
+        duration_ms: Date.now() - startTime,
+        row_count: result.row_count,
+        truncated: result.truncated,
+      })
+    } catch {}
+    return result
   } catch (e) {
+    try {
+      Telemetry.track({
+        type: "warehouse_query",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        warehouse_type: warehouseType,
+        query_type: detectQueryType(params.sql),
+        success: false,
+        duration_ms: Date.now() - startTime,
+        row_count: 0,
+        truncated: false,
+        error: String(e).slice(0, 500),
+        error_category: categorizeQueryError(e),
+      })
+    } catch {}
     return { columns: [], rows: [], row_count: 0, truncated: false, error: String(e) } as SqlExecuteResult & { error: string }
   }
 })
@@ -142,6 +209,16 @@ register("warehouse.remove", async (params: WarehouseRemoveParams): Promise<Ware
 register("warehouse.discover", async (): Promise<WarehouseDiscoverResult> => {
   try {
     const containers = await discoverContainers()
+    try {
+      Telemetry.track({
+        type: "warehouse_discovery",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        source: "docker",
+        connections_found: containers.length,
+        warehouse_types: [...new Set(containers.map((c) => c.db_type))],
+      })
+    } catch {}
     return {
       containers,
       container_count: containers.length,

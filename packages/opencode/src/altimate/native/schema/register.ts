@@ -20,18 +20,50 @@ import type {
   TagsListParams,
   TagsListResult,
 } from "../types"
+import { Telemetry } from "../../../telemetry"
 
 /** Register all schema.* native handlers. Exported for test re-registration. */
 export function registerAll(): void {
 
 // --- schema.index ---
 register("schema.index", async (params: SchemaIndexParams): Promise<SchemaIndexResult> => {
+  const startTime = Date.now()
   const connector = await Registry.get(params.warehouse)
   const config = Registry.getConfig(params.warehouse)
   const warehouseType = config?.type || "unknown"
 
   const cache = await getCache()
-  return cache.indexWarehouse(params.warehouse, warehouseType, connector)
+  try {
+    const result = await cache.indexWarehouse(params.warehouse, warehouseType, connector)
+    try {
+      Telemetry.track({
+        type: "warehouse_introspection",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        warehouse_type: warehouseType,
+        operation: "index_warehouse",
+        success: true,
+        duration_ms: Date.now() - startTime,
+        result_count: result.tables_indexed,
+      })
+    } catch {}
+    return result
+  } catch (e) {
+    try {
+      Telemetry.track({
+        type: "warehouse_introspection",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        warehouse_type: warehouseType,
+        operation: "index_warehouse",
+        success: false,
+        duration_ms: Date.now() - startTime,
+        result_count: 0,
+        error: String(e).slice(0, 500),
+      })
+    } catch {}
+    throw e
+  }
 })
 
 // --- schema.search ---

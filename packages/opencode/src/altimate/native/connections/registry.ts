@@ -17,6 +17,7 @@ import type { ConnectionConfig, Connector } from "@altimateai/drivers"
 import { resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
+import { Telemetry } from "../../../telemetry"
 
 /** In-memory config store. */
 let configs = new Map<string, ConnectionConfig>()
@@ -165,6 +166,30 @@ async function createConnector(
 }
 
 // ---------------------------------------------------------------------------
+// Telemetry helpers
+// ---------------------------------------------------------------------------
+
+function detectAuthMethod(config: ConnectionConfig): string {
+  if (config.connection_string) return "connection_string"
+  if (config.private_key_path) return "key_pair"
+  if (config.access_token || config.token) return "token"
+  if (config.password) return "password"
+  const t = config.type?.toLowerCase()
+  if (t === "duckdb" || t === "sqlite") return "file"
+  return "unknown"
+}
+
+function categorizeConnectionError(e: unknown): string {
+  const msg = String(e).toLowerCase()
+  if (msg.includes("not installed") || msg.includes("cannot find module")) return "driver_missing"
+  if (msg.includes("password") || msg.includes("authentication") || msg.includes("unauthorized") || msg.includes("jwt")) return "auth_failed"
+  if (msg.includes("timeout") || msg.includes("timed out")) return "timeout"
+  if (msg.includes("econnrefused") || msg.includes("enotfound") || msg.includes("network")) return "network_error"
+  if (msg.includes("config") || msg.includes("not found") || msg.includes("missing")) return "config_error"
+  return "other"
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -182,11 +207,43 @@ export async function get(name: string): Promise<Connector> {
     )
   }
 
-  const connector = await createConnector(name, config)
-  await connector.connect()
-  connectors.set(name, connector)
-  return connector
+  const startTime = Date.now()
+  try {
+    const connector = await createConnector(name, config)
+    await connector.connect()
+    connectors.set(name, connector)
+    try {
+      Telemetry.track({
+        type: "warehouse_connect",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        warehouse_type: config.type,
+        auth_method: detectAuthMethod(config),
+        success: true,
+        duration_ms: Date.now() - startTime,
+      })
+    } catch {}
+    return connector
+  } catch (e) {
+    try {
+      Telemetry.track({
+        type: "warehouse_connect",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        warehouse_type: config?.type ?? "unknown",
+        auth_method: detectAuthMethod(config),
+        success: false,
+        duration_ms: Date.now() - startTime,
+        error: String(e).slice(0, 500),
+        error_category: categorizeConnectionError(e),
+      })
+    } catch {}
+    throw e
+  }
 }
+
+/** Whether a one-time warehouse census has been sent this session. */
+let censusSent = false
 
 /** List all configured connections. */
 export function list(): { warehouses: WarehouseInfo[] } {
@@ -199,6 +256,31 @@ export function list(): { warehouses: WarehouseInfo[] } {
       database: config.database as string | undefined,
     })
   }
+
+  // Fire a one-time census on first list call
+  if (!censusSent && configs.size > 0) {
+    censusSent = true
+    try {
+      const allConfigs = Array.from(configs.values())
+      const types = [...new Set(allConfigs.map((c) => c.type))]
+      const sources: string[] = []
+      if (fs.existsSync(globalConfigPath())) sources.push("config_global")
+      if (fs.existsSync(localConfigPath())) sources.push("config_local")
+      if (Object.keys(loadFromEnv()).length > 0) sources.push("env")
+
+      Telemetry.track({
+        type: "warehouse_census",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        total_connections: configs.size,
+        warehouse_types: types,
+        connection_sources: sources,
+        has_ssh_tunnel: allConfigs.some((c) => !!c.ssh_host),
+        has_keychain: false,
+      })
+    } catch {}
+  }
+
   return { warehouses }
 }
 
@@ -323,6 +405,7 @@ export function reset(): void {
   configs.clear()
   connectors.clear()
   loaded = false
+  censusSent = false
 }
 
 /**

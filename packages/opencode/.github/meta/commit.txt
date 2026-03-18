@@ -1,24 +1,39 @@
-ci: add driver-e2e CI job + env var support for CI services
+feat: add warehouse telemetry — connect, query, introspection, discovery, census
 
-Add a dedicated driver-e2e CI job that runs automatically when driver
-files or connection infrastructure changes. Uses GitHub Actions services
-(PostgreSQL, MySQL, SQL Server, Redshift/PG) instead of Docker-in-Docker.
+Add 5 telemetry event types for data moat insights:
 
-CI changes (.github/workflows/ci.yml):
-- Add drivers path filter for packages/drivers/src/**, connections/**, tests
-- Add driver-e2e job with 4 service containers (PG, MySQL, MSSQL, Redshift)
-- Pass TEST_*_HOST/PORT/PASSWORD env vars to tests
-- Remove dead Python/lint jobs (altimate-engine deleted)
+warehouse_connect — every connection attempt:
+  - warehouse_type, auth_method (password/key_pair/token/file/connection_string)
+  - success/failure, duration_ms
+  - error_category (auth_failed/network_error/driver_missing/config_error/timeout)
 
-Test changes:
-- drivers-e2e.test.ts: read PG config from TEST_PG_* env vars, skip Docker
-  when CI service is available
-- drivers-docker-e2e.test.ts: read MySQL/MSSQL/Redshift config from
-  TEST_*_HOST env vars, skip Docker container startup in CI
+warehouse_query — every SQL execution:
+  - warehouse_type, query_type (SELECT/INSERT/UPDATE/DELETE/DDL/SHOW)
+  - success/failure, duration_ms, row_count, truncated
+  - error_category (syntax_error/permission_denied/timeout/connection_lost)
 
-The tests now work in 3 modes:
-1. Local with Docker: starts containers automatically
-2. CI with services: uses pre-started GitHub Actions services
-3. No Docker: skips Docker-dependent tests, runs DuckDB/SQLite only
+warehouse_introspection — schema discovery operations:
+  - operation (index_warehouse), result_count
+
+warehouse_discovery — auto-discovery runs:
+  - source (docker/dbt_profiles/env), connections_found, warehouse_types
+
+warehouse_census — one-time per session:
+  - total_connections, warehouse_types[], connection_sources[]
+  - has_ssh_tunnel, has_keychain
+
+Safety: every Telemetry.track() wrapped in try/catch — telemetry
+failures never break user operations.
+
+Data moat value:
+- Popular connectors (warehouse_type frequency)
+- Auth method adoption (password vs key-pair vs token)
+- Failure patterns (error_category distribution)
+- Query patterns (SELECT vs DDL vs DML ratios)
+- Schema usage (introspection frequency per warehouse)
+- Connection sources (config vs env vs dbt)
+
+41 new tests covering auth detection, error categorization, census
+deduplication, query type detection, and safety guarantees.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
