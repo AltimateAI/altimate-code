@@ -57,6 +57,8 @@ altimate /discover
 
 `/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more). Skip this and start building — you can always run it later.
 
+> **Headless / scripted usage:** `altimate --yolo` auto-approves all permission prompts. Not recommended with live warehouse connections.
+
 > **Zero additional setup.** One command install.
 
 ## Why a specialized harness?
@@ -89,7 +91,7 @@ no hallucinated SQL advice, no guessing at schema, no missed PII.
 - **FinOps** — credit consumption, expensive query detection, warehouse right-sizing, idle resource cleanup
 - **PII Detection** — 15 categories, 30+ regex patterns, enforced pre-execution
 
-**Works seamlessly with Claude Code and Codex.** altimate is the data engineering tool layer — use it standalone in your terminal, or mount it as the harness underneath whatever AI agent you already run. The two are complementary.
+**Works seamlessly with Claude Code and Codex.** Use `/configure-claude` or `/configure-codex` to set up integration in one step. altimate is the data engineering tool layer — use it standalone in your terminal, or mount it as the harness underneath whatever AI agent you already run. The two are complementary.
 
 altimate is a fork of [OpenCode](https://github.com/anomalyco/opencode) rebuilt for data teams. Model-agnostic — bring your own LLM or run locally with Ollama.
 
@@ -145,19 +147,15 @@ Teach your AI teammate project-specific patterns, naming conventions, and best p
 
 ## Agent Modes
 
-Each agent has scoped permissions and purpose-built tools for its role.
+Each mode has scoped permissions, tool access, and SQL write-access control.
 
-| Agent | Role | Access |
+| Mode | Role | Access |
 |---|---|---|
-| **Builder** | Create dbt models, SQL pipelines, and data transformations | Full read/write |
-| **Analyst** | Explore data, run SELECT queries, and generate insights | Read-only enforced |
-| **Validator** | Data quality checks, schema validation, test coverage analysis | Read + validate |
-| **Migrator** | Cross-warehouse SQL translation, schema migration, dialect conversion | Read/write for migrations |
-| **Researcher** | Deep-dive analysis, documentation research, and knowledge extraction | Read-only |
-| **Trainer** | Teach project-specific patterns, naming conventions, and best practices | Read + write training data |
-| **Executive** | Business-audience summaries — translates findings into revenue, cost, and compliance impact | Read-only |
+| **Builder** | Create dbt models, SQL pipelines, and data transformations | Full read/write (write SQL prompts for approval; `DROP DATABASE`/`DROP SCHEMA`/`TRUNCATE` hard-blocked) |
+| **Analyst** | Explore data, run SELECT queries, FinOps analysis, and generate insights | Read-only enforced (SELECT only, no file writes) |
+| **Plan** | Outline an approach before acting | Minimal (read files only, no SQL or bash) |
 
-> **New to altimate?** Start with **Analyst mode** — it's read-only and safe to run against production connections.
+> **New to altimate?** Start with **Analyst mode** — it's read-only and safe to run against production connections. Need specialized workflows (validation, migration, research)? Create [custom agent modes](https://docs.altimate.sh).
 
 ## Supported Warehouses
 
@@ -200,7 +198,7 @@ The CLI handles AI interactions, TUI, and tool orchestration. SQL analysis is po
 
 ```
 packages/
-  altimate-code/       TypeScript CLI (main entry point)
+  opencode/            TypeScript CLI (main entry point)
   drivers/             Shared database drivers (10 warehouses)
   dbt-tools/           dbt integration (TypeScript)
   plugin/              Plugin system
@@ -221,9 +219,10 @@ Contributions welcome — docs, SQL rules, warehouse connectors, and TUI improve
 
 ## Changelog
 
+- **v0.5.0** (March 2026) — smooth streaming mode, builtin skills via postinstall, `/configure-claude` and `/configure-codex` commands, warehouse auth hardening
+- **v0.4.9** (March 2026) — Snowflake auth overhaul (all auth methods), dbt tool regression fixes, parallel CI builds
 - **v0.4.2** (March 2026) — yolo mode, Python engine elimination (all-native TypeScript), tool consolidation, path sandboxing hardening, altimate-dbt CLI, unscoped npm package
-- **v0.4.1** (March 2026) — env-based skill selection, session caching, tracing improvements
-- **v0.4.0** (Feb 2026) — data visualization skill, 100+ tools, training system
+- **v0.4.0** (March 2026) — data visualization skill, 100+ tools, training system
 - **v0.3.x** — [See full changelog →](CHANGELOG.md)
 
 ## License
