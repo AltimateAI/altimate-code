@@ -662,33 +662,13 @@ function App() {
       onSelect: () => exit(),
       category: "System",
     },
+    // altimate_change start - trace history command
     {
-      title: "View session trace",
+      title: "View traces",
       value: "trace.view",
       category: "Debug",
       slash: {
         name: "trace",
-      },
-      onSelect: (dialog) => {
-        const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
-        if (!sessionID) {
-          // No active session — show trace history instead
-          dialog.replace(() => (
-            <DialogTraceList onSelect={openTraceInBrowser} />
-          ))
-          return
-        }
-        openTraceInBrowser(sessionID)
-        dialog.clear()
-      },
-    },
-    // altimate_change start - trace history command
-    {
-      title: "View trace history",
-      value: "trace.list",
-      category: "Debug",
-      slash: {
-        name: "traces",
       },
       onSelect: (dialog) => {
         const currentSessionID = route.data.type === "session" ? route.data.sessionID : undefined

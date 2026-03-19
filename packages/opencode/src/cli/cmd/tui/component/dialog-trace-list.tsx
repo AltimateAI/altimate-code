@@ -1,9 +1,16 @@
 // altimate_change start - trace history dialog
 import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
-import { createMemo, createResource, onMount, Show } from "solid-js"
+import { createMemo, createResource, onMount } from "solid-js"
 import { Tracer } from "@/altimate/observability/tracing"
 import { Locale } from "@/util/locale"
+
+function cleanTitle(raw: string): string {
+  // Strip quotes, markdown headings, and take first non-empty line
+  const stripped = raw.replace(/^["'`]+|["'`]+$/g, "").trim()
+  const lines = stripped.split("\n").map((l) => l.replace(/^#+\s*/, "").trim()).filter(Boolean)
+  return lines.find((l) => l.length > 5) || lines[0] || stripped
+}
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
@@ -11,11 +18,6 @@ function formatDuration(ms: number): string {
   const mins = Math.floor(ms / 60000)
   const secs = Math.floor((ms % 60000) / 1000)
   return `${mins}m${secs}s`
-}
-
-function formatCost(cost: number): string {
-  if (cost < 0.01) return `$${cost.toFixed(4)}`
-  return `$${cost.toFixed(2)}`
 }
 
 export function DialogTraceList(props: {
@@ -44,35 +46,33 @@ export function DialogTraceList(props: {
     const today = new Date().toDateString()
 
     return items.slice(0, 50).map((item) => {
-      const date = new Date(item.trace.startedAt)
-      let category = date.toDateString()
-      if (category === today) {
-        category = "Today"
-      }
+        const date = new Date(item.trace.startedAt)
+        let category = date.toDateString()
+        if (category === today) {
+          category = "Today"
+        }
 
-      const title = item.trace.metadata?.title || item.trace.metadata?.prompt?.slice(0, 60) || item.sessionId
+        const rawTitle = item.trace.metadata?.prompt || item.trace.metadata?.title || item.sessionId
+        const title = cleanTitle(rawTitle).slice(0, 80)
 
-      const summary = item.trace.summary
-      const status = summary?.status
-      const statusLabel =
-        status === "error" || status === "crashed"
-          ? `[${status}] `
-          : status === "running"
-            ? "[running] "
-            : ""
+        const summary = item.trace.summary
+        const status = summary?.status
+        const statusLabel =
+          status === "error" || status === "crashed"
+            ? `[${status}] `
+            : status === "running"
+              ? "[running] "
+              : ""
 
-      const duration = formatDuration(summary?.duration ?? 0)
-      const cost = formatCost(summary?.totalCost ?? 0)
-      const tokens = (summary?.totalTokens ?? 0).toLocaleString()
-      const tools = summary?.totalToolCalls ?? 0
+        const duration = formatDuration(summary?.duration ?? 0)
 
-      return {
-        title: `${statusLabel}${title}`,
-        value: item.sessionId,
-        category,
-        footer: `${Locale.time(date.getTime())} · ${duration} · ${tokens} tokens · ${cost} · ${tools} tools`,
-      }
-    })
+        return {
+          title: `${statusLabel}${title}`,
+          value: item.sessionId,
+          category,
+          footer: `${duration}  ${Locale.time(date.getTime())}`,
+        }
+      })
   })
 
   onMount(() => {
@@ -81,7 +81,7 @@ export function DialogTraceList(props: {
 
   return (
     <DialogSelect
-      title={traces.state === "pending" ? "Trace History (loading...)" : "Trace History"}
+      title={traces.state === "pending" ? "Traces (loading...)" : "Traces"}
       options={options()}
       current={props.currentSessionID}
       onSelect={(option) => {
