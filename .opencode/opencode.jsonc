@@ -15,4 +15,7 @@
     "github-triage": false,
     "github-pr-search": false,
   },
+  "experimental": {
+    "auto_mcp_discovery": false,
+  },
 }

@@ -175,6 +175,16 @@ export namespace MCP {
       const status: Record<string, Status> = {}
       const transports: Record<string, "stdio" | "sse" | "streamable-http"> = {}
 
+      // altimate_change start — auto-discover MCP servers from external AI tool configs
+      let discoveryResult: { serverNames: string[]; sources: string[] } | null = null
+      try {
+        const { consumeDiscoveryResult } = await import("./discover")
+        discoveryResult = consumeDiscoveryResult()
+      } catch {
+        // Discovery module not loaded — skip
+      }
+      // altimate_change end
+
       await Promise.all(
         Object.entries(config).map(async ([key, mcp]) => {
           if (!isMcpConfigured(mcp)) {
@@ -202,6 +212,27 @@ export namespace MCP {
           }
         }),
       )
+
+      // altimate_change start — show discovery toast after MCP connections complete
+      if (discoveryResult) {
+        const message = `Discovered ${discoveryResult.serverNames.length} new MCP server(s): ${discoveryResult.serverNames.join(", ")}. Run /discover-and-add-mcps to enable and add them.`
+        Bus.publish(TuiEvent.ToastShow, {
+          title: "MCP Servers Discovered",
+          message,
+          variant: "info",
+          duration: 8000,
+        }).catch(() => {})
+        Telemetry.track({
+          type: "mcp_discovery",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          server_count: discoveryResult.serverNames.length,
+          server_names: discoveryResult.serverNames,
+          sources: discoveryResult.sources,
+        })
+      }
+      // altimate_change end
+
       return {
         status,
         clients,

@@ -1,0 +1,19 @@
+---
+description: "Discover MCP servers from external AI tool configs and add them permanently"
+---
+
+Discover MCP servers configured in other AI tools (VS Code, Cursor, GitHub Copilot, Claude Code, Gemini CLI) and add them to the altimate-code config.
+
+## Instructions
+
+1. First, call the `mcp_discover` tool with `action: "list"` to see what's available.
+
+2. Show the user the results — which servers are new and which are already configured.
+
+3. If there are new servers, ask the user which ones they want to add and what scope (project or global).
+
+4. Call `mcp_discover` with `action: "add"`, the chosen `scope`, and the selected `servers` array.
+
+5. Report what was added and where.
+
+If $ARGUMENTS contains `--scope global`, use `scope: "global"`. Otherwise default to `scope: "project"`.

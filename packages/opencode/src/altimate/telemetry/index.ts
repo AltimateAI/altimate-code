@@ -261,6 +261,14 @@ export namespace Telemetry {
         resource_count: number
       }
     | {
+        type: "mcp_discovery"
+        timestamp: number
+        session_id: string
+        server_count: number
+        server_names: string[]
+        sources: string[]
+      }
+    | {
         type: "memory_operation"
         timestamp: number
         session_id: string
