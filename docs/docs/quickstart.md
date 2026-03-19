@@ -4,7 +4,7 @@ description: "Install altimate-code and run your first SQL analysis. The open-so
 
 # Quickstart
 
-> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider, or use Codex (built-in, no key required).
+> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider.
 
 ---
 
@@ -47,8 +47,6 @@ Minimal config file option (`altimate-code.json` in your project root):
   }
 }
 ```
-
-> **No API key?** Select **Codex** in the `/connect` menu. It's a built-in provider with no setup required.
 
 ---
 

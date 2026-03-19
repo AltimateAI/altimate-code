@@ -4,7 +4,7 @@ description: "Install altimate-code, connect your warehouse and LLM, configure a
 
 # Setup
 
-> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider, or use Codex (built-in, no key required).
+> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider.
 
 ---
 
@@ -48,8 +48,6 @@ Minimal config file option (`altimate-code.json` in your project root):
   "model": "anthropic/claude-sonnet-4-6"
 }
 ```
-
-> **No API key?** Select **Codex** in the `/connect` menu. It's a built-in provider with no setup required.
 
 ### Changing your LLM provider
 

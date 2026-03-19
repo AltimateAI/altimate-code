@@ -30,8 +30,6 @@ export ANTHROPIC_API_KEY=sk-ant-...
 altimate
 ```
 
-> **No API key?** Select **Codex** in `/connect` — it's built-in with no setup.
-
 ---
 
 ## Step 3: Connect Your Warehouse

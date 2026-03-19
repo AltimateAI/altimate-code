@@ -40,8 +40,6 @@ altimate        # Launch the TUI
 /connect        # Interactive setup — choose your provider and enter your API key
 ```
 
-> **No API key?** Select **Codex** in the `/connect` menu — it's built-in and requires no setup.
-
 Or set an environment variable directly:
 ```bash
 export ANTHROPIC_API_KEY=your_key   # Anthropic Claude
@@ -166,8 +164,6 @@ First-class support with schema indexing, query execution, and metadata introspe
 Model-agnostic — bring your own provider or run locally.
 
 Anthropic · OpenAI · Google Gemini · Google Vertex AI · Amazon Bedrock · Azure OpenAI · Mistral · Groq · DeepInfra · Cerebras · Cohere · Together AI · Perplexity · xAI · OpenRouter · Ollama · GitHub Copilot
-
-> **No API key?** **Codex** is a built-in provider with no key required. Select it via `/connect` to start immediately.
 
 ## Skills
 
