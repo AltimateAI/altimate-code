@@ -339,6 +339,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "message.removed": {
+          // altimate_change start - line streaming: clean up buffers for removed/aborted messages
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            flushAllBuffersForMessage(event.properties.messageID)
+          }
+          // altimate_change end
           const messages = store.message[event.properties.sessionID]
           const result = Binary.search(messages, event.properties.messageID, (m) => m.id)
           if (result.found) {
@@ -379,6 +384,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const result = Binary.search(parts, event.properties.partID, (p) => p.id)
           if (!result.found) break
           // altimate_change start - line streaming: buffer deltas, flush only on \n
+          // Note: when line streaming is enabled (including via calm mode), this branch
+          // handles all delta processing and breaks — the smooth streaming branch below
+          // is not reached. This is intentional: flushLineBuffer already does direct
+          // store path updates, so the produce() bypass is not needed.
           if (Flag.ALTIMATE_LINE_STREAMING) {
             const { messageID, partID, field, delta } = event.properties
             const key = `${messageID}:${partID}:${field}`

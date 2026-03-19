@@ -97,8 +97,29 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_ENABLE_EXA`                           | Enable Exa web search                                                                                                                                                                                                                                                         |
 | `ALTIMATE_CALM_MODE`                                | Enables all streaming optimizations: smooth rendering, line-at-a-time buffering, and 100-column width cap. Recommended for a Claude Code-like experience. Equivalent to setting `ALTIMATE_SMOOTH_STREAMING=true ALTIMATE_LINE_STREAMING=true ALTIMATE_CONTENT_MAX_WIDTH=100`. |
 | `ALTIMATE_SMOOTH_STREAMING`                         | Uses lightweight `<code>` rendering during LLM streaming, then swaps to rich markdown after completion. Reduces text jumps and scroll jitter. Included in `ALTIMATE_CALM_MODE`.                                                                                               |
-| `ALTIMATE_LINE_STREAMING`                           | Buffers LLM output and reveals one complete line at a time (on `\n`). Gives a calm, steady flow. Remaining text flushes on message completion. Included in `ALTIMATE_CALM_MODE`.                                                                                              |
+| `ALTIMATE_LINE_STREAMING`                           | Buffers LLM output and reveals one complete line at a time (on `\n`). Gives a calm, steady flow. Remaining text flushes on message completion or abort. Included in `ALTIMATE_CALM_MODE`.                                                                                     |
 | `ALTIMATE_CONTENT_MAX_WIDTH`                        | Cap text content width in columns (e.g. `100`). Improves readability on wide screens. Automatically disabled on small terminals. Set to `100` by `ALTIMATE_CALM_MODE`.                                                                                                        |
+
+#### Calm Mode Quick Start
+
+For a Claude Code-like streaming experience, add to your shell profile:
+
+```bash
+export ALTIMATE_CALM_MODE=true
+```
+
+Or use individual flags for fine-grained control:
+
+```bash
+# Smooth rendering only (no line buffering)
+export ALTIMATE_SMOOTH_STREAMING=true
+
+# Line buffering only (no rendering changes)
+export ALTIMATE_LINE_STREAMING=true
+
+# Custom width cap (e.g., 80 columns)
+export ALTIMATE_CONTENT_MAX_WIDTH=80
+```
 
 ## Non-interactive Usage
 
