@@ -188,18 +188,6 @@ The CLI handles AI interactions, TUI, and tool orchestration. SQL analysis is po
 
 **dbt-first**: When working in a dbt project, the CLI automatically uses dbt's connection from `profiles.yml` — no separate warehouse configuration needed.
 
-### Monorepo structure
-
-```
-packages/
-  opencode/            TypeScript CLI (main entry point)
-  drivers/             Shared database drivers (10 warehouses)
-  dbt-tools/           dbt integration (TypeScript)
-  plugin/              Plugin system
-  sdk/                 SDKs (includes VS Code extension)
-  util/                Shared utilities
-```
-
 ## Community & Contributing
 
 - **Slack**: [Join Slack](https://altimate.studio/join-agentic-data-engineering-slack) — Real-time chat for questions, showcases, and feature discussion
