@@ -34,6 +34,7 @@ We collect the following categories of events:
 | `mcp_server_census` | MCP server capabilities after connect (tool and resource counts — no tool names) |
 | `context_overflow_recovered` | Context overflow is handled (strategy) |
 | `skill_used` | A skill is loaded (skill name and source — `builtin`, `global`, or `project` — no skill content) |
+| `sql_execute_failure` | A SQL execution fails (warehouse type, query type, error message, PII-masked SQL — no raw values) |
 | `core_failure` | A tool failure occurs — error category, error message (truncated to 500 chars), and PII-masked arguments (string literals in SQL replaced with `?`, sensitive keys like `password`/`token`/`secret` fully redacted) |
 
 Each event includes a timestamp, anonymous session ID, and the CLI version.

@@ -342,6 +342,16 @@ export namespace Telemetry {
         duration_ms: number
       }
     | {
+        type: "sql_execute_failure"
+        timestamp: number
+        session_id: string
+        warehouse_type: string
+        query_type: string
+        error_message: string
+        masked_sql: string
+        duration_ms: number
+      }
+    | {
         type: "core_failure"
         timestamp: number
         session_id: string
