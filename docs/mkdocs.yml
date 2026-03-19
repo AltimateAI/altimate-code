@@ -82,6 +82,8 @@ nav:
       - Guides:
           - Cost Optimization: data-engineering/guides/cost-optimization.md
           - Migration: data-engineering/guides/migration.md
+          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
+          - Using with Codex: data-engineering/guides/using-with-codex.md
   - Use:
       - Agents:
           - Agent Modes: data-engineering/agent-modes.md
@@ -96,12 +98,14 @@ nav:
           - Lineage Tools: data-engineering/tools/lineage-tools.md
           - dbt Tools: data-engineering/tools/dbt-tools.md
           - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+          - Memory Tools: data-engineering/tools/memory-tools.md
           - Custom Tools: configure/tools/custom.md
       - Skills: configure/skills.md
       - Commands: configure/commands.md
       - Interfaces:
           - TUI: usage/tui.md
           - CLI: usage/cli.md
+          - Web UI: usage/web.md
           - CI: usage/ci-headless.md
           - IDE: usage/ide.md
           - GitHub: usage/github.md
@@ -118,6 +122,12 @@ nav:
       - Appearance:
           - Themes: configure/themes.md
           - Keybinds: configure/keybinds.md
+      - Observability:
+          - Tracing: configure/tracing.md
+          - Telemetry: reference/telemetry.md
+      - Training:
+          - Overview: data-engineering/training/index.md
+          - Team Deployment: data-engineering/training/team-deployment.md
       - Additional Config:
           - LSP Servers: configure/lsp.md
           - Network: reference/network.md
@@ -130,7 +140,11 @@ nav:
       - Context Management: configure/context-management.md
       - Formatters: configure/formatters.md
   - Reference:
-      - What's New: reference/changelog.md
+      - Changelog: reference/changelog.md
       - Security FAQ: reference/security-faq.md
       - Troubleshooting: reference/troubleshooting.md
-      - Telemetry: reference/telemetry.md
+      - Extend:
+          - SDK: develop/sdk.md
+          - Server API: develop/server.md
+          - Plugins: develop/plugins.md
+          - Ecosystem: develop/ecosystem.md

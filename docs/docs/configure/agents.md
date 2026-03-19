@@ -13,6 +13,18 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | `build` | Build-focused agent that prioritizes code generation |
 | `explore` | Read-only exploration agent |
 
+### Data Engineering
+
+| Agent | Description | Permissions |
+|-------|------------|------------|
+| `builder` | Create dbt models, SQL pipelines, transformations | Full read/write |
+| `analyst` | Explore data, run SELECT queries, generate insights | Read-only (enforced) |
+| `validator` | Data quality checks, schema validation, test coverage | Read + validate |
+| `migrator` | Cross-warehouse SQL translation and migration | Read/write for migration |
+
+!!! tip
+    Use the `analyst` agent when exploring data to ensure no accidental writes. Switch to `builder` when you are ready to create or modify models.
+
 ## Custom Agents
 
 Define custom agents in `altimate-code.json`:
@@ -78,7 +90,28 @@ You are a Snowflake cost optimization expert. For every query:
 
 ## Agent Permissions
 
-Each agent can have its own permission overrides that restrict or expand the default permissions. For full details, examples, and recommended configurations, see the [Permissions reference](permissions.md#per-agent-permissions).
+Each agent can have its own permission overrides that restrict or expand the default permissions:
+
+```json
+{
+  "agent": {
+    "analyst": {
+      "permission": {
+        "write": "deny",
+        "edit": "deny",
+        "bash": {
+          "dbt show *": "allow",
+          "dbt list *": "allow",
+          "*": "deny"
+        }
+      }
+    }
+  }
+}
+```
+
+!!! warning
+    Agent-specific permissions override global permissions. A `"deny"` at the agent level cannot be overridden by a global `"allow"`.
 
 ## Switching Agents
 

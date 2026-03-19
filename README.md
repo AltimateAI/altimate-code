@@ -219,7 +219,7 @@ Contributions welcome — docs, SQL rules, warehouse connectors, and TUI improve
 
 **[Read CONTRIBUTING.md →](./CONTRIBUTING.md)**
 
-## What's New
+## Changelog
 
 - **v0.4.2** (March 2026) — yolo mode, Python engine elimination (all-native TypeScript), tool consolidation, path sandboxing hardening, altimate-dbt CLI, unscoped npm package
 - **v0.4.1** (March 2026) — env-based skill selection, session caching, tracing improvements
