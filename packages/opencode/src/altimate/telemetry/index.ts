@@ -2,7 +2,10 @@ import { Account } from "@/account"
 import { Config } from "@/config/config"
 import { Installation } from "@/installation"
 import { Log } from "@/util/log"
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
+import fs from "fs"
+import path from "path"
+import os from "os"
 
 const log = Log.create({ service: "telemetry" })
 
@@ -528,6 +531,7 @@ export namespace Telemetry {
   let buffer: Event[] = []
   let flushTimer: ReturnType<typeof setInterval> | undefined
   let userEmail = ""
+  let machineId = ""
   let sessionId = ""
   let projectId = ""
   let appInsights: AppInsightsConfig | undefined
@@ -557,6 +561,7 @@ export namespace Telemetry {
       const properties: Record<string, string> = {
         cli_version: Installation.VERSION,
         project_id: fields.project_id ?? projectId,
+        ...(machineId && { machine_id: machineId }),
       }
       const measurements: Record<string, number> = {}
 
@@ -644,6 +649,18 @@ export namespace Telemetry {
         }
       } catch {
         // Account unavailable — proceed without user ID
+      }
+      try {
+        const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
+        try {
+          machineId = fs.readFileSync(machineIdPath, "utf8").trim()
+        } catch {
+          machineId = randomUUID()
+          fs.mkdirSync(path.dirname(machineIdPath), { recursive: true })
+          fs.writeFileSync(machineIdPath, machineId, "utf8")
+        }
+      } catch {
+        // Machine ID unavailable — proceed without it
       }
       enabled = true
       log.info("telemetry initialized", { mode: "appinsights" })
@@ -746,6 +763,7 @@ export namespace Telemetry {
     droppedEvents = 0
     sessionId = ""
     projectId = ""
+    machineId = ""
     initPromise = undefined
     initDone = false
   }
