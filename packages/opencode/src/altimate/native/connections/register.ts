@@ -229,6 +229,7 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
     return result
   } catch (e) {
     const errorMsg = String(e)
+    const maskedErrorMsg = Telemetry.maskString(errorMsg).slice(0, 500)
     try {
       Telemetry.track({
         type: "warehouse_query",
@@ -240,7 +241,7 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
         duration_ms: Date.now() - startTime,
         row_count: 0,
         truncated: false,
-        error: errorMsg.slice(0, 500),
+        error: maskedErrorMsg,
         error_category: categorizeQueryError(e),
       })
       Telemetry.track({
@@ -249,7 +250,7 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
         session_id: Telemetry.getContext().sessionId,
         warehouse_type: warehouseType,
         query_type: detectQueryType(params.sql),
-        error_message: errorMsg.slice(0, 500),
+        error_message: maskedErrorMsg,
         masked_sql: Telemetry.maskString(params.sql),
         duration_ms: Date.now() - startTime,
       })

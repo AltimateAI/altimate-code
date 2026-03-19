@@ -76,6 +76,7 @@ export namespace Tool {
             // Telemetry must never prevent the original error from propagating
             try {
               const errorMsg = error instanceof Error ? error.message : String(error)
+              const maskedErrorMsg = Telemetry.maskString(errorMsg).slice(0, 500)
               Telemetry.track({
                 type: "tool_call",
                 timestamp: Date.now(),
@@ -89,7 +90,7 @@ export namespace Tool {
                 sequence_index: 0,
                 previous_tool: null,
                 input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
-                error: errorMsg.slice(0, 500),
+                error: maskedErrorMsg,
               })
               Telemetry.track({
                 type: "core_failure",
@@ -98,7 +99,7 @@ export namespace Tool {
                 tool_name: id,
                 tool_category: Telemetry.categorizeToolName(id, "standard"),
                 error_class: Telemetry.classifyError(errorMsg),
-                error_message: errorMsg.slice(0, 500),
+                error_message: maskedErrorMsg,
                 input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
                 masked_args: Telemetry.maskArgs(args as Record<string, unknown>),
                 duration_ms: Date.now() - startTime,
@@ -137,7 +138,8 @@ export namespace Tool {
               const errorMsg =
                 typeof result.metadata?.error === "string"
                   ? result.metadata.error
-                  : result.output?.slice(0, 500) || "unknown error"
+                  : result.output || "unknown error"
+              const maskedErrorMsg = Telemetry.maskString(errorMsg).slice(0, 500)
               Telemetry.track({
                 type: "core_failure",
                 timestamp: Date.now(),
@@ -145,7 +147,7 @@ export namespace Tool {
                 tool_name: id,
                 tool_category: Telemetry.categorizeToolName(id, "standard"),
                 error_class: Telemetry.classifyError(errorMsg),
-                error_message: errorMsg.slice(0, 500),
+                error_message: maskedErrorMsg,
                 input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
                 masked_args: Telemetry.maskArgs(args as Record<string, unknown>),
                 duration_ms: durationMs,
