@@ -10,7 +10,7 @@
   "files": ["src"],
   "optionalDependencies": {
     "pg": "^8.0.0",
-    "snowflake-sdk": "^1.0.0",
+    "snowflake-sdk": "^2.0.3",
     "@google-cloud/bigquery": "^8.0.0",
     "@databricks/sql": "^1.0.0",
     "mysql2": "^3.0.0",
