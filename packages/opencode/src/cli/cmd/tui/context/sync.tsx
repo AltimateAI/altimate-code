@@ -116,6 +116,43 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       setStore("workspaceList", reconcile(result.data))
     }
 
+    // altimate_change start - line streaming: buffer deltas, flush only on \n or message completion
+    const lineBuffer = new Map<string, string>()
+
+    function flushLineBuffer(messageID: string, partID: string, field: string, forceAll: boolean) {
+      const key = `${messageID}:${partID}:${field}`
+      const buffer = lineBuffer.get(key)
+      if (!buffer) return
+      let textToFlush: string
+      if (forceAll) {
+        textToFlush = buffer
+        lineBuffer.delete(key)
+      } else {
+        const lastNewline = buffer.lastIndexOf("\n")
+        if (lastNewline === -1) return
+        textToFlush = buffer.slice(0, lastNewline + 1)
+        const remainder = buffer.slice(lastNewline + 1)
+        if (remainder) lineBuffer.set(key, remainder)
+        else lineBuffer.delete(key)
+      }
+      if (!textToFlush) return
+      const parts = store.part[messageID]
+      if (!parts) return
+      const result = Binary.search(parts, partID, (p) => p.id)
+      if (!result.found) return
+      const existing = parts[result.index][field as keyof (typeof parts)[number]] as string | undefined
+      setStore("part", messageID, result.index, field as any, ((existing ?? "") + textToFlush) as any)
+    }
+
+    function flushAllBuffersForMessage(messageID: string) {
+      for (const [key] of lineBuffer) {
+        if (!key.startsWith(messageID + ":")) continue
+        const [, partID, field] = key.split(":")
+        flushLineBuffer(messageID, partID, field, true)
+      }
+    }
+    // altimate_change end
+
     sdk.event.listen((e) => {
       const event = e.details
       switch (event.type) {
@@ -254,6 +291,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.updated": {
+          // altimate_change start - line streaming: flush remaining buffer when message completes
+          if (
+            Flag.ALTIMATE_LINE_STREAMING &&
+            "completed" in event.properties.info.time &&
+            event.properties.info.time.completed
+          ) {
+            flushAllBuffersForMessage(event.properties.info.id)
+          }
+          // altimate_change end
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
@@ -332,6 +378,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           if (!parts) break
           const result = Binary.search(parts, event.properties.partID, (p) => p.id)
           if (!result.found) break
+          // altimate_change start - line streaming: buffer deltas, flush only on \n
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            const { messageID, partID, field, delta } = event.properties
+            const key = `${messageID}:${partID}:${field}`
+            lineBuffer.set(key, (lineBuffer.get(key) ?? "") + delta)
+            flushLineBuffer(messageID, partID, field, false)
+            break
+          }
+          // altimate_change end
           // altimate_change start - smooth streaming: direct path update avoids produce() proxy overhead
           if (Flag.ALTIMATE_SMOOTH_STREAMING) {
             const field = event.properties.field as keyof (typeof parts)[number]

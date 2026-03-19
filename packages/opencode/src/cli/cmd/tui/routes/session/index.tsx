@@ -1467,9 +1467,20 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
   // altimate_change start - smooth streaming: use <code> during streaming to avoid layout jumps
   const isStreaming = createMemo(() => Flag.ALTIMATE_SMOOTH_STREAMING && !props.message.time.completed)
   // altimate_change end
+  // altimate_change start - calm mode: cap content width for readability, respect small screens
+  const cappedWidth = createMemo(() => {
+    const cap = Flag.ALTIMATE_CONTENT_MAX_WIDTH
+    if (!cap) return undefined
+    const available = ctx.width
+    // +3 accounts for paddingLeft on this box
+    const desired = cap + 3
+    // On small screens, don't constrain — let it use full available width
+    return available <= desired ? undefined : desired
+  })
+  // altimate_change end
   return (
     <Show when={trimmed()}>
-      <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
+      <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0} maxWidth={cappedWidth()}>
         <Switch>
           <Match when={isStreaming()}>
             <code
