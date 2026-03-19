@@ -30,6 +30,7 @@ import { PromptHistoryProvider } from "./component/prompt/history"
 import { FrecencyProvider } from "./component/prompt/frecency"
 import { Tracer } from "@/altimate/observability/tracing"
 import { renderTraceViewer } from "@/altimate/observability/viewer"
+import { DialogTraceList } from "./component/dialog-trace-list"
 import fsAsync from "fs/promises"
 
 // altimate_change start - shared trace viewer server
@@ -264,6 +265,24 @@ function App() {
   const sync = useSync()
   const exit = useExit()
   const promptRef = usePromptRef()
+
+  // altimate_change start - shared trace viewer helper
+  function openTraceInBrowser(sessionID: string) {
+    try {
+      const url = getTraceViewerUrl(sessionID)
+      const openArgs =
+        process.platform === "darwin"
+          ? ["open", url]
+          : process.platform === "win32"
+            ? ["cmd", "/c", "start", url]
+            : ["xdg-open", url]
+      Bun.spawn(openArgs, { stdout: "ignore", stderr: "ignore" })
+      toast.show({ variant: "info", message: `Trace viewer: ${url}`, duration: 6000 })
+    } catch {
+      toast.show({ variant: "info", message: `Trace files: ${Tracer.getTracesDir()}`, duration: 8000 })
+    }
+  }
+  // altimate_change end
 
   useKeyboard((evt) => {
     if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
@@ -653,30 +672,35 @@ function App() {
       onSelect: (dialog) => {
         const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
         if (!sessionID) {
-          toast.show({ variant: "warning", message: "No active session to trace", duration: 3000 })
-          dialog.clear()
+          // No active session — show trace history instead
+          dialog.replace(() => (
+            <DialogTraceList onSelect={openTraceInBrowser} />
+          ))
           return
         }
-        try {
-          const url = getTraceViewerUrl(sessionID)
-          const openArgs = process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd", "/c", "start", url] : ["xdg-open", url]
-          Bun.spawn(openArgs, { stdout: "ignore", stderr: "ignore" })
-          toast.show({
-            variant: "info",
-            message: `Trace viewer: ${url}`,
-            duration: 6000,
-          })
-        } catch (e) {
-          // Show the trace directory so user can find the file manually
-          toast.show({
-            variant: "info",
-            message: `Trace files: ${Tracer.getTracesDir()}`,
-            duration: 8000,
-          })
-        }
+        openTraceInBrowser(sessionID)
         dialog.clear()
       },
     },
+    // altimate_change start - trace history command
+    {
+      title: "View trace history",
+      value: "trace.list",
+      category: "Debug",
+      slash: {
+        name: "traces",
+      },
+      onSelect: (dialog) => {
+        const currentSessionID = route.data.type === "session" ? route.data.sessionID : undefined
+        dialog.replace(() => (
+          <DialogTraceList
+            currentSessionID={currentSessionID}
+            onSelect={openTraceInBrowser}
+          />
+        ))
+      },
+    },
+    // altimate_change end
     {
       title: "Toggle debug panel",
       category: "System",
