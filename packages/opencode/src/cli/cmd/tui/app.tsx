@@ -32,7 +32,6 @@ import { Tracer } from "@/altimate/observability/tracing"
 import { renderTraceViewer } from "@/altimate/observability/viewer"
 import { DialogTraceList } from "./component/dialog-trace-list"
 import fsAsync from "fs/promises"
-import fsSync from "fs"
 
 // altimate_change start - shared trace viewer server
 let traceViewerServer: ReturnType<typeof Bun.serve> | undefined
@@ -47,8 +46,9 @@ function getTraceViewerUrl(sessionID: string): string {
         // Extract session ID from path: /view/<sessionID> or /api/<sessionID>
         const parts = url.pathname.split("/").filter(Boolean)
         const action = parts[0] // "view" or "api"
-        const sid = parts[1]
-        if (!sid) return new Response("Usage: /view/<sessionID>", { status: 400 })
+        const encodedSid = parts[1]
+        if (!encodedSid) return new Response("Usage: /view/<sessionID>", { status: 400 })
+        const sid = decodeURIComponent(encodedSid)
 
         const safeId = sid.replace(/[/\\.:]/g, "_")
         const traceFile = `${tracesDir}/${safeId}.json`
@@ -67,7 +67,7 @@ function getTraceViewerUrl(sessionID: string): string {
         // Serve HTML viewer
         try {
           const trace = JSON.parse(await fsAsync.readFile(traceFile, "utf-8"))
-          const html = renderTraceViewer(trace, { live: true, apiPath: "/api/" + sid })
+          const html = renderTraceViewer(trace, { live: true, apiPath: "/api/" + encodeURIComponent(sid) })
           return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })
         } catch {
           return new Response("Trace not found. Try again after the agent responds.", { status: 404 })
@@ -75,7 +75,7 @@ function getTraceViewerUrl(sessionID: string): string {
       },
     })
   }
-  return `http://localhost:${traceViewerServer.port}/view/${sessionID}`
+  return `http://127.0.0.1:${traceViewerServer.port}/view/${encodeURIComponent(sessionID)}`
 }
 
 // altimate_change end — renderInlineViewer removed, now using renderTraceViewer from viewer.ts
@@ -268,26 +268,21 @@ function App() {
   const promptRef = usePromptRef()
 
   // altimate_change start - shared trace viewer helper
-  function openTraceInBrowser(sessionID: string) {
+  async function openTraceInBrowser(sessionID: string) {
     try {
       // Check if trace file exists on disk before opening browser
       const safeId = sessionID.replace(/[/\\.:]/g, "_")
       const traceFile = `${Tracer.getTracesDir()}/${safeId}.json`
-      if (!fsSync.existsSync(traceFile)) {
+      const exists = await fsAsync.access(traceFile).then(() => true).catch(() => false)
+      if (!exists) {
         toast.show({ variant: "warning", message: "Trace not available yet — send a prompt first", duration: 4000 })
         return
       }
       const url = getTraceViewerUrl(sessionID)
-      const openArgs =
-        process.platform === "darwin"
-          ? ["open", url]
-          : process.platform === "win32"
-            ? ["cmd", "/c", "start", url]
-            : ["xdg-open", url]
-      Bun.spawn(openArgs, { stdout: "ignore", stderr: "ignore" })
+      await open(url)
       toast.show({ variant: "info", message: `Trace viewer: ${url}`, duration: 6000 })
     } catch {
-      toast.show({ variant: "info", message: `Trace files: ${Tracer.getTracesDir()}`, duration: 8000 })
+      toast.show({ variant: "warning", message: `Failed to open browser. Trace files: ${Tracer.getTracesDir()}`, duration: 8000 })
     }
   }
   // altimate_change end
