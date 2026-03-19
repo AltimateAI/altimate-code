@@ -61,6 +61,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       // ---------------------------------------------------------------
       // Normalize field names: accept snake_case (dbt), camelCase (SDK),
       // and common LLM-generated variants so auth "just works".
+      // Note: normalizeConfig() in normalize.ts handles most aliases
+      // upstream, but these fallbacks provide defense-in-depth.
       // ---------------------------------------------------------------
       const keyPath = (config.private_key_path ?? config.privateKeyPath) as string | undefined
       const inlineKey = (config.private_key ?? config.privateKey) as string | undefined

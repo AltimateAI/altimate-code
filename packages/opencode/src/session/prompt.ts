@@ -728,14 +728,19 @@ export namespace SessionPrompt {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
 
-      // altimate_change start - trace system prompt
-      Tracer.active?.logSpan({
-        name: "system-prompt",
-        startTime: Date.now(),
-        endTime: Date.now(),
-        input: { agent: agent.name, step },
-        output: { parts: system.length, content: system.join("\n\n") },
-      })
+      // altimate_change start - trace system prompt once per loop() call.
+      // The system prompt is functionally identical across steps within a single
+      // loop() invocation (same agent, same environment). Agent switches re-enter
+      // loop() with step reset to 0, so each agent's prompt is traced separately.
+      if (step === 1) {
+        Tracer.active?.logSpan({
+          name: "system-prompt",
+          startTime: Date.now(),
+          endTime: Date.now(),
+          input: { agent: agent.name, step },
+          output: { parts: system.length, content: system.join("\n\n") },
+        })
+      }
       // altimate_change end
 
       const result = await processor.process({
@@ -1901,7 +1906,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return args[argIndex]
     })
     const usesArgumentsPlaceholder = templateCommand.includes("$ARGUMENTS")
-    let template = withArgs.replaceAll("$ARGUMENTS", input.arguments)
+    // altimate_change start — allow $$ARGUMENTS to produce literal $ARGUMENTS in output
+    const ESCAPE_SENTINEL = "\x00ESCAPED_DOLLAR_ARGUMENTS\x00"
+    let template = withArgs.replaceAll("$$ARGUMENTS", ESCAPE_SENTINEL).replaceAll("$ARGUMENTS", input.arguments).replaceAll(ESCAPE_SENTINEL, "$ARGUMENTS")
+    // altimate_change end
 
     // If command doesn't explicitly handle arguments (no $N or $ARGUMENTS placeholders)
     // but user provided arguments, append them to the template

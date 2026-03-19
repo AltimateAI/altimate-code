@@ -2,6 +2,9 @@ import { createOpencodeClient, type Event } from "@opencode-ai/sdk/v2"
 import { createSimpleContext } from "./helper"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { batch, onCleanup, onMount } from "solid-js"
+// altimate_change start - smooth streaming
+import { Flag } from "@/flag/flag"
+// altimate_change end
 
 export type EventSource = {
   on: (handler: (event: Event) => void) => () => void
@@ -48,6 +51,44 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       queue = []
       timer = undefined
       last = Date.now()
+
+      // altimate_change start - smooth streaming: pre-merge delta events
+      // When enabled, merge consecutive delta events for the same part+field
+      // to reduce store updates from N-per-part to 1-per-part per flush cycle.
+      if (Flag.ALTIMATE_SMOOTH_STREAMING) {
+        const merged: Event[] = []
+        const deltaMap = new Map<string, number>()
+        for (const event of events) {
+          if (event.type === "message.part.delta") {
+            const props = event.properties as { messageID: string; partID: string; field: string; delta: string }
+            const key = `${props.messageID}:${props.partID}:${props.field}`
+            const existing = deltaMap.get(key)
+            if (existing !== undefined) {
+              const prev = merged[existing] as typeof event
+              merged[existing] = {
+                ...prev,
+                properties: {
+                  ...prev.properties,
+                  delta: (prev.properties as typeof props).delta + props.delta,
+                },
+              } as Event
+              continue
+            }
+            deltaMap.set(key, merged.length)
+          } else {
+            deltaMap.clear()
+          }
+          merged.push(event)
+        }
+        batch(() => {
+          for (const event of merged) {
+            emitter.emit(event.type, event)
+          }
+        })
+        return
+      }
+      // altimate_change end
+
       // Batch all event emissions so all store updates result in a single render
       batch(() => {
         for (const event of events) {

@@ -8,6 +8,10 @@ import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_DISCOVER from "./template/discover.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import PROMPT_FEEDBACK from "./template/feedback.txt"
+// altimate_change start — configure commands for external AI CLIs
+import PROMPT_CONFIGURE_CLAUDE from "./template/configure-claude.txt"
+import PROMPT_CONFIGURE_CODEX from "./template/configure-codex.txt"
+// altimate_change end
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import { Log } from "../util/log"
@@ -60,6 +64,10 @@ export namespace Command {
     DISCOVER: "discover",
     REVIEW: "review",
     FEEDBACK: "feedback",
+    // altimate_change start
+    CONFIGURE_CLAUDE: "configure-claude",
+    CONFIGURE_CODEX: "configure-codex",
+    // altimate_change end
   } as const
 
   const state = Instance.state(async () => {
@@ -103,6 +111,26 @@ export namespace Command {
         },
         hints: hints(PROMPT_FEEDBACK),
       },
+      // altimate_change start — configure commands for external AI CLIs
+      [Default.CONFIGURE_CLAUDE]: {
+        name: Default.CONFIGURE_CLAUDE,
+        description: "configure /altimate command in Claude Code",
+        source: "command",
+        get template() {
+          return PROMPT_CONFIGURE_CLAUDE
+        },
+        hints: hints(PROMPT_CONFIGURE_CLAUDE),
+      },
+      [Default.CONFIGURE_CODEX]: {
+        name: Default.CONFIGURE_CODEX,
+        description: "configure altimate skill in Codex CLI",
+        source: "command",
+        get template() {
+          return PROMPT_CONFIGURE_CODEX
+        },
+        hints: hints(PROMPT_CONFIGURE_CODEX),
+      },
+      // altimate_change end
     }
 
     for (const [name, command] of Object.entries(cfg.command ?? {})) {

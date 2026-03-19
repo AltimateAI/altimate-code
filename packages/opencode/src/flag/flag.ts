@@ -86,6 +86,18 @@ export namespace Flag {
   export const OPENCODE_EXPERIMENTAL_PLAN_MODE = OPENCODE_EXPERIMENTAL || truthy("OPENCODE_EXPERIMENTAL_PLAN_MODE")
   export const OPENCODE_EXPERIMENTAL_WORKSPACES = OPENCODE_EXPERIMENTAL || truthy("OPENCODE_EXPERIMENTAL_WORKSPACES")
   export const OPENCODE_EXPERIMENTAL_MARKDOWN = !falsy("OPENCODE_EXPERIMENTAL_MARKDOWN")
+  // altimate_change start - calm mode: combines smooth streaming + line buffering + width cap
+  // Single flag enables all three optimizations. Individual flags still work for fine-grained control.
+  export const ALTIMATE_CALM_MODE = altTruthy("ALTIMATE_CALM_MODE", "OPENCODE_CALM_MODE")
+  export const ALTIMATE_SMOOTH_STREAMING =
+    ALTIMATE_CALM_MODE || altTruthy("ALTIMATE_SMOOTH_STREAMING", "OPENCODE_SMOOTH_STREAMING")
+  export const ALTIMATE_LINE_STREAMING =
+    ALTIMATE_CALM_MODE || altTruthy("ALTIMATE_LINE_STREAMING", "OPENCODE_LINE_STREAMING")
+  export const ALTIMATE_CONTENT_MAX_WIDTH =
+    number("ALTIMATE_CONTENT_MAX_WIDTH") ??
+    number("OPENCODE_CONTENT_MAX_WIDTH") ??
+    (ALTIMATE_CALM_MODE ? 100 : undefined)
+  // altimate_change end
   export const OPENCODE_MODELS_URL = process.env["OPENCODE_MODELS_URL"]
   export const OPENCODE_MODELS_PATH = process.env["OPENCODE_MODELS_PATH"]
   export const OPENCODE_DISABLE_CHANNEL_DB = truthy("OPENCODE_DISABLE_CHANNEL_DB")

@@ -19,25 +19,25 @@ altimate --agent analyst
 
 ## Subcommands
 
-| Command | Description |
-|---------|------------|
-| `run` | Run a prompt non-interactively |
-| `serve` | Start the HTTP API server |
-| `web` | Start the web UI |
-| `agent` | Agent management |
-| `auth` | Authentication |
-| `mcp` | Model Context Protocol tools |
-| `acp` | Agent Communication Protocol |
-| `models` | List available models |
-| `stats` | Usage statistics |
-| `export` | Export session data |
-| `import` | Import session data |
-| `session` | Session management |
-| `trace` | List and view session traces |
-| `github` | GitHub integration |
-| `pr` | Pull request tools |
-| `upgrade` | Upgrade to latest version |
-| `uninstall` | Uninstall altimate |
+| Command     | Description                    |
+| ----------- | ------------------------------ |
+| `run`       | Run a prompt non-interactively |
+| `serve`     | Start the HTTP API server      |
+| `web`       | Start the web UI               |
+| `agent`     | Agent management               |
+| `auth`      | Authentication                 |
+| `mcp`       | Model Context Protocol tools   |
+| `acp`       | Agent Communication Protocol   |
+| `models`    | List available models          |
+| `stats`     | Usage statistics               |
+| `export`    | Export session data            |
+| `import`    | Import session data            |
+| `session`   | Session management             |
+| `trace`     | List and view session traces   |
+| `github`    | GitHub integration             |
+| `pr`        | Pull request tools             |
+| `upgrade`   | Upgrade to latest version      |
+| `uninstall` | Uninstall altimate             |
 
 ## Global Flags
 
@@ -57,34 +57,34 @@ Configuration can be controlled via environment variables:
 
 ### Core Configuration
 
-| Variable | Description |
-|----------|------------|
-| `ALTIMATE_CLI_CONFIG` | Path to custom config file |
-| `ALTIMATE_CLI_CONFIG_DIR` | Custom config directory |
+| Variable                      | Description                  |
+| ----------------------------- | ---------------------------- |
+| `ALTIMATE_CLI_CONFIG`         | Path to custom config file   |
+| `ALTIMATE_CLI_CONFIG_DIR`     | Custom config directory      |
 | `ALTIMATE_CLI_CONFIG_CONTENT` | Inline config as JSON string |
-| `ALTIMATE_CLI_GIT_BASH_PATH` | Path to Git Bash (Windows) |
+| `ALTIMATE_CLI_GIT_BASH_PATH`  | Path to Git Bash (Windows)   |
 
 ### Feature Toggles
 
-| Variable | Description |
-|----------|------------|
-| `ALTIMATE_CLI_DISABLE_AUTOUPDATE` | Disable automatic updates |
-| `ALTIMATE_CLI_DISABLE_LSP_DOWNLOAD` | Don't auto-download LSP servers |
-| `ALTIMATE_CLI_DISABLE_AUTOCOMPACT` | Disable automatic context compaction |
-| `ALTIMATE_CLI_DISABLE_DEFAULT_PLUGINS` | Skip loading default plugins |
-| `ALTIMATE_CLI_DISABLE_EXTERNAL_SKILLS` | Disable external skill discovery |
-| `ALTIMATE_CLI_DISABLE_PROJECT_CONFIG` | Ignore project-level config files |
-| `ALTIMATE_CLI_DISABLE_TERMINAL_TITLE` | Don't set terminal title |
-| `ALTIMATE_CLI_DISABLE_PRUNE` | Disable database pruning |
-| `ALTIMATE_CLI_DISABLE_MODELS_FETCH` | Don't fetch models from models.dev |
+| Variable                               | Description                          |
+| -------------------------------------- | ------------------------------------ |
+| `ALTIMATE_CLI_DISABLE_AUTOUPDATE`      | Disable automatic updates            |
+| `ALTIMATE_CLI_DISABLE_LSP_DOWNLOAD`    | Don't auto-download LSP servers      |
+| `ALTIMATE_CLI_DISABLE_AUTOCOMPACT`     | Disable automatic context compaction |
+| `ALTIMATE_CLI_DISABLE_DEFAULT_PLUGINS` | Skip loading default plugins         |
+| `ALTIMATE_CLI_DISABLE_EXTERNAL_SKILLS` | Disable external skill discovery     |
+| `ALTIMATE_CLI_DISABLE_PROJECT_CONFIG`  | Ignore project-level config files    |
+| `ALTIMATE_CLI_DISABLE_TERMINAL_TITLE`  | Don't set terminal title             |
+| `ALTIMATE_CLI_DISABLE_PRUNE`           | Disable database pruning             |
+| `ALTIMATE_CLI_DISABLE_MODELS_FETCH`    | Don't fetch models from models.dev   |
 
 ### Server & Security
 
-| Variable | Description |
-|----------|------------|
+| Variable                       | Description                     |
+| ------------------------------ | ------------------------------- |
 | `ALTIMATE_CLI_SERVER_USERNAME` | Server HTTP basic auth username |
 | `ALTIMATE_CLI_SERVER_PASSWORD` | Server HTTP basic auth password |
-| `ALTIMATE_CLI_PERMISSION` | Permission config as JSON |
+| `ALTIMATE_CLI_PERMISSION`      | Permission config as JSON       |
 
 ### Permissions & Safety
 
@@ -103,14 +103,39 @@ Configuration can be controlled via environment variables:
 
 ### Experimental
 
-| Variable | Description |
-|----------|------------|
-| `ALTIMATE_CLI_EXPERIMENTAL` | Enable all experimental features |
-| `ALTIMATE_CLI_EXPERIMENTAL_FILEWATCHER` | Enable file watcher |
-| `ALTIMATE_CLI_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` | Custom bash timeout (ms) |
-| `ALTIMATE_CLI_EXPERIMENTAL_OUTPUT_TOKEN_MAX` | Max output tokens |
-| `ALTIMATE_CLI_EXPERIMENTAL_PLAN_MODE` | Enable plan mode |
-| `ALTIMATE_CLI_ENABLE_EXA` | Enable Exa web search |
+| Variable                                            | Description                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ALTIMATE_CLI_EXPERIMENTAL`                         | Enable all experimental features                                                                                                                                                                                                                                              |
+| `ALTIMATE_CLI_EXPERIMENTAL_FILEWATCHER`             | Enable file watcher                                                                                                                                                                                                                                                           |
+| `ALTIMATE_CLI_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` | Custom bash timeout (ms)                                                                                                                                                                                                                                                      |
+| `ALTIMATE_CLI_EXPERIMENTAL_OUTPUT_TOKEN_MAX`        | Max output tokens                                                                                                                                                                                                                                                             |
+| `ALTIMATE_CLI_EXPERIMENTAL_PLAN_MODE`               | Enable plan mode                                                                                                                                                                                                                                                              |
+| `ALTIMATE_CLI_ENABLE_EXA`                           | Enable Exa web search                                                                                                                                                                                                                                                         |
+| `ALTIMATE_CALM_MODE`                                | Enables all streaming optimizations: smooth rendering, line-at-a-time buffering, and 100-column width cap. Recommended for a Claude Code-like experience. Equivalent to setting `ALTIMATE_SMOOTH_STREAMING=true ALTIMATE_LINE_STREAMING=true ALTIMATE_CONTENT_MAX_WIDTH=100`. |
+| `ALTIMATE_SMOOTH_STREAMING`                         | Uses lightweight `<code>` rendering during LLM streaming, then swaps to rich markdown after completion. Reduces text jumps and scroll jitter. Included in `ALTIMATE_CALM_MODE`.                                                                                               |
+| `ALTIMATE_LINE_STREAMING`                           | Buffers LLM output and reveals one complete line at a time (on `\n`). Gives a calm, steady flow. Remaining text flushes on message completion or abort. Included in `ALTIMATE_CALM_MODE`.                                                                                     |
+| `ALTIMATE_CONTENT_MAX_WIDTH`                        | Cap text content width in columns (e.g. `100`). Improves readability on wide screens. Automatically disabled on small terminals. Set to `100` by `ALTIMATE_CALM_MODE`.                                                                                                        |
+
+#### Calm Mode Quick Start
+
+For a Claude Code-like streaming experience, add to your shell profile:
+
+```bash
+export ALTIMATE_CALM_MODE=true
+```
+
+Or use individual flags for fine-grained control:
+
+```bash
+# Smooth rendering only (no line buffering)
+export ALTIMATE_SMOOTH_STREAMING=true
+
+# Line buffering only (no rendering changes)
+export ALTIMATE_LINE_STREAMING=true
+
+# Custom width cap (e.g., 80 columns)
+export ALTIMATE_CONTENT_MAX_WIDTH=80
+```
 
 ## Non-interactive Usage
 

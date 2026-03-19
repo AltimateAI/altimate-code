@@ -288,14 +288,22 @@ export namespace Installation {
         if (!version) throw new Error(`Could not detect version for tap formula: ${formula}`)
         return version
       }
-      // altimate_change start — brew formula URL
-      return fetch("https://formulae.brew.sh/api/formula/altimate-code.json")
-      // altimate_change end
+      // altimate_change start — brew: use GitHub releases API as source of truth
+      // altimate-code is NOT in core homebrew, so formulae.brew.sh will 404.
+      // `brew info --json=v2` returns the LOCAL cached version which can be stale
+      // if the tap hasn't been updated — using it would cause `latest()` to return
+      // the already-installed version, making the upgrade command skip silently.
+      // GitHub releases API is the authoritative source for the actual latest version.
+      return fetch("https://api.github.com/repos/AltimateAI/altimate-code/releases/latest")
         .then((res) => {
-          if (!res.ok) throw new Error(res.statusText)
+          if (!res.ok) throw new Error(`GitHub releases API: ${res.status} ${res.statusText}`)
           return res.json()
         })
-        .then((data: any) => data.versions.stable)
+        .then((data: any) => {
+          if (!data.tag_name) throw new Error("Missing tag_name in GitHub releases response")
+          return data.tag_name.replace(/^v/, "")
+        })
+      // altimate_change end
     }
 
     if (detectedMethod === "npm" || detectedMethod === "bun" || detectedMethod === "pnpm") {

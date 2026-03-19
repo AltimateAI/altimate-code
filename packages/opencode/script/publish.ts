@@ -29,6 +29,7 @@ const version = Object.values(binaries)[0]
 
 await $`mkdir -p ./dist/${pkg.name}`
 await $`cp -r ./bin ./dist/${pkg.name}/bin`
+await $`cp -r ../../.opencode/skills ./dist/${pkg.name}/skills`
 await $`cp ./script/postinstall.mjs ./dist/${pkg.name}/postinstall.mjs`
 await Bun.file(`./dist/${pkg.name}/LICENSE`).write(await Bun.file("../../LICENSE").text())
 await Bun.file(`./dist/${pkg.name}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
@@ -70,6 +71,7 @@ const unscopedDir = `./dist/${unscopedName}`
 try {
   await $`mkdir -p ${unscopedDir}`
   await $`cp -r ./bin ${unscopedDir}/bin`
+  await $`cp -r ../../.opencode/skills ${unscopedDir}/skills`
   await $`cp ./script/postinstall.mjs ${unscopedDir}/postinstall.mjs`
   await Bun.file(`${unscopedDir}/LICENSE`).write(await Bun.file("../../LICENSE").text())
   await Bun.file(`${unscopedDir}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())

@@ -115,6 +115,39 @@ function printWelcome(version) {
   out(bot)
 }
 
+function copyDirRecursive(src, dst) {
+  fs.mkdirSync(dst, { recursive: true })
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name)
+    const dstPath = path.join(dst, entry.name)
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, dstPath)
+    } else {
+      fs.copyFileSync(srcPath, dstPath)
+    }
+  }
+}
+
+/**
+ * Copy bundled skills to ~/.altimate/builtin/ on every install/upgrade.
+ * The entire directory is wiped and replaced so each release is the single
+ * source of truth. Intentionally separate from ~/.altimate/skills/ which users own.
+ */
+function copySkillsToAltimate() {
+  try {
+    const skillsSrc = path.join(__dirname, "skills")
+    if (!fs.existsSync(skillsSrc)) return // skills not in package (shouldn't happen)
+
+    const builtinDst = path.join(os.homedir(), ".altimate", "builtin")
+
+    // Full wipe-and-replace — each release owns this directory entirely
+    if (fs.existsSync(builtinDst)) fs.rmSync(builtinDst, { recursive: true, force: true })
+    copyDirRecursive(skillsSrc, builtinDst)
+  } catch {
+    // Non-fatal — skills can be installed manually
+  }
+}
+
 /**
  * Write a marker file so the CLI can show a welcome/upgrade banner on first run.
  * npm v7+ silences postinstall stdout, so the CLI reads this marker at startup instead.
@@ -144,6 +177,7 @@ async function main() {
       // On Windows, the .exe is already included in the package and bin field points to it
       // No postinstall setup needed
       if (version) writeUpgradeMarker(version)
+      copySkillsToAltimate()
       return
     }
 
@@ -161,6 +195,7 @@ async function main() {
     // Write marker only — npm v7+ suppresses all postinstall output.
     // The CLI picks up the marker and shows the welcome box on first run.
     if (version) writeUpgradeMarker(version)
+    copySkillsToAltimate()
   } catch (error) {
     console.error("Failed to setup altimate-code binary:", error.message)
     process.exit(1)

@@ -26,6 +26,11 @@ const SENSITIVE_FIELDS = new Set([
   "passcode",
   "ssh_password",
   "connection_string",
+  "credentials_json",
+  "keyfile_json",
+  "ssl_key",
+  "ssl_cert",
+  "ssl_ca",
 ])
 
 /** Cached keytar module (or null if unavailable). */

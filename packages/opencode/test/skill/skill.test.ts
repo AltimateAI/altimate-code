@@ -327,6 +327,89 @@ description: A skill in the .agents/skills directory.
   })
 })
 
+test("discovers builtin skills from ~/.altimate/builtin/", async () => {
+  await using tmp = await tmpdir({ git: true })
+
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
+
+  try {
+    const builtinDir = path.join(tmp.path, ".altimate", "builtin", "builtin-skill")
+    await fs.mkdir(builtinDir, { recursive: true })
+    await Bun.write(
+      path.join(builtinDir, "SKILL.md"),
+      `---
+name: builtin-skill
+description: A builtin skill shipped with the package.
+---
+
+# Builtin Skill
+`,
+    )
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const skills = await Skill.all()
+        expect(skills.length).toBe(1)
+        expect(skills[0].name).toBe("builtin-skill")
+        expect(skills[0].location).toContain(path.join(".altimate", "builtin", "builtin-skill", "SKILL.md"))
+      },
+    })
+  } finally {
+    process.env.OPENCODE_TEST_HOME = originalHome
+  }
+})
+
+test("project skill overrides builtin skill with same name", async () => {
+  await using tmp = await tmpdir({
+    git: true,
+    init: async (dir) => {
+      const projectSkillDir = path.join(dir, ".claude", "skills", "shared-skill")
+      await Bun.write(
+        path.join(projectSkillDir, "SKILL.md"),
+        `---
+name: shared-skill
+description: Project-level version.
+---
+
+# Project Skill
+`,
+      )
+    },
+  })
+
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
+
+  try {
+    const builtinDir = path.join(tmp.path, ".altimate", "builtin", "shared-skill")
+    await fs.mkdir(builtinDir, { recursive: true })
+    await Bun.write(
+      path.join(builtinDir, "SKILL.md"),
+      `---
+name: shared-skill
+description: Builtin version.
+---
+
+# Builtin Skill
+`,
+    )
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const skills = await Skill.all()
+        const skill = skills.find((s) => s.name === "shared-skill")
+        expect(skill).toBeDefined()
+        expect(skill!.description).toBe("Project-level version.")
+      },
+    })
+  } finally {
+    process.env.OPENCODE_TEST_HOME = originalHome
+  }
+})
+
 test("properly resolves directories that skills live in", async () => {
   await using tmp = await tmpdir({
     git: true,

@@ -4,6 +4,9 @@ export type { Connector, ConnectorResult, SchemaColumn, ConnectionConfig } from 
 // Re-export escape utilities
 export { escapeSqlString, escapeSqlIdentifier } from "./sql-escape"
 
+// Re-export config normalization
+export { normalizeConfig } from "./normalize"
+
 // Re-export driver connect functions
 export { connect as connectPostgres } from "./postgres"
 export { connect as connectSnowflake } from "./snowflake"
