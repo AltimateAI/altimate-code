@@ -169,25 +169,6 @@ Anthropic · OpenAI · Google Gemini · Google Vertex AI · Amazon Bedrock · Az
 
 altimate ships with built-in skills for every common data engineering task — type `/` in the TUI to browse available skills and get autocomplete. No memorization required.
 
-## Architecture
-
-```
-altimate (TypeScript CLI)
-        |
-   @altimateai/altimate-core (napi-rs → Rust)
-   SQL analysis, lineage, PII, safety — 45 functions, ~2ms per call
-        |
-   Native Node.js drivers
-   10 warehouses: Snowflake, BigQuery, PostgreSQL, Databricks,
-   Redshift, MySQL, SQL Server, Oracle, DuckDB, SQLite
-```
-
-The CLI handles AI interactions, TUI, and tool orchestration. SQL analysis is powered by the Rust-based `@altimateai/altimate-core` engine via napi-rs bindings (no Python required). Database connectivity uses native Node.js drivers with lazy loading.
-
-**No Python dependency**: All 73 tool methods run natively in TypeScript. No pip, venv, or Python installation needed.
-
-**dbt-first**: When working in a dbt project, the CLI automatically uses dbt's connection from `profiles.yml` — no separate warehouse configuration needed.
-
 ## Community & Contributing
 
 - **Slack**: [Join Slack](https://altimate.studio/join-agentic-data-engineering-slack) — Real-time chat for questions, showcases, and feature discussion
