@@ -48,7 +48,12 @@ function getTraceViewerUrl(sessionID: string): string {
         const action = parts[0] // "view" or "api"
         const encodedSid = parts[1]
         if (!encodedSid) return new Response("Usage: /view/<sessionID>", { status: 400 })
-        const sid = decodeURIComponent(encodedSid)
+        let sid: string
+        try {
+          sid = decodeURIComponent(encodedSid)
+        } catch {
+          return new Response("Invalid session ID encoding", { status: 400 })
+        }
 
         const safeId = sid.replace(/[/\\.:]/g, "_")
         const traceFile = `${tracesDir}/${safeId}.json`

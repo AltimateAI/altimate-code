@@ -13,7 +13,7 @@ function cleanTitle(raw: string): string {
 }
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
+  if (ms < 1000) return `${Math.round(ms)}ms`
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   const mins = Math.floor(ms / 60000)
   const secs = Math.floor((ms % 60000) / 1000)
@@ -37,7 +37,6 @@ export function DialogTraceList(props: {
           title: "Failed to load traces",
           value: "__error__",
           description: `Check ${Tracer.getTracesDir()}`,
-          disabled: true,
         },
       ]
     }
@@ -98,7 +97,10 @@ export function DialogTraceList(props: {
       options={options()}
       current={props.currentSessionID}
       onSelect={(option) => {
-        if (option.value === "__error__") return
+        if (option.value === "__error__") {
+          dialog.clear()
+          return
+        }
         props.onSelect(option.value)
         dialog.clear()
       }}
