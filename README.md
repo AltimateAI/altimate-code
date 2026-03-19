@@ -14,10 +14,8 @@ Run standalone in your terminal, embed underneath Claude Code or Codex, or integ
 into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 
 [![npm](https://img.shields.io/npm/v/altimate-code)](https://www.npmjs.com/package/altimate-code)
-[![npm downloads](https://img.shields.io/npm/dm/altimate-code)](https://www.npmjs.com/package/altimate-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![CI](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml/badge.svg)](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml)
-[![Slack](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://altimate.ai/slack)
+[![Slack](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://altimate.studio/join-agentic-data-engineering-slack)
 [![Docs](https://img.shields.io/badge/docs-docs.altimate.sh-blue)](https://docs.altimate.sh)
 
 </div>
@@ -208,7 +206,7 @@ packages/
 
 ## Community & Contributing
 
-- **Slack**: [altimate.ai/slack](https://altimate.ai/slack) — Real-time chat for questions, showcases, and feature discussion
+- **Slack**: [Join Slack](https://altimate.studio/join-agentic-data-engineering-slack) — Real-time chat for questions, showcases, and feature discussion
 - **Issues**: [GitHub Issues](https://github.com/AltimateAI/altimate-code/issues) — Bug reports and feature requests
 - **Discussions**: [GitHub Discussions](https://github.com/AltimateAI/altimate-code/discussions) — Long-form questions and proposals
 - **Security**: See [SECURITY.md](./SECURITY.md) for responsible disclosure
