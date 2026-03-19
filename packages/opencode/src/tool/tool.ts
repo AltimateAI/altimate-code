@@ -4,7 +4,9 @@ import type { Agent } from "../agent/agent"
 import type { PermissionNext } from "../permission/next"
 import type { SessionID, MessageID } from "../session/schema"
 import { Truncate } from "./truncation"
+// altimate_change start — telemetry instrumentation for tool execution
 import { Telemetry } from "../altimate/telemetry"
+// altimate_change end
 
 export namespace Tool {
   interface Metadata {
@@ -68,6 +70,7 @@ export namespace Tool {
               { cause: error },
             )
           }
+          // altimate_change start — telemetry instrumentation for tool execution
           const startTime = Date.now()
           let result: Awaited<ReturnType<typeof execute>>
           try {
@@ -156,6 +159,7 @@ export namespace Tool {
           } catch {
             // Telemetry must never break tool execution
           }
+          // altimate_change end
           // Truncation runs after telemetry so I/O errors from
           // Truncate.output() are not misattributed as tool failures.
           if (result.metadata.truncated !== undefined) {

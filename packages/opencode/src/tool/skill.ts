@@ -14,11 +14,13 @@ import os from "os"
 
 const MAX_DISPLAY_SKILLS = 50
 
+// altimate_change start — classifySkillSource helper for skill telemetry
 function classifySkillSource(location: string): "builtin" | "global" | "project" {
   if (location.includes("node_modules") || location.includes(".altimate/builtin")) return "builtin"
   if (location.startsWith(os.homedir())) return "global"
   return "project"
 }
+// altimate_change end
 // altimate_change end
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
@@ -91,7 +93,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
     description,
     parameters,
     async execute(params: z.infer<typeof parameters>, ctx) {
+      // altimate_change start — telemetry: startTime for skill_used duration
       const startTime = Date.now()
+      // altimate_change end
       // altimate_change start - use upstream Skill.get() for exact name lookup
       const skill = await Skill.get(params.name)
 
@@ -131,6 +135,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         return arr
       }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
 
+      // altimate_change start — telemetry instrumentation for skill loading
       try {
         Telemetry.track({
           type: "skill_used",
@@ -144,6 +149,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       } catch {
         // Telemetry must never break skill loading
       }
+      // altimate_change end
 
       return {
         title: `Loaded skill: ${skill.name}`,
