@@ -64,9 +64,7 @@ Once complete, altimate indexes your schemas and detects your tooling, enabling 
 
 ### Option B: Manual configuration
 
-Add a warehouse connection to your `altimate-code.json`. Here are minimal snippets for each warehouse type:
-
-#### Snowflake (quick-connect)
+Add a warehouse connection to your `altimate-code.json`. Here's a quick example:
 
 ```json
 {
@@ -83,52 +81,7 @@ Add a warehouse connection to your `altimate-code.json`. Here are minimal snippe
 }
 ```
 
-#### BigQuery (quick-connect)
-
-```json
-{
-  "warehouses": {
-    "bigquery": {
-      "type": "bigquery",
-      "project": "my-gcp-project",
-      "dataset": "analytics"
-    }
-  }
-}
-```
-
-> Tip: Omit `service_account` to use Application Default Credentials (`gcloud auth application-default login`).
-
-#### Databricks (quick-connect)
-
-```json
-{
-  "warehouses": {
-    "databricks": {
-      "type": "databricks",
-      "host": "dbc-abc123.cloud.databricks.com",
-      "token": "${DATABRICKS_TOKEN}",
-      "warehouse_id": "abcdef1234567890",
-      "catalog": "main"
-    }
-  }
-}
-```
-
-#### DuckDB (quick-connect)
-
-```json
-{
-  "warehouses": {
-    "duckdb": {
-      "type": "duckdb",
-      "database": "./dev.duckdb"
-    }
-  }
-}
-```
-
-See [Warehouse connections](#warehouse-connections) below for full configuration options including key-pair auth, Redshift, and PostgreSQL.
+For all warehouse types (Snowflake, BigQuery, Databricks, PostgreSQL, Redshift, DuckDB, MySQL, SQL Server) and advanced options (key-pair auth, ADC, SSH tunneling), see the [Warehouses reference](configure/warehouses.md).
 
 ## Step 4: Choose an Agent Mode
 
@@ -162,94 +115,7 @@ altimate uses a JSON config file. Create `altimate-code.json` in your project ro
 
 ### Warehouse connections
 
-```json
-{
-  "warehouses": {
-    "prod-snowflake": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "analytics_user",
-      "password": "${SNOWFLAKE_PASSWORD}",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS",
-      "role": "ANALYST_ROLE"
-    },
-    "dev-duckdb": {
-      "type": "duckdb",
-      "database": "./dev.duckdb"
-    }
-  }
-}
-```
-
-### Snowflake (key-pair auth)
-
-```json
-{
-  "warehouses": {
-    "snowflake-prod": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "svc_altimate",
-      "private_key_path": "~/.ssh/snowflake_rsa_key.p8",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS",
-      "role": "SYSADMIN"
-    }
-  }
-}
-```
-
-### BigQuery
-
-```json
-{
-  "warehouses": {
-    "bigquery-prod": {
-      "type": "bigquery",
-      "project": "my-gcp-project",
-      "dataset": "analytics",
-      "service_account": "/path/to/service-account.json"
-    }
-  }
-}
-```
-
-Or use Application Default Credentials (ADC). Just omit `service_account` and run `gcloud auth application-default login`.
-
-### Databricks
-
-```json
-{
-  "warehouses": {
-    "databricks-prod": {
-      "type": "databricks",
-      "host": "dbc-abc123.cloud.databricks.com",
-      "token": "${DATABRICKS_TOKEN}",
-      "warehouse_id": "abcdef1234567890",
-      "catalog": "main",
-      "schema": "default"
-    }
-  }
-}
-```
-
-### PostgreSQL / Redshift
-
-```json
-{
-  "warehouses": {
-    "postgres-dev": {
-      "type": "postgres",
-      "host": "localhost",
-      "port": 5432,
-      "database": "analytics",
-      "user": "analyst",
-      "password": "${PG_PASSWORD}"
-    }
-  }
-}
-```
+For all warehouse types and configuration options, see the [Warehouses reference](configure/warehouses.md).
 
 ## Project-level config
 

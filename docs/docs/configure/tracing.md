@@ -335,7 +335,7 @@ Traces are stored **locally only** by default. They contain:
 - Tool inputs and outputs (SQL queries, file contents, command results)
 - Model responses
 
-If you configure remote exporters, trace data is sent to those endpoints. No trace data is included in the anonymous telemetry described in [Telemetry](telemetry.md).
+If you configure remote exporters, trace data is sent to those endpoints. No trace data is included in the anonymous telemetry described in [Telemetry](../reference/telemetry.md).
 
 !!! warning "Sensitive Data"
     Traces may contain SQL queries, file paths, and command outputs from your session. If you share trace files or configure remote exporters, be aware that this data will be included.

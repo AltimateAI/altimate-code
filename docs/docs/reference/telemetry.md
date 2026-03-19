@@ -93,7 +93,7 @@ Telemetry data is sent to Azure Application Insights:
 |----------|---------|
 | `eastus-8.in.applicationinsights.azure.com` | Telemetry ingestion |
 
-For a complete list of network endpoints, see the [Network Reference](../network.md).
+For a complete list of network endpoints, see the [Network Reference](network.md).
 
 ## For Contributors
 

@@ -19,66 +19,11 @@ Altimate Code needs database credentials to connect to your warehouse. Credentia
 
 ## What can the agent actually execute?
 
-Altimate Code can read files, write files, and run shell commands, but only with your permission. The [permission system](configure/permissions.md) lets you control every tool:
-
-| Level | Behavior |
-|-------|----------|
-| `"allow"` | Runs without confirmation |
-| `"ask"` | Prompts you before each use |
-| `"deny"` | Blocked entirely |
-
-By default, destructive operations like `bash`, `write`, and `edit` require confirmation. You can further restrict specific commands:
-
-```json
-{
-  "permission": {
-    "bash": {
-      "*": "ask",
-      "dbt *": "allow",
-      "git status": "allow",
-      "DROP *": "deny",
-      "rm *": "deny"
-    }
-  }
-}
-```
+Altimate Code can read files, write files, and run shell commands, but only with your permission. The [permission system](../configure/permissions.md) lets you set every tool to `"allow"`, `"ask"`, or `"deny"`, with pattern-based rules for fine-grained control. See the [Permissions reference](../configure/permissions.md) for the full configuration guide.
 
 ## Can I prevent the agent from modifying production databases?
 
-Yes. Use pattern-based permissions to deny destructive SQL:
-
-```json
-{
-  "permission": {
-    "bash": {
-      "*": "ask",
-      "DROP *": "deny",
-      "DELETE *": "deny",
-      "TRUNCATE *": "deny",
-      "ALTER *": "deny"
-    }
-  }
-}
-```
-
-You can also configure per-agent permissions. For example, restrict the `analyst` agent to read-only:
-
-```json
-{
-  "agent": {
-    "analyst": {
-      "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "bash": {
-          "SELECT *": "allow",
-          "*": "deny"
-        }
-      }
-    }
-  }
-}
-```
+Yes. Use pattern-based permissions to deny destructive SQL (`DROP *`, `DELETE *`, `TRUNCATE *`), and per-agent permissions to restrict agents like `analyst` to read-only. See the [Permissions reference](../configure/permissions.md#pattern-based-permissions) for examples and recommended configurations.
 
 ## What network endpoints does Altimate Code contact?
 
@@ -108,7 +53,7 @@ export ALTIMATE_CLI_MODELS_PATH=/path/to/models.json
 
 ## What telemetry is collected?
 
-Anonymous usage telemetry, including event names, token counts, timing, and error types. **Never** code, queries, credentials, file paths, or prompt content. See the full [Telemetry reference](configure/telemetry.md) for the complete event list.
+Anonymous usage telemetry, including event names, token counts, timing, and error types. **Never** code, queries, credentials, file paths, or prompt content. See the full [Telemetry reference](telemetry.md) for the complete event list.
 
 Disable telemetry entirely:
 
@@ -255,7 +200,7 @@ Altimate Code applies safe defaults so you don't have to configure anything for 
 
 **"Prompted"** means you'll see the command and can approve or reject it. **"Blocked"** means the agent cannot run it at all; you must override in config.
 
-To override defaults, add rules in `altimate-code.json`. See [Permissions](configure/permissions.md) for the full configuration reference.
+To override defaults, add rules in `altimate-code.json`. See [Permissions](../configure/permissions.md) for the full configuration reference.
 
 ## Best practices for staying safe
 
@@ -263,7 +208,7 @@ To override defaults, add rules in `altimate-code.json`. See [Permissions](confi
 
 2. **Work on a branch.** Let the agent work on a feature branch so you can review changes before merging. Git gives you a full safety net. This is the single most effective protection.
 
-3. **Use per-agent permissions.** Give each agent only what it needs. The `analyst` agent doesn't need write access. See [Permissions](configure/permissions.md) for examples.
+3. **Use per-agent permissions.** Give each agent only what it needs. The `analyst` agent doesn't need write access. See [Permissions](../configure/permissions.md) for examples.
 
 4. **Use read-only database credentials for exploration.** When using the agent for analysis or ad-hoc queries, connect with a read-only database user.
 

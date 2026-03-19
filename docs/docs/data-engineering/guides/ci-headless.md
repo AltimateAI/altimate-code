@@ -152,4 +152,4 @@ See [Tracing](../../configure/tracing.md) for the full trace reference.
 
 ## Security Recommendation
 
-Use a **read-only warehouse user** for CI jobs that only need to read data. Reserve write-access credentials for jobs that explicitly need them (e.g., test generation that writes files). See [Security FAQ](../../security-faq.md) and [Permissions](../../configure/permissions.md).
+Use a **read-only warehouse user** for CI jobs that only need to read data. Reserve write-access credentials for jobs that explicitly need them (e.g., test generation that writes files). See [Security FAQ](../../reference/security-faq.md) and [Permissions](../../configure/permissions.md).

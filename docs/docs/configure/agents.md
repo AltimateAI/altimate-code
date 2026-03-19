@@ -21,6 +21,11 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | `analyst` | Explore data, run SELECT queries, generate insights | Read-only (enforced) |
 | `validator` | Data quality checks, schema validation, test coverage | Read + validate |
 | `migrator` | Cross-warehouse SQL translation and migration | Read/write for migration |
+| `researcher` | Deep multi-step investigations, root cause analysis | Read-only + parallel |
+| `trainer` | Teach conventions, manage training entries | Read-only + training |
+| `executive` | Business-friendly reporting, health dashboards | Read-only |
+
+For detailed examples and usage guidance for each mode, see [Agent Modes](../data-engineering/agent-modes.md).
 
 !!! tip
     Use the `analyst` agent when exploring data to ensure no accidental writes. Switch to `builder` when you are ready to create or modify models.
@@ -90,28 +95,7 @@ You are a Snowflake cost optimization expert. For every query:
 
 ## Agent Permissions
 
-Each agent can have its own permission overrides that restrict or expand the default permissions:
-
-```json
-{
-  "agent": {
-    "analyst": {
-      "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "bash": {
-          "dbt show *": "allow",
-          "dbt list *": "allow",
-          "*": "deny"
-        }
-      }
-    }
-  }
-}
-```
-
-!!! warning
-    Agent-specific permissions override global permissions. A `"deny"` at the agent level cannot be overridden by a global `"allow"`.
+Each agent can have its own permission overrides that restrict or expand the default permissions. For full details, examples, and recommended configurations, see the [Permissions reference](permissions.md#per-agent-permissions).
 
 ## Switching Agents
 
