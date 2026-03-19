@@ -1,6 +1,6 @@
 # altimate-code llms.txt
 # AI-friendly documentation index for altimate-code
-# Generated: 2026-03-18 | Version: v0.4.2
+# Generated: 2026-03-18 | Version: v0.5.0
 # Source: https://docs.altimate.sh
 
 > altimate-code is an open-source data engineering harness with 100+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the tool layer for your data agents. Includes a deterministic SQL Intelligence Engine (100% F1 across 1,077 queries), column-level lineage, FinOps analysis, PII detection, and dbt integration. Works with any LLM provider. Local-first, MIT-licensed.
@@ -9,7 +9,7 @@
 
 - [Quickstart (5 min)](https://docs.altimate.sh/quickstart/): Install altimate, configure your LLM provider, connect your warehouse, and run your first query in under 5 minutes.
 - [Full Setup Guide](https://docs.altimate.sh/getting-started/): Complete installation, warehouse configuration for all 8 supported warehouses, LLM provider setup, and first-run walkthrough.
-- [Network & Proxy](https://docs.altimate.sh/network/): Proxy configuration, CA certificate setup, firewall requirements.
+- [Network & Proxy](https://docs.altimate.sh/reference/network/): Proxy configuration, CA certificate setup, firewall requirements.
 
 ## Data Engineering
 
@@ -34,9 +34,9 @@
 - [Agent Skills](https://docs.altimate.sh/configure/skills/): How to configure, discover, and add custom skills.
 - [Permissions](https://docs.altimate.sh/configure/permissions/): Permission levels, pattern matching, per-agent restrictions, deny rules for destructive SQL.
 - [Tracing](https://docs.altimate.sh/configure/tracing/): Local-first observability covering trace schema, span types, live viewing, remote OTLP exporters, and crash recovery.
-- [Telemetry](https://docs.altimate.sh/configure/telemetry/): 25 anonymized event types, privacy guarantees, opt-out instructions.
+- [Telemetry](https://docs.altimate.sh/reference/telemetry/): 25 anonymized event types, privacy guarantees, opt-out instructions.
 
 ## Reference
 
-- [Security FAQ](https://docs.altimate.sh/security-faq/): 12 Q&A pairs on data handling, credentials, permissions, network endpoints, and team hardening.
-- [Troubleshooting](https://docs.altimate.sh/troubleshooting/): 6 common issues with step-by-step fixes, including tool execution errors and warehouse connection setup.
+- [Security FAQ](https://docs.altimate.sh/reference/security-faq/): 12 Q&A pairs on data handling, credentials, permissions, network endpoints, and team hardening.
+- [Troubleshooting](https://docs.altimate.sh/reference/troubleshooting/): 6 common issues with step-by-step fixes, including tool execution errors and warehouse connection setup.
