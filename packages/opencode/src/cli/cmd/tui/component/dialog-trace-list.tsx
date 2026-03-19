@@ -5,7 +5,8 @@ import { createMemo, createResource, onMount } from "solid-js"
 import { Tracer } from "@/altimate/observability/tracing"
 import { Locale } from "@/util/locale"
 
-function cleanTitle(raw: string): string {
+function cleanTitle(raw: unknown): string {
+  if (!raw || typeof raw !== "string") return "(Untitled)"
   // Strip quotes, markdown headings, and take first non-empty line
   const stripped = raw.replace(/^["'`]+|["'`]+$/g, "").trim()
   const lines = stripped.split("\n").map((l) => l.replace(/^#+\s*/, "").trim()).filter(Boolean)
@@ -56,13 +57,18 @@ export function DialogTraceList(props: {
     }
 
     result.push(...items.slice(0, 50).map((item) => {
-        const date = new Date(item.trace.startedAt)
+        const rawStartedAt = item.trace.startedAt
+        const parsedDate = typeof rawStartedAt === "string" || typeof rawStartedAt === "number"
+          ? new Date(rawStartedAt)
+          : new Date(0)
+        const date = Number.isNaN(parsedDate.getTime()) ? new Date(0) : parsedDate
         let category = date.toDateString()
         if (category === today) {
           category = "Today"
         }
 
-        const rawTitle = item.trace.metadata?.prompt || item.trace.metadata?.title || item.sessionId
+        const metadata = item.trace.metadata ?? {}
+        const rawTitle = metadata.prompt || metadata.title || item.sessionId
         const title = cleanTitle(rawTitle).slice(0, 80)
 
         const summary = item.trace.summary
@@ -74,7 +80,8 @@ export function DialogTraceList(props: {
               ? "[running] "
               : ""
 
-        const duration = formatDuration(summary?.duration ?? 0)
+        const dur = Number.isFinite(summary?.duration) ? summary!.duration : 0
+        const duration = formatDuration(dur)
 
         return {
           title: `${statusLabel}${title}`,
