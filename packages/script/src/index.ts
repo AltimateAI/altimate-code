@@ -32,7 +32,7 @@ const CHANNEL = await (async () => {
 const IS_PREVIEW = CHANNEL !== "latest"
 
 const VERSION = await (async () => {
-  if (env.OPENCODE_VERSION) return env.OPENCODE_VERSION
+  if (env.OPENCODE_VERSION) return env.OPENCODE_VERSION.replace(/^v/, "")
   if (IS_PREVIEW) return `0.0.0-${CHANNEL}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`
   const version = await fetch("https://registry.npmjs.org/opencode-ai/latest")
     .then((res) => {
