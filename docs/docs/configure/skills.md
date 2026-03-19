@@ -88,7 +88,47 @@ altimate ships with built-in skills for common data engineering tasks. Type `/` 
 | `/train` | Learn standards from documents/style guides |
 | `/training-status` | Dashboard of all learned knowledge |
 
-For custom skills, see [Adding Custom Skills](#adding-custom-skills) below.
+## Adding Custom Skills
+
+Add your own skills as Markdown files in `.altimate-code/skill/`:
+
+```markdown
+---
+name: cost-review
+description: Review SQL queries for cost optimization
+---
+
+Analyze the SQL query for cost optimization opportunities.
+Focus on: $ARGUMENTS
+```
+
+`$ARGUMENTS` is replaced with whatever the user types after the skill name (e.g., `/cost-review SELECT * FROM orders` passes `SELECT * FROM orders`).
+
+Skills are loaded from these paths (highest priority first):
+
+1. `.altimate-code/skill/` (project)
+2. `~/.altimate-code/skills/` (global)
+3. Custom paths via config:
+
+```json
+{
+  "skills": {
+    "paths": ["./my-skills", "~/shared-skills"]
+  }
+}
+```
+
+### Remote Skills
+
+Host skills at a URL and load them at startup:
+
+```json
+{
+  "skills": {
+    "urls": ["https://example.com/skills-registry.json"]
+  }
+}
+```
 
 ## Disabling External Skills
 

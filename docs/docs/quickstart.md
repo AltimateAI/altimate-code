@@ -60,7 +60,7 @@ Minimal config file option (`altimate-code.json` in your project root):
 altimate /discover
 ```
 
-Auto-detects your dbt projects, warehouse credentials, and installed tools. See [Full Setup](getting-started.md#step-3-configure-your-warehouse) for details on what `/discover` finds and manual configuration options.
+Auto-detects your dbt projects, warehouse credentials, and installed tools. See [Full Setup](getting-started.md#step-3-configure-your-warehouse-optional) for details on what `/discover` finds and manual configuration options.
 
 **No cloud warehouse?** Use DuckDB with a local file:
 

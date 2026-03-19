@@ -79,11 +79,6 @@ nav:
       - Setup: getting-started/quickstart.md
   - Examples:
       - Showcase: examples/index.md
-      - Guides:
-          - Cost Optimization: data-engineering/guides/cost-optimization.md
-          - Migration: data-engineering/guides/migration.md
-          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
-          - Using with Codex: data-engineering/guides/using-with-codex.md
   - Use:
       - Agents:
           - Agent Modes: data-engineering/agent-modes.md
@@ -110,6 +105,11 @@ nav:
           - IDE: usage/ide.md
           - GitHub: usage/github.md
           - GitLab: usage/gitlab.md
+      - Guides:
+          - Cost Optimization: data-engineering/guides/cost-optimization.md
+          - Migration: data-engineering/guides/migration.md
+          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
+          - Using with Codex: data-engineering/guides/using-with-codex.md
   - Configure:
       - Overview: configure/index.md
       - Warehouses: configure/warehouses.md

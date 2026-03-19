@@ -15,7 +15,7 @@ hide:
   <img src="../assets/images/altimate-code-banner.png" alt="altimate-code" />
 </p>
 
-<p class="hero-tagline">The open-source data engineering harness.</p>
+<p class="hero-tagline">Open-source data engineering harness.</p>
 
 <p class="hero-description">100+ specialized data engineering tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across platforms, independent of any single warehouse provider.</p>
 
@@ -32,7 +32,7 @@ hide:
 <div class="hero-install" markdown>
 
 ```bash
-npm install -g altimate-code && altimate
+npm install -g altimate-code
 ```
 
 </div>

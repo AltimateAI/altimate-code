@@ -14,7 +14,7 @@ altimate --version
 ## How to upgrade
 
 ```bash
-npm update -g @altimateai/altimate-code
+npm update -g altimate-code
 ```
 
 After upgrading, the TUI welcome banner shows what changed since your previous version.
@@ -41,7 +41,6 @@ After upgrading, the TUI welcome banner shows what changed since your previous v
 - CI: faster release — build parallel with test, lower compression, tighter timeouts (#251)
 - Docker E2E tests skip in CI unless explicitly opted in (#253)
 
-## [0.4.1] - 2026-03-16
 ## [0.4.2] - 2026-03-18
 
 ### Breaking Changes
@@ -76,6 +75,8 @@ After upgrading, the TUI welcome banner shows what changed since your previous v
 - `packages/altimate-engine/` — entire Python package (~17,000 lines)
 - `packages/opencode/src/altimate/bridge/` — JSON-RPC bridge
 - `.github/workflows/publish-engine.yml` — PyPI publish workflow
+
+## [0.4.1] - 2026-03-16
 
 ### Added
 
