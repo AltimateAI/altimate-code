@@ -76,7 +76,7 @@ nav:
   - Getting Started:
       - Overview: getting-started/index.md
       - Quickstart: getting-started/quickstart-new.md
-      - Complete Setup: getting-started/quickstart.md
+      - Setup: getting-started/quickstart.md
   - Examples:
       - Showcase: examples/index.md
       - Guides:

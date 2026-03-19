@@ -192,38 +192,6 @@ Type `/` in the TUI to see all available skills. Here's a quick reference for co
 
 ## What's Next
 
-<div class="grid cards" markdown>
-
-- :material-cog:{ .lg .middle } **Complete Setup**
-
-  ***
-
-  Advanced warehouse configs, all LLM providers, SSH tunneling, multi-environment setup.
-
-  [:octicons-arrow-right-24: Complete Setup](quickstart.md)
-
-- :material-account-group:{ .lg .middle } **Agent Modes**
-
-  ***
-
-  Builder, Analyst, Validator, Migrator, Executive — choose the right permissions for your task.
-
-  [:octicons-arrow-right-24: Agent Modes](../data-engineering/agent-modes.md)
-
-- :material-robot:{ .lg .middle } **CI & Automation**
-
-  ***
-
-  Run SQL review gates in GitHub Actions, block PRs with failing grades, automate cost reports.
-
-  [:octicons-arrow-right-24: CI & Automation](../data-engineering/guides/ci-headless.md)
-
-- :material-school:{ .lg .middle } **Train Your Agent**
-
-  ***
-
-  Teach project-specific patterns, naming conventions, and SQL style rules.
-
-  [:octicons-arrow-right-24: Training](../configure/skills.md)
-
-</div>
+- **[Setup](quickstart.md)** — Warehouses, LLM providers, agent modes, skills, and permissions
+- **[Examples](../examples/index.md)** — End-to-end walkthroughs for common data engineering tasks
+- **[Interfaces](../usage/tui.md)** — TUI, CLI, CI, IDE, and GitHub/GitLab integrations

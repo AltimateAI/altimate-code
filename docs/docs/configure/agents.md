@@ -13,23 +13,6 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | `build` | Build-focused agent that prioritizes code generation |
 | `explore` | Read-only exploration agent |
 
-### Data Engineering
-
-| Agent | Description | Permissions |
-|-------|------------|------------|
-| `builder` | Create dbt models, SQL pipelines, transformations | Full read/write |
-| `analyst` | Explore data, run SELECT queries, generate insights | Read-only (enforced) |
-| `validator` | Data quality checks, schema validation, test coverage | Read + validate |
-| `migrator` | Cross-warehouse SQL translation and migration | Read/write for migration |
-| `researcher` | Deep multi-step investigations, root cause analysis | Read-only + parallel |
-| `trainer` | Teach conventions, manage training entries | Read-only + training |
-| `executive` | Business-friendly reporting, health dashboards | Read-only |
-
-For detailed examples and usage guidance for each mode, see [Agent Modes](../data-engineering/agent-modes.md).
-
-!!! tip
-    Use the `analyst` agent when exploring data to ensure no accidental writes. Switch to `builder` when you are ready to create or modify models.
-
 ## Custom Agents
 
 Define custom agents in `altimate-code.json`:
