@@ -113,7 +113,9 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.text}>
                 <b>Trace</b>
               </text>
-              <text fg={theme.textMuted}>type <span style={{ fg: theme.accent }}>/trace</span> to view</text>
+              <text fg={theme.textMuted}>Every tool call, LLM request,</text>
+              <text fg={theme.textMuted}>and decision in a live view</text>
+              <text fg={theme.textMuted}>type <span style={{ fg: theme.accent }}>/trace</span> to open</text>
             </box>
             {/* altimate_change end */}
             <Show when={mcpEntries().length > 0}>
