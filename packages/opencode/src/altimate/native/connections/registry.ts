@@ -291,7 +291,7 @@ export async function get(name: string): Promise<Connector> {
           auth_method: detectAuthMethod(config),
           success: false,
           duration_ms: Date.now() - startTime,
-          error: String(e).slice(0, 500),
+          error: Telemetry.maskString(String(e)).slice(0, 500),
           error_category: categorizeConnectionError(e),
         })
       } catch {}

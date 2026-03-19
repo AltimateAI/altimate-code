@@ -75,7 +75,7 @@ export async function call<M extends BridgeMethod>(
         method: method as string,
         status: "error",
         duration_ms: Date.now() - startTime,
-        error: String(e).slice(0, 500),
+        error: Telemetry.maskString(String(e)).slice(0, 500),
       })
     } catch {
       // Telemetry must never prevent error propagation

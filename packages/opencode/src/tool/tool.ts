@@ -138,7 +138,7 @@ export namespace Tool {
               const errorMsg =
                 typeof result.metadata?.error === "string"
                   ? result.metadata.error
-                  : result.output || "unknown error"
+                  : "unknown error"
               const maskedErrorMsg = Telemetry.maskString(errorMsg).slice(0, 500)
               Telemetry.track({
                 type: "core_failure",

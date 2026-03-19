@@ -37,7 +37,7 @@ We collect the following categories of events:
 | `sql_execute_failure` | A SQL execution fails (warehouse type, query type, error message, PII-masked SQL — no raw values) |
 | `core_failure` | An internal library error occurs — function name, error category, and error message and arguments with PII and sensitive fields masked |
 
-Each event includes a timestamp, anonymous session ID, and the CLI version.
+Each event includes a timestamp, anonymous session ID, CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
 
 ## Delivery & Reliability
 

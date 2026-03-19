@@ -435,10 +435,13 @@ export namespace Telemetry {
 
   // Mirrors altimate-sdk (Rust) SENSITIVE_KEYS — keep in sync.
   const SENSITIVE_KEYS: string[] = [
-    "key", "api_key", "apikey", "token", "access_token", "refresh_token",
+    "key", "api_key", "apikey", "apiKey", "token", "access_token", "refresh_token",
     "secret", "secret_key", "password", "passwd", "pwd",
     "credential", "credentials", "authorization", "auth",
     "signature", "sig", "private_key", "connection_string",
+    // camelCase variants not caught by prefix/suffix matching
+    "authtoken", "accesstoken", "refreshtoken", "bearertoken", "jwttoken",
+    "jwtsecret", "clientsecret", "appsecret",
   ]
 
   function isSensitiveKey(key: string): boolean {
@@ -567,7 +570,7 @@ export namespace Telemetry {
 
       // Flatten all fields — nested `tokens` object gets prefixed keys
       for (const [k, v] of Object.entries(fields)) {
-        if (k === "session_id" || k === "project_id") continue
+        if (k === "session_id" || k === "project_id" || k === "_retried") continue
         if (k === "tokens" && typeof v === "object" && v !== null) {
           for (const [tk, tv] of Object.entries(v as Record<string, unknown>)) {
             if (typeof tv === "number") measurements[`tokens_${tk}`] = tv
