@@ -32,6 +32,7 @@ import { Tracer } from "@/altimate/observability/tracing"
 import { renderTraceViewer } from "@/altimate/observability/viewer"
 import { DialogTraceList } from "./component/dialog-trace-list"
 import fsAsync from "fs/promises"
+import fsSync from "fs"
 
 // altimate_change start - shared trace viewer server
 let traceViewerServer: ReturnType<typeof Bun.serve> | undefined
@@ -269,6 +270,13 @@ function App() {
   // altimate_change start - shared trace viewer helper
   function openTraceInBrowser(sessionID: string) {
     try {
+      // Check if trace file exists on disk before opening browser
+      const safeId = sessionID.replace(/[/\\.:]/g, "_")
+      const traceFile = `${Tracer.getTracesDir()}/${safeId}.json`
+      if (!fsSync.existsSync(traceFile)) {
+        toast.show({ variant: "warning", message: "Trace not available yet — send a prompt first", duration: 4000 })
+        return
+      }
       const url = getTraceViewerUrl(sessionID)
       const openArgs =
         process.platform === "darwin"

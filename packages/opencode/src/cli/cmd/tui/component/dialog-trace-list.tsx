@@ -44,8 +44,19 @@ export function DialogTraceList(props: {
 
     const items = traces() ?? []
     const today = new Date().toDateString()
+    const result: Array<{ title: string; value: string; category: string; footer: string }> = []
 
-    return items.slice(0, 50).map((item) => {
+    // Add current session placeholder if not found in disk traces
+    if (props.currentSessionID && !items.some((t) => t.sessionId === props.currentSessionID)) {
+      result.push({
+        title: "Current session",
+        value: props.currentSessionID,
+        category: "Today",
+        footer: Locale.time(Date.now()),
+      })
+    }
+
+    result.push(...items.slice(0, 50).map((item) => {
         const date = new Date(item.trace.startedAt)
         let category = date.toDateString()
         if (category === today) {
@@ -72,7 +83,9 @@ export function DialogTraceList(props: {
           category,
           footer: `${duration}  ${Locale.time(date.getTime())}`,
         }
-      })
+      }))
+
+    return result
   })
 
   onMount(() => {
