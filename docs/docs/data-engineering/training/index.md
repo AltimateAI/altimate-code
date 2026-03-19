@@ -21,7 +21,7 @@ Builder: Saved. I'll apply this in every future session.
          Your team gets it too when they pull.
 ```
 
-That's it. **2 seconds.** No editing files. No context switching. The correction becomes permanent knowledge that every agent mode (builder, analyst, validator) sees in every future session.
+That's it. **2 seconds.** No editing files. No context switching. The correction becomes permanent knowledge that every agent mode (builder, analyst) sees in every future session.
 
 Research shows compact, focused context improves AI performance by 17 percentage points, while dumping comprehensive docs actually hurts by 3 points (SkillsBench, 7,308 test runs). Training delivers the right knowledge to the right agent at the right time, not everything to everyone.
 
@@ -48,7 +48,7 @@ Point the agent at code that demonstrates a convention:
 ```
 You: /teach @models/staging/stg_orders.sql
 
-Trainer: I see the pattern:
+Agent: I see the pattern:
   - source CTE → filtered CTE → final
   - ROW_NUMBER dedup on _loaded_at
   Save as pattern "staging-cte-structure"?
@@ -91,22 +91,15 @@ Agent: I found 8 actionable rules:
 
 No meetings. No Slack messages. No "hey everyone, remember to..."
 
-## Trainer Mode
+## Systematic Teaching
 
-For systematic teaching (not just corrections), switch to trainer mode:
+For systematic teaching (not just corrections), use the `/teach` and `/train` skills in any agent mode:
 
-```bash
-altimate --agent trainer
-```
+- `/teach @file` to learn patterns from example files
+- `/train @file` to learn standards from documentation
+- `/training-status` to see all learned knowledge
 
-Trainer mode is read-only and cannot modify your code. It helps you:
-
-- **Teach interactively**: "Let me teach you about our Databricks setup"
-- **Find gaps**: "What don't you know about my project?"
-- **Review training**: "Show me what the team has taught you"
-- **Curate**: "Which entries are stale? What should we consolidate?"
-
-### When to Use Trainer Mode
+### When to Teach
 
 | Scenario | Why |
 |---|---|
@@ -121,8 +114,6 @@ Training doesn't dump everything into every session. It delivers what's relevant
 
 - **Builder** gets rules and patterns first (naming conventions, SQL constraints)
 - **Analyst** gets glossary and context first (business terms, background knowledge)
-- **Validator** gets rules and standards first (quality gates, test requirements)
-- **Executive** gets glossary and playbooks first (business terms, procedures)
 
 Research shows 2-3 focused modules per task is optimal. The scoring system ensures each agent gets its most relevant knowledge first.
 

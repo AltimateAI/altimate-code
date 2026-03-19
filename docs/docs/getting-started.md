@@ -89,13 +89,9 @@ altimate offers specialized agent modes for different workflows:
 
 | What do you want to do? | Use this agent mode |
 |---|---|
-| Analyzing data without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling |
-| Building or generating dbt models | **Builder** for model scaffolding, SQL generation, ref() wiring |
-| Validating data quality | **Validator** for test generation, anomaly detection, data contracts |
-| Migrating across warehouses | **Migrator** for cross-dialect SQL translation, compatibility checks |
-| Teaching team conventions | **Trainer**, which learns corrections and enforces naming/style rules across team |
-| Research and exploration | **Researcher** for deep-dive analysis, lineage tracing, impact assessment |
-| Executive summaries and reports | **Executive** for high-level overviews, cost summaries, health dashboards |
+| Analyzing data without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling. SQL writes are blocked entirely. |
+| Building or generating dbt models | **Builder** for model scaffolding, SQL generation, ref() wiring. SQL writes prompt for approval. |
+| Planning before acting | **Plan** for outlining an approach before switching to builder to execute it |
 
 Switch modes in the TUI:
 
@@ -214,6 +210,6 @@ Generate data quality tests for all models in the marts/ directory. For each mod
 - [CLI](usage/cli.md): Subcommands, flags, and environment variables
 - [Config Files](configure/config.md): Full config file reference
 - [Providers](configure/providers.md): Set up Anthropic, OpenAI, Bedrock, Ollama, and more
-- [Agent Modes](data-engineering/agent-modes.md): Builder, Analyst, Validator, Migrator, Researcher, Trainer
+- [Agent Modes](data-engineering/agent-modes.md): Builder, Analyst, Plan
 - [Training](data-engineering/training/index.md): Correct the agent once, it remembers forever, your team inherits it
 - [Tools](data-engineering/tools/sql-tools.md): 100+ specialized tools for SQL, dbt, and warehouses

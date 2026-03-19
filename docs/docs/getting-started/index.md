@@ -76,7 +76,7 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
     ---
 
-    Five agent modes — Builder, Analyst, Validator, Migrator, and Executive — each with tool-level permissions you can `allow`, `ask`, or `deny` per agent. Layer on project rules via `AGENTS.md`, automatic context compaction for long sessions, and auto-formatting on every edit. Governance enforced by the harness.
+    Three agent modes — Builder, Analyst, and Plan — each with tool-level permissions you can `allow`, `ask`, or `deny` per agent. Create custom agents for specialized workflows. Layer on project rules via `AGENTS.md`, automatic context compaction for long sessions, and auto-formatting on every edit. Governance enforced by the harness.
 
 </div>
 

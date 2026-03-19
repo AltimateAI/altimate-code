@@ -1,11 +1,11 @@
 # Migration Guide
 
-Use migrator mode to translate SQL across warehouse dialects while preserving lineage and correctness.
+Use altimate to translate SQL across warehouse dialects while preserving lineage and correctness.
 
-## Start migrator mode
+## Start a migration
 
 ```bash
-altimate --agent migrator
+altimate --agent builder
 ```
 
 ## Translation workflow
@@ -15,7 +15,7 @@ altimate --agent migrator
 ```
 You: Migrate our Snowflake models to BigQuery
 
-Migrator: I'll translate each model and verify lineage is preserved.
+Builder: I'll translate each model and verify lineage is preserved.
          Let me start by listing your models.
 
 > dbt_manifest ./target/manifest.json
@@ -24,7 +24,7 @@ Migrator: I'll translate each model and verify lineage is preserved.
 
 ### 2. Translate with verification
 
-For each model, the migrator:
+For each model, the agent:
 
 1. **Reads** the source SQL
 2. **Translates** to target dialect
@@ -66,7 +66,7 @@ Some features don't have direct equivalents:
 ```
 You: Run all translations and report issues
 
-Migrator:
+Builder:
   ✓ 38/47 models translated cleanly
   ⚠ 6 models need manual review (VARIANT columns)
   ✗ 3 models use Snowflake-specific features (STREAMS, TASKS)

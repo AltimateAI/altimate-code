@@ -290,13 +290,9 @@ altimate ships with specialized agent modes, each with its own tool permissions:
 
 | Mode | Access | Use when you want to... |
 |---|---|---|
-| **Builder** | Read/Write | Create and modify SQL, dbt models, pipelines |
-| **Analyst** | Read-only | Explore production data safely, run cost analysis |
-| **Validator** | Read + Validate | Check data quality, run anti-pattern detection |
-| **Migrator** | Cross-warehouse | Translate SQL between dialects, plan migrations |
-| **Researcher** | Read-only + Parallel | Deep-dive investigations, lineage tracing |
-| **Trainer** | Read-only + Training | Teach the agent your project conventions |
-| **Executive** | Read-only | Generate business-friendly reports and summaries |
+| **Builder** | Read/Write | Create and modify SQL, dbt models, pipelines. SQL writes prompt for approval. |
+| **Analyst** | Read-only | Explore production data safely, run cost analysis. SQL writes denied entirely. |
+| **Plan** | Minimal | Plan an approach before switching to builder to execute it |
 
 Switch modes in the TUI:
 
@@ -418,13 +414,9 @@ Define project-wide conventions in an `AGENTS.md` file at your project root. The
 
 | Agent | File writes | SQL writes | Bash | Training |
 |---|---|---|---|---|
-| Builder | allow | allow | ask | deny |
-| Analyst | deny | deny (SELECT only) | deny | deny |
-| Validator | deny | deny | ask | deny |
-| Migrator | allow | allow | ask | deny |
-| Researcher | deny | deny | allow | deny |
-| Trainer | deny | deny | deny | allow |
-| Executive | deny | deny | deny | deny |
+| Builder | allow | ask (prompts for approval) | ask | allow |
+| Analyst | deny | deny (blocked entirely) | deny (safe commands auto-allowed) | allow |
+| Plan | deny | deny | deny | deny |
 
 ---
 

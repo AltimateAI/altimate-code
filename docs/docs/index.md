@@ -116,7 +116,7 @@ npm install -g altimate-code
 
 ---
 
-<h2 class="section-heading">Seven specialized agents</h2>
+<h2 class="section-heading">Purpose-built agent modes</h2>
 <p class="section-sub">Each agent has scoped permissions and purpose-built tools for its role.</p>
 
 <div class="grid cards" markdown>
@@ -125,45 +125,23 @@ npm install -g altimate-code
 
     ---
 
-    Create dbt models, SQL pipelines, and data transformations with full read/write access.
+    Create dbt models, SQL pipelines, and data transformations with full read/write access. SQL writes prompt for approval. Destructive SQL is hard-blocked.
 
 -   :material-chart-bar:{ .lg .middle } **Analyst**
 
     ---
 
-    Explore data, run SELECT queries, and generate insights. Read-only access is enforced.
+    Explore data, run SELECT queries, and generate insights. Read-only access is enforced. SQL writes are denied, not prompted. Safe bash commands auto-allowed.
 
--   :material-check-decagram:{ .lg .middle } **Validator**
-
-    ---
-
-    Data quality checks, schema validation, test coverage analysis, and CI gating.
-
--   :material-swap-horizontal:{ .lg .middle } **Migrator**
+-   :material-clipboard-text:{ .lg .middle } **Plan**
 
     ---
 
-    Cross-warehouse SQL translation, schema migration, and dialect conversion workflows.
-
--   :material-magnify:{ .lg .middle } **Researcher**
-
-    ---
-
-    Deep multi-step investigations with structured reports. Root cause analysis, cost audits, deprecation checks.
-
--   :material-school:{ .lg .middle } **Trainer**
-
-    ---
-
-    Correct the agent once, it remembers forever, your team inherits it. Teach patterns, rules, and domain knowledge.
-
--   :material-account-tie:{ .lg .middle } **Executive**
-
-    ---
-
-    Business-friendly reporting. No SQL jargon. Translates technical findings into impact and recommendations.
+    Plan before acting. Read-only with minimal permissions. No SQL, no bash, no file modifications.
 
 </div>
+
+Create custom agents with tailored permissions for specialized workflows like validation, migration, research, or executive reporting. See [Agent Configuration](configure/agents.md#custom-agents).
 
 ---
 

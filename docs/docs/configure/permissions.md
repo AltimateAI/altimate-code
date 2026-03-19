@@ -86,6 +86,7 @@ Override permissions for specific agents:
 | `grep` | Yes | Search files |
 | `list` | Yes | List directories |
 | `bash` | Yes | Shell commands |
+| `sql_execute_write` | Yes | SQL write operations (INSERT, UPDATE, DELETE, etc.) |
 | `task` | Yes | Spawn subagents |
 | `lsp` | Yes | LSP operations |
 | `skill` | Yes | Execute skills |
@@ -205,20 +206,22 @@ Give each agent only the permissions it needs:
       "permission": {
         "write": "deny",
         "edit": "deny",
+        "sql_execute_write": "deny",
         "bash": {
-          "SELECT *": "allow",
-          "dbt docs *": "allow",
-          "*": "deny"
+          "*": "deny",
+          "ls *": "allow",
+          "cat *": "allow",
+          "dbt list *": "allow"
         }
       }
     },
     "builder": {
       "permission": {
+        "sql_execute_write": "ask",
         "bash": {
           "*": "ask",
           "dbt *": "allow",
-          "git *": "ask",
-          "DROP *": "deny"
+          "rm -rf *": "deny"
         }
       }
     }

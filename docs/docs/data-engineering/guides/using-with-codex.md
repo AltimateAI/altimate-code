@@ -1,4 +1,18 @@
-# Using altimate with Codex (ChatGPT Subscription)
+# Using altimate with Codex
+
+altimate integrates with Codex in two ways: as an **LLM provider** (use your ChatGPT subscription to power altimate) and as a **Codex skill** (invoke altimate from within Codex CLI).
+
+## Using altimate as a Codex CLI skill
+
+You can delegate data engineering tasks from Codex CLI to altimate. Run `/configure-codex` inside altimate to set up the integration:
+
+```
+/configure-codex
+```
+
+This creates `~/.codex/skills/altimate/SKILL.md`. Restart Codex to pick up the new skill. Codex will then automatically invoke altimate when you ask about data engineering tasks like SQL analysis, lineage, dbt, or FinOps.
+
+## Using Codex as an LLM provider
 
 If you have a ChatGPT Plus or Pro subscription, you can use Codex as your LLM backend in altimate at no additional API cost. Your subscription covers all usage.
 
