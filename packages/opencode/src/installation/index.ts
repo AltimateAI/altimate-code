@@ -288,23 +288,21 @@ export namespace Installation {
         if (!version) throw new Error(`Could not detect version for tap formula: ${formula}`)
         return version
       }
-      // altimate_change start — brew: try local brew info, then GitHub releases API
+      // altimate_change start — brew: use GitHub releases API as source of truth
       // altimate-code is NOT in core homebrew, so formulae.brew.sh will 404.
-      // Use `brew info --json=v2` which works for any installed formula.
-      try {
-        const infoJson = await text(["brew", "info", "--json=v2", "altimate-code"])
-        const info = JSON.parse(infoJson)
-        const ver = info.formulae?.[0]?.versions?.stable
-        if (ver) return ver
-      } catch {
-        // brew info failed — fall through to GitHub releases API
-      }
+      // `brew info --json=v2` returns the LOCAL cached version which can be stale
+      // if the tap hasn't been updated — using it would cause `latest()` to return
+      // the already-installed version, making the upgrade command skip silently.
+      // GitHub releases API is the authoritative source for the actual latest version.
       return fetch("https://api.github.com/repos/AltimateAI/altimate-code/releases/latest")
         .then((res) => {
-          if (!res.ok) throw new Error(res.statusText)
+          if (!res.ok) throw new Error(`GitHub releases API: ${res.status} ${res.statusText}`)
           return res.json()
         })
-        .then((data: any) => data.tag_name.replace(/^v/, ""))
+        .then((data: any) => {
+          if (!data.tag_name) throw new Error("Missing tag_name in GitHub releases response")
+          return data.tag_name.replace(/^v/, "")
+        })
       // altimate_change end
     }
 

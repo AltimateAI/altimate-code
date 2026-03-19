@@ -26,6 +26,11 @@ describe("Script.version normalization", () => {
     expect(SCRIPT_INDEX).toContain('env.OPENCODE_VERSION.replace(/^v/, "")')
   })
 
+  test("channel detection strips v prefix before 0.0.0- check", () => {
+    // v0.0.0-preview tags should NOT be treated as "latest" channel
+    expect(SCRIPT_INDEX).toContain('env.OPENCODE_VERSION.replace(/^v/, "").startsWith("0.0.0-")')
+  })
+
   test("Installation.VERSION also strips v prefix", () => {
     const installationSrc = fs.readFileSync(
       path.resolve(import.meta.dir, "../../src/installation/index.ts"),

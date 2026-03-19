@@ -53,14 +53,18 @@ describe("brew latest() version resolution", () => {
     expect(INSTALLATION_SRC).not.toContain("formulae.brew.sh/api/formula/altimate-code.json")
   })
 
-  test("non-tap formula falls back to brew info then GitHub releases API", () => {
-    // Should try brew info --json=v2 for the non-qualified name
-    expect(INSTALLATION_SRC).toContain('"brew", "info", "--json=v2", "altimate-code"')
+  test("non-tap brew uses GitHub releases API as source of truth", () => {
+    // brew info --json=v2 returns LOCAL cached version which can be stale.
+    // GitHub releases API is authoritative for the actual latest version.
     expect(INSTALLATION_SRC).toContain("api.github.com/repos/AltimateAI/altimate-code/releases/latest")
   })
 
   test("GitHub releases fallback strips v prefix from tag_name", () => {
     expect(INSTALLATION_SRC).toContain('tag_name.replace(/^v/, "")')
+  })
+
+  test("GitHub releases fallback validates tag_name exists", () => {
+    expect(INSTALLATION_SRC).toContain("Missing tag_name")
   })
 })
 
