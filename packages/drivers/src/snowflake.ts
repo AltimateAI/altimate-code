@@ -17,12 +17,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   }
 
   // Suppress snowflake-sdk's Winston console logging — it writes JSON log
-  // lines to stdout which corrupt the TUI display (see #249).
+  // lines into the interactive TUI output and corrupts the display.
   if (typeof snowflake.configure === "function") {
     try {
-      snowflake.configure({ logLevel: "OFF" })
+      snowflake.configure({
+        logLevel: "OFF",
+        additionalLogToConsole: false,
+      })
     } catch {
-      // Older SDK versions may not support this option; ignore.
+      // Older SDK versions may not support these options; ignore.
     }
   }
 
