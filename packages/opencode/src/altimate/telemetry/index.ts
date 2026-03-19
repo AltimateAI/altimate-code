@@ -451,9 +451,12 @@ export namespace Telemetry {
     )
   }
 
-  // Mirrors altimate-sdk mask_string: replace '...' → ?, collapse whitespace.
   export function maskString(s: string): string {
-    return s.replace(/'(?:[^'\\]|\\.)*'/g, "?").replace(/\s+/g, " ").trim()
+    return s
+      .replace(/'(?:[^'\\]|\\.)*'/g, "?")
+      .replace(/"(?:[^"\\]|\\.)*"/g, "?")
+      .replace(/\s+/g, " ")
+      .trim()
   }
 
   function maskValue(value: unknown, key?: string): unknown {
