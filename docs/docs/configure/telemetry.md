@@ -35,7 +35,7 @@ We collect the following categories of events:
 | `context_overflow_recovered` | Context overflow is handled (strategy) |
 | `skill_used` | A skill is loaded (skill name and source — `builtin`, `global`, or `project` — no skill content) |
 | `sql_execute_failure` | A SQL execution fails (warehouse type, query type, error message, PII-masked SQL — no raw values) |
-| `core_failure` | An internal library error occurs — function name, error category, error message (truncated to 500 chars), and PII-masked arguments (string literals replaced with `?`, sensitive keys fully redacted) |
+| `core_failure` | An internal library error occurs — function name, error category, error message (truncated to 500 chars), and arguments with PII and sensitive fields masked |
 
 Each event includes a timestamp, anonymous session ID, and the CLI version.
 
