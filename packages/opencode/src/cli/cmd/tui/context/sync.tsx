@@ -358,6 +358,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "message.part.updated": {
+          // altimate_change start - line streaming: discard buffered text when part is
+          // authoritatively set by the server (via reconcile). Without this, the buffer
+          // would append stale text on top of the server's complete content, duplicating
+          // the trailing partial line.
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            const { messageID, id: partID } = event.properties.part
+            for (const key of lineBuffer.keys()) {
+              if (key.startsWith(`${messageID}:${partID}:`)) lineBuffer.delete(key)
+            }
+          }
+          // altimate_change end
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
             setStore("part", event.properties.part.messageID, [event.properties.part])
@@ -424,6 +435,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.part.removed": {
+          // altimate_change start - line streaming: discard buffers for removed parts
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            const { messageID, partID } = event.properties
+            for (const key of lineBuffer.keys()) {
+              if (key.startsWith(`${messageID}:${partID}:`)) lineBuffer.delete(key)
+            }
+          }
+          // altimate_change end
           const parts = store.part[event.properties.messageID]
           const result = Binary.search(parts, event.properties.partID, (p) => p.id)
           if (result.found)
