@@ -144,7 +144,9 @@ The `--live` flag adds a green "LIVE" indicator and polls for updates every 2 se
 
 ### From the TUI
 
-Type `/trace` in the TUI to open the trace viewer for the current session in your browser. The viewer launches in live mode automatically, so you can watch spans appear as the agent works.
+Type `/trace` in the TUI to open a trace history dialog listing all recent sessions. Select any trace to open it in your browser with the interactive viewer. The current session appears at the top, and traces are grouped by date with duration and timestamp info.
+
+The viewer launches in live mode automatically for in-progress sessions, so you can watch spans appear as the agent works.
 
 ## Remote Exporters
 

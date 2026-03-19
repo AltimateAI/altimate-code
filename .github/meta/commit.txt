@@ -1,26 +1,18 @@
-fix: harden auth field handling for all warehouse drivers (#267)
+fix: address multi-model code review findings for recent merges
 
-Add config field name normalization so LLM-generated, dbt, and SDK
-field names all resolve to canonical snake_case before reaching drivers.
-
-- Add `normalizeConfig()` in `@altimateai/drivers` with per-driver alias
-  maps (Snowflake, BigQuery, Databricks, Redshift, PostgreSQL, MySQL,
-  SQL Server, Oracle) and common aliases (`username` → `user`,
-  `dbname` → `database`)
-- Call `normalizeConfig()` before both `resolveConfig()` and
-  `saveConnection()` in registry so credential store uses canonical names
-- Add Snowflake inline PEM support via `config.private_key`
-- Add BigQuery `credentials_json` (inline JSON) support
-- Add MySQL SSL construction from top-level `ssl_ca`/`ssl_cert`/`ssl_key`
-  fields at connection time (not during normalization, to preserve
-  credential store detection)
-- Expand `SENSITIVE_FIELDS` with `private_key`, `token`,
-  `credentials_json`, `keyfile_json`, `ssl_key`, `ssl_cert`, `ssl_ca`
-- Update `sensitiveKeys` in `project-scan.ts` to match
-- Fix `detectAuthMethod()` to recognize inline `private_key`
-- Update `warehouse_add` tool description with per-warehouse field docs
-- Add 72 unit tests for normalization logic
-
-Closes #267
+- Fix TUI trace dialog ignoring custom `tracing.dir` config — plumb
+  config dir through `DialogTraceList`, `getTraceViewerUrl`, and
+  `openTraceInBrowser` so custom trace directories work in the TUI
+- Fix WebFetch `clearTimeout` leak — move both `fetch` calls inside the
+  `try` block so the `finally` clause always clears the timer, even on
+  DNS failures or `AbortError`
+- Fix `cleanTitle` empty string fallback — add `"(Untitled)"` as final
+  fallback when all parsing yields empty
+- Add error logging to `openTraceInBrowser` — log actual error before
+  showing toast so failures are debuggable
+- Add `altimate_change` markers around `HONEST_UA` branding constant in
+  `webfetch.ts` for upstream merge compatibility
+- Update tracing docs for new `/trace` dialog behavior
+- Update TUI docs to include `/trace` in slash command examples
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

@@ -35,9 +35,10 @@ import fsAsync from "fs/promises"
 
 // altimate_change start - shared trace viewer server
 let traceViewerServer: ReturnType<typeof Bun.serve> | undefined
-function getTraceViewerUrl(sessionID: string): string {
+let traceViewerTracesDir: string | undefined
+function getTraceViewerUrl(sessionID: string, tracesDir?: string): string {
   if (!traceViewerServer) {
-    const tracesDir = Tracer.getTracesDir()
+    traceViewerTracesDir = Tracer.getTracesDir(tracesDir)
     traceViewerServer = Bun.serve({
       port: 0, // random available port
       hostname: "127.0.0.1",
@@ -56,7 +57,7 @@ function getTraceViewerUrl(sessionID: string): string {
         }
 
         const safeId = sid.replace(/[/\\.:]/g, "_")
-        const traceFile = `${tracesDir}/${safeId}.json`
+        const traceFile = `${traceViewerTracesDir}/${safeId}.json`
 
         if (action === "api") {
           try {
@@ -273,21 +274,34 @@ function App() {
   const promptRef = usePromptRef()
 
   // altimate_change start - shared trace viewer helper
+  // Load custom tracing dir from config (same as worker.ts and trace.ts)
+  const [tracesDir, setTracesDir] = createSignal<string | undefined>(undefined)
+  onMount(async () => {
+    try {
+      const { Config } = await import("@/config/config")
+      const cfg = await Config.get()
+      setTracesDir(cfg.tracing?.dir)
+    } catch {
+      // Config failure should not prevent TUI from working
+    }
+  })
+
   async function openTraceInBrowser(sessionID: string) {
     try {
       // Check if trace file exists on disk before opening browser
       const safeId = sessionID.replace(/[/\\.:]/g, "_")
-      const traceFile = `${Tracer.getTracesDir()}/${safeId}.json`
+      const traceFile = `${Tracer.getTracesDir(tracesDir())}/${safeId}.json`
       const exists = await fsAsync.access(traceFile).then(() => true).catch(() => false)
       if (!exists) {
         toast.show({ variant: "warning", message: "Trace not available yet — send a prompt first", duration: 4000 })
         return
       }
-      const url = getTraceViewerUrl(sessionID)
+      const url = getTraceViewerUrl(sessionID, tracesDir())
       await open(url)
       toast.show({ variant: "info", message: `Trace viewer: ${url}`, duration: 6000 })
-    } catch {
-      toast.show({ variant: "warning", message: `Failed to open browser. Trace files: ${Tracer.getTracesDir()}`, duration: 8000 })
+    } catch (err) {
+      Log.Default.error(`Failed to open trace viewer: ${err}`)
+      toast.show({ variant: "warning", message: `Failed to open browser. Trace files: ${Tracer.getTracesDir(tracesDir())}`, duration: 8000 })
     }
   }
   // altimate_change end
@@ -683,6 +697,7 @@ function App() {
         dialog.replace(() => (
           <DialogTraceList
             currentSessionID={currentSessionID}
+            tracesDir={tracesDir()}
             onSelect={openTraceInBrowser}
           />
         ))

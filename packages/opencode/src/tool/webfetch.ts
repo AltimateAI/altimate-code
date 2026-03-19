@@ -7,7 +7,9 @@ import { abortAfterAny } from "../util/abort"
 const MAX_RESPONSE_SIZE = 5 * 1024 * 1024 // 5MB
 const DEFAULT_TIMEOUT = 30 * 1000 // 30 seconds
 const MAX_TIMEOUT = 120 * 1000 // 2 minutes
+// altimate_change start — branding: honest bot UA
 const HONEST_UA = "altimate-code/1.0 (+https://github.com/AltimateAI/altimate-code)"
+// altimate_change end
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 // Status codes that warrant a retry with a different User-Agent
@@ -70,16 +72,17 @@ export const WebFetchTool = Tool.define("webfetch", {
     const honestHeaders = { ...baseHeaders, "User-Agent": HONEST_UA }
     const browserHeaders = { ...baseHeaders, "User-Agent": BROWSER_UA }
 
-    let response = await fetch(params.url, { signal, headers: honestHeaders })
-
-    // Retry with browser UA if the honest UA was rejected
-    if (!response.ok && RETRYABLE_STATUSES.has(response.status)) {
-      await response.body?.cancel().catch(() => {})
-      response = await fetch(params.url, { signal, headers: browserHeaders })
-    }
-
     let arrayBuffer: ArrayBuffer
+    let response: Response
     try {
+      response = await fetch(params.url, { signal, headers: honestHeaders })
+
+      // Retry with browser UA if the honest UA was rejected
+      if (!response.ok && RETRYABLE_STATUSES.has(response.status)) {
+        await response.body?.cancel().catch(() => {})
+        response = await fetch(params.url, { signal, headers: browserHeaders })
+      }
+
       if (!response.ok) {
         throw new Error(`Request failed with status code: ${response.status}`)
       }

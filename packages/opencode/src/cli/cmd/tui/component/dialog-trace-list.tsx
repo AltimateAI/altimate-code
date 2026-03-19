@@ -10,7 +10,7 @@ function cleanTitle(raw: unknown): string {
   // Strip quotes, markdown headings, and take first non-empty line
   const stripped = raw.replace(/^["'`]+|["'`]+$/g, "").trim()
   const lines = stripped.split("\n").map((l) => l.replace(/^#+\s*/, "").trim()).filter(Boolean)
-  return lines.find((l) => l.length > 5) || lines[0] || stripped
+  return lines.find((l) => l.length > 5) || lines[0] || stripped || "(Untitled)"
 }
 
 function formatDuration(ms: number): string {
@@ -23,12 +23,13 @@ function formatDuration(ms: number): string {
 
 export function DialogTraceList(props: {
   currentSessionID?: string
+  tracesDir?: string
   onSelect: (sessionID: string) => void
 }) {
   const dialog = useDialog()
 
   const [traces] = createResource(async () => {
-    return Tracer.listTraces()
+    return Tracer.listTraces(props.tracesDir)
   })
 
   const options = createMemo(() => {
@@ -37,7 +38,7 @@ export function DialogTraceList(props: {
         {
           title: "Failed to load traces",
           value: "__error__",
-          description: `Check ${Tracer.getTracesDir()}`,
+          description: `Check ${Tracer.getTracesDir(props.tracesDir)}`,
         },
       ]
     }
