@@ -3,7 +3,7 @@
 # Generated: 2026-03-18 | Version: v0.4.2
 # Source: https://docs.altimate.sh
 
-> altimate-code is an open-source data engineering harness with 50+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the tool layer for your data agents. Includes a deterministic SQL Intelligence Engine (100% F1 across 1,077 queries), column-level lineage, FinOps analysis, PII detection, and dbt integration. Works with any LLM provider. Local-first, MIT-licensed.
+> altimate-code is an open-source data engineering harness with 100+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the tool layer for your data agents. Includes a deterministic SQL Intelligence Engine (100% F1 across 1,077 queries), column-level lineage, FinOps analysis, PII detection, and dbt integration. Works with any LLM provider. Local-first, MIT-licensed.
 
 ## Get Started
 

@@ -4,7 +4,7 @@
 
 ## Why altimate?
 
-altimate is the open-source data engineering harness with 50+ deterministic tools for building, validating, optimizing, and shipping data products. Unlike general-purpose coding agents, every tool is purpose-built for data engineering:
+altimate is the open-source data engineering harness with 100+ deterministic tools for building, validating, optimizing, and shipping data products. Unlike general-purpose coding agents, every tool is purpose-built for data engineering:
 
 | Capability | General coding agents | altimate |
 |---|---|---|
@@ -216,4 +216,4 @@ Generate data quality tests for all models in the marts/ directory. For each mod
 - [Providers](configure/providers.md): Set up Anthropic, OpenAI, Bedrock, Ollama, and more
 - [Agent Modes](data-engineering/agent-modes.md): Builder, Analyst, Validator, Migrator, Researcher, Trainer
 - [Training](data-engineering/training/index.md): Correct the agent once, it remembers forever, your team inherits it
-- [Tools](data-engineering/tools/sql-tools.md): 50+ specialized tools for SQL, dbt, and warehouses
+- [Tools](data-engineering/tools/sql-tools.md): 100+ specialized tools for SQL, dbt, and warehouses

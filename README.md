@@ -7,7 +7,7 @@
 
 **The open-source data engineering harness.**
 
-The intelligence layer for data engineering AI — 50+ deterministic tools for SQL analysis,
+The intelligence layer for data engineering AI — 100+ deterministic tools for SQL analysis,
 column-level lineage, dbt, FinOps, and warehouse connectivity across every major cloud platform.
 
 Run standalone in your terminal, embed underneath Claude Code or Codex, or integrate
@@ -223,7 +223,7 @@ Contributions welcome — docs, SQL rules, warehouse connectors, and TUI improve
 
 - **v0.4.2** (March 2026) — yolo mode, Python engine elimination (all-native TypeScript), tool consolidation, path sandboxing hardening, altimate-dbt CLI, unscoped npm package
 - **v0.4.1** (March 2026) — env-based skill selection, session caching, tracing improvements
-- **v0.4.0** (Feb 2026) — data visualization skill, 50+ tools, training system
+- **v0.4.0** (Feb 2026) — data visualization skill, 100+ tools, training system
 - **v0.3.x** — [See full changelog →](CHANGELOG.md)
 
 ## License

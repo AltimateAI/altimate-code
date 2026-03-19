@@ -1,5 +1,5 @@
 ---
-description: "Install altimate-code and run your first SQL analysis. The open-source data engineering harness with 50+ tools for building, validating, optimizing, and shipping data products."
+description: "Install altimate-code and run your first SQL analysis. The open-source data engineering harness with 100+ tools for building, validating, optimizing, and shipping data products."
 ---
 
 # Quickstart

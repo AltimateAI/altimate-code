@@ -17,7 +17,7 @@ hide:
 
 <p class="hero-tagline">The open-source data engineering harness.</p>
 
-<p class="hero-description">50+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across any platform, independent of a single warehouse provider.</p>
+<p class="hero-description">100+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across any platform, independent of a single warehouse provider.</p>
 
 <p class="hero-actions" markdown>
 
@@ -92,7 +92,7 @@ npm install -g altimate-code
 
     ---
 
-    Interactive TUI with 50+ tools, autocomplete for skills, and persistent memory across sessions.
+    Interactive TUI with 100+ tools, autocomplete for skills, and persistent memory across sessions.
 
 -   :material-pipe-disconnected:{ .lg .middle } **CI Pipeline**
 
