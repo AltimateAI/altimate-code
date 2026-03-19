@@ -25,11 +25,7 @@ into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 ## Install
 
 ```bash
-# npm (recommended)
 npm install -g altimate-code
-
-# Homebrew
-brew install AltimateAI/tap/altimate-code
 ```
 
 Then — in order:

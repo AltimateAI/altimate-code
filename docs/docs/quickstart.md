@@ -4,18 +4,14 @@ description: "Install altimate-code and run your first SQL analysis. The open-so
 
 # Quickstart
 
-> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider.
+> **You need:** npm 8+. An API key for any supported LLM provider.
 
 ---
 
 ## Step 1: Install
 
 ```bash
-# npm (recommended)
 npm install -g altimate-code
-
-# Homebrew
-brew install AltimateAI/tap/altimate-code
 ```
 
 > **Zero additional setup.** One command install.

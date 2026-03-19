@@ -64,9 +64,8 @@ The `v*` tag triggers `.github/workflows/release.yml` which:
 1. **Builds** all platform binaries (linux/darwin/windows, x64/arm64)
 2. **Publishes to npm** — platform-specific binary packages + wrapper package
 3. **Creates GitHub Release** — with auto-generated release notes and binary attachments
-4. **Updates Homebrew tap** — pushes formula update to `AltimateAI/homebrew-tap`
-5. **Updates AUR** — pushes PKGBUILD update to `altimate-code-bin`
-6. **Publishes Docker image** — to `ghcr.io/altimateai/altimate-code`
+4. **Updates AUR** — pushes PKGBUILD update to `altimate-code-bin`
+5. **Publishes Docker image** — to `ghcr.io/altimateai/altimate-code`
 
 ### 4. Verify
 
@@ -75,9 +74,6 @@ After the workflow completes:
 ```bash
 # npm
 npm info @altimateai/altimate-code version
-
-# Homebrew
-brew update && brew info altimate/tap/altimate-code
 
 # Docker
 docker pull ghcr.io/altimateai/altimate-code:0.5.0
@@ -100,10 +96,6 @@ Before your first release, set up:
 ### GitHub
 - `GITHUB_TOKEN` is automatically provided by GitHub Actions
 - Enable GitHub Packages for Docker image publishing
-
-### Homebrew
-- Create `AltimateAI/homebrew-tap` repository
-- The `GITHUB_TOKEN` needs write access to this repo
 
 ### AUR (optional)
 - Register the `altimate-code-bin` package on AUR

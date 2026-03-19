@@ -12,8 +12,6 @@ description: "Get value from Altimate Code in 10 minutes. For data engineers who
 npm install -g altimate-code
 ```
 
-Or via Homebrew: `brew install AltimateAI/tap/altimate-code`
-
 ---
 
 ## Step 2: Connect Your LLM
