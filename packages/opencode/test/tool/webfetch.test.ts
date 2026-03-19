@@ -98,4 +98,130 @@ describe("tool.webfetch", () => {
       },
     )
   })
+
+  test("uses honest UA first, retries with browser UA on 403", async () => {
+    const calls: string[] = []
+    await withFetch(
+      async (_input, init) => {
+        const ua = (init?.headers as Record<string, string>)?.["User-Agent"] ?? ""
+        calls.push(ua)
+        if (ua.includes("altimate-code")) {
+          return new Response("Forbidden", { status: 403 })
+        }
+        return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } })
+      },
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/page", format: "text" }, ctx)
+            expect(result.output).toBe("ok")
+            expect(calls.length).toBe(2)
+            expect(calls[0]).toContain("altimate-code")
+            expect(calls[1]).toContain("Chrome")
+          },
+        })
+      },
+    )
+  })
+
+  test("uses honest UA first, retries with browser UA on 406", async () => {
+    const calls: string[] = []
+    await withFetch(
+      async (_input, init) => {
+        const ua = (init?.headers as Record<string, string>)?.["User-Agent"] ?? ""
+        calls.push(ua)
+        if (ua.includes("altimate-code")) {
+          return new Response("Not Acceptable", { status: 406 })
+        }
+        return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } })
+      },
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/page", format: "text" }, ctx)
+            expect(result.output).toBe("ok")
+            expect(calls.length).toBe(2)
+            expect(calls[0]).toContain("altimate-code")
+            expect(calls[1]).toContain("Chrome")
+          },
+        })
+      },
+    )
+  })
+
+  test("does not retry on non-retryable status (500)", async () => {
+    const calls: string[] = []
+    await withFetch(
+      async (_input, init) => {
+        const ua = (init?.headers as Record<string, string>)?.["User-Agent"] ?? ""
+        calls.push(ua)
+        return new Response("Server Error", { status: 500 })
+      },
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            expect(webfetch.execute({ url: "https://example.com/page", format: "text" }, ctx)).rejects.toThrow(
+              "Request failed with status code: 500",
+            )
+            expect(calls.length).toBe(1)
+            expect(calls[0]).toContain("altimate-code")
+          },
+        })
+      },
+    )
+  })
+
+  test("does not retry when honest UA succeeds", async () => {
+    const calls: string[] = []
+    await withFetch(
+      async (_input, init) => {
+        const ua = (init?.headers as Record<string, string>)?.["User-Agent"] ?? ""
+        calls.push(ua)
+        return new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })
+      },
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/page", format: "text" }, ctx)
+            expect(result.output).toBe("hello")
+            expect(calls.length).toBe(1)
+            expect(calls[0]).toContain("altimate-code")
+          },
+        })
+      },
+    )
+  })
+
+  test("throws when both UAs fail", async () => {
+    const calls: string[] = []
+    await withFetch(
+      async (_input, init) => {
+        const ua = (init?.headers as Record<string, string>)?.["User-Agent"] ?? ""
+        calls.push(ua)
+        return new Response("Forbidden", { status: 403 })
+      },
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            expect(webfetch.execute({ url: "https://example.com/blocked", format: "text" }, ctx)).rejects.toThrow(
+              "Request failed with status code: 403",
+            )
+            expect(calls.length).toBe(2)
+            expect(calls[0]).toContain("altimate-code")
+            expect(calls[1]).toContain("Chrome")
+          },
+        })
+      },
+    )
+  })
 })
