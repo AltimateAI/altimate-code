@@ -186,11 +186,11 @@ try {
 
 | Import | Description |
 |--------|------------|
-| `@altimateai/altimate-code-sdk` | Core SDK — error types, constants, utilities |
-| `@altimateai/altimate-code-sdk/client` | HTTP client — `createClient()` |
-| `@altimateai/altimate-code-sdk/server` | Server utilities — for embedding altimate in your own server |
-| `@altimateai/altimate-code-sdk/v2` | v2 API types — TypeScript type definitions |
-| `@altimateai/altimate-code-sdk/v2/client` | v2 client — auto-generated typed client |
+| `@altimateai/altimate-code-sdk` | Core SDK: error types, constants, utilities |
+| `@altimateai/altimate-code-sdk/client` | HTTP client: `createClient()` |
+| `@altimateai/altimate-code-sdk/server` | Server utilities for embedding altimate in your own server |
+| `@altimateai/altimate-code-sdk/v2` | v2 API types: TypeScript type definitions |
+| `@altimateai/altimate-code-sdk/v2/client` | v2 client: auto-generated typed client |
 
 ## OpenAPI
 

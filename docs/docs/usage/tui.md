@@ -10,9 +10,9 @@ altimate
 
 The TUI has three main areas:
 
-- **Message area** — shows the conversation with the AI assistant
-- **Input area** — where you type messages and commands
-- **Sidebar** — shows session info, tool calls, and file changes (toggle with leader key + `s`)
+- **Message area**: shows the conversation with the AI assistant
+- **Input area**: where you type messages and commands
+- **Sidebar**: shows session info, tool calls, and file changes (toggle with leader key + `s`)
 
 ## Input Shortcuts
 
@@ -34,15 +34,16 @@ The leader key (default: `Ctrl+X`) gives access to all TUI keybindings. Press le
 | `s` | Toggle sidebar |
 | `t` | List themes |
 | `m` | List models |
+| `i` | Enhance prompt (rewrite with AI for clarity) |
 | `a` | List agents |
 | `k` | List keybinds |
 | `q` | Quit |
 
 ## Scrolling
 
-- **Page up/down** — scroll messages
-- **Home/End** — jump to first/last message
-- **Mouse scroll** — scroll with mouse wheel
+- **Page up/down**: scroll messages
+- **Home/End**: jump to first/last message
+- **Mouse scroll**: scroll with mouse wheel
 
 Configure scroll speed:
 
@@ -64,7 +65,7 @@ Switch between agents during a conversation:
 - Press leader key + `a` to see all agents
 - Use `/agent <name>` to switch directly
 - Built-in agents: `general`, `plan`, `build`, `explore`
-- Data engineering agents: `builder`, `analyst`, `validator`, `migrator`
+- Data engineering agents: `builder`, `analyst`, `plan`
 
 ## Diff Display
 

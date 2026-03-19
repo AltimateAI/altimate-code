@@ -1,28 +1,28 @@
 ---
-description: "Install altimate-code and run your first SQL analysis. The open-source data engineering harness — 99+ tools for building, validating, optimizing, and shipping data products."
+description: "Install altimate-code and run your first SQL analysis. The open-source data engineering harness with 100+ tools for building, validating, optimizing, and shipping data products."
 ---
 
 # Quickstart
 
-> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider — or use Codex (built-in, no key required).
+> **You need:** npm 8+ or Homebrew. An API key for any supported LLM provider, or use Codex (built-in, no key required).
 
 ---
 
-## Step 1 — Install
+## Step 1: Install
 
 ```bash
 # npm (recommended)
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 
 # Homebrew
 brew install AltimateAI/tap/altimate-code
 ```
 
-> **Zero Python setup required.** On first run, the CLI automatically downloads `uv`, creates an isolated Python environment, and installs the data engine. No `pip install`, no virtualenv management.
+> **Zero additional setup.** One command install.
 
 ---
 
-## Step 2 — Configure Your LLM
+## Step 2: Configure Your LLM
 
 ```bash
 altimate        # Launch the TUI
@@ -48,11 +48,11 @@ Minimal config file option (`altimate-code.json` in your project root):
 }
 ```
 
-> **No API key?** Select **Codex** in the `/connect` menu — it's a built-in provider with no setup required.
+> **No API key?** Select **Codex** in the `/connect` menu. It's a built-in provider with no setup required.
 
 ---
 
-## Step 3 — Connect Your Warehouse _(Optional)_
+## Step 3: Connect Your Warehouse _(Optional)_
 
 > Skip this step if you want to work locally or don't need warehouse/orchestration connections. You can always run `/discover` later.
 
@@ -60,7 +60,7 @@ Minimal config file option (`altimate-code.json` in your project root):
 altimate /discover
 ```
 
-`/discover` scans for dbt projects, warehouse credentials (from `~/.dbt/profiles.yml`, environment variables, and Docker), and installed tools. It **reads but never writes** — safe to run against production.
+Auto-detects your dbt projects, warehouse credentials, and installed tools. See [Full Setup](getting-started.md#step-3-configure-your-warehouse-optional) for details on what `/discover` finds and manual configuration options.
 
 **No cloud warehouse?** Use DuckDB with a local file:
 
@@ -77,7 +77,7 @@ altimate /discover
 
 ---
 
-## Step 4 — Build Your First Artifact
+## Step 4: Build Your First Artifact
 
 In the TUI, try these prompts or describe your own use case:
 
@@ -97,6 +97,6 @@ Build me a real time, interactive dashboard for my macbook system metrics and he
 
 ## What's Next
 
-- [Full Setup](getting-started.md) — All warehouse configs, LLM providers, advanced setup
-- [Agent Modes](data-engineering/agent-modes.md) — Choose the right agent for your task
-- [CI & Automation](data-engineering/guides/ci-headless.md) — Run altimate in automated pipelines
+- [Full Setup](getting-started.md): All warehouse configs, LLM providers, advanced setup
+- [Agent Modes](data-engineering/agent-modes.md): Choose the right agent for your task
+- [CI & Automation](data-engineering/guides/ci-headless.md): Run altimate in automated pipelines

@@ -56,7 +56,7 @@ Once authenticated, all altimate tools work with Codex as the LLM backend. No AP
 
 - altimate authenticates via PKCE OAuth flow with ChatGPT
 - Requests route through `chatgpt.com/backend-api/codex/responses`
-- Your subscription covers all token usage — no per-token billing
+- Your subscription covers all token usage, so there is no per-token billing
 - Token is stored locally at `~/.altimate/data/auth.json`
 
 ## Cost

@@ -51,7 +51,7 @@ SNOWFLAKE_WAREHOUSE=compute_wh
 
 | Code | Meaning |
 |---|---|
-| `0` | Success — task completed |
+| `0` | Success (task completed) |
 | `1` | Task completed but result indicates issues (e.g., anti-patterns found) |
 | `2` | Configuration error (missing API key, bad connection) |
 | `3` | Tool execution error (warehouse unreachable, query failed) |
@@ -66,7 +66,7 @@ altimate run "validate models in models/staging/ for anti-patterns" || exit 1
 
 ## Worked Examples
 
-### Example 1 — Nightly Cost Check (GitHub Actions)
+### Example 1: Nightly Cost Check (GitHub Actions)
 
 ```yaml
 # .github/workflows/cost-check.yml
@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install altimate
-        run: npm install -g @altimateai/altimate-code
+        run: npm install -g altimate-code
 
       - name: Run cost report
         env:
@@ -105,7 +105,7 @@ jobs:
           path: cost-report.json
 ```
 
-### Example 2 — Post-Deploy SQL Validation
+### Example 2: Post-Deploy SQL Validation
 
 Add to your dbt deployment workflow to catch anti-patterns before they reach production:
 
@@ -120,7 +120,7 @@ Add to your dbt deployment workflow to catch anti-patterns before they reach pro
             --output json
 ```
 
-### Example 3 — Automated Test Generation (Pre-commit)
+### Example 3: Automated Test Generation (Pre-commit)
 
 ```bash
 #!/bin/bash
@@ -152,4 +152,4 @@ See [Tracing](../../configure/tracing.md) for the full trace reference.
 
 ## Security Recommendation
 
-Use a **read-only warehouse user** for CI jobs that only need to read data. Reserve write-access credentials for jobs that explicitly need them (e.g., test generation that writes files). See [Security FAQ](../../security-faq.md) and [Permissions](../../configure/permissions.md).
+Use a **read-only warehouse user** for CI jobs that only need to read data. Reserve write-access credentials for jobs that explicitly need them (e.g., test generation that writes files). See [Security FAQ](../../reference/security-faq.md) and [Permissions](../../configure/permissions.md).

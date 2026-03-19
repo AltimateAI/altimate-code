@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-18
+
+### Added
+
+- Smooth streaming mode for TUI response rendering (#281)
+- Ship builtin skills to customers via `postinstall` (#279)
+- `/configure-claude` and `/configure-codex` built-in commands (#235)
+
+### Fixed
+
+- Brew formula stuck at v0.3.1 — version normalization in publish pipeline (#286)
+- Harden auth field handling for all warehouse drivers (#271)
+- Suppress console logging that corrupts TUI display (#269)
+
 ## [0.4.9] - 2026-03-18
 
 ### Added

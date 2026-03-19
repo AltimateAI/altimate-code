@@ -75,6 +75,28 @@ describe("publish package validation", () => {
   })
 })
 
+describe("version normalization in publish pipeline", () => {
+  test("publish.ts never produces double-v (vv) in any URL", () => {
+    const publishScript = fs.readFileSync(path.join(REPO_PKG_DIR, "script/publish.ts"), "utf-8")
+    // All URLs use v${Script.version} or v${...} patterns
+    // Script.version is already clean (v stripped), so vv should never appear
+    expect(publishScript).not.toContain('"vv')
+    expect(publishScript).not.toContain("/vv")
+  })
+
+  test("Script source strips v prefix from OPENCODE_VERSION", () => {
+    const scriptSrc = fs.readFileSync(path.resolve(REPO_PKG_DIR, "../../packages/script/src/index.ts"), "utf-8")
+    expect(scriptSrc).toContain('env.OPENCODE_VERSION.replace(/^v/, "")')
+  })
+
+  test("optionalDependencies version comes from build artifacts (clean semver)", () => {
+    const publishScript = fs.readFileSync(path.join(REPO_PKG_DIR, "script/publish.ts"), "utf-8")
+    // The version is extracted from binary package.json files in dist/
+    // which get their version from Script.version (now v-stripped)
+    expect(publishScript).toContain("const version = Object.values(binaries)[0]")
+  })
+})
+
 describe("unscoped package (altimate-code)", () => {
   const publishScript = fs.readFileSync(path.join(REPO_PKG_DIR, "script/publish.ts"), "utf-8")
 

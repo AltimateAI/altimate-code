@@ -24,7 +24,7 @@ altimate includes built-in tools that agents use to interact with your codebase 
 
 ## Data Engineering Tools
 
-In addition to built-in tools, altimate provides 55+ specialized data engineering tools. See the [Data Engineering Tools](../data-engineering/tools/index.md) section for details.
+In addition to built-in tools, altimate provides 100+ specialized data engineering tools. See the [Data Engineering Tools](../data-engineering/tools/index.md) section for details.
 
 ## Tool Permissions
 
@@ -98,9 +98,9 @@ The `bash` tool executes shell commands in the project directory. Commands run i
 
 File tools respect the project boundaries and permission settings:
 
-- **`read`** — Reads file contents, supports line ranges
-- **`write`** — Creates or overwrites entire files
-- **`edit`** — Surgical find-and-replace edits within files
+- **`read`** reads file contents and supports line ranges
+- **`write`** creates or overwrites entire files
+- **`edit`** performs surgical find-and-replace edits within files
 
 ### LSP Tool
 

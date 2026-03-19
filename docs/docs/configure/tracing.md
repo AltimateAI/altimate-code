@@ -1,13 +1,13 @@
 # Tracing
 
-Altimate Code captures detailed traces of every headless session — LLM generations, tool calls, token usage, cost, and timing — and saves them locally as JSON files. Traces are invaluable for debugging agent behavior, optimizing cost, and understanding how the agent solves problems.
+Altimate Code captures detailed traces of every headless session, including LLM generations, tool calls, token usage, cost, and timing, and saves them locally as JSON files. Traces are invaluable for debugging agent behavior, optimizing cost, and understanding how the agent solves problems.
 
 Tracing is **enabled by default** and requires no configuration. Traces are stored locally and never leave your machine unless you configure a remote exporter.
 
 ## Quick Start
 
 ```bash
-# Run a prompt — trace is saved automatically
+# Run a prompt (trace is saved automatically)
 altimate-code run "optimize my most expensive queries"
 # → Trace saved: ~/.local/share/altimate-code/traces/abc123.json
 
@@ -44,7 +44,7 @@ When using SQL and dbt tools, traces automatically capture domain-specific data:
 | **Data Quality** | Row counts, null percentages, freshness, anomaly detection |
 | **Cost Attribution** | LLM cost + warehouse compute cost + storage delta = total cost, per user/team/project |
 
-These attributes are purely optional — traces are valid without them. They're populated automatically by tools that have access to warehouse metadata.
+These attributes are purely optional. Traces are valid without them. They're populated automatically by tools that have access to warehouse metadata.
 
 ## Configuration
 
@@ -115,9 +115,9 @@ altimate-code trace view <session-id>
 
 Opens a local web server with an interactive trace viewer in your browser. The viewer shows:
 
-- **Summary cards** — duration, token breakdown (input/output/reasoning/cache), cost, generations, tool calls, status
-- **Timeline** — horizontal bars for each span, color-coded by type (generation, tool, error)
-- **Detail panel** — click any span to see its model info, token counts, finish reason, input/output, and domain-specific attributes (warehouse metrics, dbt results, etc.)
+- **Summary cards** showing duration, token breakdown (input/output/reasoning/cache), cost, generations, tool calls, status
+- **Timeline** with horizontal bars for each span, color-coded by type (generation, tool, error)
+- **Detail panel** where you click any span to see its model info, token counts, finish reason, input/output, and domain-specific attributes (warehouse metrics, dbt results, etc.)
 
 Options:
 
@@ -126,11 +126,11 @@ Options:
 | `--port` | Port for the viewer server (default: random) |
 | `--live` | Auto-refresh every 2s for in-progress sessions |
 
-Partial session ID matching is supported — `altimate-code trace view abc` matches `abc123def456`.
+Partial session ID matching is supported. For example, `altimate-code trace view abc` matches `abc123def456`.
 
 ### Live Viewing (In-Progress Sessions)
 
-Traces are written incrementally — after every tool call and generation, a snapshot is flushed to disk. This means you can view a trace while the session is still running:
+Traces are written incrementally. After every tool call and generation, a snapshot is flushed to disk. This means you can view a trace while the session is still running:
 
 ```bash
 # In terminal 1: run a long task
@@ -178,7 +178,7 @@ Traces can be sent to remote backends via HTTP POST. Each exporter receives the 
 - A failing exporter never blocks local file storage or other exporters
 - If the server responds with `{ "url": "..." }`, the URL is displayed to the user
 - Exporters have a 10-second timeout
-- All export operations are best-effort — they never crash the CLI
+- All export operations are best-effort and never crash the CLI
 
 ## Trace File Format
 
@@ -296,13 +296,13 @@ All domain-specific attributes use the `de.*` prefix and are stored in the `attr
 
 Traces are designed to survive process crashes:
 
-1. **Immediate snapshot** — A trace file is written as soon as `startTrace()` is called, before any LLM interaction. Even if the process crashes immediately, a minimal trace file exists.
+1. **Immediate snapshot.** A trace file is written as soon as `startTrace()` is called, before any LLM interaction. Even if the process crashes immediately, a minimal trace file exists.
 
-2. **Incremental snapshots** — After every tool call and generation completion, the trace file is updated atomically (write to temp file, then rename). The file on disk always contains a valid, complete JSON document.
+2. **Incremental snapshots.** After every tool call and generation completion, the trace file is updated atomically (write to temp file, then rename). The file on disk always contains a valid, complete JSON document.
 
-3. **Crash handlers** — The `run` command registers `SIGINT`/`SIGTERM`/`beforeExit` handlers that flush the trace synchronously with a `"crashed"` status.
+3. **Crash handlers.** The `run` command registers `SIGINT`/`SIGTERM`/`beforeExit` handlers that flush the trace synchronously with a `"crashed"` status.
 
-4. **Status indicators** — Trace status tells you exactly what happened:
+4. **Status indicators.** Trace status tells you exactly what happened:
 
 | Status | Meaning |
 |--------|---------|
@@ -335,7 +335,7 @@ Traces are stored **locally only** by default. They contain:
 - Tool inputs and outputs (SQL queries, file contents, command results)
 - Model responses
 
-If you configure remote exporters, trace data is sent to those endpoints. No trace data is included in the anonymous telemetry described in [Telemetry](telemetry.md).
+If you configure remote exporters, trace data is sent to those endpoints. No trace data is included in the anonymous telemetry described in [Telemetry](../reference/telemetry.md).
 
 !!! warning "Sensitive Data"
     Traces may contain SQL queries, file paths, and command outputs from your session. If you share trace files or configure remote exporters, be aware that this data will be included.

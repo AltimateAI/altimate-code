@@ -1,5 +1,5 @@
 site_name: altimate-code
-site_description: The open-source data engineering harness. 99+ tools for building, validating, optimizing, and shipping data products.
+site_description: The open-source data engineering harness. 100+ tools for building, validating, optimizing, and shipping data products.
 site_url: https://docs.altimate.sh
 repo_url: https://github.com/AltimateAI/altimate-code
 repo_name: AltimateAI/altimate-code
@@ -73,77 +73,78 @@ markdown_extensions:
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 nav:
-  - Home: index.md
-
-  - Get Started:
-      - Quickstart: quickstart.md
-      - Full Setup: getting-started.md
-      - Agent Modes: data-engineering/agent-modes.md
+  - Getting Started:
+      - Overview: getting-started/index.md
+      - Quickstart: getting-started/quickstart-new.md
+      - Setup: getting-started/quickstart.md
+  - Examples:
+      - Showcase: examples/index.md
+  - Use:
+      - Agents:
+          - Agent Modes: data-engineering/agent-modes.md
+          - Agent Config: configure/agents.md
+      - Tools:
+          - Overview: configure/tools/index.md
+          - Built-in Tools: configure/tools/config.md
+          - Core Tools: configure/tools/core-tools.md
+          - SQL Tools: data-engineering/tools/sql-tools.md
+          - Schema Tools: data-engineering/tools/schema-tools.md
+          - FinOps Tools: data-engineering/tools/finops-tools.md
+          - Lineage Tools: data-engineering/tools/lineage-tools.md
+          - dbt Tools: data-engineering/tools/dbt-tools.md
+          - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+          - Memory Tools: data-engineering/tools/memory-tools.md
+          - Custom Tools: configure/tools/custom.md
+      - Skills: configure/skills.md
+      - Commands: configure/commands.md
       - Interfaces:
-          - Terminal UI: usage/tui.md
+          - TUI: usage/tui.md
           - CLI: usage/cli.md
-          - IDE / VS Code: usage/ide.md
           - Web UI: usage/web.md
-
-  - Guides:
-      - Cost Optimization: data-engineering/guides/cost-optimization.md
-      - SQL Migration: data-engineering/guides/migration.md
-      - CI & Automation: data-engineering/guides/ci-headless.md
-
-  - Tools:
-      - SQL Analysis: data-engineering/tools/sql-tools.md
-      - Schema & Metadata: data-engineering/tools/schema-tools.md
-      - Column-Level Lineage: data-engineering/tools/lineage-tools.md
-      - dbt Integration: data-engineering/tools/dbt-tools.md
-      - Cost & FinOps: data-engineering/tools/finops-tools.md
-      - Warehouse Tools: data-engineering/tools/warehouse-tools.md
-
-  - Integrations:
-      - GitHub Actions: usage/github.md
-      - GitLab CI: usage/gitlab.md
-      - Claude Code: data-engineering/guides/using-with-claude-code.md
-      - Codex: data-engineering/guides/using-with-codex.md
-      - MCP Servers: configure/mcp-servers.md
-      - LSP: configure/lsp.md
-      - ACP: configure/acp.md
-
+          - CI: usage/ci-headless.md
+          - IDE: usage/ide.md
+          - GitHub: usage/github.md
+          - GitLab: usage/gitlab.md
+      - Guides:
+          - Cost Optimization: data-engineering/guides/cost-optimization.md
+          - Migration: data-engineering/guides/migration.md
+          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
+          - Using with Codex: data-engineering/guides/using-with-codex.md
   - Configure:
-      - Config Files: configure/config.md
-      - AI Providers & Models:
+      - Overview: configure/index.md
+      - Warehouses: configure/warehouses.md
+      - LLMs:
           - Providers: configure/providers.md
           - Models: configure/models.md
-      - Agents & Skills:
-          - Agents: configure/agents.md
-          - Skills: configure/skills.md
-      - Tools & Access:
-          - Allowed Tools: configure/tools.md
-          - Custom Tools: configure/custom-tools.md
-          - Access Control: configure/permissions.md
-      - Behavior:
-          - Rules: configure/rules.md
-          - Commands: configure/commands.md
-          - Context Management: configure/context-management.md
-          - Memory: data-engineering/tools/memory-tools.md
-          - Training:
-              - Overview: data-engineering/training/index.md
-              - Team Deployment: data-engineering/training/team-deployment.md
+      - MCPs & ACPs:
+          - MCP Servers: configure/mcp-servers.md
+          - ACP Support: configure/acp.md
       - Appearance:
           - Themes: configure/themes.md
           - Keybinds: configure/keybinds.md
-          - Formatters: configure/formatters.md
       - Observability:
           - Tracing: configure/tracing.md
-          - Telemetry: configure/telemetry.md
-      - Network & Proxy: network.md
-      - Windows / WSL: windows-wsl.md
-
-  - Extend:
-      - SDK: develop/sdk.md
-      - Server API: develop/server.md
-      - Plugins: develop/plugins.md
-      - Ecosystem: develop/ecosystem.md
-
+          - Telemetry: reference/telemetry.md
+      - Training:
+          - Overview: data-engineering/training/index.md
+          - Team Deployment: data-engineering/training/team-deployment.md
+      - Additional Config:
+          - LSP Servers: configure/lsp.md
+          - Network: reference/network.md
+          - Windows / WSL: reference/windows-wsl.md
+      - Config File Reference: configure/config.md
+  - Governance:
+      - Overview: configure/governance.md
+      - Rules: configure/rules.md
+      - Permissions: configure/permissions.md
+      - Context Management: configure/context-management.md
+      - Formatters: configure/formatters.md
   - Reference:
-      - Security FAQ: security-faq.md
-      - Troubleshooting: troubleshooting.md
-      - Changelog: https://github.com/AltimateAI/altimate-code/blob/main/CHANGELOG.md
+      - Changelog: reference/changelog.md
+      - Security FAQ: reference/security-faq.md
+      - Troubleshooting: reference/troubleshooting.md
+      - Extend:
+          - SDK: develop/sdk.md
+          - Server API: develop/server.md
+          - Plugins: develop/plugins.md
+          - Ecosystem: develop/ecosystem.md

@@ -4,26 +4,46 @@ Agents define different AI personas with specific models, prompts, permissions, 
 
 ## Built-in Agents
 
-### General Purpose
+| Agent | Description | Access Level |
+|-------|------------|-------------|
+| `builder` | Create and modify dbt models, SQL pipelines, and data transformations | Full read/write. SQL mutations prompt for approval. |
+| `analyst` | Explore data, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes denied. Safe bash commands auto-allowed. |
+| `plan` | Plan before acting, restricted to planning files only | Minimal: no edits, no bash, no SQL |
 
-| Agent | Description |
-|-------|------------|
-| `general` | Default general-purpose coding agent |
-| `plan` | Planning agent — analyzes before acting |
-| `build` | Build-focused agent — prioritizes code generation |
-| `explore` | Read-only exploration agent |
+### Builder
 
-### Data Engineering
+Full access mode. Can read/write files, run any bash command (with approval), execute SQL, and modify dbt models. SQL write operations (`INSERT`, `UPDATE`, `DELETE`, `CREATE`, etc.) prompt for user approval. Destructive SQL (`DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE`) is hard-blocked.
 
-| Agent | Description | Permissions |
-|-------|------------|------------|
-| `builder` | Create dbt models, SQL pipelines, transformations | Full read/write |
-| `analyst` | Explore data, run SELECT queries, generate insights | Read-only (enforced) |
-| `validator` | Data quality checks, schema validation, test coverage | Read + validate |
-| `migrator` | Cross-warehouse SQL translation and migration | Read/write for migration |
+### Analyst
+
+Truly read-only mode for safe data exploration:
+
+- **File access**: Read, grep, glob without prompts
+- **SQL**: SELECT queries execute freely. Write queries are denied (not prompted, blocked entirely)
+- **Bash**: Safe commands auto-allowed (`ls`, `grep`, `cat`, `head`, `tail`, `find`, `wc`). dbt read commands allowed (`dbt list`, `dbt ls`, `dbt debug`, `dbt deps`). Everything else denied.
+- **Web**: Fetch and search allowed without prompts
+- **Schema/warehouse/finops**: All inspection tools available
 
 !!! tip
-    Use the `analyst` agent when exploring data to ensure no accidental writes. Switch to `builder` when you are ready to create or modify models.
+    Use `analyst` when exploring data to ensure no accidental writes. Switch to `builder` when you're ready to create or modify models.
+
+### Plan
+
+Planning mode with minimal permissions. Can only read files and edit plan files. No SQL, no bash, no file modifications.
+
+## SQL Write Access Control
+
+All SQL queries are classified before execution:
+
+| Query Type | Builder | Analyst |
+|-----------|---------|---------|
+| `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Allowed | Allowed |
+| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied |
+| `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked |
+
+The classifier detects write operations including: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `COPY INTO`, `CALL`, `EXEC`, `EXECUTE IMMEDIATE`, `BEGIN`, `DECLARE`, `REPLACE`, `UPSERT`, `RENAME`.
+
+Multi-statement queries (`SELECT 1; INSERT INTO ...`) are classified as write if any statement is a write.
 
 ## Custom Agents
 
@@ -86,11 +106,11 @@ You are a Snowflake cost optimization expert. For every query:
 ```
 
 !!! info
-    Markdown agent files use YAML frontmatter for configuration and the body as the system prompt. This is a convenient way to define agents without editing your main config file.
+    Markdown agent files use YAML frontmatter for configuration and the body as the system prompt.
 
 ## Agent Permissions
 
-Each agent can have its own permission overrides that restrict or expand the default permissions:
+Each agent can have its own permission overrides:
 
 ```json
 {
@@ -99,10 +119,11 @@ Each agent can have its own permission overrides that restrict or expand the def
       "permission": {
         "write": "deny",
         "edit": "deny",
+        "sql_execute_write": "deny",
         "bash": {
-          "dbt show *": "allow",
+          "*": "deny",
           "dbt list *": "allow",
-          "*": "deny"
+          "ls *": "allow"
         }
       }
     }
@@ -117,4 +138,4 @@ Each agent can have its own permission overrides that restrict or expand the def
 
 - **TUI**: Press leader + `a` or use `/agent <name>`
 - **CLI**: `altimate --agent analyst`
-- **In conversation**: Type `/agent validator`
+- **In conversation**: Type `/agent analyst`

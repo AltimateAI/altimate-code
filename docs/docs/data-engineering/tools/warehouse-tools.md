@@ -9,9 +9,6 @@ Scan the entire data engineering environment in one call. Detects dbt projects, 
 
 # Environment Scan
 
-## Python Engine
-✓ Engine healthy
-
 ## Git Repository
 ✓ Git repo on branch `main` (origin: github.com/org/analytics)
 

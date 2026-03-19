@@ -2,16 +2,16 @@
 
 Altimate Memory gives your data engineering agent **persistent, cross-session memory**. Instead of re-explaining your warehouse setup, naming conventions, or team preferences every session, the agent remembers what matters and picks up where you left off.
 
-Memory blocks are plain Markdown files stored on disk — human-readable, version-controllable, and fully under your control.
+Memory blocks are plain Markdown files stored on disk, making them human-readable, version-controllable, and fully under your control.
 
 ## Why memory matters for data engineering
 
 General-purpose coding agents treat every session as a blank slate. For data engineering, this is especially painful because:
 
-- **Warehouse context is stable** — your Snowflake warehouse name, default database, and connection details rarely change, but you re-explain them every session.
-- **Naming conventions are tribal knowledge** — `stg_` for staging, `int_` for intermediate, `fct_`/`dim_` for marts. The agent needs to learn these once, not every time.
-- **Past analyses inform future work** — if the agent optimized a query or traced lineage for a table last week, recalling that context avoids redundant work.
-- **User preferences accumulate** — SQL style, preferred dialects, dbt patterns, warehouse sizing decisions.
+- **Warehouse context is stable.** Your Snowflake warehouse name, default database, and connection details rarely change, but you re-explain them every session.
+- **Naming conventions are tribal knowledge.** `stg_` for staging, `int_` for intermediate, `fct_`/`dim_` for marts. The agent needs to learn these once, not every time.
+- **Past analyses inform future work.** If the agent optimized a query or traced lineage for a table last week, recalling that context avoids redundant work.
+- **User preferences accumulate.** SQL style, preferred dialects, dbt patterns, warehouse sizing decisions.
 
 Altimate Memory solves this with three tools that let the agent save, recall, and manage its own persistent knowledge.
 
@@ -41,7 +41,7 @@ Memory: 1 block(s)
 |---|---|---|---|
 | `scope` | `"global" \| "project" \| "all"` | `"all"` | Filter by scope |
 | `tags` | `string[]` | `[]` | Filter to blocks containing all specified tags |
-| `id` | `string` | — | Read a specific block by ID |
+| `id` | `string` | (none) | Read a specific block by ID |
 
 ---
 
@@ -55,7 +55,7 @@ Create or update a persistent memory block.
 Memory: Created "warehouse-config"
 ```
 
-The agent automatically calls this when it learns something worth persisting — you can also explicitly ask it to "remember" something.
+The agent automatically calls this when it learns something worth persisting. You can also explicitly ask it to "remember" something.
 
 **Parameters:**
 
@@ -116,7 +116,7 @@ tags: ["snowflake", "warehouse"]
 - **Default database**: ANALYTICS_DB
 ```
 
-Files are human-readable and editable. You can create, edit, or delete them manually — the agent will pick up changes on the next session.
+Files are human-readable and editable. You can create, edit, or delete them manually. The agent will pick up changes on the next session.
 
 ## Limits and safety
 
@@ -134,7 +134,7 @@ Blocks are written to a temporary file first, then atomically renamed. This prev
 
 ## Disabling memory
 
-Set the environment variable to disable all memory functionality — tools and automatic injection:
+Set the environment variable to disable all memory functionality, including tools and automatic injection:
 
 ```bash
 ALTIMATE_DISABLE_MEMORY=true
@@ -149,7 +149,7 @@ Altimate Memory automatically injects relevant blocks into the system prompt at 
 **What this means in practice:**
 
 - With a typical block size of 200-500 characters, the default budget comfortably fits 15-40 blocks
-- Memory injection adds a one-time cost at session start — it does not grow during the session
+- Memory injection adds a one-time cost at session start and does not grow during the session
 - If you notice context pressure, reduce the number of blocks or keep them concise
 - The agent's own tool calls and responses consume far more context than memory blocks
 - To disable injection entirely (e.g., for benchmarks), set `ALTIMATE_DISABLE_MEMORY=true`
@@ -173,7 +173,7 @@ Memory blocks persist indefinitely. If your warehouse configuration changes or a
 
 **How to prevent:**
 
-- Review memory blocks periodically — they're plain Markdown files you can inspect directly
+- Review memory blocks periodically, since they're plain Markdown files you can inspect directly
 - Ask the agent to "forget" outdated information when things change
 - Keep blocks focused on stable facts rather than ephemeral details
 
@@ -193,7 +193,7 @@ The agent decides what to save based on conversation context. It may occasionall
 **How to fix:**
 
 - Delete the bad block: ask the agent or run `rm .altimate-code/memory/bad-block.md`
-- Edit the file directly — it's just Markdown
+- Edit the file directly, since it's just Markdown
 - Ask the agent to rewrite it: "Update the warehouse-config memory with the correct warehouse name"
 
 ### Context bloat
@@ -219,7 +219,7 @@ Memory blocks are stored as plaintext files on disk. Be mindful of what gets sav
 - **Do not** save credentials, API keys, or connection strings in memory blocks
 - **Do** save structural information (warehouse names, naming conventions, schema patterns)
 - If using project-scoped memory in a shared repo, add `.altimate-code/memory/` to `.gitignore` to avoid committing sensitive context
-- Memory blocks are scoped per-user (global) and per-project — there is no cross-user or cross-project leakage
+- Memory blocks are scoped per-user (global) and per-project, so there is no cross-user or cross-project leakage
 
 !!! warning
     Memory blocks are not encrypted. Treat them like any other configuration file on your machine. Do not store secrets or PII in memory blocks.

@@ -8,7 +8,7 @@ You can install and run altimate directly in PowerShell or Command Prompt withou
 
 ```powershell
 # PowerShell or CMD — install globally
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 
 # Launch
 altimate
@@ -18,7 +18,7 @@ This works with Node.js 18+ installed natively on Windows. All core features wor
 
 ## WSL Setup (Recommended)
 
-For the best experience — especially with file watching, shell tools, and dbt — we recommend WSL 2:
+For the best experience (especially with file watching, shell tools, and dbt), we recommend WSL 2:
 
 1. Install WSL:
    ```powershell
@@ -115,4 +115,4 @@ If you installed Node.js but `npm` or `node` is not recognized:
 - Use WSL 2 for better performance
 - Store your projects in the WSL filesystem (`~/projects/`) rather than `/mnt/c/` for faster file operations
 - Set up your warehouse connections in the WSL environment
-- If using both WSL and native Windows, keep separate config files — the WSL and Windows file systems have different path conventions
+- If using both WSL and native Windows, keep separate config files because the WSL and Windows file systems have different path conventions

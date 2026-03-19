@@ -4,7 +4,7 @@
 
 ## The Problem
 
-AI coding assistants make the same mistakes over and over. You say "use DECIMAL not FLOAT," it fixes it — then does the same thing next session. You write instructions in CLAUDE.md, but nobody updates it after corrections. The knowledge from your day-to-day work never becomes permanent.
+AI coding assistants make the same mistakes over and over. You say "use DECIMAL not FLOAT," it fixes it, then does the same thing next session. You write instructions in CLAUDE.md, but nobody updates it after corrections. The knowledge from your day-to-day work never becomes permanent.
 
 ## How Training Works
 
@@ -21,9 +21,9 @@ Builder: Saved. I'll apply this in every future session.
          Your team gets it too when they pull.
 ```
 
-That's it. **2 seconds.** No editing files. No context switching. The correction becomes permanent knowledge that every agent mode (builder, analyst, validator) sees in every future session.
+That's it. **2 seconds.** No editing files. No context switching. The correction becomes permanent knowledge that every agent mode (builder, analyst) sees in every future session.
 
-Research shows compact, focused context improves AI performance by 17 percentage points — while dumping comprehensive docs actually hurts by 3 points (SkillsBench, 7,308 test runs). Training delivers the right knowledge to the right agent at the right time, not everything to everyone.
+Research shows compact, focused context improves AI performance by 17 percentage points, while dumping comprehensive docs actually hurts by 3 points (SkillsBench, 7,308 test runs). Training delivers the right knowledge to the right agent at the right time, not everything to everyone.
 
 ## Three Ways to Teach
 
@@ -48,7 +48,7 @@ Point the agent at code that demonstrates a convention:
 ```
 You: /teach @models/staging/stg_orders.sql
 
-Trainer: I see the pattern:
+Agent: I see the pattern:
   - source CTE → filtered CTE → final
   - ROW_NUMBER dedup on _loaded_at
   Save as pattern "staging-cte-structure"?
@@ -75,7 +75,7 @@ Agent: I found 8 actionable rules:
 
 | Kind | Purpose | Example |
 |---|---|---|
-| **rule** | Hard constraint | "Never use FLOAT for money — use DECIMAL(18,2)" |
+| **rule** | Hard constraint | "Never use FLOAT for money. Use DECIMAL(18,2)." |
 | **pattern** | How code should look | "Staging models: source CTE → filtered → final" |
 | **standard** | Team convention | "Every PR needs tests + schema YAML" |
 | **glossary** | Business term | "ARR = Annual Recurring Revenue = MRR * 12" |
@@ -91,22 +91,15 @@ Agent: I found 8 actionable rules:
 
 No meetings. No Slack messages. No "hey everyone, remember to..."
 
-## Trainer Mode
+## Systematic Teaching
 
-For systematic teaching (not just corrections), switch to trainer mode:
+For systematic teaching (not just corrections), use the `/teach` and `/train` skills in any agent mode:
 
-```bash
-altimate --agent trainer
-```
+- `/teach @file` to learn patterns from example files
+- `/train @file` to learn standards from documentation
+- `/training-status` to see all learned knowledge
 
-Trainer mode is read-only — it can't modify your code. It helps you:
-
-- **Teach interactively**: "Let me teach you about our Databricks setup"
-- **Find gaps**: "What don't you know about my project?"
-- **Review training**: "Show me what the team has taught you"
-- **Curate**: "Which entries are stale? What should we consolidate?"
-
-### When to Use Trainer Mode
+### When to Teach
 
 | Scenario | Why |
 |---|---|
@@ -121,8 +114,6 @@ Training doesn't dump everything into every session. It delivers what's relevant
 
 - **Builder** gets rules and patterns first (naming conventions, SQL constraints)
 - **Analyst** gets glossary and context first (business terms, background knowledge)
-- **Validator** gets rules and standards first (quality gates, test requirements)
-- **Executive** gets glossary and playbooks first (business terms, procedures)
 
 Research shows 2-3 focused modules per task is optimal. The scoring system ensures each agent gets its most relevant knowledge first.
 
@@ -148,7 +139,7 @@ Training doesn't replace CLAUDE.md. They complement each other:
 
 - **Advisory, not enforced.** Training guides the agent, but it's not a hard gate. For critical rules, also add dbt tests or sqlfluff rules that block CI.
 - **No approval workflow.** Anyone with repo access can save training to project scope. Use code review on `.altimate-code/memory/` changes for governance.
-- **No audit trail** beyond git history. Training doesn't track who saved what — use `git blame` on the training files.
+- **No audit trail** beyond git history. Training doesn't track who saved what, so use `git blame` on the training files.
 - **Context budget.** Training competes for context space. Under pressure, least-relevant entries are excluded. Run `/training-status` to see what's included.
 - **20 entries per kind.** Hard limit. Consolidate related rules into one entry rather than saving many small ones.
 - **SQL-focused file analysis.** The `/teach` skill works best with SQL/dbt files. Python, PySpark, and other patterns must be taught manually via conversation.

@@ -8,7 +8,7 @@ altimate ships with six built-in slash commands:
 |---------|-------------|
 | `/init` | Create or update an AGENTS.md file with build commands and code style guidelines. |
 | `/discover` | Scan your data stack and set up warehouse connections. Detects dbt projects, warehouse connections from profiles/Docker/env vars, installed tools, and config files. Walks you through adding and testing new connections, then indexes schemas. |
-| `/review` | Review changes — accepts `commit`, `branch`, or `pr` as an argument (defaults to uncommitted changes). |
+| `/review` | Review changes. Accepts `commit`, `branch`, or `pr` as an argument (defaults to uncommitted changes). |
 | `/feedback` | Submit product feedback as a GitHub issue. Guides you through title, category, description, and optional session context. |
 | `/configure-claude` | Configure altimate as a `/altimate` slash command in [Claude Code](https://claude.com/claude-code). Writes `~/.claude/commands/altimate.md` so you can invoke altimate from within Claude Code sessions. |
 | `/configure-codex` | Configure altimate as a skill in [Codex CLI](https://developers.openai.com/codex). Creates `~/.codex/skills/altimate/SKILL.md` so Codex can delegate data engineering tasks to altimate. |
@@ -37,10 +37,10 @@ The recommended way to set up a new data engineering project. Run `/discover` in
 
 Submit product feedback directly from the CLI. The agent walks you through:
 
-1. **Title** — a short summary of your feedback
-2. **Category** — bug, feature, improvement, or ux
-3. **Description** — detailed explanation
-4. **Session context** (opt-in) — includes working directory name and session ID for debugging
+1. **Title**, a short summary of your feedback
+2. **Category**: bug, feature, improvement, or ux
+3. **Description** with a detailed explanation
+4. **Session context** (opt-in), which includes working directory name and session ID for debugging
 
 ```
 /feedback                    # start the guided feedback flow
@@ -137,7 +137,7 @@ Commands are loaded from:
 
 Press leader + `/` to see all available commands.
 
-## External CLI integration
+## External CLI Integration
 
 The `/configure-claude` and `/configure-codex` commands write integration files to external CLI tools:
 

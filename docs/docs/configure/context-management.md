@@ -1,14 +1,14 @@
 # Context Management
 
-altimate automatically manages conversation context so you can work through long sessions without hitting model limits. When a conversation grows large, the CLI summarizes older messages, prunes stale tool outputs, and recovers from provider overflow errors — all without losing the important details of your work.
+altimate automatically manages conversation context so you can work through long sessions without hitting model limits. When a conversation grows large, the CLI summarizes older messages, prunes stale tool outputs, and recovers from provider overflow errors, all without losing the important details of your work.
 
 ## How It Works
 
 Every LLM has a finite context window. As you work, each message, tool call, and tool result adds tokens to the conversation. When the conversation approaches the model's limit, altimate takes action:
 
-1. **Prune** — Old tool outputs (file reads, command results, query results) are replaced with compact summaries
-2. **Compact** — The entire conversation history is summarized into a continuation prompt
-3. **Continue** — The agent picks up where it left off using the summary
+1. **Prune.** Old tool outputs (file reads, command results, query results) are replaced with compact summaries
+2. **Compact.** The entire conversation history is summarized into a continuation prompt
+3. **Continue.** The agent picks up where it left off using the summary
 
 This happens automatically by default. You do not need to manually manage context.
 
@@ -38,7 +38,7 @@ When a tool output is pruned, it is replaced with a brief fingerprint:
 [Tool output cleared — read_file(file: src/main.ts) returned 42 lines, 1.2 KB — "import { App } from './app'"]
 ```
 
-This tells the model what tool was called, what arguments were used, how much output it produced, and the first line of the result — enough to maintain continuity without consuming tokens.
+This tells the model what tool was called, what arguments were used, how much output it produced, and the first line of the result. That is enough to maintain continuity without consuming tokens.
 
 **Pruning rules:**
 
@@ -51,12 +51,12 @@ This tells the model what tool was called, what arguments were used, how much ou
 
 Compaction is aware of data engineering workflows. When summarizing a conversation, the compaction prompt preserves:
 
-- **Warehouse connections** — which databases or warehouses are connected
-- **Schema context** — discovered tables, columns, and relationships
-- **dbt project state** — models, sources, tests, and project structure
-- **Lineage findings** — upstream and downstream dependencies
-- **Query patterns** — SQL dialects, anti-patterns, and optimization opportunities
-- **FinOps context** — cost findings and warehouse sizing recommendations
+- **Warehouse connections**, including which databases or warehouses are connected
+- **Schema context**, including discovered tables, columns, and relationships
+- **dbt project state**, including models, sources, tests, and project structure
+- **Lineage findings**, including upstream and downstream dependencies
+- **Query patterns**, including SQL dialects, anti-patterns, and optimization opportunities
+- **FinOps context**, including cost findings and warehouse sizing recommendations
 
 This means you can run a long data exploration session and compaction will not lose track of what schemas you discovered, what dbt models you were working with, or what cost optimizations you identified.
 

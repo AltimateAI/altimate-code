@@ -49,7 +49,7 @@ For tools that accept arguments (like `bash`), use pattern matching:
 }
 ```
 
-Patterns are matched in order — **last matching rule wins**. Use `*` as a wildcard. Place your catch-all `"*"` rule first and more specific rules after it.
+Patterns are matched in order, and the **last matching rule wins**. Use `*` as a wildcard. Place your catch-all `"*"` rule first and more specific rules after it.
 
 For example, with `"*": "ask"` first and `"rm *": "deny"` after it, all `rm` commands are denied while everything else prompts. If you put `"*": "ask"` last, it would override the deny rule.
 
@@ -86,6 +86,7 @@ Override permissions for specific agents:
 | `grep` | Yes | Search files |
 | `list` | Yes | List directories |
 | `bash` | Yes | Shell commands |
+| `sql_execute_write` | Yes | SQL write operations (INSERT, UPDATE, DELETE, etc.) |
 | `task` | Yes | Spawn subagents |
 | `lsp` | Yes | LSP operations |
 | `skill` | Yes | Execute skills |
@@ -125,7 +126,7 @@ export ALTIMATE_CLI_YOLO=true
 altimate-code run "analyze my queries"
 ```
 
-The fallback `OPENCODE_YOLO` env var is also supported. When both are set, `ALTIMATE_CLI_YOLO` takes precedence — setting it to `false` disables yolo even if `OPENCODE_YOLO=true`.
+The fallback `OPENCODE_YOLO` env var is also supported. When both are set, `ALTIMATE_CLI_YOLO` takes precedence. Setting it to `false` disables yolo even if `OPENCODE_YOLO=true`.
 
 **Safety:** Explicit `deny` rules in your config are still enforced. Deny rules throw an error *before* any permission prompt is created, so yolo mode never sees them. If you've denied `rm *` or `DROP *`, those remain blocked even with `--yolo`.
 
@@ -133,7 +134,7 @@ When yolo mode is active in the TUI, a `△ YOLO` indicator appears in the foote
 
 ## Recommended Configurations
 
-### Data Engineering (Default — Balanced)
+### Data Engineering (Default, Balanced)
 
 A good starting point for most data engineering workflows. Allows safe read operations, prompts for writes and commands:
 
@@ -205,20 +206,22 @@ Give each agent only the permissions it needs:
       "permission": {
         "write": "deny",
         "edit": "deny",
+        "sql_execute_write": "deny",
         "bash": {
-          "SELECT *": "allow",
-          "dbt docs *": "allow",
-          "*": "deny"
+          "*": "deny",
+          "ls *": "allow",
+          "cat *": "allow",
+          "dbt list *": "allow"
         }
       }
     },
     "builder": {
       "permission": {
+        "sql_execute_write": "ask",
         "bash": {
           "*": "ask",
           "dbt *": "allow",
-          "git *": "ask",
-          "DROP *": "deny"
+          "rm -rf *": "deny"
         }
       }
     }
@@ -230,11 +233,11 @@ Give each agent only the permissions it needs:
 
 When the agent wants to use a tool, the permission system evaluates your rules in order:
 
-1. **Config rules** — from `altimate-code.json`
-2. **Agent-level rules** — per-agent overrides
-3. **Session approvals** — patterns you've approved with "Allow always" during the current session
+1. **Config rules** from `altimate-code.json`
+2. **Agent-level rules** for per-agent overrides
+3. **Session approvals** for patterns you've approved with "Allow always" during the current session
 
-If a rule matches, it applies. If no rule matches, the default is `"ask"` — you'll be prompted.
+If a rule matches, it applies. If no rule matches, the default is `"ask"`, which means you'll be prompted.
 
 When prompted, you have three choices:
 
@@ -251,4 +254,4 @@ When prompted, you have three choices:
 - **Start with `"ask"` and relax as you build confidence.** You can always approve patterns with "Allow always" during a session.
 - **Use `"deny"` for truly dangerous commands** like `rm *`, `DROP *`, `git push --force *`, and `git reset --hard *`. These are blocked even if other rules would allow them.
 - **Use per-agent permissions** to enforce least-privilege. An analyst doesn't need write access. A builder doesn't need `DROP`.
-- **Review the prompt before approving.** The TUI shows you exactly what will run — including diffs for file edits and the full command for bash operations.
+- **Review the prompt before approving.** The TUI shows you exactly what will run, including diffs for file edits and the full command for bash operations.

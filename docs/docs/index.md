@@ -17,7 +17,7 @@ hide:
 
 <p class="hero-tagline">The open-source data engineering harness.</p>
 
-<p class="hero-description">99+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across any platform — independent of a single warehouse provider.</p>
+<p class="hero-description">100+ tools for building, validating, optimizing, and shipping data products. Use in your terminal, CI pipeline, orchestration DAGs, or as the harness for your data agents. Evaluate across any platform, independent of a single warehouse provider.</p>
 
 <p class="hero-actions" markdown>
 
@@ -39,7 +39,7 @@ npm install -g altimate-code
 ---
 
 <h2 class="section-heading">Purpose-built for the data product lifecycle</h2>
-<p class="section-sub">Every tool covers a specific stage — build, validate, optimize, or ship. Not general-purpose AI on top of SQL files.</p>
+<p class="section-sub">Every tool covers a specific stage: build, validate, optimize, or ship. Not general-purpose AI on top of SQL files.</p>
 
 <div class="grid cards" markdown>
 
@@ -92,7 +92,7 @@ npm install -g altimate-code
 
     ---
 
-    Interactive TUI with 99+ tools, autocomplete for skills, and persistent memory across sessions.
+    Interactive TUI with 100+ tools, autocomplete for skills, and persistent memory across sessions.
 
 -   :material-pipe-disconnected:{ .lg .middle } **CI Pipeline**
 
@@ -110,13 +110,13 @@ npm install -g altimate-code
 
     ---
 
-    Mount altimate as the tool layer underneath Claude Code, Codex, or any AI agent — giving it deterministic, warehouse-aware capabilities.
+    Mount altimate as the tool layer underneath Claude Code, Codex, or any AI agent, giving it deterministic, warehouse-aware capabilities.
 
 </div>
 
 ---
 
-<h2 class="section-heading">Seven specialized agents</h2>
+<h2 class="section-heading">Purpose-built agent modes</h2>
 <p class="section-sub">Each agent has scoped permissions and purpose-built tools for its role.</p>
 
 <div class="grid cards" markdown>
@@ -125,50 +125,28 @@ npm install -g altimate-code
 
     ---
 
-    Create dbt models, SQL pipelines, and data transformations with full read/write access.
+    Create dbt models, SQL pipelines, and data transformations with full read/write access. SQL writes prompt for approval. Destructive SQL is hard-blocked.
 
 -   :material-chart-bar:{ .lg .middle } **Analyst**
 
     ---
 
-    Explore data, run SELECT queries, and generate insights. Read-only access is enforced.
+    Explore data, run SELECT queries, and generate insights. Read-only access is enforced. SQL writes are denied, not prompted. Safe bash commands auto-allowed.
 
--   :material-check-decagram:{ .lg .middle } **Validator**
-
-    ---
-
-    Data quality checks, schema validation, test coverage analysis, and CI gating.
-
--   :material-swap-horizontal:{ .lg .middle } **Migrator**
+-   :material-clipboard-text:{ .lg .middle } **Plan**
 
     ---
 
-    Cross-warehouse SQL translation, schema migration, and dialect conversion workflows.
-
--   :material-magnify:{ .lg .middle } **Researcher**
-
-    ---
-
-    Deep multi-step investigations with structured reports. Root cause analysis, cost audits, deprecation checks.
-
--   :material-school:{ .lg .middle } **Trainer**
-
-    ---
-
-    Correct the agent once, it remembers forever, your team inherits it. Teach patterns, rules, and domain knowledge.
-
--   :material-account-tie:{ .lg .middle } **Executive**
-
-    ---
-
-    Business-friendly reporting. No SQL jargon — translates technical findings into impact and recommendations.
+    Plan before acting. Read-only with minimal permissions. No SQL, no bash, no file modifications.
 
 </div>
+
+Create custom agents with tailored permissions for specialized workflows like validation, migration, research, or executive reporting. See [Agent Configuration](configure/agents.md#custom-agents).
 
 ---
 
 <h2 class="section-heading">Works with any LLM</h2>
-<p class="section-sub">Model-agnostic — bring your own provider or run locally.</p>
+<p class="section-sub">Model-agnostic. Bring your own provider or run locally.</p>
 
 <div class="pill-grid" markdown>
 
@@ -185,7 +163,7 @@ npm install -g altimate-code
 ---
 
 <h2 class="section-heading">Evaluate across any platform</h2>
-<p class="section-sub">First-class support for 8 warehouses. Migrate, compare, and translate across platforms — not locked to one vendor.</p>
+<p class="section-sub">First-class support for 10 databases. Migrate, compare, and translate across platforms, not locked to one vendor.</p>
 
 <div class="pill-grid" markdown>
 
@@ -197,6 +175,8 @@ npm install -g altimate-code
 - :material-duck: **DuckDB**
 - :material-database: **MySQL**
 - :material-microsoft: **SQL Server**
+- :material-database-outline: **Oracle**
+- :material-database-search: **SQLite**
 
 </div>
 
@@ -204,8 +184,8 @@ npm install -g altimate-code
 
 <div class="doc-links" markdown>
 
-**Documentation** — [Getting Started](getting-started.md) | [Guides](data-engineering/guides/cost-optimization.md) | [Tools](data-engineering/tools/sql-tools.md) | [Configuration](configure/config.md)
+**Documentation**: [Getting Started](getting-started.md) | [Guides](data-engineering/guides/cost-optimization.md) | [Tools](data-engineering/tools/sql-tools.md) | [Configuration](configure/config.md)
 
-**Extend** — [SDK](develop/sdk.md) | [Plugins](develop/plugins.md) | [Server API](develop/server.md)
+**Extend**: [SDK](develop/sdk.md) | [Plugins](develop/plugins.md) | [Server API](develop/server.md)
 
 </div>

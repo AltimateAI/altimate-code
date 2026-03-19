@@ -7,19 +7,18 @@
 
 **The open-source data engineering harness.**
 
-The intelligence layer for data engineering AI — 99+ deterministic tools for SQL analysis,
+The intelligence layer for data engineering AI — 100+ deterministic tools for SQL analysis,
 column-level lineage, dbt, FinOps, and warehouse connectivity across every major cloud platform.
 
 Run standalone in your terminal, embed underneath Claude Code or Codex, or integrate
 into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 
-[![npm](https://img.shields.io/npm/v/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
-[![npm](https://img.shields.io/npm/v/@altimateai/altimate-core)](https://www.npmjs.com/package/@altimateai/altimate-core)
-[![npm downloads](https://img.shields.io/npm/dm/@altimateai/altimate-code)](https://www.npmjs.com/package/@altimateai/altimate-code)
+[![npm](https://img.shields.io/npm/v/altimate-code)](https://www.npmjs.com/package/altimate-code)
+[![npm downloads](https://img.shields.io/npm/dm/altimate-code)](https://www.npmjs.com/package/altimate-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![CI](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml/badge.svg)](https://github.com/AltimateAI/altimate-code/actions/workflows/ci.yml)
 [![Slack](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://altimate.ai/slack)
-[![Docs](https://img.shields.io/badge/docs-altimateai.github.io-blue)](https://altimateai.github.io/altimate-code)
+[![Docs](https://img.shields.io/badge/docs-docs.altimate.sh-blue)](https://docs.altimate.sh)
 
 </div>
 
@@ -29,7 +28,7 @@ into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 
 ```bash
 # npm (recommended)
-npm install -g @altimateai/altimate-code
+npm install -g altimate-code
 
 # Homebrew
 brew install AltimateAI/tap/altimate-code
@@ -58,7 +57,7 @@ altimate /discover
 
 `/discover` auto-detects dbt projects, warehouse connections (from `~/.dbt/profiles.yml`, Docker, environment variables), and installed tools (dbt, sqlfluff, airflow, dagster, and more). Skip this and start building — you can always run it later.
 
-> **Zero Python setup required.** On first run, the CLI automatically downloads [`uv`](https://github.com/astral-sh/uv), creates an isolated Python environment, and installs the data engine with all warehouse drivers. No `pip install`, no virtualenv management.
+> **Zero additional setup.** One command install.
 
 ## Why a specialized harness?
 
@@ -162,7 +161,7 @@ Each agent has scoped permissions and purpose-built tools for its role.
 
 ## Supported Warehouses
 
-Snowflake · BigQuery · Databricks · PostgreSQL · Redshift · DuckDB · MySQL · SQL Server
+Snowflake · BigQuery · Databricks · PostgreSQL · Redshift · DuckDB · MySQL · SQL Server · Oracle · SQLite
 
 First-class support with schema indexing, query execution, and metadata introspection. SSH tunneling available for secure connections.
 
@@ -220,10 +219,11 @@ Contributions welcome — docs, SQL rules, warehouse connectors, and TUI improve
 
 **[Read CONTRIBUTING.md →](./CONTRIBUTING.md)**
 
-## What's New
+## Changelog
 
+- **v0.4.2** (March 2026) — yolo mode, Python engine elimination (all-native TypeScript), tool consolidation, path sandboxing hardening, altimate-dbt CLI, unscoped npm package
 - **v0.4.1** (March 2026) — env-based skill selection, session caching, tracing improvements
-- **v0.4.0** (Feb 2026) — data visualization skill, 99+ tools, training system
+- **v0.4.0** (Feb 2026) — data visualization skill, 100+ tools, training system
 - **v0.3.x** — [See full changelog →](CHANGELOG.md)
 
 ## License

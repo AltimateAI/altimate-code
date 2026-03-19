@@ -1,53 +1,11 @@
-# Web
+# Web UI
 
-altimate includes a web-based interface for browser access.
-
-```bash
-altimate web
-```
-
-## Configuration
-
-Configure the web server in `altimate-code.json`:
-
-```json
-{
-  "server": {
-    "port": 3000,
-    "hostname": "localhost",
-    "cors": ["https://myapp.example.com"],
-    "mdns": true,
-    "mdnsDomain": "altimate-code.local"
-  }
-}
-```
-
-| Option | Default | Description |
-|--------|---------|------------|
-| `port` | 3000 | HTTP port |
-| `hostname` | `localhost` | Bind address |
-| `cors` | `[]` | Allowed CORS origins |
-| `mdns` | `false` | Enable mDNS discovery |
-| `mdnsDomain` | — | Custom mDNS domain |
-
-## Authentication
-
-Set basic auth credentials:
-
-```bash
-export ALTIMATE_CLI_SERVER_USERNAME=admin
-export ALTIMATE_CLI_SERVER_PASSWORD=secret
-altimate web
-```
-
-## Features
-
-The web UI provides the same conversational interface as the TUI:
+Altimate Web is a browser-based interface for interacting with altimate's data engineering tools without the terminal. It provides the same conversational agent experience as the TUI, accessible from any browser.
 
 - Full chat interface with streaming responses
+- Agent switching between builder, analyst, and plan modes
 - File references and tool call results
-- Agent switching
-- Session management
+- Session management and history
 
-!!! note
-    The web UI is the general-purpose agent interface. For data-engineering-specific UIs, see the [Data Engineering guides](../data-engineering/guides/index.md).
+!!! info "Coming Soon"
+    The web UI is currently under development. For now, use the [TUI](tui.md) or [CLI](cli.md) to interact with altimate.

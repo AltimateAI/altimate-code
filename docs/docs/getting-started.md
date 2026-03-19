@@ -4,7 +4,7 @@
 
 ## Why altimate?
 
-altimate is the open-source data engineering harness — 99+ deterministic tools for building, validating, optimizing, and shipping data products. Unlike general-purpose coding agents, every tool is purpose-built for data engineering:
+altimate is the open-source data engineering harness with 100+ deterministic tools for building, validating, optimizing, and shipping data products. Unlike general-purpose coding agents, every tool is purpose-built for data engineering:
 
 | Capability | General coding agents | altimate |
 |---|---|---|
@@ -42,7 +42,7 @@ Then in the TUI:
 
 This walks you through selecting and authenticating with an LLM provider (Anthropic, OpenAI, Bedrock, Codex, Ollama, etc.). You need a working LLM connection before the agent can do anything useful.
 
-## Step 3: Configure Your Warehouse
+## Step 3: Configure Your Warehouse _(Optional)_
 
 Set up warehouse connections so altimate can query your data platform. You have two options:
 
@@ -54,19 +54,17 @@ Set up warehouse connections so altimate can query your data platform. You have 
 
 `/discover` scans your environment and sets up everything automatically:
 
-1. **Detects your dbt project** — finds `dbt_project.yml`, parses the manifest, and reads profiles
-2. **Discovers warehouse connections** — from `~/.dbt/profiles.yml`, running Docker containers, and environment variables (e.g. `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABASE_URL`)
-3. **Checks installed tools** — dbt, sqlfluff, airflow, dagster, prefect, soda, sqlmesh, great_expectations, sqlfmt
-4. **Offers to configure connections** — walks you through adding and testing each discovered warehouse
-5. **Indexes schemas** — populates the schema cache for autocomplete and context-aware analysis
+1. **Detects your dbt project** by finding `dbt_project.yml`, parsing the manifest, and reading profiles
+2. **Discovers warehouse connections** from `~/.dbt/profiles.yml`, running Docker containers, and environment variables (e.g. `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABASE_URL`)
+3. **Checks installed tools** including dbt, sqlfluff, airflow, dagster, prefect, soda, sqlmesh, great_expectations, sqlfmt
+4. **Offers to configure connections** and walks you through adding and testing each discovered warehouse
+5. **Indexes schemas** to populate the schema cache for autocomplete and context-aware analysis
 
 Once complete, altimate indexes your schemas and detects your tooling, enabling schema-aware autocomplete and context-rich analysis.
 
 ### Option B: Manual configuration
 
-Add a warehouse connection to your `altimate-code.json`. Here are minimal snippets for each warehouse type:
-
-#### Snowflake (quick-connect)
+Add a warehouse connection to your `altimate-code.json`. Here's a quick example:
 
 ```json
 {
@@ -83,52 +81,7 @@ Add a warehouse connection to your `altimate-code.json`. Here are minimal snippe
 }
 ```
 
-#### BigQuery (quick-connect)
-
-```json
-{
-  "warehouses": {
-    "bigquery": {
-      "type": "bigquery",
-      "project": "my-gcp-project",
-      "dataset": "analytics"
-    }
-  }
-}
-```
-
-> Tip: Omit `service_account` to use Application Default Credentials (`gcloud auth application-default login`).
-
-#### Databricks (quick-connect)
-
-```json
-{
-  "warehouses": {
-    "databricks": {
-      "type": "databricks",
-      "host": "dbc-abc123.cloud.databricks.com",
-      "token": "${DATABRICKS_TOKEN}",
-      "warehouse_id": "abcdef1234567890",
-      "catalog": "main"
-    }
-  }
-}
-```
-
-#### DuckDB (quick-connect)
-
-```json
-{
-  "warehouses": {
-    "duckdb": {
-      "type": "duckdb",
-      "database": "./dev.duckdb"
-    }
-  }
-}
-```
-
-See [Warehouse connections](#warehouse-connections) below for full configuration options including key-pair auth, Redshift, and PostgreSQL.
+For all warehouse types (Snowflake, BigQuery, Databricks, PostgreSQL, Redshift, DuckDB, MySQL, SQL Server) and advanced options (key-pair auth, ADC, SSH tunneling), see the [Warehouses reference](configure/warehouses.md).
 
 ## Step 4: Choose an Agent Mode
 
@@ -136,13 +89,9 @@ altimate offers specialized agent modes for different workflows:
 
 | What do you want to do? | Use this agent mode |
 |---|---|
-| Analyzing data without risk of changes | **Analyst** — read-only queries, cost analysis, data profiling |
-| Building or generating dbt models | **Builder** — model scaffolding, SQL generation, ref() wiring |
-| Validating data quality | **Validator** — test generation, anomaly detection, data contracts |
-| Migrating across warehouses | **Migrator** — cross-dialect SQL translation, compatibility checks |
-| Teaching team conventions | **Trainer** — learns corrections, enforces naming/style rules across team |
-| Research and exploration | **Researcher** — deep-dive analysis, lineage tracing, impact assessment |
-| Executive summaries and reports | **Executive** — high-level overviews, cost summaries, health dashboards |
+| Analyzing data without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling. SQL writes are blocked entirely. |
+| Building or generating dbt models | **Builder** for model scaffolding, SQL generation, ref() wiring. SQL writes prompt for approval. |
+| Planning before acting | **Plan** for outlining an approach before switching to builder to execute it |
 
 Switch modes in the TUI:
 
@@ -162,94 +111,7 @@ altimate uses a JSON config file. Create `altimate-code.json` in your project ro
 
 ### Warehouse connections
 
-```json
-{
-  "warehouses": {
-    "prod-snowflake": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "analytics_user",
-      "password": "${SNOWFLAKE_PASSWORD}",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS",
-      "role": "ANALYST_ROLE"
-    },
-    "dev-duckdb": {
-      "type": "duckdb",
-      "database": "./dev.duckdb"
-    }
-  }
-}
-```
-
-### Snowflake (key-pair auth)
-
-```json
-{
-  "warehouses": {
-    "snowflake-prod": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "svc_altimate",
-      "private_key_path": "~/.ssh/snowflake_rsa_key.p8",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS",
-      "role": "SYSADMIN"
-    }
-  }
-}
-```
-
-### BigQuery
-
-```json
-{
-  "warehouses": {
-    "bigquery-prod": {
-      "type": "bigquery",
-      "project": "my-gcp-project",
-      "dataset": "analytics",
-      "service_account": "/path/to/service-account.json"
-    }
-  }
-}
-```
-
-Or use Application Default Credentials (ADC) — just omit `service_account` and run `gcloud auth application-default login`.
-
-### Databricks
-
-```json
-{
-  "warehouses": {
-    "databricks-prod": {
-      "type": "databricks",
-      "host": "dbc-abc123.cloud.databricks.com",
-      "token": "${DATABRICKS_TOKEN}",
-      "warehouse_id": "abcdef1234567890",
-      "catalog": "main",
-      "schema": "default"
-    }
-  }
-}
-```
-
-### PostgreSQL / Redshift
-
-```json
-{
-  "warehouses": {
-    "postgres-dev": {
-      "type": "postgres",
-      "host": "localhost",
-      "port": 5432,
-      "database": "analytics",
-      "user": "analyst",
-      "password": "${PG_PASSWORD}"
-    }
-  }
-}
-```
+For all warehouse types and configuration options, see the [Warehouses reference](configure/warehouses.md).
 
 ## Project-level config
 
@@ -302,7 +164,7 @@ altimate integrates with Codex in two ways:
 1. Run `/connect` in the TUI
 2. Select **Codex** as your provider
 3. Authenticate via browser OAuth
-4. Your subscription covers all usage — no API keys needed
+4. Your subscription covers all usage, so no API keys are needed
 
 See [Using with Codex](data-engineering/guides/using-with-codex.md) for details.
 
@@ -358,10 +220,10 @@ Generate data quality tests for all models in the marts/ directory. For each mod
 
 ## Next steps
 
-- [Terminal UI](usage/tui.md) — Learn the terminal interface, keybinds, and slash commands
-- [CLI](usage/cli.md) — Subcommands, flags, and environment variables
-- [Config Files](configure/config.md) — Full config file reference
-- [Providers](configure/providers.md) — Set up Anthropic, OpenAI, Bedrock, Ollama, and more
-- [Agent Modes](data-engineering/agent-modes.md) — Builder, Analyst, Validator, Migrator, Researcher, Trainer
-- [Training](data-engineering/training/index.md) — Correct the agent once, it remembers forever, your team inherits it
-- [Tools](data-engineering/tools/sql-tools.md) — 99+ specialized tools for SQL, dbt, and warehouses
+- [Terminal UI](usage/tui.md): Learn the terminal interface, keybinds, and slash commands
+- [CLI](usage/cli.md): Subcommands, flags, and environment variables
+- [Config Files](configure/config.md): Full config file reference
+- [Providers](configure/providers.md): Set up Anthropic, OpenAI, Bedrock, Ollama, and more
+- [Agent Modes](data-engineering/agent-modes.md): Builder, Analyst, Plan
+- [Training](data-engineering/training/index.md): Correct the agent once, it remembers forever, your team inherits it
+- [Tools](data-engineering/tools/sql-tools.md): 100+ specialized tools for SQL, dbt, and warehouses

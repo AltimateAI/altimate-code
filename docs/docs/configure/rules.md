@@ -6,9 +6,9 @@ Rules are instructions that guide agent behavior. They are loaded automatically 
 
 altimate looks for instruction files in these locations:
 
-- `AGENTS.md` — Primary instruction file (searched up directory tree)
-- `CLAUDE.md` — Fallback instruction file
-- `.altimate-code/AGENTS.md` — Project-specific instructions
+- `AGENTS.md`: Primary instruction file (searched up directory tree)
+- `CLAUDE.md`: Fallback instruction file
+- `.altimate-code/AGENTS.md`: Project-specific instructions
 - Custom patterns via the `instructions` config field
 
 !!! tip
@@ -31,9 +31,9 @@ Specify additional instruction sources in your config:
 
 Patterns support:
 
-- **Glob patterns** — `*.md`, `docs/**/*.md`
-- **URLs** — fetched at startup
-- **Relative paths** — resolved from project root
+- **Glob patterns** such as `*.md`, `docs/**/*.md`
+- **URLs**, which are fetched at startup
+- **Relative paths**, which are resolved from project root
 
 ## Writing Effective Rules
 
@@ -57,7 +57,7 @@ This is a dbt project for our analytics warehouse on Snowflake.
 ```
 
 !!! example "Tips for effective rules"
-    - Be specific and actionable — vague rules get ignored
+    - Be specific and actionable, since vague rules get ignored
     - Include project-specific terminology and conventions
     - Reference file paths and commands that agents should use
     - Keep rules concise; overly long instructions dilute focus
