@@ -9,7 +9,7 @@ copyright: "&copy; 2026 Altimate Inc. All rights reserved."
 theme:
   name: material
   custom_dir: docs/overrides
-  logo: assets/logo.png
+  logo: assets/images/altimate-code-banner-sml.png
   favicon: assets/images/favicon.png
   font:
     text: Inter

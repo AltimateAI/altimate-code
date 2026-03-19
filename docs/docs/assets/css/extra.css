@@ -1,3 +1,13 @@
+/* --- Header: banner logo replaces site-name text --- */
+.md-header__button.md-logo img {
+  height: 1.6rem;
+  width: auto;
+}
+
+.md-header__ellipsis > .md-header__topic:first-child {
+  display: none;
+}
+
 /* Make nav section headers more prominent */
 .md-nav--primary > .md-nav__list > .md-nav__item--section > .md-nav__link {
   font-weight: 700;
