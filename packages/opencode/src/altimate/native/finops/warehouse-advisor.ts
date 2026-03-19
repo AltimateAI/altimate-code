@@ -17,21 +17,19 @@ import type {
 const SNOWFLAKE_LOAD_SQL = `
 SELECT
     warehouse_name,
-    warehouse_size,
     AVG(avg_running) as avg_concurrency,
     AVG(avg_queued_load) as avg_queue_load,
     MAX(avg_queued_load) as peak_queue_load,
     COUNT(*) as sample_count
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY
 WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-GROUP BY warehouse_name, warehouse_size
+GROUP BY warehouse_name
 ORDER BY avg_queue_load DESC
 `
 
 const SNOWFLAKE_SIZING_SQL = `
 SELECT
     warehouse_name,
-    warehouse_size,
     COUNT(*) as query_count,
     AVG(total_elapsed_time) / 1000.0 as avg_time_sec,
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_elapsed_time) / 1000.0 as p95_time_sec,
@@ -40,9 +38,13 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND execution_status = 'SUCCESS'
-GROUP BY warehouse_name, warehouse_size
+GROUP BY warehouse_name
 ORDER BY total_credits DESC
 `
+
+// SHOW WAREHOUSES: fast metadata query — no ACCOUNT_USAGE latency, no credits consumed.
+// Used to look up current warehouse sizes for recommendations.
+const SNOWFLAKE_SHOW_WAREHOUSES = "SHOW WAREHOUSES"
 
 // ---------------------------------------------------------------------------
 // BigQuery SQL templates
@@ -150,13 +152,15 @@ function rowsToRecords(result: { columns: string[]; rows: any[][] }): Record<str
 }
 
 function generateSizingRecommendations(
-  loadData: Record<string, unknown>[], sizingData: Record<string, unknown>[],
+  loadData: Record<string, unknown>[],
+  sizingData: Record<string, unknown>[],
+  sizeByWarehouse: Map<string, string>,
 ): Record<string, unknown>[] {
   const recs: Record<string, unknown>[] = []
 
   for (const wh of loadData) {
     const name = String(wh.warehouse_name || "unknown")
-    const size = String(wh.warehouse_size || "unknown")
+    const size = sizeByWarehouse.get(name) ?? String(wh.warehouse_size || "unknown")
     const avgQueue = Number(wh.avg_queue_load || 0)
     const peakQueue = Number(wh.peak_queue_load || 0)
     const avgConcurrency = Number(wh.avg_concurrency || 0)
@@ -230,12 +234,35 @@ export async function adviseWarehouse(params: WarehouseAdvisorParams): Promise<W
 
   try {
     const connector = await Registry.get(params.warehouse)
-    const loadResult = await connector.execute(loadSql, 1000)
-    const sizingResult = await connector.execute(sizingSql, 1000)
+
+    // Run load and sizing queries in parallel
+    const [loadResult, sizingResult] = await Promise.all([
+      connector.execute(loadSql, 1000),
+      connector.execute(sizingSql, 1000),
+    ])
+
+    // Build warehouse name → size map from SHOW WAREHOUSES (Snowflake only).
+    // Failures (e.g. insufficient privileges) are silently ignored — recommendations
+    // still work but show "unknown" for size.
+    const sizeByWarehouse = new Map<string, string>()
+    if (whType === "snowflake") {
+      try {
+        const showResult = await connector.execute(SNOWFLAKE_SHOW_WAREHOUSES, 1000)
+        const nameIdx = showResult.columns.indexOf("name")
+        const sizeIdx = showResult.columns.indexOf("size")
+        for (const row of showResult.rows) {
+          if (nameIdx >= 0 && sizeIdx >= 0) {
+            sizeByWarehouse.set(String(row[nameIdx]), String(row[sizeIdx]))
+          }
+        }
+      } catch {
+        // ignore — size will fall back to "unknown"
+      }
+    }
 
     const loadData = rowsToRecords(loadResult)
     const sizingData = rowsToRecords(sizingResult)
-    const recommendations = generateSizingRecommendations(loadData, sizingData)
+    const recommendations = generateSizingRecommendations(loadData, sizingData, sizeByWarehouse)
 
     return {
       success: true,
@@ -260,10 +287,12 @@ export async function adviseWarehouse(params: WarehouseAdvisorParams): Promise<W
 export const SQL_TEMPLATES = {
   SNOWFLAKE_LOAD_SQL,
   SNOWFLAKE_SIZING_SQL,
+  SNOWFLAKE_SHOW_WAREHOUSES,
   BIGQUERY_LOAD_SQL,
   BIGQUERY_SIZING_SQL,
   DATABRICKS_LOAD_SQL,
   DATABRICKS_SIZING_SQL,
   buildLoadSql,
   buildSizingSql,
+  generateSizingRecommendations,
 }

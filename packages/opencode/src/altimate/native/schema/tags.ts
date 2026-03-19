@@ -37,7 +37,6 @@ SELECT
     tag_schema,
     tag_name,
     tag_owner,
-    comment,
     created
 FROM SNOWFLAKE.ACCOUNT_USAGE.TAGS
 WHERE deleted IS NULL

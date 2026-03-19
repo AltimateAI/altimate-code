@@ -41,9 +41,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!rows || rows.length === 0) {
             return resolve({ columns: [], rows: [] })
           }
-          const columns = Object.keys(rows[0])
+          const rawColumns = Object.keys(rows[0])
+          const columns = rawColumns.map((col) => col.toLowerCase())
           const mapped = rows.map((row) =>
-            columns.map((col) => row[col]),
+            rawColumns.map((col) => row[col]),
           )
           resolve({ columns, rows: mapped })
         },

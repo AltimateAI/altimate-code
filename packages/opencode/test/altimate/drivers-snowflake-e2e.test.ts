@@ -49,7 +49,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
   describe("Password Auth", () => {
     test("connects successfully with password", async () => {
       const result = await connector.execute("SELECT CURRENT_USER() AS u")
-      expect(result.columns).toEqual(["U"])
+      expect(result.columns).toEqual(["u"])
       expect(result.rows.length).toBe(1)
       expect(typeof result.rows[0][0]).toBe("string")
     })
@@ -76,7 +76,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
   describe("Query Execution", () => {
     test("SELECT literal integer", async () => {
       const r = await connector.execute("SELECT 1 AS n")
-      expect(r.columns).toEqual(["N"])
+      expect(r.columns).toEqual(["n"])
       expect(r.rows).toEqual([[1]])
       expect(r.row_count).toBe(1)
       expect(r.truncated).toBe(false)
@@ -103,7 +103,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
       const r = await connector.execute(
         "SELECT 1 AS a, 'b' AS b, TRUE AS c, NULL AS d",
       )
-      expect(r.columns).toEqual(["A", "B", "C", "D"])
+      expect(r.columns).toEqual(["a", "b", "c", "d"])
       expect(r.rows[0][0]).toBe(1)
       expect(r.rows[0][1]).toBe("b")
       expect(r.rows[0][2]).toBe(true)
@@ -203,7 +203,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
         "SELECT * FROM _altimate_sf_e2e_test ORDER BY id",
       )
       expect(r.row_count).toBe(3)
-      expect(r.columns).toEqual(["ID", "NAME", "ACTIVE"])
+      expect(r.columns).toEqual(["id", "name", "active"])
     })
 
     test("UPDATE row", async () => {
@@ -239,7 +239,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
       const r = await connector.execute(
         "SELECT ARRAY_CONSTRUCT(1, 2, 3) AS arr, OBJECT_CONSTRUCT('key', 'value') AS obj",
       )
-      expect(r.columns).toEqual(["ARR", "OBJ"])
+      expect(r.columns).toEqual(["arr", "obj"])
       expect(r.rows.length).toBe(1)
     })
 
@@ -247,7 +247,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
       const r = await connector.execute(
         "SELECT CURRENT_DATE() AS d, CURRENT_TIME() AS t, CURRENT_TIMESTAMP() AS ts",
       )
-      expect(r.columns).toEqual(["D", "T", "TS"])
+      expect(r.columns).toEqual(["d", "t", "ts"])
     })
 
     test("BOOLEAN", async () => {
@@ -360,7 +360,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
         undefined,
         ["alice"],
       )
-      expect(result.columns).toEqual(["NAME"])
+      expect(result.columns).toEqual(["name"])
       expect(result.rows).toHaveLength(1)
       expect(result.rows[0][0]).toBe("alice")
     })
@@ -437,7 +437,7 @@ describe.skipIf(!HAS_SNOWFLAKE)("Snowflake Driver E2E", () => {
 
     test("scalar bind — SELECT ? returns the bound value", async () => {
       const result = await connector.execute("SELECT ? AS val", undefined, [42])
-      expect(result.columns).toEqual(["VAL"])
+      expect(result.columns).toEqual(["val"])
       expect(result.rows[0][0]).toBe(42)
     })
 

@@ -239,6 +239,75 @@ describe("FinOps: SQL template generation", () => {
   })
 })
 
+describe("FinOps: regression #203 — WAREHOUSE_LOAD_HISTORY has no warehouse_size column", () => {
+  test("SNOWFLAKE_LOAD_SQL does not reference warehouse_size at all", () => {
+    expect(AdvisorTemplates.SNOWFLAKE_LOAD_SQL).not.toContain("warehouse_size")
+  })
+
+  test("SNOWFLAKE_LOAD_SQL does not GROUP BY warehouse_size", () => {
+    const sql = AdvisorTemplates.SNOWFLAKE_LOAD_SQL
+    const groupByMatch = sql.match(/GROUP BY\s+([^\n]+)/i)
+    expect(groupByMatch?.[1]?.trim()).toBe("warehouse_name")
+  })
+
+  test("SNOWFLAKE_SIZING_SQL no longer selects warehouse_size (sourced from SHOW WAREHOUSES now)", () => {
+    expect(AdvisorTemplates.SNOWFLAKE_SIZING_SQL).not.toContain("warehouse_size")
+  })
+
+  test("SNOWFLAKE_SHOW_WAREHOUSES is just SHOW WAREHOUSES", () => {
+    expect(AdvisorTemplates.SNOWFLAKE_SHOW_WAREHOUSES).toBe("SHOW WAREHOUSES")
+  })
+})
+
+describe("Snowflake driver: column names are lowercased (regression #203)", () => {
+  test("rowsToRecords from Snowflake uppercase columns yields lowercase keys", () => {
+    // Simulate Snowflake SDK returning UPPERCASE column names in row objects
+    const fakeUppercaseRow: Record<string, unknown> = {
+      WAREHOUSE_NAME: "MY_WH",
+      AVG_CONCURRENCY: 0.5,
+      AVG_QUEUE_LOAD: 0.0,
+      PEAK_QUEUE_LOAD: 0.0,
+      SAMPLE_COUNT: 100,
+      TOTAL_CREDITS: 42.5,
+    }
+    const rawColumns = Object.keys(fakeUppercaseRow)
+    const columns = rawColumns.map((col) => col.toLowerCase())
+    const rows = [rawColumns.map((col) => fakeUppercaseRow[col])]
+    const records = rows.map((row) => {
+      const obj: Record<string, unknown> = {}
+      columns.forEach((col, i) => { obj[col] = row[i] })
+      return obj
+    })
+    expect(records[0]).toHaveProperty("warehouse_name", "MY_WH")
+    expect(records[0]).toHaveProperty("avg_concurrency", 0.5)
+    expect(records[0]).toHaveProperty("total_credits", 42.5)
+    // Uppercase keys must NOT exist
+    expect(records[0]["WAREHOUSE_NAME"]).toBeUndefined()
+    expect(records[0]["TOTAL_CREDITS"]).toBeUndefined()
+  })
+
+  test("credit recommendation uses lowercase keys and produces correct output", () => {
+    // With uppercase keys (old behavior), total_credits would be undefined → 0
+    // After fix, lowercase keys are read correctly
+    const loadData = [
+      {
+        warehouse_name: "MY_WH",
+        avg_concurrency: 0.5,
+        avg_queue_load: 0.0,
+        peak_queue_load: 0.0,
+        sample_count: 100,
+      },
+    ]
+    const sizeByWarehouse = new Map<string, string>([["MY_WH", "Small"]])
+    const recs = AdvisorTemplates.generateSizingRecommendations(loadData, [], sizeByWarehouse)
+    // avg_queue_load=0, peak_queue_load=0 → no SCALE_UP/BURST
+    // avg_concurrency=0.5 > 0.1 → no SCALE_DOWN
+    // → HEALTHY
+    expect(recs).toHaveLength(1)
+    expect(recs[0]).toMatchObject({ type: "HEALTHY" })
+  })
+})
+
 describe("dbt: manifest parser", () => {
   test("returns empty result for non-existent file", async () => {
     const result = await parseManifest({ path: "/tmp/nonexistent-manifest.json" })

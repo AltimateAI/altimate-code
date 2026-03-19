@@ -32,10 +32,10 @@ WHERE active_bytes > 0
       FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY ah,
            LATERAL FLATTEN(input => ah.base_objects_accessed) f
       WHERE f.value:"objectName"::string = table_catalog || '.' || table_schema || '.' || table_name
-        AND ah.query_start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND ah.query_start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
   )
 ORDER BY size_bytes DESC NULLS LAST
-LIMIT {limit}
+LIMIT ?
 `
 
 const SNOWFLAKE_UNUSED_TABLES_SIMPLE_SQL = `
@@ -51,9 +51,9 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS
 WHERE active_bytes > 0
   AND table_catalog NOT IN ('SNOWFLAKE')
   AND table_schema NOT IN ('INFORMATION_SCHEMA')
-  AND last_altered < DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND last_altered < DATEADD('day', ?, CURRENT_TIMESTAMP())
 ORDER BY size_bytes DESC NULLS LAST
-LIMIT {limit}
+LIMIT ?
 `
 
 const SNOWFLAKE_IDLE_WAREHOUSES_SQL = `
@@ -68,7 +68,7 @@ SELECT
         WHEN name NOT IN (
             SELECT DISTINCT warehouse_name
             FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+            WHERE start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
         ) THEN TRUE
         ELSE FALSE
     END as is_idle
@@ -92,9 +92,9 @@ SELECT
     creation_time as created
 FROM \`region-US.INFORMATION_SCHEMA.TABLE_STORAGE\`
 WHERE NOT deleted
-  AND last_modified_time < UNIX_MILLIS(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY))
+  AND last_modified_time < UNIX_MILLIS(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY))
 ORDER BY size_bytes DESC
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -111,9 +111,9 @@ SELECT
     last_altered,
     created
 FROM system.information_schema.tables
-WHERE last_altered < DATE_SUB(CURRENT_DATE(), {days})
+WHERE last_altered < DATE_SUB(CURRENT_DATE(), ?)
 ORDER BY last_altered ASC
-LIMIT {limit}
+LIMIT ?
 `
 
 // ---------------------------------------------------------------------------
@@ -165,17 +165,11 @@ export async function findUnusedResources(params: UnusedResourcesParams): Promis
     if (whType === "snowflake") {
       // Try ACCESS_HISTORY first, fall back to simple query
       try {
-        const sql = SNOWFLAKE_UNUSED_TABLES_SQL
-          .replace("{days}", String(days))
-          .replace("{limit}", String(limit))
-        const result = await connector.execute(sql, limit)
+        const result = await connector.execute(SNOWFLAKE_UNUSED_TABLES_SQL, limit, [-days, limit])
         unusedTables = rowsToRecords(result)
       } catch {
         try {
-          const sql = SNOWFLAKE_UNUSED_TABLES_SIMPLE_SQL
-            .replace("{days}", String(days))
-            .replace("{limit}", String(limit))
-          const result = await connector.execute(sql, limit)
+          const result = await connector.execute(SNOWFLAKE_UNUSED_TABLES_SIMPLE_SQL, limit, [-days, limit])
           unusedTables = rowsToRecords(result)
         } catch (e) {
           errors.push(`Could not query unused tables: ${e}`)
@@ -184,8 +178,7 @@ export async function findUnusedResources(params: UnusedResourcesParams): Promis
 
       // Idle warehouses
       try {
-        const sql = SNOWFLAKE_IDLE_WAREHOUSES_SQL.replace("{days}", String(days))
-        const result = await connector.execute(sql, 1000)
+        const result = await connector.execute(SNOWFLAKE_IDLE_WAREHOUSES_SQL, 1000, [-days])
         const all = rowsToRecords(result)
         idleWarehouses = all.filter((w) => w.is_idle)
       } catch (e) {
@@ -193,20 +186,14 @@ export async function findUnusedResources(params: UnusedResourcesParams): Promis
       }
     } else if (whType === "bigquery") {
       try {
-        const sql = BIGQUERY_UNUSED_TABLES_SQL
-          .replace("{days}", String(days))
-          .replace("{limit}", String(limit))
-        const result = await connector.execute(sql, limit)
+        const result = await connector.execute(BIGQUERY_UNUSED_TABLES_SQL, limit, [days, limit])
         unusedTables = rowsToRecords(result)
       } catch (e) {
         errors.push(`Could not query unused tables: ${e}`)
       }
     } else if (whType === "databricks") {
       try {
-        const sql = DATABRICKS_UNUSED_TABLES_SQL
-          .replace(/{days}/g, String(days))
-          .replace("{limit}", String(limit))
-        const result = await connector.execute(sql, limit)
+        const result = await connector.execute(DATABRICKS_UNUSED_TABLES_SQL, limit, [days, limit])
         unusedTables = rowsToRecords(result)
       } catch (e) {
         errors.push(`Could not query unused tables: ${e}`)
