@@ -250,7 +250,7 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
         warehouse_type: warehouseType,
         query_type: detectQueryType(params.sql),
         error_message: errorMsg.slice(0, 500),
-        masked_sql: Telemetry.maskArgs({ sql: params.sql }),
+        masked_sql: Telemetry.maskString(params.sql),
         duration_ms: Date.now() - startTime,
       })
     } catch {}

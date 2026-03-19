@@ -384,8 +384,8 @@ export namespace Telemetry {
       keywords: ["econnrefused", "connection", "socket", "enotfound", "econnreset"],
     },
     { class: "timeout", keywords: ["timeout", "etimedout", "bridge timeout", "timed out"] },
-    { class: "validation", keywords: ["invalid params", "invalid", "missing", "required"] },
     { class: "permission", keywords: ["permission", "denied", "unauthorized", "forbidden"] },
+    { class: "validation", keywords: ["invalid params", "invalid", "missing", "required"] },
     { class: "internal", keywords: ["internal", "assertion"] },
   ]
 
@@ -449,7 +449,7 @@ export namespace Telemetry {
   }
 
   // Mirrors altimate-sdk mask_string: replace '...' → ?, collapse whitespace.
-  function maskString(s: string): string {
+  export function maskString(s: string): string {
     return s.replace(/'(?:[^'\\]|\\.)*'/g, "?").replace(/\s+/g, " ").trim()
   }
 
