@@ -112,30 +112,4 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_EXPERIMENTAL_PLAN_MODE` | Enable plan mode |
 | `ALTIMATE_CLI_ENABLE_EXA` | Enable Exa web search |
 
-## Non-interactive Usage
-
-```bash
-# Pipe input
-echo "explain this SQL" | altimate run
-
-# With a specific model
-altimate run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
-
-# Print logs for debugging
-altimate --print-logs --log-level DEBUG run "test query"
-
-# Disable tracing for a single run
-altimate run --no-trace "quick question"
-```
-
-## Tracing
-
-Every `run` command automatically saves a trace file with the full session details, including generations, tool calls, tokens, cost, and timing. See [Tracing](../configure/tracing.md) for configuration options.
-
-```bash
-# List recent traces
-altimate trace list
-
-# View a trace in the browser
-altimate trace view <session-id>
-```
+For non-interactive usage, CI pipelines, and headless automation, see [CI & Automation](ci-headless.md).
