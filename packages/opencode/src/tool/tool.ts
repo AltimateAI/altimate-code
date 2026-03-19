@@ -112,22 +112,27 @@ export namespace Tool {
           try {
             const isSoftFailure = result.metadata?.success === false
             const durationMs = Date.now() - startTime
-            Telemetry.track({
-              type: "tool_call",
-              timestamp: Date.now(),
-              session_id: ctx.sessionID,
-              message_id: ctx.messageID,
-              tool_name: id,
-              tool_type: "standard",
-              tool_category: Telemetry.categorizeToolName(id, "standard"),
-              status: isSoftFailure ? "error" : "success",
-              duration_ms: durationMs,
-              sequence_index: 0,
-              previous_tool: null,
-              ...(isSoftFailure && {
-                input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
-              }),
-            })
+            const toolCategory = Telemetry.categorizeToolName(id, "standard")
+            // Skip success tool_call for file tools (read/write/edit/glob/grep/bash) — high
+            // volume, low signal. Failures are still captured via core_failure below.
+            if (isSoftFailure || toolCategory !== "file") {
+              Telemetry.track({
+                type: "tool_call",
+                timestamp: Date.now(),
+                session_id: ctx.sessionID,
+                message_id: ctx.messageID,
+                tool_name: id,
+                tool_type: "standard",
+                tool_category: toolCategory,
+                status: isSoftFailure ? "error" : "success",
+                duration_ms: durationMs,
+                sequence_index: 0,
+                previous_tool: null,
+                ...(isSoftFailure && {
+                  input_signature: Telemetry.computeInputSignature(args as Record<string, unknown>),
+                }),
+              })
+            }
             if (isSoftFailure) {
               const errorMsg =
                 typeof result.metadata?.error === "string"
