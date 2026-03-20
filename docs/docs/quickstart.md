@@ -60,11 +60,9 @@ Auto-detects your dbt projects, warehouse credentials, and installed tools. See 
 
 ```json
 {
-  "connections": {
-    "local": {
-      "type": "duckdb",
-      "database": "~/.altimate/local.duckdb"
-    }
+  "local": {
+    "type": "duckdb",
+    "database": "~/.altimate/local.duckdb"
   }
 }
 ```

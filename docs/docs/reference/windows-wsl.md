@@ -71,15 +71,13 @@ export ALTIMATE_CLI_GIT_BASH_PATH="C:\\Program Files\\Git\\bin\\bash.exe"
 
 ### Path separator issues
 
-Windows uses backslashes (`\`) in file paths, but altimate config files should always use **forward slashes** (`/`), even on Windows. This applies to all paths in `altimate-code.json`:
+Windows uses backslashes (`\`) in file paths, but altimate config files should always use **forward slashes** (`/`), even on Windows. This applies to all paths in `.altimate-code/connections.json`:
 
 ```json
 {
-  "warehouses": {
-    "local-duckdb": {
-      "type": "duckdb",
-      "database": "C:/Users/analyst/projects/dev.duckdb"
-    }
+  "local-duckdb": {
+    "type": "duckdb",
+    "database": "C:/Users/analyst/projects/dev.duckdb"
   }
 }
 ```

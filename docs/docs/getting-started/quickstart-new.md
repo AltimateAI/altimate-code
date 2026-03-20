@@ -50,23 +50,21 @@ Indexing schema... 142 tables, 1,847 columns indexed
 
 ### Option B: Manual configuration
 
-Add to `altimate-code.json` in your project root:
+Add to `.altimate-code/connections.json` in your project root:
 
 === "Snowflake"
 
     ```json
     {
-      "connections": {
-        "snowflake": {
-          "type": "snowflake",
-          "account": "xy12345.us-east-1",
-          "user": "dbt_user",
-          "password": "${SNOWFLAKE_PASSWORD}",
-          "warehouse": "TRANSFORM_WH",
-          "database": "ANALYTICS",
-          "schema": "PUBLIC",
-          "role": "TRANSFORMER"
-        }
+      "snowflake": {
+        "type": "snowflake",
+        "account": "xy12345.us-east-1",
+        "user": "dbt_user",
+        "password": "${SNOWFLAKE_PASSWORD}",
+        "warehouse": "TRANSFORM_WH",
+        "database": "ANALYTICS",
+        "schema": "PUBLIC",
+        "role": "TRANSFORMER"
       }
     }
     ```
@@ -75,12 +73,10 @@ Add to `altimate-code.json` in your project root:
 
     ```json
     {
-      "connections": {
-        "bigquery": {
-          "type": "bigquery",
-          "project": "my-project-id",
-          "keyfile": "~/.config/gcloud/application_default_credentials.json"
-        }
+      "bigquery": {
+        "type": "bigquery",
+        "project": "my-project-id",
+        "keyfile": "~/.config/gcloud/application_default_credentials.json"
       }
     }
     ```
@@ -89,15 +85,13 @@ Add to `altimate-code.json` in your project root:
 
     ```json
     {
-      "connections": {
-        "postgres": {
-          "type": "postgres",
-          "host": "localhost",
-          "port": 5432,
-          "database": "analytics",
-          "user": "postgres",
-          "password": "${POSTGRES_PASSWORD}"
-        }
+      "postgres": {
+        "type": "postgres",
+        "host": "localhost",
+        "port": 5432,
+        "database": "analytics",
+        "user": "postgres",
+        "password": "${POSTGRES_PASSWORD}"
       }
     }
     ```
@@ -106,11 +100,9 @@ Add to `altimate-code.json` in your project root:
 
     ```json
     {
-      "connections": {
-        "local": {
-          "type": "duckdb",
-          "database": "./data/analytics.duckdb"
-        }
+      "local": {
+        "type": "duckdb",
+        "database": "./data/analytics.duckdb"
       }
     }
     ```

@@ -1,6 +1,6 @@
 # Warehouses
 
-Altimate Code connects to 8 warehouse types. Configure them in the `warehouses` section of your config file or in `.altimate-code/connections.json`.
+Altimate Code connects to 8 warehouse types. Configure them in `.altimate-code/connections.json` (project-local) or `~/.altimate-code/connections.json` (global).
 
 ## Configuration
 
@@ -8,11 +8,9 @@ Each warehouse has a key (the connection name) and a config object:
 
 ```json
 {
-  "warehouses": {
-    "my-connection-name": {
-      "type": "<warehouse-type>",
-      ...
-    }
+  "my-connection-name": {
+    "type": "<warehouse-type>",
+    ...
   }
 }
 ```
@@ -24,16 +22,14 @@ Each warehouse has a key (the connection name) and a config object:
 
 ```json
 {
-  "warehouses": {
-    "prod-snowflake": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "analytics_user",
-      "password": "{env:SNOWFLAKE_PASSWORD}",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS",
-      "role": "ANALYST_ROLE"
-    }
+  "prod-snowflake": {
+    "type": "snowflake",
+    "account": "xy12345.us-east-1",
+    "user": "analytics_user",
+    "password": "{env:SNOWFLAKE_PASSWORD}",
+    "warehouse": "COMPUTE_WH",
+    "database": "ANALYTICS",
+    "role": "ANALYST_ROLE"
   }
 }
 ```
@@ -54,17 +50,15 @@ Each warehouse has a key (the connection name) and a config object:
 
 ```json
 {
-  "warehouses": {
-    "prod-snowflake": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "svc_altimate",
-      "private_key_path": "~/.ssh/snowflake_rsa_key.p8",
-      "private_key_passphrase": "{env:SNOWFLAKE_KEY_PASSPHRASE}",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS",
-      "role": "TRANSFORM_ROLE"
-    }
+  "prod-snowflake": {
+    "type": "snowflake",
+    "account": "xy12345.us-east-1",
+    "user": "svc_altimate",
+    "private_key_path": "~/.ssh/snowflake_rsa_key.p8",
+    "private_key_passphrase": "{env:SNOWFLAKE_KEY_PASSPHRASE}",
+    "warehouse": "COMPUTE_WH",
+    "database": "ANALYTICS",
+    "role": "TRANSFORM_ROLE"
   }
 }
 ```
@@ -73,13 +67,11 @@ Each warehouse has a key (the connection name) and a config object:
 
 ```json
 {
-  "warehouses": {
-    "bigquery-prod": {
-      "type": "bigquery",
-      "project": "my-gcp-project",
-      "credentials_path": "/path/to/service-account.json",
-      "location": "US"
-    }
+  "bigquery-prod": {
+    "type": "bigquery",
+    "project": "my-gcp-project",
+    "credentials_path": "/path/to/service-account.json",
+    "location": "US"
   }
 }
 ```
@@ -96,11 +88,9 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "bigquery-prod": {
-      "type": "bigquery",
-      "project": "my-gcp-project"
-    }
+  "bigquery-prod": {
+    "type": "bigquery",
+    "project": "my-gcp-project"
   }
 }
 ```
@@ -109,15 +99,13 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "databricks-prod": {
-      "type": "databricks",
-      "server_hostname": "adb-1234567890.1.azuredatabricks.net",
-      "http_path": "/sql/1.0/warehouses/abcdef1234567890",
-      "access_token": "{env:DATABRICKS_TOKEN}",
-      "catalog": "main",
-      "schema": "default"
-    }
+  "databricks-prod": {
+    "type": "databricks",
+    "server_hostname": "adb-1234567890.1.azuredatabricks.net",
+    "http_path": "/sql/1.0/warehouses/abcdef1234567890",
+    "access_token": "{env:DATABRICKS_TOKEN}",
+    "catalog": "main",
+    "schema": "default"
   }
 }
 ```
@@ -134,15 +122,13 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "my-postgres": {
-      "type": "postgres",
-      "host": "localhost",
-      "port": 5432,
-      "database": "analytics",
-      "user": "analyst",
-      "password": "{env:PG_PASSWORD}"
-    }
+  "my-postgres": {
+    "type": "postgres",
+    "host": "localhost",
+    "port": 5432,
+    "database": "analytics",
+    "user": "analyst",
+    "password": "{env:PG_PASSWORD}"
   }
 }
 ```
@@ -160,11 +146,9 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "my-postgres": {
-      "type": "postgres",
-      "connection_string": "postgresql://analyst:secret@localhost:5432/analytics"
-    }
+  "my-postgres": {
+    "type": "postgres",
+    "connection_string": "postgresql://analyst:secret@localhost:5432/analytics"
   }
 }
 ```
@@ -173,15 +157,13 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "redshift-prod": {
-      "type": "redshift",
-      "host": "my-cluster.abc123.us-east-1.redshift.amazonaws.com",
-      "port": 5439,
-      "database": "analytics",
-      "user": "admin",
-      "password": "{env:REDSHIFT_PASSWORD}"
-    }
+  "redshift-prod": {
+    "type": "redshift",
+    "host": "my-cluster.abc123.us-east-1.redshift.amazonaws.com",
+    "port": 5439,
+    "database": "analytics",
+    "user": "admin",
+    "password": "{env:REDSHIFT_PASSWORD}"
   }
 }
 ```
@@ -202,16 +184,14 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "redshift-prod": {
-      "type": "redshift",
-      "host": "my-cluster.abc123.us-east-1.redshift.amazonaws.com",
-      "database": "analytics",
-      "user": "admin",
-      "iam_role": "arn:aws:iam::123456789012:role/RedshiftReadOnly",
-      "cluster_identifier": "my-cluster",
-      "region": "us-east-1"
-    }
+  "redshift-prod": {
+    "type": "redshift",
+    "host": "my-cluster.abc123.us-east-1.redshift.amazonaws.com",
+    "database": "analytics",
+    "user": "admin",
+    "iam_role": "arn:aws:iam::123456789012:role/RedshiftReadOnly",
+    "cluster_identifier": "my-cluster",
+    "region": "us-east-1"
   }
 }
 ```
@@ -220,11 +200,9 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "dev-duckdb": {
-      "type": "duckdb",
-      "path": "./dev.duckdb"
-    }
+  "dev-duckdb": {
+    "type": "duckdb",
+    "path": "./dev.duckdb"
   }
 }
 ```
@@ -237,15 +215,13 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "mysql-prod": {
-      "type": "mysql",
-      "host": "localhost",
-      "port": 3306,
-      "database": "analytics",
-      "user": "analyst",
-      "password": "{env:MYSQL_PASSWORD}"
-    }
+  "mysql-prod": {
+    "type": "mysql",
+    "host": "localhost",
+    "port": 3306,
+    "database": "analytics",
+    "user": "analyst",
+    "password": "{env:MYSQL_PASSWORD}"
   }
 }
 ```
@@ -265,15 +241,13 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 ```json
 {
-  "warehouses": {
-    "sqlserver-prod": {
-      "type": "sqlserver",
-      "host": "localhost",
-      "port": 1433,
-      "database": "analytics",
-      "user": "sa",
-      "password": "{env:MSSQL_PASSWORD}"
-    }
+  "sqlserver-prod": {
+    "type": "sqlserver",
+    "host": "localhost",
+    "port": 1433,
+    "database": "analytics",
+    "user": "sa",
+    "password": "{env:MSSQL_PASSWORD}"
   }
 }
 ```
@@ -295,19 +269,17 @@ All warehouse types support SSH tunneling for connections behind a bastion host:
 
 ```json
 {
-  "warehouses": {
-    "prod-via-bastion": {
-      "type": "postgres",
-      "host": "10.0.1.50",
-      "database": "analytics",
-      "user": "analyst",
-      "password": "{env:PG_PASSWORD}",
-      "ssh_host": "bastion.example.com",
-      "ssh_port": 22,
-      "ssh_user": "ubuntu",
-      "ssh_auth_type": "key",
-      "ssh_key_path": "~/.ssh/id_rsa"
-    }
+  "prod-via-bastion": {
+    "type": "postgres",
+    "host": "10.0.1.50",
+    "database": "analytics",
+    "user": "analyst",
+    "password": "{env:PG_PASSWORD}",
+    "ssh_host": "bastion.example.com",
+    "ssh_port": 22,
+    "ssh_user": "ubuntu",
+    "ssh_auth_type": "key",
+    "ssh_key_path": "~/.ssh/id_rsa"
   }
 }
 ```

@@ -64,19 +64,17 @@ Once complete, altimate indexes your schemas and detects your tooling, enabling 
 
 ### Option B: Manual configuration
 
-Add a warehouse connection to your `altimate-code.json`. Here's a quick example:
+Add a warehouse connection to `.altimate-code/connections.json`. Here's a quick example:
 
 ```json
 {
-  "warehouses": {
-    "snowflake": {
-      "type": "snowflake",
-      "account": "xy12345.us-east-1",
-      "user": "your_user",
-      "password": "${SNOWFLAKE_PASSWORD}",
-      "warehouse": "COMPUTE_WH",
-      "database": "ANALYTICS"
-    }
+  "snowflake": {
+    "type": "snowflake",
+    "account": "xy12345.us-east-1",
+    "user": "your_user",
+    "password": "${SNOWFLAKE_PASSWORD}",
+    "warehouse": "COMPUTE_WH",
+    "database": "ANALYTICS"
   }
 }
 ```
@@ -120,7 +118,7 @@ Place `.altimate-code/altimate-code.json` in your dbt project root for project-s
 ```
 my-dbt-project/
   .altimate-code/
-    altimate-code.json    # warehouse connections, model preferences
+    altimate-code.json    # providers, model preferences, permissions
     agents/               # custom agent prompts
     commands/             # custom slash commands
     plugins/              # custom plugins

@@ -168,23 +168,21 @@ Auto-detects your dbt projects, warehouse credentials from `~/.dbt/profiles.yml`
 
 ### Manual configuration
 
-Add a warehouse connection to `altimate-code.json`:
+Add a warehouse connection to `.altimate-code/connections.json`:
 
 === "Snowflake"
 
     ```json
     {
-      "warehouses": {
-        "snowflake": {
-          "type": "snowflake",
-          "account": "xy12345.us-east-1",
-          "user": "dbt_user",
-          "password": "{env:SNOWFLAKE_PASSWORD}",
-          "warehouse": "TRANSFORM_WH",
-          "database": "ANALYTICS",
-          "schema": "PUBLIC",
-          "role": "TRANSFORMER"
-        }
+      "snowflake": {
+        "type": "snowflake",
+        "account": "xy12345.us-east-1",
+        "user": "dbt_user",
+        "password": "{env:SNOWFLAKE_PASSWORD}",
+        "warehouse": "TRANSFORM_WH",
+        "database": "ANALYTICS",
+        "schema": "PUBLIC",
+        "role": "TRANSFORMER"
       }
     }
     ```
@@ -193,12 +191,10 @@ Add a warehouse connection to `altimate-code.json`:
 
     ```json
     {
-      "warehouses": {
-        "bigquery": {
-          "type": "bigquery",
-          "project": "my-project-id",
-          "credentials_path": "~/.config/gcloud/application_default_credentials.json"
-        }
+      "bigquery": {
+        "type": "bigquery",
+        "project": "my-project-id",
+        "credentials_path": "~/.config/gcloud/application_default_credentials.json"
       }
     }
     ```
@@ -207,15 +203,13 @@ Add a warehouse connection to `altimate-code.json`:
 
     ```json
     {
-      "warehouses": {
-        "databricks": {
-          "type": "databricks",
-          "server_hostname": "dbc-abc123.cloud.databricks.com",
-          "http_path": "/sql/1.0/warehouses/abcdef",
-          "access_token": "{env:DATABRICKS_TOKEN}",
-          "catalog": "main",
-          "schema": "default"
-        }
+      "databricks": {
+        "type": "databricks",
+        "server_hostname": "dbc-abc123.cloud.databricks.com",
+        "http_path": "/sql/1.0/warehouses/abcdef",
+        "access_token": "{env:DATABRICKS_TOKEN}",
+        "catalog": "main",
+        "schema": "default"
       }
     }
     ```
@@ -224,15 +218,13 @@ Add a warehouse connection to `altimate-code.json`:
 
     ```json
     {
-      "warehouses": {
-        "postgres": {
-          "type": "postgres",
-          "host": "localhost",
-          "port": 5432,
-          "database": "analytics",
-          "user": "postgres",
-          "password": "{env:POSTGRES_PASSWORD}"
-        }
+      "postgres": {
+        "type": "postgres",
+        "host": "localhost",
+        "port": 5432,
+        "database": "analytics",
+        "user": "postgres",
+        "password": "{env:POSTGRES_PASSWORD}"
       }
     }
     ```
@@ -241,11 +233,9 @@ Add a warehouse connection to `altimate-code.json`:
 
     ```json
     {
-      "warehouses": {
-        "local": {
-          "type": "duckdb",
-          "path": "./data/analytics.duckdb"
-        }
+      "local": {
+        "type": "duckdb",
+        "path": "./data/analytics.duckdb"
       }
     }
     ```
@@ -254,15 +244,13 @@ Add a warehouse connection to `altimate-code.json`:
 
     ```json
     {
-      "warehouses": {
-        "redshift": {
-          "type": "redshift",
-          "host": "my-cluster.abc123.us-east-1.redshift.amazonaws.com",
-          "port": 5439,
-          "database": "analytics",
-          "user": "admin",
-          "password": "{env:REDSHIFT_PASSWORD}"
-        }
+      "redshift": {
+        "type": "redshift",
+        "host": "my-cluster.abc123.us-east-1.redshift.amazonaws.com",
+        "port": 5439,
+        "database": "analytics",
+        "user": "admin",
+        "password": "{env:REDSHIFT_PASSWORD}"
       }
     }
     ```
