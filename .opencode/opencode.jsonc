@@ -10,11 +10,19 @@
       "env": [],
       "options": {
         "apiKey": "lm-studio",
-        "baseURL": "http://localhost:1234/v1",
+        "baseURL": "http://localhost:11434/v1",
       },
       "models": {
-        "qwen": {
-          "name": "Qwen (LM Studio)",
+        "gpt-oss:20b": {
+          "name": "GPT-OSS 20B (LM Studio)",
+          "tool_call": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096,
+          },
+        },
+        "deepseek-r1:70b": {
+          "name": "DeepSeek R1 70B (LM Studio)",
           "tool_call": true,
           "limit": {
             "context": 32768,
