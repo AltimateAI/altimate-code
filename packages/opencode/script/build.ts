@@ -80,6 +80,10 @@ for (const entry of skillEntries) {
   builtinSkills.push({ name: entry.name, content })
 }
 console.log(`Loaded ${builtinSkills.length} builtin skills`)
+if (Script.release && builtinSkills.length === 0) {
+  console.error("No builtin skills were loaded from ../../.opencode/skills; aborting release build.")
+  process.exit(1)
+}
 
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")

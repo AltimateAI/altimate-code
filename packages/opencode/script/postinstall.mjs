@@ -136,7 +136,10 @@ function copyDirRecursive(src, dst) {
 function setupDbtTools() {
   try {
     const dbtBinSrc = path.join(__dirname, "dbt-tools", "bin", "altimate-dbt")
-    if (!fs.existsSync(dbtBinSrc)) return
+    if (!fs.existsSync(dbtBinSrc)) {
+      console.warn(`Bundled altimate-dbt entrypoint missing: ${dbtBinSrc}`)
+      return
+    }
 
     const binDir = path.join(__dirname, "bin")
     if (!fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true })
@@ -160,8 +163,8 @@ function setupDbtTools() {
       const cmdTarget = path.join(binDir, "altimate-dbt.cmd")
       fs.writeFileSync(cmdTarget, '@echo off\r\nnode "%~dp0\\..\\dbt-tools\\dist\\index.js" %*\r\n')
     }
-  } catch {
-    // Non-fatal — dbt-tools is optional
+  } catch (error) {
+    console.warn("Failed to setup bundled altimate-dbt:", error)
   }
 }
 

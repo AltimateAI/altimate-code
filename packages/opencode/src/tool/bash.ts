@@ -172,7 +172,8 @@ export const BashTool = Tool.define("bash", async () => {
       if (binDir) {
         const sep = process.platform === "win32" ? ";" : ":"
         const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""
-        if (!basePath.includes(binDir)) {
+        const pathEntries = basePath.split(sep).filter(Boolean)
+        if (!pathEntries.some((entry) => entry === binDir)) {
           mergedEnv.PATH = `${binDir}${sep}${basePath}`
         }
       }
