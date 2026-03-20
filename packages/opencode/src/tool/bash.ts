@@ -165,8 +165,7 @@ export const BashTool = Tool.define("bash", async () => {
         { env: {} },
       )
 
-      // Merge process.env + shell plugin env, then prepend bundled tools dir.
-      // shellEnv.env may contain PATH additions from user's shell profile.
+      // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) to PATH
       const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
       const binDir = process.env.ALTIMATE_BIN_DIR
       if (binDir) {
@@ -177,6 +176,7 @@ export const BashTool = Tool.define("bash", async () => {
           mergedEnv.PATH = basePath ? `${binDir}${sep}${basePath}` : binDir
         }
       }
+      // altimate_change end
 
       const proc = spawn(params.command, {
         shell,

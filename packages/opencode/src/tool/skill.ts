@@ -112,6 +112,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         metadata: {},
       })
 
+      // altimate_change start — handle builtin: skills that have no filesystem directory
       const isBuiltin = skill.location.startsWith("builtin:")
       const dir = isBuiltin ? "" : path.dirname(skill.location)
       const base = isBuiltin ? skill.location : pathToFileURL(dir).href
@@ -137,6 +138,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
             }
             return arr
           }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
+      // altimate_change end
 
       // altimate_change start — telemetry instrumentation for skill loading
       try {

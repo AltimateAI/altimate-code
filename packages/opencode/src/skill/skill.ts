@@ -1,7 +1,9 @@
 import z from "zod"
 import path from "path"
 import os from "os"
+// altimate_change start — gray-matter for parsing embedded builtin skill frontmatter
 import matter from "gray-matter"
+// altimate_change end
 import { Config } from "../config/config"
 import { Instance } from "../project/instance"
 import { NamedError } from "@opencode-ai/util/error"
@@ -18,12 +20,11 @@ import { pathToFileURL } from "url"
 import type { Agent } from "@/agent/agent"
 import { PermissionNext } from "@/permission/next"
 
-// Builtin skills embedded at build time — available in ALL distribution channels
-// (npm, Homebrew, AUR, Docker) without relying on postinstall filesystem copies.
-// Falls back to filesystem scan in dev mode when the global is undefined.
+// altimate_change start — builtin skills embedded at build time for all distribution channels
 declare const OPENCODE_BUILTIN_SKILLS:
   | { name: string; content: string }[]
   | undefined
+// altimate_change end
 
 export namespace Skill {
   const log = Log.create({ service: "skill" })
@@ -112,8 +113,7 @@ export namespace Skill {
         })
     }
 
-    // Load builtin skills — prefer filesystem (supports @references), fall back
-    // to binary-embedded data (works without postinstall for Homebrew/AUR/Docker).
+    // altimate_change start — load builtin skills from filesystem or binary-embedded data
     if (!Flag.OPENCODE_DISABLE_EXTERNAL_SKILLS) {
       let loadedFromFs = false
 
@@ -155,6 +155,7 @@ export namespace Skill {
         log.info("loaded embedded builtin skills", { count: OPENCODE_BUILTIN_SKILLS.length })
       }
     }
+    // altimate_change end
 
     // Scan external skill directories (.claude/skills/, .agents/skills/, etc.)
     // Load global (home) first, then project-level (so project-level overwrites)
@@ -259,7 +260,9 @@ export namespace Skill {
           `  <skill>`,
           `    <name>${skill.name}</name>`,
           `    <description>${skill.description}</description>`,
+          // altimate_change start — handle builtin: protocol for embedded skills
           `    <location>${skill.location.startsWith("builtin:") ? skill.location : pathToFileURL(skill.location).href}</location>`,
+          // altimate_change end
           `  </skill>`,
         ]),
         "</available_skills>",
