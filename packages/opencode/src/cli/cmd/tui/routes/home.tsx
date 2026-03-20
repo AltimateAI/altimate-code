@@ -15,7 +15,9 @@ import { Installation } from "@/installation"
 import { useKV } from "../context/kv"
 import { useCommandDialog } from "../component/dialog-command"
 import { useLocal } from "../context/local"
+// altimate_change start — upgrade indicator import
 import { UpgradeIndicator } from "../component/upgrade-indicator"
+// altimate_change end
 
 // TODO: what is the best way to do this?
 let once = false
@@ -153,7 +155,9 @@ export function Home() {
         </box>
         <box flexGrow={1} />
         <box flexShrink={0}>
+          {/* altimate_change start — upgrade indicator in home footer */}
           <UpgradeIndicator fallback={<text fg={theme.textMuted}>{Installation.VERSION}</text>} />
+          {/* altimate_change end */}
         </box>
       </box>
     </>

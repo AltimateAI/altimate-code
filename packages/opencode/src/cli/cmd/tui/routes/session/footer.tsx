@@ -8,7 +8,9 @@ import { useRoute } from "../../context/route"
 // altimate_change start - yolo mode visual indicator
 import { Flag } from "@/flag/flag"
 // altimate_change end
+// altimate_change start — upgrade indicator import
 import { UpgradeIndicator } from "../../component/upgrade-indicator"
+// altimate_change end
 
 export function Footer() {
   const { theme } = useTheme()
@@ -96,7 +98,9 @@ export function Footer() {
             <text fg={theme.textMuted}>/status</text>
           </Match>
         </Switch>
+        {/* altimate_change start — upgrade indicator in session footer */}
         <UpgradeIndicator />
+        {/* altimate_change end */}
       </box>
     </box>
   )
