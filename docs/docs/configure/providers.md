@@ -148,6 +148,48 @@ No API key needed. Runs entirely on your local machine.
 !!! info
     Make sure Ollama is running before starting altimate. Install it from [ollama.com](https://ollama.com) and pull your desired model with `ollama pull llama3.1`.
 
+## LM Studio (Local)
+
+Run local models through [LM Studio](https://lmstudio.ai)'s OpenAI-compatible server:
+
+```json
+{
+  "provider": {
+    "lmstudio": {
+      "name": "LM Studio",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["LMSTUDIO_API_KEY"],
+      "options": {
+        "apiKey": "lm-studio",
+        "baseURL": "http://localhost:1234/v1"
+      },
+      "models": {
+        "qwen2.5-7b-instruct": {
+          "name": "Qwen 2.5 7B Instruct",
+          "tool_call": true,
+          "limit": { "context": 131072, "output": 8192 }
+        }
+      }
+    }
+  },
+  "model": "lmstudio/qwen2.5-7b-instruct"
+}
+```
+
+**Setup:**
+
+1. Open LM Studio → **Developer** tab → **Start Server** (default port: 1234)
+2. Load a model in LM Studio
+3. Find your model ID: `curl http://localhost:1234/v1/models`
+4. Add the model ID to the `models` section in your config
+5. Use it: `altimate-code run -m lmstudio/<model-id>`
+
+!!! tip
+    The model key in your config must match the model ID returned by LM Studio's `/v1/models` endpoint. If you change models in LM Studio, update the config to match.
+
+!!! note
+    If you changed LM Studio's default port, update the `baseURL` accordingly. No real API key is needed — the `"lm-studio"` placeholder satisfies the SDK requirement.
+
 ## OpenRouter
 
 ```json
