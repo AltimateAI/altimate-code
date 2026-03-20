@@ -15,7 +15,7 @@ export function UpgradeIndicator(props: { fallback?: JSX.Element }) {
         <box flexDirection="row" gap={1} flexShrink={0}>
           <text fg={theme.success}>↑</text>
           <text fg={theme.accent}>{version()}</text>
-          <text fg={theme.textMuted}>available · altimate upgrade</text>
+          <text fg={theme.textMuted}>update available · altimate upgrade</text>
         </box>
       )}
     </Show>
