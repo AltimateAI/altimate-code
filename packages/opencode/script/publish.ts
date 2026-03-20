@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { $ } from "bun"
+import fs from "fs"
 import pkg from "../package.json"
 import { Script } from "@opencode-ai/script"
 import { fileURLToPath } from "url"
@@ -56,10 +57,16 @@ async function copyAssets(targetDir: string) {
   await $`cp -r ./bin ${targetDir}/bin`
   await $`cp -r ../../.opencode/skills ${targetDir}/skills`
   await $`cp ./script/postinstall.mjs ${targetDir}/postinstall.mjs`
-  // Bundle dbt-tools: copy its bin wrapper + built dist
+  // Bundle dbt-tools: copy its bin wrapper + only the files it actually needs.
+  // The full dist/ contains ~220 MB of .node native binaries from altimate-core
+  // that bun copies as transitive build artifacts but dbt-tools never loads.
   await $`mkdir -p ${targetDir}/dbt-tools/bin`
   await $`cp ../dbt-tools/bin/altimate-dbt ${targetDir}/dbt-tools/bin/altimate-dbt`
-  await $`cp -r ../dbt-tools/dist ${targetDir}/dbt-tools/dist`
+  await $`mkdir -p ${targetDir}/dbt-tools/dist`
+  await $`cp ../dbt-tools/dist/index.js ${targetDir}/dbt-tools/dist/`
+  if (fs.existsSync("../dbt-tools/dist/altimate_python_packages")) {
+    await $`cp -r ../dbt-tools/dist/altimate_python_packages ${targetDir}/dbt-tools/dist/`
+  }
   await Bun.file(`${targetDir}/LICENSE`).write(await Bun.file("../../LICENSE").text())
   await Bun.file(`${targetDir}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
 }

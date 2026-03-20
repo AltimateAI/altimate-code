@@ -297,6 +297,15 @@ describe("Bundle Completeness", () => {
     expect(publishScript).toContain("bun run build")
   })
 
+  test("publish.ts copies only needed dbt-tools dist files (not .node binaries)", () => {
+    const publishScript = readFileSync(join(repoRoot, "packages/opencode/script/publish.ts"), "utf-8")
+    // Should copy index.js and altimate_python_packages selectively, not `cp -r dist`
+    expect(publishScript).toContain("dist/index.js")
+    expect(publishScript).toContain("altimate_python_packages")
+    // Should NOT do a blanket `cp -r ../dbt-tools/dist` (would include ~220MB of .node files)
+    expect(publishScript).not.toMatch(/cp -r \.\.\/dbt-tools\/dist [^/]/)
+  })
+
   test("postinstall.mjs sets up dbt-tools symlink", () => {
     const postinstall = readFileSync(join(repoRoot, "packages/opencode/script/postinstall.mjs"), "utf-8")
     expect(postinstall).toContain("setupDbtTools")
