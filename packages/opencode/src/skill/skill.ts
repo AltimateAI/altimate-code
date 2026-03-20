@@ -1,6 +1,7 @@
 import z from "zod"
 import path from "path"
 import os from "os"
+import matter from "gray-matter"
 import { Config } from "../config/config"
 import { Instance } from "../project/instance"
 import { NamedError } from "@opencode-ai/util/error"
@@ -16,6 +17,13 @@ import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 import type { Agent } from "@/agent/agent"
 import { PermissionNext } from "@/permission/next"
+
+// Builtin skills embedded at build time — available in ALL distribution channels
+// (npm, Homebrew, AUR, Docker) without relying on postinstall filesystem copies.
+// Falls back to filesystem scan in dev mode when the global is undefined.
+declare const OPENCODE_BUILTIN_SKILLS:
+  | { name: string; content: string }[]
+  | undefined
 
 export namespace Skill {
   const log = Log.create({ service: "skill" })
@@ -104,10 +112,13 @@ export namespace Skill {
         })
     }
 
-    // altimate_change start - scan ~/.altimate/builtin/ for release-managed builtin skills
-    // This path is fully owned by postinstall (wipe-and-replace on every release).
-    // Kept separate from user-editable skill dirs so users never accidentally modify builtins.
+    // Load builtin skills — prefer filesystem (supports @references), fall back
+    // to binary-embedded data (works without postinstall for Homebrew/AUR/Docker).
     if (!Flag.OPENCODE_DISABLE_EXTERNAL_SKILLS) {
+      let loadedFromFs = false
+
+      // Try filesystem first — postinstall copies skills (including references/) to
+      // ~/.altimate/builtin/. Filesystem paths are required for @references resolution.
       const builtinDir = path.join(Global.Path.home, ".altimate", "builtin")
       if (await Filesystem.isDir(builtinDir)) {
         const matches = await Glob.scan(SKILL_PATTERN, {
@@ -116,10 +127,34 @@ export namespace Skill {
           include: "file",
           symlink: true,
         })
-        await Promise.all(matches.map(addSkill))
+        if (matches.length > 0) {
+          await Promise.all(matches.map(addSkill))
+          loadedFromFs = true
+        }
+      }
+
+      // Fallback: load from binary-embedded data when filesystem is unavailable
+      // (e.g. Homebrew, AUR, Docker installs that skip npm postinstall).
+      // Note: @references won't resolve for embedded skills, but core functionality works.
+      if (!loadedFromFs && typeof OPENCODE_BUILTIN_SKILLS !== "undefined") {
+        for (const entry of OPENCODE_BUILTIN_SKILLS) {
+          try {
+            const md = matter(entry.content)
+            const meta = Info.pick({ name: true, description: true }).safeParse(md.data)
+            if (!meta.success) continue
+            skills[meta.data.name] = {
+              name: meta.data.name,
+              description: meta.data.description,
+              location: `builtin:${entry.name}/SKILL.md`,
+              content: md.content,
+            }
+          } catch (err) {
+            log.error("failed to parse embedded skill", { skill: entry.name, err })
+          }
+        }
+        log.info("loaded embedded builtin skills", { count: OPENCODE_BUILTIN_SKILLS.length })
       }
     }
-    // altimate_change end
 
     // Scan external skill directories (.claude/skills/, .agents/skills/, etc.)
     // Load global (home) first, then project-level (so project-level overwrites)
@@ -224,7 +259,7 @@ export namespace Skill {
           `  <skill>`,
           `    <name>${skill.name}</name>`,
           `    <description>${skill.description}</description>`,
-          `    <location>${pathToFileURL(skill.location).href}</location>`,
+          `    <location>${skill.location.startsWith("builtin:") ? skill.location : pathToFileURL(skill.location).href}</location>`,
           `  </skill>`,
         ]),
         "</available_skills>",

@@ -33,6 +33,12 @@ function run(target) {
   // Search from BOTH the binary's location AND the wrapper script's location
   // to cover npm flat installs, pnpm isolated stores, and hoisted monorepos.
   const env = { ...process.env }
+
+  // Export bin directory so the compiled binary can add it to PATH when
+  // spawning bash commands. This makes bundled tools (e.g. altimate-dbt)
+  // available to agents without manual PATH configuration.
+  env.ALTIMATE_BIN_DIR = scriptDir
+
   try {
     const resolvedTarget = fs.realpathSync(target)
     const targetDir = path.dirname(path.dirname(resolvedTarget))

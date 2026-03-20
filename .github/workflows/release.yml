@@ -131,6 +131,10 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Build dbt-tools (bundled with CLI)
+        run: bun run build
+        working-directory: packages/dbt-tools
+
       - name: Free disk space for artifact download + npm publish
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost

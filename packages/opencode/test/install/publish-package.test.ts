@@ -57,10 +57,13 @@ describe("publish package validation", () => {
     expect(publishScript).toContain("optionalDependencies: binaries")
   })
 
-  test("publish.ts copies postinstall and bin to dist", () => {
+  test("publish.ts copies postinstall, bin, skills, and dbt-tools to dist", () => {
     const publishScript = fs.readFileSync(path.join(REPO_PKG_DIR, "script/publish.ts"), "utf-8")
     expect(publishScript).toContain("postinstall.mjs")
     expect(publishScript).toContain("cp -r ./bin")
+    expect(publishScript).toContain("cp -r ../../.opencode/skills")
+    expect(publishScript).toContain("dbt-tools/bin/altimate-dbt")
+    expect(publishScript).toContain("dbt-tools/dist")
   })
 
   test("source scripts exist and use expected patterns", () => {
@@ -113,10 +116,8 @@ describe("unscoped package (altimate-code)", () => {
   })
 
   test("unscoped package gets postinstall, bin, LICENSE, CHANGELOG, and README", () => {
-    expect(publishScript).toContain("cp -r ./bin ${unscopedDir}/bin")
-    expect(publishScript).toContain("cp ./script/postinstall.mjs ${unscopedDir}/postinstall.mjs")
-    expect(publishScript).toContain("${unscopedDir}/LICENSE")
-    expect(publishScript).toContain("${unscopedDir}/CHANGELOG.md")
+    // copyAssets() handles bin, skills, postinstall, dbt-tools, LICENSE, CHANGELOG
+    expect(publishScript).toContain("await copyAssets(unscopedDir)")
     expect(publishScript).toContain("${unscopedDir}/README.md")
   })
 

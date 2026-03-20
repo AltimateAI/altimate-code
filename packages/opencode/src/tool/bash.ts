@@ -164,13 +164,23 @@ export const BashTool = Tool.define("bash", async () => {
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
+
+      // Merge process.env + shell plugin env, then prepend bundled tools dir.
+      // shellEnv.env may contain PATH additions from user's shell profile.
+      const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
+      const binDir = process.env.ALTIMATE_BIN_DIR
+      if (binDir) {
+        const sep = process.platform === "win32" ? ";" : ":"
+        const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""
+        if (!basePath.includes(binDir)) {
+          mergedEnv.PATH = `${binDir}${sep}${basePath}`
+        }
+      }
+
       const proc = spawn(params.command, {
         shell,
         cwd,
-        env: {
-          ...process.env,
-          ...shellEnv.env,
-        },
+        env: mergedEnv,
         stdio: ["ignore", "pipe", "pipe"],
         detached: process.platform !== "win32",
         windowsHide: process.platform === "win32",

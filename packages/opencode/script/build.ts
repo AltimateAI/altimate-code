@@ -64,6 +64,23 @@ const migrations = await Promise.all(
 )
 console.log(`Loaded ${migrations.length} migrations`)
 
+// Load builtin skills from .opencode/skills/ directory for embedding in binary.
+// This ensures skills are available in ALL distribution channels (npm, Homebrew, AUR, Docker)
+// without relying on postinstall filesystem copies.
+const skillsRoot = path.resolve(dir, "../../.opencode/skills")
+const skillEntries = fs.existsSync(skillsRoot)
+  ? (await fs.promises.readdir(skillsRoot, { withFileTypes: true })).filter((e) => e.isDirectory())
+  : []
+
+const builtinSkills: { name: string; content: string }[] = []
+for (const entry of skillEntries) {
+  const skillFile = path.join(skillsRoot, entry.name, "SKILL.md")
+  if (!fs.existsSync(skillFile)) continue
+  const content = await Bun.file(skillFile).text()
+  builtinSkills.push({ name: entry.name, content })
+}
+console.log(`Loaded ${builtinSkills.length} builtin skills`)
+
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
@@ -242,6 +259,7 @@ for (const item of targets) {
       // ALTIMATE_ENGINE_VERSION removed — Python engine eliminated
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
+      OPENCODE_BUILTIN_SKILLS: JSON.stringify(builtinSkills),
       OPENCODE_CHANGELOG: JSON.stringify(changelog),
       OPENCODE_WORKER_PATH: workerPath,
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,

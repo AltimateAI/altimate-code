@@ -43,10 +43,29 @@ for (const filepath of new Bun.Glob("**/package.json").scanSync({ cwd: "./dist" 
 console.log("binaries", binaries)
 const version = Object.values(binaries)[0]
 
+// Build dbt-tools so we can bundle it alongside the CLI
+console.log("Building dbt-tools...")
+await $`bun run build`.cwd("../dbt-tools")
+console.log("dbt-tools built successfully")
+
+/**
+ * Copy common assets (bin, skills, dbt-tools, postinstall, license, changelog)
+ * into a target dist directory. Shared by scoped and unscoped packages.
+ */
+async function copyAssets(targetDir: string) {
+  await $`cp -r ./bin ${targetDir}/bin`
+  await $`cp -r ../../.opencode/skills ${targetDir}/skills`
+  await $`cp ./script/postinstall.mjs ${targetDir}/postinstall.mjs`
+  // Bundle dbt-tools: copy its bin wrapper + built dist
+  await $`mkdir -p ${targetDir}/dbt-tools/bin`
+  await $`cp ../dbt-tools/bin/altimate-dbt ${targetDir}/dbt-tools/bin/altimate-dbt`
+  await $`cp -r ../dbt-tools/dist ${targetDir}/dbt-tools/dist`
+  await Bun.file(`${targetDir}/LICENSE`).write(await Bun.file("../../LICENSE").text())
+  await Bun.file(`${targetDir}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
+}
+
 await $`mkdir -p ./dist/${pkg.name}`
-await $`cp -r ./bin ./dist/${pkg.name}/bin`
-await $`cp -r ../../.opencode/skills ./dist/${pkg.name}/skills`
-await $`cp ./script/postinstall.mjs ./dist/${pkg.name}/postinstall.mjs`
+await copyAssets(`./dist/${pkg.name}`)
 await Bun.file(`./dist/${pkg.name}/LICENSE`).write(await Bun.file("../../LICENSE").text())
 await Bun.file(`./dist/${pkg.name}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
 
@@ -88,11 +107,7 @@ const unscopedName = "altimate-code"
 const unscopedDir = `./dist/${unscopedName}`
 try {
   await $`mkdir -p ${unscopedDir}`
-  await $`cp -r ./bin ${unscopedDir}/bin`
-  await $`cp -r ../../.opencode/skills ${unscopedDir}/skills`
-  await $`cp ./script/postinstall.mjs ${unscopedDir}/postinstall.mjs`
-  await Bun.file(`${unscopedDir}/LICENSE`).write(await Bun.file("../../LICENSE").text())
-  await Bun.file(`${unscopedDir}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
+  await copyAssets(unscopedDir)
   await Bun.file(`${unscopedDir}/README.md`).write(await Bun.file("../../README.md").text())
   await Bun.file(`${unscopedDir}/package.json`).write(
     JSON.stringify(

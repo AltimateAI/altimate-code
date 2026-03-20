@@ -112,28 +112,31 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         metadata: {},
       })
 
-      const dir = path.dirname(skill.location)
-      const base = pathToFileURL(dir).href
+      const isBuiltin = skill.location.startsWith("builtin:")
+      const dir = isBuiltin ? "" : path.dirname(skill.location)
+      const base = isBuiltin ? skill.location : pathToFileURL(dir).href
 
       const limit = 10
-      const files = await iife(async () => {
-        const arr = []
-        for await (const file of Ripgrep.files({
-          cwd: dir,
-          follow: false,
-          hidden: true,
-          signal: ctx.abort,
-        })) {
-          if (file.includes("SKILL.md")) {
-            continue
-          }
-          arr.push(path.resolve(dir, file))
-          if (arr.length >= limit) {
-            break
-          }
-        }
-        return arr
-      }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
+      const files = isBuiltin
+        ? ""
+        : await iife(async () => {
+            const arr = []
+            for await (const file of Ripgrep.files({
+              cwd: dir,
+              follow: false,
+              hidden: true,
+              signal: ctx.abort,
+            })) {
+              if (file.includes("SKILL.md")) {
+                continue
+              }
+              arr.push(path.resolve(dir, file))
+              if (arr.length >= limit) {
+                break
+              }
+            }
+            return arr
+          }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
 
       // altimate_change start — telemetry instrumentation for skill loading
       try {

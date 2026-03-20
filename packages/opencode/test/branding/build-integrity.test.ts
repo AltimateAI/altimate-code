@@ -249,7 +249,87 @@ describe("No Orphaned Package References", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 7. Install Script
+// 7. Bundle Completeness — Skills & dbt-tools
+// ---------------------------------------------------------------------------
+
+describe("Bundle Completeness", () => {
+  test("all skills in .opencode/skills/ have a SKILL.md file", () => {
+    const skillsDir = join(repoRoot, ".opencode", "skills")
+    expect(existsSync(skillsDir)).toBe(true)
+
+    const entries = require("fs").readdirSync(skillsDir, { withFileTypes: true })
+    const skillDirs = entries.filter((e: any) => e.isDirectory())
+    expect(skillDirs.length).toBeGreaterThan(0)
+
+    for (const dir of skillDirs) {
+      const skillPath = join(skillsDir, dir.name, "SKILL.md")
+      expect(existsSync(skillPath)).toBe(true)
+    }
+  })
+
+  test("altimate-setup skill exists in root .opencode/skills/ (not in packages/opencode)", () => {
+    // altimate-setup must be in root .opencode/skills/ to be bundled by publish.ts
+    const rootSkill = join(repoRoot, ".opencode", "skills", "altimate-setup", "SKILL.md")
+    expect(existsSync(rootSkill)).toBe(true)
+
+    // Should NOT exist in packages/opencode/.opencode/skills/ (causes split-brain)
+    const pkgSkill = join(repoRoot, "packages", "opencode", ".opencode", "skills", "altimate-setup", "SKILL.md")
+    expect(existsSync(pkgSkill)).toBe(false)
+  })
+
+  test("build.ts embeds skills via OPENCODE_BUILTIN_SKILLS define", () => {
+    const buildScript = readFileSync(join(repoRoot, "packages/opencode/script/build.ts"), "utf-8")
+    expect(buildScript).toContain("OPENCODE_BUILTIN_SKILLS")
+    expect(buildScript).toContain(".opencode/skills")
+    expect(buildScript).toContain("SKILL.md")
+  })
+
+  test("skill.ts loads embedded skills from OPENCODE_BUILTIN_SKILLS", () => {
+    const skillTs = readFileSync(join(repoRoot, "packages/opencode/src/skill/skill.ts"), "utf-8")
+    expect(skillTs).toContain("OPENCODE_BUILTIN_SKILLS")
+    expect(skillTs).toContain("builtin:")
+  })
+
+  test("publish.ts bundles dbt-tools binary and dist", () => {
+    const publishScript = readFileSync(join(repoRoot, "packages/opencode/script/publish.ts"), "utf-8")
+    expect(publishScript).toContain("dbt-tools/bin/altimate-dbt")
+    expect(publishScript).toContain("dbt-tools/dist")
+    expect(publishScript).toContain("bun run build")
+  })
+
+  test("postinstall.mjs sets up dbt-tools symlink", () => {
+    const postinstall = readFileSync(join(repoRoot, "packages/opencode/script/postinstall.mjs"), "utf-8")
+    expect(postinstall).toContain("setupDbtTools")
+    expect(postinstall).toContain("dbt-tools")
+    expect(postinstall).toContain("altimate-dbt")
+  })
+
+  test("bin/altimate exports ALTIMATE_BIN_DIR for bundled tool discovery", () => {
+    const wrapper = readFileSync(join(repoRoot, "packages/opencode/bin/altimate"), "utf-8")
+    expect(wrapper).toContain("ALTIMATE_BIN_DIR")
+  })
+
+  test("bash.ts prepends ALTIMATE_BIN_DIR to PATH", () => {
+    const bashTs = readFileSync(join(repoRoot, "packages/opencode/src/tool/bash.ts"), "utf-8")
+    expect(bashTs).toContain("ALTIMATE_BIN_DIR")
+    expect(bashTs).toContain("PATH")
+  })
+
+  test("dbt-tools package exists with bin entry", () => {
+    const dbtPkg = readJSON("packages/dbt-tools/package.json")
+    expect(dbtPkg.bin).toBeDefined()
+    expect(dbtPkg.bin["altimate-dbt"]).toBeDefined()
+  })
+
+  test("release.yml builds dbt-tools before publish", () => {
+    const releaseYml = readFileSync(join(repoRoot, ".github/workflows/release.yml"), "utf-8")
+    expect(releaseYml).toContain("Build dbt-tools")
+    expect(releaseYml).toContain("packages/dbt-tools")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. Install Script
 // ---------------------------------------------------------------------------
 
 describe("Install Script", () => {

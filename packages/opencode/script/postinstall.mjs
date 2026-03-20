@@ -129,6 +129,43 @@ function copyDirRecursive(src, dst) {
 }
 
 /**
+ * Link bundled dbt-tools binary into the package's bin/ directory so it's
+ * available alongside the main CLI binary. The wrapper script exports
+ * ALTIMATE_BIN_DIR pointing to this directory.
+ */
+function setupDbtTools() {
+  try {
+    const dbtBinSrc = path.join(__dirname, "dbt-tools", "bin", "altimate-dbt")
+    if (!fs.existsSync(dbtBinSrc)) return
+
+    const binDir = path.join(__dirname, "bin")
+    if (!fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true })
+
+    const target = path.join(binDir, "altimate-dbt")
+    if (fs.existsSync(target)) fs.unlinkSync(target)
+
+    // Prefer symlink (preserves original relative imports), fall back to
+    // writing a new wrapper with the correct path from bin/ → dbt-tools/dist/.
+    try {
+      fs.symlinkSync(dbtBinSrc, target)
+    } catch {
+      // Direct copy would break the `import("../dist/index.js")` resolution
+      // since the script moves from dbt-tools/bin/ → bin/. Write a wrapper instead.
+      fs.writeFileSync(target, '#!/usr/bin/env node\nimport("../dbt-tools/dist/index.js")\n')
+    }
+    fs.chmodSync(target, 0o755)
+
+    // Windows: create .cmd shim since cmd.exe doesn't understand shebangs
+    if (os.platform() === "win32") {
+      const cmdTarget = path.join(binDir, "altimate-dbt.cmd")
+      fs.writeFileSync(cmdTarget, '@echo off\r\nnode "%~dp0\\..\\dbt-tools\\dist\\index.js" %*\r\n')
+    }
+  } catch {
+    // Non-fatal — dbt-tools is optional
+  }
+}
+
+/**
  * Copy bundled skills to ~/.altimate/builtin/ on every install/upgrade.
  * The entire directory is wiped and replaced so each release is the single
  * source of truth. Intentionally separate from ~/.altimate/skills/ which users own.
@@ -178,6 +215,7 @@ async function main() {
       // No postinstall setup needed
       if (version) writeUpgradeMarker(version)
       copySkillsToAltimate()
+      setupDbtTools()
       return
     }
 
@@ -196,6 +234,7 @@ async function main() {
     // The CLI picks up the marker and shows the welcome box on first run.
     if (version) writeUpgradeMarker(version)
     copySkillsToAltimate()
+    setupDbtTools()
   } catch (error) {
     console.error("Failed to setup altimate-code binary:", error.message)
     process.exit(1)
