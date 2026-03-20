@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_tables_search ON tables_cache(search_text);
 CREATE INDEX IF NOT EXISTS idx_columns_search ON columns_cache(search_text);
 CREATE INDEX IF NOT EXISTS idx_tables_warehouse ON tables_cache(warehouse);
 CREATE INDEX IF NOT EXISTS idx_columns_warehouse ON columns_cache(warehouse);
-CREATE INDEX IF NOT EXISTS idx_columns_table ON columns_cache(warehouse, schema_name, table_name);
+CREATE INDEX IF NOT EXISTS idx_columns_table ON columns_cache(warehouse, schema_name, table_name, column_name);
 `
 
 // ---------------------------------------------------------------------------
@@ -177,6 +177,18 @@ export class SchemaCache {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
 
+    // Batch inserts per-table inside a transaction to avoid per-statement disk fsyncs.
+    // The async connector calls (listTables, describeTable) run outside the transaction;
+    // only the synchronous SQLite inserts are wrapped.
+    const insertTableBatch = this.db.transaction(
+      (tableArgs: any[], columnArgsBatch: any[][]) => {
+        insertTable.run(...tableArgs)
+        for (const colArgs of columnArgsBatch) {
+          insertColumn.run(...colArgs)
+        }
+      },
+    )
+
     for (const schemaName of schemas) {
       if (schemaName.toUpperCase() === "INFORMATION_SCHEMA") continue
       totalSchemas++
@@ -191,27 +203,32 @@ export class SchemaCache {
       for (const tableInfo of tables) {
         totalTables++
         const searchText = makeSearchText(databaseName, schemaName, tableInfo.name, tableInfo.type)
-        insertTable.run(
-          warehouseName, databaseName, schemaName, tableInfo.name, tableInfo.type, searchText,
-        )
 
         let columns: Array<{ name: string; data_type: string; nullable: boolean }> = []
         try {
           columns = await connector.describeTable(schemaName, tableInfo.name)
         } catch {
-          continue
+          // continue with empty columns
         }
 
+        // Build column insert args
+        const columnArgsBatch: any[][] = []
         for (const col of columns) {
           totalColumns++
           const colSearch = makeSearchText(
             databaseName, schemaName, tableInfo.name, col.name, col.data_type,
           )
-          insertColumn.run(
+          columnArgsBatch.push([
             warehouseName, databaseName, schemaName, tableInfo.name,
             col.name, col.data_type, col.nullable ? 1 : 0, colSearch,
-          )
+          ])
         }
+
+        // Insert table + all its columns in a single transaction
+        insertTableBatch(
+          [warehouseName, databaseName, schemaName, tableInfo.name, tableInfo.type, searchText],
+          columnArgsBatch,
+        )
       }
     }
 

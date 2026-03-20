@@ -12,11 +12,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   return {
     async connect() {
+      const isReadonly = config.readonly === true
       db = new Database(dbPath, {
-        readonly: config.readonly === true,
-        create: true,
+        readonly: isReadonly,
+        create: !isReadonly,
       })
-      db.exec("PRAGMA journal_mode = WAL")
+      if (!isReadonly) {
+        db.exec("PRAGMA journal_mode = WAL")
+      }
     },
 
     async execute(sql: string, limit?: number, _binds?: any[]): Promise<ConnectorResult> {

@@ -605,7 +605,7 @@ describe("file-based cache persistence", () => {
     cache2.close()
   })
 
-  test("creates parent directory if it doesn't exist", () => {
+  test("opens existing DB file at a custom path", () => {
     const nestedPath = join(tmpDir, "deep", "nested", "dir", "cache.db")
     mkdirSync(join(tmpDir, "deep", "nested", "dir"), { recursive: true })
     const cache = SchemaCache.create(nestedPath)
@@ -678,5 +678,57 @@ describe("SQLite driver PRAGMA handling", () => {
     expect(result.truncated).toBe(true)
 
     await connector.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 13. SQLite driver — readonly connection handling
+// ---------------------------------------------------------------------------
+
+describe("SQLite driver readonly connections", () => {
+  test("readonly connection can read existing database", async () => {
+    const { connect } = await import("@altimateai/drivers/sqlite")
+    const dbPath = join(tmpDir, "readonly-test.db")
+
+    // Create a database with data first
+    const writer = await connect({ type: "sqlite", path: dbPath })
+    await writer.connect()
+    await writer.execute("CREATE TABLE items (id INTEGER, name TEXT)")
+    await writer.execute("INSERT INTO items VALUES (1, 'test')")
+    await writer.close()
+
+    // Open readonly and verify reads work
+    const reader = await connect({ type: "sqlite", path: dbPath, readonly: true })
+    await reader.connect()
+    const result = await reader.execute("SELECT * FROM items")
+    expect(result.rows).toEqual([[1, "test"]])
+    await reader.close()
+  })
+
+  test("readonly connection rejects writes", async () => {
+    const { connect } = await import("@altimateai/drivers/sqlite")
+    const dbPath = join(tmpDir, "readonly-write-test.db")
+
+    // Create a database first
+    const writer = await connect({ type: "sqlite", path: dbPath })
+    await writer.connect()
+    await writer.execute("CREATE TABLE items (id INTEGER)")
+    await writer.close()
+
+    // Open readonly and verify writes fail
+    const reader = await connect({ type: "sqlite", path: dbPath, readonly: true })
+    await reader.connect()
+    expect(() => reader.execute("INSERT INTO items VALUES (1)")).toThrow()
+    await reader.close()
+  })
+
+  test("readonly connection does not create nonexistent file", async () => {
+    const { connect } = await import("@altimateai/drivers/sqlite")
+    const dbPath = join(tmpDir, "ghost-file.db")
+
+    const reader = await connect({ type: "sqlite", path: dbPath, readonly: true })
+    // Should throw because the file doesn't exist and create=false
+    expect(() => reader.connect()).toThrow()
+    expect(existsSync(dbPath)).toBe(false)
   })
 })
