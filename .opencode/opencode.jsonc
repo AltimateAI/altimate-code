@@ -4,6 +4,25 @@
     "opencode": {
       "options": {},
     },
+    "lmstudio": {
+      "name": "LM Studio",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": [],
+      "options": {
+        "apiKey": "lm-studio",
+        "baseURL": "http://localhost:1234/v1",
+      },
+      "models": {
+        "qwen": {
+          "name": "Qwen (LM Studio)",
+          "tool_call": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096,
+          },
+        },
+      },
+    },
   },
   "permission": {
     "edit": {
