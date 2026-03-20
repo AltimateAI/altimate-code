@@ -16,6 +16,9 @@ import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 import { PartID } from "./schema"
 import type { SessionID, MessageID } from "./schema"
+// altimate_change start — import Telemetry for per-generation token tracking
+import { Telemetry } from "@/altimate/telemetry"
+// altimate_change end
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -47,6 +50,9 @@ export namespace SessionProcessor {
         log.info("process")
         needsCompaction = false
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
+        // altimate_change start — track step start time for generation telemetry duration_ms
+        let stepStartTime = Date.now()
+        // altimate_change end
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined
@@ -240,6 +246,9 @@ export namespace SessionProcessor {
                     snapshot,
                     type: "step-start",
                   })
+                  // altimate_change start — record step start time for generation telemetry duration
+                  stepStartTime = Date.now()
+                  // altimate_change end
                   break
 
                 case "finish-step":
@@ -251,6 +260,26 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  // altimate_change start — emit per-generation telemetry with token breakdown
+                  // Only include token fields that are actually provided by the API (never default to 0).
+                  Telemetry.track({
+                    type: "generation",
+                    timestamp: Date.now(),
+                    session_id: input.sessionID,
+                    message_id: input.assistantMessage.id,
+                    model_id: streamInput.model.id,
+                    provider_id: streamInput.model.providerID,
+                    agent: streamInput.agent.name,
+                    finish_reason: value.finishReason,
+                    cost: usage.cost,
+                    duration_ms: Date.now() - stepStartTime,
+                    tokens_input: usage.tokens.input,
+                    tokens_output: usage.tokens.output,
+                    ...(value.usage.reasoningTokens !== undefined && { tokens_reasoning: usage.tokens.reasoning }),
+                    ...(value.usage.cachedInputTokens !== undefined && { tokens_cache_read: usage.tokens.cache.read }),
+                    ...(usage.tokens.cache.write > 0 && { tokens_cache_write: usage.tokens.cache.write }),
+                  })
+                  // altimate_change end
                   await Session.updatePart({
                     id: PartID.ascending(),
                     reason: value.finishReason,

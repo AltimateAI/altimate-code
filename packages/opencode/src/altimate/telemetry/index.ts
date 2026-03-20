@@ -50,9 +50,15 @@ export namespace Telemetry {
         provider_id: string
         agent: string
         finish_reason: string
-        tokens: TokensPayload
         cost: number
         duration_ms: number
+        // Flat token fields — only present when data is available from the provider.
+        // No nested objects: Azure App Insights custom measures must be top-level numbers.
+        tokens_input: number
+        tokens_output: number
+        tokens_reasoning?: number    // only for reasoning models
+        tokens_cache_read?: number   // only when a cached prompt was reused
+        tokens_cache_write?: number  // only when a new cache entry was written
       }
     | {
         type: "tool_call"
