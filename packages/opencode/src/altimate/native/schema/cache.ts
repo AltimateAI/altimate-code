@@ -1,11 +1,12 @@
 /**
  * Schema cache — indexes warehouse metadata into SQLite for fast search.
  *
- * Uses better-sqlite3 (optional dependency, dynamically imported) to build
- * a local FTS-ready cache of warehouse schemas, tables, and columns.
+ * Uses bun:sqlite (built into the Bun runtime) to build a local FTS-ready
+ * cache of warehouse schemas, tables, and columns.
  * Cache location: ~/.altimate-code/schema-cache.db
  */
 
+import { Database } from "bun:sqlite"
 import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
@@ -115,45 +116,24 @@ function tokenizeQuery(query: string): string[] {
 
 /** SQLite-backed schema metadata cache for fast warehouse search. */
 export class SchemaCache {
-  private db: any // better-sqlite3 Database instance
+  private db: Database
   private dbPath: string
 
-  private constructor(db: any, dbPath: string) {
+  private constructor(db: Database, dbPath: string) {
     this.db = db
     this.dbPath = dbPath
   }
 
-  /**
-   * Create a SchemaCache instance.
-   * Uses dynamic import for better-sqlite3 (optional dependency).
-   */
-  static async create(dbPath?: string): Promise<SchemaCache> {
+  /** Create a SchemaCache instance backed by a file on disk. */
+  static create(dbPath?: string): SchemaCache {
     const resolvedPath = dbPath || defaultCachePath()
-    let Database: any
-    try {
-      const mod = await import("better-sqlite3")
-      Database = mod.default || mod
-    } catch {
-      throw new Error(
-        "better-sqlite3 not installed. Install with: npm install better-sqlite3",
-      )
-    }
-    const db = new Database(resolvedPath)
+    const db = new Database(resolvedPath, { create: true })
     db.exec(CREATE_TABLES_SQL)
     return new SchemaCache(db, resolvedPath)
   }
 
-  /**
-   * Create a SchemaCache with an in-memory database (for testing).
-   */
-  static async createInMemory(): Promise<SchemaCache> {
-    let Database: any
-    try {
-      const mod = await import("better-sqlite3")
-      Database = mod.default || mod
-    } catch {
-      throw new Error("better-sqlite3 not installed.")
-    }
+  /** Create a SchemaCache with an in-memory database (for testing). */
+  static createInMemory(): SchemaCache {
     const db = new Database(":memory:")
     db.exec(CREATE_TABLES_SQL)
     return new SchemaCache(db, ":memory:")
@@ -399,7 +379,7 @@ let _cache: SchemaCache | null = null
 
 export async function getCache(): Promise<SchemaCache> {
   if (!_cache) {
-    _cache = await SchemaCache.create()
+    _cache = SchemaCache.create()
   }
   return _cache
 }

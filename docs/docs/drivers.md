@@ -10,7 +10,7 @@ Altimate Code connects to 10 databases natively via TypeScript drivers. No Pytho
 |----------|---------|-------------|------------|-------|
 | PostgreSQL | `pg` | Password, Connection String, SSL | ✅ Docker | Stable, fully parameterized queries |
 | DuckDB | `duckdb` | File/Memory (no auth) | ✅ In-memory | Default local database |
-| SQLite | `better-sqlite3` | File (no auth) | ✅ File-based | Sync API wrapped async |
+| SQLite | `bun:sqlite` (built-in) | File (no auth) | ✅ File-based | Zero-install, built into runtime |
 | MySQL | `mysql2` | Password | ✅ Docker | Parameterized introspection |
 | SQL Server | `mssql` | Password, Azure AD | ✅ Docker | Uses `tedious` TDS protocol |
 | Redshift | `pg` (wire-compat) | Password | ✅ Docker (PG wire) | Uses SVV system views |
@@ -26,7 +26,7 @@ Drivers are `optionalDependencies`, so install only what you need:
 ```bash
 # Embedded databases (no external service needed)
 bun add duckdb
-bun add better-sqlite3
+# SQLite uses bun:sqlite (built-in, no install needed)
 
 # Standard databases
 bun add pg                        # PostgreSQL + Redshift

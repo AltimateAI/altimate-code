@@ -73,7 +73,6 @@
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
-    "@types/better-sqlite3": "7.6.13",
     "@types/pg": "8.18.0",
     "@typescript/native-preview": "catalog:",
     "husky": "9.1.7",

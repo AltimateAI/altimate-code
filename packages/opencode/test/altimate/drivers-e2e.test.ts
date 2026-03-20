@@ -19,19 +19,6 @@ function isDuckDBAvailable(): boolean {
   }
 }
 
-function isBetterSqlite3Available(): boolean {
-  try {
-    const Database = require("better-sqlite3")
-    // Verify it actually works (bun throws "not yet supported")
-    const db = new Database(":memory:")
-    db.prepare("SELECT 1").get()
-    db.close()
-    return true
-  } catch {
-    return false
-  }
-}
-
 function isDockerAvailable(): boolean {
   if (process.env.TEST_PG_HOST) return true // CI services replace Docker
   if (!process.env.DRIVER_E2E_DOCKER) return false // Skip unless opted in
@@ -70,7 +57,6 @@ async function waitForPort(
 }
 
 const duckdbAvailable = isDuckDBAvailable()
-const sqliteAvailable = isBetterSqlite3Available()
 const dockerAvailable = isDockerAvailable()
 
 // ---------------------------------------------------------------------------
@@ -418,7 +404,7 @@ describe("SQLite Driver E2E", () => {
   let tmpDir: string
 
   beforeAll(async () => {
-    if (!sqliteAvailable) return
+    // bun:sqlite is always available — no runtime check needed
     tmpDir = mkdtempSync(join(tmpdir(), "sqlite-test-"))
     const dbFile = join(tmpDir, "test.sqlite")
     const mod = await import("@altimateai/drivers/sqlite")
@@ -431,11 +417,11 @@ describe("SQLite Driver E2E", () => {
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test.skipIf(!sqliteAvailable)("connect to file database", () => {
+  test("connect to file database", () => {
     expect(connector).toBeDefined()
   })
 
-  test.skipIf(!sqliteAvailable)("execute SELECT query", async () => {
+  test("execute SELECT query", async () => {
     const result = await connector.execute("SELECT 1 AS num, 'hello' AS msg")
     expect(result.columns).toEqual(["num", "msg"])
     expect(result.rows).toEqual([[1, "hello"]])
@@ -443,7 +429,7 @@ describe("SQLite Driver E2E", () => {
     expect(result.truncated).toBe(false)
   })
 
-  test.skipIf(!sqliteAvailable)(
+  test(
     "execute DDL + DML queries",
     async () => {
       // CREATE
@@ -493,7 +479,7 @@ describe("SQLite Driver E2E", () => {
     },
   )
 
-  test.skipIf(!sqliteAvailable)(
+  test(
     "listSchemas (SQLite has only 'main')",
     async () => {
       const schemas = await connector.listSchemas()
@@ -501,7 +487,7 @@ describe("SQLite Driver E2E", () => {
     },
   )
 
-  test.skipIf(!sqliteAvailable)("listTables", async () => {
+  test("listTables", async () => {
     const tables = await connector.listTables("main")
     const names = tables.map((t) => t.name)
     expect(names).toContain("test_sqlite")
@@ -509,16 +495,17 @@ describe("SQLite Driver E2E", () => {
     expect(entry?.type).toBe("table")
   })
 
-  test.skipIf(!sqliteAvailable)("describeTable", async () => {
+  test("describeTable", async () => {
     const columns = await connector.describeTable("main", "test_sqlite")
     expect(columns).toEqual([
-      { name: "id", data_type: "INTEGER", nullable: false },
+      // INTEGER PRIMARY KEY is a rowid alias — SQLite reports notnull=0 for it
+      { name: "id", data_type: "INTEGER", nullable: true },
       { name: "name", data_type: "TEXT", nullable: true },
       { name: "score", data_type: "REAL", nullable: true },
     ])
   })
 
-  test.skipIf(!sqliteAvailable)(
+  test(
     "handles read vs write query detection",
     async () => {
       // SELECT-like returns data rows
@@ -541,7 +528,7 @@ describe("SQLite Driver E2E", () => {
     },
   )
 
-  test.skipIf(!sqliteAvailable)(
+  test(
     "LIMIT truncation works",
     async () => {
       // Insert enough rows
@@ -560,14 +547,14 @@ describe("SQLite Driver E2E", () => {
     },
   )
 
-  test.skipIf(!sqliteAvailable)(
+  test(
     "handles invalid SQL gracefully",
     async () => {
       expect(() => connector.execute("INVALID SQL STATEMENT")).toThrow()
     },
   )
 
-  test.skipIf(!sqliteAvailable)(
+  test(
     "close and cleanup",
     async () => {
       const tmpDir2 = mkdtempSync(join(tmpdir(), "sqlite-close-test-"))
@@ -586,7 +573,7 @@ describe("SQLite Driver E2E", () => {
     },
   )
 
-  test.skipIf(!sqliteAvailable)(
+  test(
     "view is listed with correct type",
     async () => {
       await connector.execute(

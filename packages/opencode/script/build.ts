@@ -242,7 +242,7 @@ for (const item of targets) {
       "@altimateai/altimate-core",
       // Database drivers — native addons, users install on demand per warehouse
       "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
-      "mysql2", "mssql", "oracledb", "duckdb", "better-sqlite3",
+      "mysql2", "mssql", "oracledb", "duckdb",
       // Optional infra packages — native addons or heavy optional deps
       "keytar", "ssh2", "dockerode",
     ],
