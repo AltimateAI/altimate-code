@@ -14,13 +14,6 @@ export namespace Telemetry {
   const MAX_BUFFER_SIZE = 200
   const REQUEST_TIMEOUT_MS = 10_000
 
-  export type TokensPayload = {
-    input: number
-    output: number
-    reasoning: number
-    cache_read: number
-    cache_write: number
-  }
 
   export type Event =
     | {
