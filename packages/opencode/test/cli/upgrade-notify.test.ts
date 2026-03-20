@@ -92,14 +92,19 @@ describe("KV-based upgrade indicator integration", () => {
   })
 
   test("indicator hidden when stored version is older (prevents downgrade arrow)", () => {
-    // F2 fix: user on 0.5.3, KV has stale "0.5.0" → should NOT show downgrade
-    // In dev mode (VERSION="local"), semver parsing can't compare, so indicator shows
+    // F2 fix: user on 0.5.3, KV has stale "0.5.0" — should NOT show downgrade
+    // In dev mode (VERSION="local"), valid semver candidates still show
     const result = getAvailableVersion("0.5.0")
     if (Installation.VERSION === "local") {
       expect(result).toBe("0.5.0")
     } else {
       expect(result).toBeUndefined()
     }
+  })
+
+  test("indicator hidden for invalid/corrupted KV values", () => {
+    expect(getAvailableVersion("corrupted")).toBeUndefined()
+    expect(getAvailableVersion("not-semver")).toBeUndefined()
   })
 
   test("indicator shown when stored version is newer than current", () => {

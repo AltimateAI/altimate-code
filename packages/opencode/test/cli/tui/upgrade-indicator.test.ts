@@ -38,15 +38,25 @@ describe("upgrade-indicator-utils", () => {
       expect(getAvailableVersion("")).toBeUndefined()
     })
 
-    test("returns version when stored version is newer or unparseable (dev mode)", () => {
-      // In dev mode VERSION="local", semver parsing falls back to showing indicator
-      const result = getAvailableVersion("999.0.0")
-      expect(typeof result === "string" || result === undefined).toBe(true)
+    test("returns undefined for invalid/corrupted version strings", () => {
+      // Invalid versions should not show the indicator (semver rejects them)
+      expect(getAvailableVersion("not-a-version")).toBeUndefined()
+      expect(getAvailableVersion("error")).toBeUndefined()
     })
 
-    test("returns version for any valid semver in dev mode", () => {
-      // When VERSION="local" (dev), isNewer returns true for any candidate
-      // When VERSION is semver, only truly newer versions pass
+    test("handles prerelease versions correctly", () => {
+      // Prerelease of a very high version should still show
+      const result = getAvailableVersion("99.0.0-beta.1")
+      if (Installation.VERSION === "local") {
+        expect(result).toBe("99.0.0-beta.1")
+      } else {
+        // semver.gt handles prerelease correctly
+        expect(typeof result === "string" || result === undefined).toBe(true)
+      }
+    })
+
+    test("returns version for valid semver in dev mode", () => {
+      // When VERSION="local" (dev), any valid semver candidate shows
       const result = getAvailableVersion("0.0.1")
       if (Installation.VERSION === "local") {
         expect(result).toBe("0.0.1")
