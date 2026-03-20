@@ -50,9 +50,13 @@ function transform(entry: Record<string, any>): Config.Mcp | undefined {
 
   // Local server
   if (entry.command) {
+    const safeStr = (x: unknown): string => {
+      if (typeof x === "string") return x
+      try { return String(x) } catch { return "[invalid]" }
+    }
     const cmd = Array.isArray(entry.command)
-      ? entry.command.map(String)
-      : [String(entry.command), ...(Array.isArray(entry.args) ? entry.args.map(String) : [])]
+      ? entry.command.filter((x: unknown) => x != null).map(safeStr)
+      : [safeStr(entry.command), ...(Array.isArray(entry.args) ? entry.args.filter((x: unknown) => x != null).map(safeStr) : [])]
 
     const result: Record<string, any> = {
       type: "local" as const,
@@ -114,7 +118,7 @@ async function readJsonSafe(filePath: string): Promise<any | undefined> {
     return undefined
   }
   const errors: any[] = []
-  const result = parseJsonc(text, errors)
+  const result = parseJsonc(text, errors, { allowTrailingComma: true })
   if (errors.length > 0) {
     log.debug("failed to parse external MCP config", { file: filePath, errors: errors.length })
     return undefined
@@ -173,7 +177,7 @@ export async function discoverExternalMcp(worktree: string): Promise<{
   sources: string[]
 }> {
   log.info("Discovering MCP servers from external AI tool configs...")
-  const result: Record<string, Config.Mcp> = {}
+  const result: Record<string, Config.Mcp> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()
 
