@@ -174,7 +174,7 @@ export const BashTool = Tool.define("bash", async () => {
         const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""
         const pathEntries = basePath.split(sep).filter(Boolean)
         if (!pathEntries.some((entry) => entry === binDir)) {
-          mergedEnv.PATH = `${binDir}${sep}${basePath}`
+          mergedEnv.PATH = basePath ? `${binDir}${sep}${basePath}` : binDir
         }
       }
 
