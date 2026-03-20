@@ -850,6 +850,10 @@ function App() {
       duration: 10000,
     })
   })
+
+  sdk.event.on(Installation.Event.Updated.type, () => {
+    kv.set("update_available_version", Installation.VERSION)
+  })
   // altimate_change end
 
   return (

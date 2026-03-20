@@ -87,25 +87,22 @@ describe("KV-based upgrade indicator integration", () => {
 
   test("simulated KV store correctly tracks update version", () => {
     const store: Record<string, any> = {}
-    store[UPGRADE_KV_KEY] = "2.0.0"
-    expect(store[UPGRADE_KV_KEY]).toBe("2.0.0")
+    store[UPGRADE_KV_KEY] = "999.0.0"
+    expect(store[UPGRADE_KV_KEY]).toBe("999.0.0")
   })
 
-  test("indicator hidden after upgrade (version matches)", () => {
-    const store: Record<string, any> = {}
-    store[UPGRADE_KV_KEY] = "2.0.0"
-
-    // Simulate: after upgrade, current version = stored version
-    const shouldShow = getAvailableVersion(store[UPGRADE_KV_KEY])
-    // This test is version-dependent; use 2.0.0 which won't match Installation.VERSION
-    if (Installation.VERSION === "2.0.0") {
-      expect(shouldShow).toBeUndefined()
+  test("indicator hidden when stored version is older (prevents downgrade arrow)", () => {
+    // F2 fix: user on 0.5.3, KV has stale "0.5.0" → should NOT show downgrade
+    // In dev mode (VERSION="local"), semver parsing can't compare, so indicator shows
+    const result = getAvailableVersion("0.5.0")
+    if (Installation.VERSION === "local") {
+      expect(result).toBe("0.5.0")
     } else {
-      expect(shouldShow).toBe("2.0.0")
+      expect(result).toBeUndefined()
     }
   })
 
-  test("indicator shown when stored version differs from current", () => {
+  test("indicator shown when stored version is newer than current", () => {
     const store: Record<string, any> = {}
     store[UPGRADE_KV_KEY] = "999.0.0"
 
@@ -121,31 +118,23 @@ describe("KV-based upgrade indicator integration", () => {
 
   test("KV value can be overwritten with newer version", () => {
     const store: Record<string, any> = {}
-    store[UPGRADE_KV_KEY] = "2.0.0"
-    expect(store[UPGRADE_KV_KEY]).toBe("2.0.0")
-
-    store[UPGRADE_KV_KEY] = "3.0.0"
-    expect(store[UPGRADE_KV_KEY]).toBe("3.0.0")
+    store[UPGRADE_KV_KEY] = "998.0.0"
+    store[UPGRADE_KV_KEY] = "999.0.0"
+    expect(store[UPGRADE_KV_KEY]).toBe("999.0.0")
 
     const result = getAvailableVersion(store[UPGRADE_KV_KEY])
-    expect(result).toBe("3.0.0")
+    expect(result).toBe("999.0.0")
   })
 
-  test("end-to-end: event → KV → indicator flow", () => {
+  test("end-to-end: event → KV → indicator → reset on Updated", () => {
     const store: Record<string, any> = {}
 
-    // Step 1: Simulate UpdateAvailable event handler storing version
-    const eventVersion = "5.0.0"
-    store[UPGRADE_KV_KEY] = eventVersion
+    // Step 1: UpdateAvailable event stores version
+    store[UPGRADE_KV_KEY] = "999.0.0"
+    expect(getAvailableVersion(store[UPGRADE_KV_KEY])).toBe("999.0.0")
 
-    // Step 2: Verify indicator reads correctly
-    const displayVersion = getAvailableVersion(store[UPGRADE_KV_KEY])
-    expect(displayVersion).toBe("5.0.0")
-
-    // Step 3: After upgrade, clear or match version
-    // Simulate user upgraded — now VERSION would be "5.0.0"
-    // We can't change Installation.VERSION at runtime, so verify logic:
-    const shouldHideAfterUpgrade = eventVersion === eventVersion // same version = hide
-    expect(shouldHideAfterUpgrade).toBe(true)
+    // Step 2: Updated event sets KV to current version (F1 fix)
+    store[UPGRADE_KV_KEY] = Installation.VERSION
+    expect(getAvailableVersion(store[UPGRADE_KV_KEY])).toBeUndefined()
   })
 })
