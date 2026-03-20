@@ -11,7 +11,7 @@ We collect the following categories of events:
 | `session_start` | A new CLI session begins |
 | `session_end` | A CLI session ends (includes duration) |
 | `session_forked` | A session is forked from an existing one |
-| `generation` | An AI model generation completes (model ID, token counts, duration — no prompt content) |
+| `generation` | An AI model generation (step) completes — model ID, provider ID, agent, finish reason, cost, duration, and token breakdown: input, output, and when available: reasoning tokens (reasoning models only), cache-read tokens (prompt cache hit), cache-write tokens (new cache entry). No prompt content. |
 | `tool_call` | A tool is invoked (tool name and category — no arguments or output) |
 | `native_call` | A native engine call completes (method name and duration — no arguments) |
 | `command` | A CLI command is executed (command name only) |

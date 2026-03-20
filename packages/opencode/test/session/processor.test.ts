@@ -468,20 +468,18 @@ describe("generation telemetry", () => {
       provider_id: "anthropic",
       agent: "builder",
       finish_reason: "end_turn",
-      tokens: {
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-        cache_read: 800,
-        cache_write: 100,
-      },
+      tokens_input: 1000,
+      tokens_output: 500,
+      tokens_reasoning: 200,
+      tokens_cache_read: 800,
+      tokens_cache_write: 100,
       cost: 0.05,
       duration_ms: 3000,
     }
 
     expect(event.model_id).toBe("claude-opus-4-6")
-    expect(event.tokens.input).toBe(1000)
-    expect(event.tokens.cache_read).toBe(800)
+    expect(event.tokens_input).toBe(1000)
+    expect(event.tokens_cache_read).toBe(800)
     expect(event.cost).toBe(0.05)
     expect(event.finish_reason).toBe("end_turn")
   })
