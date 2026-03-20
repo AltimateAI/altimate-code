@@ -1,3 +1,6 @@
-release: v0.5.2
+fix: add missing `altimate_change` markers for `experimental` block in `opencode.jsonc`
+
+The `experimental` config added in #311 was missing upstream markers,
+causing the Marker Guard CI check to fail on main.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
