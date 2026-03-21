@@ -152,6 +152,39 @@ MCP (Model Context Protocol) servers extend Altimate Code with additional tools.
 !!! warning
     Third-party MCP servers are not reviewed or audited by Altimate. Treat them like any other third-party dependency: review the source, check for updates, and limit their access.
 
+## What is MCP auto-discovery?
+
+Altimate Code can automatically discover MCP server definitions from other AI tools installed on your machine. This saves you from manually re-configuring servers you already use elsewhere. Sources include:
+
+| Source | Config file | Scope |
+|--------|------------|-------|
+| VS Code | `.vscode/mcp.json` | Project |
+| Cursor | `.cursor/mcp.json` | Project |
+| GitHub Copilot | `.github/copilot/mcp.json` | Project |
+| Claude Code | `.mcp.json` | Project + Home |
+| Gemini CLI | `.gemini/settings.json` | Project + Home |
+| Claude Desktop | `~/.claude.json` | Home |
+
+**Security model:**
+
+- **Home-directory configs** (your personal machine config) are treated as trusted and auto-enabled, since you installed them.
+- **Project-scoped configs** (checked into a repo) are discovered but **disabled by default**. You must explicitly approve them via the `/discover-and-add-mcps` tool before they run.
+- **Sensitive details are redacted** in discovery notifications. Server commands and URLs are only shown when you explicitly inspect them.
+- **Prototype pollution, command injection, and path traversal** are hardened against with input validation and `Object.create(null)` result objects.
+
+**To disable auto-discovery entirely:**
+
+```json
+{
+  "experimental": {
+    "auto_mcp_discovery": false
+  }
+}
+```
+
+!!! tip
+    If your project repository contains `.vscode/mcp.json` or similar config files from other contributors, auto-discovery will find them but **will not start them** until you approve. Always review discovered servers before enabling them.
+
 ## How does the SQL analysis engine work?
 
 As of v0.4.2, all 73 tool methods run natively in TypeScript via `@altimateai/altimate-core` (Rust napi-rs bindings). There is no Python dependency. The engine executes in-process with no subprocess, no network port, and no external service.
