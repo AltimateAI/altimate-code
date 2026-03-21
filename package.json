@@ -76,6 +76,7 @@
     "@types/pg": "8.18.0",
     "@typescript/native-preview": "catalog:",
     "husky": "9.1.7",
+    "playwright-core": "1.58.2",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
     "turbo": "2.8.13"
