@@ -80,7 +80,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .wf-icon.generation { background: rgba(77,142,255,0.15); color: var(--secondary); }
 .wf-icon.tool { background: rgba(34,211,238,0.12); color: var(--cyan); }
 .wf-icon.error { background: rgba(248,113,113,0.15); color: var(--red); }
-.wf-name { font-size: 13px; font-weight: 500; width: 200px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-info { width: 300px; flex-shrink: 0; overflow: hidden; min-width: 0; }
+.wf-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-preview { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+.wf-preview .pv-tag { display: inline-block; font-size: 10px; font-weight: 600; padding: 0 4px; border-radius: 3px; margin-right: 4px; vertical-align: baseline; }
+.wf-preview .pv-tag.model { background: rgba(77,142,255,0.12); color: var(--secondary); }
+.wf-preview .pv-tag.tok { background: rgba(74,222,128,0.12); color: var(--green); }
+.wf-preview .pv-tag.err { background: rgba(248,113,113,0.12); color: var(--red); }
 .wf-bar-c { flex: 1; height: 18px; position: relative; overflow: hidden; }
 .wf-bar { position: absolute; height: 100%; border-radius: 3px; min-width: 3px; opacity: 0.85; display: flex; align-items: center; padding-left: 4px; }
 .wf-bar.generation { background: var(--secondary); }
@@ -102,6 +108,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .tree-type.session { background: rgba(77,142,255,0.1); color: var(--primary); }
 .tree-title { font-size: 13px; font-weight: 500; }
 .tree-meta { font-size: 12px; color: var(--dim); display: flex; gap: 12px; margin-top: 2px; }
+.tree-preview { font-size: 11px; color: var(--dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 600px; }
+.tree-preview .pv-tag { display: inline-block; font-size: 10px; font-weight: 600; padding: 0 4px; border-radius: 3px; margin-right: 4px; vertical-align: baseline; }
+.tree-preview .pv-tag.model { background: rgba(77,142,255,0.12); color: var(--secondary); }
+.tree-preview .pv-tag.tok { background: rgba(74,222,128,0.12); color: var(--green); }
+.tree-preview .pv-tag.err { background: rgba(248,113,113,0.12); color: var(--red); }
 .tree-detail { margin-top: 8px; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; display: none; }
 .tree-detail.open { display: block; }
 
@@ -238,6 +249,53 @@ var tEnd = spans.length ? Math.max.apply(null, spans.map(function(s) { return s.
 var tTotal = tEnd - tStart || 1;
 var icons = { session: '\\u25A0', generation: '\\u2B50', tool: '\\u2692', text: '\\u270E' };
 
+// --- Inline preview helper ---
+// Returns a short HTML string summarizing a span without expanding it.
+function getPreview(span) {
+  var parts = [];
+  // Error message always shown
+  if (span.status === 'error' && span.statusMessage) {
+    return '<span class="pv-tag err">\\u2718</span>' + e((span.statusMessage || '').slice(0, 120));
+  }
+  if (span.kind === 'tool') {
+    // Extract a useful summary from tool input
+    var inp = span.input;
+    if (inp) {
+      if (typeof inp === 'string') {
+        parts.push(e(inp.slice(0, 120)));
+      } else if (typeof inp === 'object') {
+        // Common tool input patterns
+        var o = inp;
+        if (o.command) parts.push(e(String(o.command).slice(0, 120)));
+        else if (o.file_path) parts.push(e(String(o.file_path)));
+        else if (o.pattern && o.path) parts.push(e(o.pattern + ' in ' + o.path));
+        else if (o.pattern) parts.push(e(String(o.pattern)));
+        else if (o.query) parts.push(e(String(o.query).slice(0, 120)));
+        else if (o.url) parts.push(e(String(o.url).slice(0, 120)));
+        else if (o.prompt) parts.push(e(String(o.prompt).slice(0, 120)));
+        else if (o.description) parts.push(e(String(o.description).slice(0, 120)));
+        else {
+          var s = JSON.stringify(o);
+          if (s.length > 120) s = s.slice(0, 120) + '...';
+          parts.push(e(s));
+        }
+      }
+    }
+    if (span.status === 'error') parts.unshift('<span class="pv-tag err">\\u2718</span>');
+  } else if (span.kind === 'generation') {
+    if (span.model && span.model.modelId) parts.push('<span class="pv-tag model">' + e(span.model.modelId) + '</span>');
+    if (span.tokens && span.tokens.total) parts.push('<span class="pv-tag tok">' + Number(span.tokens.total).toLocaleString() + ' tok</span>');
+    if (span.finishReason && span.finishReason !== 'stop') parts.push(e(span.finishReason));
+    if (span.cost) parts.push(fc(span.cost));
+  } else if (span.kind === 'text') {
+    if (span.input) {
+      var txt = typeof span.input === 'string' ? span.input : JSON.stringify(span.input);
+      parts.push(e(txt.slice(0, 120)));
+    }
+  }
+  return parts.join(' ');
+}
+
 // --- Detail panel ---
 function showDetail(span) {
   var dur = (span.endTime || Date.now()) - (span.startTime || 0);
@@ -317,8 +375,9 @@ function showDetail(span) {
     row.className = 'wf-row';
     row.setAttribute('data-idx', String(idx));
     var iconCls = span.status === 'error' ? 'error' : e(span.kind);
+    var pv = getPreview(span);
     row.innerHTML = '<div class="wf-icon ' + iconCls + '">' + (icons[span.kind]||'\\u2022') + '</div>' +
-      '<div class="wf-name">' + e(span.name) + '</div>' +
+      '<div class="wf-info"><div class="wf-name">' + e(span.name) + '</div>' + (pv ? '<div class="wf-preview">' + pv + '</div>' : '') + '</div>' +
       '<div class="wf-bar-c"><div class="wf-bar ' + cls + '" style="left:'+left+'%;width:'+width+'%"><span class="wf-bar-label">' + fd(dur) + '</span></div></div>' +
       '<div class="wf-dur">' + fd(dur) + '</div>';
     el.appendChild(row);
@@ -355,6 +414,8 @@ function showDetail(span) {
       html += '<span class="tree-type ' + e(span.kind) + '">' + e(span.kind) + '</span>';
       html += '<span class="tree-title">' + e(span.name) + '</span>';
       html += '</div>';
+      var treePv = getPreview(span);
+      if (treePv) html += '<div class="tree-preview">' + treePv + '</div>';
       html += '<div class="tree-meta">' + meta.join(' &middot; ') + '</div>';
       html += '</div>';
       html += buildTree(span.spanId);
@@ -435,10 +496,16 @@ function showDetail(span) {
     var logIcon = span.kind === 'generation' ? '\\u2B50' : span.kind === 'tool' ? '\\u2692' : '\\u25A0';
     html += '<span class="log-kind ' + kindCls + '">' + logIcon + ' ' + e(span.kind||'') + '</span>';
     html += '<span class="log-name">' + e(span.name) + '</span>';
+    if (span.kind === 'generation' && span.model && span.model.modelId) html += ' <span style="color:var(--secondary);font-size:11px;opacity:0.8">' + e(span.model.modelId) + '</span>';
     if (span.tokens) html += ' <span style="color:var(--dim);font-size:11px">' + Number(span.tokens.total||0) + ' tok</span>';
     if (span.cost) html += ' <span style="color:var(--orange);font-size:11px">' + fc(span.cost) + '</span>';
     if (span.tool && span.tool.durationMs != null) html += ' <span style="color:var(--dim);font-size:11px">' + fd(span.tool.durationMs) + '</span>';
     if (span.status === 'error') html += ' <span style="color:var(--red);font-size:11px">\\u2718 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
+    // Show inline preview for tools (input is more useful than output)
+    if (span.kind === 'tool' && span.input) {
+      var logPv = getPreview(span);
+      if (logPv) html += '<div class="log-data" style="color:var(--cyan);opacity:0.7;max-height:none">' + logPv + '</div>';
+    }
     // Show input/output preview
     if (span.output) {
       var out = typeof span.output === 'string' ? span.output : JSON.stringify(span.output);
