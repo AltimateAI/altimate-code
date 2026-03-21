@@ -161,6 +161,9 @@ const SkillListCommand = cmd({
       const skills = await Skill.all()
       const cwd = Instance.directory
 
+      // Sort alphabetically for consistent output
+      skills.sort((a, b) => a.name.localeCompare(b.name))
+
       if (args.json) {
         const enriched = await Promise.all(
           skills.map(async (skill) => {
@@ -190,9 +193,9 @@ const SkillListCommand = cmd({
 
       // Calculate column widths
       const nameWidth = Math.max(6, ...skills.map((s) => s.name.length))
-      const sourceWidth = 8
+      const toolsWidth = 20
 
-      const header = `${"SKILL".padEnd(nameWidth)}  ${"SOURCE".padEnd(sourceWidth)}  ${"TOOLS".padEnd(20)}  DESCRIPTION`
+      const header = `${"SKILL".padEnd(nameWidth)}  ${"TOOLS".padEnd(toolsWidth)}  DESCRIPTION`
       const separator = "─".repeat(header.length)
 
       process.stdout.write(EOL)
@@ -201,13 +204,19 @@ const SkillListCommand = cmd({
 
       for (const skill of skills) {
         const tools = detectToolReferences(skill.content)
-        const source = skillSource(skill.location)
         const rawToolStr = tools.length > 0 ? tools.join(", ") : "—"
-        const toolStr = rawToolStr.length > 20 ? rawToolStr.slice(0, 17) + "..." : rawToolStr
-        const desc = skill.description.length > 60 ? skill.description.slice(0, 57) + "..." : skill.description
+        const toolStr = rawToolStr.length > toolsWidth ? rawToolStr.slice(0, toolsWidth - 3) + "..." : rawToolStr
+        // Truncate on word boundary
+        let desc = skill.description
+        if (desc.length > 60) {
+          desc = desc.slice(0, 60)
+          const lastSpace = desc.lastIndexOf(" ")
+          if (lastSpace > 40) desc = desc.slice(0, lastSpace)
+          desc += "..."
+        }
 
         process.stdout.write(
-          `${skill.name.padEnd(nameWidth)}  ${source.padEnd(sourceWidth)}  ${toolStr.padEnd(20)}  ${desc}` + EOL,
+          `${skill.name.padEnd(nameWidth)}  ${toolStr.padEnd(toolsWidth)}  ${desc}` + EOL,
         )
       }
 
