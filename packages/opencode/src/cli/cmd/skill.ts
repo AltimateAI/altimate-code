@@ -256,7 +256,7 @@ const SkillCreateCommand = cmd({
     const noTool = args["skill-only"] as boolean
 
     // Validate name before bootstrap (fast fail)
-    if (!/^[a-z][a-z0-9]+(-[a-z0-9]+)*$/.test(name)) {
+    if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(name) || name.length < 2) {
       process.stderr.write(`Error: Skill name must be lowercase alphanumeric with hyphens, at least 2 chars (e.g., "my-tool")` + EOL)
       process.exit(1)
     }
@@ -490,8 +490,13 @@ const SkillInstallCommand = cmd({
         default: false,
       }),
   async handler(args) {
-    const source = args.source as string
+    const source = (args.source as string).trim()
     const isGlobal = args.global as boolean
+
+    if (!source) {
+      process.stderr.write(`Error: Source is required. Use owner/repo, URL, or local path.` + EOL)
+      process.exit(1)
+    }
 
     await bootstrap(process.cwd(), async () => {
       const rootDir = Instance.worktree !== "/" ? Instance.worktree : Instance.directory

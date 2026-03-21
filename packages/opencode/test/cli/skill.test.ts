@@ -275,21 +275,32 @@ if (command === "help" || command === "--help") {
   })
 
   test("rejects invalid skill names", () => {
-    const valid = (n: string) => /^[a-z][a-z0-9]+(-[a-z0-9]+)*$/.test(n) && n.length <= 64
+    const valid = (n: string) => /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(n) && n.length >= 2 && n.length <= 64
+    // Valid names
     expect(valid("my-tool")).toBe(true)
     expect(valid("freshness-check")).toBe(true)
     expect(valid("tool123")).toBe(true)
     expect(valid("ab")).toBe(true)
+    expect(valid("a-tool")).toBe(true)
+    expect(valid("x-ray")).toBe(true)
+    expect(valid("a-very-long-but-valid-name")).toBe(true)
+    expect(valid("dbt-custom-check")).toBe(true)
+    // Invalid: uppercase, numbers first, spaces, underscores
     expect(valid("MyTool")).toBe(false)
     expect(valid("123tool")).toBe(false)
     expect(valid("my tool")).toBe(false)
     expect(valid("my_tool")).toBe(false)
+    // Invalid: single char, trailing hyphen, leading hyphen, double hyphen
     expect(valid("a")).toBe(false)
     expect(valid("a-")).toBe(false)
     expect(valid("-tool")).toBe(false)
     expect(valid("tool-")).toBe(false)
+    expect(valid("my--tool")).toBe(false)
+    // Invalid: too long
     expect(valid("a".repeat(65))).toBe(false)
+    // Valid edge cases
     expect(valid("a".repeat(64))).toBe(true)
+    // Invalid: injection attempts
     expect(valid("$(whoami)")).toBe(false)
     expect(valid("../etc/passwd")).toBe(false)
     expect(valid("`rm -rf /`")).toBe(false)
