@@ -12,6 +12,7 @@ import { Session } from "../session"
 import { NamedError } from "@opencode-ai/util/error"
 import { CopilotAuthPlugin } from "./copilot"
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
+import { SnowflakeCortexAuthPlugin } from "../altimate/plugin/snowflake"
 
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
@@ -22,7 +23,7 @@ export namespace Plugin {
   // GitlabAuthPlugin uses a different version of @opencode-ai/plugin (from npm)
   // vs the workspace version, causing a type mismatch on internal HeyApiClient.
   // The types are structurally compatible at runtime.
-  const INTERNAL_PLUGINS: PluginInstance[] = [CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin as unknown as PluginInstance]
+  const INTERNAL_PLUGINS: PluginInstance[] = [CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin as unknown as PluginInstance, SnowflakeCortexAuthPlugin]
 
   const state = Instance.state(async () => {
     const client = createOpencodeClient({

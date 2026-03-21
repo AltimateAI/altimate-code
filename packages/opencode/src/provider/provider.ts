@@ -670,6 +670,20 @@ export namespace Provider {
         },
       }
     },
+    "snowflake-cortex": async () => {
+      const auth = await Auth.get("snowflake-cortex")
+      const account = iife(() => {
+        if (auth?.type === "oauth" && (auth as any).accountId) return (auth as any).accountId
+        return Env.get("SNOWFLAKE_ACCOUNT")
+      })
+      if (!account) return { autoload: false }
+      return {
+        autoload: true,
+        options: {
+          baseURL: `https://${account}.snowflakecomputing.com/api/v2/cortex/v1`,
+        },
+      }
+    },
   }
 
   export const Model = z
@@ -877,6 +891,59 @@ export namespace Provider {
           providerID: ProviderID.githubCopilotEnterprise,
         })),
       }
+    }
+
+    // Add Snowflake Cortex provider (not in models.dev — defined here)
+    function makeSnowflakeModel(
+      id: string,
+      name: string,
+      limits: { context: number; output: number },
+      caps?: { reasoning?: boolean; attachment?: boolean; toolcall?: boolean },
+    ): Model {
+      const m: Model = {
+        id: ModelID.make(id),
+        providerID: ProviderID.snowflakeCortex,
+        api: {
+          id,
+          url: "",
+          npm: "@ai-sdk/openai-compatible",
+        },
+        name,
+        capabilities: {
+          temperature: true,
+          reasoning: caps?.reasoning ?? false,
+          attachment: caps?.attachment ?? false,
+          toolcall: caps?.toolcall ?? true,
+          input: { text: true, audio: false, image: false, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: limits.context, output: limits.output },
+        status: "active" as const,
+        options: {},
+        headers: {},
+        release_date: "2024-01-01",
+        variants: {},
+      }
+      m.variants = mapValues(ProviderTransform.variants(m), (v) => v)
+      return m
+    }
+
+    database["snowflake-cortex"] = {
+      id: ProviderID.snowflakeCortex,
+      source: "custom",
+      name: "Snowflake Cortex",
+      env: ["SNOWFLAKE_PAT"],
+      options: {},
+      models: {
+        "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", { context: 200000, output: 64000 }),
+        "claude-haiku-4-5": makeSnowflakeModel("claude-haiku-4-5", "Claude Haiku 4.5", { context: 200000, output: 16000 }),
+        "claude-3-5-sonnet": makeSnowflakeModel("claude-3-5-sonnet", "Claude 3.5 Sonnet", { context: 200000, output: 8096 }),
+        "llama3.3-70b": makeSnowflakeModel("llama3.3-70b", "Llama 3.3 70B", { context: 128000, output: 4096 }, { toolcall: false }),
+        "mistral-large2": makeSnowflakeModel("mistral-large2", "Mistral Large 2", { context: 131000, output: 4096 }, { toolcall: false }),
+        "deepseek-r1": makeSnowflakeModel("deepseek-r1", "DeepSeek R1", { context: 64000, output: 32000 }, { reasoning: true, toolcall: false }),
+      },
     }
 
     function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
