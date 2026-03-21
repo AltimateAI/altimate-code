@@ -34,7 +34,8 @@ Focus on the query: $ARGUMENTS
 
 Skills are loaded from these locations (in priority order):
 
-1. **altimate-code directories** (project-scoped, highest priority):
+1. **Project directories** (project-scoped, highest priority):
+    - `.opencode/skills/`
     - `.altimate-code/skill/`
     - `.altimate-code/skills/`
 

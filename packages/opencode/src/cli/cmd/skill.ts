@@ -7,113 +7,7 @@ import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
 import { Instance } from "../../project/instance"
 import { Global } from "@/global"
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Shell builtins, common utilities, and agent tool names to filter when detecting CLI tool references. */
-const SHELL_BUILTINS = new Set([
-  // Shell builtins
-  "echo", "cd", "export", "set", "if", "then", "else", "fi", "for", "do", "done",
-  "case", "esac", "printf", "source", "alias", "read", "local", "return", "exit",
-  "break", "continue", "shift", "trap", "type", "command", "builtin", "eval", "exec",
-  "test", "true", "false",
-  // Common CLI utilities (not user tools)
-  "cat", "grep", "awk", "sed", "rm", "cp", "mv", "mkdir", "ls", "chmod", "which",
-  "curl", "wget", "pwd", "touch", "head", "tail", "sort", "uniq", "wc", "tee",
-  "xargs", "find", "tar", "gzip", "unzip", "git", "npm", "yarn", "bun", "pip",
-  "python", "python3", "node", "bash", "sh", "zsh", "docker", "make",
-  // System utilities unlikely to be user tools
-  "sudo", "kill", "ps", "env", "whoami", "id", "date", "sleep", "diff", "less", "more",
-  // Agent tool names that appear in skill content but aren't CLI tools
-  "glob", "write", "edit",
-])
-
-/** Detect CLI tool references inside a skill's content (bash code blocks mentioning executables). */
-function detectToolReferences(content: string): string[] {
-  const tools = new Set<string>()
-
-  // Match "Tools used: bash (runs `altimate-dbt` commands), ..."
-  const toolsUsedMatch = content.match(/Tools used:\s*(.+)/i)
-  if (toolsUsedMatch) {
-    const refs = toolsUsedMatch[1].matchAll(/`([a-z][\w-]*)`/gi)
-    for (const m of refs) {
-      if (!SHELL_BUILTINS.has(m[1])) tools.add(m[1])
-    }
-  }
-
-  // Match executable names in bash code blocks: lines starting with an executable name
-  const bashBlocks = content.matchAll(/```(?:bash|sh)\r?\n([\s\S]*?)```/g)
-  for (const block of bashBlocks) {
-    const lines = block[1].split("\n")
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith("#")) continue
-      // Extract the first word (the command)
-      const cmdMatch = trimmed.match(/^(?:\$\s+)?([a-z][\w.-]*(?:-[\w]+)*)/i)
-      if (cmdMatch) {
-        const cmd = cmdMatch[1]
-        // Filter out common shell builtins and generic commands
-        if (!SHELL_BUILTINS.has(cmd)) {
-          tools.add(cmd)
-        }
-      }
-    }
-  }
-
-  return Array.from(tools)
-}
-
-/** Determine the source label for a skill based on its location. */
-function skillSource(location: string): string {
-  if (location.startsWith("builtin:")) return "builtin"
-  const home = Global.Path.home
-  // Builtin skills shipped with altimate-code
-  if (location.startsWith(path.join(home, ".altimate", "builtin"))) return "builtin"
-  // Global user skills (~/.claude/skills/, ~/.agents/skills/, ~/.config/altimate-code/skills/)
-  const globalDirs = [
-    path.join(home, ".claude", "skills"),
-    path.join(home, ".agents", "skills"),
-    path.join(home, ".altimate-code", "skills"),
-    path.join(Global.Path.config, "skills"),
-  ]
-  if (globalDirs.some((dir) => location.startsWith(dir))) return "global"
-  // Everything else is project-level
-  return "project"
-}
-
-/** Check if a tool is available on the current PATH (including .opencode/tools/). */
-async function isToolOnPath(toolName: string, cwd: string): Promise<boolean> {
-  // Check .opencode/tools/ in both cwd and worktree (they may differ in monorepos)
-  const dirsToCheck = new Set([
-    path.join(cwd, ".opencode", "tools"),
-    path.join(Instance.worktree !== "/" ? Instance.worktree : cwd, ".opencode", "tools"),
-    path.join(Global.Path.config, "tools"),
-  ])
-
-  for (const dir of dirsToCheck) {
-    try {
-      await fs.access(path.join(dir, toolName), fs.constants.X_OK)
-      return true
-    } catch {}
-  }
-
-  // Check system PATH
-  const sep = process.platform === "win32" ? ";" : ":"
-  const binDir = process.env.ALTIMATE_BIN_DIR
-  const pathDirs = (process.env.PATH ?? "").split(sep).filter(Boolean)
-  if (binDir) pathDirs.unshift(binDir)
-
-  for (const dir of pathDirs) {
-    try {
-      await fs.access(path.join(dir, toolName), fs.constants.X_OK)
-      return true
-    } catch {}
-  }
-
-  return false
-}
+import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -475,25 +369,26 @@ const SkillTestCommand = cmd({
       }
 
       // 4. Detect and check paired tools
+      const projectDir = Instance.directory
       const tools = detectToolReferences(skill.content)
       if (tools.length === 0) {
         warn(`No CLI tool references detected in skill content`)
       } else {
         process.stdout.write(EOL + `  Paired tools:` + EOL)
         for (const tool of tools) {
-          const available = await isToolOnPath(tool, cwd)
+          const available = await isToolOnPath(tool, projectDir)
           if (available) {
             pass(`"${tool}" found on PATH`)
 
             // Try running --help (with 5s timeout to prevent hangs)
             try {
-              const worktreeDir = Instance.worktree !== "/" ? Instance.worktree : cwd
+              const worktreeDir = Instance.worktree !== "/" ? Instance.worktree : projectDir
               const toolEnv = {
                 ...process.env,
                 PATH: [
                   process.env.ALTIMATE_BIN_DIR,
                   path.join(worktreeDir, ".opencode", "tools"),
-                  path.join(cwd, ".opencode", "tools"),
+                  path.join(projectDir, ".opencode", "tools"),
                   path.join(Global.Path.config, "tools"),
                   process.env.PATH,
                 ]
@@ -501,7 +396,7 @@ const SkillTestCommand = cmd({
                   .join(process.platform === "win32" ? ";" : ":"),
               }
               const proc = Bun.spawn([tool, "--help"], {
-                cwd,
+                cwd: projectDir,
                 stdout: "pipe",
                 stderr: "pipe",
                 env: toolEnv,
@@ -512,12 +407,12 @@ const SkillTestCommand = cmd({
               if (exitCode === 0) {
                 pass(`"${tool} --help" exits cleanly`)
               } else if (exitCode === null || exitCode === 137 || exitCode === 143) {
-                warn(`"${tool} --help" timed out after 5s`)
+                fail(`"${tool} --help" timed out after 5s`)
               } else {
-                warn(`"${tool} --help" exited with code ${exitCode}`)
+                fail(`"${tool} --help" exited with code ${exitCode}`)
               }
             } catch {
-              warn(`"${tool} --help" failed to execute`)
+              fail(`"${tool} --help" failed to execute`)
             }
           } else {
             fail(`"${tool}" not found on PATH`)

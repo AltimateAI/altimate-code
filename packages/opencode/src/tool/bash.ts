@@ -182,14 +182,15 @@ export const BashTool = Tool.define("bash", async () => {
       }
 
       // 2. Project-level user tools (.opencode/tools/) — user extensions
-      // Check both the cwd and the worktree root (they may differ in monorepos or subdirs)
-      const projectToolsDir = path.join(cwd, ".opencode", "tools")
+      // Anchored to Instance.directory (not cwd) so external_directory workdirs
+      // can't shadow project tools. Also check worktree root for monorepos.
+      const projectToolsDir = path.join(Instance.directory, ".opencode", "tools")
       if (!pathEntries.has(projectToolsDir)) {
         prependDirs.push(projectToolsDir)
       }
-      if (Instance.worktree !== "/") {
+      if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
         const worktreeToolsDir = path.join(Instance.worktree, ".opencode", "tools")
-        if (worktreeToolsDir !== projectToolsDir && !pathEntries.has(worktreeToolsDir)) {
+        if (!pathEntries.has(worktreeToolsDir)) {
           prependDirs.push(worktreeToolsDir)
         }
       }

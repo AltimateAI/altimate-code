@@ -1,56 +1,13 @@
 // altimate_change start — tests for skill CLI command (create, list, test)
-import { describe, test, expect, beforeAll, afterAll } from "bun:test"
+import { describe, test, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import os from "os"
+import { tmpdir } from "../fixture/fixture"
+import { detectToolReferences, SHELL_BUILTINS } from "../../src/cli/cmd/skill-helpers"
 
 // ---------------------------------------------------------------------------
-// Unit tests for the helper functions extracted from skill.ts
-// We import the module indirectly by testing the CLI output.
-// For pure unit tests we replicate the helper logic here (same source).
+// Unit tests — import production code directly (no duplication)
 // ---------------------------------------------------------------------------
-
-/** Shell builtins to filter — mirrors SHELL_BUILTINS in skill.ts */
-const SHELL_BUILTINS = new Set([
-  "echo", "cd", "export", "set", "if", "then", "else", "fi", "for", "do", "done",
-  "case", "esac", "printf", "source", "alias", "read", "local", "return", "exit",
-  "break", "continue", "shift", "trap", "type", "command", "builtin", "eval", "exec",
-  "test", "true", "false",
-  "cat", "grep", "awk", "sed", "rm", "cp", "mv", "mkdir", "ls", "chmod", "which",
-  "curl", "wget", "pwd", "touch", "head", "tail", "sort", "uniq", "wc", "tee",
-  "xargs", "find", "tar", "gzip", "unzip", "git", "npm", "yarn", "bun", "pip",
-  "python", "python3", "node", "bash", "sh", "zsh", "docker", "make",
-  "glob", "write", "edit",
-])
-
-/** Detect CLI tool references inside a skill's content. */
-function detectToolReferences(content: string): string[] {
-  const tools = new Set<string>()
-
-  const toolsUsedMatch = content.match(/Tools used:\s*(.+)/i)
-  if (toolsUsedMatch) {
-    const refs = toolsUsedMatch[1].matchAll(/`([a-z][\w-]*)`/gi)
-    for (const m of refs) tools.add(m[1])
-  }
-
-  const bashBlocks = content.matchAll(/```(?:bash|sh)\n([\s\S]*?)```/g)
-  for (const block of bashBlocks) {
-    const lines = block[1].split("\n")
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith("#")) continue
-      const cmdMatch = trimmed.match(/^(?:\$\s+)?([a-z][\w.-]*(?:-[\w]+)*)/i)
-      if (cmdMatch) {
-        const cmd = cmdMatch[1]
-        if (!SHELL_BUILTINS.has(cmd)) {
-          tools.add(cmd)
-        }
-      }
-    }
-  }
-
-  return Array.from(tools)
-}
 
 describe("detectToolReferences", () => {
   test("detects tools from Tools used line", () => {
@@ -58,6 +15,15 @@ describe("detectToolReferences", () => {
     const tools = detectToolReferences(content)
     expect(tools).toContain("altimate-dbt")
     expect(tools).toContain("sql_analyze")
+  })
+
+  test("filters builtins from Tools used line", () => {
+    const content = `**Tools used:** \`bash\`, \`read\`, \`glob\`, \`altimate-dbt\``
+    const tools = detectToolReferences(content)
+    expect(tools).toContain("altimate-dbt")
+    expect(tools).not.toContain("bash")
+    expect(tools).not.toContain("read")
+    expect(tools).not.toContain("glob")
   })
 
   test("detects tools from bash code blocks", () => {
@@ -115,36 +81,65 @@ $ altimate-schema search --pattern "user*"
     const tools = detectToolReferences(content)
     expect(tools).toContain("altimate-schema")
   })
+
+  test("handles \\r\\n line endings in bash blocks", () => {
+    const content = "```bash\r\nmy-tool run\r\n```"
+    const tools = detectToolReferences(content)
+    expect(tools).toContain("my-tool")
+  })
+
+  test("filters common utilities (git, python, docker, etc.)", () => {
+    const content = `
+\`\`\`bash
+git status
+python3 script.py
+docker build .
+my-custom-cli run
+\`\`\`
+`
+    const tools = detectToolReferences(content)
+    expect(tools).toContain("my-custom-cli")
+    expect(tools).not.toContain("git")
+    expect(tools).not.toContain("python3")
+    expect(tools).not.toContain("docker")
+  })
+})
+
+describe("SHELL_BUILTINS", () => {
+  test("contains expected shell builtins", () => {
+    for (const cmd of ["echo", "cd", "export", "if", "for", "case"]) {
+      expect(SHELL_BUILTINS.has(cmd)).toBe(true)
+    }
+  })
+
+  test("contains common utilities", () => {
+    for (const cmd of ["git", "python", "node", "docker", "curl", "make"]) {
+      expect(SHELL_BUILTINS.has(cmd)).toBe(true)
+    }
+  })
+
+  test("contains agent tool names", () => {
+    for (const cmd of ["glob", "write", "edit"]) {
+      expect(SHELL_BUILTINS.has(cmd)).toBe(true)
+    }
+  })
+
+  test("does not contain altimate tools", () => {
+    expect(SHELL_BUILTINS.has("altimate-dbt")).toBe(false)
+    expect(SHELL_BUILTINS.has("altimate-sql")).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
-// Integration tests — run the actual CLI commands
+// Scaffold template tests — use tmpdir() fixture
 // ---------------------------------------------------------------------------
 
 describe("altimate-code skill create", () => {
-  let tmpDir: string
-
-  beforeAll(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "skill-test-"))
-  })
-
-  afterAll(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
-
-  test("creates skill and bash tool", async () => {
-    const result = Bun.spawnSync(["bun", "run", "src/cli/cmd/skill.ts", "--help"], {
-      cwd: path.join(import.meta.dir, "../../"),
-    })
-    // Just verify the module parses without errors
-    // Full CLI integration requires bootstrap which needs a git repo
-  })
-
-  test("scaffold generates valid SKILL.md", async () => {
-    const skillDir = path.join(tmpDir, ".opencode", "skills", "test-tool")
+  test("scaffold generates valid SKILL.md with tool reference", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const skillDir = path.join(tmp.path, ".opencode", "skills", "test-tool")
     await fs.mkdir(skillDir, { recursive: true })
 
-    // Generate template content (same as in skill.ts)
     const name = "test-tool"
     const content = `---
 name: ${name}
@@ -164,7 +159,7 @@ ${name} <subcommand> [options]
 
 ## Workflow
 1. Understand what the user needs
-2. Run the appropriate command
+2. Run the appropriate CLI command
 3. Interpret the output and act on it
 `
     const skillFile = path.join(skillDir, "SKILL.md")
@@ -174,10 +169,41 @@ ${name} <subcommand> [options]
     expect(written).toContain("name: test-tool")
     expect(written).toContain("description: TODO")
     expect(written).toContain("test-tool --help")
+
+    // Verify tool detection works on the template
+    const tools = detectToolReferences(written)
+    expect(tools).toContain("test-tool")
+  })
+
+  test("scaffold generates valid SKILL.md without tool reference (skill-only)", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const skillDir = path.join(tmp.path, ".opencode", "skills", "prompt-only")
+    await fs.mkdir(skillDir, { recursive: true })
+
+    const content = `---
+name: prompt-only
+description: TODO — describe what this skill does
+---
+
+# prompt-only
+
+## When to Use
+TODO — describe when the agent should invoke this skill.
+
+## Workflow
+1. Understand what the user needs
+2. Provide guidance based on the instructions below
+`
+    const skillFile = path.join(skillDir, "SKILL.md")
+    await fs.writeFile(skillFile, content)
+
+    const tools = detectToolReferences(content)
+    expect(tools.length).toBe(0)
   })
 
   test("scaffold generates executable bash tool", async () => {
-    const toolsDir = path.join(tmpDir, ".opencode", "tools")
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".opencode", "tools")
     await fs.mkdir(toolsDir, { recursive: true })
 
     const name = "test-tool"
@@ -192,17 +218,18 @@ esac
     await fs.writeFile(toolFile, template, { mode: 0o755 })
 
     const stat = await fs.stat(toolFile)
-    // Check executable bit (owner)
     expect(stat.mode & 0o100).toBeTruthy()
 
-    // Run the tool
     const proc = Bun.spawnSync(["bash", toolFile, "--help"])
     expect(proc.exitCode).toBe(0)
     expect(proc.stdout.toString()).toContain("Usage:")
   })
 
   test("scaffold generates executable python tool", async () => {
-    const toolsDir = path.join(tmpDir, ".opencode", "tools")
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".opencode", "tools")
+    await fs.mkdir(toolsDir, { recursive: true })
+
     const name = "py-test-tool"
     const template = `#!/usr/bin/env python3
 """${name}"""
@@ -225,7 +252,10 @@ if __name__ == "__main__":
   })
 
   test("scaffold generates executable node tool", async () => {
-    const toolsDir = path.join(tmpDir, ".opencode", "tools")
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".opencode", "tools")
+    await fs.mkdir(toolsDir, { recursive: true })
+
     const name = "node-test-tool"
     const template = `#!/usr/bin/env node
 const command = process.argv[2] || "help"
@@ -245,27 +275,21 @@ if (command === "help" || command === "--help") {
   })
 
   test("rejects invalid skill names", () => {
-    // Names must match /^[a-z][a-z0-9]+(-[a-z0-9]+)*$/ (min 2 chars, no trailing hyphens)
     const valid = (n: string) => /^[a-z][a-z0-9]+(-[a-z0-9]+)*$/.test(n) && n.length <= 64
     expect(valid("my-tool")).toBe(true)
     expect(valid("freshness-check")).toBe(true)
     expect(valid("tool123")).toBe(true)
     expect(valid("ab")).toBe(true)
-    // Invalid: uppercase, numbers first, spaces, underscores
     expect(valid("MyTool")).toBe(false)
     expect(valid("123tool")).toBe(false)
     expect(valid("my tool")).toBe(false)
     expect(valid("my_tool")).toBe(false)
-    // Invalid: single char, trailing hyphen, leading hyphen
     expect(valid("a")).toBe(false)
     expect(valid("a-")).toBe(false)
     expect(valid("-tool")).toBe(false)
     expect(valid("tool-")).toBe(false)
-    // Invalid: too long
     expect(valid("a".repeat(65))).toBe(false)
-    // Valid edge cases
     expect(valid("a".repeat(64))).toBe(true)
-    // Invalid: injection attempts
     expect(valid("$(whoami)")).toBe(false)
     expect(valid("../etc/passwd")).toBe(false)
     expect(valid("`rm -rf /`")).toBe(false)
@@ -273,39 +297,36 @@ if (command === "help" || command === "--help") {
 })
 
 // ---------------------------------------------------------------------------
-// PATH auto-discovery tests
+// PATH auto-discovery tests — use tmpdir() fixture
 // ---------------------------------------------------------------------------
 
 describe("PATH auto-discovery for .opencode/tools/", () => {
-  let tmpDir: string
-
-  beforeAll(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "tools-path-test-"))
-    // Create .opencode/tools/ with an executable
-    const toolsDir = path.join(tmpDir, ".opencode", "tools")
+  test("tool in .opencode/tools/ is executable", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".opencode", "tools")
     await fs.mkdir(toolsDir, { recursive: true })
     await fs.writeFile(path.join(toolsDir, "my-test-tool"), '#!/usr/bin/env bash\necho "hello from tool"', {
       mode: 0o755,
     })
-  })
 
-  afterAll(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
-
-  test("tool in .opencode/tools/ is executable", async () => {
-    const toolPath = path.join(tmpDir, ".opencode", "tools", "my-test-tool")
+    const toolPath = path.join(toolsDir, "my-test-tool")
     const proc = Bun.spawnSync(["bash", toolPath])
     expect(proc.exitCode).toBe(0)
     expect(proc.stdout.toString().trim()).toBe("hello from tool")
   })
 
   test("tool is discoverable when .opencode/tools/ is on PATH", async () => {
-    const toolsDir = path.join(tmpDir, ".opencode", "tools")
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".opencode", "tools")
+    await fs.mkdir(toolsDir, { recursive: true })
+    await fs.writeFile(path.join(toolsDir, "my-test-tool"), '#!/usr/bin/env bash\necho "hello from tool"', {
+      mode: 0o755,
+    })
+
     const sep = process.platform === "win32" ? ";" : ":"
     const env = { ...process.env, PATH: `${toolsDir}${sep}${process.env.PATH}` }
 
-    const proc = Bun.spawnSync(["my-test-tool"], { env, cwd: tmpDir })
+    const proc = Bun.spawnSync(["my-test-tool"], { env, cwd: tmp.path })
     expect(proc.exitCode).toBe(0)
     expect(proc.stdout.toString().trim()).toBe("hello from tool")
   })
