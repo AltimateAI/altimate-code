@@ -252,30 +252,51 @@ describe("transformSnowflakeBody", () => {
 // ---------------------------------------------------------------------------
 
 describe("snowflake-cortex provider", () => {
-  test("loads when SNOWFLAKE_ACCOUNT env var is set", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
-      },
+  // Save and restore any real stored credentials to keep tests hermetic
+  let savedAuth: Awaited<ReturnType<typeof Auth.get>>
+  const setupOAuth = async (account = "myorg-myaccount") => {
+    savedAuth = await Auth.get("snowflake-cortex")
+    await Auth.set("snowflake-cortex", {
+      type: "oauth",
+      access: "test-pat-token",
+      refresh: "",
+      expires: Date.now() + 90 * 24 * 60 * 60 * 1000,
+      accountId: account,
     })
-    await Instance.provide({
-      directory: tmp.path,
-      init: async () => {
-        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
-      },
-      fn: async () => {
-        const providers = await Provider.list()
-        expect(providers["snowflake-cortex"]).toBeDefined()
-        expect(providers["snowflake-cortex"].options.baseURL).toBe(
-          "https://myorg-myaccount.snowflakecomputing.com/api/v2/cortex/v1",
-        )
-      },
-    })
+  }
+  const restoreAuth = async () => {
+    if (savedAuth) {
+      await Auth.set("snowflake-cortex", savedAuth)
+    } else {
+      await Auth.remove("snowflake-cortex")
+    }
+  }
+
+  test("loads when oauth auth with accountId is set", async () => {
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          expect(providers["snowflake-cortex"]).toBeDefined()
+          expect(providers["snowflake-cortex"].options.baseURL).toBe(
+            "https://myorg-myaccount.snowflakecomputing.com/api/v2/cortex/v1",
+          )
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
   })
 
-  test("does not load without credentials", async () => {
-    // Auth reads from global auth.json; save and restore any real stored credentials
-    const savedAuth = await Auth.get("snowflake-cortex")
+  test("does not load without oauth auth", async () => {
+    savedAuth = await Auth.get("snowflake-cortex")
     if (savedAuth) await Auth.remove("snowflake-cortex")
     try {
       await using tmp = await tmpdir({
@@ -286,7 +307,6 @@ describe("snowflake-cortex provider", () => {
       await Instance.provide({
         directory: tmp.path,
         init: async () => {
-          // Env copies process.env per instance; remove any shell-level SNOWFLAKE_ACCOUNT
           Env.remove("SNOWFLAKE_ACCOUNT")
         },
         fn: async () => {
@@ -295,105 +315,139 @@ describe("snowflake-cortex provider", () => {
         },
       })
     } finally {
-      if (savedAuth) await Auth.set("snowflake-cortex", savedAuth)
+      await restoreAuth()
+    }
+  })
+
+  test("does not load with only SNOWFLAKE_ACCOUNT env (no oauth)", async () => {
+    savedAuth = await Auth.get("snowflake-cortex")
+    if (savedAuth) await Auth.remove("snowflake-cortex")
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        init: async () => {
+          Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
+        },
+        fn: async () => {
+          const providers = await Provider.list()
+          expect(providers["snowflake-cortex"]).toBeUndefined()
+        },
+      })
+    } finally {
+      await restoreAuth()
     }
   })
 
   test("claude models have toolcall: true", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      init: async () => {
-        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
-      },
-      fn: async () => {
-        const providers = await Provider.list()
-        const models = providers["snowflake-cortex"].models
-        expect(models["claude-sonnet-4-6"].capabilities.toolcall).toBe(true)
-        expect(models["claude-haiku-4-5"].capabilities.toolcall).toBe(true)
-      },
-    })
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const models = providers["snowflake-cortex"].models
+          expect(models["claude-sonnet-4-6"].capabilities.toolcall).toBe(true)
+          expect(models["claude-haiku-4-5"].capabilities.toolcall).toBe(true)
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
   })
 
   test("non-claude models have toolcall: false", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      init: async () => {
-        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
-      },
-      fn: async () => {
-        const providers = await Provider.list()
-        const models = providers["snowflake-cortex"].models
-        expect(models["mistral-large2"].capabilities.toolcall).toBe(false)
-        expect(models["llama3.3-70b"].capabilities.toolcall).toBe(false)
-        expect(models["deepseek-r1"].capabilities.toolcall).toBe(false)
-      },
-    })
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const models = providers["snowflake-cortex"].models
+          expect(models["mistral-large2"].capabilities.toolcall).toBe(false)
+          expect(models["llama3.3-70b"].capabilities.toolcall).toBe(false)
+          expect(models["deepseek-r1"].capabilities.toolcall).toBe(false)
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
   })
 
   test("all models have zero cost", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      init: async () => {
-        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
-      },
-      fn: async () => {
-        const providers = await Provider.list()
-        for (const model of Object.values(providers["snowflake-cortex"].models)) {
-          expect(model.cost.input).toBe(0)
-          expect(model.cost.output).toBe(0)
-        }
-      },
-    })
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          for (const model of Object.values(providers["snowflake-cortex"].models)) {
+            expect(model.cost.input).toBe(0)
+            expect(model.cost.output).toBe(0)
+          }
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
   })
 
-  test("env array lists SNOWFLAKE_ACCOUNT", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      init: async () => {
-        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
-      },
-      fn: async () => {
-        const providers = await Provider.list()
-        expect(providers["snowflake-cortex"].env).toContain("SNOWFLAKE_ACCOUNT")
-      },
-    })
+  test("env array is empty (auth-only provider)", async () => {
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          expect(providers["snowflake-cortex"].env).toEqual([])
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
   })
 
   test("claude-3-5-sonnet output limit is 8192", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      init: async () => {
-        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
-      },
-      fn: async () => {
-        const providers = await Provider.list()
-        expect(providers["snowflake-cortex"].models["claude-3-5-sonnet"].limit.output).toBe(8192)
-      },
-    })
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          expect(providers["snowflake-cortex"].models["claude-3-5-sonnet"].limit.output).toBe(8192)
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
   })
 })

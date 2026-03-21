@@ -673,11 +673,9 @@ export namespace Provider {
     // altimate_change start — snowflake cortex provider loader
     "snowflake-cortex": async () => {
       const auth = await Auth.get("snowflake-cortex")
-      const account = iife(() => {
-        if (auth?.type === "oauth" && auth.accountId) return auth.accountId
-        return Env.get("SNOWFLAKE_ACCOUNT")
-      })
-      if (!account) return { autoload: false }
+      if (auth?.type !== "oauth") return { autoload: false }
+      const account = auth.accountId ?? Env.get("SNOWFLAKE_ACCOUNT")
+      if (!account || !/^[a-zA-Z0-9._-]+$/.test(account)) return { autoload: false }
       return {
         autoload: true,
         options: {
@@ -936,7 +934,7 @@ export namespace Provider {
       id: ProviderID.snowflakeCortex,
       source: "custom",
       name: "Snowflake Cortex",
-      env: ["SNOWFLAKE_ACCOUNT"],
+      env: [],
       options: {},
       models: {
         "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", { context: 200000, output: 64000 }),
