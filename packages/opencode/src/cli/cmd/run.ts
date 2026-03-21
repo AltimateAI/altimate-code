@@ -351,6 +351,12 @@ export const RunCommand = cmd({
         describe: "enable session tracing (default: true, disable with --no-trace)",
         default: true,
       })
+      // altimate_change start — budget limits for CI/enterprise governance
+      .option("max-turns", {
+        type: "number",
+        describe: "maximum number of assistant turns before aborting the session",
+      })
+      // altimate_change end
   },
   handler: async (args) => {
     let message = [...args.message, ...(args["--"] || [])]
@@ -549,6 +555,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       async function loop() {
         const toggles = new Map<string, boolean>()
+        // altimate_change start — max-turns budget enforcement
+        let turnCount = 0
+        const maxTurns = args.maxTurns
+        // altimate_change end
 
         for await (const event of events.stream) {
           if (
@@ -603,6 +613,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "step-start") {
               tracer?.logStepStart(part)
+              // altimate_change start — enforce max-turns budget
+              turnCount++
+              if (maxTurns && turnCount > maxTurns) {
+                error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
+                UI.println(
+                  UI.Style.TEXT_DANGER_BOLD + "!",
+                  UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`,
+                )
+                await sdk.session.abort({ sessionID })
+                break
+              }
+              // altimate_change end
               if (emit("step_start", { part })) continue
             }
 
@@ -664,18 +686,40 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "permission.asked") {
             const permission = event.properties
             if (permission.sessionID !== sessionID) continue
-            // altimate_change start - yolo mode: auto-approve instead of auto-reject
+            // altimate_change start - yolo mode: auto-approve but respect explicit deny rules
             const yolo = args.yolo || Flag.ALTIMATE_CLI_YOLO
             if (yolo) {
-              UI.println(
-                UI.Style.TEXT_WARNING_BOLD + "!",
-                UI.Style.TEXT_NORMAL +
-                  `yolo mode: auto-approved ${permission.permission} (${permission.patterns.join(", ")})`,
+              // Check if any pattern matches an explicit deny rule from the session config
+              const isDenied = rules.some(
+                (r) =>
+                  r.action === "deny" &&
+                  r.permission === permission.permission &&
+                  permission.patterns.some((p) => {
+                    if (r.pattern === "*") return true
+                    return p.includes(r.pattern) || r.pattern.includes(p)
+                  }),
               )
-              await sdk.permission.reply({
-                requestID: permission.id,
-                reply: "once",
-              })
+              if (isDenied) {
+                UI.println(
+                  UI.Style.TEXT_DANGER_BOLD + "!",
+                  UI.Style.TEXT_NORMAL +
+                    `yolo mode: BLOCKED by deny rule: ${permission.permission} (${permission.patterns.join(", ")})`,
+                )
+                await sdk.permission.reply({
+                  requestID: permission.id,
+                  reply: "reject",
+                })
+              } else {
+                UI.println(
+                  UI.Style.TEXT_WARNING_BOLD + "!",
+                  UI.Style.TEXT_NORMAL +
+                    `yolo mode: auto-approved ${permission.permission} (${permission.patterns.join(", ")})`,
+                )
+                await sdk.permission.reply({
+                  requestID: permission.id,
+                  reply: "once",
+                })
+              }
             } else {
               UI.println(
                 UI.Style.TEXT_WARNING_BOLD + "!",
