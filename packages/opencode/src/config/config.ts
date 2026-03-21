@@ -1294,8 +1294,8 @@ export namespace Config {
           // altimate_change start - auto MCP discovery toggle
           auto_mcp_discovery: z
             .boolean()
-            .optional()
-            .describe("Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup (default: true). Set to false to disable."),
+            .default(true)
+            .describe("Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup. Set to false to disable."),
           // altimate_change end
         })
         .optional(),
