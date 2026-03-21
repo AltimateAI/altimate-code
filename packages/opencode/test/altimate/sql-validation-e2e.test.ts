@@ -634,7 +634,92 @@ describe("Skill files reference real tools", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 10. Cross-cutting: validate + check + analyze all agree on same SQL
+// 10. Prompt skill references match actual skill directories
+// ---------------------------------------------------------------------------
+
+describe("Prompt skill references match actual skills", () => {
+  const repoRoot = path.resolve(process.cwd(), "../..")
+  const fs = require("fs")
+
+  function getSkillDirs(): string[] {
+    const skillsDir = path.join(repoRoot, ".opencode/skills")
+    if (!fs.existsSync(skillsDir)) return []
+    return fs
+      .readdirSync(skillsDir, { withFileTypes: true })
+      .filter((d: any) => d.isDirectory())
+      .map((d: any) => d.name)
+  }
+
+  function extractSkillRefs(text: string): string[] {
+    // Match /skill-name patterns (e.g., /dbt-analyze, /sql-review)
+    const matches = text.match(/\/([a-z][a-z0-9-]+)/g) || []
+    return [...new Set(matches.map((m) => m.slice(1)))]
+  }
+
+  // Known non-skill slash references to exclude
+  const NON_SKILL_REFS = new Set([
+    "tmp", "dev", "null", "etc", "bin", "usr", "home", "var",
+    "opencode", "sql", "dbt", "api", "v1", "v2",
+  ])
+
+  test("analyst 'Skills Available' section only lists skills that exist", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const analyst = await Agent.get("analyst")
+        expect(analyst).toBeDefined()
+
+        const skillDirs = getSkillDirs()
+
+        // Extract only the "Skills Available" section (before the "Note:" line)
+        const prompt = analyst!.prompt
+        const skillsSectionMatch = prompt.match(
+          /## Skills Available[^\n]*\n([\s\S]*?)(?=\nNote:|## )/,
+        )
+        if (!skillsSectionMatch) return // No skills section found — nothing to check
+
+        const skillsSection = skillsSectionMatch[1]
+        const refs = extractSkillRefs(skillsSection)
+          .filter((r) => !NON_SKILL_REFS.has(r))
+
+        for (const ref of refs) {
+          expect(skillDirs).toContain(ref)
+        }
+      },
+    })
+  })
+
+  test("analyst prompt does NOT reference phantom /impact-analysis", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const analyst = await Agent.get("analyst")
+        expect(analyst).toBeDefined()
+        expect(analyst!.prompt).not.toContain("/impact-analysis")
+        // Should reference the real skill
+        expect(analyst!.prompt).toContain("/dbt-analyze")
+      },
+    })
+  })
+
+  test("builder prompt skill references match actual skills", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const builder = await Agent.get("builder")
+        expect(builder).toBeDefined()
+        expect(builder!.prompt).not.toContain("/impact-analysis")
+        expect(builder!.prompt).toContain("/dbt-analyze")
+      },
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 11. Cross-cutting: validate + check + analyze all agree on same SQL
 // ---------------------------------------------------------------------------
 
 describe("Validation tools agree on results", () => {
