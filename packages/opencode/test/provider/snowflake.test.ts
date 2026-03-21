@@ -44,6 +44,31 @@ describe("parseSnowflakePAT", () => {
     const result = parseSnowflakePAT("myorg::token::with::colons")
     expect(result).toEqual({ account: "myorg", token: "token::with::colons" })
   })
+
+  test("rejects account with slashes (URL injection)", () => {
+    expect(parseSnowflakePAT("evil/path::token")).toBeNull()
+  })
+
+  test("rejects account with query characters", () => {
+    expect(parseSnowflakePAT("evil?x=y::token")).toBeNull()
+  })
+
+  test("rejects account with hash fragment", () => {
+    expect(parseSnowflakePAT("evil#fragment::token")).toBeNull()
+  })
+
+  test("rejects account with spaces", () => {
+    expect(parseSnowflakePAT("evil account::token")).toBeNull()
+  })
+
+  test("rejects account with unicode characters", () => {
+    expect(parseSnowflakePAT("αλφα::token")).toBeNull()
+  })
+
+  test("accepts account with dots and underscores", () => {
+    const result = parseSnowflakePAT("my_org.account-1::token")
+    expect(result).toEqual({ account: "my_org.account-1", token: "token" })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -150,6 +175,75 @@ describe("transformSnowflakeBody", () => {
     })
     const { syntheticStop } = transformSnowflakeBody(input)
     expect(syntheticStop).toBeUndefined()
+  })
+
+  test("triggers synthetic stop when tool_calls is empty array", () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: "test" },
+        { role: "assistant", content: "done", tool_calls: [] },
+      ],
+    })
+    const { syntheticStop } = transformSnowflakeBody(input)
+    expect(syntheticStop).toBeDefined()
+  })
+
+  test("removes orphaned tool_calls from messages for no-toolcall models", () => {
+    const input = JSON.stringify({
+      model: "llama3.3-70b",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "", tool_calls: [{ id: "tc1", function: { name: "read_file" } }] },
+        { role: "tool", content: "file contents", tool_call_id: "tc1" },
+        { role: "assistant", content: "here is the file" },
+      ],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+    })
+    const { body } = transformSnowflakeBody(input)
+    const parsed = JSON.parse(body)
+    expect(parsed.tools).toBeUndefined()
+    // tool_calls should be removed from assistant messages
+    for (const msg of parsed.messages) {
+      expect(msg.tool_calls).toBeUndefined()
+    }
+    // tool role messages should be filtered out
+    expect(parsed.messages.every((m: { role: string }) => m.role !== "tool")).toBe(true)
+  })
+
+  test("throws on invalid JSON input", () => {
+    expect(() => transformSnowflakeBody("not-json")).toThrow()
+  })
+
+  test("synthetic stop SSE stream has correct format", async () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: "test" },
+        { role: "assistant", content: "done" },
+      ],
+    })
+    const { syntheticStop } = transformSnowflakeBody(input)
+    expect(syntheticStop).toBeDefined()
+    const text = await syntheticStop!.text()
+    // Should contain SSE data lines and [DONE]
+    expect(text).toContain("data: ")
+    expect(text).toContain('"finish_reason":"stop"')
+    expect(text).toContain("data: [DONE]")
+    // Should NOT contain usage block (avoids zero-token accounting issues)
+    expect(text).not.toContain('"usage"')
+  })
+
+  test("handles empty messages array without crashing", () => {
+    const input = JSON.stringify({ model: "claude-sonnet-4-6", messages: [] })
+    const { syntheticStop } = transformSnowflakeBody(input)
+    expect(syntheticStop).toBeUndefined()
+  })
+
+  test("handles missing messages field", () => {
+    const input = JSON.stringify({ model: "claude-sonnet-4-6" })
+    const { body } = transformSnowflakeBody(input)
+    expect(JSON.parse(body).model).toBe("claude-sonnet-4-6")
   })
 })
 
@@ -263,6 +357,42 @@ describe("snowflake-cortex provider", () => {
           expect(model.cost.input).toBe(0)
           expect(model.cost.output).toBe(0)
         }
+      },
+    })
+  })
+
+  test("env array lists SNOWFLAKE_ACCOUNT", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
+      },
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers["snowflake-cortex"].env).toContain("SNOWFLAKE_ACCOUNT")
+      },
+    })
+  })
+
+  test("claude-3-5-sonnet output limit is 8192", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
+      },
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers["snowflake-cortex"].models["claude-3-5-sonnet"].limit.output).toBe(8192)
       },
     })
   })

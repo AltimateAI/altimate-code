@@ -3,6 +3,9 @@ import { Auth, OAUTH_DUMMY_KEY } from "@/auth"
 
 const NO_TOOLCALL_MODELS = new Set(["llama3.3-70b", "mistral-large2", "deepseek-r1"])
 
+/** Snowflake account identifiers contain only alphanumeric, hyphen, underscore, and dot characters. */
+const VALID_ACCOUNT_RE = /^[a-zA-Z0-9._-]+$/
+
 /** Parse a `account::token` PAT credential string. */
 export function parseSnowflakePAT(code: string): { account: string; token: string } | null {
   const sep = code.indexOf("::")
@@ -10,6 +13,7 @@ export function parseSnowflakePAT(code: string): { account: string; token: strin
   const account = code.substring(0, sep).trim()
   const token = code.substring(sep + 2).trim()
   if (!account || !token) return null
+  if (!VALID_ACCOUNT_RE.test(account)) return null
   return { account, token }
 }
 
@@ -26,10 +30,17 @@ export function transformSnowflakeBody(bodyText: string): { body: string; synthe
     delete parsed.max_tokens
   }
 
-  // Strip tools for models that don't support tool calling on Snowflake Cortex
+  // Strip tools for models that don't support tool calling on Snowflake Cortex.
+  // Also remove orphaned tool_calls from messages to avoid Snowflake API errors.
   if (NO_TOOLCALL_MODELS.has(parsed.model)) {
     delete parsed.tools
     delete parsed.tool_choice
+    if (Array.isArray(parsed.messages)) {
+      for (const msg of parsed.messages) {
+        if (msg.tool_calls) delete msg.tool_calls
+      }
+      parsed.messages = parsed.messages.filter((msg: { role: string }) => msg.role !== "tool")
+    }
   }
 
   // Snowflake rejects requests where the last message is an assistant role.
@@ -38,11 +49,11 @@ export function transformSnowflakeBody(bodyText: string): { body: string; synthe
   // Instead, short-circuit by returning a synthetic "stop" streaming response.
   if (Array.isArray(parsed.messages)) {
     const last = parsed.messages.at(-1)
-    if (last?.role === "assistant" && !last?.tool_calls?.length) {
+    if (last?.role === "assistant" && (!Array.isArray(last.tool_calls) || last.tool_calls.length === 0)) {
       const encoder = new TextEncoder()
       const chunks = [
         `data: {"id":"sf-done","object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant","content":""},"index":0,"finish_reason":null}]}\n\n`,
-        `data: {"id":"sf-done","object":"chat.completion.chunk","choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}\n\n`,
+        `data: {"id":"sf-done","object":"chat.completion.chunk","choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}\n\n`,
         `data: [DONE]\n\n`,
       ]
       const stream = new ReadableStream({
@@ -107,9 +118,10 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
                 let text: string
                 if (typeof body === "string") {
                   text = body
-                } else if (body instanceof Uint8Array) {
+                } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
                   text = new TextDecoder().decode(body)
                 } else {
+                  // ReadableStream, Blob, FormData — pass through untransformed
                   text = ""
                 }
                 if (text) {
@@ -118,7 +130,7 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
                   body = result.body
                 }
               } catch {
-                // ignore parse errors
+                // JSON parse error — pass original body through untransformed
               }
             }
 
@@ -142,7 +154,8 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
                 type: "success" as const,
                 access: parsed.token,
                 refresh: "",
-                expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
+                // PATs have variable TTLs (default 90 days); use conservative expiry
+                expires: Date.now() + 90 * 24 * 60 * 60 * 1000,
                 accountId: parsed.account,
               }
             },

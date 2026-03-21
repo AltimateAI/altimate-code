@@ -670,10 +670,11 @@ export namespace Provider {
         },
       }
     },
+    // altimate_change start — snowflake cortex provider loader
     "snowflake-cortex": async () => {
       const auth = await Auth.get("snowflake-cortex")
       const account = iife(() => {
-        if (auth?.type === "oauth" && (auth as any).accountId) return (auth as any).accountId
+        if (auth?.type === "oauth" && auth.accountId) return auth.accountId
         return Env.get("SNOWFLAKE_ACCOUNT")
       })
       if (!account) return { autoload: false }
@@ -684,6 +685,7 @@ export namespace Provider {
         },
       }
     },
+    // altimate_change end
   }
 
   export const Model = z
@@ -893,7 +895,7 @@ export namespace Provider {
       }
     }
 
-    // Add Snowflake Cortex provider (not in models.dev — defined here)
+    // altimate_change start — snowflake cortex provider models
     function makeSnowflakeModel(
       id: string,
       name: string,
@@ -934,17 +936,18 @@ export namespace Provider {
       id: ProviderID.snowflakeCortex,
       source: "custom",
       name: "Snowflake Cortex",
-      env: ["SNOWFLAKE_PAT"],
+      env: ["SNOWFLAKE_ACCOUNT"],
       options: {},
       models: {
         "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", { context: 200000, output: 64000 }),
         "claude-haiku-4-5": makeSnowflakeModel("claude-haiku-4-5", "Claude Haiku 4.5", { context: 200000, output: 16000 }),
-        "claude-3-5-sonnet": makeSnowflakeModel("claude-3-5-sonnet", "Claude 3.5 Sonnet", { context: 200000, output: 8096 }),
+        "claude-3-5-sonnet": makeSnowflakeModel("claude-3-5-sonnet", "Claude 3.5 Sonnet", { context: 200000, output: 8192 }),
         "llama3.3-70b": makeSnowflakeModel("llama3.3-70b", "Llama 3.3 70B", { context: 128000, output: 4096 }, { toolcall: false }),
         "mistral-large2": makeSnowflakeModel("mistral-large2", "Mistral Large 2", { context: 131000, output: 4096 }, { toolcall: false }),
         "deepseek-r1": makeSnowflakeModel("deepseek-r1", "DeepSeek R1", { context: 64000, output: 32000 }, { reasoning: true, toolcall: false }),
       },
     }
+    // altimate_change end
 
     function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
       const existing = providers[providerID]
