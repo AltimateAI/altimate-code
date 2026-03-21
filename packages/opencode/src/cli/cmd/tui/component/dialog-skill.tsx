@@ -46,11 +46,11 @@ export function DialogSkill(props: DialogSkillProps) {
     return result.data ?? []
   })
 
-  // altimate_change start — build a lookup from skill name → location for editor/test actions
+  // altimate_change start — build lookups from skill name → location/content for actions
   const skillMap = createMemo(() => {
-    const map = new Map<string, string>()
+    const map = new Map<string, { location: string; content: string; description: string }>()
     for (const skill of skills() ?? []) {
-      map.set(skill.name, skill.location)
+      map.set(skill.name, { location: skill.location, content: skill.content, description: skill.description })
     }
     return map
   })
@@ -79,20 +79,43 @@ export function DialogSkill(props: DialogSkillProps) {
     })
   })
 
-  // Keybind actions: edit skill in $EDITOR, test skill
+  // Keybind actions: view, edit, test
   const keybinds = createMemo(() => [
+    {
+      keybind: Keybind.parse("ctrl+o")[0],
+      title: "view",
+      onTrigger: async (option: DialogSelectOption<string>) => {
+        const info = skillMap().get(option.value)
+        if (!info) return
+        const tools = detectToolReferences(info.content)
+        const lines = [
+          `Skill: ${option.value}`,
+          info.description,
+          "",
+          `Location: ${info.location}`,
+          tools.length > 0 ? `Tools: ${tools.join(", ")}` : null,
+          "",
+          "Content:",
+          "─".repeat(40),
+          info.content.slice(0, 800) + (info.content.length > 800 ? "\n..." : ""),
+        ]
+          .filter((l) => l !== null)
+          .join("\n")
+        toast.show({ message: lines, variant: "info", duration: 10000 })
+      },
+    },
     {
       keybind: Keybind.parse("ctrl+e")[0],
       title: "edit",
       onTrigger: async (option: DialogSelectOption<string>) => {
-        const location = skillMap().get(option.value)
-        if (!location || location.startsWith("builtin:")) {
+        const info = skillMap().get(option.value)
+        if (!info || info.location.startsWith("builtin:")) {
           toast.show({ message: "Cannot edit built-in skills", variant: "info" })
           return
         }
         const editor = process.env.EDITOR || process.env.VISUAL || "vi"
         dialog.clear()
-        spawn(editor, [location], { stdio: "inherit", detached: true }).unref()
+        spawn(editor, [info.location], { stdio: "inherit", detached: true }).unref()
       },
     },
     {

@@ -408,6 +408,46 @@ export function Prompt(props: PromptProps) {
           ))
         },
       },
+      // altimate_change start — skill management commands
+      {
+        title: "Create skill",
+        value: "prompt.skill-create",
+        category: "Skills",
+        slash: {
+          name: "skill-create",
+          arguments: "<name>",
+        },
+        onSelect: () => {
+          input.setText("/skill-create ")
+          setStore("prompt", { input: "/skill-create ", parts: [] })
+          input.gotoBufferEnd()
+          toast.show({
+            message: "Type a name, e.g.: /skill-create my-tool\nOr use CLI: altimate-code skill create <name>",
+            variant: "info",
+            duration: 5000,
+          })
+        },
+      },
+      {
+        title: "Install skill",
+        value: "prompt.skill-install",
+        category: "Skills",
+        slash: {
+          name: "skill-install",
+          arguments: "<source>",
+        },
+        onSelect: () => {
+          input.setText("/skill-install ")
+          setStore("prompt", { input: "/skill-install ", parts: [] })
+          input.gotoBufferEnd()
+          toast.show({
+            message: "Type a source, e.g.: /skill-install anthropics/skills\nSupports: owner/repo, URL, or local path",
+            variant: "info",
+            duration: 5000,
+          })
+        },
+      },
+      // altimate_change end
     ]
   })
 
