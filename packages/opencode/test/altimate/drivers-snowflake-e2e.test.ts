@@ -4,7 +4,7 @@
  * Requires env vars (set one or more):
  *
  *   # Password auth (primary):
- *   export ALTIMATE_CODE_CONN_SNOWFLAKE_TEST='{"type":"snowflake","account":"ejjkbko-fub20041","user":"juleszobi","password":"Ejungle9!","warehouse":"COMPUTE_WH","database":"TENANT_INFORMATICA_MIGRATION","schema":"public","role":"ACCOUNTADMIN"}'
+ *   export ALTIMATE_CODE_CONN_SNOWFLAKE_TEST='{"type":"snowflake","account":"<account>","user":"<user>","password":"<password>","warehouse":"<warehouse>","database":"<database>","schema":"public","role":"ACCOUNTADMIN"}'
  *
  *   # Key-pair auth (optional — requires RSA key setup in Snowflake):
  *   export SNOWFLAKE_TEST_KEY_PATH="/path/to/rsa_key.p8"
