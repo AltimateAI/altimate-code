@@ -940,11 +940,17 @@ export namespace Provider {
       env: [],
       options: {},
       models: {
+        // Claude models — only these support tool calling on Cortex
         "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", { context: 200000, output: 64000 }),
         "claude-haiku-4-5": makeSnowflakeModel("claude-haiku-4-5", "Claude Haiku 4.5", { context: 200000, output: 16000 }),
         "claude-3-5-sonnet": makeSnowflakeModel("claude-3-5-sonnet", "Claude 3.5 Sonnet", { context: 200000, output: 8192 }),
-        "llama3.3-70b": makeSnowflakeModel("llama3.3-70b", "Llama 3.3 70B", { context: 128000, output: 4096 }, { toolcall: false }),
+        // Open-source models — no tool calling support on Cortex
+        "snowflake-llama-3.3-70b": makeSnowflakeModel("snowflake-llama-3.3-70b", "Snowflake Llama 3.3 70B", { context: 128000, output: 4096 }, { toolcall: false }),
+        "llama3.1-70b": makeSnowflakeModel("llama3.1-70b", "Llama 3.1 70B", { context: 128000, output: 4096 }, { toolcall: false }),
+        "llama3.1-405b": makeSnowflakeModel("llama3.1-405b", "Llama 3.1 405B", { context: 128000, output: 4096 }, { toolcall: false }),
+        "llama3.1-8b": makeSnowflakeModel("llama3.1-8b", "Llama 3.1 8B", { context: 128000, output: 4096 }, { toolcall: false }),
         "mistral-large2": makeSnowflakeModel("mistral-large2", "Mistral Large 2", { context: 131000, output: 4096 }, { toolcall: false }),
+        "mistral-7b": makeSnowflakeModel("mistral-7b", "Mistral 7B", { context: 32000, output: 4096 }, { toolcall: false }),
         "deepseek-r1": makeSnowflakeModel("deepseek-r1", "DeepSeek R1", { context: 64000, output: 32000 }, { reasoning: true, toolcall: false }),
       },
     }

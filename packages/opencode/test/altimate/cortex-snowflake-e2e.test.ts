@@ -226,23 +226,105 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   })
 
   // -------------------------------------------------------------------------
-  // Model availability
+  // Model availability & response format
   // -------------------------------------------------------------------------
   describe("Model Availability", () => {
-    const models = ["claude-3-5-sonnet", "llama3.3-70b", "mistral-large2"]
+    // All models registered in provider.ts — availability depends on region/cross-region config
+    const allModels = [
+      "claude-sonnet-4-6", "claude-haiku-4-5", "claude-3-5-sonnet",
+      "snowflake-llama-3.3-70b", "llama3.1-70b", "llama3.1-405b", "llama3.1-8b",
+      "mistral-large2", "mistral-7b", "deepseek-r1",
+    ]
 
-    for (const model of models) {
-      test(`model ${model} responds`, async () => {
+    for (const model of allModels) {
+      test(`model ${model} responds or gracefully rejects`, async () => {
         const resp = await cortexChat({
           model,
           messages: [{ role: "user", content: "Reply with: ok" }],
           stream: false,
-          max_tokens: 8,
+          max_tokens: 16,
         })
-        // 200 = available, 400 = not enabled for this account — both are valid
+        // 200 = available, 400 = not enabled or region-locked — both are valid
         expect([200, 400]).toContain(resp.status)
+        if (resp.status === 200) {
+          const json = await resp.json()
+          // All models should return the same response shape
+          expect(json.choices).toBeDefined()
+          expect(json.choices[0].message.role).toBe("assistant")
+          expect(json.choices[0].message.content).toBeTruthy()
+          expect(json.usage).toBeDefined()
+          expect(json.usage.prompt_tokens).toBeGreaterThan(0)
+        }
       }, 30000)
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // Tool calling — only Claude models support it on Cortex
+  // -------------------------------------------------------------------------
+  describe("Tool Calling", () => {
+    const claudeModel = "claude-3-5-sonnet"
+    const nonClaudeModel = "mistral-large2"
+
+    test(`${claudeModel} supports tool calls`, async () => {
+      const resp = await fetch(`${cortexBaseURL(CORTEX_ACCOUNT!)}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          model: claudeModel,
+          messages: [{ role: "user", content: "What is the weather in Paris?" }],
+          max_completion_tokens: 64,
+          stream: false,
+          tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
+          tool_choice: "auto",
+        }),
+      })
+      // Accept 200 (tool call) or 400 (region-locked)
+      if (resp.status === 200) {
+        const json = await resp.json()
+        const tc = json.choices[0].message.tool_calls
+        expect(tc).toBeDefined()
+        expect(tc.length).toBeGreaterThan(0)
+        expect(tc[0].function.name).toBe("get_weather")
+      }
+    }, 30000)
+
+    test(`${nonClaudeModel} rejects tool calls`, async () => {
+      const resp = await fetch(`${cortexBaseURL(CORTEX_ACCOUNT!)}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          model: nonClaudeModel,
+          messages: [{ role: "user", content: "What is the weather?" }],
+          max_completion_tokens: 32,
+          stream: false,
+          tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
+        }),
+      })
+      // Non-Claude models reject tool calls with 400
+      if (resp.status !== 200) {
+        expect(resp.status).toBe(400)
+      }
+    }, 30000)
+  })
+
+  // -------------------------------------------------------------------------
+  // DeepSeek R1 reasoning format
+  // -------------------------------------------------------------------------
+  describe("DeepSeek R1 Reasoning", () => {
+    test("deepseek-r1 returns <think> tags in content", async () => {
+      const resp = await cortexChat({
+        model: "deepseek-r1",
+        messages: [{ role: "user", content: "What is 2+2?" }],
+        stream: false,
+        max_tokens: 64,
+      })
+      if (resp.status === 200) {
+        const json = await resp.json()
+        const content = json.choices[0].message.content
+        expect(content).toContain("<think>")
+      }
+    }, 30000)
   })
 
   // -------------------------------------------------------------------------

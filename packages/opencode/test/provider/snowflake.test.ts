@@ -418,8 +418,10 @@ describe("snowflake-cortex provider", () => {
           const providers = await Provider.list()
           const models = providers["snowflake-cortex"].models
           expect(models["mistral-large2"].capabilities.toolcall).toBe(false)
-          expect(models["llama3.3-70b"].capabilities.toolcall).toBe(false)
+          expect(models["snowflake-llama-3.3-70b"].capabilities.toolcall).toBe(false)
+          expect(models["llama3.1-70b"].capabilities.toolcall).toBe(false)
           expect(models["deepseek-r1"].capabilities.toolcall).toBe(false)
+          expect(models["mistral-7b"].capabilities.toolcall).toBe(false)
         },
       })
     } finally {

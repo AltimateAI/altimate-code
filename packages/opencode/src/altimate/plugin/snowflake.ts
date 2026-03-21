@@ -1,7 +1,9 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Auth, OAUTH_DUMMY_KEY } from "@/auth"
 
-const NO_TOOLCALL_MODELS = new Set(["llama3.3-70b", "mistral-large2", "deepseek-r1"])
+// Only Claude models support tool calling on Snowflake Cortex.
+// All other models reject tools with "tool calling is not supported".
+const TOOLCALL_MODELS = new Set(["claude-sonnet-4-6", "claude-haiku-4-5", "claude-3-5-sonnet"])
 
 /** Snowflake account identifiers contain only alphanumeric, hyphen, underscore, and dot characters. */
 export const VALID_ACCOUNT_RE = /^[a-zA-Z0-9._-]+$/
@@ -32,7 +34,7 @@ export function transformSnowflakeBody(bodyText: string): { body: string; synthe
 
   // Strip tools for models that don't support tool calling on Snowflake Cortex.
   // Also remove orphaned tool_calls from messages to avoid Snowflake API errors.
-  if (NO_TOOLCALL_MODELS.has(parsed.model)) {
+  if (!TOOLCALL_MODELS.has(parsed.model)) {
     delete parsed.tools
     delete parsed.tool_choice
     if (Array.isArray(parsed.messages)) {
