@@ -189,6 +189,7 @@ Use this skill.
       config: {
         experimental: {
           env_fingerprint_skill_selection: false,
+          auto_mcp_discovery: true,
         },
       },
       init: async (dir) => {
@@ -225,6 +226,7 @@ Use this skill.
       config: {
         experimental: {
           env_fingerprint_skill_selection: true,
+          auto_mcp_discovery: true,
         },
       },
       init: async (dir) => {
