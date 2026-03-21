@@ -121,8 +121,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .chat-tool pre { background: var(--bg); padding: 6px; border-radius: 4px; margin-top: 4px; font-size: 11px; overflow-x: auto; max-height: 150px; overflow-y: auto; }
 
 /* ---- Log View ---- */
-.log-entry { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+.log-entry { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; font-family: 'JetBrains Mono', 'Fira Code', monospace; cursor: pointer; }
 .log-entry:hover { background: var(--s1); }
+.log-entry.sel { background: var(--s2); }
 .log-ts { color: var(--dim); font-size: 11px; margin-right: 8px; }
 .log-kind { font-size: 10px; font-weight: 600; text-transform: uppercase; padding: 1px 4px; border-radius: 3px; margin-right: 8px; }
 .log-kind.generation { background: rgba(77,142,255,0.15); color: var(--secondary); }
@@ -221,10 +222,12 @@ document.getElementById('cards').innerHTML = cardsData.filter(function(c) { retu
 
 // --- Tab switching ---
 document.getElementById('tabs').addEventListener('click', function(ev) {
-  var view = ev.target.dataset.view; if (!view) return;
-  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
-  document.querySelectorAll('.view').forEach(function(v) { v.classList.remove('active'); });
-  ev.target.classList.add('active');
+  var tab = ev.target.closest ? ev.target.closest('.tab') : ev.target;
+  if (!tab || !tab.dataset || !tab.dataset.view) return;
+  var view = tab.dataset.view;
+  document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
+  document.querySelectorAll('.view').forEach(function(el) { el.classList.remove('active'); });
+  tab.classList.add('active');
   document.getElementById('v-' + view).classList.add('active');
   document.getElementById('detail').innerHTML = '';
 });
@@ -304,7 +307,7 @@ function showDetail(span) {
 // ===================== WATERFALL VIEW =====================
 (function() {
   var el = document.getElementById('v-waterfall');
-  nonSession.forEach(function(span) {
+  nonSession.forEach(function(span, idx) {
     var st = (span.startTime||0) - tStart;
     var dur = (span.endTime || Date.now()) - (span.startTime||0);
     var left = (st / tTotal * 100).toFixed(2);
@@ -312,17 +315,22 @@ function showDetail(span) {
     var cls = span.status === 'error' ? 'error' : e(span.kind);
     var row = document.createElement('div');
     row.className = 'wf-row';
+    row.setAttribute('data-idx', String(idx));
     var iconCls = span.status === 'error' ? 'error' : e(span.kind);
     row.innerHTML = '<div class="wf-icon ' + iconCls + '">' + (icons[span.kind]||'\\u2022') + '</div>' +
       '<div class="wf-name">' + e(span.name) + '</div>' +
       '<div class="wf-bar-c"><div class="wf-bar ' + cls + '" style="left:'+left+'%;width:'+width+'%"><span class="wf-bar-label">' + fd(dur) + '</span></div></div>' +
       '<div class="wf-dur">' + fd(dur) + '</div>';
-    row.onclick = function() {
-      document.querySelectorAll('.wf-row').forEach(function(r){r.classList.remove('sel');});
-      row.classList.add('sel');
-      showDetail(span);
-    };
     el.appendChild(row);
+  });
+  el.addEventListener('click', function(ev) {
+    var row = ev.target.closest ? ev.target.closest('.wf-row') : ev.target;
+    if (!row || !row.dataset || row.dataset.idx == null) return;
+    var span = nonSession[Number(row.dataset.idx)];
+    if (!span) return;
+    document.querySelectorAll('.wf-row').forEach(function(r){r.classList.remove('sel');});
+    row.classList.add('sel');
+    showDetail(span);
   });
 })();
 
@@ -335,13 +343,14 @@ function showDetail(span) {
     if (!children.length) return '';
     var html = '';
     children.forEach(function(span) {
+      var idx = spans.indexOf(span);
       var dur = (span.endTime||Date.now()) - (span.startTime||0);
       var meta = [];
       meta.push(fd(dur));
       if (span.tokens) meta.push(Number(span.tokens.total||0) + ' tok');
       if (span.cost) meta.push(fc(span.cost));
       if (span.status === 'error') meta.push('<span style="color:var(--red)">error</span>');
-      html += '<div class="tree-node"><div class="tree-item" data-sid="' + e(span.spanId) + '">';
+      html += '<div class="tree-node"><div class="tree-item" data-idx="' + idx + '">';
       html += '<div class="tree-head">';
       html += '<span class="tree-type ' + e(span.kind) + '">' + e(span.kind) + '</span>';
       html += '<span class="tree-title">' + e(span.name) + '</span>';
@@ -356,12 +365,11 @@ function showDetail(span) {
   var rootId = sessionSpan ? sessionSpan.spanId : null;
   el.innerHTML = buildTree(rootId) || '<div style="color:var(--dim);padding:20px">No spans recorded yet.</div>';
   el.addEventListener('click', function(ev) {
-    var item = ev.target.closest('.tree-item');
-    if (!item) return;
-    var sid = item.dataset.sid;
-    var span = spans.find(function(s){return s.spanId===sid;});
+    var item = ev.target.closest ? ev.target.closest('.tree-item') : null;
+    if (!item || item.dataset.idx == null) return;
+    var span = spans[Number(item.dataset.idx)];
     if (!span) return;
-    document.querySelectorAll('.tree-item').forEach(function(i){i.classList.remove('sel');});
+    document.querySelectorAll('.tree-item').forEach(function(el){el.classList.remove('sel');});
     item.classList.add('sel');
     showDetail(span);
   });
@@ -419,9 +427,10 @@ function showDetail(span) {
   var sorted = spans.slice().sort(function(a,b){return (a.startTime||0)-(b.startTime||0);});
   sorted.forEach(function(span) {
     if (span.kind === 'session') return;
+    var idx = spans.indexOf(span);
     var ts = span.startTime ? new Date(span.startTime).toISOString().slice(11,23) : '';
     var kindCls = span.status === 'error' ? 'error' : e(span.kind);
-    html += '<div class="log-entry">';
+    html += '<div class="log-entry" data-idx="' + idx + '">';
     html += '<span class="log-ts">' + ts + '</span>';
     var logIcon = span.kind === 'generation' ? '\\u2B50' : span.kind === 'tool' ? '\\u2692' : '\\u25A0';
     html += '<span class="log-kind ' + kindCls + '">' + logIcon + ' ' + e(span.kind||'') + '</span>';
@@ -440,6 +449,15 @@ function showDetail(span) {
   });
   if (!html) html = '<div style="color:var(--dim);padding:20px">No log entries yet.</div>';
   el.innerHTML = html;
+  el.addEventListener('click', function(ev) {
+    var entry = ev.target.closest ? ev.target.closest('.log-entry') : null;
+    if (!entry || entry.dataset.idx == null) return;
+    var span = spans[Number(entry.dataset.idx)];
+    if (!span) return;
+    document.querySelectorAll('.log-entry').forEach(function(el){el.classList.remove('sel');});
+    entry.classList.add('sel');
+    showDetail(span);
+  });
 })();
 
 // ===================== LIVE POLLING =====================
