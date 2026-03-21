@@ -46,6 +46,9 @@ import { GoogleAuth } from "google-auth-library"
 import { ProviderTransform } from "./transform"
 import { Installation } from "../installation"
 import { ModelID, ProviderID } from "./schema"
+// altimate_change start — snowflake cortex account validation
+import { VALID_ACCOUNT_RE } from "../altimate/plugin/snowflake"
+// altimate_change end
 
 const DEFAULT_CHUNK_TIMEOUT = 120_000
 
@@ -675,7 +678,7 @@ export namespace Provider {
       const auth = await Auth.get("snowflake-cortex")
       if (auth?.type !== "oauth") return { autoload: false }
       const account = auth.accountId ?? Env.get("SNOWFLAKE_ACCOUNT")
-      if (!account || !/^[a-zA-Z0-9._-]+$/.test(account)) return { autoload: false }
+      if (!account || !VALID_ACCOUNT_RE.test(account)) return { autoload: false }
       return {
         autoload: true,
         options: {

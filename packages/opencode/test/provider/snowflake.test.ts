@@ -177,6 +177,44 @@ describe("transformSnowflakeBody", () => {
     expect(syntheticStop).toBeUndefined()
   })
 
+  test("does NOT short-circuit when stream is false", () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      stream: false,
+      messages: [
+        { role: "user", content: "test" },
+        { role: "assistant", content: "I'm here!" },
+      ],
+    })
+    const { syntheticStop } = transformSnowflakeBody(input)
+    expect(syntheticStop).toBeUndefined()
+  })
+
+  test("short-circuits when stream is true", () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      stream: true,
+      messages: [
+        { role: "user", content: "test" },
+        { role: "assistant", content: "I'm here!" },
+      ],
+    })
+    const { syntheticStop } = transformSnowflakeBody(input)
+    expect(syntheticStop).toBeDefined()
+  })
+
+  test("short-circuits when stream is not specified (defaults to streaming)", () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: "test" },
+        { role: "assistant", content: "I'm here!" },
+      ],
+    })
+    const { syntheticStop } = transformSnowflakeBody(input)
+    expect(syntheticStop).toBeDefined()
+  })
+
   test("triggers synthetic stop when tool_calls is empty array", () => {
     const input = JSON.stringify({
       model: "claude-sonnet-4-6",
@@ -358,6 +396,7 @@ describe("snowflake-cortex provider", () => {
           const models = providers["snowflake-cortex"].models
           expect(models["claude-sonnet-4-6"].capabilities.toolcall).toBe(true)
           expect(models["claude-haiku-4-5"].capabilities.toolcall).toBe(true)
+          expect(models["claude-3-5-sonnet"].capabilities.toolcall).toBe(true)
         },
       })
     } finally {

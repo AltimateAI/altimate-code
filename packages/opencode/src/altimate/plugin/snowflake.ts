@@ -4,7 +4,7 @@ import { Auth, OAUTH_DUMMY_KEY } from "@/auth"
 const NO_TOOLCALL_MODELS = new Set(["llama3.3-70b", "mistral-large2", "deepseek-r1"])
 
 /** Snowflake account identifiers contain only alphanumeric, hyphen, underscore, and dot characters. */
-const VALID_ACCOUNT_RE = /^[a-zA-Z0-9._-]+$/
+export const VALID_ACCOUNT_RE = /^[a-zA-Z0-9._-]+$/
 
 /** Parse a `account::token` PAT credential string. */
 export function parseSnowflakePAT(code: string): { account: string; token: string } | null {
@@ -49,7 +49,7 @@ export function transformSnowflakeBody(bodyText: string): { body: string; synthe
   // Instead, short-circuit by returning a synthetic "stop" streaming response.
   if (Array.isArray(parsed.messages)) {
     const last = parsed.messages.at(-1)
-    if (last?.role === "assistant" && (!Array.isArray(last.tool_calls) || last.tool_calls.length === 0)) {
+    if (parsed.stream !== false && last?.role === "assistant" && (!Array.isArray(last.tool_calls) || last.tool_calls.length === 0)) {
       const encoder = new TextEncoder()
       const chunks = [
         `data: {"id":"sf-done","object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant","content":""},"index":0,"finish_reason":null}]}\n\n`,
@@ -128,6 +128,7 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
                   const result = transformSnowflakeBody(text)
                   if (result.syntheticStop) return result.syntheticStop
                   body = result.body
+                  headers.delete("content-length")
                 }
               } catch {
                 // JSON parse error — pass original body through untransformed
