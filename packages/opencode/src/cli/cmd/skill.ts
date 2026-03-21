@@ -440,6 +440,174 @@ const SkillTestCommand = cmd({
   },
 })
 
+const SkillShowCommand = cmd({
+  command: "show <name>",
+  describe: "display the full content of a skill",
+  builder: (yargs) =>
+    yargs.positional("name", {
+      type: "string",
+      describe: "name of the skill to show",
+      demandOption: true,
+    }),
+  async handler(args) {
+    const name = args.name as string
+    await bootstrap(process.cwd(), async () => {
+      const skill = await Skill.get(name)
+      if (!skill) {
+        process.stderr.write(`Error: Skill "${name}" not found.` + EOL)
+        process.exit(1)
+      }
+
+      const tools = detectToolReferences(skill.content)
+
+      process.stdout.write(EOL)
+      process.stdout.write(`  Name:        ${skill.name}` + EOL)
+      process.stdout.write(`  Description: ${skill.description}` + EOL)
+      process.stdout.write(`  Location:    ${skill.location}` + EOL)
+      if (tools.length > 0) {
+        process.stdout.write(`  Tools:       ${tools.join(", ")}` + EOL)
+      }
+      process.stdout.write(EOL + "─".repeat(60) + EOL + EOL)
+      process.stdout.write(skill.content + EOL)
+    })
+  },
+})
+
+const SkillInstallCommand = cmd({
+  command: "install <source>",
+  describe: "install a skill from GitHub or a local path",
+  builder: (yargs) =>
+    yargs
+      .positional("source", {
+        type: "string",
+        describe: "GitHub repo (owner/repo), URL, or local path",
+        demandOption: true,
+      })
+      .option("global", {
+        alias: "g",
+        type: "boolean",
+        describe: "install globally instead of per-project",
+        default: false,
+      }),
+  async handler(args) {
+    const source = args.source as string
+    const isGlobal = args.global as boolean
+
+    await bootstrap(process.cwd(), async () => {
+      const rootDir = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+      const targetDir = isGlobal
+        ? path.join(Global.Path.config, "skills")
+        : path.join(rootDir, ".opencode", "skills")
+
+      // Determine source type and fetch
+      let skillDir: string
+
+      if (source.startsWith("http://") || source.startsWith("https://")) {
+        // URL: clone the repo
+        process.stdout.write(`Fetching from ${source}...` + EOL)
+        const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
+        const proc = Bun.spawnSync(["git", "clone", "--depth", "1", source, tmpDir], {
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        if (proc.exitCode !== 0) {
+          process.stderr.write(`Error: Failed to clone ${source}` + EOL)
+          process.stderr.write(proc.stderr.toString() + EOL)
+          process.exit(1)
+        }
+        skillDir = tmpDir
+      } else if (source.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
+        // GitHub shorthand: owner/repo
+        const url = `https://github.com/${source}.git`
+        process.stdout.write(`Fetching from github.com/${source}...` + EOL)
+        const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
+        const proc = Bun.spawnSync(["git", "clone", "--depth", "1", url, tmpDir], {
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        if (proc.exitCode !== 0) {
+          process.stderr.write(`Error: Failed to clone ${url}` + EOL)
+          process.stderr.write(proc.stderr.toString() + EOL)
+          process.exit(1)
+        }
+        skillDir = tmpDir
+      } else {
+        // Local path
+        const resolved = path.isAbsolute(source) ? source : path.resolve(source)
+        try {
+          await fs.access(resolved)
+        } catch {
+          process.stderr.write(`Error: Path not found: ${resolved}` + EOL)
+          process.exit(1)
+        }
+        skillDir = resolved
+      }
+
+      // Find all SKILL.md files in the source
+      const { Glob: BunGlob } = globalThis.Bun
+      const glob = new BunGlob("**/SKILL.md")
+      const matches: string[] = []
+      for await (const match of glob.scan({ cwd: skillDir, absolute: true })) {
+        // Skip .git directory
+        if (!match.includes("/.git/")) matches.push(match)
+      }
+
+      if (matches.length === 0) {
+        process.stderr.write(`Error: No SKILL.md files found in ${source}` + EOL)
+        // Clean up tmp if cloned
+        if (skillDir.startsWith(Global.Path.cache)) {
+          await fs.rm(skillDir, { recursive: true, force: true })
+        }
+        process.exit(1)
+      }
+
+      let installed = 0
+      for (const skillFile of matches) {
+        const skillParent = path.dirname(skillFile)
+        const skillName = path.basename(skillParent)
+        const dest = path.join(targetDir, skillName)
+
+        // Check if already installed
+        try {
+          await fs.access(dest)
+          process.stdout.write(`  ⚠ Skipping "${skillName}" — already exists` + EOL)
+          continue
+        } catch {
+          // Not installed, proceed
+        }
+
+        // Copy the entire skill directory (SKILL.md + any supporting files)
+        await fs.mkdir(dest, { recursive: true })
+        const files = await fs.readdir(skillParent)
+        for (const file of files) {
+          const src = path.join(skillParent, file)
+          const dst = path.join(dest, file)
+          const stat = await fs.stat(src)
+          if (stat.isFile()) {
+            await fs.copyFile(src, dst)
+          } else if (stat.isDirectory()) {
+            await fs.cp(src, dst, { recursive: true })
+          }
+        }
+        process.stdout.write(`  ✓ Installed "${skillName}" → ${path.relative(rootDir, dest)}` + EOL)
+        installed++
+      }
+
+      // Clean up tmp if cloned
+      if (skillDir.startsWith(Global.Path.cache)) {
+        await fs.rm(skillDir, { recursive: true, force: true })
+      }
+
+      process.stdout.write(EOL)
+      if (installed > 0) {
+        process.stdout.write(`${installed} skill(s) installed${isGlobal ? " globally" : ""}.` + EOL)
+      } else {
+        process.stdout.write(`No new skills installed.` + EOL)
+      }
+    })
+  },
+})
+
 // ---------------------------------------------------------------------------
 // Top-level skill command
 // ---------------------------------------------------------------------------
@@ -452,6 +620,8 @@ export const SkillCommand = cmd({
       .command(SkillListCommand)
       .command(SkillCreateCommand)
       .command(SkillTestCommand)
+      .command(SkillShowCommand)
+      .command(SkillInstallCommand)
       .demandCommand(),
   async handler() {},
 })
