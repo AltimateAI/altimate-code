@@ -2,8 +2,11 @@ import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
 import { createResource, createMemo } from "solid-js"
 import { useDialog } from "@tui/ui/dialog"
 import { useSDK } from "@tui/context/sdk"
-// altimate_change start — import helpers for tool detection
+// altimate_change start — import helpers for tool detection and keybind support
 import { detectToolReferences } from "../../skill-helpers"
+import { Keybind } from "@/util/keybind"
+import { useToast } from "@tui/ui/toast"
+import { spawn } from "child_process"
 // altimate_change end
 
 export type DialogSkillProps = {
@@ -35,12 +38,23 @@ const SKILL_CATEGORIES: Record<string, string> = {
 export function DialogSkill(props: DialogSkillProps) {
   const dialog = useDialog()
   const sdk = useSDK()
+  const toast = useToast()
   dialog.setSize("large")
 
   const [skills] = createResource(async () => {
     const result = await sdk.client.app.skills()
     return result.data ?? []
   })
+
+  // altimate_change start — build a lookup from skill name → location for editor/test actions
+  const skillMap = createMemo(() => {
+    const map = new Map<string, string>()
+    for (const skill of skills() ?? []) {
+      map.set(skill.name, skill.location)
+    }
+    return map
+  })
+  // altimate_change end
 
   // altimate_change start — enrich skill list with domain categories and tool info
   const options = createMemo<DialogSelectOption<string>[]>(() => {
@@ -49,7 +63,6 @@ export function DialogSkill(props: DialogSkillProps) {
     return list.map((skill) => {
       const tools = detectToolReferences(skill.content)
       const category = SKILL_CATEGORIES[skill.name] ?? "Other"
-      // Truncate description to keep it readable in the dialog
       const desc = skill.description?.replace(/\s+/g, " ").trim()
       const shortDesc = desc && desc.length > 80 ? desc.slice(0, 77) + "..." : desc
       return {
@@ -65,7 +78,55 @@ export function DialogSkill(props: DialogSkillProps) {
       }
     })
   })
+
+  // Keybind actions: edit skill in $EDITOR, test skill
+  const keybinds = createMemo(() => [
+    {
+      keybind: Keybind.parse("ctrl+e")[0],
+      title: "edit",
+      onTrigger: async (option: DialogSelectOption<string>) => {
+        const location = skillMap().get(option.value)
+        if (!location || location.startsWith("builtin:")) {
+          toast.show({ message: "Cannot edit built-in skills", variant: "info" })
+          return
+        }
+        const editor = process.env.EDITOR || process.env.VISUAL || "vi"
+        dialog.clear()
+        spawn(editor, [location], { stdio: "inherit", detached: true }).unref()
+      },
+    },
+    {
+      keybind: Keybind.parse("ctrl+t")[0],
+      title: "test",
+      onTrigger: async (option: DialogSelectOption<string>) => {
+        toast.show({ message: `Testing ${option.value}...`, variant: "info" })
+        try {
+          const proc = Bun.spawn(["altimate-code", "skill", "test", option.value], {
+            stdout: "pipe",
+            stderr: "pipe",
+          })
+          const exitCode = await proc.exited
+          const output = await new Response(proc.stdout).text()
+          const passed = output.includes("PASS")
+          toast.show({
+            message: passed ? `✓ ${option.value}: PASS` : `✗ ${option.value}: FAIL`,
+            variant: passed ? "success" : "error",
+            duration: 4000,
+          })
+        } catch {
+          toast.show({ message: `Failed to test ${option.value}`, variant: "error" })
+        }
+      },
+    },
+  ])
   // altimate_change end
 
-  return <DialogSelect title="Skills" placeholder="Search skills..." options={options()} />
+  return (
+    <DialogSelect
+      title="Skills"
+      placeholder="Search skills..."
+      options={options()}
+      keybind={keybinds()}
+    />
+  )
 }
