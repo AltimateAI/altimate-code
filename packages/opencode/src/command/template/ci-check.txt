@@ -1,0 +1,51 @@
+You are running altimate-code in CI/pre-merge validation mode. Analyze all changed SQL and dbt files for issues.
+
+Step 1 — Identify changed files:
+Run bash to find changed files: `git diff --name-only HEAD~1...HEAD -- '*.sql' '*.yml' '*.yaml'`
+If a base branch is available (e.g., main), use: `git diff --name-only origin/main...HEAD -- '*.sql' '*.yml' '*.yaml'`
+
+If no files changed, report "No SQL or dbt files changed — all clear" and stop.
+
+Step 2 — Analyze each changed SQL file:
+For each `.sql` file found:
+- Read the file contents
+- Run `sql_analyze` with the appropriate dialect (auto-detect from project config or default to snowflake)
+- Run `lineage_check` to verify lineage is not broken
+- If any WARNING or ERROR severity issues found, collect them
+
+Step 3 — Check dbt project integrity (if dbt detected):
+- Run `project_scan` to detect dbt project
+- If manifest exists, run `dbt_manifest` to parse it
+- For each changed model, run `impact_analysis` to assess downstream risk
+- Flag any changes with HIGH blast radius (>10 downstream models)
+
+Step 4 — Run schema validation:
+For each changed SQL file:
+- Run `altimate_core_validate` to check syntax correctness
+- Run `altimate_core_check` for additional quality checks
+
+Step 5 — Generate summary report:
+Present results in a CI-friendly format:
+
+### SQL Quality Report
+
+**Files analyzed:** N
+**Issues found:** N (X errors, Y warnings)
+**Downstream impact:** N models affected
+
+#### Issues by File
+For each file with issues:
+- File path
+- Issue type, severity, message
+- Recommendation
+
+#### Impact Assessment
+For models with downstream dependents:
+- Model name
+- Number of affected downstream models
+- Risk level (LOW/MEDIUM/HIGH)
+
+If all checks pass, report: "All SQL quality checks passed. Safe to merge."
+If blocking issues found, clearly state: "BLOCKING: N issues must be resolved before merge."
+
+$ARGUMENTS
