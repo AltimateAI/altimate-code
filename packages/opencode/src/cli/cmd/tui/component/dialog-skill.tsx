@@ -79,7 +79,7 @@ async function createSkillDirect(name: string): Promise<{ ok: boolean; message: 
 }
 
 /** Install skills from a GitHub repo or local path directly. */
-async function installSkillDirect(source: string): Promise<{ ok: boolean; message: string }> {
+async function installSkillDirect(source: string): Promise<{ ok: boolean; message: string; installedNames?: string[] }> {
   const trimmed = source.trim()
   if (!trimmed) return { ok: false, message: "Source is required" }
 
@@ -166,7 +166,7 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
 
   if (isTmp) await fs.rm(skillDir, { recursive: true, force: true })
   if (installed === 0) return { ok: true, message: "No new skills installed (all already exist)" }
-  return { ok: true, message: `Installed ${installed} skill(s): ${names.join(", ")}` }
+  return { ok: true, message: `Installed ${installed} skill(s): ${names.join(", ")}`, installedNames: names }
 }
 
 /** Test a skill by checking its tool responds to --help. */
@@ -209,14 +209,15 @@ async function testSkillDirect(skillName: string, location: string, content: str
 // altimate_change end
 
 // altimate_change start — sub-dialogs for create and install
-// Reload skills on the server so the cache is invalidated in the worker thread.
-// Calls GET /skill?reload=true via the SDK's fetch to invalidate the cache
-// and force a re-scan of all skill directories.
-async function reloadSkillsOnServer(sdk: ReturnType<typeof useSDK>) {
+
+/** Reload skills on the server and verify new skills are visible. */
+async function reloadAndVerify(sdk: ReturnType<typeof useSDK>, expectedNames: string[]): Promise<string[]> {
   try {
-    await sdk.fetch(`${sdk.url}/skill?reload=true`)
+    const resp = await sdk.fetch(`${sdk.url}/skill?reload=true`)
+    const skills = (await resp.json()) as Array<{ name: string; description: string }>
+    return expectedNames.filter((n) => skills.some((s) => s.name === n))
   } catch {
-    // Best-effort — if it fails, skills will show on next TUI restart
+    return []
   }
 }
 
@@ -231,14 +232,27 @@ function DialogSkillCreate() {
       placeholder="my-tool"
       onConfirm={async (name) => {
         dialog.clear()
-        toast.show({ message: `Creating ${name}...`, variant: "info" })
+        toast.show({ message: `Creating "${name}"...`, variant: "info", duration: 30000 })
         const result = await createSkillDirect(name)
-        if (result.ok) await reloadSkillsOnServer(sdk)
-        toast.show({
-          message: result.ok ? `✓ ${result.message}` : result.message,
-          variant: result.ok ? "success" : "error",
-          duration: 5000,
-        })
+        if (!result.ok) {
+          toast.show({ message: result.message, variant: "error", duration: 6000 })
+          return
+        }
+        // Verify the skill loaded on the server
+        const verified = await reloadAndVerify(sdk, [name])
+        if (verified.length > 0) {
+          toast.show({
+            message: `✓ Created "${name}"\n\nSkill and CLI tool ready at .opencode/skills/${name}/\nUse /skills to find it, or type /${name} in the prompt.`,
+            variant: "success",
+            duration: 8000,
+          })
+        } else {
+          toast.show({
+            message: `Created files but skill not loaded. Try reopening /skills.`,
+            variant: "warning",
+            duration: 6000,
+          })
+        }
       }}
       onCancel={() => dialog.clear()}
     />
@@ -256,14 +270,27 @@ function DialogSkillInstall() {
       placeholder="anthropics/skills"
       onConfirm={async (source) => {
         dialog.clear()
-        toast.show({ message: `Installing from ${source}...`, variant: "info" })
+        toast.show({ message: `Installing from ${source}...`, variant: "info", duration: 30000 })
         const result = await installSkillDirect(source)
-        if (result.ok) await reloadSkillsOnServer(sdk)
-        toast.show({
-          message: result.ok ? `✓ ${result.message}` : result.message,
-          variant: result.ok ? "success" : "error",
-          duration: 6000,
-        })
+        if (!result.ok) {
+          toast.show({ message: result.message, variant: "error", duration: 6000 })
+          return
+        }
+        if (result.message.includes("all already exist")) {
+          toast.show({ message: "All skills already installed.", variant: "info", duration: 4000 })
+          return
+        }
+        // Extract installed names and verify they loaded
+        const names = result.installedNames ?? []
+        const verified = await reloadAndVerify(sdk, names)
+        const lines = [
+          `✓ Installed ${verified.length} skill(s)`,
+          "",
+          ...verified.map((n) => `  • ${n}`),
+          "",
+          "Open /skills to browse, or type /<skill-name> to use.",
+        ]
+        toast.show({ message: lines.join("\n"), variant: "success", duration: 8000 })
       }}
       onCancel={() => dialog.clear()}
     />
