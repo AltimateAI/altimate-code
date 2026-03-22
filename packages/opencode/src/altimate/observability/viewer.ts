@@ -557,7 +557,7 @@ function showDetail(span) {
 
   // Handle empty trace
   if (!spans.length || !nonSession.length) {
-    el.innerHTML = '<div class="sum-empty">No activity recorded</div>';
+    el.innerHTML = '<div class="sum-empty" style="padding:40px;text-align:center;color:var(--dim)"><div style="font-size:24px;margin-bottom:8px">\\u2014</div><div>No activity recorded in this session</div>' + (t.metadata.prompt ? '<div style="margin-top:16px;color:var(--text);font-size:14px">Prompt: ' + e(t.metadata.prompt.slice(0, 200)) + '</div>' : '') + '</div>';
     return;
   }
 
@@ -721,9 +721,24 @@ function showDetail(span) {
 
     // SQL tool results (non-bash)
     if ((lname.indexOf('sql') >= 0 || lname.indexOf('query') >= 0 || lname.indexOf('execute') >= 0) && outStr) {
-      var rowMatch = outStr.match(/(\\d+)\\s*rows?\\s*(?:returned|affected|found|selected)/i);
+      var rowMatch = outStr.match(/(\\d+)\\s*rows?\\s*(?:returned|affected|found|selected)/i)
+        || outStr.match(/row returned|query.*(?:success|complete)/i);
       if (rowMatch) {
         cmdOutcomes.push({ command: 'SQL query', result: rowMatch[0], status: sp.status === 'error' ? 'error' : 'ok', spanId: sp.spanId, tool: 'sql' });
+      } else if (sp.status === 'error') {
+        var sqlErr = outStr.match(/ERROR[^\\n]*/i);
+        cmdOutcomes.push({ command: 'SQL query', result: sqlErr ? sqlErr[0].slice(0, 100) : 'Query failed', status: 'error', spanId: sp.spanId, tool: 'sql' });
+      }
+    }
+
+    // Schema, validation, lineage tool results (non-bash, non-SQL)
+    if ((lname.indexOf('schema') >= 0 || lname.indexOf('lineage') >= 0 || lname.indexOf('validate') >= 0 || lname.indexOf('altimate_core') >= 0 || lname.indexOf('inspect') >= 0) && outStr) {
+      var toolResult = outStr.match(/(?:pass|fail|valid|invalid|\\d+\\s*issues?|\\d+\\s*errors?|succeeded|completed)[^\\n]*/i);
+      if (toolResult) {
+        var isErr = sp.status === 'error' || /fail|invalid|error/i.test(toolResult[0]);
+        cmdOutcomes.push({ command: sp.name || lname, result: toolResult[0].replace(/\\s+/g, ' ').trim().slice(0, 100), status: isErr ? 'error' : 'ok', spanId: sp.spanId, tool: 'validation' });
+      } else if (sp.status === 'error') {
+        cmdOutcomes.push({ command: sp.name || lname, result: outStr.slice(0, 100), status: 'error', spanId: sp.spanId, tool: 'validation' });
       }
     }
   });
