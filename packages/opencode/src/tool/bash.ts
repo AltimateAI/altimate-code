@@ -17,6 +17,7 @@ import { Shell } from "@/shell/shell"
 import { BashArity } from "@/permission/arity"
 import { Truncate } from "./truncation"
 import { Plugin } from "@/plugin"
+import { Global } from "@/global"
 
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
@@ -165,16 +166,44 @@ export const BashTool = Tool.define("bash", async () => {
         { env: {} },
       )
 
-      // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) to PATH
+      // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) and user tools dirs to PATH
       const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
+      const sep = process.platform === "win32" ? ";" : ":"
+      const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""
+      const pathEntries = new Set(basePath.split(sep).filter(Boolean))
+
+      // Collect directories to prepend (highest priority first)
+      const prependDirs: string[] = []
+
+      // 1. Bundled tools (altimate-dbt, etc.) — highest priority
       const binDir = process.env.ALTIMATE_BIN_DIR
-      if (binDir) {
-        const sep = process.platform === "win32" ? ";" : ":"
-        const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""
-        const pathEntries = basePath.split(sep).filter(Boolean)
-        if (!pathEntries.some((entry) => entry === binDir)) {
-          mergedEnv.PATH = basePath ? `${binDir}${sep}${basePath}` : binDir
+      if (binDir && !pathEntries.has(binDir)) {
+        prependDirs.push(binDir)
+      }
+
+      // 2. Project-level user tools (.opencode/tools/) — user extensions
+      // Anchored to Instance.directory (not cwd) so external_directory workdirs
+      // can't shadow project tools. Also check worktree root for monorepos.
+      const projectToolsDir = path.join(Instance.directory, ".opencode", "tools")
+      if (!pathEntries.has(projectToolsDir)) {
+        prependDirs.push(projectToolsDir)
+      }
+      if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
+        const worktreeToolsDir = path.join(Instance.worktree, ".opencode", "tools")
+        if (!pathEntries.has(worktreeToolsDir)) {
+          prependDirs.push(worktreeToolsDir)
         }
+      }
+
+      // 3. Global user tools (~/.config/altimate-code/tools/) — shared across projects
+      const globalToolsDir = path.join(Global.Path.config, "tools")
+      if (!pathEntries.has(globalToolsDir)) {
+        prependDirs.push(globalToolsDir)
+      }
+
+      if (prependDirs.length > 0) {
+        const prefix = prependDirs.join(sep)
+        mergedEnv.PATH = basePath ? `${prefix}${sep}${basePath}` : prefix
       }
       // altimate_change end
 

@@ -7,7 +7,9 @@ import { Instance } from "../project/instance"
 import { lazy } from "@opencode-ai/util/lazy"
 import { Shell } from "@/shell/shell"
 import { Plugin } from "@/plugin"
+import { Global } from "@/global"
 import { PtyID } from "./schema"
+import path from "path"
 
 export namespace Pty {
   const log = Log.create({ service: "pty" })
@@ -134,6 +136,27 @@ export namespace Pty {
       TERM: "xterm-256color",
       OPENCODE_TERMINAL: "1",
     } as Record<string, string>
+
+    // altimate_change start — prepend user tools dirs to PATH in terminal sessions
+    const sep = process.platform === "win32" ? ";" : ":"
+    const basePath = env.PATH ?? env.Path ?? ""
+    const pathEntries = new Set(basePath.split(sep).filter(Boolean))
+    const prependDirs: string[] = []
+    const binDir = process.env.ALTIMATE_BIN_DIR
+    if (binDir && !pathEntries.has(binDir)) prependDirs.push(binDir)
+    const projectToolsDir = path.join(Instance.directory, ".opencode", "tools")
+    if (!pathEntries.has(projectToolsDir)) prependDirs.push(projectToolsDir)
+    if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
+      const worktreeToolsDir = path.join(Instance.worktree, ".opencode", "tools")
+      if (!pathEntries.has(worktreeToolsDir)) prependDirs.push(worktreeToolsDir)
+    }
+    const globalToolsDir = path.join(Global.Path.config, "tools")
+    if (!pathEntries.has(globalToolsDir)) prependDirs.push(globalToolsDir)
+    if (prependDirs.length > 0) {
+      const prefix = prependDirs.join(sep)
+      env.PATH = basePath ? `${prefix}${sep}${basePath}` : prefix
+    }
+    // altimate_change end
 
     if (process.platform === "win32") {
       env.LC_ALL = "C.UTF-8"

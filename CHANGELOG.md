@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-03-22
+
+### Added
+
+- **Skill CLI command** — new top-level `altimate-code skill` with `list`, `create`, `test`, `show`, `install`, `remove` subcommands for managing AI agent skills and paired CLI tools (#342)
+- **`.opencode/tools/` auto-discovery** — executables in `.opencode/tools/` (project) and `~/.config/altimate-code/tools/` (global) are automatically prepended to PATH in BashTool and PTY sessions (#342)
+- **TUI skill management** — `/skills` dialog with domain-grouped skill browser, `ctrl+a` action picker (show, edit, test, remove), `ctrl+n` create, `ctrl+i` install from GitHub (#342)
+- **Skill install from GitHub** — `altimate-code skill install owner/repo` clones and installs skills; supports GitHub web URLs, shorthand, local paths, and `--global` flag (#342)
+- **Skill cache invalidation** — `State.invalidate()` and `Skill.invalidate()` with `GET /skill?reload=true` endpoint for cross-thread cache clearing (#342)
+- **Snowflake Cortex AI provider** — use Snowflake Cortex as an AI provider for LLM completions (#349)
+- **Telemetry for skill operations** — `skill_created`, `skill_installed`, `skill_removed` events (#342)
+- **E2E smoke tests** — committed tests for skill lifecycle, git-tracked protection, symlink safety, GitHub URL normalization (#363)
+
+### Fixed
+
+- Symlink traversal protection during skill install — uses `fs.lstat` to skip symlinks and prevent file disclosure from malicious repos (#342)
+- Git-tracked skills cannot be removed via `skill remove` or TUI — prevents accidental deletion of repo-managed skills (#342)
+- GitHub web URLs (e.g., `https://github.com/owner/repo/tree/main/path`) correctly normalized to clonable repo URLs (#342)
+- `.git` suffix stripped from install source to prevent double-append (#342)
+- TUI skill operations use `sdk.directory` + `gitRoot()` instead of `Instance`/`Global` which only exist in the worker thread (#342)
+- TUI install uses async `Bun.spawn` instead of blocking `Bun.spawnSync` to keep UI responsive (#342)
+- Missing `altimate_change` markers in `dialog-skill.tsx` and `skill.ts` (#341, #344)
+
 ## [0.5.5] - 2026-03-20
 
 ### Added

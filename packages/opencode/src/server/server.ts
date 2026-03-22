@@ -450,6 +450,12 @@ export namespace Server {
           },
         }),
         async (c) => {
+          // altimate_change start — support cache invalidation via query param
+          const reload = c.req.query("reload")
+          if (reload === "true") {
+            Skill.invalidate()
+          }
+          // altimate_change end
           const skills = await Skill.all()
           return c.json(skills)
         },
