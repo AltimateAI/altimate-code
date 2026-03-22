@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import { BashTool } from "../../src/tool/bash"
@@ -401,3 +402,86 @@ describe("tool.bash truncation", () => {
     })
   })
 })
+
+// altimate_change start — tests for .opencode/tools/ PATH injection (skill CLI feature)
+describe("tool.bash PATH injection", () => {
+  test(".opencode/tools/ is prepended to PATH so user tools are executable", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".opencode", "tools")
+    await fs.mkdir(toolsDir, { recursive: true })
+    await fs.writeFile(
+      path.join(toolsDir, "my-custom-tool"),
+      '#!/usr/bin/env bash\necho "custom-tool-output"',
+      { mode: 0o755 },
+    )
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const result = await bash.execute(
+          {
+            command: "my-custom-tool",
+            description: "Run custom tool from .opencode/tools/",
+          },
+          ctx,
+        )
+        expect(result.metadata.exit).toBe(0)
+        expect(result.metadata.output).toContain("custom-tool-output")
+      },
+    })
+  })
+
+  test("PATH does not contain duplicate .opencode/tools/ entries", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".opencode", "tools")
+    await fs.mkdir(toolsDir, { recursive: true })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const result = await bash.execute(
+          {
+            command: 'echo "$PATH"',
+            description: "Print PATH",
+          },
+          ctx,
+        )
+        const pathValue = result.metadata.output.trim()
+        const sep = process.platform === "win32" ? ";" : ":"
+        const entries = pathValue.split(sep)
+        const count = entries.filter((e: string) => e === toolsDir).length
+        expect(count).toBeLessThanOrEqual(1)
+      },
+    })
+  })
+
+  test("ALTIMATE_BIN_DIR is on PATH with higher priority than system dirs", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const result = await bash.execute(
+          {
+            command: 'echo "$PATH"',
+            description: "Print PATH to check ALTIMATE_BIN_DIR",
+          },
+          ctx,
+        )
+        const pathValue = result.metadata.output.trim()
+        const binDir = process.env.ALTIMATE_BIN_DIR
+        if (binDir) {
+          const sep = process.platform === "win32" ? ";" : ":"
+          const entries = pathValue.split(sep)
+          const binIdx = entries.indexOf(binDir)
+          // ALTIMATE_BIN_DIR should appear early in PATH (prepended, not appended)
+          expect(binIdx).toBeGreaterThanOrEqual(0)
+          expect(binIdx).toBeLessThan(5)
+        }
+      },
+    })
+  })
+})
+// altimate_change end
