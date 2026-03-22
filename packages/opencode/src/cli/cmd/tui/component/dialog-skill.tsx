@@ -10,6 +10,7 @@ import { spawn } from "child_process"
 import { DialogPrompt } from "@tui/ui/dialog-prompt"
 import { Instance } from "@/project/instance"
 import { Global } from "@/global"
+import { Skill } from "@/skill"
 import path from "path"
 import fs from "fs/promises"
 // altimate_change end
@@ -75,6 +76,8 @@ async function createSkillDirect(name: string): Promise<{ ok: boolean; message: 
     `#!/usr/bin/env bash\nset -euo pipefail\ncase "\${1:-help}" in\n  help|--help|-h) echo "Usage: ${name} <command>" ;;\n  *) echo "Unknown: \${1}" >&2; exit 1 ;;\nesac\n`,
     { mode: 0o755 },
   )
+  // Invalidate cached skill list so new skill appears immediately
+  Skill.invalidate()
   return { ok: true, message: `Created skill + tool at .opencode/skills/${name}/` }
 }
 
@@ -166,6 +169,8 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
 
   if (isTmp) await fs.rm(skillDir, { recursive: true, force: true })
   if (installed === 0) return { ok: true, message: "No new skills installed (all already exist)" }
+  // Invalidate cached skill list so new skills appear immediately
+  Skill.invalidate()
   return { ok: true, message: `Installed ${installed} skill(s): ${names.join(", ")}` }
 }
 

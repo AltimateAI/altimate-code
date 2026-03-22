@@ -28,6 +28,14 @@ export namespace State {
     }
   }
 
+  // altimate_change start — allow invalidating a single state entry by its init function
+  export function invalidate(key: string, init: any) {
+    const entries = recordsByKey.get(key)
+    if (!entries) return
+    entries.delete(init)
+  }
+  // altimate_change end
+
   export async function dispose(key: string) {
     const entries = recordsByKey.get(key)
     if (!entries) return

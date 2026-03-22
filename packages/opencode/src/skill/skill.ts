@@ -6,6 +6,9 @@ import matter from "gray-matter"
 // altimate_change end
 import { Config } from "../config/config"
 import { Instance } from "../project/instance"
+// altimate_change start — import State for cache invalidation
+import { State } from "../project/state"
+// altimate_change end
 import { NamedError } from "@opencode-ai/util/error"
 import { ConfigMarkdown } from "../config/markdown"
 import { Log } from "../util/log"
@@ -61,7 +64,9 @@ export namespace Skill {
   const OPENCODE_SKILL_PATTERN = "{skill,skills}/**/SKILL.md"
   const SKILL_PATTERN = "**/SKILL.md"
 
-  export const state = Instance.state(async () => {
+  // altimate_change start — extract init function so it can be referenced for cache invalidation
+  const stateInit = async () => {
+  // altimate_change end
     const skills: Record<string, Info> = {}
     const dirs = new Set<string>()
 
@@ -229,7 +234,18 @@ export namespace Skill {
       skills,
       dirs: Array.from(dirs),
     }
-  })
+  }
+  // altimate_change start — wrap extracted init in Instance.state
+  export const state = Instance.state(stateInit)
+  // altimate_change end
+
+  // altimate_change start — allow invalidating the skill cache so new skills are picked up
+  export function invalidate() {
+    // Clear the cached state for this init function so the next call
+    // to state() will re-scan all skill directories and pick up new skills.
+    State.invalidate(Instance.directory, stateInit)
+  }
+  // altimate_change end
 
   export async function get(name: string) {
     return state().then((x) => x.skills[name])
