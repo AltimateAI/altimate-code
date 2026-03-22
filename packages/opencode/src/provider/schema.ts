@@ -23,6 +23,9 @@ export const ProviderID = providerIdSchema.pipe(
     azure: schema.makeUnsafe("azure"),
     openrouter: schema.makeUnsafe("openrouter"),
     mistral: schema.makeUnsafe("mistral"),
+    // altimate_change start — snowflake cortex provider ID
+    snowflakeCortex: schema.makeUnsafe("snowflake-cortex"),
+    // altimate_change end
   })),
 )
 

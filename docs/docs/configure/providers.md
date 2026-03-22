@@ -176,6 +176,36 @@ Access 150+ models through a single API key.
 
 Uses your GitHub Copilot subscription. Authenticate with `altimate auth`.
 
+## Snowflake Cortex
+
+```json
+{
+  "provider": {
+    "snowflake-cortex": {}
+  },
+  "model": "snowflake-cortex/claude-sonnet-4-6"
+}
+```
+
+Authenticate with `altimate auth snowflake-cortex` using a Programmatic Access Token (PAT). Enter credentials as `account-identifier::pat-token`.
+
+Create a PAT in Snowsight: **Admin > Security > Programmatic Access Tokens**.
+
+Billing flows through your Snowflake credits — no per-token costs.
+
+**Available models:**
+
+| Model | Tool Calling |
+|-------|-------------|
+| `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-4-sonnet`, `claude-3-7-sonnet`, `claude-3-5-sonnet` | Yes |
+| `openai-gpt-4.1`, `openai-gpt-5`, `openai-gpt-5-mini`, `openai-gpt-5-nano`, `openai-gpt-5-chat` | Yes |
+| `llama4-maverick`, `snowflake-llama-3.3-70b`, `llama3.1-70b`, `llama3.1-405b`, `llama3.1-8b` | No |
+| `mistral-large`, `mistral-large2`, `mistral-7b` | No |
+| `deepseek-r1` | No |
+
+!!! note
+    Model availability depends on your Snowflake region. Enable cross-region inference with `ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION'` for full model access.
+
 ## Custom / OpenAI-Compatible
 
 Any OpenAI-compatible endpoint can be used as a provider:

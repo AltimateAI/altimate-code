@@ -350,6 +350,32 @@ export namespace Telemetry {
         skill_source: "builtin" | "global" | "project"
         duration_ms: number
       }
+    // altimate_change start — telemetry for skill management operations
+    | {
+        type: "skill_created"
+        timestamp: number
+        session_id: string
+        skill_name: string
+        language: string
+        source: "cli" | "tui"
+      }
+    | {
+        type: "skill_installed"
+        timestamp: number
+        session_id: string
+        install_source: string
+        skill_count: number
+        skill_names: string[]
+        source: "cli" | "tui"
+      }
+    | {
+        type: "skill_removed"
+        timestamp: number
+        session_id: string
+        skill_name: string
+        source: "cli" | "tui"
+      }
+    // altimate_change end
     | {
         type: "sql_execute_failure"
         timestamp: number
