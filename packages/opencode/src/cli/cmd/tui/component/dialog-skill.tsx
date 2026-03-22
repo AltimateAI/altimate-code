@@ -382,8 +382,25 @@ export function DialogSkill(props: DialogSkillProps) {
     })
   })
 
-  // Keybind actions: edit, create, install, remove
+  // Keybind actions: show, edit, test, create, install, remove
   const keybinds = createMemo(() => [
+    {
+      keybind: Keybind.parse("ctrl+o")[0],
+      title: "show",
+      onTrigger: async (option: DialogSelectOption<string>) => {
+        const info = skillMap().get(option.value)
+        if (!info) return
+        const tools = detectToolReferences(info.content)
+        const lines = [
+          `${option.value}: ${info.description}`,
+          tools.length > 0 ? `Tools: ${tools.join(", ")}` : null,
+          `Location: ${info.location}`,
+        ]
+          .filter((l) => l !== null)
+          .join("\n")
+        toast.show({ message: lines, variant: "info", duration: 8000 })
+      },
+    },
     {
       keybind: Keybind.parse("ctrl+e")[0],
       title: "edit",
@@ -396,6 +413,21 @@ export function DialogSkill(props: DialogSkillProps) {
         const editor = process.env.EDITOR || process.env.VISUAL || "vi"
         dialog.clear()
         spawn(editor, [info.location], { stdio: "inherit", detached: true }).unref()
+      },
+    },
+    {
+      keybind: Keybind.parse("ctrl+t")[0],
+      title: "test",
+      onTrigger: async (option: DialogSelectOption<string>) => {
+        const info = skillMap().get(option.value)
+        if (!info) return
+        toast.show({ message: `Testing ${option.value}...`, variant: "info", duration: 600000 })
+        const result = await testSkillDirect(option.value, info.content, gitRoot(sdk.directory ?? process.cwd()))
+        toast.show({
+          message: result.ok ? `✓ ${result.message}` : `✗ ${result.message}`,
+          variant: result.ok ? "success" : "error",
+          duration: 4000,
+        })
       },
     },
     {
