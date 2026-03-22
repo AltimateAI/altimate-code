@@ -1,9 +1,16 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Auth, OAUTH_DUMMY_KEY } from "@/auth"
 
-// Only Claude models support tool calling on Snowflake Cortex.
+// Only OpenAI and Claude models support tool calling on Snowflake Cortex.
 // All other models reject tools with "tool calling is not supported".
-const TOOLCALL_MODELS = new Set(["claude-sonnet-4-6", "claude-haiku-4-5", "claude-3-5-sonnet"])
+const TOOLCALL_MODELS = new Set([
+  // Claude
+  "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5",
+  "claude-haiku-4-5", "claude-4-sonnet", "claude-4-opus", "claude-3-7-sonnet", "claude-3-5-sonnet",
+  // OpenAI
+  "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5-mini", "openai-gpt-5-nano",
+  "openai-gpt-5-chat", "openai-gpt-oss-120b",
+])
 
 /** Snowflake account identifiers contain only alphanumeric, hyphen, underscore, and dot characters. */
 export const VALID_ACCOUNT_RE = /^[a-zA-Z0-9._-]+$/

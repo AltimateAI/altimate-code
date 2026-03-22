@@ -127,6 +127,18 @@ describe("transformSnowflakeBody", () => {
     expect(parsed.tools).toBeUndefined()
   })
 
+  test("keeps tools for openai-gpt-4.1", () => {
+    const input = JSON.stringify({
+      model: "openai-gpt-4.1",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+    })
+    const { body } = transformSnowflakeBody(input)
+    const parsed = JSON.parse(body)
+    expect(parsed.tools).toBeDefined()
+    expect(parsed.tools).toHaveLength(1)
+  })
+
   test("keeps tools for claude-sonnet-4-6", () => {
     const input = JSON.stringify({
       model: "claude-sonnet-4-6",
@@ -381,7 +393,7 @@ describe("snowflake-cortex provider", () => {
     }
   })
 
-  test("claude models have toolcall: true", async () => {
+  test("Claude and OpenAI models have toolcall: true", async () => {
     await setupOAuth()
     try {
       await using tmp = await tmpdir({
@@ -394,9 +406,13 @@ describe("snowflake-cortex provider", () => {
         fn: async () => {
           const providers = await Provider.list()
           const models = providers["snowflake-cortex"].models
+          // Claude
           expect(models["claude-sonnet-4-6"].capabilities.toolcall).toBe(true)
           expect(models["claude-haiku-4-5"].capabilities.toolcall).toBe(true)
           expect(models["claude-3-5-sonnet"].capabilities.toolcall).toBe(true)
+          // OpenAI
+          expect(models["openai-gpt-4.1"].capabilities.toolcall).toBe(true)
+          expect(models["openai-gpt-5"].capabilities.toolcall).toBe(true)
         },
       })
     } finally {
@@ -404,7 +420,7 @@ describe("snowflake-cortex provider", () => {
     }
   })
 
-  test("non-claude models have toolcall: false", async () => {
+  test("Llama, Mistral, and DeepSeek models have toolcall: false", async () => {
     await setupOAuth()
     try {
       await using tmp = await tmpdir({
@@ -421,7 +437,7 @@ describe("snowflake-cortex provider", () => {
           expect(models["snowflake-llama-3.3-70b"].capabilities.toolcall).toBe(false)
           expect(models["llama3.1-70b"].capabilities.toolcall).toBe(false)
           expect(models["deepseek-r1"].capabilities.toolcall).toBe(false)
-          expect(models["mistral-7b"].capabilities.toolcall).toBe(false)
+          expect(models["llama4-maverick"].capabilities.toolcall).toBe(false)
         },
       })
     } finally {

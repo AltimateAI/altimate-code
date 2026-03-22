@@ -940,17 +940,34 @@ export namespace Provider {
       env: [],
       options: {},
       models: {
-        // Claude models — only these support tool calling on Cortex
+        // Claude models — tool calling supported
         "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", { context: 200000, output: 64000 }),
+        "claude-opus-4-6": makeSnowflakeModel("claude-opus-4-6", "Claude Opus 4.6", { context: 200000, output: 32000 }),
+        "claude-sonnet-4-5": makeSnowflakeModel("claude-sonnet-4-5", "Claude Sonnet 4.5", { context: 200000, output: 64000 }),
+        "claude-opus-4-5": makeSnowflakeModel("claude-opus-4-5", "Claude Opus 4.5", { context: 200000, output: 32000 }),
         "claude-haiku-4-5": makeSnowflakeModel("claude-haiku-4-5", "Claude Haiku 4.5", { context: 200000, output: 16000 }),
+        "claude-4-sonnet": makeSnowflakeModel("claude-4-sonnet", "Claude 4 Sonnet", { context: 200000, output: 64000 }),
+        "claude-4-opus": makeSnowflakeModel("claude-4-opus", "Claude 4 Opus", { context: 200000, output: 32000 }),
+        "claude-3-7-sonnet": makeSnowflakeModel("claude-3-7-sonnet", "Claude 3.7 Sonnet", { context: 200000, output: 16000 }),
         "claude-3-5-sonnet": makeSnowflakeModel("claude-3-5-sonnet", "Claude 3.5 Sonnet", { context: 200000, output: 8192 }),
-        // Open-source models — no tool calling support on Cortex
+        // OpenAI models — tool calling supported
+        "openai-gpt-4.1": makeSnowflakeModel("openai-gpt-4.1", "OpenAI GPT-4.1", { context: 1047576, output: 32768 }),
+        "openai-gpt-5": makeSnowflakeModel("openai-gpt-5", "OpenAI GPT-5", { context: 1047576, output: 32768 }),
+        "openai-gpt-5-mini": makeSnowflakeModel("openai-gpt-5-mini", "OpenAI GPT-5 Mini", { context: 1047576, output: 32768 }),
+        "openai-gpt-5-nano": makeSnowflakeModel("openai-gpt-5-nano", "OpenAI GPT-5 Nano", { context: 1047576, output: 32768 }),
+        "openai-gpt-5-chat": makeSnowflakeModel("openai-gpt-5-chat", "OpenAI GPT-5 Chat", { context: 1047576, output: 32768 }),
+        "openai-gpt-oss-120b": makeSnowflakeModel("openai-gpt-oss-120b", "OpenAI GPT OSS 120B", { context: 131072, output: 32768 }),
+        // Meta Llama — no tool calling
+        "llama4-maverick": makeSnowflakeModel("llama4-maverick", "Llama 4 Maverick", { context: 1048576, output: 4096 }, { toolcall: false }),
         "snowflake-llama-3.3-70b": makeSnowflakeModel("snowflake-llama-3.3-70b", "Snowflake Llama 3.3 70B", { context: 128000, output: 4096 }, { toolcall: false }),
         "llama3.1-70b": makeSnowflakeModel("llama3.1-70b", "Llama 3.1 70B", { context: 128000, output: 4096 }, { toolcall: false }),
         "llama3.1-405b": makeSnowflakeModel("llama3.1-405b", "Llama 3.1 405B", { context: 128000, output: 4096 }, { toolcall: false }),
         "llama3.1-8b": makeSnowflakeModel("llama3.1-8b", "Llama 3.1 8B", { context: 128000, output: 4096 }, { toolcall: false }),
+        // Mistral — no tool calling
+        "mistral-large": makeSnowflakeModel("mistral-large", "Mistral Large", { context: 131000, output: 4096 }, { toolcall: false }),
         "mistral-large2": makeSnowflakeModel("mistral-large2", "Mistral Large 2", { context: 131000, output: 4096 }, { toolcall: false }),
         "mistral-7b": makeSnowflakeModel("mistral-7b", "Mistral 7B", { context: 32000, output: 4096 }, { toolcall: false }),
+        // DeepSeek — no tool calling
         "deepseek-r1": makeSnowflakeModel("deepseek-r1", "DeepSeek R1", { context: 64000, output: 32000 }, { reasoning: true, toolcall: false }),
       },
     }

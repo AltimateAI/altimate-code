@@ -231,9 +231,18 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   describe("Model Availability", () => {
     // All models registered in provider.ts — availability depends on region/cross-region config
     const allModels = [
-      "claude-sonnet-4-6", "claude-haiku-4-5", "claude-3-5-sonnet",
-      "snowflake-llama-3.3-70b", "llama3.1-70b", "llama3.1-405b", "llama3.1-8b",
-      "mistral-large2", "mistral-7b", "deepseek-r1",
+      // Claude
+      "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5",
+      "claude-haiku-4-5", "claude-4-sonnet", "claude-4-opus", "claude-3-7-sonnet", "claude-3-5-sonnet",
+      // OpenAI
+      "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5-mini", "openai-gpt-5-nano",
+      "openai-gpt-5-chat", "openai-gpt-oss-120b",
+      // Meta Llama
+      "llama4-maverick", "snowflake-llama-3.3-70b", "llama3.1-70b", "llama3.1-405b", "llama3.1-8b",
+      // Mistral
+      "mistral-large", "mistral-large2", "mistral-7b",
+      // DeepSeek
+      "deepseek-r1",
     ]
 
     for (const model of allModels) {
