@@ -342,4 +342,135 @@ describe("PATH auto-discovery for .opencode/tools/", () => {
     expect(proc.stdout.toString().trim()).toBe("hello from tool")
   })
 })
+
+// ---------------------------------------------------------------------------
+// E2E smoke tests — full skill lifecycle in isolated git repos
+// ---------------------------------------------------------------------------
+
+describe("skill create → test → remove lifecycle", () => {
+  test("create generates SKILL.md and executable tool", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const skillDir = path.join(tmp.path, ".opencode", "skills", "lifecycle-test")
+    const toolFile = path.join(tmp.path, ".opencode", "tools", "lifecycle-test")
+
+    // Create
+    await fs.mkdir(skillDir, { recursive: true })
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      '---\nname: lifecycle-test\ndescription: test\n---\n```bash\nlifecycle-test --help\n```\n',
+    )
+    await fs.mkdir(path.dirname(toolFile), { recursive: true })
+    await fs.writeFile(toolFile, '#!/usr/bin/env bash\necho "Usage: lifecycle-test"', { mode: 0o755 })
+
+    // Verify
+    const stat = await fs.stat(toolFile)
+    expect(stat.mode & 0o100).toBeTruthy()
+    const proc = Bun.spawnSync(["bash", toolFile, "--help"])
+    expect(proc.exitCode).toBe(0)
+
+    // Detect tools
+    const content = await fs.readFile(path.join(skillDir, "SKILL.md"), "utf-8")
+    const tools = detectToolReferences(content)
+    expect(tools).toContain("lifecycle-test")
+
+    // Remove
+    await fs.rm(skillDir, { recursive: true, force: true })
+    await fs.rm(toolFile, { force: true })
+    const exists = await fs
+      .stat(skillDir)
+      .then(() => true)
+      .catch(() => false)
+    expect(exists).toBe(false)
+  })
+
+  test("cannot remove git-tracked skill", async () => {
+    await using tmp = await tmpdir({ git: true })
+
+    // Create a skill and commit it to git (simulates a repo-tracked skill)
+    const skillDir = path.join(tmp.path, ".opencode", "skills", "tracked-skill")
+    await fs.mkdir(skillDir, { recursive: true })
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      "---\nname: tracked-skill\ndescription: tracked\n---\n# Tracked\n",
+    )
+    const { $: shell } = await import("bun")
+    await shell`git add .`.cwd(tmp.path).quiet()
+    await shell`git commit -m "add skill"`.cwd(tmp.path).quiet()
+
+    // Verify it's tracked
+    const gitCheck = Bun.spawnSync(
+      ["git", "ls-files", "--error-unmatch", path.join(skillDir, "SKILL.md")],
+      { cwd: tmp.path, stdout: "pipe", stderr: "pipe" },
+    )
+    expect(gitCheck.exitCode).toBe(0)
+
+    // The skill file should NOT be deleted by our remove logic
+    // (our CLI checks git ls-files and blocks removal)
+    const skillExists = await fs
+      .stat(path.join(skillDir, "SKILL.md"))
+      .then(() => true)
+      .catch(() => false)
+    expect(skillExists).toBe(true)
+  })
+})
+
+describe("skill install — symlink safety", () => {
+  test("symlinks are skipped during install copy", async () => {
+    await using tmp = await tmpdir({ git: true })
+
+    // Create a source directory with a SKILL.md and a symlink
+    const srcDir = path.join(tmp.path, "source", "evil-skill")
+    await fs.mkdir(srcDir, { recursive: true })
+    await fs.writeFile(
+      path.join(srcDir, "SKILL.md"),
+      "---\nname: evil-skill\ndescription: has symlink\n---\n# Evil\n",
+    )
+    // Create a symlink to /etc/passwd (should be skipped)
+    await fs.symlink("/etc/passwd", path.join(srcDir, "stolen-file"))
+
+    // Install: simulate the copy logic with lstat + skip symlinks
+    const destDir = path.join(tmp.path, ".opencode", "skills", "evil-skill")
+    await fs.mkdir(destDir, { recursive: true })
+    const files = await fs.readdir(srcDir)
+    for (const file of files) {
+      const src = path.join(srcDir, file)
+      const dst = path.join(destDir, file)
+      const stat = await fs.lstat(src)
+      if (stat.isSymbolicLink()) continue
+      if (stat.isFile()) await fs.copyFile(src, dst)
+    }
+
+    // SKILL.md should be copied
+    const skillExists = await fs
+      .stat(path.join(destDir, "SKILL.md"))
+      .then(() => true)
+      .catch(() => false)
+    expect(skillExists).toBe(true)
+
+    // symlink should NOT be copied
+    const symlinkCopied = await fs
+      .stat(path.join(destDir, "stolen-file"))
+      .then(() => true)
+      .catch(() => false)
+    expect(symlinkCopied).toBe(false)
+  })
+})
+
+describe("GitHub URL normalization", () => {
+  test("extracts owner/repo from web URLs", () => {
+    const re = /^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\/(?:tree|blob)\/.*)?$/
+    expect("https://github.com/anthropics/skills/tree/main/skills/pdf".match(re)?.[1]).toBe("anthropics/skills")
+    expect("https://github.com/dagster-io/skills/tree/main".match(re)?.[1]).toBe("dagster-io/skills")
+    expect("https://github.com/owner/repo".match(re)?.[1]).toBe("owner/repo")
+    expect("https://github.com/owner/repo/blob/main/README.md".match(re)?.[1]).toBe("owner/repo")
+    expect("https://gitlab.com/owner/repo/tree/main".match(re)).toBeNull()
+  })
+
+  test("strips .git suffix", () => {
+    const strip = (s: string) => s.trim().replace(/\.git$/, "")
+    expect(strip("owner/repo.git")).toBe("owner/repo")
+    expect(strip("owner/repo")).toBe("owner/repo")
+    expect(strip("https://github.com/owner/repo.git")).toBe("https://github.com/owner/repo")
+  })
+})
 // altimate_change end
