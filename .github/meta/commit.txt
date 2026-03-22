@@ -1,14 +1,14 @@
-fix: address all 10 CodeRabbit review comments
+fix: viewer UX improvements from 100-trace analysis
 
-- Track loops by `(tool, inputHash)` not just tool name (#2)
-- Use "Failed after" narrative for error traces (#3)
-- Add keyboard accessibility to viewer tabs (role, tabindex, Enter/Space) (#4)
-- Use full command as dedup key, not `slice(0,60)` (#5)
-- Sort timeline events by time before rendering (#6)
-- Pass `tracesDir` to footer text in `listRecaps` (#7)
-- Increase `MAX_RECAPS` to 100, add eviction warning log (#8)
-- Resolve assistant `parentID` for recap enrichment (#9)
-- Remove unused `tracer` variable in test (#10)
-- Clarify `--no-trace` backward-compat flag in docs (#1)
+- Collapse Files Changed after 5 entries with "Show all N files" toggle
+- Rename "GENS" → "LLM Calls" in header cards
+- Hide Tokens card when cost is $0 (not actionable without cost context)
+- Hide Cost metric card when $0.00 (wasted space)
+- Add prominent error summary banner right after header metrics
+- Improved dbt outcome detection: catch [PASS], [ERROR], N of M, Compilation Error
+- Outcome detection rate improved from 18% → 33% across 100 real traces
+- Updated doc screenshots with cleaner samples
+
+Tested across 100 real production traces: 0 crashes, 0 JS errors.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

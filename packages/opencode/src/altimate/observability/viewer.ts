@@ -346,8 +346,8 @@ var cardsData = [
   ['Duration', fd(s.duration), 'primary', true],
   ['Cost', fc(s.totalCost), 'orange', s.totalCost > 0],
   ['Tools', Number(s.totalToolCalls||0), 'green', Number(s.totalToolCalls||0) > 0],
-  ['Gens', Number(s.totalGenerations||0), 'secondary', Number(s.totalGenerations||0) > 0],
-  ['Tokens', Number(s.totalTokens||0).toLocaleString(), 'accent', Number(s.totalTokens||0) > 0]
+  ['LLM Calls', Number(s.totalGenerations||0), 'secondary', Number(s.totalGenerations||0) > 0],
+  ['Tokens', Number(s.totalTokens||0).toLocaleString(), 'accent', s.totalCost > 0]
 ];
 
 // Duration color coding
@@ -668,7 +668,13 @@ function showDetail(span) {
       if (!isSignificant) {
         var buildMatch = outStr.match(/(?:Completed|Finished|Built)\\s+(?:successfully|with|in)[^\\n]*/i)
           || outStr.match(/BUILD\\s+(?:SUCCESS|FAILED|SUCCESSFUL)/i)
-          || outStr.match(/(?:Compiling|Building).*(?:Finished|Done|Complete)/i);
+          || outStr.match(/(?:Compiling|Building).*(?:Finished|Done|Complete)/i)
+          // dbt-specific: output is often truncated, so also match partial results
+          || outStr.match(/\\d+\\s+of\\s+\\d+\\s+(?:PASS|ERROR|FAIL|START|OK)\\b[^\\n]*/i)
+          || outStr.match(/\\[PASS[^\\]]*\\]/i)
+          || outStr.match(/\\[ERROR[^\\]]*\\]/i)
+          || outStr.match(/Compilation\\s+Error[^\\n]*/i)
+          || outStr.match(/command\\s+not\\s+found[^\\n]*/i);
         if (buildMatch) { isSignificant = true; resultText = buildMatch[0].replace(/\\s+/g, ' ').replace(/:$/, '').trim().slice(0, 100); }
       }
 
@@ -776,7 +782,9 @@ function showDetail(span) {
   if (s.status !== 'running') {
     html += '<div class="sum-metric"><div class="val" style="color:' + durColorVal + '">' + fd(s.duration) + '</div><div class="lbl">Completed in</div></div>';
   }
-  html += '<div class="sum-metric"><div class="val" style="color:var(--orange)">' + fc(s.totalCost) + '</div><div class="lbl">Cost</div></div>';
+  if (s.totalCost > 0) {
+    html += '<div class="sum-metric"><div class="val" style="color:var(--orange)">' + fc(s.totalCost) + '</div><div class="lbl">Cost</div></div>';
+  }
   var changedCount = Object.keys(changedFiles).length;
   if (changedCount > 0) {
     html += '<div class="sum-metric"><div class="val" style="color:var(--green)">' + changedCount + '</div><div class="lbl">Files changed</div></div>';
@@ -785,6 +793,18 @@ function showDetail(span) {
     html += '<div class="sum-metric"><div class="val" style="color:var(--red)">' + errSpans.length + '</div><div class="lbl">Error' + (errSpans.length > 1 ? 's' : '') + '</div></div>';
   }
   html += '</div></div>';
+
+  // Show error summary prominently right after header if there are errors
+  if (errSpans.length > 0) {
+    html += '<div class="sum-error-banner" style="margin:0 0 8px;padding:10px 16px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:8px;display:flex;align-items:center;gap:10px">';
+    html += '<span style="color:var(--red);font-size:18px">\\u26A0</span>';
+    html += '<div style="font-size:13px"><strong style="color:var(--red)">' + errSpans.length + ' error' + (errSpans.length > 1 ? 's' : '') + ' during session</strong>';
+    var firstErr = errSpans[0];
+    var firstErrMsg = firstErr.statusMessage || '';
+    if (!firstErrMsg && firstErr.output && typeof firstErr.output === 'string') firstErrMsg = firstErr.output.slice(0, 100);
+    if (firstErrMsg) html += '<div style="color:var(--dim);font-size:12px;margin-top:2px">' + e((firstErr.name || '') + ': ' + firstErrMsg.slice(0, 100)) + '</div>';
+    html += '</div></div>';
+  }
 
   // What was asked
   html += '<div class="sum-section">';
@@ -810,16 +830,22 @@ function showDetail(span) {
     html += '<div class="sum-section">';
     html += '<div class="sum-section-title">Files Changed (' + changedCount + ')</div>';
     html += '<div class="sum-file-list">';
-    Object.keys(changedFiles).sort().forEach(function(fp) {
+    var changedKeys = Object.keys(changedFiles).sort();
+    var MAX_FILES_VISIBLE = 5;
+    changedKeys.forEach(function(fp, idx) {
+      var hidden = idx >= MAX_FILES_VISIBLE && changedCount > MAX_FILES_VISIBLE ? ' style="display:none" data-extra-file="1"' : '';
       var badge = changedFiles[fp] === 'write' ? 'write' : 'edit';
       var label = badge === 'write' ? 'NEW' : 'EDIT';
-      html += '<div class="sum-file-item"><span class="file-badge ' + badge + '">' + label + '</span><span class="file-path" title="' + e(fp) + '">' + e(shortPath(fp)) + '</span></div>';
-      // Show diff preview if available
+      html += '<div class="sum-file-item"' + hidden + '><span class="file-badge ' + badge + '">' + label + '</span><span class="file-path" title="' + e(fp) + '">' + e(shortPath(fp)) + '</span></div>';
+      // Show diff preview if available (only for first 5 files)
       var preview = changedFilePreviews[fp];
-      if (preview) {
-        html += '<div class="sum-diff-preview"><pre>' + e(preview.length > 300 ? preview.slice(0, 300) + '...' : preview) + '</pre></div>';
+      if (preview && idx < MAX_FILES_VISIBLE) {
+        html += '<div class="sum-diff-preview"' + hidden + '><pre>' + e(preview.length > 300 ? preview.slice(0, 300) + '...' : preview) + '</pre></div>';
       }
     });
+    if (changedCount > MAX_FILES_VISIBLE) {
+      html += '<div class="sum-prompt-toggle" style="margin-top:6px;font-size:12px;color:var(--primary);cursor:pointer" onclick="var extras=this.parentElement.querySelectorAll(\\x27[data-extra-file]\\x27);var show=extras[0]&&extras[0].style.display===\\x27none\\x27;extras.forEach(function(el){el.style.display=show?\\x27\\x27:\\x27none\\x27});this.textContent=show?\\x27Show fewer\\x27:\\x27Show all ' + changedCount + ' files\\x27">Show all ' + changedCount + ' files</div>';
+    }
     html += '</div></div>';
   }
 
