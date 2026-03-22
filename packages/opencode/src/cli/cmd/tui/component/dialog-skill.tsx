@@ -2,11 +2,12 @@ import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
 import { createResource, createMemo } from "solid-js"
 import { useDialog } from "@tui/ui/dialog"
 import { useSDK } from "@tui/context/sdk"
-// altimate_change start — import helpers for tool detection and keybind support
+// altimate_change start — import helpers for tool detection, keybind support, and prompt dialog
 import { detectToolReferences } from "../../skill-helpers"
 import { Keybind } from "@/util/keybind"
 import { useToast } from "@tui/ui/toast"
 import { spawn } from "child_process"
+import { DialogPrompt } from "@tui/ui/dialog-prompt"
 // altimate_change end
 
 export type DialogSkillProps = {
@@ -32,6 +33,74 @@ const SKILL_CATEGORIES: Record<string, string> = {
   "teach": "Training",
   "training-status": "Training",
   "altimate-setup": "Setup",
+}
+// altimate_change end
+
+// altimate_change start — sub-dialogs for create and install
+function DialogSkillCreate() {
+  const dialog = useDialog()
+  const toast = useToast()
+
+  return (
+    <DialogPrompt
+      title="Create Skill"
+      placeholder="my-tool"
+      onConfirm={async (name) => {
+        dialog.clear()
+        toast.show({ message: `Creating ${name}...`, variant: "info" })
+        try {
+          const proc = Bun.spawn(["altimate-code", "skill", "create", name], {
+            stdout: "pipe",
+            stderr: "pipe",
+          })
+          await proc.exited
+          const stdout = await new Response(proc.stdout).text()
+          const stderr = await new Response(proc.stderr).text()
+          if (proc.exitCode === 0) {
+            toast.show({ message: `✓ Created skill "${name}"\n${stdout.trim()}`, variant: "success", duration: 5000 })
+          } else {
+            toast.show({ message: stderr.trim() || `Failed to create "${name}"`, variant: "error", duration: 5000 })
+          }
+        } catch {
+          toast.show({ message: `Failed to create "${name}"`, variant: "error" })
+        }
+      }}
+      onCancel={() => dialog.clear()}
+    />
+  )
+}
+
+function DialogSkillInstall() {
+  const dialog = useDialog()
+  const toast = useToast()
+
+  return (
+    <DialogPrompt
+      title="Install Skill (owner/repo, URL, or path)"
+      placeholder="anthropics/skills"
+      onConfirm={async (source) => {
+        dialog.clear()
+        toast.show({ message: `Installing from ${source}...`, variant: "info" })
+        try {
+          const proc = Bun.spawn(["altimate-code", "skill", "install", source], {
+            stdout: "pipe",
+            stderr: "pipe",
+          })
+          await proc.exited
+          const stdout = await new Response(proc.stdout).text()
+          const stderr = await new Response(proc.stderr).text()
+          if (proc.exitCode === 0) {
+            toast.show({ message: stdout.trim(), variant: "success", duration: 6000 })
+          } else {
+            toast.show({ message: stderr.trim() || `Failed to install from "${source}"`, variant: "error", duration: 5000 })
+          }
+        } catch {
+          toast.show({ message: `Failed to install from "${source}"`, variant: "error" })
+        }
+      }}
+      onCancel={() => dialog.clear()}
+    />
+  )
 }
 // altimate_change end
 
@@ -79,7 +148,7 @@ export function DialogSkill(props: DialogSkillProps) {
     })
   })
 
-  // Keybind actions: view, edit, test
+  // Keybind actions: view, edit, test, create, install
   const keybinds = createMemo(() => [
     {
       keybind: Keybind.parse("ctrl+o")[0],
@@ -139,6 +208,20 @@ export function DialogSkill(props: DialogSkillProps) {
         } catch {
           toast.show({ message: `Failed to test ${option.value}`, variant: "error" })
         }
+      },
+    },
+    {
+      keybind: Keybind.parse("ctrl+n")[0],
+      title: "create",
+      onTrigger: async () => {
+        dialog.replace(() => <DialogSkillCreate />)
+      },
+    },
+    {
+      keybind: Keybind.parse("ctrl+i")[0],
+      title: "install",
+      onTrigger: async () => {
+        dialog.replace(() => <DialogSkillInstall />)
       },
     },
   ])
