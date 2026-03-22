@@ -49,7 +49,7 @@ function DialogSkillCreate() {
         dialog.clear()
         toast.show({ message: `Creating ${name}...`, variant: "info" })
         try {
-          const proc = Bun.spawn(["altimate-code", "skill", "create", name], {
+          const proc = Bun.spawn([process.argv[0], "skill", "create", name], {
             stdout: "pipe",
             stderr: "pipe",
           })
@@ -82,7 +82,7 @@ function DialogSkillInstall() {
         dialog.clear()
         toast.show({ message: `Installing from ${source}...`, variant: "info" })
         try {
-          const proc = Bun.spawn(["altimate-code", "skill", "install", source], {
+          const proc = Bun.spawn([process.argv[0], "skill", "install", source], {
             stdout: "pipe",
             stderr: "pipe",
           })
@@ -193,7 +193,7 @@ export function DialogSkill(props: DialogSkillProps) {
       onTrigger: async (option: DialogSelectOption<string>) => {
         toast.show({ message: `Testing ${option.value}...`, variant: "info" })
         try {
-          const proc = Bun.spawn(["altimate-code", "skill", "test", option.value], {
+          const proc = Bun.spawn([process.argv[0], "skill", "test", option.value], {
             stdout: "pipe",
             stderr: "pipe",
           })
