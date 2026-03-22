@@ -52,6 +52,7 @@ function DialogSkillCreate() {
           const proc = Bun.spawn([process.argv[0], "skill", "create", name], {
             stdout: "pipe",
             stderr: "pipe",
+            env: { ...process.env },
           })
           await proc.exited
           const stdout = await new Response(proc.stdout).text()
@@ -59,10 +60,12 @@ function DialogSkillCreate() {
           if (proc.exitCode === 0) {
             toast.show({ message: `✓ Created skill "${name}"\n${stdout.trim()}`, variant: "success", duration: 5000 })
           } else {
-            toast.show({ message: stderr.trim() || `Failed to create "${name}"`, variant: "error", duration: 5000 })
+            const errMsg = (stderr.trim() || stdout.trim() || `Exit code ${proc.exitCode}`).slice(0, 200)
+            toast.show({ message: `Create failed: ${errMsg}`, variant: "error", duration: 6000 })
           }
-        } catch {
-          toast.show({ message: `Failed to create "${name}"`, variant: "error" })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          toast.show({ message: `Create error: ${msg}`, variant: "error", duration: 6000 })
         }
       }}
       onCancel={() => dialog.clear()}
@@ -85,6 +88,7 @@ function DialogSkillInstall() {
           const proc = Bun.spawn([process.argv[0], "skill", "install", source], {
             stdout: "pipe",
             stderr: "pipe",
+            env: { ...process.env },
           })
           await proc.exited
           const stdout = await new Response(proc.stdout).text()
@@ -92,10 +96,12 @@ function DialogSkillInstall() {
           if (proc.exitCode === 0) {
             toast.show({ message: stdout.trim(), variant: "success", duration: 6000 })
           } else {
-            toast.show({ message: stderr.trim() || `Failed to install from "${source}"`, variant: "error", duration: 5000 })
+            const errMsg = (stderr.trim() || stdout.trim() || `Exit code ${proc.exitCode}`).slice(0, 200)
+            toast.show({ message: `Install failed: ${errMsg}`, variant: "error", duration: 6000 })
           }
-        } catch {
-          toast.show({ message: `Failed to install from "${source}"`, variant: "error" })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          toast.show({ message: `Install error: ${msg}`, variant: "error", duration: 6000 })
         }
       }}
       onCancel={() => dialog.clear()}
@@ -196,8 +202,9 @@ export function DialogSkill(props: DialogSkillProps) {
           const proc = Bun.spawn([process.argv[0], "skill", "test", option.value], {
             stdout: "pipe",
             stderr: "pipe",
+            env: { ...process.env },
           })
-          const exitCode = await proc.exited
+          await proc.exited
           const output = await new Response(proc.stdout).text()
           const passed = output.includes("PASS")
           toast.show({
@@ -205,8 +212,9 @@ export function DialogSkill(props: DialogSkillProps) {
             variant: passed ? "success" : "error",
             duration: 4000,
           })
-        } catch {
-          toast.show({ message: `Failed to test ${option.value}`, variant: "error" })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          toast.show({ message: `Test error: ${msg}`, variant: "error", duration: 6000 })
         }
       },
     },
