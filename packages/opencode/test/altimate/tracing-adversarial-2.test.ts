@@ -16,7 +16,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   HttpExporter,
   type TraceFile,
@@ -47,7 +47,7 @@ const ZERO_STEP = { id: "1", reason: "stop", cost: 0, tokens: EMPTY_TOKENS }
 
 describe("Clock skew and timing", () => {
   test("tool call with endTime before startTime", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-clock-skew", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -72,7 +72,7 @@ describe("Clock skew and timing", () => {
   })
 
   test("tool call with zero-duration (instant)", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-zero-dur", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -92,7 +92,7 @@ describe("Clock skew and timing", () => {
   })
 
   test("tool call with epoch 0 timestamps", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-epoch0", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -112,7 +112,7 @@ describe("Clock skew and timing", () => {
 
   test("tool call with very large timestamps (year 3000)", async () => {
     const year3000 = new Date("3000-01-01").getTime()
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-future", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -132,7 +132,7 @@ describe("Clock skew and timing", () => {
   })
 
   test("negative timestamps", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-neg-ts", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -157,7 +157,7 @@ describe("Clock skew and timing", () => {
 
 describe("Prototype pollution and exotic objects", () => {
   test("__proto__ in tool input doesn't pollute", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-proto", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -183,7 +183,7 @@ describe("Prototype pollution and exotic objects", () => {
   })
 
   test("Symbol keys in tool input are silently dropped by JSON.stringify", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-symbol", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -208,7 +208,7 @@ describe("Prototype pollution and exotic objects", () => {
   })
 
   test("frozen object as tool input", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-frozen", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -229,7 +229,7 @@ describe("Prototype pollution and exotic objects", () => {
   })
 
   test("sealed object as tool input", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-sealed", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -250,7 +250,7 @@ describe("Prototype pollution and exotic objects", () => {
   })
 
   test("Map and Set in tool input (non-plain objects)", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-map-set", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -277,7 +277,7 @@ describe("Prototype pollution and exotic objects", () => {
   })
 
   test("tool input with getter that throws", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-getter-throw", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -304,7 +304,7 @@ describe("Prototype pollution and exotic objects", () => {
   })
 
   test("tool input with toJSON method", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-tojson", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -330,7 +330,7 @@ describe("Prototype pollution and exotic objects", () => {
   })
 
   test("tool input with toJSON that throws", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-tojson-throw", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -363,7 +363,7 @@ describe("Prototype pollution and exotic objects", () => {
 
 describe("Attribute and metadata explosion", () => {
   test("10,000 tags in metadata", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     const tags = Array.from({ length: 10000 }, (_, i) => `tag-${i}`)
     tracer.startTrace("s-10k-tags", { prompt: "test", tags })
     const filePath = await tracer.endTrace()
@@ -372,7 +372,7 @@ describe("Attribute and metadata explosion", () => {
   })
 
   test("very long prompt (1MB)", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     const longPrompt = "x".repeat(1024 * 1024)
     tracer.startTrace("s-1mb-prompt", { prompt: longPrompt })
     const filePath = await tracer.endTrace()
@@ -383,7 +383,7 @@ describe("Attribute and metadata explosion", () => {
   })
 
   test("tool input with 1000 keys", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-1k-keys", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -417,13 +417,13 @@ describe("Re-entrant and recursive calls", () => {
       name: "reentrant",
       export: async (trace) => {
         // This exporter creates ANOTHER tracer inside — should not deadlock
-        const inner = Tracer.withExporters([new FileExporter(tmpDir)])
+        const inner = Recap.withExporters([new FileExporter(tmpDir)])
         inner.startTrace("inner-" + trace.sessionId, { prompt: "inception" })
         await inner.endTrace()
         return "reentrant-done"
       },
     }
-    const tracer = Tracer.withExporters([reentrantExporter, makeExporter()])
+    const tracer = Recap.withExporters([reentrantExporter, makeExporter()])
     tracer.startTrace("s-reentrant", { prompt: "test" })
     const result = await tracer.endTrace()
     expect(result).toBe("reentrant-done")
@@ -440,7 +440,7 @@ describe("Re-entrant and recursive calls", () => {
 
 describe("Numeric edge cases", () => {
   test("MAX_SAFE_INTEGER token counts", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-maxint", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -460,7 +460,7 @@ describe("Numeric edge cases", () => {
   })
 
   test("negative token counts are passed through (not our job to validate)", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-neg-tokens", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -481,7 +481,7 @@ describe("Numeric edge cases", () => {
   })
 
   test("fractional token counts", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-frac", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -751,7 +751,7 @@ describe("HttpExporter robustness", () => {
 
 describe("enrichFromAssistant edge cases", () => {
   test("enrichment with empty strings doesn't overwrite existing values", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-enrich-empty", {
       model: "original-model",
       agent: "original-agent",
@@ -767,7 +767,7 @@ describe("enrichFromAssistant edge cases", () => {
   })
 
   test("multiple enrichFromAssistant calls — last one wins", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-multi-enrich", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: "model-1", providerID: "p1" })
     tracer.enrichFromAssistant({ modelID: "model-2", providerID: "p2" })
@@ -785,7 +785,7 @@ describe("enrichFromAssistant edge cases", () => {
 
 describe("Empty and minimal traces", () => {
   test("trace with only startTrace and endTrace", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-minimal", {})
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -798,7 +798,7 @@ describe("Empty and minimal traces", () => {
   })
 
   test("trace with empty metadata object", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-empty-meta", {})
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -809,7 +809,7 @@ describe("Empty and minimal traces", () => {
   })
 
   test("generation with only text (no tool calls)", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-text-only", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: "Here is my answer." })
@@ -821,7 +821,7 @@ describe("Empty and minimal traces", () => {
   })
 
   test("generation with only tool calls (no text)", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-tools-only", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({

@@ -16,7 +16,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   HttpExporter,
   type TraceFile,
@@ -41,7 +41,7 @@ afterEach(async () => {
 
 /** Simulate a realistic multi-generation agent session */
 async function simulateAgentSession(
-  tracer: Tracer,
+  tracer: Recap,
   sessionId: string,
   opts: {
     generations: number
@@ -159,7 +159,7 @@ async function simulateAgentSession(
 
 describe("Incremental snapshots", () => {
   test("trace file exists after startTrace (before any tool calls)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-snapshot-1", { prompt: "test" })
 
     // Wait for initial snapshot to flush
@@ -210,7 +210,7 @@ describe("Incremental snapshots", () => {
   })
 
   test("snapshot updates as more spans are added", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-snapshot-inc", { prompt: "test" })
     const filePath = tracer.getTracePath()!
 
@@ -247,7 +247,7 @@ describe("Incremental snapshots", () => {
   })
 
   test("getTracePath returns correct path", () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     // Before startTrace — no path
     expect(tracer.getTracePath()).toBeUndefined()
 
@@ -256,7 +256,7 @@ describe("Incremental snapshots", () => {
   })
 
   test("getTracePath returns undefined when no FileExporter", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     expect(tracer.getTracePath()).toBeUndefined()
   })
@@ -268,7 +268,7 @@ describe("Incremental snapshots", () => {
 
 describe("Realistic session simulation", () => {
   test("3-generation session with DE attributes produces valid trace", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     await simulateAgentSession(tracer, "real-session-1", {
       generations: 3,
       toolsPerGeneration: 4,
@@ -346,7 +346,7 @@ describe("Realistic session simulation", () => {
 
 describe("Performance", () => {
   test("1000 logToolCall operations complete in <500ms", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-perf-tools", { prompt: "perf test" })
     tracer.logStepStart({ id: "1" })
 
@@ -375,7 +375,7 @@ describe("Performance", () => {
   })
 
   test("logStepStart + logStepFinish cycle is <1ms", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-perf-gen", { prompt: "perf test" })
 
     const times: number[] = []
@@ -396,7 +396,7 @@ describe("Performance", () => {
   })
 
   test("setSpanAttributes is <0.1ms per call", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-perf-attrs", { prompt: "perf test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -423,7 +423,7 @@ describe("Performance", () => {
   })
 
   test("endTrace with 1000 spans completes in <200ms", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-perf-end", { prompt: "perf test" })
     tracer.logStepStart({ id: "1" })
     for (let i = 0; i < 1000; i++) {
@@ -448,7 +448,7 @@ describe("Performance", () => {
   })
 
   test("snapshot doesn't block the caller", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-perf-snap", { prompt: "perf test" })
     tracer.logStepStart({ id: "1" })
 
@@ -483,7 +483,7 @@ describe("Performance", () => {
 describe("Concurrent sessions", () => {
   test("10 parallel sessions produce independent traces", async () => {
     const promises = Array.from({ length: 10 }, async (_, i) => {
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       await simulateAgentSession(tracer, `concurrent-${i}`, {
         generations: 2,
         toolsPerGeneration: 3,
@@ -522,7 +522,7 @@ describe("Concurrent sessions", () => {
 
   test("concurrent traces to same session ID overwrite cleanly", async () => {
     const promises = Array.from({ length: 3 }, async (_, i) => {
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace("same-session", { prompt: `attempt-${i}` })
       tracer.logStepStart({ id: "1" })
       // Add a slight delay so writes don't all happen at the exact same instant
@@ -553,11 +553,11 @@ describe("Concurrent sessions", () => {
 describe("Worker event simulation", () => {
   test("simulated TUI event stream feeds tracer correctly", async () => {
     // Simulate what the worker does: create a tracer per session and feed events
-    const tracers = new Map<string, Tracer>()
+    const tracers = new Map<string, Recap>()
 
-    function getOrCreateTracer(sessionID: string): Tracer {
+    function getOrCreateRecap(sessionID: string): Recap {
       if (tracers.has(sessionID)) return tracers.get(sessionID)!
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(sessionID, {})
       tracers.set(sessionID, tracer)
       return tracer
@@ -577,7 +577,7 @@ describe("Worker event simulation", () => {
       try {
         if (event.type === "message.updated" && (event as any).properties?.info?.role === "assistant") {
           const info = (event as any).properties.info
-          const tracer = getOrCreateTracer(info.parentID ?? "unknown")
+          const tracer = getOrCreateRecap(info.parentID ?? "unknown")
           tracer.enrichFromAssistant({
             modelID: info.modelID,
             providerID: info.providerID,
@@ -626,7 +626,7 @@ describe("Worker event simulation", () => {
   })
 
   test("malformed events don't crash the worker tracing logic", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s-malformed", { prompt: "test" })
 
     // All of these should be no-ops, not crashes
@@ -667,7 +667,7 @@ describe("Worker event simulation", () => {
 describe("Trace viewer server", () => {
   test("/api/trace returns valid JSON for an existing trace", async () => {
     // Write a trace file
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("viewer-test", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -725,7 +725,7 @@ describe("HttpExporter e2e", () => {
     try {
       const httpExporter = new HttpExporter("test-cloud", `http://localhost:${server.port}`)
       const fileExporter = new FileExporter(tmpDir)
-      const tracer = Tracer.withExporters([fileExporter, httpExporter])
+      const tracer = Recap.withExporters([fileExporter, httpExporter])
 
       await simulateAgentSession(tracer, "http-e2e", {
         generations: 2,
@@ -764,7 +764,7 @@ describe("HttpExporter e2e", () => {
     try {
       const httpExporter = new HttpExporter("broken", `http://localhost:${server.port}`)
       const fileExporter = new FileExporter(tmpDir)
-      const tracer = Tracer.withExporters([fileExporter, httpExporter])
+      const tracer = Recap.withExporters([fileExporter, httpExporter])
 
       tracer.startTrace("http-fail", { prompt: "test" })
       const result = await tracer.endTrace()

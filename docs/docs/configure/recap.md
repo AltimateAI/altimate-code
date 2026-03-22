@@ -1,26 +1,29 @@
-# Tracing
+# Recap
 
-Altimate Code captures detailed traces of every headless session, including LLM generations, tool calls, token usage, cost, and timing, and saves them locally as JSON files. Traces are invaluable for debugging agent behavior, optimizing cost, and understanding how the agent solves problems.
+Altimate Code captures detailed recaps of every session, including LLM generations, tool calls, token usage, cost, and timing, and saves them locally as JSON files. Recaps are invaluable for debugging agent behavior, optimizing cost, and understanding how the agent solves problems.
 
-Tracing is **enabled by default** and requires no configuration. Traces are stored locally and never leave your machine unless you configure a remote exporter.
+Recap is **enabled by default** and requires no configuration. Recaps are stored locally and never leave your machine unless you configure a remote exporter.
+
+!!! note "Renamed from Tracer"
+    The tracer feature has been renamed to **recap**. The `trace` command still works as a backward-compatible alias. New features include loop detection, post-session summary, and shareable HTML exports with virality support.
 
 ## Quick Start
 
 ```bash
-# Run a prompt (trace is saved automatically)
+# Run a prompt (recap is saved automatically)
 altimate-code run "optimize my most expensive queries"
-# → Trace saved: ~/.local/share/altimate-code/traces/abc123.json
+# → Recap saved: ~/.local/share/altimate-code/traces/abc123.json
 
-# List recent traces
-altimate-code trace list
+# List recent recaps
+altimate-code recap list
 
-# View a trace in the browser
-altimate-code trace view abc123
+# View a recap in the browser
+altimate-code recap view abc123
 ```
 
 ## What's Captured
 
-Each trace records the full agent session:
+Each recap records the full agent session:
 
 | Data | Description |
 |------|-------------|
@@ -31,10 +34,12 @@ Each trace records the full agent session:
 | **Timing** | Start/end timestamps for every span (session, generation, tool) |
 | **Errors** | Error messages and status on failed tool calls or generations |
 | **Metadata** | Model, provider, agent, prompt, user ID, environment, tags |
+| **Loop Detection** | Automatic detection of repeated tool call patterns |
+| **Post-Session Summary** | AI-generated summary of the session's key actions and outcomes |
 
 ### Data Engineering Attributes
 
-When using SQL and dbt tools, traces automatically capture domain-specific data:
+When using SQL and dbt tools, recaps automatically capture domain-specific data:
 
 | Category | Examples |
 |----------|----------|
@@ -44,7 +49,7 @@ When using SQL and dbt tools, traces automatically capture domain-specific data:
 | **Data Quality** | Row counts, null percentages, freshness, anomaly detection |
 | **Cost Attribution** | LLM cost + warehouse compute cost + storage delta = total cost, per user/team/project |
 
-These attributes are purely optional. Traces are valid without them. They're populated automatically by tools that have access to warehouse metadata.
+These attributes are purely optional. Recaps are valid without them. They're populated automatically by tools that have access to warehouse metadata.
 
 ## Configuration
 
@@ -63,12 +68,12 @@ Add to your config file (`~/.config/altimate-code/altimate-code.json` or project
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | `boolean` | `true` | Enable or disable tracing |
-| `dir` | `string` | `~/.local/share/altimate-code/traces/` | Custom directory for trace files |
-| `maxFiles` | `number` | `100` | Max trace files to keep (oldest pruned automatically). Set to `0` for unlimited |
+| `enabled` | `boolean` | `true` | Enable or disable recap |
+| `dir` | `string` | `~/.local/share/altimate-code/traces/` | Custom directory for recap files |
+| `maxFiles` | `number` | `100` | Max recap files to keep (oldest pruned automatically). Set to `0` for unlimited |
 | `exporters` | `array` | `[]` | Remote HTTP exporters (see below) |
 
-### Disabling Tracing
+### Disabling Recap
 
 ```json
 {
@@ -84,15 +89,15 @@ Or per-run with the `--no-trace` flag:
 altimate-code run --no-trace "quick question"
 ```
 
-## Viewing Traces
+## Viewing Recaps
 
-### List Traces
+### List Recaps
 
 ```bash
-altimate-code trace list
+altimate-code recap list
 ```
 
-Shows a table of recent traces with session ID, timestamp, duration, tokens, cost, tool calls, and status.
+Shows a table of recent recaps with session ID, timestamp, duration, tokens, cost, tool calls, and status.
 
 ```
 SESSION              WHEN       DURATION   TOKENS     COST       TOOLS  STATUS     PROMPT
@@ -105,19 +110,22 @@ Options:
 
 | Flag | Description |
 |------|-------------|
-| `-n`, `--limit` | Number of traces to show (default: 20) |
+| `-n`, `--limit` | Number of recaps to show (default: 20) |
 
-### View a Trace
+### View a Recap
 
 ```bash
-altimate-code trace view <session-id>
+altimate-code recap view <session-id>
 ```
 
-Opens a local web server with an interactive trace viewer in your browser. The viewer shows:
+Opens a local web server with an interactive recap viewer in your browser. The viewer shows:
 
 - **Summary cards** showing duration, token breakdown (input/output/reasoning/cache), cost, generations, tool calls, status
 - **Timeline** with horizontal bars for each span, color-coded by type (generation, tool, error)
 - **Detail panel** where you click any span to see its model info, token counts, finish reason, input/output, and domain-specific attributes (warehouse metrics, dbt results, etc.)
+- **Loop detection indicators** highlighting repeated tool call patterns
+- **Post-session summary** with AI-generated overview of key actions and outcomes
+- **Share button** to export a self-contained HTML file for sharing with teammates
 
 Options:
 
@@ -126,31 +134,35 @@ Options:
 | `--port` | Port for the viewer server (default: random) |
 | `--live` | Auto-refresh every 2s for in-progress sessions |
 
-Partial session ID matching is supported. For example, `altimate-code trace view abc` matches `abc123def456`.
+Partial session ID matching is supported. For example, `altimate-code recap view abc` matches `abc123def456`.
 
 ### Live Viewing (In-Progress Sessions)
 
-Traces are written incrementally. After every tool call and generation, a snapshot is flushed to disk. This means you can view a trace while the session is still running:
+Recaps are written incrementally. After every tool call and generation, a snapshot is flushed to disk. This means you can view a recap while the session is still running:
 
 ```bash
 # In terminal 1: run a long task
 altimate-code run "refactor the entire pipeline"
 
-# In terminal 2: watch the trace live
-altimate-code trace view <session-id> --live
+# In terminal 2: watch the recap live
+altimate-code recap view <session-id> --live
 ```
 
 The `--live` flag adds a green "LIVE" indicator and polls for updates every 2 seconds. The page auto-refreshes when new spans appear.
 
 ### From the TUI
 
-Type `/trace` in the TUI to open a trace history dialog listing all recent sessions. Select any trace to open it in your browser with the interactive viewer. The current session appears at the top, and traces are grouped by date with duration and timestamp info.
+Type `/recap` in the TUI to open a recap history dialog listing all recent sessions. Select any recap to open it in your browser with the interactive viewer. The current session appears at the top, and recaps are grouped by date with duration and timestamp info.
 
 The viewer launches in live mode automatically for in-progress sessions, so you can watch spans appear as the agent works.
 
+### Sharing Recaps
+
+The recap viewer includes a **Share** button that exports a self-contained HTML file. This file includes all session data and can be opened in any browser without a server — perfect for sharing with teammates, attaching to tickets, or archiving sessions.
+
 ## Remote Exporters
 
-Traces can be sent to remote backends via HTTP POST. Each exporter receives the full trace JSON on session completion.
+Recaps can be sent to remote backends via HTTP POST. Each exporter receives the full recap JSON on session completion.
 
 ```json
 {
@@ -171,7 +183,7 @@ Traces can be sent to remote backends via HTTP POST. Each exporter receives the 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `string` | Identifier for this exporter (used in logs) |
-| `endpoint` | `string` | HTTP endpoint to POST trace JSON to |
+| `endpoint` | `string` | HTTP endpoint to POST recap JSON to |
 | `headers` | `object` | Custom headers (e.g., auth tokens) |
 
 **How it works:**
@@ -182,9 +194,9 @@ Traces can be sent to remote backends via HTTP POST. Each exporter receives the 
 - Exporters have a 10-second timeout
 - All export operations are best-effort and never crash the CLI
 
-## Trace File Format
+## Recap File Format
 
-Traces are stored as JSON files in the traces directory. The schema is versioned for forward compatibility.
+Recaps are stored as JSON files in the traces directory. The schema is versioned for forward compatibility.
 
 ```json
 {
@@ -296,15 +308,15 @@ All domain-specific attributes use the `de.*` prefix and are stored in the `attr
 
 ## Crash Recovery
 
-Traces are designed to survive process crashes:
+Recaps are designed to survive process crashes:
 
-1. **Immediate snapshot.** A trace file is written as soon as `startTrace()` is called, before any LLM interaction. Even if the process crashes immediately, a minimal trace file exists.
+1. **Immediate snapshot.** A recap file is written as soon as `startTrace()` is called, before any LLM interaction. Even if the process crashes immediately, a minimal recap file exists.
 
-2. **Incremental snapshots.** After every tool call and generation completion, the trace file is updated atomically (write to temp file, then rename). The file on disk always contains a valid, complete JSON document.
+2. **Incremental snapshots.** After every tool call and generation completion, the recap file is updated atomically (write to temp file, then rename). The file on disk always contains a valid, complete JSON document.
 
-3. **Crash handlers.** The `run` command registers `SIGINT`/`SIGTERM`/`beforeExit` handlers that flush the trace synchronously with a `"crashed"` status.
+3. **Crash handlers.** The `run` command registers `SIGINT`/`SIGTERM`/`beforeExit` handlers that flush the recap synchronously with a `"crashed"` status.
 
-4. **Status indicators.** Trace status tells you exactly what happened:
+4. **Status indicators.** Recap status tells you exactly what happened:
 
 | Status | Meaning |
 |--------|---------|
@@ -313,31 +325,31 @@ Traces are designed to survive process crashes:
 | `running` | Session is still in progress (visible in live mode) |
 | `crashed` | Process was interrupted before the session completed |
 
-Crashed traces contain all data up to the last successful snapshot. You can view them normally with `altimate-code trace view`.
+Crashed recaps contain all data up to the last successful snapshot. You can view them normally with `altimate-code recap view`.
 
-## Historical Traces
+## Historical Recaps
 
-All traces are stored in the traces directory and persist across sessions. Use `trace list` to browse history:
+All recaps are stored in the traces directory and persist across sessions. Use `recap list` to browse history:
 
 ```bash
-# Show the last 50 traces
-altimate-code trace list -n 50
+# Show the last 50 recaps
+altimate-code recap list -n 50
 
-# View any historical trace
-altimate-code trace view <session-id>
+# View any historical recap
+altimate-code recap view <session-id>
 ```
 
-Traces are automatically pruned when `maxFiles` is exceeded (default: 100). The oldest traces are removed first. Set `maxFiles: 0` for unlimited retention.
+Recaps are automatically pruned when `maxFiles` is exceeded (default: 100). The oldest recaps are removed first. Set `maxFiles: 0` for unlimited retention.
 
 ## Privacy
 
-Traces are stored **locally only** by default. They contain:
+Recaps are stored **locally only** by default. They contain:
 
 - The prompt you sent
 - Tool inputs and outputs (SQL queries, file contents, command results)
 - Model responses
 
-If you configure remote exporters, trace data is sent to those endpoints. No trace data is included in the anonymous telemetry described in [Telemetry](../reference/telemetry.md).
+If you configure remote exporters, recap data is sent to those endpoints. No recap data is included in the anonymous telemetry described in [Telemetry](../reference/telemetry.md).
 
 !!! warning "Sensitive Data"
-    Traces may contain SQL queries, file paths, and command outputs from your session. If you share trace files or configure remote exporters, be aware that this data will be included.
+    Recaps may contain SQL queries, file paths, and command outputs from your session. If you share recap files or configure remote exporters, be aware that this data will be included.

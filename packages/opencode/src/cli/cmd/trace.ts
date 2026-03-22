@@ -1,7 +1,9 @@
 import type { Argv } from "yargs"
 import { cmd } from "./cmd"
 import { UI } from "../ui"
-import { Tracer, type TraceFile } from "../../altimate/observability/tracing"
+// altimate_change start — recap: rename Tracer → Recap
+import { Recap, type TraceFile } from "../../altimate/observability/tracing"
+// altimate_change end
 import { renderTraceViewer } from "../../altimate/observability/viewer"
 import { Config } from "../../config/config"
 import fs from "fs/promises"
@@ -46,9 +48,10 @@ function truncate(str: string, len: number): string {
   return str.slice(0, len - 1) + "…"
 }
 
-function listTraces(traces: Array<{ sessionId: string; trace: TraceFile }>) {
+// altimate_change start — recap: rename listTraces → listRecaps
+function listRecaps(traces: Array<{ sessionId: string; trace: TraceFile }>) {
   if (traces.length === 0) {
-    UI.println("No traces found. Run a command with tracing enabled:")
+    UI.println("No recaps found. Run a command with tracing enabled:")
     UI.println("  altimate-code run \"your prompt here\"")
     return
   }
@@ -94,14 +97,17 @@ function listTraces(traces: Array<{ sessionId: string; trace: TraceFile }>) {
   }
 
   UI.empty()
-  UI.println(UI.Style.TEXT_DIM + `${traces.length} trace(s) in ${Tracer.getTracesDir()}` + UI.Style.TEXT_NORMAL)
-  UI.println(UI.Style.TEXT_DIM + "View a trace: altimate-code trace view <session-id>" + UI.Style.TEXT_NORMAL)
+  UI.println(UI.Style.TEXT_DIM + `${traces.length} recap(s) in ${Recap.getTracesDir()}` + UI.Style.TEXT_NORMAL)
+  UI.println(UI.Style.TEXT_DIM + "View a recap: altimate-code recap view <session-id>" + UI.Style.TEXT_NORMAL)
 }
+// altimate_change end
 
 
-export const TraceCommand = cmd({
-  command: "trace [action] [id]",
-  describe: "list and view session traces",
+// altimate_change start — recap: rename TraceCommand → RecapCommand, keep trace as hidden alias
+export const RecapCommand = cmd({
+  command: "recap [action] [id]",
+  aliases: ["trace"],
+  describe: "list and view session recaps",
   builder: (yargs: Argv) => {
     return yargs
       .positional("action", {
@@ -116,18 +122,18 @@ export const TraceCommand = cmd({
       })
       .option("port", {
         type: "number",
-        describe: "port for trace viewer server",
+        describe: "port for recap viewer server",
         default: 0,
       })
       .option("limit", {
         alias: ["n"],
         type: "number",
-        describe: "number of traces to show",
+        describe: "number of recaps to show",
         default: 20,
       })
       .option("live", {
         type: "boolean",
-        describe: "auto-refresh the viewer as the trace updates (for in-progress sessions)",
+        describe: "auto-refresh the viewer as the recap updates (for in-progress sessions)",
         default: false,
       })
   },
@@ -137,31 +143,31 @@ export const TraceCommand = cmd({
     const tracesDir = (cfg as any).tracing?.dir as string | undefined
 
     if (action === "list") {
-      const traces = await Tracer.listTraces(tracesDir)
-      listTraces(traces.slice(0, args.limit || 20))
+      const traces = await Recap.listTraces(tracesDir)
+      listRecaps(traces.slice(0, args.limit || 20))
       return
     }
 
     if (action === "view") {
       if (!args.id) {
-        UI.error("Usage: altimate-code trace view <session-id>")
+        UI.error("Usage: altimate-code recap view <session-id>")
         process.exit(1)
       }
 
       // Support partial session ID matching
-      const traces = await Tracer.listTraces(tracesDir)
+      const traces = await Recap.listTraces(tracesDir)
       const match = traces.find(
         (t) => t.sessionId === args.id || t.sessionId.startsWith(args.id!) || t.file.startsWith(args.id!),
       )
 
       if (!match) {
-        UI.error(`Trace not found: ${args.id}`)
-        UI.println("Available traces:")
-        listTraces(traces.slice(0, 10))
+        UI.error(`Recap not found: ${args.id}`)
+        UI.println("Available recaps:")
+        listRecaps(traces.slice(0, 10))
         process.exit(1)
       }
 
-      const tracePath = path.join(Tracer.getTracesDir(tracesDir), match.file)
+      const tracePath = path.join(Recap.getTracesDir(tracesDir), match.file)
       const port = args.port || 0
       const live = args.live || false
 
@@ -171,7 +177,7 @@ export const TraceCommand = cmd({
         async fetch(req) {
           const url = new URL(req.url)
 
-          // /api/trace — serves latest trace JSON (for live polling)
+          // /api/trace — serves latest recap JSON (for live polling)
           if (url.pathname === "/api/trace") {
             try {
               const content = await fs.readFile(tracePath, "utf-8")
@@ -196,7 +202,7 @@ export const TraceCommand = cmd({
       })
 
       const url = `http://localhost:${server.port}`
-      UI.println(`Trace viewer: ${url}`)
+      UI.println(`Recap viewer: ${url}`)
       if (live) {
         UI.println(UI.Style.TEXT_DIM + "Live mode: auto-refreshing every 2s" + UI.Style.TEXT_NORMAL)
       }
@@ -223,3 +229,7 @@ export const TraceCommand = cmd({
     }
   },
 })
+
+/** @deprecated Use RecapCommand instead */
+export const TraceCommand = RecapCommand
+// altimate_change end

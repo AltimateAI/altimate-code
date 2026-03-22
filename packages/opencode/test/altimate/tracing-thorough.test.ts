@@ -10,7 +10,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   HttpExporter,
   type TraceFile,
@@ -109,7 +109,7 @@ describe("FileExporter — sessionId robustness", () => {
 
 describe("logToolCall — state.time null/undefined", () => {
   test("state.time is null", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -132,7 +132,7 @@ describe("logToolCall — state.time null/undefined", () => {
   })
 
   test("state.time is undefined", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -151,7 +151,7 @@ describe("logToolCall — state.time null/undefined", () => {
   })
 
   test("state itself is null (entire state object)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     // The try/catch should handle this
@@ -167,7 +167,7 @@ describe("logToolCall — state.time null/undefined", () => {
   })
 
   test("part itself is null", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     // This should be caught by try/catch
@@ -178,7 +178,7 @@ describe("logToolCall — state.time null/undefined", () => {
   })
 
   test("part is undefined", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall(undefined as any)
@@ -194,7 +194,7 @@ describe("logToolCall — state.time null/undefined", () => {
 
 describe("logToolCall — tool name edge cases", () => {
   test("null tool name becomes 'unknown' in generation output", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -211,7 +211,7 @@ describe("logToolCall — tool name edge cases", () => {
   })
 
   test("undefined tool name becomes 'unknown'", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -233,7 +233,7 @@ describe("logToolCall — tool name edge cases", () => {
 
 describe("startTrace — both instance_id and sessionId edge cases", () => {
   test("both instance_id and sessionId are empty strings", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("", { instance_id: "", prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -248,7 +248,7 @@ describe("startTrace — both instance_id and sessionId edge cases", () => {
 
 describe("endTrace — statusMessage precision", () => {
   test("successful trace has no statusMessage on root span", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -260,7 +260,7 @@ describe("endTrace — statusMessage precision", () => {
   })
 
   test("error trace has statusMessage on root span", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace("something broke")
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -275,7 +275,7 @@ describe("endTrace — statusMessage precision", () => {
 
 describe("logStepFinish — completely malformed input", () => {
   test("null part doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(null as any)
@@ -285,7 +285,7 @@ describe("logStepFinish — completely malformed input", () => {
   })
 
   test("undefined part doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(undefined as any)
@@ -294,7 +294,7 @@ describe("logStepFinish — completely malformed input", () => {
   })
 
   test("part with missing reason doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({ id: "1" } as any)
@@ -303,7 +303,7 @@ describe("logStepFinish — completely malformed input", () => {
   })
 
   test("part with only id and reason (no cost, no tokens)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({ id: "1", reason: "stop" } as any)
@@ -321,7 +321,7 @@ describe("logStepFinish — completely malformed input", () => {
 
 describe("logStepStart — part.id edge cases", () => {
   test("null id doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: null as any })
     tracer.logStepFinish(ZERO_STEP)
@@ -332,7 +332,7 @@ describe("logStepStart — part.id edge cases", () => {
   })
 
   test("undefined id doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: undefined as any })
     tracer.logStepFinish(ZERO_STEP)
@@ -341,7 +341,7 @@ describe("logStepStart — part.id edge cases", () => {
   })
 
   test("numeric id is coerced to string in name", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: 42 as any })
     tracer.logStepFinish(ZERO_STEP)
@@ -352,7 +352,7 @@ describe("logStepStart — part.id edge cases", () => {
   })
 
   test("empty object as part doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({} as any)
     tracer.logStepFinish(ZERO_STEP)
@@ -361,7 +361,7 @@ describe("logStepStart — part.id edge cases", () => {
   })
 
   test("null part to logStepStart doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart(null as any)
     // Should be caught by try/catch
@@ -376,7 +376,7 @@ describe("logStepStart — part.id edge cases", () => {
 
 describe("logText — thorough edge cases", () => {
   test("boolean text is coerced to string", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: true as any })
@@ -389,7 +389,7 @@ describe("logText — thorough edge cases", () => {
   })
 
   test("object text is coerced to string", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: { key: "value" } as any })
@@ -401,7 +401,7 @@ describe("logText — thorough edge cases", () => {
   })
 
   test("empty part object doesn't crash", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({} as any)
@@ -410,7 +410,7 @@ describe("logText — thorough edge cases", () => {
   })
 
   test("null part to logText doesn't crash", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     // Should not throw — part.text access on null will throw but...
     // Actually this WILL throw: null.text → TypeError
@@ -430,7 +430,7 @@ describe("logText — thorough edge cases", () => {
 
 describe("endTrace — sessionId regex correctness", () => {
   test("backslash in sessionId is replaced", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("path\\to\\session", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -439,7 +439,7 @@ describe("endTrace — sessionId regex correctness", () => {
   })
 
   test("colon in sessionId is replaced", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("C:\\Users\\session:v2", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -447,7 +447,7 @@ describe("endTrace — sessionId regex correctness", () => {
   })
 
   test("dot in sessionId is replaced", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session.with.dots", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -455,7 +455,7 @@ describe("endTrace — sessionId regex correctness", () => {
   })
 
   test("hyphens and underscores are preserved", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("my-session_123-abc", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -469,7 +469,7 @@ describe("endTrace — sessionId regex correctness", () => {
 
 describe("setSpanAttributes — timing relative to generation lifecycle", () => {
   test("setSpanAttributes('generation') after logStepFinish is a no-op", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(ZERO_STEP)
@@ -483,7 +483,7 @@ describe("setSpanAttributes — timing relative to generation lifecycle", () => 
   })
 
   test("setSpanAttributes('generation') during active generation works", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.setSpanAttributes({ active: "yes" }, "generation")
@@ -501,7 +501,7 @@ describe("setSpanAttributes — timing relative to generation lifecycle", () => 
 
 describe("enrichFromAssistant — wrong types", () => {
   test("number as modelID", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: 42 as any, providerID: true as any })
     const filePath = await tracer.endTrace()
@@ -511,7 +511,7 @@ describe("enrichFromAssistant — wrong types", () => {
   })
 
   test("null values don't overwrite", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { model: "original", agent: "original-agent", prompt: "test" })
     tracer.enrichFromAssistant({
       modelID: null as any,
@@ -533,7 +533,7 @@ describe("enrichFromAssistant — wrong types", () => {
 
 describe("JSON validity — every trace must be parseable", () => {
   test("trace with NaN in attributes (set via setSpanAttributes)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.setSpanAttributes({
       nan_val: NaN,
@@ -551,7 +551,7 @@ describe("JSON validity — every trace must be parseable", () => {
   })
 
   test("trace with all edge cases combined is valid JSON", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("combined-edge", {
       prompt: 'Prompt with "quotes" and\nnewlines and\ttabs',
       tags: ["tag with spaces", "tag/with/slashes", ""],
@@ -607,7 +607,7 @@ describe("withExporters — input array mutation", () => {
   test("withExporters with maxFiles replaces FileExporter in the array", async () => {
     const original = new FileExporter(tmpDir, 50)
     const exporters: TraceExporter[] = [original]
-    Tracer.withExporters(exporters, { maxFiles: 5 })
+    Recap.withExporters(exporters, { maxFiles: 5 })
     // The original array was mutated — the FileExporter was replaced
     expect(exporters[0]).not.toBe(original)
     expect((exporters[0] as FileExporter).getDir()).toBe(tmpDir)
@@ -616,7 +616,7 @@ describe("withExporters — input array mutation", () => {
   test("withExporters without maxFiles doesn't mutate", async () => {
     const original = new FileExporter(tmpDir, 50)
     const exporters: TraceExporter[] = [original]
-    Tracer.withExporters(exporters)
+    Recap.withExporters(exporters)
     expect(exporters[0]).toBe(original)
   })
 })

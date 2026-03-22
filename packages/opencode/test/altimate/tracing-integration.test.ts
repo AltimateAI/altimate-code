@@ -11,7 +11,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   type TraceFile,
   type TraceSpan,
@@ -36,7 +36,7 @@ const ZERO_STEP = {
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
 }
 
-// Helper: write a trace file directly (bypassing Tracer)
+// Helper: write a trace file directly (bypassing Recap)
 async function writeTraceFile(dir: string, trace: TraceFile) {
   await fs.mkdir(dir, { recursive: true })
   await fs.writeFile(path.join(dir, `${trace.sessionId}.json`), JSON.stringify(trace, null, 2))
@@ -68,7 +68,7 @@ function makeTrace(overrides: Partial<TraceFile> & { sessionId: string }): Trace
 
 describe("Write → Read round-trip", () => {
   test("full trace survives JSON serialization round-trip", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("roundtrip-1", {
       model: "anthropic/claude-sonnet-4-20250514",
       providerId: "anthropic",
@@ -213,7 +213,7 @@ describe("Write → Read round-trip", () => {
 
 describe("listTraces — with real files", () => {
   test("returns traces sorted by startedAt descending (newest first)", async () => {
-    // Use the global traces dir via the Tracer — write 3 traces with different times
+    // Use the global traces dir via the Recap — write 3 traces with different times
     const traces = [
       makeTrace({ sessionId: "old", startedAt: "2025-01-01T00:00:00.000Z" }),
       makeTrace({ sessionId: "mid", startedAt: "2025-06-15T00:00:00.000Z" }),
@@ -281,7 +281,7 @@ describe("HTML renderer — XSS prevention", () => {
   test("sessionId with script tags in title is escaped", async () => {
     // We can't call renderTraceViewerHTML directly (not exported),
     // but we can test the trace that would be rendered via a server.
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace('</title><script>alert("xss")</script>', { prompt: "evil" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -292,7 +292,7 @@ describe("HTML renderer — XSS prevention", () => {
   })
 
   test("prompt with HTML tags survives JSON embedding", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-html-prompt", {
       prompt: '<img src=x onerror=alert(1)> <script>alert("xss")</script>',
     })
@@ -307,7 +307,7 @@ describe("HTML renderer — XSS prevention", () => {
   })
 
   test("tool output with </script> tag doesn't break viewer", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-script-break", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -371,14 +371,14 @@ describe("FileExporter pruning — race conditions", () => {
 })
 
 // ---------------------------------------------------------------------------
-// 5. Tracer reuse patterns
+// 5. Recap reuse patterns
 // ---------------------------------------------------------------------------
 
-describe("Tracer reuse patterns", () => {
+describe("Recap reuse patterns", () => {
   test("creating many tracers rapidly doesn't leak", async () => {
     const results: string[] = []
     for (let i = 0; i < 50; i++) {
-      const t = Tracer.withExporters([new FileExporter(tmpDir, 0)])
+      const t = Recap.withExporters([new FileExporter(tmpDir, 0)])
       t.startTrace(`rapid-${i}`, { prompt: `p${i}` })
       t.logStepStart({ id: "1" })
       t.logStepFinish(ZERO_STEP)
@@ -393,7 +393,7 @@ describe("Tracer reuse patterns", () => {
   test("each tracer has a unique traceId", async () => {
     const traceIds = new Set<string>()
     for (let i = 0; i < 20; i++) {
-      const t = Tracer.withExporters([new FileExporter(tmpDir, 0)])
+      const t = Recap.withExporters([new FileExporter(tmpDir, 0)])
       t.startTrace(`unique-${i}`, { prompt: "test" })
       const filePath = await t.endTrace()
       const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -409,7 +409,7 @@ describe("Tracer reuse patterns", () => {
 
 describe("Complex span trees", () => {
   test("alternating generations and tool calls produce correct tree", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-complex", { prompt: "complex task" })
 
     // Gen 1: plan
@@ -521,7 +521,7 @@ describe("Complex span trees", () => {
 
 describe("DE attributes on different span types in same trace", () => {
   test("warehouse attrs on tool, dbt attrs on another tool, cost on session", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-multi-de", { prompt: "run pipeline" })
     tracer.logStepStart({ id: "1" })
 
@@ -596,7 +596,7 @@ describe("DE attributes on different span types in same trace", () => {
 
 describe("Complete pipeline edge cases", () => {
   test("trace with every optional field populated", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-all-fields", {
       instance_id: "inst-1",
       model: "anthropic/claude-sonnet-4-20250514",
@@ -673,7 +673,7 @@ describe("Complete pipeline edge cases", () => {
   })
 
   test("trace with nothing but startTrace and error endTrace", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-instant-error", { prompt: "fail immediately" })
     const filePath = await tracer.endTrace("Provider authentication failed")
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))

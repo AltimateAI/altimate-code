@@ -1,22 +1,25 @@
-<<<<<<< Updated upstream
-fix: add missing `altimate_change` markers for `experimental` block in `opencode.jsonc`
+feat: rename tracer to recap with loop detection, post-session summary, and enhanced viewer
 
-The `experimental` config added in #311 was missing upstream markers,
-causing the Marker Guard CI check to fail on main.
-=======
-fix: add try/catch and input sanitization to TUI install/create (#341)
-
-Root cause of silent failures: `onConfirm` async callbacks had no
-try/catch, so any thrown error was swallowed and no result toast shown.
-
-Fixes:
-- Wrap all install/create logic in try/catch with error toast
-- Strip trailing dots from input (textarea was appending `.`)
-- Strip `.git` suffix from URLs (users paste from browser)
-- Trim whitespace and validate before proceeding
-- "Installing..." toast now shows 60s duration with helpful text
-  ("This may take a moment while the repo is cloned")
-- Empty input shows immediate error instead of proceeding
->>>>>>> Stashed changes
+- Rename `Tracer` class to `Recap` with backward-compat aliases
+- Rename CLI command `trace` to `recap` (hidden `trace` alias preserved)
+- Add loop detection: flags repeated tool calls with same input (3+ in last 10)
+- Add post-session summary: `narrative`, `topTools`, `loops` in trace output
+- New Summary tab (default) in HTML viewer with:
+  - Truncated prompt with expand toggle
+  - Files changed with SQL diff previews
+  - Tool-agnostic outcome extraction (dbt, pytest, Airflow, pip, SQL)
+  - Deduped dbt commands with pass/fail status, clickable to waterfall
+  - Smart command grouping (boring ls/cd collapsed, meaningful shown)
+  - Error details with resolution tracking
+  - Cost breakdown in collapsible section
+- Virality: Share Recap (self-contained HTML download), Copy Summary (markdown),
+  Copy Link, branded footer
+- Fix XSS: timeline items escaped with `e()`
+- Fix memory leak: per-session `sessionUserMsgIds` with cleanup on eviction
+- Fix JS syntax: onclick quote escaping in collapsible section
+- Bound `toolCallHistory` to prevent unbounded growth (cap at 200)
+- Summary view wrapped in try-catch for visible error messages
+- Update all 13 test files for rename + 8 new adversarial viewer tests
+- Update docs: `tracing.md` → `recap.md`, CLI/TUI references updated
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
