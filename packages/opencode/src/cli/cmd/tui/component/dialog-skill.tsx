@@ -8,8 +8,7 @@ import { Keybind } from "@/util/keybind"
 import { useToast } from "@tui/ui/toast"
 import { spawn } from "child_process"
 import { DialogPrompt } from "@tui/ui/dialog-prompt"
-import { Instance } from "@/project/instance"
-import { Global } from "@/global"
+import os from "os"
 import path from "path"
 import fs from "fs/promises"
 // altimate_change end
@@ -39,20 +38,19 @@ const SKILL_CATEGORIES: Record<string, string> = {
   "altimate-setup": "Setup",
 }
 
-/** Resolve the project root for skill operations. */
-function projectRoot(): string {
-  return Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+// Cache dir for temporary git clones
+function cacheDir(): string {
+  return path.join(os.homedir(), ".cache", "altimate-code")
 }
 // altimate_change end
 
 // altimate_change start — inline skill operations (no subprocess spawning)
 
 /** Create a skill + tool pair directly via fs operations. */
-async function createSkillDirect(name: string): Promise<{ ok: boolean; message: string }> {
+async function createSkillDirect(name: string, rootDir: string): Promise<{ ok: boolean; message: string }> {
   if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(name) || name.length < 2 || name.length > 64) {
     return { ok: false, message: "Name must be lowercase alphanumeric with hyphens, 2-64 chars" }
   }
-  const rootDir = projectRoot()
   const skillDir = path.join(rootDir, ".opencode", "skills", name)
   const skillFile = path.join(skillDir, "SKILL.md")
   try {
@@ -84,12 +82,11 @@ type ProgressFn = (status: string) => void
 /** Install skills from a GitHub repo or local path directly. */
 async function installSkillDirect(
   source: string,
+  rootDir: string,
   onProgress?: ProgressFn,
 ): Promise<{ ok: boolean; message: string; installedNames?: string[] }> {
   const trimmed = source.trim()
   if (!trimmed) return { ok: false, message: "Source is required" }
-
-  const rootDir = projectRoot()
   const targetDir = path.join(rootDir, ".opencode", "skills")
   let skillDir: string
   let isTmp = false
@@ -98,7 +95,7 @@ async function installSkillDirect(
     const url = trimmed.startsWith("http") ? trimmed : `https://github.com/${trimmed}.git`
     const label = trimmed.startsWith("http") ? trimmed.replace(/https?:\/\/github\.com\//, "") : trimmed
     onProgress?.(`Cloning ${label}...`)
-    const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
+    const tmpDir = path.join(cacheDir(), "skill-install-" + Date.now())
     isTmp = true
     const proc = Bun.spawn(["git", "clone", "--depth", "1", url, tmpDir], {
       stdout: "pipe",
@@ -170,18 +167,14 @@ async function installSkillDirect(
 }
 
 /** Test a skill by checking its tool responds to --help. */
-async function testSkillDirect(skillName: string, location: string, content: string): Promise<{ ok: boolean; message: string }> {
+async function testSkillDirect(skillName: string, content: string, rootDir: string): Promise<{ ok: boolean; message: string }> {
   const tools = detectToolReferences(content)
   if (tools.length === 0) return { ok: true, message: `${skillName}: PASS (no CLI tools)` }
 
-  const rootDir = projectRoot()
-  const worktreeDir = Instance.worktree !== "/" ? Instance.worktree : rootDir
   const sep = process.platform === "win32" ? ";" : ":"
   const toolPath = [
     process.env.ALTIMATE_BIN_DIR,
-    path.join(worktreeDir, ".opencode", "tools"),
     path.join(rootDir, ".opencode", "tools"),
-    path.join(Global.Path.config, "tools"),
     process.env.PATH,
   ]
     .filter(Boolean)
@@ -239,7 +232,7 @@ function DialogSkillCreate() {
         }
         toast.show({ message: `Creating "${name}"...`, variant: "info", duration: 30000 })
         try {
-          const result = await createSkillDirect(name)
+          const result = await createSkillDirect(name, sdk.directory ?? process.cwd())
           if (!result.ok) {
             toast.show({ message: `Create failed: ${result.message}`, variant: "error", duration: 6000 })
             return
@@ -290,7 +283,7 @@ function DialogSkillInstall() {
         }
         progress("Preparing...")
         try {
-          const result = await installSkillDirect(source, progress)
+          const result = await installSkillDirect(source, sdk.directory ?? process.cwd(), progress)
           if (!result.ok) {
             toast.show({ message: `Install failed: ${result.message}`, variant: "error", duration: 6000 })
             return
@@ -411,7 +404,7 @@ export function DialogSkill(props: DialogSkillProps) {
         const info = skillMap().get(option.value)
         if (!info) return
         toast.show({ message: `Testing ${option.value}...`, variant: "info" })
-        const result = await testSkillDirect(option.value, info.location, info.content)
+        const result = await testSkillDirect(option.value, info.content, sdk.directory ?? process.cwd())
         toast.show({
           message: result.ok ? `✓ ${result.message}` : `✗ ${result.message}`,
           variant: result.ok ? "success" : "error",
