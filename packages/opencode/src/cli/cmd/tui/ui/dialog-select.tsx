@@ -337,7 +337,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
         </scrollbox>
       </Show>
       <Show when={keybinds().length} fallback={<box flexShrink={0} />}>
-        <box paddingRight={2} paddingLeft={4} flexDirection="row" gap={2} flexShrink={0} paddingTop={1} flexWrap="wrap">
+        <box paddingRight={2} paddingLeft={4} flexDirection="row" gap={2} flexShrink={0} paddingTop={1}>
           <For each={keybinds()}>
             {(item) => (
               <text>

@@ -382,104 +382,131 @@ export function DialogSkill(props: DialogSkillProps) {
     })
   })
 
-  // Keybind actions: show, edit, test, create, install, remove
+  // Single keybind opens action picker for the selected skill
+  function openActionPicker(skillName: string) {
+    const info = skillMap().get(skillName)
+    const isBuiltinOrTracked = (() => {
+      if (!info) return true
+      if (info.location.startsWith("builtin:")) return true
+      const gitCheck = Bun.spawnSync(["git", "ls-files", "--error-unmatch", info.location], {
+        cwd: path.dirname(path.dirname(info.location)),
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      return gitCheck.exitCode === 0
+    })()
+
+    const actions: DialogSelectOption<string>[] = [
+      {
+        title: "Show details",
+        value: "show",
+        description: "View skill info, tools, and location",
+      },
+      {
+        title: "Edit in $EDITOR",
+        value: "edit",
+        description: "Open SKILL.md in your editor",
+        disabled: isBuiltinOrTracked,
+      },
+      {
+        title: "Test paired tool",
+        value: "test",
+        description: "Run --help on the paired CLI tool",
+      },
+      {
+        title: "Create new skill",
+        value: "create",
+        description: "Scaffold a new skill + CLI tool",
+      },
+      {
+        title: "Install from GitHub",
+        value: "install",
+        description: "Install skills from a repo or URL",
+      },
+      {
+        title: "Remove skill",
+        value: "remove",
+        description: "Delete this skill and its paired tool",
+        disabled: isBuiltinOrTracked,
+      },
+    ].filter((a) => !a.disabled)
+
+    dialog.replace(() => (
+      <DialogSelect
+        title={`Actions: ${skillName}`}
+        options={actions}
+        onSelect={async (action) => {
+          switch (action.value) {
+            case "show": {
+              if (!info) return
+              const tools = detectToolReferences(info.content)
+              const lines = [
+                `${skillName}: ${info.description}`,
+                tools.length > 0 ? `Tools: ${tools.join(", ")}` : null,
+                `Location: ${info.location}`,
+              ]
+                .filter((l) => l !== null)
+                .join("\n")
+              dialog.clear()
+              toast.show({ message: lines, variant: "info", duration: 8000 })
+              break
+            }
+            case "edit": {
+              if (!info) return
+              const editor = process.env.EDITOR || process.env.VISUAL || "vi"
+              dialog.clear()
+              spawn(editor, [info.location], { stdio: "inherit", detached: true }).unref()
+              break
+            }
+            case "test": {
+              if (!info) return
+              dialog.clear()
+              toast.show({ message: `Testing ${skillName}...`, variant: "info", duration: 600000 })
+              const result = await testSkillDirect(skillName, info.content, gitRoot(sdk.directory ?? process.cwd()))
+              toast.show({
+                message: result.ok ? `✓ ${result.message}` : `✗ ${result.message}`,
+                variant: result.ok ? "success" : "error",
+                duration: 4000,
+              })
+              break
+            }
+            case "create": {
+              dialog.replace(() => <DialogSkillCreate />)
+              break
+            }
+            case "install": {
+              dialog.replace(() => <DialogSkillInstall />)
+              break
+            }
+            case "remove": {
+              if (!info) return
+              try {
+                const skillDir = path.dirname(info.location)
+                await fs.rm(skillDir, { recursive: true, force: true })
+                const root = gitRoot(sdk.directory ?? process.cwd())
+                const toolFile = path.join(root, ".opencode", "tools", skillName)
+                await fs.rm(toolFile, { force: true }).catch(() => {})
+                await reloadAndVerify(sdk, [])
+                dialog.clear()
+                toast.show({ message: `Removed "${skillName}".`, variant: "success", duration: 4000 })
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err)
+                toast.show({ message: `Remove failed: ${msg.slice(0, 150)}`, variant: "error", duration: 5000 })
+              }
+              break
+            }
+          }
+        }}
+      />
+    ))
+  }
+
   const keybinds = createMemo(() => [
     {
-      keybind: Keybind.parse("ctrl+o")[0],
-      title: "show",
+      keybind: Keybind.parse("ctrl+a")[0],
+      title: "actions",
       onTrigger: async (option: DialogSelectOption<string>) => {
-        const info = skillMap().get(option.value)
-        if (!info) return
-        const tools = detectToolReferences(info.content)
-        const lines = [
-          `${option.value}: ${info.description}`,
-          tools.length > 0 ? `Tools: ${tools.join(", ")}` : null,
-          `Location: ${info.location}`,
-        ]
-          .filter((l) => l !== null)
-          .join("\n")
-        toast.show({ message: lines, variant: "info", duration: 8000 })
-      },
-    },
-    {
-      keybind: Keybind.parse("ctrl+e")[0],
-      title: "edit",
-      onTrigger: async (option: DialogSelectOption<string>) => {
-        const info = skillMap().get(option.value)
-        if (!info || info.location.startsWith("builtin:")) {
-          toast.show({ message: "Cannot edit built-in skills", variant: "info" })
-          return
-        }
-        const editor = process.env.EDITOR || process.env.VISUAL || "vi"
-        dialog.clear()
-        spawn(editor, [info.location], { stdio: "inherit", detached: true }).unref()
-      },
-    },
-    {
-      keybind: Keybind.parse("ctrl+t")[0],
-      title: "test",
-      onTrigger: async (option: DialogSelectOption<string>) => {
-        const info = skillMap().get(option.value)
-        if (!info) return
-        toast.show({ message: `Testing ${option.value}...`, variant: "info", duration: 600000 })
-        const result = await testSkillDirect(option.value, info.content, gitRoot(sdk.directory ?? process.cwd()))
-        toast.show({
-          message: result.ok ? `✓ ${result.message}` : `✗ ${result.message}`,
-          variant: result.ok ? "success" : "error",
-          duration: 4000,
-        })
-      },
-    },
-    {
-      keybind: Keybind.parse("ctrl+n")[0],
-      title: "create",
-      onTrigger: async () => {
-        dialog.replace(() => <DialogSkillCreate />)
-      },
-    },
-    {
-      keybind: Keybind.parse("ctrl+i")[0],
-      title: "install",
-      onTrigger: async () => {
-        dialog.replace(() => <DialogSkillInstall />)
-      },
-    },
-    {
-      keybind: Keybind.parse("ctrl+d")[0],
-      title: "remove",
-      onTrigger: async (option: DialogSelectOption<string>) => {
-        const info = skillMap().get(option.value)
-        if (!info) return
-        if (info.location.startsWith("builtin:")) {
-          toast.show({ message: "Cannot remove built-in skills.", variant: "info", duration: 3000 })
-          return
-        }
-        // Check if tracked by git (part of the repo)
-        const gitCheck = Bun.spawnSync(["git", "ls-files", "--error-unmatch", info.location], {
-          cwd: path.dirname(path.dirname(info.location)),
-          stdout: "pipe",
-          stderr: "pipe",
-        })
-        if (gitCheck.exitCode === 0) {
-          toast.show({ message: `Cannot remove "${option.value}" — it is part of the repository.`, variant: "info", duration: 4000 })
-          return
-        }
-        try {
-          const skillDir = path.dirname(info.location)
-          await fs.rm(skillDir, { recursive: true, force: true })
-          // Also remove paired tool
-          const root = gitRoot(sdk.directory ?? process.cwd())
-          const toolFile = path.join(root, ".opencode", "tools", option.value)
-          await fs.rm(toolFile, { force: true }).catch(() => {})
-          // Reload server cache
-          await reloadAndVerify(sdk, [])
-          toast.show({ message: `Removed "${option.value}".`, variant: "success", duration: 4000 })
-          // Close and let user reopen to see updated list
-          dialog.clear()
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          toast.show({ message: `Remove failed: ${msg.slice(0, 150)}`, variant: "error", duration: 5000 })
-        }
+        openActionPicker(option.value)
       },
     },
   ])
