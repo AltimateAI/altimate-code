@@ -8,6 +8,9 @@ import { cmd } from "./cmd"
 import { Instance } from "../../project/instance"
 import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
+// altimate_change start — telemetry for skill operations
+import { Telemetry } from "@/altimate/telemetry"
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -314,6 +317,19 @@ const SkillCreateCommand = cmd({
         }
       }
 
+      // altimate_change start — telemetry
+      try {
+        Telemetry.track({
+          type: "skill_created",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId || "",
+          skill_name: name,
+          language,
+          source: "cli",
+        })
+      } catch {}
+      // altimate_change end
+
       process.stdout.write(EOL)
       process.stdout.write(`Next steps:` + EOL)
       process.stdout.write(`  1. Edit .opencode/skills/${name}/SKILL.md — teach the agent when and how to use your tool` + EOL)
@@ -573,6 +589,7 @@ const SkillInstallCommand = cmd({
       }
 
       let installed = 0
+      const installedNames: string[] = []
       for (const skillFile of matches) {
         const skillParent = path.dirname(skillFile)
         const skillName = path.basename(skillParent)
@@ -603,6 +620,7 @@ const SkillInstallCommand = cmd({
           }
         }
         process.stdout.write(`  ✓ Installed "${skillName}" → ${path.relative(rootDir, dest)}` + EOL)
+        installedNames.push(skillName)
         installed++
       }
 
@@ -614,6 +632,19 @@ const SkillInstallCommand = cmd({
       process.stdout.write(EOL)
       if (installed > 0) {
         process.stdout.write(`${installed} skill(s) installed${isGlobal ? " globally" : ""}.` + EOL)
+        // altimate_change start — telemetry
+        try {
+          Telemetry.track({
+            type: "skill_installed",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId || "",
+            install_source: source,
+            skill_count: installed,
+            skill_names: installedNames,
+            source: "cli",
+          })
+        } catch {}
+        // altimate_change end
       } else {
         process.stdout.write(`No new skills installed.` + EOL)
       }
@@ -671,6 +702,18 @@ const SkillRemoveCommand = cmd({
       } catch {
         // No paired tool, that's fine
       }
+
+      // altimate_change start — telemetry
+      try {
+        Telemetry.track({
+          type: "skill_removed",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId || "",
+          skill_name: name,
+          source: "cli",
+        })
+      } catch {}
+      // altimate_change end
 
       process.stdout.write(EOL + `Skill "${name}" removed.` + EOL)
     })
