@@ -217,7 +217,28 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 git push -u origin HEAD
 gh pr create --title "test: [area] — [what's being tested]" --body "$(cat <<'EOF'
 ### What does this PR do?
-Adds tests for [area] discovered by hourly test sweep.
+
+[Write a clear, well-structured description. Do NOT use a one-liner. Include:]
+
+**For each module/file tested, provide:**
+- The module name and source file path
+- WHY it was untested and WHY it matters (what user-facing risk does this cover?)
+- A brief list of the specific scenarios covered (e.g., "push-before-next ordering", "error propagation")
+
+**Example format:**
+
+**1. `AsyncQueue` and `work()` — `src/util/queue.ts`** (10 new tests)
+
+These utilities power streaming result delivery and concurrent task processing. Zero tests existed. New coverage includes:
+- Push/next resolution ordering and async iterator correctness
+- Concurrency limit enforcement in `work()`
+- Error propagation from workers
+
+**2. `State.invalidate` — `src/project/state.ts`** (2 new tests)
+
+This `altimate_change` clears cached state after config changes. Coverage includes:
+- Invalidated entry is re-initialized on next access
+- No-op on nonexistent key
 
 ### Type of change
 - [x] New feature (non-breaking change which adds functionality)
@@ -226,7 +247,12 @@ Adds tests for [area] discovered by hourly test sweep.
 N/A — proactive test coverage
 
 ### How did you verify your code works?
-`bun test test/[path]` — all pass
+
+[List each test file and its pass count, e.g.:]
+```
+bun test test/util/queue.test.ts       # 10 pass
+bun test test/project/state.test.ts    #  7 pass (5 existing + 2 new)
+```
 
 ### Checklist
 - [x] I have added tests that prove my fix is effective or that my feature works
@@ -247,3 +273,5 @@ Send `shutdown_request` to the critic. Delete the team.
 6. **Critic must approve.** Don't commit tests the critic rejected.
 7. **Check existing tests first.** Run `grep -r "describe.*[feature]" packages/opencode/test/` before writing.
 8. **Branch protection.** Always use a feature branch + PR. Never push to main.
+9. **TUI impact check.** Whenever your tests touch code that feeds into the TUI (session state, config, skills, tools, MCP, provider changes), check whether the TUI could be affected. If so, add or extend E2E tests that exercise the TUI path — e.g., verifying that dialog rendering, skill listing, or config display still work after the change. The TUI is the primary user interface; regressions there are high-visibility. Look at existing TUI tests in `packages/opencode/test/config/tui.test.ts` for patterns.
+10. **PR descriptions must be well-documented.** Never submit a one-liner PR body. Each PR must clearly explain what modules were tested, why they were untested, what user-facing risk the new tests mitigate, and the specific scenarios covered. See the PR template in Phase 5 for the expected format.
