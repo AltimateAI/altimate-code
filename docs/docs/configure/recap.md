@@ -4,8 +4,10 @@ Altimate Code captures detailed recaps of every session, including LLM generatio
 
 Recap is **enabled by default** and requires no configuration. Recaps are stored locally and never leave your machine unless you configure a remote exporter.
 
+![Recap Summary View](../assets/images/recap/summary-tab.png)
+
 !!! note "Renamed from Tracer"
-    The tracer feature has been renamed to **recap**. The `trace` command still works as a backward-compatible alias. New features include loop detection, post-session summary, and shareable HTML exports with virality support.
+    The tracer feature has been renamed to **recap**. The `trace` command still works as a backward-compatible alias (`--no-trace` is the backward-compatible flag name). New features include loop detection, post-session summary, and shareable HTML exports.
 
 ## Quick Start
 
@@ -118,14 +120,26 @@ Options:
 altimate-code recap view <session-id>
 ```
 
-Opens a local web server with an interactive recap viewer in your browser. The viewer shows:
+Opens a local web server with an interactive recap viewer in your browser.
 
-- **Summary cards** showing duration, token breakdown (input/output/reasoning/cache), cost, generations, tool calls, status
-- **Timeline** with horizontal bars for each span, color-coded by type (generation, tool, error)
-- **Detail panel** where you click any span to see its model info, token counts, finish reason, input/output, and domain-specific attributes (warehouse metrics, dbt results, etc.)
-- **Loop detection indicators** highlighting repeated tool call patterns
-- **Post-session summary** with AI-generated overview of key actions and outcomes
-- **Share button** to export a self-contained HTML file for sharing with teammates
+![Recap Full View](../assets/images/recap/summary-full.png)
+
+The viewer has 5 tabs:
+
+- **Summary** (default) — The story of the session: what was asked, files changed with diff previews, outcome (dbt/pytest/Airflow results), what happened timeline, and cost breakdown
+- **Waterfall** — Gantt-style timeline bars for every span, color-coded by type
+- **Tree** — Nested indentation view showing parent/child span relationships
+- **Chat** — Conversation flow with user prompt and agent responses
+- **Log** — Flat chronological list of all events
+
+The Summary tab shows what matters most to data engineers:
+
+- **What was asked** — Your prompt, truncated with expand toggle
+- **Files changed** — Each file with NEW/EDIT badge and SQL diff preview
+- **Outcome** — dbt build results, test results, SQL query results (clickable to jump to waterfall)
+- **What happened** — Smart timeline grouping boring commands, showing meaningful actions
+- **Loop warnings** — Automatic detection when the agent repeats the same tool call
+- **Cost details** — Collapsible token breakdown with visual bar chart
 
 Options:
 
