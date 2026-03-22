@@ -89,28 +89,32 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
   let isTmp = false
 
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-    // URL
+    // URL — use async spawn so TUI doesn't freeze
     const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
     isTmp = true
-    const proc = Bun.spawnSync(["git", "clone", "--depth", "1", trimmed, tmpDir], {
+    const proc = Bun.spawn(["git", "clone", "--depth", "1", trimmed, tmpDir], {
       stdout: "pipe",
       stderr: "pipe",
     })
+    await proc.exited
     if (proc.exitCode !== 0) {
-      return { ok: false, message: `Failed to clone: ${proc.stderr.toString().trim().slice(0, 150)}` }
+      const stderr = await new Response(proc.stderr).text()
+      return { ok: false, message: `Failed to clone: ${stderr.trim().slice(0, 150)}` }
     }
     skillDir = tmpDir
   } else if (trimmed.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
-    // GitHub shorthand
+    // GitHub shorthand — use async spawn
     const url = `https://github.com/${trimmed}.git`
     const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
     isTmp = true
-    const proc = Bun.spawnSync(["git", "clone", "--depth", "1", url, tmpDir], {
+    const proc = Bun.spawn(["git", "clone", "--depth", "1", url, tmpDir], {
       stdout: "pipe",
       stderr: "pipe",
     })
+    await proc.exited
     if (proc.exitCode !== 0) {
-      return { ok: false, message: `Failed to clone ${trimmed}: ${proc.stderr.toString().trim().slice(0, 150)}` }
+      const stderr = await new Response(proc.stderr).text()
+      return { ok: false, message: `Failed to clone ${trimmed}: ${stderr.trim().slice(0, 150)}` }
     }
     skillDir = tmpDir
   } else {
