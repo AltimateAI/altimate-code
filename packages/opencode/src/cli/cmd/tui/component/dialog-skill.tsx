@@ -410,28 +410,18 @@ export function DialogSkill(props: DialogSkillProps) {
         description: "View skill info, tools, and location",
       },
       {
-        title: "Edit in $EDITOR",
+        title: "Edit",
         value: "edit",
-        description: "Open SKILL.md in your editor",
+        description: "Open SKILL.md in your default editor",
         disabled: isBuiltinOrTracked,
       },
       {
-        title: "Test paired tool",
+        title: "Test",
         value: "test",
-        description: "Run --help on the paired CLI tool",
+        description: "Validate the paired CLI tool works",
       },
       {
-        title: "Create new skill",
-        value: "create",
-        description: "Scaffold a new skill + CLI tool",
-      },
-      {
-        title: "Install from GitHub",
-        value: "install",
-        description: "Install skills from a repo or URL",
-      },
-      {
-        title: "Remove skill",
+        title: "Remove",
         value: "remove",
         description: "Delete this skill and its paired tool",
         disabled: isBuiltinOrTracked,
@@ -483,14 +473,6 @@ export function DialogSkill(props: DialogSkillProps) {
               reopenSkillList()
               break
             }
-            case "create": {
-              dialog.replace(() => <DialogSkillCreate />)
-              break
-            }
-            case "install": {
-              dialog.replace(() => <DialogSkillInstall />)
-              break
-            }
             case "remove": {
               if (!info) return
               try {
@@ -520,6 +502,20 @@ export function DialogSkill(props: DialogSkillProps) {
       title: "actions",
       onTrigger: async (option: DialogSelectOption<string>) => {
         openActionPicker(option.value)
+      },
+    },
+    {
+      keybind: Keybind.parse("ctrl+n")[0],
+      title: "new",
+      onTrigger: async () => {
+        dialog.replace(() => <DialogSkillCreate />)
+      },
+    },
+    {
+      keybind: Keybind.parse("ctrl+i")[0],
+      title: "install",
+      onTrigger: async () => {
+        dialog.replace(() => <DialogSkillInstall />)
       },
     },
   ])
