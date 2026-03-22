@@ -347,7 +347,7 @@ var cardsData = [
   ['Cost', fc(s.totalCost), 'orange', s.totalCost > 0],
   ['Tools', Number(s.totalToolCalls||0), 'green', Number(s.totalToolCalls||0) > 0],
   ['LLM Calls', Number(s.totalGenerations||0), 'secondary', Number(s.totalGenerations||0) > 0],
-  ['Tokens', Number(s.totalTokens||0).toLocaleString(), 'accent', s.totalCost > 0]
+  ['Tokens', Number(s.totalTokens||0).toLocaleString(), 'accent', Number(s.totalTokens||0) > 0]
 ];
 
 // Duration color coding
@@ -782,9 +782,7 @@ function showDetail(span) {
   if (s.status !== 'running') {
     html += '<div class="sum-metric"><div class="val" style="color:' + durColorVal + '">' + fd(s.duration) + '</div><div class="lbl">Completed in</div></div>';
   }
-  if (s.totalCost > 0) {
-    html += '<div class="sum-metric"><div class="val" style="color:var(--orange)">' + fc(s.totalCost) + '</div><div class="lbl">Cost</div></div>';
-  }
+  html += '<div class="sum-metric"><div class="val" style="color:var(--orange)">' + fc(s.totalCost) + '</div><div class="lbl">Cost</div></div>';
   var changedCount = Object.keys(changedFiles).length;
   if (changedCount > 0) {
     html += '<div class="sum-metric"><div class="val" style="color:var(--green)">' + changedCount + '</div><div class="lbl">Files changed</div></div>';
