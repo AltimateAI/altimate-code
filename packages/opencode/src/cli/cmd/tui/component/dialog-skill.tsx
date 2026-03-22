@@ -8,6 +8,10 @@ import { Keybind } from "@/util/keybind"
 import { useToast } from "@tui/ui/toast"
 import { spawn } from "child_process"
 import { DialogPrompt } from "@tui/ui/dialog-prompt"
+import { Instance } from "@/project/instance"
+import { Global } from "@/global"
+import path from "path"
+import fs from "fs/promises"
 // altimate_change end
 
 export type DialogSkillProps = {
@@ -34,6 +38,170 @@ const SKILL_CATEGORIES: Record<string, string> = {
   "training-status": "Training",
   "altimate-setup": "Setup",
 }
+
+/** Resolve the project root for skill operations. */
+function projectRoot(): string {
+  return Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+}
+// altimate_change end
+
+// altimate_change start — inline skill operations (no subprocess spawning)
+
+/** Create a skill + tool pair directly via fs operations. */
+async function createSkillDirect(name: string): Promise<{ ok: boolean; message: string }> {
+  if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(name) || name.length < 2 || name.length > 64) {
+    return { ok: false, message: "Name must be lowercase alphanumeric with hyphens, 2-64 chars" }
+  }
+  const rootDir = projectRoot()
+  const skillDir = path.join(rootDir, ".opencode", "skills", name)
+  const skillFile = path.join(skillDir, "SKILL.md")
+  try {
+    await fs.access(skillFile)
+    return { ok: false, message: `Skill "${name}" already exists` }
+  } catch {
+    // doesn't exist, good
+  }
+  await fs.mkdir(skillDir, { recursive: true })
+  await fs.writeFile(
+    skillFile,
+    `---\nname: ${name}\ndescription: TODO — describe what this skill does\n---\n\n# ${name}\n\n## When to Use\nTODO\n\n## CLI Reference\n\`\`\`bash\n${name} --help\n\`\`\`\n\n## Workflow\n1. Understand what the user needs\n2. Run the appropriate CLI command\n3. Interpret the output\n`,
+  )
+  // Create tool stub
+  const toolsDir = path.join(rootDir, ".opencode", "tools")
+  await fs.mkdir(toolsDir, { recursive: true })
+  const toolFile = path.join(toolsDir, name)
+  await fs.writeFile(
+    toolFile,
+    `#!/usr/bin/env bash\nset -euo pipefail\ncase "\${1:-help}" in\n  help|--help|-h) echo "Usage: ${name} <command>" ;;\n  *) echo "Unknown: \${1}" >&2; exit 1 ;;\nesac\n`,
+    { mode: 0o755 },
+  )
+  return { ok: true, message: `Created skill + tool at .opencode/skills/${name}/` }
+}
+
+/** Install skills from a GitHub repo or local path directly. */
+async function installSkillDirect(source: string): Promise<{ ok: boolean; message: string }> {
+  const trimmed = source.trim()
+  if (!trimmed) return { ok: false, message: "Source is required" }
+
+  const rootDir = projectRoot()
+  const targetDir = path.join(rootDir, ".opencode", "skills")
+  let skillDir: string
+  let isTmp = false
+
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    // URL
+    const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
+    isTmp = true
+    const proc = Bun.spawnSync(["git", "clone", "--depth", "1", trimmed, tmpDir], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    if (proc.exitCode !== 0) {
+      return { ok: false, message: `Failed to clone: ${proc.stderr.toString().trim().slice(0, 150)}` }
+    }
+    skillDir = tmpDir
+  } else if (trimmed.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
+    // GitHub shorthand
+    const url = `https://github.com/${trimmed}.git`
+    const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
+    isTmp = true
+    const proc = Bun.spawnSync(["git", "clone", "--depth", "1", url, tmpDir], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    if (proc.exitCode !== 0) {
+      return { ok: false, message: `Failed to clone ${trimmed}: ${proc.stderr.toString().trim().slice(0, 150)}` }
+    }
+    skillDir = tmpDir
+  } else {
+    // Local path
+    const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(trimmed)
+    try {
+      await fs.access(resolved)
+    } catch {
+      return { ok: false, message: `Path not found: ${resolved}` }
+    }
+    skillDir = resolved
+  }
+
+  // Find SKILL.md files
+  const glob = new Bun.Glob("**/SKILL.md")
+  const matches: string[] = []
+  for await (const match of glob.scan({ cwd: skillDir, absolute: true })) {
+    if (!match.includes("/.git/")) matches.push(match)
+  }
+  if (matches.length === 0) {
+    if (isTmp) await fs.rm(skillDir, { recursive: true, force: true })
+    return { ok: false, message: `No SKILL.md files found in ${source}` }
+  }
+
+  let installed = 0
+  const names: string[] = []
+  for (const skillFile of matches) {
+    const skillParent = path.dirname(skillFile)
+    const skillName = path.basename(skillParent)
+    const dest = path.join(targetDir, skillName)
+    try {
+      await fs.access(dest)
+      continue // already exists, skip
+    } catch {
+      // not installed
+    }
+    await fs.mkdir(dest, { recursive: true })
+    const files = await fs.readdir(skillParent)
+    for (const file of files) {
+      const src = path.join(skillParent, file)
+      const dst = path.join(dest, file)
+      const stat = await fs.stat(src)
+      if (stat.isFile()) await fs.copyFile(src, dst)
+      else if (stat.isDirectory()) await fs.cp(src, dst, { recursive: true })
+    }
+    names.push(skillName)
+    installed++
+  }
+
+  if (isTmp) await fs.rm(skillDir, { recursive: true, force: true })
+  if (installed === 0) return { ok: true, message: "No new skills installed (all already exist)" }
+  return { ok: true, message: `Installed ${installed} skill(s): ${names.join(", ")}` }
+}
+
+/** Test a skill by checking its tool responds to --help. */
+async function testSkillDirect(skillName: string, location: string, content: string): Promise<{ ok: boolean; message: string }> {
+  const tools = detectToolReferences(content)
+  if (tools.length === 0) return { ok: true, message: `${skillName}: PASS (no CLI tools)` }
+
+  const rootDir = projectRoot()
+  const worktreeDir = Instance.worktree !== "/" ? Instance.worktree : rootDir
+  const sep = process.platform === "win32" ? ";" : ":"
+  const toolPath = [
+    process.env.ALTIMATE_BIN_DIR,
+    path.join(worktreeDir, ".opencode", "tools"),
+    path.join(rootDir, ".opencode", "tools"),
+    path.join(Global.Path.config, "tools"),
+    process.env.PATH,
+  ]
+    .filter(Boolean)
+    .join(sep)
+
+  for (const tool of tools) {
+    try {
+      const proc = Bun.spawn([tool, "--help"], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, PATH: toolPath },
+      })
+      const timeout = setTimeout(() => proc.kill(), 5000)
+      const exitCode = await proc.exited
+      clearTimeout(timeout)
+      if (exitCode !== 0) {
+        return { ok: false, message: `${skillName}: FAIL — "${tool} --help" exited with code ${exitCode}` }
+      }
+    } catch {
+      return { ok: false, message: `${skillName}: FAIL — "${tool}" not found or failed to execute` }
+    }
+  }
+  return { ok: true, message: `${skillName}: PASS` }
+}
 // altimate_change end
 
 // altimate_change start — sub-dialogs for create and install
@@ -48,25 +216,12 @@ function DialogSkillCreate() {
       onConfirm={async (name) => {
         dialog.clear()
         toast.show({ message: `Creating ${name}...`, variant: "info" })
-        try {
-          const proc = Bun.spawn([process.argv[0], "skill", "create", name], {
-            stdout: "pipe",
-            stderr: "pipe",
-            env: { ...process.env },
-          })
-          await proc.exited
-          const stdout = await new Response(proc.stdout).text()
-          const stderr = await new Response(proc.stderr).text()
-          if (proc.exitCode === 0) {
-            toast.show({ message: `✓ Created skill "${name}"\n${stdout.trim()}`, variant: "success", duration: 5000 })
-          } else {
-            const errMsg = (stderr.trim() || stdout.trim() || `Exit code ${proc.exitCode}`).slice(0, 200)
-            toast.show({ message: `Create failed: ${errMsg}`, variant: "error", duration: 6000 })
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          toast.show({ message: `Create error: ${msg}`, variant: "error", duration: 6000 })
-        }
+        const result = await createSkillDirect(name)
+        toast.show({
+          message: result.ok ? `✓ ${result.message}` : result.message,
+          variant: result.ok ? "success" : "error",
+          duration: 5000,
+        })
       }}
       onCancel={() => dialog.clear()}
     />
@@ -84,25 +239,12 @@ function DialogSkillInstall() {
       onConfirm={async (source) => {
         dialog.clear()
         toast.show({ message: `Installing from ${source}...`, variant: "info" })
-        try {
-          const proc = Bun.spawn([process.argv[0], "skill", "install", source], {
-            stdout: "pipe",
-            stderr: "pipe",
-            env: { ...process.env },
-          })
-          await proc.exited
-          const stdout = await new Response(proc.stdout).text()
-          const stderr = await new Response(proc.stderr).text()
-          if (proc.exitCode === 0) {
-            toast.show({ message: stdout.trim(), variant: "success", duration: 6000 })
-          } else {
-            const errMsg = (stderr.trim() || stdout.trim() || `Exit code ${proc.exitCode}`).slice(0, 200)
-            toast.show({ message: `Install failed: ${errMsg}`, variant: "error", duration: 6000 })
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          toast.show({ message: `Install error: ${msg}`, variant: "error", duration: 6000 })
-        }
+        const result = await installSkillDirect(source)
+        toast.show({
+          message: result.ok ? `✓ ${result.message}` : result.message,
+          variant: result.ok ? "success" : "error",
+          duration: 6000,
+        })
       }}
       onCancel={() => dialog.clear()}
     />
@@ -116,7 +258,7 @@ export function DialogSkill(props: DialogSkillProps) {
   const toast = useToast()
   dialog.setSize("large")
 
-  const [skills] = createResource(async () => {
+  const [skills, { refetch }] = createResource(async () => {
     const result = await sdk.client.app.skills()
     return result.data ?? []
   })
@@ -197,25 +339,15 @@ export function DialogSkill(props: DialogSkillProps) {
       keybind: Keybind.parse("ctrl+t")[0],
       title: "test",
       onTrigger: async (option: DialogSelectOption<string>) => {
+        const info = skillMap().get(option.value)
+        if (!info) return
         toast.show({ message: `Testing ${option.value}...`, variant: "info" })
-        try {
-          const proc = Bun.spawn([process.argv[0], "skill", "test", option.value], {
-            stdout: "pipe",
-            stderr: "pipe",
-            env: { ...process.env },
-          })
-          await proc.exited
-          const output = await new Response(proc.stdout).text()
-          const passed = output.includes("PASS")
-          toast.show({
-            message: passed ? `✓ ${option.value}: PASS` : `✗ ${option.value}: FAIL`,
-            variant: passed ? "success" : "error",
-            duration: 4000,
-          })
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          toast.show({ message: `Test error: ${msg}`, variant: "error", duration: 6000 })
-        }
+        const result = await testSkillDirect(option.value, info.location, info.content)
+        toast.show({
+          message: result.ok ? `✓ ${result.message}` : `✗ ${result.message}`,
+          variant: result.ok ? "success" : "error",
+          duration: 4000,
+        })
       },
     },
     {
