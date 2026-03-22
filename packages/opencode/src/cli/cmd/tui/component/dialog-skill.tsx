@@ -42,6 +42,22 @@ const SKILL_CATEGORIES: Record<string, string> = {
 function cacheDir(): string {
   return path.join(os.homedir(), ".cache", "altimate-code")
 }
+
+/** Resolve git worktree root from a directory, falling back to the directory itself. */
+function gitRoot(dir: string): string {
+  try {
+    const proc = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    if (proc.exitCode === 0) {
+      const root = new TextDecoder().decode(proc.stdout).trim()
+      if (root) return root
+    }
+  } catch {}
+  return dir
+}
 // altimate_change end
 
 // altimate_change start — inline skill operations (no subprocess spawning)
@@ -232,7 +248,7 @@ function DialogSkillCreate() {
         }
         toast.show({ message: `Creating "${name}"...`, variant: "info", duration: 30000 })
         try {
-          const result = await createSkillDirect(name, sdk.directory ?? process.cwd())
+          const result = await createSkillDirect(name, gitRoot(sdk.directory ?? process.cwd()))
           if (!result.ok) {
             toast.show({ message: `Create failed: ${result.message}`, variant: "error", duration: 6000 })
             return
@@ -283,7 +299,7 @@ function DialogSkillInstall() {
         }
         progress("Preparing...")
         try {
-          const result = await installSkillDirect(source, sdk.directory ?? process.cwd(), progress)
+          const result = await installSkillDirect(source, gitRoot(sdk.directory ?? process.cwd()), progress)
           if (!result.ok) {
             toast.show({ message: `Install failed: ${result.message}`, variant: "error", duration: 6000 })
             return
@@ -404,7 +420,7 @@ export function DialogSkill(props: DialogSkillProps) {
         const info = skillMap().get(option.value)
         if (!info) return
         toast.show({ message: `Testing ${option.value}...`, variant: "info" })
-        const result = await testSkillDirect(option.value, info.content, sdk.directory ?? process.cwd())
+        const result = await testSkillDirect(option.value, info.content, gitRoot(sdk.directory ?? process.cwd()))
         toast.show({
           message: result.ok ? `✓ ${result.message}` : `✗ ${result.message}`,
           variant: result.ok ? "success" : "error",
