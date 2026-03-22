@@ -4,6 +4,35 @@
     "opencode": {
       "options": {},
     },
+    // LM Studio — local inference via OpenAI-compatible API
+    // 1. Open LM Studio → Developer tab → Start Server (default port: 1234)
+    // 2. Load a model in LM Studio
+    // 3. Run: curl http://localhost:1234/v1/models   to find the model ID
+    // 4. Add the model ID to the "models" section below
+    // 5. Use as: altimate-code run -m lmstudio/<model-id>
+    "lmstudio": {
+      "name": "LM Studio",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["LMSTUDIO_API_KEY"],
+      "options": {
+        "apiKey": "lm-studio",
+        "baseURL": "http://localhost:1234/v1",
+      },
+      "models": {
+        // Add your loaded models here. The key must match the model ID from LM Studio.
+        // Examples:
+        // "qwen2.5-7b-instruct": {
+        //   "name": "Qwen 2.5 7B Instruct",
+        //   "tool_call": true,
+        //   "limit": { "context": 131072, "output": 8192 }
+        // },
+        // "deepseek-r1:70b": {
+        //   "name": "DeepSeek R1 70B",
+        //   "tool_call": true,
+        //   "limit": { "context": 65536, "output": 8192 }
+        // }
+      },
+    },
   },
   "permission": {
     "edit": {

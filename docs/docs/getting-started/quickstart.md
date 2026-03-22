@@ -130,6 +130,31 @@ Switch providers at any time by updating the `provider` and `model` fields in `a
     }
     ```
 
+=== "LM Studio (Local)"
+
+    ```json
+    {
+      "provider": {
+        "lmstudio": {
+          "name": "LM Studio",
+          "npm": "@ai-sdk/openai-compatible",
+          "options": {
+            "apiKey": "lm-studio",
+            "baseURL": "http://localhost:1234/v1"
+          },
+          "models": {
+            "qwen2.5-7b-instruct": {
+              "name": "Qwen 2.5 7B Instruct",
+              "tool_call": true,
+              "limit": { "context": 131072, "output": 8192 }
+            }
+          }
+        }
+      },
+      "model": "lmstudio/qwen2.5-7b-instruct"
+    }
+    ```
+
 === "OpenRouter"
 
     ```json
