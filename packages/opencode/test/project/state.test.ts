@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test"
 
 import { Instance } from "../../src/project/instance"
+import { State } from "../../src/project/state"
 import { tmpdir } from "../fixture/fixture"
 
 afterEach(async () => {
@@ -112,4 +113,32 @@ test("Instance.state dedupes concurrent promise initialization", async () => {
 
   expect(a).toBe(b)
   expect(n).toBe(1)
+})
+
+test("State.invalidate removes cached entry for re-initialization", async () => {
+  await using tmp = await tmpdir()
+  let n = 0
+  const init = () => ({ n: ++n })
+  const state = Instance.state(init)
+
+  const a = await Instance.provide({
+    directory: tmp.path,
+    fn: async () => state(),
+  })
+  expect(a.n).toBe(1)
+
+  // Invalidate the cached entry so next access re-initializes
+  State.invalidate(tmp.path, init)
+
+  const b = await Instance.provide({
+    directory: tmp.path,
+    fn: async () => state(),
+  })
+  expect(b.n).toBe(2)
+  expect(a).not.toBe(b)
+})
+
+test("State.invalidate on nonexistent key is a no-op", () => {
+  // Should not throw
+  State.invalidate("/nonexistent/path", () => {})
 })
