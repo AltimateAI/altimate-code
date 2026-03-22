@@ -50,7 +50,7 @@ const eventStream = {
 // altimate_change start — recap: per-session recaps
 const sessionRecaps = new Map<string, Recap>()
 const sessionUserMsgIds = new Map<string, Set<string>>() // Per-session user message IDs (cleaned up on session end)
-const MAX_RECAPS = 50
+const MAX_RECAPS = 100
 
 // Cached tracing config — loaded once at first use
 let tracingConfigLoaded = false
@@ -85,6 +85,7 @@ function getOrCreateRecap(sessionID: string): Recap | null {
     if (sessionRecaps.size >= MAX_RECAPS) {
       const oldest = sessionRecaps.keys().next().value
       if (oldest) {
+        Log.Default.warn(`[tracing] Evicting recap for session ${oldest} — ${MAX_RECAPS} concurrent sessions reached`)
         sessionRecaps.get(oldest)?.endTrace().catch(() => {})
         sessionRecaps.delete(oldest)
         sessionUserMsgIds.delete(oldest)
@@ -147,13 +148,25 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
         try {
           if (event.type === "message.updated") {
             const info = (event as any).properties?.info
-            if (info?.sessionID) {
+            // Resolve sessionID: use info.sessionID directly, or fall back to
+            // finding the session via info.parentID (assistant messages may only
+            // carry the parent message ID, not the session ID).
+            let resolvedSessionID = info?.sessionID as string | undefined
+            if (!resolvedSessionID && info?.parentID) {
+              for (const [sid, msgIds] of sessionUserMsgIds) {
+                if (msgIds.has(info.parentID)) {
+                  resolvedSessionID = sid
+                  break
+                }
+              }
+            }
+            if (resolvedSessionID) {
               // Create recap eagerly on user message (arrives before part events)
-              const recap = sessionRecaps.get(info.sessionID) ?? (info.role === "user" ? getOrCreateRecap(info.sessionID) : null)
+              const recap = sessionRecaps.get(resolvedSessionID) ?? (info.role === "user" ? getOrCreateRecap(resolvedSessionID) : null)
               if (info.role === "user") {
                 if (info.id) {
-                  if (!sessionUserMsgIds.has(info.sessionID)) sessionUserMsgIds.set(info.sessionID, new Set())
-                  sessionUserMsgIds.get(info.sessionID)!.add(info.id)
+                  if (!sessionUserMsgIds.has(resolvedSessionID)) sessionUserMsgIds.set(resolvedSessionID, new Set())
+                  sessionUserMsgIds.get(resolvedSessionID)!.add(info.id)
                 }
                 if (recap) {
                   const title = (info as any).summary?.title || (info as any).summary?.body
@@ -161,7 +174,7 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
                 }
               }
               if (info.role === "assistant") {
-                const r = recap ?? getOrCreateRecap(info.sessionID)
+                const r = recap ?? getOrCreateRecap(resolvedSessionID)
                 r?.enrichFromAssistant({
                   modelID: info.modelID,
                   providerID: info.providerID,

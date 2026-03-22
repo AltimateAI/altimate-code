@@ -49,7 +49,7 @@ function truncate(str: string, len: number): string {
 }
 
 // altimate_change start — recap: rename listTraces → listRecaps
-function listRecaps(traces: Array<{ sessionId: string; trace: TraceFile }>) {
+function listRecaps(traces: Array<{ sessionId: string; trace: TraceFile }>, tracesDir?: string) {
   if (traces.length === 0) {
     UI.println("No recaps found. Run a command with tracing enabled:")
     UI.println("  altimate-code run \"your prompt here\"")
@@ -97,7 +97,7 @@ function listRecaps(traces: Array<{ sessionId: string; trace: TraceFile }>) {
   }
 
   UI.empty()
-  UI.println(UI.Style.TEXT_DIM + `${traces.length} recap(s) in ${Recap.getTracesDir()}` + UI.Style.TEXT_NORMAL)
+  UI.println(UI.Style.TEXT_DIM + `${traces.length} recap(s) in ${Recap.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
   UI.println(UI.Style.TEXT_DIM + "View a recap: altimate-code recap view <session-id>" + UI.Style.TEXT_NORMAL)
 }
 // altimate_change end
@@ -144,7 +144,7 @@ export const RecapCommand = cmd({
 
     if (action === "list") {
       const traces = await Recap.listTraces(tracesDir)
-      listRecaps(traces.slice(0, args.limit || 20))
+      listRecaps(traces.slice(0, args.limit || 20), tracesDir)
       return
     }
 
@@ -163,7 +163,7 @@ export const RecapCommand = cmd({
       if (!match) {
         UI.error(`Recap not found: ${args.id}`)
         UI.println("Available recaps:")
-        listRecaps(traces.slice(0, 10))
+        listRecaps(traces.slice(0, 10), tracesDir)
         process.exit(1)
       }
 

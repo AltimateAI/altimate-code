@@ -303,7 +303,7 @@ export class Recap {
 
   // altimate_change start — recap: loop detection state
   private toolCallHistory: Array<{ tool: string; inputHash: string; time: number }> = []
-  private loopsDetected: Array<{ tool: string; count: number; firstSeen: number; lastSeen: number }> = []
+  private loopsDetected: Array<{ tool: string; inputHash: string; count: number; firstSeen: number; lastSeen: number }> = []
   // altimate_change end
 
   private metadata: TraceFile["metadata"] = {}
@@ -606,7 +606,7 @@ export class Recap {
         const recent = this.toolCallHistory.slice(-10)
         const matchCount = recent.filter((h) => h.tool === toolName && h.inputHash === inputHash).length
         if (matchCount >= 3) {
-          const existing = this.loopsDetected.find((l) => l.tool === toolName)
+          const existing = this.loopsDetected.find((l) => l.tool === toolName && l.inputHash === inputHash)
           if (existing) {
             existing.count = matchCount
             existing.lastSeen = now
@@ -614,6 +614,7 @@ export class Recap {
             const firstMatch = recent.find((h) => h.tool === toolName && h.inputHash === inputHash)
             this.loopsDetected.push({
               tool: toolName,
+              inputHash,
               count: matchCount,
               firstSeen: firstMatch?.time ?? now,
               lastSeen: now,
@@ -867,8 +868,9 @@ export class Recap {
       if (this.loopsDetected.length > 0) {
         trace.summary.loops = this.loopsDetected.map((l) => ({
           tool: l.tool,
+          inputHash: l.inputHash,
           count: l.count,
-          description: `${l.tool} called ${l.count} times with same input`,
+          description: `${l.tool} called ${l.count} times with same input (hash: ${l.inputHash})`,
         }))
       }
 
@@ -880,7 +882,8 @@ export class Recap {
         ? ` Warning: ${this.loopsDetected.length} loop(s) detected.`
         : ""
       const costStr = Number.isFinite(this.totalCost) ? `$${this.totalCost.toFixed(4)}` : "$0.0000"
-      trace.summary.narrative = `Completed in ${dur}. Made ${this.generationCount} LLM calls${toolsStr}.${loopWarning} Total cost: ${costStr}.`
+      const statusPrefix = error ? `Failed after ${dur}` : `Completed in ${dur}`
+      trace.summary.narrative = `${statusPrefix}. Made ${this.generationCount} LLM calls${toolsStr}.${loopWarning} Total cost: ${costStr}.`
     } catch {
       // Narrative generation must never crash the recap
     }

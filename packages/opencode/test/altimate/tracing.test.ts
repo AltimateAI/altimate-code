@@ -699,7 +699,7 @@ describe("Recap — multiple exporters", () => {
 describe("Recap.withExporters — options", () => {
   test("maxFiles option is applied to FileExporter", async () => {
     const fileExporter = new FileExporter(tmpDir)
-    const tracer = Recap.withExporters([fileExporter], { maxFiles: 2 })
+    Recap.withExporters([fileExporter], { maxFiles: 2 })
 
     // Write 4 traces
     for (let i = 0; i < 4; i++) {

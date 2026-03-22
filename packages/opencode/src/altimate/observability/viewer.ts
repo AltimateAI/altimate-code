@@ -297,12 +297,12 @@ pre.io { background: var(--bg); border: 1px solid var(--border); border-radius: 
 <div class="mini-timeline" id="mini-timeline"></div>
 <div id="prompt-area"></div>
 <div class="cards" id="cards"></div>
-<div class="tabs" id="tabs">
-  <div class="tab active" data-view="summary">Summary</div>
-  <div class="tab" data-view="waterfall">Waterfall</div>
-  <div class="tab" data-view="tree">Tree</div>
-  <div class="tab" data-view="chat">Chat</div>
-  <div class="tab" data-view="log">Log</div>
+<div class="tabs" id="tabs" role="tablist">
+  <div class="tab active" data-view="summary" role="tab" tabindex="0">Summary</div>
+  <div class="tab" data-view="waterfall" role="tab" tabindex="0">Waterfall</div>
+  <div class="tab" data-view="tree" role="tab" tabindex="0">Tree</div>
+  <div class="tab" data-view="chat" role="tab" tabindex="0">Chat</div>
+  <div class="tab" data-view="log" role="tab" tabindex="0">Log</div>
 </div>
 <div class="content">
   <div class="view active" id="v-summary"></div>
@@ -389,8 +389,7 @@ document.getElementById('cards').innerHTML = cardsData.filter(function(c) { retu
 })();
 
 // --- Tab switching ---
-document.getElementById('tabs').addEventListener('click', function(ev) {
-  var tab = ev.target.closest ? ev.target.closest('.tab') : ev.target;
+function activateTab(tab) {
   if (!tab || !tab.dataset || !tab.dataset.view) return;
   var view = tab.dataset.view;
   document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
@@ -398,6 +397,17 @@ document.getElementById('tabs').addEventListener('click', function(ev) {
   tab.classList.add('active');
   document.getElementById('v-' + view).classList.add('active');
   document.getElementById('detail').innerHTML = '';
+}
+document.getElementById('tabs').addEventListener('click', function(ev) {
+  var tab = ev.target.closest ? ev.target.closest('.tab') : ev.target;
+  activateTab(tab);
+});
+document.getElementById('tabs').addEventListener('keydown', function(ev) {
+  if (ev.key === 'Enter' || ev.key === ' ') {
+    ev.preventDefault();
+    var tab = ev.target.closest ? ev.target.closest('.tab') : ev.target;
+    activateTab(tab);
+  }
 });
 
 // --- Jump to span (from Summary outcome links) ---
@@ -824,7 +834,7 @@ function showDetail(span) {
     // Deduplicate by command — group identical commands
     var outcomeMap = {};
     cmdOutcomes.forEach(function(o) {
-      var key = o.command.slice(0, 60);
+      var key = o.command;
       if (!outcomeMap[key]) {
         outcomeMap[key] = { command: o.command, result: o.result, status: o.status, spanId: o.spanId, count: 0 };
       }
@@ -1022,6 +1032,7 @@ function showDetail(span) {
     timelineEvents.push({ type: 'gen', text: genSpans.length + ' LLM generation' + (genSpans.length > 1 ? 's' : '') + ' using ' + e(model), time: 0 });
   }
 
+  timelineEvents.sort(function(a, b) { return (a.time || 0) - (b.time || 0); });
   timelineEvents.forEach(function(item) {
     html += '<div class="sum-timeline-item"><div class="sum-timeline-dot ' + item.type + '"></div><div class="sum-timeline-text">' + e(item.text) + '</div></div>';
   });

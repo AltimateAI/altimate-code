@@ -149,7 +149,7 @@ altimate run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
 # Print logs for debugging
 altimate --print-logs --log-level DEBUG run "test query"
 
-# Disable recap for a single run
+# Disable recap for a single run (--no-trace is the backward-compatible flag name)
 altimate run --no-trace "quick question"
 ```
 
