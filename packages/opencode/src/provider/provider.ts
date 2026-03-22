@@ -947,7 +947,7 @@ export namespace Provider {
         "claude-opus-4-5": makeSnowflakeModel("claude-opus-4-5", "Claude Opus 4.5", { context: 200000, output: 32000 }),
         "claude-haiku-4-5": makeSnowflakeModel("claude-haiku-4-5", "Claude Haiku 4.5", { context: 200000, output: 16000 }),
         "claude-4-sonnet": makeSnowflakeModel("claude-4-sonnet", "Claude 4 Sonnet", { context: 200000, output: 64000 }),
-        "claude-4-opus": makeSnowflakeModel("claude-4-opus", "Claude 4 Opus", { context: 200000, output: 32000 }),
+        // claude-4-opus: documented but gated (403 "account not allowed" on tested accounts)
         "claude-3-7-sonnet": makeSnowflakeModel("claude-3-7-sonnet", "Claude 3.7 Sonnet", { context: 200000, output: 16000 }),
         "claude-3-5-sonnet": makeSnowflakeModel("claude-3-5-sonnet", "Claude 3.5 Sonnet", { context: 200000, output: 8192 }),
         // OpenAI models — tool calling supported
@@ -956,7 +956,7 @@ export namespace Provider {
         "openai-gpt-5-mini": makeSnowflakeModel("openai-gpt-5-mini", "OpenAI GPT-5 Mini", { context: 1047576, output: 32768 }),
         "openai-gpt-5-nano": makeSnowflakeModel("openai-gpt-5-nano", "OpenAI GPT-5 Nano", { context: 1047576, output: 32768 }),
         "openai-gpt-5-chat": makeSnowflakeModel("openai-gpt-5-chat", "OpenAI GPT-5 Chat", { context: 1047576, output: 32768 }),
-        "openai-gpt-oss-120b": makeSnowflakeModel("openai-gpt-oss-120b", "OpenAI GPT OSS 120B", { context: 131072, output: 32768 }),
+        // openai-gpt-oss-120b: documented but returns 500 (not yet stable)
         // Meta Llama — no tool calling
         "llama4-maverick": makeSnowflakeModel("llama4-maverick", "Llama 4 Maverick", { context: 1048576, output: 4096 }, { toolcall: false }),
         "snowflake-llama-3.3-70b": makeSnowflakeModel("snowflake-llama-3.3-70b", "Snowflake Llama 3.3 70B", { context: 128000, output: 4096 }, { toolcall: false }),

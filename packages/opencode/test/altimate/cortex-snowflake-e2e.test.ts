@@ -236,7 +236,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
       "claude-haiku-4-5", "claude-4-sonnet", "claude-4-opus", "claude-3-7-sonnet", "claude-3-5-sonnet",
       // OpenAI
       "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5-mini", "openai-gpt-5-nano",
-      "openai-gpt-5-chat", "openai-gpt-oss-120b",
+      "openai-gpt-5-chat",
       // Meta Llama
       "llama4-maverick", "snowflake-llama-3.3-70b", "llama3.1-70b", "llama3.1-405b", "llama3.1-8b",
       // Mistral
