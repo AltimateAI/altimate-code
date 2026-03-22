@@ -285,7 +285,7 @@ function DialogSkillInstall() {
           toast.show({ message: "No source provided.", variant: "error", duration: 4000 })
           return
         }
-        toast.show({ message: `Installing from ${source}...\nThis may take a moment while the repo is cloned.`, variant: "info", duration: 60000 })
+        toast.show({ message: `Installing from ${source}...\nThis may take a moment while the repo is cloned.`, variant: "info", duration: 600000 })
         try {
           const result = await installSkillDirect(source)
           if (!result.ok) {
