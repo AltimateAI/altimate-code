@@ -490,7 +490,7 @@ const SkillInstallCommand = cmd({
         default: false,
       }),
   async handler(args) {
-    const source = (args.source as string).trim()
+    let source = (args.source as string).trim()
     const isGlobal = args.global as boolean
 
     if (!source) {
@@ -506,6 +506,12 @@ const SkillInstallCommand = cmd({
 
       // Determine source type and fetch
       let skillDir: string
+
+      // Normalize GitHub web URLs (e.g. /tree/main/path) to clonable repo URLs
+      const ghWebMatch = source.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\/(?:tree|blob)\/.*)?$/)
+      if (ghWebMatch) {
+        source = `https://github.com/${ghWebMatch[1]}.git`
+      }
 
       if (source.startsWith("http://") || source.startsWith("https://")) {
         // URL: clone the repo

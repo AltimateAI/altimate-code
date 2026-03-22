@@ -107,9 +107,17 @@ async function installSkillDirect(
   let skillDir: string
   let isTmp = false
 
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
-    const url = trimmed.startsWith("http") ? trimmed : `https://github.com/${trimmed}.git`
-    const label = trimmed.startsWith("http") ? trimmed.replace(/https?:\/\/github\.com\//, "") : trimmed
+  // Normalize GitHub web URLs (e.g. https://github.com/owner/repo/tree/main/path)
+  // to clonable repo URLs (https://github.com/owner/repo.git)
+  let normalized = trimmed
+  const ghWebMatch = trimmed.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\/(?:tree|blob)\/.*)?$/)
+  if (ghWebMatch) {
+    normalized = `https://github.com/${ghWebMatch[1]}.git`
+  }
+
+  if (normalized.startsWith("http://") || normalized.startsWith("https://") || normalized.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
+    const url = normalized.startsWith("http") ? normalized : `https://github.com/${normalized}.git`
+    const label = url.replace(/https?:\/\/github\.com\//, "").replace(/\.git$/, "")
     onProgress?.(`Cloning ${label}...`)
     const tmpDir = path.join(cacheDir(), "skill-install-" + Date.now())
     isTmp = true
@@ -374,31 +382,8 @@ export function DialogSkill(props: DialogSkillProps) {
     })
   })
 
-  // Keybind actions: view, edit, test, create, install
+  // Keybind actions: edit, create, install, remove
   const keybinds = createMemo(() => [
-    {
-      keybind: Keybind.parse("ctrl+o")[0],
-      title: "view",
-      onTrigger: async (option: DialogSelectOption<string>) => {
-        const info = skillMap().get(option.value)
-        if (!info) return
-        const tools = detectToolReferences(info.content)
-        const lines = [
-          `Skill: ${option.value}`,
-          info.description,
-          "",
-          `Location: ${info.location}`,
-          tools.length > 0 ? `Tools: ${tools.join(", ")}` : null,
-          "",
-          "Content:",
-          "─".repeat(40),
-          info.content.slice(0, 800) + (info.content.length > 800 ? "\n..." : ""),
-        ]
-          .filter((l) => l !== null)
-          .join("\n")
-        toast.show({ message: lines, variant: "info", duration: 10000 })
-      },
-    },
     {
       keybind: Keybind.parse("ctrl+e")[0],
       title: "edit",
@@ -411,21 +396,6 @@ export function DialogSkill(props: DialogSkillProps) {
         const editor = process.env.EDITOR || process.env.VISUAL || "vi"
         dialog.clear()
         spawn(editor, [info.location], { stdio: "inherit", detached: true }).unref()
-      },
-    },
-    {
-      keybind: Keybind.parse("ctrl+t")[0],
-      title: "test",
-      onTrigger: async (option: DialogSelectOption<string>) => {
-        const info = skillMap().get(option.value)
-        if (!info) return
-        toast.show({ message: `Testing ${option.value}...`, variant: "info" })
-        const result = await testSkillDirect(option.value, info.content, gitRoot(sdk.directory ?? process.cwd()))
-        toast.show({
-          message: result.ok ? `✓ ${result.message}` : `✗ ${result.message}`,
-          variant: result.ok ? "success" : "error",
-          duration: 4000,
-        })
       },
     },
     {
