@@ -1347,7 +1347,7 @@ function showDetail(span) {
     setTimeout(function() { toast.classList.remove('show'); }, 2500);
   }
 
-  // Build markdown summary
+  // Build markdown summary — self-contained, doesn't depend on Summary IIFE variables
   function buildMarkdownSummary() {
     var s = t.summary || {};
     var title = t.metadata.title || t.sessionId || 'Session';
@@ -1358,41 +1358,54 @@ function showDetail(span) {
 
     // Prompt
     if (t.metadata.prompt) {
+      var promptLine = t.metadata.prompt.replace(/^["']+|["']+$/g, '').replace(/^#+\\s*/gm, '').trim().split('\\n').filter(function(l) { return l.trim().length > 5; })[0] || '';
       lines.push('### What was asked');
-      lines.push('> ' + t.metadata.prompt.split('\\n')[0].slice(0, 200));
+      lines.push('> ' + promptLine.slice(0, 200));
       lines.push('');
     }
 
-    // Files changed
-    var changedKeys = Object.keys(changedFiles);
-    if (changedKeys.length > 0) {
+    // Compute files from spans (independent of Summary IIFE)
+    var mdChanged = {};
+    var mdReadCount = 0;
+    var mdDbtCount = 0;
+    var mdSqlCount = 0;
+    var mdErrCount = 0;
+    var mdCmdCount = 0;
+    nonSession.forEach(function(sp) {
+      if (sp.kind !== 'tool') { if (sp.status === 'error') mdErrCount++; return; }
+      var nm = (sp.name || '').toLowerCase();
+      var inp = (sp.input && typeof sp.input === 'object') ? sp.input : {};
+      var fp = inp.file_path || inp.filePath || inp.path || null;
+      if (nm.indexOf('write') >= 0 || nm.indexOf('edit') >= 0) { if (fp) mdChanged[fp] = nm.indexOf('write') >= 0 ? 'new' : 'edited'; }
+      else if (nm.indexOf('read') >= 0) { mdReadCount++; }
+      else if (nm === 'bash') {
+        var cmd = inp.command || '';
+        var parts = cmd.split(/\\s*&&\\s*/);
+        var last = parts[parts.length - 1].trim().toLowerCase();
+        if (/\\bdbt\\s+/.test(last)) mdDbtCount++;
+        else if (!/^(ls|cd|cat|head|tail|echo|pwd|which|wc|file|mkdir|test|find|stat)\\b/.test(last)) mdCmdCount++;
+      }
+      else if (nm.indexOf('sql') >= 0) mdSqlCount++;
+      if (sp.status === 'error') mdErrCount++;
+    });
+
+    var mdChangedKeys = Object.keys(mdChanged);
+    if (mdChangedKeys.length > 0) {
       lines.push('### Files changed');
-      changedKeys.forEach(function(fp) {
-        lines.push('- \\x60' + shortPath(fp) + '\\x60 (' + (changedFiles[fp] === 'write' ? 'new' : 'edited') + ')');
+      mdChangedKeys.forEach(function(fp) {
+        var short = fp.split('/').slice(-3).join('/');
+        lines.push('- ' + short + ' (' + mdChanged[fp] + ')');
       });
       lines.push('');
     }
 
-    // Outcome
-    if (cmdOutcomes.length > 0) {
-      lines.push('### Outcome');
-      cmdOutcomes.forEach(function(o) {
-        lines.push('- ' + (o.status === 'error' ? '\\u274C ' : '\\u2705 ') + o.command + ': ' + o.result);
-      });
-      lines.push('');
-    }
-
-    // What happened
     lines.push('### What happened');
-    var readCount = Object.keys(readFiles).length;
-    if (readCount > 0) lines.push('- Read ' + readCount + ' files for context');
-    if (changedKeys.length > 0) lines.push('- Modified ' + changedKeys.length + ' file(s)');
-    if (dbtOps.length > 0) lines.push('- Ran ' + dbtOps.length + ' dbt command(s)');
-    if (sqlQueries.length > 0) lines.push('- Executed ' + sqlQueries.length + ' SQL query/queries');
-    var meaningfulBash = bashCmds.filter(function(c) { if (c.isDbt) return false; var d = (c.displayCommand || c.command).trim().toLowerCase(); return !/^(ls|cd|cat|head|tail|echo|pwd|which|wc|file|mkdir|test|find|stat)\\b/.test(d); });
-    if (meaningfulBash.length > 0) lines.push('- Ran ' + meaningfulBash.length + ' shell command(s)');
-    var errCount = nonSession.filter(function(sp) { return sp.status === 'error'; }).length;
-    if (errCount > 0) lines.push('- ' + errCount + ' error(s) encountered');
+    if (mdReadCount > 0) lines.push('- Read ' + mdReadCount + ' files for context');
+    if (mdChangedKeys.length > 0) lines.push('- Modified ' + mdChangedKeys.length + ' file(s)');
+    if (mdDbtCount > 0) lines.push('- Ran ' + mdDbtCount + ' dbt command(s)');
+    if (mdSqlCount > 0) lines.push('- Executed ' + mdSqlCount + ' SQL query/queries');
+    if (mdCmdCount > 0) lines.push('- Ran ' + mdCmdCount + ' shell command(s)');
+    if (mdErrCount > 0) lines.push('- ' + mdErrCount + ' error(s) encountered');
     lines.push('');
     lines.push('---');
     lines.push('_Generated with [Altimate Code](https://altimate.ai/recap)_');
