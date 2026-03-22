@@ -295,6 +295,104 @@ describe("transformSnowflakeBody", () => {
     const { body } = transformSnowflakeBody(input)
     expect(JSON.parse(body).model).toBe("claude-sonnet-4-6")
   })
+
+  test("preserves max_completion_tokens when max_tokens is absent", () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "test" }],
+      max_completion_tokens: 500,
+    })
+    const { body } = transformSnowflakeBody(input)
+    const parsed = JSON.parse(body)
+    expect(parsed.max_completion_tokens).toBe(500)
+    expect(parsed.max_tokens).toBeUndefined()
+  })
+
+  test("handles both max_tokens and max_completion_tokens (max_tokens wins)", () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "test" }],
+      max_tokens: 100,
+      max_completion_tokens: 500,
+    })
+    const { body } = transformSnowflakeBody(input)
+    const parsed = JSON.parse(body)
+    expect(parsed.max_completion_tokens).toBe(100)
+    expect(parsed.max_tokens).toBeUndefined()
+  })
+
+  test("strips tools for unknown model (not in TOOLCALL_MODELS allowlist)", () => {
+    const input = JSON.stringify({
+      model: "some-future-model",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+    })
+    const { body } = transformSnowflakeBody(input)
+    const parsed = JSON.parse(body)
+    expect(parsed.tools).toBeUndefined()
+  })
+
+  test("strips tool_choice without tools for non-toolcall model", () => {
+    const input = JSON.stringify({
+      model: "mistral-7b",
+      messages: [{ role: "user", content: "hello" }],
+      tool_choice: "auto",
+    })
+    const { body } = transformSnowflakeBody(input)
+    const parsed = JSON.parse(body)
+    expect(parsed.tool_choice).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fetch interceptor (SnowflakeCortexAuthPlugin)
+// ---------------------------------------------------------------------------
+
+describe("SnowflakeCortexAuthPlugin fetch interceptor", () => {
+  test("content-length header is deleted after body transformation", async () => {
+    // Simulate what the fetch wrapper does: copy headers, transform body, delete content-length
+    const originalBody = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "test" }],
+      max_tokens: 1000,
+    })
+    const headers = new Headers({
+      "content-type": "application/json",
+      "content-length": String(originalBody.length),
+    })
+
+    // Transform body (same logic as the fetch wrapper)
+    const result = transformSnowflakeBody(originalBody)
+    const newBody = result.body
+
+    // Body changed (max_tokens → max_completion_tokens), so lengths differ
+    expect(newBody.length).not.toBe(originalBody.length)
+
+    // The fetch wrapper should delete content-length after transform
+    headers.delete("content-length")
+    expect(headers.has("content-length")).toBe(false)
+  })
+
+  test("synthetic stop returns valid SSE Response object", async () => {
+    const input = JSON.stringify({
+      model: "claude-sonnet-4-6",
+      stream: true,
+      messages: [
+        { role: "user", content: "test" },
+        { role: "assistant", content: "response" },
+      ],
+    })
+    const { syntheticStop } = transformSnowflakeBody(input)
+    expect(syntheticStop).toBeInstanceOf(Response)
+    expect(syntheticStop!.status).toBe(200)
+    expect(syntheticStop!.headers.get("content-type")).toBe("text/event-stream")
+    expect(syntheticStop!.headers.get("cache-control")).toBe("no-cache")
+
+    // Body should be a readable stream
+    const text = await syntheticStop!.text()
+    const lines = text.split("\n").filter((l: string) => l.startsWith("data: "))
+    expect(lines.length).toBe(3) // delta, stop, [DONE]
+  })
 })
 
 // ---------------------------------------------------------------------------

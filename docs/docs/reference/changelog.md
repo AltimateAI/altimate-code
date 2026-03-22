@@ -21,6 +21,16 @@ After upgrading, the TUI welcome banner shows what changed since your previous v
 
 ---
 
+## [0.5.6] - 2026-03-21
+
+### Added
+
+- Snowflake Cortex as a built-in AI provider with PAT authentication (#349)
+  - 26 models: Claude, OpenAI, Llama, Mistral, DeepSeek
+  - Tool calling support for Claude and OpenAI models
+  - Zero token cost — billing via Snowflake credits
+  - Cortex-specific request transforms (`max_completion_tokens`, tool stripping, synthetic stop)
+
 ## [0.5.0] - 2026-03-18
 
 ### Added

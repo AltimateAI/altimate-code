@@ -79,6 +79,7 @@ Models are referenced as `provider/model-name`:
 | Ollama | `ollama/llama3.1` |
 | OpenRouter | `openrouter/anthropic/claude-sonnet-4-6` |
 | Copilot | `copilot/gpt-4o` |
+| Snowflake Cortex | `snowflake-cortex/claude-sonnet-4-6` |
 | Custom | `my-provider/my-model` |
 
 See [Providers](providers.md) for full provider configuration details.
