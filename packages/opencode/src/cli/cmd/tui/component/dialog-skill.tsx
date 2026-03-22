@@ -78,8 +78,14 @@ async function createSkillDirect(name: string): Promise<{ ok: boolean; message: 
   return { ok: true, message: `Created skill + tool at .opencode/skills/${name}/` }
 }
 
+/** Progress callback for live status updates. */
+type ProgressFn = (status: string) => void
+
 /** Install skills from a GitHub repo or local path directly. */
-async function installSkillDirect(source: string): Promise<{ ok: boolean; message: string; installedNames?: string[] }> {
+async function installSkillDirect(
+  source: string,
+  onProgress?: ProgressFn,
+): Promise<{ ok: boolean; message: string; installedNames?: string[] }> {
   const trimmed = source.trim()
   if (!trimmed) return { ok: false, message: "Source is required" }
 
@@ -88,23 +94,10 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
   let skillDir: string
   let isTmp = false
 
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-    // URL — use async spawn so TUI doesn't freeze
-    const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
-    isTmp = true
-    const proc = Bun.spawn(["git", "clone", "--depth", "1", trimmed, tmpDir], {
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    await proc.exited
-    if (proc.exitCode !== 0) {
-      const stderr = await new Response(proc.stderr).text()
-      return { ok: false, message: `Failed to clone: ${stderr.trim().slice(0, 150)}` }
-    }
-    skillDir = tmpDir
-  } else if (trimmed.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
-    // GitHub shorthand — use async spawn
-    const url = `https://github.com/${trimmed}.git`
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)) {
+    const url = trimmed.startsWith("http") ? trimmed : `https://github.com/${trimmed}.git`
+    const label = trimmed.startsWith("http") ? trimmed.replace(/https?:\/\/github\.com\//, "") : trimmed
+    onProgress?.(`Cloning ${label}...`)
     const tmpDir = path.join(Global.Path.cache, "skill-install-" + Date.now())
     isTmp = true
     const proc = Bun.spawn(["git", "clone", "--depth", "1", url, tmpDir], {
@@ -114,17 +107,18 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
     await proc.exited
     if (proc.exitCode !== 0) {
       const stderr = await new Response(proc.stderr).text()
-      return { ok: false, message: `Failed to clone ${trimmed}: ${stderr.trim().slice(0, 150)}` }
+      return { ok: false, message: `Failed to clone: ${stderr.trim().slice(0, 150)}` }
     }
+    onProgress?.(`Cloned. Scanning for skills...`)
     skillDir = tmpDir
   } else {
-    // Local path
     const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(trimmed)
     try {
       await fs.access(resolved)
     } catch {
       return { ok: false, message: `Path not found: ${resolved}` }
     }
+    onProgress?.(`Scanning ${resolved}...`)
     skillDir = resolved
   }
 
@@ -138,6 +132,8 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
     if (isTmp) await fs.rm(skillDir, { recursive: true, force: true })
     return { ok: false, message: `No SKILL.md files found in ${source}` }
   }
+
+  onProgress?.(`Found ${matches.length} skill(s). Installing...`)
 
   let installed = 0
   const names: string[] = []
@@ -162,9 +158,13 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
     }
     names.push(skillName)
     installed++
+    onProgress?.(`Installed ${installed}/${matches.length}: ${skillName}`)
   }
 
-  if (isTmp) await fs.rm(skillDir, { recursive: true, force: true })
+  if (isTmp) {
+    onProgress?.(`Cleaning up...`)
+    await fs.rm(skillDir, { recursive: true, force: true })
+  }
   if (installed === 0) return { ok: true, message: "No new skills installed (all already exist)" }
   return { ok: true, message: `Installed ${installed} skill(s): ${names.join(", ")}`, installedNames: names }
 }
@@ -285,9 +285,12 @@ function DialogSkillInstall() {
           toast.show({ message: "No source provided.", variant: "error", duration: 4000 })
           return
         }
-        toast.show({ message: `Installing from ${source}...\nThis may take a moment while the repo is cloned.`, variant: "info", duration: 600000 })
+        const progress = (status: string) => {
+          toast.show({ message: `Installing from ${source}\n\n${status}`, variant: "info", duration: 600000 })
+        }
+        progress("Preparing...")
         try {
-          const result = await installSkillDirect(source)
+          const result = await installSkillDirect(source, progress)
           if (!result.ok) {
             toast.show({ message: `Install failed: ${result.message}`, variant: "error", duration: 6000 })
             return
@@ -297,6 +300,7 @@ function DialogSkillInstall() {
             return
           }
           const names = result.installedNames ?? []
+          progress("Verifying skills loaded...")
           const verified = await reloadAndVerify(sdk, names)
           const lines = [
             `✓ Installed ${verified.length} skill(s)`,
