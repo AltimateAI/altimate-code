@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-03-22
+
+### Added
+
+- **Impact analysis tool** — analyze downstream blast radius of dbt model/column changes across the DAG with severity classification (SAFE/LOW/MEDIUM/HIGH) and actionable recommendations (#350)
+- **Training import tool** — bulk import training entries from markdown style guides, glossaries, and playbooks with dry-run preview and capacity management (#350)
+- **CI check command** — `/ci-check` template for pre-merge SQL validation that analyzes changed files, checks dbt integrity, and generates CI-friendly reports (#350)
+- **`--max-turns` budget limit** — CLI option to cap agent steps for CI/enterprise governance (#350)
+- **LM Studio provider** — local Qwen model support via LM Studio (#340)
+- **Improved onboarding** — first-time user hints on home screen, beginner-focused tips, practical quickstart examples (#350)
+- **Expanded `/discover`** — detects additional cloud warehouse credentials (Snowflake, BigQuery, PostgreSQL, Databricks, Redshift) (#350)
+- **Automated test discovery** — `/test-discovery` command for hourly test generation with critic validation (#364, #365, #366, #367)
+
+### Fixed
+
+- Yolo mode now respects explicit deny rules from session config instead of auto-approving everything (#350)
+- Training limits increased from 20→50 entries per kind and 16KB→48KB budget for enterprise teams (#350)
+
+### Testing
+
+- E2E tests for trace viewer with adversarial cases (#353)
+- Bash tool PATH injection tests (#366)
+- `fn()` wrapper and `skillSource` trust classification tests (#367)
+- `AsyncQueue`/`work()` utility and `State.invalidate` coverage (#364)
+
 ## [0.5.6] - 2026-03-22
 
 ### Added

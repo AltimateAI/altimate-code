@@ -3,9 +3,15 @@ import z from "zod"
 
 export const TRAINING_TAG = "training"
 export const TRAINING_ID_PREFIX = "training"
-export const TRAINING_MAX_PATTERNS_PER_KIND = 20
-// Budget scales with available context. Default is generous; users can override via config.
-export const TRAINING_BUDGET = 16000
+// altimate_change start — increase training limits for enterprise teams
+// 20 entries per kind is too restrictive for teams with 200+ dbt models spanning
+// multiple domains. 50 entries accommodates real enterprise glossaries, style guides,
+// and domain-specific conventions.
+export const TRAINING_MAX_PATTERNS_PER_KIND = 50
+// Budget scales with available context. 48KB accommodates enterprise teams with
+// rich glossaries, standards, and playbooks across multiple data domains.
+export const TRAINING_BUDGET = 48000
+// altimate_change end
 
 export const TrainingKind = z.enum(["pattern", "rule", "glossary", "standard", "context", "playbook"])
 export type TrainingKind = z.infer<typeof TrainingKind>

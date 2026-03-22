@@ -30,9 +30,29 @@ function parse(tip: string): TipPart[] {
   return parts
 }
 
-export function Tips() {
+// altimate_change start — prioritized beginner & data engineering tips
+const BEGINNER_TIPS = [
+  "Run {highlight}/connect{/highlight} to add your API key and get started",
+  "Run {highlight}/discover{/highlight} to auto-detect your dbt project and warehouse connections",
+  "Press {highlight}Ctrl+P{/highlight} to see all available commands",
+  "Press {highlight}Tab{/highlight} to cycle between Build and Plan agents",
+  "Use {highlight}/cost-report{/highlight} to analyze warehouse spending",
+  "Use {highlight}/dbt-docs{/highlight} to generate dbt model documentation",
+  "Use {highlight}/generate-tests{/highlight} to auto-generate dbt tests for your models",
+  "Use {highlight}/sql-review{/highlight} to review SQL for correctness and performance",
+  "Use {highlight}/migrate-sql{/highlight} to translate SQL between warehouse dialects",
+  "Use {highlight}/ci-check{/highlight} to run pre-merge SQL validation on changed files",
+  "Ask me to analyze a SQL query for anti-patterns — I'll detect 19+ issue types with zero false positives",
+  "Ask me to trace column-level lineage for any SQL query across dialects",
+]
+// altimate_change end
+
+// altimate_change start — first-time user beginner tips
+export function Tips(props: { isFirstTime?: boolean }) {
   const theme = useTheme().theme
-  const parts = parse(TIPS[Math.floor(Math.random() * TIPS.length)])
+  const pool = props.isFirstTime ? BEGINNER_TIPS : TIPS
+  const parts = parse(pool[Math.floor(Math.random() * pool.length)])
+  // altimate_change end
 
   return (
     <box flexDirection="row" maxWidth="100%">

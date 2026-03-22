@@ -173,7 +173,7 @@ async function activeView(page: Page) {
 /** Count JS errors on the page */
 function collectErrors(page: Page): string[] {
   const errors: string[] = []
-  page.on("pageerror", (err) => errors.push(err.message))
+  page.on("pageerror", (err: Error) => errors.push(err.message))
   return errors
 }
 
@@ -322,7 +322,7 @@ describe.skipIf(!canRunBrowserTests)("Trace Viewer E2E", () => {
     // Check each entry points to the right span
     for (let i = 0; i < entries.length; i++) {
       const detail = await clickLogEntry(page, i)
-      expect(detail).toBe(entries[i].name)
+      expect(detail).toBe(entries[i]!.name as string | null)
     }
     await page.close()
   })
