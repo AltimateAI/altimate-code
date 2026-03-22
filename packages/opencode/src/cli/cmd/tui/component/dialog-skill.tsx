@@ -442,6 +442,44 @@ export function DialogSkill(props: DialogSkillProps) {
         dialog.replace(() => <DialogSkillInstall />)
       },
     },
+    {
+      keybind: Keybind.parse("ctrl+d")[0],
+      title: "remove",
+      onTrigger: async (option: DialogSelectOption<string>) => {
+        const info = skillMap().get(option.value)
+        if (!info) return
+        if (info.location.startsWith("builtin:")) {
+          toast.show({ message: "Cannot remove built-in skills.", variant: "info", duration: 3000 })
+          return
+        }
+        // Check if tracked by git (part of the repo)
+        const gitCheck = Bun.spawnSync(["git", "ls-files", "--error-unmatch", info.location], {
+          cwd: path.dirname(path.dirname(info.location)),
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        if (gitCheck.exitCode === 0) {
+          toast.show({ message: `Cannot remove "${option.value}" — it is part of the repository.`, variant: "info", duration: 4000 })
+          return
+        }
+        try {
+          const skillDir = path.dirname(info.location)
+          await fs.rm(skillDir, { recursive: true, force: true })
+          // Also remove paired tool
+          const root = gitRoot(sdk.directory ?? process.cwd())
+          const toolFile = path.join(root, ".opencode", "tools", option.value)
+          await fs.rm(toolFile, { force: true }).catch(() => {})
+          // Reload server cache
+          await reloadAndVerify(sdk, [])
+          toast.show({ message: `Removed "${option.value}".`, variant: "success", duration: 4000 })
+          // Close and let user reopen to see updated list
+          dialog.clear()
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          toast.show({ message: `Remove failed: ${msg.slice(0, 150)}`, variant: "error", duration: 5000 })
+        }
+      },
+    },
   ])
   // altimate_change end
 

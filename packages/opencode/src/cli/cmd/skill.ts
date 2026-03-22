@@ -613,6 +613,62 @@ const SkillInstallCommand = cmd({
   },
 })
 
+const SkillRemoveCommand = cmd({
+  command: "remove <name>",
+  describe: "remove an installed skill and its paired CLI tool",
+  builder: (yargs) =>
+    yargs.positional("name", {
+      type: "string",
+      describe: "name of the skill to remove",
+      demandOption: true,
+    }),
+  async handler(args) {
+    const name = args.name as string
+    await bootstrap(process.cwd(), async () => {
+      const skill = await Skill.get(name)
+      if (!skill) {
+        process.stderr.write(`Error: Skill "${name}" not found.` + EOL)
+        process.exit(1)
+      }
+
+      if (skill.location.startsWith("builtin:")) {
+        process.stderr.write(`Error: Cannot remove built-in skill "${name}".` + EOL)
+        process.exit(1)
+      }
+
+      // Check if skill is tracked by git (part of the repo, not user-installed)
+      const skillDir = path.dirname(skill.location)
+      const gitCheck = Bun.spawnSync(["git", "ls-files", "--error-unmatch", skill.location], {
+        cwd: path.dirname(skillDir),
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      if (gitCheck.exitCode === 0) {
+        process.stderr.write(`Error: Cannot remove "${name}" — it is tracked by git.` + EOL)
+        process.stderr.write(`This skill is part of the repository, not user-installed.` + EOL)
+        process.exit(1)
+      }
+
+      // Remove skill directory
+      await fs.rm(skillDir, { recursive: true, force: true })
+      process.stdout.write(`  ✓ Removed skill: ${skillDir}` + EOL)
+
+      // Remove paired CLI tool if it exists
+      const rootDir = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+      const toolFile = path.join(rootDir, ".opencode", "tools", name)
+      try {
+        await fs.access(toolFile)
+        await fs.rm(toolFile, { force: true })
+        process.stdout.write(`  ✓ Removed tool:  ${toolFile}` + EOL)
+      } catch {
+        // No paired tool, that's fine
+      }
+
+      process.stdout.write(EOL + `Skill "${name}" removed.` + EOL)
+    })
+  },
+})
+
 // ---------------------------------------------------------------------------
 // Top-level skill command
 // ---------------------------------------------------------------------------
@@ -627,6 +683,7 @@ export const SkillCommand = cmd({
       .command(SkillTestCommand)
       .command(SkillShowCommand)
       .command(SkillInstallCommand)
+      .command(SkillRemoveCommand)
       .demandCommand(),
   async handler() {},
 })
