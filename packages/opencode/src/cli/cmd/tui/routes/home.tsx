@@ -145,7 +145,9 @@ export function Home() {
         {/* altimate_change end */}
         <box height={4} minHeight={0} width="100%" maxWidth={75} alignItems="center" paddingTop={3} flexShrink={1}>
           <Show when={showTips()}>
+            {/* altimate_change start — pass first-time flag for beginner tips */}
             <Tips isFirstTime={isFirstTimeUser()} />
+            {/* altimate_change end */}
           </Show>
         </box>
         <box flexGrow={1} minHeight={0} />

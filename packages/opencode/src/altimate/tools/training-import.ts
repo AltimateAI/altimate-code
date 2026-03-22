@@ -40,6 +40,7 @@ export const TrainingImportTool = Tool.define("training_import", {
       .default(20)
       .describe("Maximum number of entries to import from the document"),
   }),
+  // @ts-expect-error tsgo TS2719 false positive — identical pattern works in other tools
   async execute(args, ctx) {
     try {
       // Read the markdown file

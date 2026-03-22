@@ -13,6 +13,7 @@ Summarize the scan results in a friendly way:
 - Installed data tools (dbt, sqlfluff, etc.)
 - Configuration files found
 
+altimate_change start — detect additional cloud credentials
 Step 3 — Check for additional cloud warehouse credentials:
 Beyond what project_scan found, also check for:
 - `~/.snowsql/config` for Snowflake connections (parse [connections] sections)
@@ -67,3 +68,4 @@ Present a summary of what was set up, then suggest what the user can do next:
 - `sql_execute` — Run queries against any connected warehouse
 
 $ARGUMENTS
+altimate_change end

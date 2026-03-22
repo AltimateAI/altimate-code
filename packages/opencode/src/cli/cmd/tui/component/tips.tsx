@@ -47,10 +47,12 @@ const BEGINNER_TIPS = [
 ]
 // altimate_change end
 
+// altimate_change start — first-time user beginner tips
 export function Tips(props: { isFirstTime?: boolean }) {
   const theme = useTheme().theme
   const pool = props.isFirstTime ? BEGINNER_TIPS : TIPS
   const parts = parse(pool[Math.floor(Math.random() * pool.length)])
+  // altimate_change end
 
   return (
     <box flexDirection="row" maxWidth="100%">
