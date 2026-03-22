@@ -506,7 +506,7 @@ const SkillInstallCommand = cmd({
         default: false,
       }),
   async handler(args) {
-    let source = (args.source as string).trim()
+    let source = (args.source as string).trim().replace(/\.git$/, "")
     const isGlobal = args.global as boolean
 
     if (!source) {
