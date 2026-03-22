@@ -6,6 +6,7 @@ import { RouteProvider, useRoute } from "@tui/context/route"
 import { Switch, Match, createEffect, untrack, ErrorBoundary, createSignal, onMount, batch, Show, on } from "solid-js"
 import { win32DisableProcessedInput, win32FlushInputBuffer, win32InstallCtrlCGuard } from "./win32"
 import { Installation } from "@/installation"
+import { UPGRADE_KV_KEY } from "./component/upgrade-indicator-utils"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
@@ -842,12 +843,19 @@ function App() {
 
   // altimate_change start — branding: altimate upgrade
   sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
+    kv.set(UPGRADE_KV_KEY, evt.properties.version)
     toast.show({
       variant: "info",
       title: "Update Available",
       message: `Altimate Code v${evt.properties.version} is available. Run 'altimate upgrade' to update manually.`,
       duration: 10000,
     })
+  })
+
+  sdk.event.on(Installation.Event.Updated.type, () => {
+    if (kv.get(UPGRADE_KV_KEY) !== Installation.VERSION) {
+      kv.set(UPGRADE_KV_KEY, Installation.VERSION)
+    }
   })
   // altimate_change end
 

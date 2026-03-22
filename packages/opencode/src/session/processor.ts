@@ -16,6 +16,9 @@ import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 import { PartID } from "./schema"
 import type { SessionID, MessageID } from "./schema"
+// altimate_change start — import Telemetry for per-generation token tracking
+import { Telemetry } from "@/altimate/telemetry"
+// altimate_change end
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -35,6 +38,9 @@ export namespace SessionProcessor {
     let blocked = false
     let attempt = 0
     let needsCompaction = false
+    // altimate_change start — per-step generation telemetry
+    let stepStartTime = Date.now()
+    // altimate_change end
 
     const result = {
       get message() {
@@ -233,6 +239,9 @@ export namespace SessionProcessor {
 
                 case "start-step":
                   snapshot = await Snapshot.track()
+                  // altimate_change start — record step start time for generation telemetry duration
+                  stepStartTime = Date.now()
+                  // altimate_change end
                   await Session.updatePart({
                     id: PartID.ascending(),
                     messageID: input.assistantMessage.id,
@@ -251,6 +260,26 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  // altimate_change start — emit per-generation telemetry with token breakdown
+                  // Optional fields are only included when the provider actually returns them.
+                  Telemetry.track({
+                    type: "generation",
+                    timestamp: Date.now(),
+                    session_id: input.sessionID,
+                    message_id: input.assistantMessage.id,
+                    model_id: input.model.id,
+                    provider_id: input.model.providerID,
+                    agent: input.assistantMessage.agent,
+                    finish_reason: value.finishReason ?? "unknown",
+                    cost: usage.cost,
+                    duration_ms: Date.now() - stepStartTime,
+                    tokens_input: usage.tokens.input,
+                    tokens_output: usage.tokens.output,
+                    ...(value.usage.reasoningTokens !== undefined && { tokens_reasoning: usage.tokens.reasoning }),
+                    ...(value.usage.cachedInputTokens !== undefined && { tokens_cache_read: usage.tokens.cache.read }),
+                    ...(usage.tokens.cache.write > 0 && { tokens_cache_write: usage.tokens.cache.write }),
+                  })
+                  // altimate_change end
                   await Session.updatePart({
                     id: PartID.ascending(),
                     reason: value.finishReason,

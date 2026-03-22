@@ -14,14 +14,6 @@ export namespace Telemetry {
   const MAX_BUFFER_SIZE = 200
   const REQUEST_TIMEOUT_MS = 10_000
 
-  export type TokensPayload = {
-    input: number
-    output: number
-    reasoning: number
-    cache_read: number
-    cache_write: number
-  }
-
   export type Event =
     | {
         type: "session_start"
@@ -50,9 +42,15 @@ export namespace Telemetry {
         provider_id: string
         agent: string
         finish_reason: string
-        tokens: TokensPayload
         cost: number
         duration_ms: number
+        // Flat token fields — only present when data is available from the provider.
+        // No nested objects: Azure App Insights custom measures must be top-level numbers.
+        tokens_input: number
+        tokens_output: number
+        tokens_reasoning?: number   // only for reasoning models
+        tokens_cache_read?: number  // only when a cached prompt was reused
+        tokens_cache_write?: number // only when a new cache entry was written
       }
     | {
         type: "tool_call"
@@ -263,6 +261,14 @@ export namespace Telemetry {
         resource_count: number
       }
     | {
+        type: "mcp_discovery"
+        timestamp: number
+        session_id: string
+        server_count: number
+        server_names: string[]
+        sources: string[]
+      }
+    | {
         type: "memory_operation"
         timestamp: number
         session_id: string
@@ -344,6 +350,32 @@ export namespace Telemetry {
         skill_source: "builtin" | "global" | "project"
         duration_ms: number
       }
+    // altimate_change start — telemetry for skill management operations
+    | {
+        type: "skill_created"
+        timestamp: number
+        session_id: string
+        skill_name: string
+        language: string
+        source: "cli" | "tui"
+      }
+    | {
+        type: "skill_installed"
+        timestamp: number
+        session_id: string
+        install_source: string
+        skill_count: number
+        skill_names: string[]
+        source: "cli" | "tui"
+      }
+    | {
+        type: "skill_removed"
+        timestamp: number
+        session_id: string
+        skill_name: string
+        source: "cli" | "tui"
+      }
+    // altimate_change end
     | {
         type: "sql_execute_failure"
         timestamp: number
@@ -571,14 +603,9 @@ export namespace Telemetry {
       }
       const measurements: Record<string, number> = {}
 
-      // Flatten all fields — nested `tokens` object gets prefixed keys
       for (const [k, v] of Object.entries(fields)) {
         if (k === "session_id" || k === "project_id" || k === "_retried") continue
-        if (k === "tokens" && typeof v === "object" && v !== null) {
-          for (const [tk, tv] of Object.entries(v as Record<string, unknown>)) {
-            if (typeof tv === "number") measurements[`tokens_${tk}`] = tv
-          }
-        } else if (typeof v === "number") {
+        if (typeof v === "number") {
           measurements[k] = v
         } else if (v !== undefined && v !== null) {
           properties[k] = typeof v === "object" ? JSON.stringify(v) : String(v)

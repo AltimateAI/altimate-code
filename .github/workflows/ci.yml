@@ -280,7 +280,6 @@ jobs:
   marker-guard:
     name: Marker Guard
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -300,9 +299,20 @@ jobs:
         run: bun install
         working-directory: script/upstream
 
+      - name: Run marker parser tests
+        run: bun test
+        working-directory: script/upstream
+
       - name: Check for missing altimate_change markers
         run: |
-          if [[ "${{ github.head_ref }}" == merge-upstream-* ]] || [[ "${{ github.head_ref }}" == upstream/merge-* ]]; then
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            if [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
+              echo "Initial push (zero-SHA) — skipping marker check"
+              exit 0
+            fi
+            echo "Push to main — running marker check against pre-push state"
+            bun run script/upstream/analyze.ts --markers --base "${{ github.event.before }}" --strict
+          elif [[ "${{ github.head_ref }}" == merge-upstream-* ]] || [[ "${{ github.head_ref }}" == upstream/merge-* ]]; then
             echo "Upstream merge PR detected — running marker check in non-strict mode"
             bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }}
           else

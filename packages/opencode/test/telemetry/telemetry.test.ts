@@ -624,7 +624,7 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
     }
   })
 
-  test("nested tokens object is flattened with tokens_ prefix", async () => {
+  test("flat token fields appear in measurements", async () => {
     const { fetchCalls, cleanup } = await initWithMockedFetch()
     try {
       Telemetry.track({
@@ -636,13 +636,11 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
         provider_id: "anthropic",
         agent: "builder",
         finish_reason: "end_turn",
-        tokens: {
-          input: 100,
-          output: 200,
-          reasoning: 50,
-          cache_read: 10,
-          cache_write: 5,
-        },
+        tokens_input: 100,
+        tokens_output: 200,
+        tokens_reasoning: 50,
+        tokens_cache_read: 10,
+        tokens_cache_write: 5,
         cost: 0.01,
         duration_ms: 2000,
       })
@@ -656,8 +654,6 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
       expect(measurements.tokens_reasoning).toBe(50)
       expect(measurements.tokens_cache_read).toBe(10)
       expect(measurements.tokens_cache_write).toBe(5)
-      // Raw "tokens" key should not appear in properties
-      expect(envelopes[0].data.baseData.properties.tokens).toBeUndefined()
     } finally {
       cleanup()
     }

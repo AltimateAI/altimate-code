@@ -110,3 +110,41 @@ When [LSP servers](lsp.md) are configured, the `lsp` tool provides:
 - Go-to-definition
 - Hover information
 - Completions
+
+### MCP Discover Tool
+
+The `mcp_discover` tool finds MCP servers configured in other AI coding tools and can add them to your altimate-code config permanently.
+
+**Supported sources:**
+
+| Tool | Config Path | Key |
+|------|------------|-----|
+| VS Code / Copilot | `.vscode/mcp.json` | `servers` |
+| Cursor | `.cursor/mcp.json` | `mcpServers` |
+| GitHub Copilot | `.github/copilot/mcp.json` | `mcpServers` |
+| Claude Code | `.mcp.json`, `~/.claude.json` | `mcpServers` |
+| Gemini CLI | `.gemini/settings.json` | `mcpServers` |
+
+**Actions:**
+
+- `mcp_discover(action: "list")` — Show discovered servers and which are already in your config
+- `mcp_discover(action: "add", scope: "project")` — Write new servers to `.altimate-code/altimate-code.json`
+- `mcp_discover(action: "add", scope: "global")` — Write to the global config dir (`~/.config/opencode/`)
+
+**Auto-discovery:** At startup, altimate-code discovers external MCP servers and shows a toast notification. Servers from your home directory (`~/.claude.json`, `~/.gemini/settings.json`) are auto-enabled since they're user-owned. Servers from project-level files (`.vscode/mcp.json`, `.mcp.json`, `.cursor/mcp.json`) are discovered but **disabled by default** for security — run `/discover-and-add-mcps` to review and enable them.
+
+!!! tip
+    Home-directory MCP servers (from `~/.claude.json`, `~/.gemini/settings.json`) are loaded automatically. Project-scoped servers require explicit approval via `/discover-and-add-mcps` or `mcp_discover(action: "add")`.
+
+!!! warning "Security: untrusted repositories"
+    Project-level MCP configs (`.vscode/mcp.json`, `.mcp.json`, `.cursor/mcp.json`) are discovered but not auto-connected. This prevents malicious repositories from executing arbitrary commands. You must explicitly approve project-scoped servers before they run.
+
+To disable auto-discovery, set in your config:
+
+```json
+{
+  "experimental": {
+    "auto_mcp_discovery": false
+  }
+}
+```

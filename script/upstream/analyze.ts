@@ -606,22 +606,9 @@ function isUpstreamShared(file: string, config: MergeConfig): boolean {
   return upstreamFiles.has(file)
 }
 
-function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
-  const { execSync } = require("child_process")
-  const root = repoRoot()
+// altimate_change start — exported for unit testing
+export function parseDiffForMarkerWarnings(file: string, diffOutput: string): MarkerWarning[] {
   const warnings: MarkerWarning[] = []
-
-  const diffCmd = base
-    ? `git diff -U5 ${base}...HEAD -- "${file}"`
-    : `git diff -U5 HEAD -- "${file}"`
-
-  let diffOutput: string
-  try {
-    diffOutput = execSync(diffCmd, { cwd: root, encoding: "utf-8" })
-  } catch {
-    return warnings
-  }
-
   if (!diffOutput.trim()) return warnings
 
   const lines = diffOutput.split("\n")
@@ -635,16 +622,36 @@ function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
     const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/)
     if (hunkMatch) {
       currentLine = parseInt(hunkMatch[1]) - 1
+      // Reset marker state at hunk boundaries — hunks are discontinuous
+      // regions of the file, so marker blocks from one region don't apply
+      // to another.
+      inMarkerBlock = false
       continue
     }
 
-    if (line.startsWith("+") && !line.startsWith("+++")) {
+    // altimate_change start — fix: track marker state from context lines, not just added lines
+    if (line.startsWith("-") && !line.startsWith("---")) {
+      // deleted line, don't increment
+      continue
+    }
+
+    // Both added (+) and context ( ) lines appear in the final file,
+    // so both must update marker state. Without this, existing markers
+    // on context lines are invisible and new code next to them looks
+    // unmarked — causing false positives.
+    const isAdded = line.startsWith("+") && !line.startsWith("+++")
+    const isContext = !line.startsWith("+") && !line.startsWith("-") && !line.startsWith("\\")
+
+    if (isAdded || isContext) {
       currentLine++
       const content = line.slice(1).trim()
 
       if (content.includes("altimate_change start")) { inMarkerBlock = true; continue }
       if (content.includes("altimate_change end")) { inMarkerBlock = false; continue }
       if (content.includes("altimate_change")) continue
+
+      // Only flag added lines as violations — context lines are pre-existing
+      if (!isAdded) continue
 
       if (!content) continue
       if (content.startsWith("//") && !content.includes("TODO")) continue
@@ -658,11 +665,8 @@ function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
           newCodeContext = content
         }
       }
-    } else if (line.startsWith("-")) {
-      // deleted line, don't increment
-    } else {
-      currentLine++
     }
+    // altimate_change end
   }
 
   if (hasNewCode) {
@@ -675,6 +679,25 @@ function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
   }
 
   return warnings
+}
+// altimate_change end
+
+function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
+  const { execSync } = require("child_process")
+  const root = repoRoot()
+
+  const diffCmd = base
+    ? `git diff -U5 ${base}...HEAD -- "${file}"`
+    : `git diff -U5 HEAD -- "${file}"`
+
+  let diffOutput: string
+  try {
+    diffOutput = execSync(diffCmd, { cwd: root, encoding: "utf-8" })
+  } catch {
+    return []
+  }
+
+  return parseDiffForMarkerWarnings(file, diffOutput)
 }
 
 function runMarkerCheck(config: MergeConfig, base?: string, strict?: boolean): number {
@@ -804,7 +827,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => {
-  logger.error(`Analysis failed: ${e.message || e}`)
-  process.exit(2)
-})
+// altimate_change start — guard CLI execution when imported as a module (e.g., by tests)
+if (import.meta.main) {
+  main().catch((e) => {
+    logger.error(`Analysis failed: ${e.message || e}`)
+    process.exit(2)
+  })
+}
+// altimate_change end
