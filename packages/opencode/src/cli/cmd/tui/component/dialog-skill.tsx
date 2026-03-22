@@ -230,28 +230,37 @@ function DialogSkillCreate() {
     <DialogPrompt
       title="Create Skill"
       placeholder="my-tool"
-      onConfirm={async (name) => {
+      onConfirm={async (rawName) => {
+        const name = rawName.trim()
         dialog.clear()
-        toast.show({ message: `Creating "${name}"...`, variant: "info", duration: 30000 })
-        const result = await createSkillDirect(name)
-        if (!result.ok) {
-          toast.show({ message: result.message, variant: "error", duration: 6000 })
+        if (!name) {
+          toast.show({ message: "No name provided.", variant: "error", duration: 4000 })
           return
         }
-        // Verify the skill loaded on the server
-        const verified = await reloadAndVerify(sdk, [name])
-        if (verified.length > 0) {
-          toast.show({
-            message: `✓ Created "${name}"\n\nSkill and CLI tool ready at .opencode/skills/${name}/\nUse /skills to find it, or type /${name} in the prompt.`,
-            variant: "success",
-            duration: 8000,
-          })
-        } else {
-          toast.show({
-            message: `Created files but skill not loaded. Try reopening /skills.`,
-            variant: "warning",
-            duration: 6000,
-          })
+        toast.show({ message: `Creating "${name}"...`, variant: "info", duration: 30000 })
+        try {
+          const result = await createSkillDirect(name)
+          if (!result.ok) {
+            toast.show({ message: `Create failed: ${result.message}`, variant: "error", duration: 6000 })
+            return
+          }
+          const verified = await reloadAndVerify(sdk, [name])
+          if (verified.length > 0) {
+            toast.show({
+              message: `✓ Created "${name}"\n\nSkill + CLI tool at .opencode/skills/${name}/\nType /${name} in the prompt to use it.`,
+              variant: "success",
+              duration: 8000,
+            })
+          } else {
+            toast.show({
+              message: `✓ Created "${name}" files.\nReopen /skills to see it.`,
+              variant: "success",
+              duration: 6000,
+            })
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          toast.show({ message: `Create error: ${msg.slice(0, 200)}`, variant: "error", duration: 8000 })
         }
       }}
       onCancel={() => dialog.clear()}
@@ -268,29 +277,39 @@ function DialogSkillInstall() {
     <DialogPrompt
       title="Install Skill (owner/repo, URL, or path)"
       placeholder="anthropics/skills"
-      onConfirm={async (source) => {
+      onConfirm={async (rawSource) => {
+        // Strip trailing dots, whitespace, and .git suffix that users might paste
+        const source = rawSource.trim().replace(/\.+$/, "").replace(/\.git$/, "")
         dialog.clear()
-        toast.show({ message: `Installing from ${source}...`, variant: "info", duration: 30000 })
-        const result = await installSkillDirect(source)
-        if (!result.ok) {
-          toast.show({ message: result.message, variant: "error", duration: 6000 })
+        if (!source) {
+          toast.show({ message: "No source provided.", variant: "error", duration: 4000 })
           return
         }
-        if (result.message.includes("all already exist")) {
-          toast.show({ message: "All skills already installed.", variant: "info", duration: 4000 })
-          return
+        toast.show({ message: `Installing from ${source}...\nThis may take a moment while the repo is cloned.`, variant: "info", duration: 60000 })
+        try {
+          const result = await installSkillDirect(source)
+          if (!result.ok) {
+            toast.show({ message: `Install failed: ${result.message}`, variant: "error", duration: 6000 })
+            return
+          }
+          if (result.message.includes("all already exist")) {
+            toast.show({ message: "All skills from this source are already installed.", variant: "info", duration: 4000 })
+            return
+          }
+          const names = result.installedNames ?? []
+          const verified = await reloadAndVerify(sdk, names)
+          const lines = [
+            `✓ Installed ${verified.length} skill(s)`,
+            "",
+            ...verified.map((n) => `  • ${n}`),
+            "",
+            "Open /skills to browse, or type /<name> to use.",
+          ]
+          toast.show({ message: lines.join("\n"), variant: "success", duration: 8000 })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          toast.show({ message: `Install error: ${msg.slice(0, 200)}`, variant: "error", duration: 8000 })
         }
-        // Extract installed names and verify they loaded
-        const names = result.installedNames ?? []
-        const verified = await reloadAndVerify(sdk, names)
-        const lines = [
-          `✓ Installed ${verified.length} skill(s)`,
-          "",
-          ...verified.map((n) => `  • ${n}`),
-          "",
-          "Open /skills to browse, or type /<skill-name> to use.",
-        ]
-        toast.show({ message: lines.join("\n"), variant: "success", duration: 8000 })
       }}
       onCancel={() => dialog.clear()}
     />
