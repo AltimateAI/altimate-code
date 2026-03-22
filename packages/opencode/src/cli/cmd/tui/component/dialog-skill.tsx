@@ -10,7 +10,6 @@ import { spawn } from "child_process"
 import { DialogPrompt } from "@tui/ui/dialog-prompt"
 import { Instance } from "@/project/instance"
 import { Global } from "@/global"
-import { Skill } from "@/skill"
 import path from "path"
 import fs from "fs/promises"
 // altimate_change end
@@ -76,8 +75,6 @@ async function createSkillDirect(name: string): Promise<{ ok: boolean; message: 
     `#!/usr/bin/env bash\nset -euo pipefail\ncase "\${1:-help}" in\n  help|--help|-h) echo "Usage: ${name} <command>" ;;\n  *) echo "Unknown: \${1}" >&2; exit 1 ;;\nesac\n`,
     { mode: 0o755 },
   )
-  // Invalidate cached skill list so new skill appears immediately
-  Skill.invalidate()
   return { ok: true, message: `Created skill + tool at .opencode/skills/${name}/` }
 }
 
@@ -169,8 +166,6 @@ async function installSkillDirect(source: string): Promise<{ ok: boolean; messag
 
   if (isTmp) await fs.rm(skillDir, { recursive: true, force: true })
   if (installed === 0) return { ok: true, message: "No new skills installed (all already exist)" }
-  // Invalidate cached skill list so new skills appear immediately
-  Skill.invalidate()
   return { ok: true, message: `Installed ${installed} skill(s): ${names.join(", ")}` }
 }
 
@@ -214,9 +209,21 @@ async function testSkillDirect(skillName: string, location: string, content: str
 // altimate_change end
 
 // altimate_change start — sub-dialogs for create and install
+// Reload skills on the server so the cache is invalidated in the worker thread.
+// Calls GET /skill?reload=true via the SDK's fetch to invalidate the cache
+// and force a re-scan of all skill directories.
+async function reloadSkillsOnServer(sdk: ReturnType<typeof useSDK>) {
+  try {
+    await sdk.fetch(`${sdk.url}/skill?reload=true`)
+  } catch {
+    // Best-effort — if it fails, skills will show on next TUI restart
+  }
+}
+
 function DialogSkillCreate() {
   const dialog = useDialog()
   const toast = useToast()
+  const sdk = useSDK()
 
   return (
     <DialogPrompt
@@ -226,6 +233,7 @@ function DialogSkillCreate() {
         dialog.clear()
         toast.show({ message: `Creating ${name}...`, variant: "info" })
         const result = await createSkillDirect(name)
+        if (result.ok) await reloadSkillsOnServer(sdk)
         toast.show({
           message: result.ok ? `✓ ${result.message}` : result.message,
           variant: result.ok ? "success" : "error",
@@ -240,6 +248,7 @@ function DialogSkillCreate() {
 function DialogSkillInstall() {
   const dialog = useDialog()
   const toast = useToast()
+  const sdk = useSDK()
 
   return (
     <DialogPrompt
@@ -249,6 +258,7 @@ function DialogSkillInstall() {
         dialog.clear()
         toast.show({ message: `Installing from ${source}...`, variant: "info" })
         const result = await installSkillDirect(source)
+        if (result.ok) await reloadSkillsOnServer(sdk)
         toast.show({
           message: result.ok ? `✓ ${result.message}` : result.message,
           variant: result.ok ? "success" : "error",
