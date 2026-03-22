@@ -178,8 +178,18 @@ describe("impact_analysis: severity classification", () => {
     return { models, model_count: models.length, test_count: 0 }
   }
 
-  test("MEDIUM severity for 4-10 downstream models", async () => {
-    mockDispatcher({ "dbt.manifest": makeManifest(7) })
+  test("LOW severity boundary: exactly 3 downstream models", async () => {
+    mockDispatcher({ "dbt.manifest": makeManifest(3) })
+    const tool = await ImpactAnalysisTool.init()
+    const result = await tool.execute(
+      { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
+      ctx,
+    )
+    expect(result.metadata.severity).toBe("LOW")
+  })
+
+  test("MEDIUM severity boundary: exactly 4 downstream models", async () => {
+    mockDispatcher({ "dbt.manifest": makeManifest(4) })
     const tool = await ImpactAnalysisTool.init()
     const result = await tool.execute(
       { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
@@ -188,8 +198,18 @@ describe("impact_analysis: severity classification", () => {
     expect(result.metadata.severity).toBe("MEDIUM")
   })
 
-  test("HIGH severity for >10 downstream models", async () => {
-    mockDispatcher({ "dbt.manifest": makeManifest(12) })
+  test("MEDIUM severity boundary: exactly 10 downstream models", async () => {
+    mockDispatcher({ "dbt.manifest": makeManifest(10) })
+    const tool = await ImpactAnalysisTool.init()
+    const result = await tool.execute(
+      { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
+      ctx,
+    )
+    expect(result.metadata.severity).toBe("MEDIUM")
+  })
+
+  test("HIGH severity boundary: exactly 11 downstream models", async () => {
+    mockDispatcher({ "dbt.manifest": makeManifest(11) })
     const tool = await ImpactAnalysisTool.init()
     const result = await tool.execute(
       { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
@@ -214,7 +234,9 @@ describe("impact_analysis: error handling", () => {
 })
 
 describe("impact_analysis: blast radius percentage", () => {
-  test("output includes blast radius percentage", async () => {
+  test("percentage uses model_count, not models array length", async () => {
+    // model_count (20) intentionally differs from models.length (4)
+    // to verify the denominator comes from the declared count
     mockDispatcher({
       "dbt.manifest": {
         models: [
@@ -223,7 +245,7 @@ describe("impact_analysis: blast radius percentage", () => {
           { name: "child2", depends_on: ["root"], materialized: "table" },
           { name: "unrelated", depends_on: [], materialized: "view" },
         ],
-        model_count: 4,
+        model_count: 20,
         test_count: 3,
       },
     })
@@ -232,8 +254,8 @@ describe("impact_analysis: blast radius percentage", () => {
       { model: "root", change_type: "remove", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
     )
-    // 2 out of 4 = 50.0%
-    expect(result.output).toContain("50.0%")
-    expect(result.output).toContain("2/4")
+    // 2 downstream out of 20 declared = 10.0%
+    expect(result.output).toContain("10.0%")
+    expect(result.output).toContain("2/20")
   })
 })

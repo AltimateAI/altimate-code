@@ -9,6 +9,7 @@ import { describe, test, expect, spyOn, afterAll, beforeEach } from "bun:test"
 import { TrainingImportTool } from "../../src/altimate/tools/training-import"
 import { TrainingStore } from "../../src/altimate/training"
 import { TrainingPrompt } from "../../src/altimate/training"
+import { TRAINING_MAX_PATTERNS_PER_KIND } from "../../src/altimate/training"
 import { SessionID, MessageID } from "../../src/session/schema"
 import * as fs from "fs/promises"
 
@@ -141,7 +142,11 @@ describe("training_import: markdown parsing (dry_run)", () => {
     expect(result.metadata.count).toBe(0)
   })
 
-  test("skips H2 sections with empty content", async () => {
+  test("includes H2 sections even when content is only whitespace", async () => {
+    // NOTE: parseMarkdownSections checks currentContent.length > 0 (array length)
+    // but does NOT check whether the trimmed content is empty. This means a
+    // section with only blank lines still gets included. This documents the
+    // actual behavior — a future fix could skip truly empty sections.
     setupMocks({
       fileContent: [
         "## Empty Section",
@@ -156,10 +161,10 @@ describe("training_import: markdown parsing (dry_run)", () => {
       { file_path: "mixed.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
       ctx,
     )
-    // "Empty Section" has only a blank line — should be trimmed and skipped
-    // (parseMarkdownSections checks currentContent.length > 0 AND trims)
-    expect(result.metadata.count).toBeGreaterThanOrEqual(1)
+    expect(result.metadata.count).toBe(2)
     expect(result.output).toContain("section-with-content")
+    // Empty section is included with 0 chars after trim
+    expect(result.output).toContain("empty-section")
   })
 
   test("respects max_entries limit", async () => {
@@ -190,7 +195,7 @@ describe("training_import: capacity enforcement", () => {
         "## Entry 3",
         "Content 3",
       ].join("\n"),
-      currentCount: 48, // TRAINING_MAX_PATTERNS_PER_KIND is 50
+      currentCount: TRAINING_MAX_PATTERNS_PER_KIND - 2,
     })
 
     const tool = await TrainingImportTool.init()
