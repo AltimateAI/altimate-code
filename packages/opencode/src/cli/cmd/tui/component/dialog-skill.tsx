@@ -428,12 +428,13 @@ export function DialogSkill(props: DialogSkillProps) {
       },
     ].filter((a) => !a.disabled)
 
-    dialog.replace(() => (
-      <DialogSelect
-        title={`Actions: ${skillName}`}
-        options={actions}
-        onSelect={async (action) => {
-          switch (action.value) {
+    dialog.replace(
+      () => (
+        <DialogSelect
+          title={`Actions: ${skillName}`}
+          options={actions}
+          onSelect={async (action) => {
+            switch (action.value) {
             case "show": {
               if (!info) return
               const tools = detectToolReferences(info.content)
@@ -493,7 +494,10 @@ export function DialogSkill(props: DialogSkillProps) {
           }
         }}
       />
-    ))
+      ),
+      // When Esc is pressed on the action picker, go back to skill list
+      () => setTimeout(() => reopenSkillList(), 0),
+    )
   }
 
   const keybinds = createMemo(() => [
