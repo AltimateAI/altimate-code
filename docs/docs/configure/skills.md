@@ -94,21 +94,41 @@ altimate ships with built-in skills for common data engineering tasks. Type `/` 
 Manage skills from the command line:
 
 ```bash
-# List all skills with their paired CLI tools
-altimate-code skill list
+# Browse skills
+altimate-code skill list                    # table view
+altimate-code skill list --json             # JSON (for scripting)
+altimate-code skill show dbt-develop        # view full skill content
 
-# List as JSON (for scripting)
-altimate-code skill list --json
+# Create
+altimate-code skill create my-tool                    # scaffold skill + bash tool
+altimate-code skill create my-tool --language python   # python tool stub
+altimate-code skill create my-tool --language node     # node tool stub
+altimate-code skill create my-tool --skill-only        # skill only, no CLI tool
 
-# Scaffold a new skill + CLI tool pair
-altimate-code skill create my-tool
-altimate-code skill create my-tool --language python
-altimate-code skill create my-tool --language node
-altimate-code skill create my-tool --skill-only  # skill only, no CLI stub
+# Validate
+altimate-code skill test my-tool            # check frontmatter + tool --help
 
-# Validate a skill and its paired tool
-altimate-code skill test my-tool
+# Install from GitHub
+altimate-code skill install owner/repo              # GitHub shorthand
+altimate-code skill install https://github.com/...  # full URL (web URLs work too)
+altimate-code skill install ./local-path            # local directory
+altimate-code skill install owner/repo --global     # install globally
+
+# Remove
+altimate-code skill remove my-tool          # remove skill + paired tool
 ```
+
+### TUI
+
+Type `/skills` in the TUI prompt to open the skill browser. From there:
+
+| Key | Action |
+|-----|--------|
+| Enter | Use — inserts `/<skill-name>` into the prompt |
+| `ctrl+a` | Actions — show, edit, test, or remove the selected skill |
+| `ctrl+n` | New — scaffold a new skill + CLI tool |
+| `ctrl+i` | Install — install skills from a GitHub repo or URL |
+| Esc | Back — returns to previous screen |
 
 ## Adding Custom Skills
 

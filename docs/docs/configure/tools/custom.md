@@ -52,6 +52,24 @@ altimate-code skill test my-tool
 
 This checks that the SKILL.md is valid and the paired tool is executable.
 
+### Installing Community Skills
+
+Install skills (with their paired tools) from GitHub:
+
+```bash
+# From a GitHub repo
+altimate-code skill install anthropics/skills
+altimate-code skill install dagster-io/skills
+
+# From a GitHub web URL (pasted from browser)
+altimate-code skill install https://github.com/owner/repo/tree/main/skills/my-skill
+
+# Remove an installed skill
+altimate-code skill remove my-skill
+```
+
+Or use the TUI: type `/skills`, then `ctrl+i` to install or `ctrl+a` → Remove to delete.
+
 ### Output Conventions
 
 For best results with the AI agent:
