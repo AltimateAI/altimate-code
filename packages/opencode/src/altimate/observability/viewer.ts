@@ -1038,7 +1038,8 @@ function showDetail(span) {
     timelineEvents.push({ type: 'tool', text: 'Used ' + name + ' ' + count + ' time' + (count > 1 ? 's' : ''), time: 0 });
   });
 
-  // Errors with resolution tracking
+  // Errors with resolution tracking — sort spans once for temporal resolution search
+  var sortedForResolution = nonSession.slice().sort(function(a, b) { return (a.startTime || 0) - (b.startTime || 0); });
   errSpans.forEach(function(errSp) {
     var errName = errSp.name || 'unknown tool';
     var errMsg = errSp.statusMessage || '';
@@ -1056,9 +1057,8 @@ function showDetail(span) {
     // Look for resolution: find the next successful span after this error (sorted by time)
     var errTime = errSp.endTime || errSp.startTime || 0;
     var resolved = false;
-    var sortedSpans = nonSession.slice().sort(function(a, b) { return (a.startTime || 0) - (b.startTime || 0); });
-    for (var ri = 0; ri < sortedSpans.length; ri++) {
-      var candidate = sortedSpans[ri];
+    for (var ri = 0; ri < sortedForResolution.length; ri++) {
+      var candidate = sortedForResolution[ri];
       if ((candidate.startTime || 0) > errTime && candidate.status === 'ok' && candidate.kind === 'tool') {
         errText += ' \\u2192 Resolved with ' + (candidate.name || 'next action');
         resolved = true;

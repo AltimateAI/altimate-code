@@ -883,7 +883,8 @@ export class Recap {
         : ""
       const costStr = Number.isFinite(this.totalCost) ? `$${this.totalCost.toFixed(4)}` : "$0.0000"
       const statusPrefix = error ? `Failed after ${dur}` : `Completed in ${dur}`
-      trace.summary.narrative = `${statusPrefix}. Made ${this.generationCount} LLM calls${toolsStr}.${loopWarning} Total cost: ${costStr}.`
+      const llmStr = this.generationCount > 0 ? `. Made ${this.generationCount} LLM call${this.generationCount > 1 ? "s" : ""}` : ""
+      trace.summary.narrative = `${statusPrefix}${llmStr}${toolsStr}.${loopWarning} Total cost: ${costStr}.`
     } catch {
       // Narrative generation must never crash the recap
     }

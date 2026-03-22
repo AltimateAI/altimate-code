@@ -1043,7 +1043,7 @@ describe("Post-session narrative", () => {
     expect(trace.summary.narrative).toBeDefined()
     expect(trace.summary.narrative!.length).toBeGreaterThan(0)
     expect(trace.summary.narrative).toContain("Completed in")
-    expect(trace.summary.narrative).toContain("LLM calls")
+    expect(trace.summary.narrative).toContain("LLM call")
     expect(trace.summary.narrative).toContain("Total cost:")
   })
 
@@ -1121,7 +1121,8 @@ describe("Post-session narrative", () => {
     expect(trace.summary.narrative).toBeDefined()
     expect(trace.summary.narrative!.length).toBeGreaterThan(0)
     expect(trace.summary.narrative).toContain("Completed in")
-    expect(trace.summary.narrative).toContain("0 LLM calls")
+    // With 0 generations, narrative omits LLM call count entirely
+    expect(trace.summary.narrative).not.toContain("LLM call")
   })
 
   test("should include loop warnings in narrative", async () => {
