@@ -141,9 +141,11 @@ describe("training meta roundtrip through content", () => {
 
 describe("TRAINING_MAX_PATTERNS_PER_KIND", () => {
   test("is a reasonable limit", () => {
-    expect(TRAINING_MAX_PATTERNS_PER_KIND).toBe(20)
+    // altimate_change start — limit increased from 20 to 50 for enterprise teams
+    expect(TRAINING_MAX_PATTERNS_PER_KIND).toBe(50)
     expect(TRAINING_MAX_PATTERNS_PER_KIND).toBeGreaterThan(0)
-    expect(TRAINING_MAX_PATTERNS_PER_KIND).toBeLessThanOrEqual(50)
+    expect(TRAINING_MAX_PATTERNS_PER_KIND).toBeLessThanOrEqual(100)
+    // altimate_change end
   })
 })
 
