@@ -588,16 +588,18 @@ const SkillInstallCommand = cmd({
         }
 
         // Copy the entire skill directory (SKILL.md + any supporting files)
+        // Use lstat to skip symlinks (security: prevents file disclosure from malicious repos)
         await fs.mkdir(dest, { recursive: true })
         const files = await fs.readdir(skillParent)
         for (const file of files) {
           const src = path.join(skillParent, file)
           const dst = path.join(dest, file)
-          const stat = await fs.stat(src)
+          const stat = await fs.lstat(src)
+          if (stat.isSymbolicLink()) continue
           if (stat.isFile()) {
             await fs.copyFile(src, dst)
           } else if (stat.isDirectory()) {
-            await fs.cp(src, dst, { recursive: true })
+            await fs.cp(src, dst, { recursive: true, dereference: false })
           }
         }
         process.stdout.write(`  ✓ Installed "${skillName}" → ${path.relative(rootDir, dest)}` + EOL)

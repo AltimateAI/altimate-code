@@ -80,15 +80,20 @@ async function createSkillDirect(name: string, rootDir: string): Promise<{ ok: b
     skillFile,
     `---\nname: ${name}\ndescription: TODO — describe what this skill does\n---\n\n# ${name}\n\n## When to Use\nTODO\n\n## CLI Reference\n\`\`\`bash\n${name} --help\n\`\`\`\n\n## Workflow\n1. Understand what the user needs\n2. Run the appropriate CLI command\n3. Interpret the output\n`,
   )
-  // Create tool stub
+  // Create tool stub (skip if tool already exists)
   const toolsDir = path.join(rootDir, ".opencode", "tools")
   await fs.mkdir(toolsDir, { recursive: true })
   const toolFile = path.join(toolsDir, name)
-  await fs.writeFile(
-    toolFile,
-    `#!/usr/bin/env bash\nset -euo pipefail\ncase "\${1:-help}" in\n  help|--help|-h) echo "Usage: ${name} <command>" ;;\n  *) echo "Unknown: \${1}" >&2; exit 1 ;;\nesac\n`,
-    { mode: 0o755 },
-  )
+  try {
+    await fs.access(toolFile)
+    // Tool already exists, don't overwrite
+  } catch {
+    await fs.writeFile(
+      toolFile,
+      `#!/usr/bin/env bash\nset -euo pipefail\ncase "\${1:-help}" in\n  help|--help|-h) echo "Usage: ${name} <command>" ;;\n  *) echo "Unknown: \${1}" >&2; exit 1 ;;\nesac\n`,
+      { mode: 0o755 },
+    )
+  }
   return { ok: true, message: `Created skill + tool at .opencode/skills/${name}/` }
 }
 
@@ -119,7 +124,9 @@ async function installSkillDirect(
     const url = normalized.startsWith("http") ? normalized : `https://github.com/${normalized}.git`
     const label = url.replace(/https?:\/\/github\.com\//, "").replace(/\.git$/, "")
     onProgress?.(`Cloning ${label}...`)
-    const tmpDir = path.join(cacheDir(), "skill-install-" + Date.now())
+    const cache = cacheDir()
+    await fs.mkdir(cache, { recursive: true })
+    const tmpDir = path.join(cache, "skill-install-" + Date.now())
     isTmp = true
     const proc = Bun.spawn(["git", "clone", "--depth", "1", url, tmpDir], {
       stdout: "pipe",
@@ -173,9 +180,10 @@ async function installSkillDirect(
     for (const file of files) {
       const src = path.join(skillParent, file)
       const dst = path.join(dest, file)
-      const stat = await fs.stat(src)
+      const stat = await fs.lstat(src)
+      if (stat.isSymbolicLink()) continue
       if (stat.isFile()) await fs.copyFile(src, dst)
-      else if (stat.isDirectory()) await fs.cp(src, dst, { recursive: true })
+      else if (stat.isDirectory()) await fs.cp(src, dst, { recursive: true, dereference: false })
     }
     names.push(skillName)
     installed++
@@ -199,6 +207,7 @@ async function testSkillDirect(skillName: string, content: string, rootDir: stri
   const toolPath = [
     process.env.ALTIMATE_BIN_DIR,
     path.join(rootDir, ".opencode", "tools"),
+    path.join(os.homedir(), ".config", "altimate-code", "tools"),
     process.env.PATH,
   ]
     .filter(Boolean)
@@ -392,15 +401,15 @@ export function DialogSkill(props: DialogSkillProps) {
   // Single keybind opens action picker for the selected skill
   function openActionPicker(skillName: string) {
     const info = skillMap().get(skillName)
-    const isBuiltinOrTracked = (() => {
-      if (!info) return true
-      if (info.location.startsWith("builtin:")) return true
-      const gitCheck = Bun.spawnSync(["git", "ls-files", "--error-unmatch", info.location], {
-        cwd: path.dirname(path.dirname(info.location)),
+    const isBuiltin = !info || info.location.startsWith("builtin:")
+    const isRemovable = (() => {
+      if (isBuiltin) return false
+      const gitCheck = Bun.spawnSync(["git", "ls-files", "--error-unmatch", info!.location], {
+        cwd: path.dirname(path.dirname(info!.location)),
         stdout: "pipe",
         stderr: "pipe",
       })
-      return gitCheck.exitCode === 0
+      return gitCheck.exitCode !== 0 // only removable if NOT git-tracked
     })()
 
     const actions: DialogSelectOption<string>[] = [
@@ -413,7 +422,7 @@ export function DialogSkill(props: DialogSkillProps) {
         title: "Edit",
         value: "edit",
         description: "Open SKILL.md in your default editor",
-        disabled: isBuiltinOrTracked,
+        disabled: isBuiltin, // allow editing git-tracked skills, only block builtin
       },
       {
         title: "Test",
@@ -424,7 +433,7 @@ export function DialogSkill(props: DialogSkillProps) {
         title: "Remove",
         value: "remove",
         description: "Delete this skill and its paired tool",
-        disabled: isBuiltinOrTracked,
+        disabled: !isRemovable,
       },
     ].filter((a) => !a.disabled)
 
