@@ -460,9 +460,15 @@ export function DialogSkill(props: DialogSkillProps) {
             }
             case "edit": {
               if (!info) return
-              const editor = process.env.EDITOR || process.env.VISUAL || "vi"
-              dialog.clear()
-              spawn(editor, [info.location], { stdio: "inherit", detached: true }).unref()
+              // Open in system editor (new window, doesn't conflict with TUI)
+              const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open"
+              spawn(openCmd, [info.location], { stdio: "ignore", detached: true }).unref()
+              toast.show({
+                message: `Opening ${skillName}/SKILL.md in your editor.\n\nFile: ${info.location}`,
+                variant: "info",
+                duration: 5000,
+              })
+              reopenSkillList()
               break
             }
             case "test": {
