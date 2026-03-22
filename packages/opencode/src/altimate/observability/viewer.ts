@@ -423,7 +423,8 @@ function gotoSpan(el) {
   if (wfView) wfView.classList.add('active');
   // Find and highlight the row
   setTimeout(function() {
-    var row = document.querySelector('.wf-row[data-span-id="' + spanId + '"]');
+    var safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(spanId) : spanId.replace(/[\\\\"\\/]/g, '');
+    var row = document.querySelector('.wf-row[data-span-id="' + safeId + '"]');
     if (row) {
       row.scrollIntoView({ behavior: 'smooth', block: 'center' });
       row.classList.add('sel');
@@ -1052,11 +1053,12 @@ function showDetail(span) {
     var errText = 'Error in ' + errName;
     if (errMsg) errText += ': ' + (errMsg.length > 100 ? errMsg.slice(0, 100) + '...' : errMsg);
 
-    // Look for resolution: find the next successful span after this error
+    // Look for resolution: find the next successful span after this error (sorted by time)
     var errTime = errSp.endTime || errSp.startTime || 0;
     var resolved = false;
-    for (var ri = 0; ri < nonSession.length; ri++) {
-      var candidate = nonSession[ri];
+    var sortedSpans = nonSession.slice().sort(function(a, b) { return (a.startTime || 0) - (b.startTime || 0); });
+    for (var ri = 0; ri < sortedSpans.length; ri++) {
+      var candidate = sortedSpans[ri];
       if ((candidate.startTime || 0) > errTime && candidate.status === 'ok' && candidate.kind === 'tool') {
         errText += ' \\u2192 Resolved with ' + (candidate.name || 'next action');
         resolved = true;

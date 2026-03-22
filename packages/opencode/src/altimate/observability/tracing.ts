@@ -128,7 +128,7 @@ export interface TraceFile {
     }
     // altimate_change start — recap: loop detection + post-session summary
     /** Detected tool call loops (same tool+input repeated 3+ times). */
-    loops?: Array<{ tool: string; count: number; description: string }>
+    loops?: Array<{ tool: string; inputHash?: string; count: number; description: string }>
     /** Human-readable session narrative generated at endTrace. */
     narrative?: string
     /** Top tools by call count with total duration. */

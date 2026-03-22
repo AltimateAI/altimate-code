@@ -324,7 +324,7 @@ All domain-specific attributes use the `de.*` prefix and are stored in the `attr
 
 Recaps are designed to survive process crashes:
 
-1. **Immediate snapshot.** A recap file is written as soon as `startTrace()` is called, before any LLM interaction. Even if the process crashes immediately, a minimal recap file exists.
+1. **Immediate snapshot.** A recap file is written as soon as the session starts, before any LLM interaction. Even if the process crashes immediately, a minimal recap file exists.
 
 2. **Incremental snapshots.** After every tool call and generation completion, the recap file is updated atomically (write to temp file, then rename). The file on disk always contains a valid, complete JSON document.
 
