@@ -382,6 +382,13 @@ export function DialogSkill(props: DialogSkillProps) {
     })
   })
 
+  // Re-open the main skills dialog (used after an action completes)
+  function reopenSkillList() {
+    dialog.replace(() => (
+      <DialogSkill onSelect={props.onSelect} />
+    ))
+  }
+
   // Single keybind opens action picker for the selected skill
   function openActionPicker(skillName: string) {
     const info = skillMap().get(skillName)
@@ -447,8 +454,8 @@ export function DialogSkill(props: DialogSkillProps) {
               ]
                 .filter((l) => l !== null)
                 .join("\n")
-              dialog.clear()
               toast.show({ message: lines, variant: "info", duration: 8000 })
+              reopenSkillList()
               break
             }
             case "edit": {
@@ -460,7 +467,6 @@ export function DialogSkill(props: DialogSkillProps) {
             }
             case "test": {
               if (!info) return
-              dialog.clear()
               toast.show({ message: `Testing ${skillName}...`, variant: "info", duration: 600000 })
               const result = await testSkillDirect(skillName, info.content, gitRoot(sdk.directory ?? process.cwd()))
               toast.show({
@@ -468,6 +474,7 @@ export function DialogSkill(props: DialogSkillProps) {
                 variant: result.ok ? "success" : "error",
                 duration: 4000,
               })
+              reopenSkillList()
               break
             }
             case "create": {
@@ -487,8 +494,8 @@ export function DialogSkill(props: DialogSkillProps) {
                 const toolFile = path.join(root, ".opencode", "tools", skillName)
                 await fs.rm(toolFile, { force: true }).catch(() => {})
                 await reloadAndVerify(sdk, [])
-                dialog.clear()
                 toast.show({ message: `Removed "${skillName}".`, variant: "success", duration: 4000 })
+                reopenSkillList()
               } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err)
                 toast.show({ message: `Remove failed: ${msg.slice(0, 150)}`, variant: "error", duration: 5000 })
