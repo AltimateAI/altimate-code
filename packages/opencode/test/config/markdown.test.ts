@@ -226,3 +226,78 @@ describe("ConfigMarkdown: frontmatter has weird model id", async () => {
     expect(result.content.trim()).toBe("Strictly follow da rules")
   })
 })
+
+describe("ConfigMarkdown.fallbackSanitization", () => {
+  test("converts unquoted value with colon to block scalar that gray-matter can parse", async () => {
+    const input = `---\nurl: https://example.com:8080\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("url: |-")
+    expect(result).toContain("  https://example.com:8080")
+    // Verify the sanitized output is actually parseable
+    const matter = await import("gray-matter")
+    const parsed = matter.default(result)
+    expect(parsed.data.url).toBe("https://example.com:8080")
+  })
+
+  test("preserves already double-quoted values", () => {
+    const input = `---\nurl: "https://example.com:8080"\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain('url: "https://example.com:8080"')
+  })
+
+  test("preserves already single-quoted values", () => {
+    const input = `---\nurl: 'https://example.com:8080'\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("url: 'https://example.com:8080'")
+  })
+
+  test("preserves empty values", () => {
+    const input = `---\nempty:\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("empty:")
+  })
+
+  test("preserves YAML comments", () => {
+    const input = `---\n# This is a comment\nkey: value\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("# This is a comment")
+  })
+
+  test("preserves indented continuation lines", () => {
+    const input = `---\nlist:\n  - item1\n  - item2\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("  - item1")
+    expect(result).toContain("  - item2")
+  })
+
+  test("returns input unchanged when no frontmatter present", () => {
+    const input = "Just plain content"
+    expect(ConfigMarkdown.fallbackSanitization(input)).toBe(input)
+  })
+
+  test("handles multiple values with colons", async () => {
+    const input = `---\nurl: http://a:1\nmodel: org/repo:tag\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("url: |-")
+    expect(result).toContain("model: |-")
+    // Verify both values parse correctly
+    const matter = await import("gray-matter")
+    const parsed = matter.default(result)
+    expect(parsed.data.url).toBe("http://a:1")
+    expect(parsed.data.model).toBe("org/repo:tag")
+  })
+
+  test("values without colons are left unchanged", () => {
+    const input = `---\nname: John\nage: 30\n---\nContent`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("name: John")
+    expect(result).toContain("age: 30")
+  })
+
+  test("content after frontmatter is not modified", () => {
+    const input = `---\nkey: val:ue\n---\nurl: https://example.com:8080/path`
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    // Body content should be preserved verbatim
+    expect(result).toContain("url: https://example.com:8080/path")
+  })
+})
