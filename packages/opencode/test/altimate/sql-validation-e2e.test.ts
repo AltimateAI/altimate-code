@@ -674,7 +674,8 @@ describe("Prompt skill references match actual skills", () => {
 
         // Extract only the "Skills Available" section (before the "Note:" line)
         const prompt = analyst!.prompt
-        const skillsSectionMatch = prompt.match(
+        expect(prompt).toBeDefined()
+        const skillsSectionMatch = prompt!.match(
           /## Skills Available[^\n]*\n([\s\S]*?)(?=\nNote:|## )/,
         )
         expect(skillsSectionMatch).toBeDefined()
