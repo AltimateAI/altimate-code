@@ -103,11 +103,13 @@ export function DialogRecapList(props: {
     dialog.setSize("large")
   })
 
+  // altimate_change start — recap: renamed title text
+  const dialogTitle = traces.state === "pending" ? "Recaps (loading...)" : "Recaps"
+  // altimate_change end
+
   return (
     <DialogSelect
-      {/* altimate_change start — recap: renamed title text */}
-      title={traces.state === "pending" ? "Recaps (loading...)" : "Recaps"}
-      {/* altimate_change end */}
+      title={dialogTitle}
       options={options()}
       current={props.currentSessionID}
       onSelect={(option) => {
