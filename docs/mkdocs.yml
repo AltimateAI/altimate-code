@@ -97,6 +97,7 @@ nav:
           - Custom Tools: configure/tools/custom.md
       - Skills: configure/skills.md
       - Commands: configure/commands.md
+      - Recap: configure/recap.md
       - Interfaces:
           - TUI: usage/tui.md
           - CLI: usage/cli.md
@@ -122,9 +123,6 @@ nav:
       - Appearance:
           - Themes: configure/themes.md
           - Keybinds: configure/keybinds.md
-      - Observability:
-          - Tracing: configure/tracing.md
-          - Telemetry: reference/telemetry.md
       - Training:
           - Overview: data-engineering/training/index.md
           - Team Deployment: data-engineering/training/team-deployment.md
@@ -141,6 +139,7 @@ nav:
       - Formatters: configure/formatters.md
   - Reference:
       - Changelog: reference/changelog.md
+      - Telemetry: reference/telemetry.md
       - Security FAQ: reference/security-faq.md
       - Troubleshooting: reference/troubleshooting.md
       - Extend:

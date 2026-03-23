@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Tracer, FileExporter, type TraceFile } from "../../src/altimate/observability/tracing"
+import { Recap, FileExporter, type TraceFile } from "../../src/altimate/observability/tracing"
 import { tmpdir } from "../fixture/fixture"
 
 function makeStepFinish(overrides?: Partial<{ id: string; cost: number }>) {
@@ -25,7 +25,7 @@ describe("Trace persistence across sessions", () => {
 
     for (const sessionId of sessions) {
       const exporter = new FileExporter(tmp.path)
-      const tracer = Tracer.withExporters([exporter])
+      const tracer = Recap.withExporters([exporter])
       tracer.startTrace(sessionId, {
         title: `Session ${sessionId}`,
         prompt: `prompt for ${sessionId}`,
@@ -40,7 +40,7 @@ describe("Trace persistence across sessions", () => {
     const jsonFiles = files.filter((f) => f.endsWith(".json"))
     expect(jsonFiles.length).toBe(3)
 
-    const traces = await Tracer.listTraces(tmp.path)
+    const traces = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(3)
 
     const listedIds = traces.map((t) => t.sessionId)
@@ -59,24 +59,24 @@ describe("Trace persistence across sessions", () => {
     await using tmp = await tmpdir()
 
     const exporter1 = new FileExporter(tmp.path)
-    const tracer1 = Tracer.withExporters([exporter1])
+    const tracer1 = Recap.withExporters([exporter1])
     tracer1.startTrace("ses_A", { title: "Session A", prompt: "prompt A" })
     tracer1.logStepStart({ id: "step-1" })
     tracer1.logStepFinish(makeStepFinish())
     await tracer1.endTrace()
 
-    let traces = await Tracer.listTraces(tmp.path)
+    let traces = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(1)
     expect(traces[0].sessionId).toBe("ses_A")
 
     const exporter2 = new FileExporter(tmp.path)
-    const tracer2 = Tracer.withExporters([exporter2])
+    const tracer2 = Recap.withExporters([exporter2])
     tracer2.startTrace("ses_B", { title: "Session B", prompt: "prompt B" })
     tracer2.logStepStart({ id: "step-1" })
     tracer2.logStepFinish(makeStepFinish())
     await tracer2.endTrace()
 
-    traces = await Tracer.listTraces(tmp.path)
+    traces = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(2)
 
     const ids = traces.map((t) => t.sessionId)
@@ -93,7 +93,7 @@ describe("Trace persistence across sessions", () => {
 
     for (let i = 0; i < 3; i++) {
       const exporter = new FileExporter(tmp.path)
-      const tracer = Tracer.withExporters([exporter])
+      const tracer = Recap.withExporters([exporter])
       tracer.startTrace(`ses_${i}`, { title: `Session ${i}` })
       tracer.logStepStart({ id: "step-1" })
       tracer.logStepFinish(makeStepFinish())
@@ -101,7 +101,7 @@ describe("Trace persistence across sessions", () => {
       await new Promise((r) => setTimeout(r, 10))
     }
 
-    const traces = await Tracer.listTraces(tmp.path)
+    const traces = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(3)
 
     for (let i = 0; i < traces.length - 1; i++) {
@@ -115,7 +115,7 @@ describe("Trace persistence across sessions", () => {
     await using tmp = await tmpdir()
     const sessionId = "ses_unique123"
     const exporter = new FileExporter(tmp.path)
-    const tracer = Tracer.withExporters([exporter])
+    const tracer = Recap.withExporters([exporter])
     tracer.startTrace(sessionId, { title: "Unique Session", prompt: "test prompt" })
     tracer.logStepStart({ id: "step-1" })
     tracer.logStepFinish(makeStepFinish())
@@ -134,7 +134,7 @@ describe("Trace persistence across sessions", () => {
 
   test("listTraces returns empty array when no traces exist", async () => {
     await using tmp = await tmpdir()
-    const traces = await Tracer.listTraces(tmp.path)
+    const traces = await Recap.listTraces(tmp.path)
     expect(traces).toEqual([])
   })
 
@@ -143,7 +143,7 @@ describe("Trace persistence across sessions", () => {
 
     // Write a valid trace
     const exporter = new FileExporter(tmp.path)
-    const tracer = Tracer.withExporters([exporter])
+    const tracer = Recap.withExporters([exporter])
     tracer.startTrace("ses_valid", { title: "Valid Session" })
     tracer.logStepStart({ id: "step-1" })
     tracer.logStepFinish(makeStepFinish())
@@ -152,7 +152,7 @@ describe("Trace persistence across sessions", () => {
     // Write a corrupted JSON file
     await fs.writeFile(path.join(tmp.path, "corrupted.json"), "not valid json{{{")
 
-    const traces = await Tracer.listTraces(tmp.path)
+    const traces = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(1)
     expect(traces[0].sessionId).toBe("ses_valid")
   })

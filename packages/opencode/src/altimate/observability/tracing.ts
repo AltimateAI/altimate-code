@@ -1,5 +1,5 @@
 /**
- * Tracing for Altimate CLI.
+ * Recap (session tracing) for Altimate CLI.
  *
  * Trace schema aligned with industry standards (OpenTelemetry GenAI semantic
  * conventions, Arize Phoenix / OpenInference, Langfuse).
@@ -126,6 +126,14 @@ export interface TraceFile {
       cacheRead: number
       cacheWrite: number
     }
+    // altimate_change start — recap: loop detection + post-session summary
+    /** Detected tool call loops (same tool+input repeated 3+ times). */
+    loops?: Array<{ tool: string; inputHash?: string; count: number; description: string }>
+    /** Human-readable session narrative generated at endTrace. */
+    narrative?: string
+    /** Top tools by call count with total duration. */
+    topTools?: Array<{ name: string; count: number; totalDuration: number }>
+    // altimate_change end
   }
 }
 
@@ -166,7 +174,7 @@ export class FileExporter implements TraceExporter {
   async export(trace: TraceFile): Promise<string | undefined> {
     try {
       await fs.mkdir(this.dir, { recursive: true })
-      // Sanitize sessionId for safe file name (defense-in-depth — also sanitized in Tracer)
+      // Sanitize sessionId for safe file name (defense-in-depth — also sanitized in Recap)
       const safeId = (trace.sessionId ?? "unknown").replace(/[/\\.:]/g, "_") || "unknown"
       const filePath = path.join(this.dir, `${safeId}.json`)
       await fs.writeFile(filePath, JSON.stringify(trace, null, 2))
@@ -239,18 +247,41 @@ export class HttpExporter implements TraceExporter {
 }
 
 // ---------------------------------------------------------------------------
-// Tracer
+// Recap (formerly Tracer)
 // ---------------------------------------------------------------------------
 
 interface TracerOptions {
   maxFiles?: number
 }
 
-export class Tracer {
-  // Global active tracer — set when a session starts, cleared on end.
-  private static _active: Tracer | null = null
-  static get active(): Tracer | null { return Tracer._active }
-  static setActive(tracer: Tracer | null) { Tracer._active = tracer }
+// altimate_change start — recap: helper utilities for loop detection and narrative
+function simpleHash(str: string): string {
+  try {
+    let hash = 0
+    for (let i = 0; i < str.length; i++) {
+      const ch = str.charCodeAt(i)
+      hash = ((hash << 5) - hash + ch) | 0
+    }
+    return hash.toString(36)
+  } catch {
+    return "0"
+  }
+}
+
+function formatDurationShort(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  const mins = Math.floor(ms / 60000)
+  const secs = Math.floor((ms % 60000) / 1000)
+  return `${mins}m${secs}s`
+}
+// altimate_change end
+
+export class Recap {
+  // Global active recap — set when a session starts, cleared on end.
+  private static _active: Recap | null = null
+  static get active(): Recap | null { return Recap._active }
+  static setActive(recap: Recap | null) { Recap._active = recap }
 
   private traceId: string
   private sessionId: string | undefined
@@ -269,6 +300,11 @@ export class Tracer {
   private toolCallCount = 0
   private generationCount = 0
   private tokensBreakdown = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+
+  // altimate_change start — recap: loop detection state
+  private toolCallHistory: Array<{ tool: string; inputHash: string; time: number }> = []
+  private loopsDetected: Array<{ tool: string; inputHash: string; count: number; firstSeen: number; lastSeen: number }> = []
+  // altimate_change end
 
   private metadata: TraceFile["metadata"] = {}
   private snapshotDir: string | undefined
@@ -290,16 +326,16 @@ export class Tracer {
   }
 
   /**
-   * Create a tracer with the default local file exporter.
+   * Create a recap with the default local file exporter.
    */
-  static create(extraExporters: TraceExporter[] = []): Tracer {
-    return new Tracer([new FileExporter(), ...extraExporters])
+  static create(extraExporters: TraceExporter[] = []): Recap {
+    return new Recap([new FileExporter(), ...extraExporters])
   }
 
   /**
-   * Create a tracer with explicit exporters (no defaults).
+   * Create a recap with explicit exporters (no defaults).
    */
-  static withExporters(exporters: TraceExporter[], options?: TracerOptions): Tracer {
+  static withExporters(exporters: TraceExporter[], options?: TracerOptions): Recap {
     if (options?.maxFiles != null) {
       for (const exp of exporters) {
         if (exp instanceof FileExporter) {
@@ -309,7 +345,7 @@ export class Tracer {
         }
       }
     }
-    return new Tracer(exporters)
+    return new Recap(exporters)
   }
 
   /**
@@ -554,6 +590,42 @@ export class Tracer {
         output: isError ? { error: errorStr } : outputStr.slice(0, 10000),
       })
       this.toolCallCount++
+
+      // altimate_change start — recap: loop detection
+      try {
+        const inputStr = safeInput != null ? JSON.stringify(safeInput) : ""
+        const inputHash = simpleHash(toolName + inputStr)
+        const now = Date.now()
+        this.toolCallHistory.push({ tool: toolName, inputHash, time: now })
+        // Prune to prevent unbounded growth in long sessions
+        if (this.toolCallHistory.length > 200) {
+          this.toolCallHistory = this.toolCallHistory.slice(-100)
+        }
+
+        // Check last 10 tool calls for repeated tool+input
+        const recent = this.toolCallHistory.slice(-10)
+        const matchCount = recent.filter((h) => h.tool === toolName && h.inputHash === inputHash).length
+        if (matchCount >= 3) {
+          const existing = this.loopsDetected.find((l) => l.tool === toolName && l.inputHash === inputHash)
+          if (existing) {
+            existing.count = matchCount
+            existing.lastSeen = now
+          } else {
+            const firstMatch = recent.find((h) => h.tool === toolName && h.inputHash === inputHash)
+            this.loopsDetected.push({
+              tool: toolName,
+              inputHash,
+              count: matchCount,
+              firstSeen: firstMatch?.time ?? now,
+              lastSeen: now,
+            })
+          }
+        }
+      } catch {
+        // Loop detection must never crash the recap
+      }
+      // altimate_change end
+
       this.snapshot()
     } catch {
       // best-effort
@@ -775,6 +847,49 @@ export class Tracer {
 
     const trace = this.buildTraceFile(error)
 
+    // altimate_change start — recap: post-session summary (narrative, loops, topTools)
+    try {
+      // Top tools by call count
+      const toolCounts = new Map<string, { count: number; totalDuration: number }>()
+      for (const span of this.spans) {
+        if (span.kind !== "tool") continue
+        const entry = toolCounts.get(span.name) ?? { count: 0, totalDuration: 0 }
+        entry.count++
+        entry.totalDuration += span.tool?.durationMs ?? 0
+        toolCounts.set(span.name, entry)
+      }
+      const topTools = [...toolCounts.entries()]
+        .sort((a, b) => b[1].count - a[1].count)
+        .slice(0, 10)
+        .map(([name, stats]) => ({ name, count: stats.count, totalDuration: stats.totalDuration }))
+      trace.summary.topTools = topTools
+
+      // Loops
+      if (this.loopsDetected.length > 0) {
+        trace.summary.loops = this.loopsDetected.map((l) => ({
+          tool: l.tool,
+          inputHash: l.inputHash,
+          count: l.count,
+          description: `${l.tool} called ${l.count} times with same input (hash: ${l.inputHash})`,
+        }))
+      }
+
+      // Narrative
+      const dur = formatDurationShort(trace.summary.duration)
+      const top3 = topTools.slice(0, 3).map((t) => t.name).join(", ")
+      const toolsStr = top3 ? ` using ${toolCounts.size} tools (${top3})` : ""
+      const loopWarning = this.loopsDetected.length > 0
+        ? ` Warning: ${this.loopsDetected.length} loop(s) detected.`
+        : ""
+      const costStr = Number.isFinite(this.totalCost) ? `$${this.totalCost.toFixed(4)}` : "$0.0000"
+      const statusPrefix = error ? `Failed after ${dur}` : `Completed in ${dur}`
+      const llmStr = this.generationCount > 0 ? `. Made ${this.generationCount} LLM call${this.generationCount > 1 ? "s" : ""}` : ""
+      trace.summary.narrative = `${statusPrefix}${llmStr}${toolsStr}.${loopWarning} Total cost: ${costStr}.`
+    } catch {
+      // Narrative generation must never crash the recap
+    }
+    // altimate_change end
+
     // Wrap each exporter call with a timeout to prevent hanging exporters
     // from blocking the entire endTrace call
     const EXPORTER_TIMEOUT_MS = 5_000
@@ -878,3 +993,10 @@ export class Tracer {
     }
   }
 }
+
+// altimate_change start — recap: backward-compat alias (value + type)
+/** @deprecated Use Recap instead */
+export const Tracer = Recap
+/** @deprecated Use Recap instead */
+export type Tracer = Recap
+// altimate_change end

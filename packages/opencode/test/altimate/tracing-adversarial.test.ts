@@ -16,7 +16,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   HttpExporter,
   type TraceFile,
@@ -44,7 +44,7 @@ function makeExporter() {
 
 describe("Adversarial — malformed input", () => {
   test("NaN token counts produce valid JSON", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-nan", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -71,7 +71,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("undefined/null token cache object doesn't crash", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-null-cache", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     // Simulate a malformed event where cache is missing
@@ -93,7 +93,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("circular reference in tool input doesn't crash", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-circular", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -127,7 +127,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("path traversal in session ID is sanitized", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("../../etc/passwd", { prompt: "evil" })
     const filePath = await tracer.endTrace()
 
@@ -142,7 +142,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("session ID with special characters is safe", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("session:with/slashes\\and..dots", { prompt: "test" })
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
@@ -154,7 +154,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("empty string session ID defaults to 'unknown'", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("", { prompt: "test" })
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
@@ -165,7 +165,7 @@ describe("Adversarial — malformed input", () => {
 
   test("extremely long session ID doesn't cause issues", async () => {
     const longId = "x".repeat(10000)
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace(longId, { prompt: "test" })
     const filePath = await tracer.endTrace()
     // Should still work — file systems have name limits but we don't crash
@@ -174,7 +174,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("tool call with non-string error doesn't crash", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-err-type", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -198,7 +198,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("tool call with undefined error doesn't crash", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-undef-err", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -222,7 +222,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("tool call with null output doesn't crash", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-null-out", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -246,7 +246,7 @@ describe("Adversarial — malformed input", () => {
   })
 
   test("tool call with missing time fields doesn't crash", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-no-time", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -276,7 +276,7 @@ describe("Adversarial — malformed input", () => {
 
 describe("Adversarial — unicode and special characters", () => {
   test("emoji in prompt and tool output", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-emoji", { prompt: "Fix the 🐛 in the 🔧 pipeline 🚀" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -302,7 +302,7 @@ describe("Adversarial — unicode and special characters", () => {
   })
 
   test("null bytes in strings", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-null-bytes", { prompt: "test\x00with\x00nulls" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: "output\x00with\x00nulls" })
@@ -320,7 +320,7 @@ describe("Adversarial — unicode and special characters", () => {
   })
 
   test("CJK characters in metadata", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-cjk", {
       prompt: "修复数据库中的错误 — バグを修正する — 데이터 파이프라인 수정",
       agent: "分析师",
@@ -332,7 +332,7 @@ describe("Adversarial — unicode and special characters", () => {
   })
 
   test("very long tool output with mixed encodings", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-mixed", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -366,7 +366,7 @@ describe("Adversarial — unicode and special characters", () => {
 
 describe("Adversarial — extreme scale", () => {
   test("1000 tool calls in a single generation", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-1k-tools", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -397,7 +397,7 @@ describe("Adversarial — extreme scale", () => {
   })
 
   test("50 generations in sequence", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-50-gens", { prompt: "test" })
 
     for (let i = 0; i < 50; i++) {
@@ -418,7 +418,7 @@ describe("Adversarial — extreme scale", () => {
   })
 
   test("5MB tool output is truncated and doesn't OOM", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-5mb", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -455,7 +455,7 @@ describe("Adversarial — extreme scale", () => {
 describe("Adversarial — concurrency", () => {
   test("multiple tracers writing to the same directory concurrently", async () => {
     const tracers = Array.from({ length: 10 }, (_, i) => {
-      const t = Tracer.withExporters([new FileExporter(tmpDir)])
+      const t = Recap.withExporters([new FileExporter(tmpDir)])
       t.startTrace(`concurrent-${i}`, { prompt: `prompt-${i}` })
       return t
     })
@@ -479,7 +479,7 @@ describe("Adversarial — concurrency", () => {
   })
 
   test("rapid-fire logToolCall doesn't corrupt state", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-rapid", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -521,7 +521,7 @@ describe("Adversarial — exporter failures", () => {
         throw new Error("Sync explosion!")
       },
     }
-    const tracer = Tracer.withExporters([badExporter, makeExporter()])
+    const tracer = Recap.withExporters([badExporter, makeExporter()])
     tracer.startTrace("s-sync-throw", { prompt: "test" })
     const result = await tracer.endTrace()
     // FileExporter should still succeed
@@ -535,7 +535,7 @@ describe("Adversarial — exporter failures", () => {
         throw "string error" // eslint-disable-line no-throw-literal
       },
     }
-    const tracer = Tracer.withExporters([badExporter, makeExporter()])
+    const tracer = Recap.withExporters([badExporter, makeExporter()])
     tracer.startTrace("s-reject-str", { prompt: "test" })
     const result = await tracer.endTrace()
     expect(result).toBeDefined()
@@ -556,7 +556,7 @@ describe("Adversarial — exporter failures", () => {
     const fileExporter = makeExporter()
 
     // Put FileExporter first so its result is returned
-    const tracer = Tracer.withExporters([fileExporter, hangingExporter])
+    const tracer = Recap.withExporters([fileExporter, hangingExporter])
     tracer.startTrace("s-hang", { prompt: "test" })
 
     const result = await tracer.endTrace()
@@ -574,7 +574,7 @@ describe("Adversarial — exporter failures", () => {
       name: "undef-return",
       export: async () => undefined,
     }
-    const tracer = Tracer.withExporters([nullExporter, undefExporter, makeExporter()])
+    const tracer = Recap.withExporters([nullExporter, undefExporter, makeExporter()])
     tracer.startTrace("s-null-ret", { prompt: "test" })
     const result = await tracer.endTrace()
     // FileExporter result should be returned
@@ -646,7 +646,7 @@ describe("Adversarial — exporter failures", () => {
 
 describe("Adversarial — state machine", () => {
   test("double startTrace overwrites cleanly", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("first", { prompt: "first" })
     tracer.startTrace("second", { prompt: "second" })
     const filePath = await tracer.endTrace()
@@ -659,7 +659,7 @@ describe("Adversarial — state machine", () => {
   })
 
   test("logStepFinish called twice for same generation", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-double-fin", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -683,7 +683,7 @@ describe("Adversarial — state machine", () => {
   })
 
   test("logStepStart without matching logStepFinish", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-no-finish", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     // Never call logStepFinish — generation span left open
@@ -696,7 +696,7 @@ describe("Adversarial — state machine", () => {
   })
 
   test("interleaved step-start without finishing previous", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-interleave", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -725,7 +725,7 @@ describe("Adversarial — state machine", () => {
   })
 
   test("endTrace called twice is safe", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-double-end", { prompt: "test" })
     const first = await tracer.endTrace()
     const second = await tracer.endTrace()
@@ -735,7 +735,7 @@ describe("Adversarial — state machine", () => {
   })
 
   test("operations after endTrace don't crash", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-post-end", { prompt: "test" })
     await tracer.endTrace()
 
@@ -770,7 +770,7 @@ describe("Adversarial — state machine", () => {
 
 describe("Adversarial — JSON serialization", () => {
   test("tool input with Date objects", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-date", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -796,7 +796,7 @@ describe("Adversarial — JSON serialization", () => {
   })
 
   test("tool input with BigInt throws on JSON.stringify — should be caught", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-bigint", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -820,7 +820,7 @@ describe("Adversarial — JSON serialization", () => {
   })
 
   test("tool input with Uint8Array (binary data)", async () => {
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-binary", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -850,7 +850,7 @@ describe("Adversarial — JSON serialization", () => {
       deep = { nested: deep }
     }
 
-    const tracer = Tracer.withExporters([makeExporter()])
+    const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-deep", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({

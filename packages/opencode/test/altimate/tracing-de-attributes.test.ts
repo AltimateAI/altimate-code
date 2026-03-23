@@ -13,7 +13,7 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import os from "os"
-import { Tracer, FileExporter, type TraceFile } from "../../src/altimate/observability/tracing"
+import { Recap, FileExporter, type TraceFile } from "../../src/altimate/observability/tracing"
 import { DE } from "../../src/altimate/observability/de-attributes"
 
 let tmpDir: string
@@ -88,7 +88,7 @@ describe("DE attribute constants", () => {
 
 describe("setSpanAttributes — targeting", () => {
   test("attaches to last tool span by default", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-tool-attrs", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -119,7 +119,7 @@ describe("setSpanAttributes — targeting", () => {
   })
 
   test("attaches to generation span when target='generation'", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-gen-attrs", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.setSpanAttributes({ custom: "on-generation" }, "generation")
@@ -132,7 +132,7 @@ describe("setSpanAttributes — targeting", () => {
   })
 
   test("attaches to session span when target='session'", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-session-attrs", { prompt: "test" })
     tracer.setSpanAttributes({
       [DE.COST.TOTAL_USD]: 0.15,
@@ -147,7 +147,7 @@ describe("setSpanAttributes — targeting", () => {
   })
 
   test("auto-targeting falls through: no tool → generation → session", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-fallthrough", { prompt: "test" })
     // No tool spans, no generation — should attach to session
     tracer.setSpanAttributes({ fallthrough: "to-session" })
@@ -165,13 +165,13 @@ describe("setSpanAttributes — targeting", () => {
 
 describe("setSpanAttributes — graceful degradation", () => {
   test("no-op before startTrace", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     // Should not throw
     tracer.setSpanAttributes({ [DE.WAREHOUSE.SYSTEM]: "snowflake" })
   })
 
   test("undefined values are skipped", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-undef-vals", { prompt: "test" })
     tracer.setSpanAttributes({
       [DE.WAREHOUSE.SYSTEM]: "bigquery",
@@ -187,7 +187,7 @@ describe("setSpanAttributes — graceful degradation", () => {
   })
 
   test("null values are preserved (unlike undefined)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-null-vals", { prompt: "test" })
     tracer.setSpanAttributes({
       [DE.DBT.MODEL_ERROR]: null,
@@ -200,7 +200,7 @@ describe("setSpanAttributes — graceful degradation", () => {
   })
 
   test("empty attributes object is a no-op", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-empty-attrs", { prompt: "test" })
     tracer.setSpanAttributes({}, "session")
     const filePath = await tracer.endTrace()
@@ -211,7 +211,7 @@ describe("setSpanAttributes — graceful degradation", () => {
   })
 
   test("multiple setSpanAttributes calls merge correctly", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-merge", { prompt: "test" })
     tracer.setSpanAttributes({ [DE.WAREHOUSE.SYSTEM]: "snowflake" }, "session")
     tracer.setSpanAttributes({ [DE.WAREHOUSE.BYTES_SCANNED]: 5000 }, "session")
@@ -226,7 +226,7 @@ describe("setSpanAttributes — graceful degradation", () => {
   })
 
   test("later setSpanAttributes overwrites earlier values for same key", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-overwrite", { prompt: "test" })
     tracer.setSpanAttributes({ [DE.WAREHOUSE.SYSTEM]: "snowflake" }, "session")
     tracer.setSpanAttributes({ [DE.WAREHOUSE.SYSTEM]: "bigquery" }, "session")
@@ -238,7 +238,7 @@ describe("setSpanAttributes — graceful degradation", () => {
   })
 
   test("targeting non-existent span type is a no-op", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-no-gen", { prompt: "test" })
     // No generation span exists
     tracer.setSpanAttributes({ custom: "value" }, "generation")
@@ -254,7 +254,7 @@ describe("setSpanAttributes — graceful degradation", () => {
 
 describe("Real-world data engineering scenarios", () => {
   test("SQL execute tool with Snowflake warehouse metrics", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-snowflake", { prompt: "Show me top 10 customers by revenue" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -304,7 +304,7 @@ describe("Real-world data engineering scenarios", () => {
   })
 
   test("dbt run with model results", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-dbt-run", { prompt: "Run the staging models" })
     tracer.logStepStart({ id: "1" })
 
@@ -358,7 +358,7 @@ describe("Real-world data engineering scenarios", () => {
   })
 
   test("failed SQL with validation error", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-sql-fail", { prompt: "Query the data" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -388,7 +388,7 @@ describe("Real-world data engineering scenarios", () => {
   })
 
   test("trace without any DE attributes is still valid", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-no-de", { prompt: "Just a regular coding task" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -413,7 +413,7 @@ describe("Real-world data engineering scenarios", () => {
   })
 
   test("mixed DE and non-DE attributes coexist", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-mixed-attrs", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
