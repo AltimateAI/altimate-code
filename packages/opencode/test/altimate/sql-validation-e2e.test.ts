@@ -13,6 +13,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
+import fs from "fs"
 import path from "path"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/altimate-core"
@@ -370,7 +371,8 @@ describe("sql.analyze e2e", () => {
     const selectStarIssue = result.issues.find(
       (i: any) => i.type === "lint" && (i.message?.includes("SELECT *") || i.message?.includes("select_star") || i.message?.toLowerCase?.().includes("star")),
     )
-    // At minimum, issues array should exist and analyzer should not crash
+    // Verify the SELECT * lint issue was actually found
+    expect(selectStarIssue).toBeDefined()
     expect(Array.isArray(result.issues)).toBe(true)
   })
 
@@ -606,8 +608,8 @@ describe("SQL validation Dispatcher methods are registered", () => {
 // ---------------------------------------------------------------------------
 
 describe("Skill files reference real tools", () => {
-  // Skills live at the repo root, not packages/opencode
-  const repoRoot = path.resolve(process.cwd(), "../..")
+  // Derive repo root from test file location, not cwd (works from any directory)
+  const repoRoot = path.resolve(import.meta.dir, "../../../..")
 
   test("sql-translate skill references altimate_core_validate, not sql_validate", async () => {
     const skillPath = path.join(
@@ -638,9 +640,7 @@ describe("Skill files reference real tools", () => {
 // ---------------------------------------------------------------------------
 
 describe("Prompt skill references match actual skills", () => {
-  const repoRoot = path.resolve(process.cwd(), "../..")
-  const fs = require("fs")
-
+  const repoRoot = path.resolve(import.meta.dir, "../../../..")
   function getSkillDirs(): string[] {
     const skillsDir = path.join(repoRoot, ".opencode/skills")
     if (!fs.existsSync(skillsDir)) return []
@@ -677,7 +677,8 @@ describe("Prompt skill references match actual skills", () => {
         const skillsSectionMatch = prompt.match(
           /## Skills Available[^\n]*\n([\s\S]*?)(?=\nNote:|## )/,
         )
-        if (!skillsSectionMatch) return // No skills section found — nothing to check
+        expect(skillsSectionMatch).toBeDefined()
+        if (!skillsSectionMatch) return // TypeScript narrowing
 
         const skillsSection = skillsSectionMatch[1]
         const refs = extractSkillRefs(skillsSection)

@@ -32,7 +32,7 @@ import { registerAll } from "../../src/altimate/native/altimate-core"
 import { registerAllSql } from "../../src/altimate/native/sql/register"
 import { registerAll as registerConnections } from "../../src/altimate/native/connections/register"
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { classify, classifyMulti, classifyAndCheck } from "../../src/altimate/tools/sql-classify"
+import { classifyAndCheck } from "../../src/altimate/tools/sql-classify"
 import { SqlExecuteTool } from "../../src/altimate/tools/sql-execute"
 import { Instance } from "../../src/project/instance"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -950,8 +950,8 @@ describe("E2E: translate and optimize through pipeline", () => {
   test("sql.translate is callable and returns result shape", async () => {
     const r = await Dispatcher.call("sql.translate", {
       sql: "SELECT IFNULL(name, 'unknown') FROM users",
-      from_dialect: "snowflake",
-      to_dialect: "postgres",
+      source_dialect: "snowflake",
+      target_dialect: "postgres",
     })
     expect(r).toHaveProperty("success")
   })
@@ -967,14 +967,14 @@ describe("E2E: translate and optimize through pipeline", () => {
     // A SELECT stays a SELECT after translation
     const translated = await Dispatcher.call("sql.translate", {
       sql: "SELECT NVL(name, 'unknown') FROM users LIMIT 10",
-      from_dialect: "snowflake",
-      to_dialect: "postgres",
+      source_dialect: "snowflake",
+      target_dialect: "postgres",
     })
 
-    if (translated.success && translated.data?.sql) {
-      const { queryType, blocked } = classifyAndCheck(translated.data.sql as string)
-      expect(queryType).toBe("read")
-      expect(blocked).toBe(false)
-    }
+    expect(translated.success).toBe(true)
+    expect(translated.translated_sql).toBeDefined()
+    const { queryType, blocked } = classifyAndCheck(translated.translated_sql as string)
+    expect(queryType).toBe("read")
+    expect(blocked).toBe(false)
   })
 })
