@@ -168,7 +168,7 @@ export namespace Agent {
           PermissionNext.fromConfig({
             "*": "deny",
             // SQL read tools
-            sql_execute: "allow", sql_validate: "allow", sql_analyze: "allow",
+            sql_execute: "allow", altimate_core_validate: "allow", sql_analyze: "allow",
             sql_translate: "allow", sql_optimize: "allow", lineage_check: "allow",
             sql_explain: "allow", sql_format: "allow", sql_fix: "allow",
             sql_autocomplete: "allow", sql_diff: "allow",
@@ -184,7 +184,7 @@ export namespace Agent {
             finops_unused_resources: "allow", finops_role_grants: "allow",
             finops_role_hierarchy: "allow", finops_user_roles: "allow",
             // Core tools
-            altimate_core_validate: "allow", altimate_core_check: "allow",
+            altimate_core_check: "allow",
             altimate_core_rewrite: "allow",
             // Read-only file access
             read: "allow", grep: "allow", glob: "allow",

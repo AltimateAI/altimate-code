@@ -7,7 +7,7 @@ description: Translate SQL queries between database dialects (Snowflake, BigQuer
 
 ## Requirements
 **Agent:** builder or migrator (may write translated SQL to files)
-**Tools used:** sql_translate, read, write, sql_validate
+**Tools used:** sql_translate, read, write, altimate_core_validate
 
 Translate SQL queries from one database dialect to another using sqlglot's transpilation engine.
 
@@ -36,7 +36,7 @@ Translate SQL queries from one database dialect to another using sqlglot's trans
    - Any warnings about lossy translations or features that need manual review
 
 6. **Offer next steps** if applicable:
-   - Suggest running `sql_validate` on the translated SQL to verify syntax
+   - Suggest running `altimate_core_validate` on the translated SQL to verify syntax
    - Offer to write the translated SQL to a file
    - Offer to translate additional queries
 
@@ -65,4 +65,4 @@ The user invokes this skill with optional dialect and SQL arguments:
 | Oracle | `oracle` |
 | Trino/Presto | `trino` / `presto` |
 
-Use the tools: `sql_translate`, `read`, `write`, `sql_validate`.
+Use the tools: `sql_translate`, `read`, `write`, `altimate_core_validate`.
