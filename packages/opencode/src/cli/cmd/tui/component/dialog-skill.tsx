@@ -289,7 +289,6 @@ function DialogSkillCreate() {
           toast.show({ message: `Create error: ${msg.slice(0, 200)}`, variant: "error", duration: 8000 })
         }
       }}
-      onCancel={() => dialog.clear()}
     />
   )
 }
@@ -341,7 +340,6 @@ function DialogSkillInstall() {
           toast.show({ message: `Install error: ${msg.slice(0, 200)}`, variant: "error", duration: 8000 })
         }
       }}
-      onCancel={() => dialog.clear()}
     />
   )
 }
@@ -525,14 +523,20 @@ export function DialogSkill(props: DialogSkillProps) {
       keybind: Keybind.parse("ctrl+n")[0],
       title: "new",
       onTrigger: async () => {
-        dialog.replace(() => <DialogSkillCreate />)
+        dialog.replace(
+          () => <DialogSkillCreate />,
+          () => setTimeout(() => reopenSkillList(), 0),
+        )
       },
     },
     {
       keybind: Keybind.parse("ctrl+i")[0],
       title: "install",
       onTrigger: async () => {
-        dialog.replace(() => <DialogSkillInstall />)
+        dialog.replace(
+          () => <DialogSkillInstall />,
+          () => setTimeout(() => reopenSkillList(), 0),
+        )
       },
     },
   ])

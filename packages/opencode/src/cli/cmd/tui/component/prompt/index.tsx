@@ -390,6 +390,9 @@ export function Prompt(props: PromptProps) {
         title: "Skills",
         value: "prompt.skills",
         category: "Prompt",
+        // altimate_change start — global keybind to open skills dialog
+        keybind: "skill_list",
+        // altimate_change end
         slash: {
           name: "skills",
         },
