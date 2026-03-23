@@ -46,11 +46,10 @@ describe("publish.ts dbt-tools ESM bundling", () => {
     expect(publishSource).toContain("dbt-tools/package.json")
   })
 
-  test('bundled package.json includes "type": "module"', () => {
-    // The publish script must write `{ type: "module" }` (or equivalent)
-    // so that Node treats .js files in dbt-tools/ as ESM.
-    // Match the JS object literal (unquoted key), not just the comment.
-    expect(publishSource).toContain('type: "module"')
+  test('copyAssets writes package.json with type: "module" via Bun.file', () => {
+    // Match the actual write call, not just a comment or string literal.
+    expect(publishSource).toContain('Bun.file(`${targetDir}/dbt-tools/package.json`).write')
+    expect(publishSource).toContain('JSON.stringify({ type: "module" }')
   })
 
   test("copyAssets creates dbt-tools/bin and dbt-tools/dist directories", () => {
@@ -94,20 +93,19 @@ describe("dbt-tools + Node compatibility", () => {
     // This test verifies the chain of conditions that require package.json:
     const bin = fs.readFileSync(path.join(DBT_TOOLS_DIR, "bin/altimate-dbt"), "utf-8")
 
-    // Condition 1: Uses node (not bun) as the runtime
+    // Assert prerequisites explicitly so the test cannot pass vacuously
     const usesNode = bin.includes("#!/usr/bin/env node")
-    // Condition 2: Uses ESM import syntax
     const usesESMImport = bin.includes("import(")
+    expect(usesNode).toBe(true)
+    expect(usesESMImport).toBe(true)
 
-    if (usesNode && usesESMImport) {
-      // Then package.json MUST have "type": "module"
-      const pkg = JSON.parse(fs.readFileSync(path.join(DBT_TOOLS_DIR, "package.json"), "utf-8"))
-      expect(pkg.type).toBe("module")
+    // Given both conditions hold, package.json MUST have "type": "module"
+    const pkg = JSON.parse(fs.readFileSync(path.join(DBT_TOOLS_DIR, "package.json"), "utf-8"))
+    expect(pkg.type).toBe("module")
 
-      // AND publish.ts MUST bundle that information
-      const publishSource = fs.readFileSync(PUBLISH_SCRIPT, "utf-8")
-      expect(publishSource).toContain('"type": "module"')
-    }
+    // AND publish.ts MUST bundle that information via Bun.file().write()
+    const publishSource = fs.readFileSync(PUBLISH_SCRIPT, "utf-8")
+    expect(publishSource).toContain('JSON.stringify({ type: "module" }')
   })
 
   test("all dbt-tools bin entries use node shebang (consistency check)", () => {
