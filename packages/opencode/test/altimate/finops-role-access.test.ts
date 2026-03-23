@@ -18,9 +18,6 @@ import { SessionID, MessageID } from "../../src/session/schema"
 beforeEach(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 })
-afterAll(() => {
-  delete process.env.ALTIMATE_TELEMETRY_DISABLED
-})
 
 const ctx = {
   sessionID: SessionID.make("ses_test"),
@@ -45,6 +42,7 @@ function mockDispatcher(responses: Record<string, any>) {
 
 afterAll(() => {
   dispatcherSpy?.mockRestore()
+  delete process.env.ALTIMATE_TELEMETRY_DISABLED
 })
 
 describe("formatGrants: privilege summary and grant rows", () => {

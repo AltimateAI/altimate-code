@@ -1,10 +1,10 @@
 import { describe, test, expect } from "bun:test"
-import path from "path"
 import { SessionSummary } from "../../src/session/summary"
 import { Instance } from "../../src/project/instance"
 import { Storage } from "../../src/storage/storage"
 import { Log } from "../../src/util/log"
 import { Identifier } from "../../src/id/id"
+import { tmpdir } from "../fixture/fixture"
 
 /**
  * Tests for the unquoteGitPath function used in SessionSummary.diff().
@@ -18,7 +18,6 @@ import { Identifier } from "../../src/id/id"
  * stored FileDiff entries.
  */
 
-const projectRoot = path.join(__dirname, "../..")
 Log.init({ print: false })
 
 // Helper: write fake diffs to Storage for a session, then read them back via diff()
@@ -40,8 +39,9 @@ async function roundtrip(files: string[]): Promise<string[]> {
 
 describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   test("plain ASCII paths pass through unchanged", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         const files = await roundtrip([
           "src/index.ts",
@@ -58,8 +58,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("git-quoted path with octal-encoded UTF-8 (2-byte: é = \\303\\251)", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         // Git quotes "café.txt" as "caf\\303\\251.txt"
         const files = await roundtrip(['"caf\\303\\251.txt"'])
@@ -69,8 +70,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("git-quoted path with 3-byte UTF-8 octal (CJK character 中 = \\344\\270\\255)", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         // Git quotes "中文.txt" as "\\344\\270\\255\\346\\226\\207.txt"
         const files = await roundtrip(['"\\344\\270\\255\\346\\226\\207.txt"'])
@@ -80,8 +82,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("git-quoted path with standard escape sequences (\\n, \\t, \\\\, \\\")", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         const files = await roundtrip([
           '"path\\\\with\\\\backslashes"',
@@ -98,8 +101,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("mixed octal and plain ASCII in one path", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         // "docs/résumé.md" → git quotes accented chars only
         // é = \303\251 in UTF-8
@@ -110,8 +114,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("unquoted path (no surrounding double quotes) passes through unchanged", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         // If git doesn't quote the path, it should pass through as-is
         const files = await roundtrip(["normal/path.ts", "another-file.js"])
@@ -121,8 +126,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("path with embedded double quote (\\\")", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         const files = await roundtrip(['"file\\"name.txt"'])
         expect(files).toEqual(['file"name.txt'])
@@ -131,8 +137,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("empty string passes through unchanged", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         const files = await roundtrip([""])
         expect(files).toEqual([""])
@@ -141,8 +148,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("Japanese filename with 3-byte UTF-8 sequences (テスト = \\343\\203\\206\\343\\202\\271\\343\\203\\210)", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         // テ = E3 83 86 = \343\203\206
         // ス = E3 82 B9 = \343\202\271
@@ -154,8 +162,9 @@ describe("SessionSummary.diff: unquoteGitPath decoding", () => {
   })
 
   test("multiple files: some quoted, some not", async () => {
+    await using tmp = await tmpdir()
     await Instance.provide({
-      directory: projectRoot,
+      directory: tmp.path,
       fn: async () => {
         const files = await roundtrip([
           "plain.ts",
