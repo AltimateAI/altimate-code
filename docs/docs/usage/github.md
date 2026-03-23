@@ -39,6 +39,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
+!!! important "LLM provider required"
+    The workflow `GITHUB_TOKEN` is for repository access only — it cannot be used for LLM inference. You must provide a separate API key (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) as a repository secret. GitHub Copilot and GitHub Models providers are automatically disabled in Actions environments.
+
 ### Triggers
 
 | Event | Behavior |

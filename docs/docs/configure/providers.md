@@ -218,6 +218,9 @@ Access 150+ models through a single API key.
 
 Uses your GitHub Copilot subscription. Authenticate with `altimate auth`.
 
+!!! note "Codespaces & GitHub Actions"
+    In GitHub Codespaces and GitHub Actions, the machine-scoped `GITHUB_TOKEN` lacks `models:read` permission and cannot be used for GitHub Copilot or GitHub Models inference. altimate automatically skips these providers in machine environments. To use them, authenticate explicitly with `altimate auth` or set a personal access token with `models:read` scope as a Codespace secret.
+
 ## Snowflake Cortex
 
 ```json

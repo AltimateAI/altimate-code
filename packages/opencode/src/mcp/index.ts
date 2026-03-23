@@ -215,7 +215,7 @@ export namespace MCP {
 
       // altimate_change start — show discovery toast after MCP connections complete
       if (discoveryResult) {
-        const message = `Discovered ${discoveryResult.serverNames.length} new MCP server(s): ${discoveryResult.serverNames.join(", ")}. Run /discover-and-add-mcps to enable and add them.`
+        const message = `Discovered ${discoveryResult.serverNames.length} new MCP server(s): ${discoveryResult.serverNames.join(", ")}. Ask the assistant to add them, or they will be available automatically in the current session.`
         Bus.publish(TuiEvent.ToastShow, {
           title: "MCP Servers Discovered",
           message,

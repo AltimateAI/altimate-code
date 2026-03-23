@@ -1,14 +1,16 @@
-fix: viewer UX improvements from 100-trace analysis
+fix: Codespaces — skip machine-scoped `GITHUB_TOKEN`, cap retries, fix phantom command
 
-- Collapse Files Changed after 5 entries with "Show all N files" toggle
-- Rename "GENS" → "LLM Calls" in header cards
-- Hide Tokens card when cost is $0 (not actionable without cost context)
-- Hide Cost metric card when $0.00 (wasted space)
-- Add prominent error summary banner right after header metrics
-- Improved dbt outcome detection: catch [PASS], [ERROR], N of M, Compilation Error
-- Outcome detection rate improved from 18% → 33% across 100 real traces
-- Updated doc screenshots with cleaner samples
+Closes #413
 
-Tested across 100 real production traces: 0 crashes, 0 JS errors.
-
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+- Skip auto-enabling `github-models` and `github-copilot` providers in
+  machine environments (Codespaces: `CODESPACES=true`, GitHub Actions:
+  `GITHUB_ACTIONS=true`) when only machine-scoped tokens (`GITHUB_TOKEN`,
+  `GH_TOKEN`) are available. The Codespace/Actions token lacks
+  `models:read` scope needed for GitHub Models API.
+- Cap retry attempts at 5 (`RETRY_MAX_ATTEMPTS`) to prevent infinite
+  retry loops. Log actionable warning when retries exhaust.
+- Replace phantom `/discover-and-add-mcps` toast with actionable message.
+- Add `.devcontainer/` config (Node 22, Bun 1.3.10) for Codespaces.
+- Add 32 adversarial e2e tests covering full Codespace/Actions env
+  simulation, `GH_TOKEN`, token variations, config overrides, retry bounds.
+- Update docs to reference `mcp_discover` tool.

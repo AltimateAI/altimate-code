@@ -2282,3 +2282,52 @@ test("cloudflare-ai-gateway forwards config metadata options", async () => {
     },
   })
 })
+
+// altimate_change start — test Codespace GITHUB_TOKEN skip logic
+test("github-models is excluded when CODESPACES=true and only GITHUB_TOKEN is set", async () => {
+  await using tmp = await tmpdir({ config: {} })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      Env.set("GITHUB_TOKEN", "test-codespace-token")
+      Env.set("CODESPACES", "true")
+    },
+    fn: async () => {
+      const providers = await Provider.list()
+      expect(providers["github-models"]).toBeUndefined()
+    },
+  })
+})
+
+test("github-models is available when GITHUB_TOKEN set without CODESPACES", async () => {
+  await using tmp = await tmpdir({ config: {} })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      // Remove machine-env vars that may leak from CI
+      Env.remove("CODESPACES")
+      Env.remove("GITHUB_ACTIONS")
+      Env.set("GITHUB_TOKEN", "test-personal-token")
+    },
+    fn: async () => {
+      const providers = await Provider.list()
+      expect(providers["github-models"]).toBeDefined()
+    },
+  })
+})
+
+test("github-copilot is excluded when CODESPACES=true and only GITHUB_TOKEN is set", async () => {
+  await using tmp = await tmpdir({ config: {} })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      Env.set("GITHUB_TOKEN", "test-codespace-token")
+      Env.set("CODESPACES", "true")
+    },
+    fn: async () => {
+      const providers = await Provider.list()
+      expect(providers["github-copilot"]).toBeUndefined()
+    },
+  })
+})
+// altimate_change end

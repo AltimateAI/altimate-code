@@ -91,6 +91,12 @@ describe("session.retry.delay", () => {
   })
 })
 
+describe("session.retry.max_attempts", () => {
+  test("RETRY_MAX_ATTEMPTS is 5", () => {
+    expect(SessionRetry.RETRY_MAX_ATTEMPTS).toBe(5)
+  })
+})
+
 describe("session.retry.retryable", () => {
   test("maps too_many_requests json messages", () => {
     const error = wrap(JSON.stringify({ type: "error", error: { type: "too_many_requests" } }))

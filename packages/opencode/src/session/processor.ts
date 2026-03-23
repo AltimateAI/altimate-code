@@ -394,7 +394,9 @@ export namespace SessionProcessor {
               })
             } else {
               const retry = SessionRetry.retryable(error)
-              if (retry !== undefined) {
+              // altimate_change start — cap retries to avoid infinite loops, log on exhaustion
+              if (retry !== undefined && attempt < SessionRetry.RETRY_MAX_ATTEMPTS) {
+              // altimate_change end
                 attempt++
                 const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
                 SessionStatus.set(input.sessionID, {
@@ -406,6 +408,16 @@ export namespace SessionProcessor {
                 await SessionRetry.sleep(delay, input.abort).catch(() => {})
                 continue
               }
+              // altimate_change start — log when retries exhausted for debugging
+              if (retry !== undefined) {
+                log.warn("max retry attempts reached, giving up", {
+                  attempt,
+                  message: retry,
+                  providerID: input.model.providerID,
+                  modelID: input.model.id,
+                })
+              }
+              // altimate_change end
               input.assistantMessage.error = error
               Bus.publish(Session.Event.Error, {
                 sessionID: input.assistantMessage.sessionID,

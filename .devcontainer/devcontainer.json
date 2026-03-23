@@ -1,0 +1,32 @@
+{
+  "name": "Altimate Code",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/shyim/devcontainers-features/bun:0": {
+      "version": "1.3.10"
+    }
+  },
+  "postCreateCommand": ".devcontainer/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "biomejs.biome",
+        "dbaeumer.vscode-eslint"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    },
+    "codespaces": {
+      "openFiles": [
+        "README.md"
+      ]
+    }
+  },
+  "forwardPorts": [],
+  "remoteEnv": {
+    "BUN_INSTALL": "/home/node/.bun",
+    "PATH": "/home/node/.bun/bin:${containerEnv:PATH}"
+  }
+}

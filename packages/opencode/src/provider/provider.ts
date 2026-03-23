@@ -1071,11 +1071,41 @@ export namespace Provider {
 
     // load env
     const env = Env.all()
+    // altimate_change start — skip github-models/github-copilot auto-enable from machine-scoped GITHUB_TOKEN
+    // In GitHub Codespaces and GitHub Actions, GITHUB_TOKEN is a machine-scoped
+    // token for repo operations, not for model inference. Auto-enabling these
+    // providers leads to immediate rate limiting ("Too Many Requests") and long
+    // retry loops. We detect these environments and skip auto-enable unless the
+    // user has explicitly set a different token.
+    //
+    // Environment detection (official GitHub docs):
+    //   Codespaces: CODESPACES=true, CODESPACE_NAME set
+    //   Actions:    GITHUB_ACTIONS=true, CI=true
+    //
+    // Machine-scoped tokens to ignore: GITHUB_TOKEN and GH_TOKEN (gh CLI alias)
+    const isMachineEnv = env["CODESPACES"] === "true" || env["GITHUB_ACTIONS"] === "true"
+    const machineTokenNames = new Set(["GITHUB_TOKEN", "GH_TOKEN"])
+    const skipGithubProviders = new Set(["github-models", "github-copilot", "github-copilot-enterprise"])
+    // altimate_change end
     for (const [id, provider] of Object.entries(database)) {
       const providerID = ProviderID.make(id)
       if (disabled.has(providerID)) continue
       const apiKey = provider.env.map((item) => env[item]).find(Boolean)
       if (!apiKey) continue
+      // altimate_change start — skip GitHub providers when only machine-scoped tokens exist
+      if (isMachineEnv && skipGithubProviders.has(id)) {
+        // Check if ALL env vars for this provider are machine-scoped tokens
+        const matchedEnvVars = provider.env.filter((item) => env[item])
+        const allMachineScoped = matchedEnvVars.every((item) => machineTokenNames.has(item))
+        if (allMachineScoped) {
+          log.info("skipping provider in machine environment (token is not for model inference)", {
+            providerID,
+            environment: env["CODESPACES"] ? "codespace" : "github-actions",
+          })
+          continue
+        }
+      }
+      // altimate_change end
       mergeProvider(providerID, {
         source: "env",
         key: provider.env.length === 1 ? apiKey : undefined,

@@ -131,10 +131,10 @@ The `mcp_discover` tool finds MCP servers configured in other AI coding tools an
 - `mcp_discover(action: "add", scope: "project")` — Write new servers to `.altimate-code/altimate-code.json`
 - `mcp_discover(action: "add", scope: "global")` — Write to the global config dir (`~/.config/opencode/`)
 
-**Auto-discovery:** At startup, altimate-code discovers external MCP servers and shows a toast notification. Servers from your home directory (`~/.claude.json`, `~/.gemini/settings.json`) are auto-enabled since they're user-owned. Servers from project-level files (`.vscode/mcp.json`, `.mcp.json`, `.cursor/mcp.json`) are discovered but **disabled by default** for security — run `/discover-and-add-mcps` to review and enable them.
+**Auto-discovery:** At startup, altimate-code discovers external MCP servers and shows a toast notification. Servers from your home directory (`~/.claude.json`, `~/.gemini/settings.json`) are auto-enabled since they're user-owned. Servers from project-level files (`.vscode/mcp.json`, `.mcp.json`, `.cursor/mcp.json`) are discovered but **disabled by default** for security — ask the assistant to add them or use `mcp_discover(action: "add")`.
 
 !!! tip
-    Home-directory MCP servers (from `~/.claude.json`, `~/.gemini/settings.json`) are loaded automatically. Project-scoped servers require explicit approval via `/discover-and-add-mcps` or `mcp_discover(action: "add")`.
+    Home-directory MCP servers (from `~/.claude.json`, `~/.gemini/settings.json`) are loaded automatically. Project-scoped servers require explicit approval via `mcp_discover(action: "add")`.
 
 !!! warning "Security: untrusted repositories"
     Project-level MCP configs (`.vscode/mcp.json`, `.mcp.json`, `.cursor/mcp.json`) are discovered but not auto-connected. This prevents malicious repositories from executing arbitrary commands. You must explicitly approve project-scoped servers before they run.

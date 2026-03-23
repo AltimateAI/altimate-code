@@ -168,7 +168,7 @@ Altimate Code can automatically discover MCP server definitions from other AI to
 **Security model:**
 
 - **Home-directory configs** (your personal machine config) are treated as trusted and auto-enabled, since you installed them.
-- **Project-scoped configs** (checked into a repo) are discovered but **disabled by default**. You must explicitly approve them via the `/discover-and-add-mcps` tool before they run.
+- **Project-scoped configs** (checked into a repo) are discovered but **not auto-connected**. They are loaded with `enabled: false` and shown in a notification. Ask the assistant to enable them, or disable auto-discovery entirely with `experimental.auto_mcp_discovery: false`.
 - **Sensitive details are redacted** in discovery notifications. Server commands and URLs are only shown when you explicitly inspect them.
 - **Prototype pollution, command injection, and path traversal** are hardened against with input validation and `Object.create(null)` result objects.
 
