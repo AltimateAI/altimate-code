@@ -38,6 +38,8 @@ const driverPeerDependenciesMeta: Record<string, { optional: true }> = Object.fr
 const binaries: Record<string, string> = {}
 for (const filepath of new Bun.Glob("**/package.json").scanSync({ cwd: "./dist" })) {
   const pkg = await Bun.file(`./dist/${filepath}`).json()
+  // Skip synthesized package.json files (e.g. dbt-tools) that lack name/version
+  if (!pkg.name || !pkg.version) continue
   binaries[pkg.name] = pkg.version
 }
 console.log("binaries", binaries)

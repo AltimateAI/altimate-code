@@ -47,9 +47,10 @@ describe("publish.ts dbt-tools ESM bundling", () => {
   })
 
   test('bundled package.json includes "type": "module"', () => {
-    // The publish script must write `{ "type": "module" }` (or equivalent)
+    // The publish script must write `{ type: "module" }` (or equivalent)
     // so that Node treats .js files in dbt-tools/ as ESM.
-    expect(publishSource).toContain('"type": "module"')
+    // Match the JS object literal (unquoted key), not just the comment.
+    expect(publishSource).toContain('type: "module"')
   })
 
   test("copyAssets creates dbt-tools/bin and dbt-tools/dist directories", () => {
