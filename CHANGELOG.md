@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.8] - 2026-03-23
+
+### Fixed
+
+- **dbt commands crash with `SyntaxError: Cannot use import statement`** — bundled `dbt-tools/` was missing `package.json` with `"type": "module"`, causing Node to default to CJS and reject ESM imports. Broken since v0.5.3. (#407)
+- **Publish script idempotency** — re-running `publish.ts` without cleaning `dist/` would crash because the synthesized `dbt-tools/package.json` (no `name`/`version`) polluted the binary glob scan (#407)
+- **Skill builder `ctrl+i` keybind** — ESC navigation and dialog lifecycle fixes in TUI skill management (#386)
+- **Upgrade notification silently skipped** — multiple scenarios where the upgrade check was bypassed (#389)
+- **Phantom `sql_validate` tool** — removed non-existent tool reference from analyst agent permissions, replaced with `altimate_core_validate` (#352)
+- **CI test suite stability** — eliminated 29 pre-existing test failures: added `duckdb` devDependency, fixed native binding contention with retry logic and `beforeAll` connections, increased timeouts for slow bootstrap operations, added `--timeout 30000` to CI workflow (#411)
+
+### Added
+
+- **Recap (renamed from Tracer)** — session recap with loop detection and enhanced viewer (#381)
+- **ESM bundling regression tests** — 9 e2e tests verifying Node can load `altimate-dbt` via symlink, wrapper, and direct invocation paths
+
+### Testing
+
+- 133 new tests across 9 modules: finops role access, tool lookup, config path parsing, ID generation, file ignore/traversal, patch operations, session instructions/messages/summaries, shell utilities (#403)
+- SQL validation adversarial + e2e test suites (#352)
+- Provider error classification — overflow detection and message extraction (#375)
+- Impact analysis DAG traversal and training import parsing (#384)
+- RPC client protocol and `abortAfter`/`abortAfterAny` coverage (#382)
+- Color, signal, and defer utility coverage (#379)
+- MCP config CRUD + Locale utility coverage (#369)
+
 ## [0.5.7] - 2026-03-22
 
 ### Added
