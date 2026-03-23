@@ -19,23 +19,23 @@ describe("formatBytes: normal cases", () => {
   })
 })
 
-describe("formatBytes: edge cases that expose bugs", () => {
-  test("negative bytes produces NaN/undefined (known bug)", () => {
-    // Users see "NaN undefined" when finops tools compute negative deltas
-    // (e.g. comparing two periods where usage decreased)
-    const result = formatBytes(-100)
-    expect(result).toContain("NaN")
+describe("formatBytes: edge cases", () => {
+  test("negative bytes displays with sign", () => {
+    expect(formatBytes(-100)).toBe("-100 B")
+    expect(formatBytes(-1536)).toBe("-1.50 KB")
   })
 
-  test("fractional bytes produces undefined unit (known bug)", () => {
-    // Math.floor(Math.log(0.5) / Math.log(1024)) = -1, units[-1] is undefined
-    const result = formatBytes(0.5)
-    expect(result).toContain("undefined")
+  test("fractional bytes clamps to B unit", () => {
+    expect(formatBytes(0.5)).toBe("1 B")
   })
 
-  test("NaN input produces NaN output (known bug)", () => {
-    const result = formatBytes(NaN)
-    expect(result).toContain("NaN")
+  test("NaN input returns 0 B", () => {
+    expect(formatBytes(NaN)).toBe("0 B")
+  })
+
+  test("Infinity input returns 0 B", () => {
+    expect(formatBytes(Infinity)).toBe("0 B")
+    expect(formatBytes(-Infinity)).toBe("0 B")
   })
 })
 
@@ -61,19 +61,18 @@ describe("truncateQuery: normal cases", () => {
   })
 })
 
-describe("truncateQuery: edge cases that expose bugs", () => {
-  test("whitespace-only returns empty string instead of (empty) (known bug)", () => {
-    // "   " is truthy so the `if (!text)` guard is skipped.
-    // After `.replace(/\s+/g, " ").trim()` it becomes "".
-    // The length check `0 <= 10` passes, returning the empty string directly.
-    expect(truncateQuery("   ", 10)).toBe("")
+describe("truncateQuery: edge cases", () => {
+  test("whitespace-only returns (empty)", () => {
+    expect(truncateQuery("   ", 10)).toBe("(empty)")
   })
 
-  test("maxLen smaller than 3 produces string longer than maxLen (known bug)", () => {
-    // slice(0, 2-3) = slice(0, -1) keeps most of the string, then "..." is appended
-    const result = truncateQuery("hello world", 2)
-    expect(result.length).toBeGreaterThan(2)
-    // Actual output is "hello worl..." (13 chars) — far exceeds the 2-char limit
-    expect(result).toBe("hello worl...")
+  test("maxLen smaller than 4 hard-truncates without ellipsis", () => {
+    expect(truncateQuery("hello world", 2)).toBe("he")
+    expect(truncateQuery("hello world", 3)).toBe("hel")
+  })
+
+  test("maxLen zero or negative returns empty string", () => {
+    expect(truncateQuery("hello", 0)).toBe("")
+    expect(truncateQuery("hello", -5)).toBe("")
   })
 })
