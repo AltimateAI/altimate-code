@@ -63,6 +63,13 @@ async function copyAssets(targetDir: string) {
   await $`cp ../dbt-tools/bin/altimate-dbt ${targetDir}/dbt-tools/bin/altimate-dbt`
   await $`mkdir -p ${targetDir}/dbt-tools/dist`
   await $`cp ../dbt-tools/dist/index.js ${targetDir}/dbt-tools/dist/`
+  // A package.json with "type": "module" must be present so Node loads
+  // dist/index.js as ESM instead of CJS. We synthesize a minimal one rather
+  // than copying the full source package.json (which contains devDependencies
+  // with Bun catalog: versions that would confuse vulnerability scanners).
+  await Bun.file(`${targetDir}/dbt-tools/package.json`).write(
+    JSON.stringify({ type: "module" }, null, 2) + "\n",
+  )
   if (fs.existsSync("../dbt-tools/dist/altimate_python_packages")) {
     await $`cp -r ../dbt-tools/dist/altimate_python_packages ${targetDir}/dbt-tools/dist/`
   }

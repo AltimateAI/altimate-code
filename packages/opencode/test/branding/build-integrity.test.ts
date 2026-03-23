@@ -295,6 +295,8 @@ describe("Bundle Completeness", () => {
     expect(publishScript).toContain("dbt-tools/bin/altimate-dbt")
     expect(publishScript).toContain("dbt-tools/dist")
     expect(publishScript).toContain("bun run build")
+    // package.json must be bundled so Node sees "type": "module"
+    expect(publishScript).toContain("dbt-tools/package.json")
   })
 
   test("publish.ts copies only needed dbt-tools dist files (not .node binaries)", () => {
