@@ -258,11 +258,14 @@ function DialogSkillCreate() {
       placeholder="my-tool"
       onConfirm={async (rawName) => {
         const name = rawName.trim()
-        dialog.clear()
         if (!name) {
+          dialog.clear()
           toast.show({ message: "No name provided.", variant: "error", duration: 4000 })
           return
         }
+        // Close dialog after validation but before async work to avoid premature
+        // onClose callback triggering reopenSkillList during the operation
+        dialog.clear()
         toast.show({ message: `Creating "${name}"...`, variant: "info", duration: 30000 })
         try {
           const result = await createSkillDirect(name, gitRoot(sdk.directory ?? process.cwd()))
@@ -305,11 +308,13 @@ function DialogSkillInstall() {
       onConfirm={async (rawSource) => {
         // Strip trailing dots, whitespace, and .git suffix that users might paste
         const source = rawSource.trim().replace(/\.+$/, "").replace(/\.git$/, "")
-        dialog.clear()
         if (!source) {
+          dialog.clear()
           toast.show({ message: "No source provided.", variant: "error", duration: 4000 })
           return
         }
+        // Close dialog after validation to avoid premature onClose callback
+        dialog.clear()
         const progress = (status: string) => {
           toast.show({ message: `Installing from ${source}\n\n${status}`, variant: "info", duration: 600000 })
         }
@@ -525,6 +530,7 @@ export function DialogSkill(props: DialogSkillProps) {
       onTrigger: async () => {
         dialog.replace(
           () => <DialogSkillCreate />,
+          // defer to next tick so dialog stack is fully cleared before reopening
           () => setTimeout(() => reopenSkillList(), 0),
         )
       },
@@ -535,6 +541,7 @@ export function DialogSkill(props: DialogSkillProps) {
       onTrigger: async () => {
         dialog.replace(
           () => <DialogSkillInstall />,
+          // defer to next tick so dialog stack is fully cleared before reopening
           () => setTimeout(() => reopenSkillList(), 0),
         )
       },

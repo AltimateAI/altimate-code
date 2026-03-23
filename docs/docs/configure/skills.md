@@ -120,7 +120,7 @@ altimate-code skill remove my-tool          # remove skill + paired tool
 
 ### TUI
 
-Open the skill browser with `ctrl+i` from anywhere, or type `/skills` in the prompt:
+Open the skill browser with `ctrl+i` when no other dialog is open, or type `/skills` in the prompt:
 
 ![Skill Browser](../assets/images/skills/tui-skill-browser.png)
 
@@ -128,11 +128,10 @@ Open the skill browser with `ctrl+i` from anywhere, or type `/skills` in the pro
 
 | Key | Action |
 |-----|--------|
-| `ctrl+i` | Open skill browser (global shortcut) |
+| `ctrl+i` | Open skill browser (when no dialog is open) / Install skill (when inside browser) |
 | Enter | Use — inserts `/<skill-name>` into the prompt |
 | `ctrl+a` | Actions — show, edit, test, or remove the selected skill |
 | `ctrl+n` | New — scaffold a new skill + CLI tool |
-| `ctrl+i` | Install — install skills from a GitHub repo or URL (when inside browser) |
 | Esc | Back — returns to previous screen |
 
 **Create skill** (`ctrl+n`):
