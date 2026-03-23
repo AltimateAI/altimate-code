@@ -1021,6 +1021,100 @@ describe("Loop detection", () => {
     // Only 2 repeats in window — should not trigger loop detection
     expect(trace.summary.loops).toBeUndefined()
   })
+
+  test("history pruning at 201 entries preserves recent loop evidence", async () => {
+    const exporter = new FileExporter(tmpDir)
+    const recap = Recap.withExporters([exporter])
+
+    recap.startTrace("s-loop-prune", { prompt: "test" })
+    recap.logStepStart({ id: "1" })
+
+    // Fill 198 unique tool calls to push toward the pruning boundary
+    for (let i = 0; i < 198; i++) {
+      recap.logToolCall({
+        tool: `filler-${i}`,
+        callID: `c-filler-${i}`,
+        state: {
+          status: "completed",
+          input: { i },
+          output: "ok",
+          time: { start: 1000 + i, end: 2000 + i },
+        },
+      })
+    }
+
+    // Now add 3 identical calls (entries 199, 200, 201) — triggers prune at 201
+    // After pruning (>200 → last 100), these 3 calls are at positions 98-100
+    // of the surviving slice, well within the last-10 detection window
+    for (let i = 0; i < 3; i++) {
+      recap.logToolCall({
+        tool: "bash",
+        callID: `c-loop-${i}`,
+        state: {
+          status: "completed",
+          input: { command: "ls -la" },
+          output: "total 0",
+          time: { start: 5000 + i, end: 6000 + i },
+        },
+      })
+    }
+
+    recap.logStepFinish(makeStepFinish())
+    const filePath = await recap.endTrace()
+
+    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    // The 3 identical "bash" calls should still be detected after pruning
+    expect(trace.summary.loops).toBeDefined()
+    expect(trace.summary.loops!.length).toBeGreaterThanOrEqual(1)
+    expect(trace.summary.loops!.find((l) => l.tool === "bash")).toBeDefined()
+  })
+
+  test("two distinct loops detected simultaneously", async () => {
+    const exporter = new FileExporter(tmpDir)
+    const recap = Recap.withExporters([exporter])
+
+    recap.startTrace("s-multi-loop", { prompt: "test" })
+    recap.logStepStart({ id: "1" })
+
+    // Interleave two different loops: bash(ls) and read(file.ts)
+    for (let i = 0; i < 4; i++) {
+      recap.logToolCall({
+        tool: "bash",
+        callID: `c-bash-${i}`,
+        state: {
+          status: "completed",
+          input: { command: "ls" },
+          output: "file1.ts",
+          time: { start: 1000 + i * 2, end: 2000 + i * 2 },
+        },
+      })
+      recap.logToolCall({
+        tool: "read",
+        callID: `c-read-${i}`,
+        state: {
+          status: "completed",
+          input: { file: "config.ts" },
+          output: "content",
+          time: { start: 1001 + i * 2, end: 2001 + i * 2 },
+        },
+      })
+    }
+
+    recap.logStepFinish(makeStepFinish())
+    const filePath = await recap.endTrace()
+
+    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    // Both loops should be detected
+    expect(trace.summary.loops).toBeDefined()
+    expect(trace.summary.loops!.length).toBeGreaterThanOrEqual(2)
+
+    const bashLoop = trace.summary.loops!.find((l) => l.tool === "bash")
+    const readLoop = trace.summary.loops!.find((l) => l.tool === "read")
+    expect(bashLoop).toBeDefined()
+    expect(bashLoop!.count).toBeGreaterThanOrEqual(3)
+    expect(readLoop).toBeDefined()
+    expect(readLoop!.count).toBeGreaterThanOrEqual(3)
+  })
 })
 
 // ---------------------------------------------------------------------------
