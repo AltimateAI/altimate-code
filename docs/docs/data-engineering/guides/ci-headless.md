@@ -137,16 +137,16 @@ fi
 
 ---
 
-## Tracing in Headless Mode
+## Recap in Headless Mode
 
-Tracing works in headless mode. View traces after the run:
+Recap works in headless mode. View recaps after the run:
 
 ```bash
-altimate trace list
-altimate trace view <trace-id>
+altimate recap list
+altimate recap view <session-id>
 ```
 
-See [Tracing](../../configure/tracing.md) for the full trace reference.
+See [Recap](../../configure/recap.md) for the full recap reference.
 
 ---
 

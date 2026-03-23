@@ -881,6 +881,9 @@ export namespace Config {
       model_cycle_favorite_reverse: z.string().optional().default("none").describe("Previous favorite model"),
       command_list: z.string().optional().default("ctrl+p").describe("List available commands"),
       agent_list: z.string().optional().default("<leader>a").describe("List agents"),
+      // altimate_change start — global keybind to open skills dialog
+      skill_list: z.string().optional().default("ctrl+i").describe("Open skill browser"),
+      // altimate_change end
       agent_cycle: z.string().optional().default("tab").describe("Next agent"),
       agent_cycle_reverse: z.string().optional().default("shift+tab").describe("Previous agent"),
       variant_cycle: z.string().optional().default("ctrl+t").describe("Cycle model variants"),

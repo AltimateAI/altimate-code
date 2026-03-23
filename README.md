@@ -131,8 +131,8 @@ Manifest parsing, test generation, model scaffolding, incremental model detectio
 ### Data Visualization
 Interactive charts and dashboards from SQL results. The data-viz skill generates publication-ready visualizations with automatic chart type selection based on your data.
 
-### Local-First Tracing
-Built-in observability for AI interactions — trace tool calls, token usage, and session activity locally. No external services required. View traces with `altimate trace`.
+### Local-First Recap
+Built-in observability for AI interactions — recap tool calls, token usage, and session activity locally. No external services required. View recaps with `altimate recap`. Features include loop detection, post-session summary, and shareable HTML exports.
 
 ### AI Teammate Training
 Teach your AI teammate project-specific patterns, naming conventions, and best practices. The training system learns from examples and applies rules automatically across sessions.

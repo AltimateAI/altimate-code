@@ -3,7 +3,8 @@ import { describe, test, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { tmpdir } from "../fixture/fixture"
-import { detectToolReferences, SHELL_BUILTINS } from "../../src/cli/cmd/skill-helpers"
+import { detectToolReferences, SHELL_BUILTINS, skillSource } from "../../src/cli/cmd/skill-helpers"
+import os from "os"
 
 // ---------------------------------------------------------------------------
 // Unit tests — import production code directly (no duplication)
@@ -453,6 +454,44 @@ describe("skill install — symlink safety", () => {
       .then(() => true)
       .catch(() => false)
     expect(symlinkCopied).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// skillSource trust classification — determines builtin / global / project label
+// ---------------------------------------------------------------------------
+
+describe("skillSource", () => {
+  // Global.Path.home reads process.env.OPENCODE_TEST_HOME || os.homedir()
+  const home = process.env.OPENCODE_TEST_HOME || os.homedir()
+
+  test("builtin: prefix → builtin", () => {
+    expect(skillSource("builtin:dbt-run")).toBe("builtin")
+    expect(skillSource("builtin:")).toBe("builtin")
+  })
+
+  test("~/.altimate/builtin/... → builtin", () => {
+    expect(skillSource(path.join(home, ".altimate", "builtin", "dbt-run", "SKILL.md"))).toBe("builtin")
+  })
+
+  test("~/.claude/skills/... → global", () => {
+    expect(skillSource(path.join(home, ".claude", "skills", "my-skill", "SKILL.md"))).toBe("global")
+  })
+
+  test("~/.agents/skills/... → global", () => {
+    expect(skillSource(path.join(home, ".agents", "skills", "my-skill", "SKILL.md"))).toBe("global")
+  })
+
+  test("~/.altimate-code/skills/... → global", () => {
+    expect(skillSource(path.join(home, ".altimate-code", "skills", "custom", "SKILL.md"))).toBe("global")
+  })
+
+  test("project path → project", () => {
+    expect(skillSource("/home/user/myproject/.opencode/skills/custom/SKILL.md")).toBe("project")
+  })
+
+  test("random path with no skill dir match → project", () => {
+    expect(skillSource("/tmp/something/SKILL.md")).toBe("project")
   })
 })
 

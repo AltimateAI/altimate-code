@@ -14,7 +14,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   HttpExporter,
   type TraceFile,
@@ -45,7 +45,7 @@ const ZERO_STEP = {
 
 describe("enrichFromAssistant — crash prevention", () => {
   test("null info doesn't crash", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     // This used to throw TypeError: Cannot read properties of null
     tracer.enrichFromAssistant(null as any)
@@ -54,21 +54,21 @@ describe("enrichFromAssistant — crash prevention", () => {
   })
 
   test("undefined info doesn't crash", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant(undefined as any)
     expect(true).toBe(true)
   })
 
   test("info with non-string modelID doesn't crash", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: { nested: true } as any })
     expect(true).toBe(true)
   })
 
   test("info with Error object as modelID doesn't crash", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: new Error("bad") as any })
     expect(true).toBe(true)
@@ -81,7 +81,7 @@ describe("enrichFromAssistant — crash prevention", () => {
 
 describe("toolCallCount accuracy", () => {
   test("failed logToolCall (null state) doesn't inflate count", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -104,7 +104,7 @@ describe("toolCallCount accuracy", () => {
   })
 
   test("failed logToolCall (undefined state) doesn't inflate count", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -123,7 +123,7 @@ describe("toolCallCount accuracy", () => {
   })
 
   test("totalToolCalls equals number of tool spans", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -151,7 +151,7 @@ describe("toolCallCount accuracy", () => {
 
 describe("generationCount accuracy", () => {
   test("logStepStart with null part creates generation-unknown span", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
 
     // null part is handled gracefully — part?.id ?? "unknown"
@@ -172,7 +172,7 @@ describe("generationCount accuracy", () => {
   })
 
   test("totalGenerations equals number of generation spans", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
 
     for (let i = 0; i < 3; i++) {
@@ -195,7 +195,7 @@ describe("generationCount accuracy", () => {
 
 describe("Orphaned generation — endTrace with unclosed generation", () => {
   test("endTrace with active generation produces 'completed' status (not 'running')", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     // Never call logStepFinish — generation is orphaned
@@ -208,7 +208,7 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
   })
 
   test("endTrace with error + orphaned generation produces 'error' status", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     // Never finish — orphaned generation
@@ -221,7 +221,7 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
   })
 
   test("snapshot mid-generation shows 'running', endTrace shows 'completed'", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-run-complete", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50)) // wait for initial snapshot
     tracer.logStepStart({ id: "1" })
@@ -249,24 +249,24 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
 describe("Worker race — events after endTrace", () => {
   test("endedSessions guard prevents events from reaching dead tracer", async () => {
     // Simulate the worker's logic
-    const tracers = new Map<string, Tracer>()
+    const tracers = new Map<string, Recap>()
     const endedSessions = new Set<string>()
 
-    function getOrCreateTracer(sessionID: string): Tracer | null {
+    function getOrCreateRecap(sessionID: string): Recap | null {
       if (!sessionID) return null
       if (endedSessions.has(sessionID)) {
         endedSessions.delete(sessionID)
         tracers.delete(sessionID)
       }
       if (tracers.has(sessionID)) return tracers.get(sessionID)!
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(sessionID, {})
       tracers.set(sessionID, tracer)
       return tracer
     }
 
     // Create session and add some data
-    const tracer = getOrCreateTracer("race-session")!
+    const tracer = getOrCreateRecap("race-session")!
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
       tool: "bash", callID: "c1",
@@ -305,24 +305,24 @@ describe("Worker race — events after endTrace", () => {
   })
 
   test("new prompt cycle after idle creates fresh tracer", async () => {
-    const tracers = new Map<string, Tracer>()
+    const tracers = new Map<string, Recap>()
     const endedSessions = new Set<string>()
 
-    function getOrCreateTracer(sessionID: string): Tracer | null {
+    function getOrCreateRecap(sessionID: string): Recap | null {
       if (!sessionID) return null
       if (endedSessions.has(sessionID)) {
         endedSessions.delete(sessionID)
         tracers.delete(sessionID)
       }
       if (tracers.has(sessionID)) return tracers.get(sessionID)!
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(sessionID, {})
       tracers.set(sessionID, tracer)
       return tracer
     }
 
     // Cycle 1
-    const t1 = getOrCreateTracer("cycle-test")!
+    const t1 = getOrCreateRecap("cycle-test")!
     t1.logStepStart({ id: "1" })
     t1.logToolCall({
       tool: "bash", callID: "c1",
@@ -333,7 +333,7 @@ describe("Worker race — events after endTrace", () => {
     await t1.endTrace()
 
     // Cycle 2 — should get a NEW tracer
-    const t2 = getOrCreateTracer("cycle-test")!
+    const t2 = getOrCreateRecap("cycle-test")!
     expect(t2).not.toBe(t1)
 
     t2.logStepStart({ id: "1" })
@@ -359,7 +359,7 @@ describe("Worker race — events after endTrace", () => {
 
 describe("logStepStart — state consistency", () => {
   test("generationCount and span count are always in sync", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
 
     // Multiple starts — each creates a span and increments count
@@ -376,7 +376,7 @@ describe("logStepStart — state consistency", () => {
   })
 
   test("logStepStart before startTrace is a no-op (no spans, no count)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     // No startTrace called
     tracer.logStepStart({ id: "orphan" })
     tracer.logStepFinish(ZERO_STEP)
@@ -398,7 +398,7 @@ describe("logStepStart — state consistency", () => {
 
 describe("buildTraceFile — status transitions", () => {
   test("status progression: completed → running → completed", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-status", { prompt: "test" })
     const path1 = tracer.getTracePath()!
 
@@ -449,7 +449,7 @@ describe("Exporter ordering", () => {
     const failHttp = new HttpExporter("broken", "http://localhost:1")
     const fileExp = new FileExporter(tmpDir)
     // HttpExporter is FIRST in the array
-    const tracer = Tracer.withExporters([failHttp, fileExp])
+    const tracer = Recap.withExporters([failHttp, fileExp])
     tracer.startTrace("s-order", { prompt: "test" })
     const result = await tracer.endTrace()
     // HttpExporter fails, FileExporter succeeds — should return file path
@@ -467,7 +467,7 @@ describe("Exporter ordering", () => {
     try {
       const httpExp = new HttpExporter("slow", `http://localhost:${server.port}`)
       const fileExp = new FileExporter(tmpDir)
-      const tracer = Tracer.withExporters([fileExp, httpExp])
+      const tracer = Recap.withExporters([fileExp, httpExp])
       tracer.startTrace("s-slow-order", { prompt: "test" })
       const result = await tracer.endTrace()
       // FileExporter is first and fast — its result should be returned
@@ -484,7 +484,7 @@ describe("Exporter ordering", () => {
 
 describe("Snapshot debounce under load", () => {
   test("alternating logToolCall and logStepFinish doesn't lose data", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-debounce", { prompt: "test" })
 
     // Rapid alternation: each triggers snapshot
@@ -521,7 +521,7 @@ describe("Snapshot debounce under load", () => {
 
 describe("End-to-end field verification", () => {
   test("every span field is correctly populated after full session", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-fields", {
       model: "anthropic/claude-sonnet-4-20250514",
       providerId: "anthropic",

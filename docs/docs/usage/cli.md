@@ -33,7 +33,7 @@ altimate --agent analyst
 | `export`    | Export session data            |
 | `import`    | Import session data            |
 | `session`   | Session management             |
-| `trace`     | List and view session traces   |
+| `recap`     | List and view session recaps (formerly `trace`) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
 | `upgrade`   | Upgrade to latest version      |
@@ -68,7 +68,7 @@ Configuration can be controlled via environment variables:
 
 | Variable                               | Description                          |
 | -------------------------------------- | ------------------------------------ |
-| `ALTIMATE_CLI_DISABLE_AUTOUPDATE`      | Disable automatic updates            |
+| `ALTIMATE_CLI_DISABLE_AUTOUPDATE`      | Disable automatic updates (still shows upgrade indicator) |
 | `ALTIMATE_CLI_DISABLE_LSP_DOWNLOAD`    | Don't auto-download LSP servers      |
 | `ALTIMATE_CLI_DISABLE_AUTOCOMPACT`     | Disable automatic context compaction |
 | `ALTIMATE_CLI_DISABLE_DEFAULT_PLUGINS` | Skip loading default plugins         |
@@ -149,20 +149,22 @@ altimate run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
 # Print logs for debugging
 altimate --print-logs --log-level DEBUG run "test query"
 
-# Disable tracing for a single run
+# Disable recap for a single run (--no-trace is the backward-compatible flag name)
 altimate run --no-trace "quick question"
 ```
 
 For CI pipelines and headless automation, see [CI & Automation](ci-headless.md).
 
-## Tracing
+## Recap
 
-Every `run` command automatically saves a trace file with the full session details, including generations, tool calls, tokens, cost, and timing. See [Tracing](../configure/tracing.md) for configuration options.
+Every `run` command automatically saves a recap file with the full session details, including generations, tool calls, tokens, cost, and timing. See [Recap](../configure/recap.md) for configuration options.
 
 ```bash
-# List recent traces
-altimate trace list
+# List recent recaps
+altimate recap list
 
-# View a trace in the browser
-altimate trace view <session-id>
+# View a recap in the browser
+altimate recap view <session-id>
 ```
+
+> **Note:** The `trace` command still works as a backward-compatible alias for `recap`.
