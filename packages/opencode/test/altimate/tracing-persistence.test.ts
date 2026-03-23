@@ -40,8 +40,9 @@ describe("Trace persistence across sessions", () => {
     const jsonFiles = files.filter((f) => f.endsWith(".json"))
     expect(jsonFiles.length).toBe(3)
 
-    const traces = await Recap.listTraces(tmp.path)
+    const { items: traces, total } = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(3)
+    expect(total).toBe(3)
 
     const listedIds = traces.map((t) => t.sessionId)
     for (const sessionId of sessions) {
@@ -65,7 +66,7 @@ describe("Trace persistence across sessions", () => {
     tracer1.logStepFinish(makeStepFinish())
     await tracer1.endTrace()
 
-    let traces = await Recap.listTraces(tmp.path)
+    let { items: traces } = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(1)
     expect(traces[0].sessionId).toBe("ses_A")
 
@@ -76,7 +77,7 @@ describe("Trace persistence across sessions", () => {
     tracer2.logStepFinish(makeStepFinish())
     await tracer2.endTrace()
 
-    traces = await Recap.listTraces(tmp.path)
+    ;({ items: traces } = await Recap.listTraces(tmp.path))
     expect(traces.length).toBe(2)
 
     const ids = traces.map((t) => t.sessionId)
@@ -101,7 +102,7 @@ describe("Trace persistence across sessions", () => {
       await new Promise((r) => setTimeout(r, 10))
     }
 
-    const traces = await Recap.listTraces(tmp.path)
+    const { items: traces } = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(3)
 
     for (let i = 0; i < traces.length - 1; i++) {
@@ -132,10 +133,11 @@ describe("Trace persistence across sessions", () => {
     expect(trace.summary.totalTokens).toBeGreaterThan(0)
   })
 
-  test("listTraces returns empty array when no traces exist", async () => {
+  test("listTraces returns empty items when no traces exist", async () => {
     await using tmp = await tmpdir()
-    const traces = await Recap.listTraces(tmp.path)
-    expect(traces).toEqual([])
+    const { items, total } = await Recap.listTraces(tmp.path)
+    expect(items).toEqual([])
+    expect(total).toBe(0)
   })
 
   test("listTraces skips corrupted JSON files gracefully", async () => {
@@ -152,8 +154,111 @@ describe("Trace persistence across sessions", () => {
     // Write a corrupted JSON file
     await fs.writeFile(path.join(tmp.path, "corrupted.json"), "not valid json{{{")
 
-    const traces = await Recap.listTraces(tmp.path)
+    const { items: traces } = await Recap.listTraces(tmp.path)
     expect(traces.length).toBe(1)
     expect(traces[0].sessionId).toBe("ses_valid")
+  })
+})
+
+describe("listTraces pagination", () => {
+  async function createTraces(dir: string, count: number) {
+    for (let i = 0; i < count; i++) {
+      const exporter = new FileExporter(dir)
+      const tracer = Recap.withExporters([exporter])
+      tracer.startTrace(`ses_${String(i).padStart(3, "0")}`, { title: `Session ${i}` })
+      tracer.logStepStart({ id: "step-1" })
+      tracer.logStepFinish(makeStepFinish())
+      await tracer.endTrace()
+      // Small delay to ensure distinct timestamps for sorting
+      await new Promise((r) => setTimeout(r, 5))
+    }
+  }
+
+  test("returns total count of all traces regardless of limit", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 10)
+
+    const { items, total } = await Recap.listTraces(tmp.path, { limit: 3 })
+    expect(total).toBe(10)
+    expect(items.length).toBe(3)
+  })
+
+  test("limit restricts the number of returned items", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 5)
+
+    const { items, total } = await Recap.listTraces(tmp.path, { limit: 2 })
+    expect(items.length).toBe(2)
+    expect(total).toBe(5)
+  })
+
+  test("offset skips the first N traces", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 5)
+
+    const { items: all } = await Recap.listTraces(tmp.path)
+    const { items: page2 } = await Recap.listTraces(tmp.path, { offset: 2, limit: 2 })
+
+    expect(page2.length).toBe(2)
+    expect(page2[0].sessionId).toBe(all[2].sessionId)
+    expect(page2[1].sessionId).toBe(all[3].sessionId)
+  })
+
+  test("offset beyond total returns empty items with correct total", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 3)
+
+    const { items, total } = await Recap.listTraces(tmp.path, { offset: 10, limit: 5 })
+    expect(items.length).toBe(0)
+    expect(total).toBe(3)
+  })
+
+  test("pagination with offset and limit covers all items across pages", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 7)
+
+    const page1 = await Recap.listTraces(tmp.path, { offset: 0, limit: 3 })
+    const page2 = await Recap.listTraces(tmp.path, { offset: 3, limit: 3 })
+    const page3 = await Recap.listTraces(tmp.path, { offset: 6, limit: 3 })
+
+    expect(page1.total).toBe(7)
+    expect(page1.items.length).toBe(3)
+    expect(page2.items.length).toBe(3)
+    expect(page3.items.length).toBe(1)
+
+    // All session IDs should be unique across pages
+    const allIds = [
+      ...page1.items.map((t) => t.sessionId),
+      ...page2.items.map((t) => t.sessionId),
+      ...page3.items.map((t) => t.sessionId),
+    ]
+    expect(new Set(allIds).size).toBe(7)
+  })
+
+  test("no options returns all items (backward compatible)", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 4)
+
+    const { items, total } = await Recap.listTraces(tmp.path)
+    expect(items.length).toBe(4)
+    expect(total).toBe(4)
+  })
+
+  test("limit larger than total returns all items", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 3)
+
+    const { items, total } = await Recap.listTraces(tmp.path, { limit: 100 })
+    expect(items.length).toBe(3)
+    expect(total).toBe(3)
+  })
+
+  test("offset only (no limit) returns remaining items", async () => {
+    await using tmp = await tmpdir()
+    await createTraces(tmp.path, 5)
+
+    const { items, total } = await Recap.listTraces(tmp.path, { offset: 2 })
+    expect(items.length).toBe(3)
+    expect(total).toBe(5)
   })
 })

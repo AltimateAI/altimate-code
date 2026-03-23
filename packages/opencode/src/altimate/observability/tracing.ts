@@ -957,7 +957,11 @@ export class Recap {
     return dir ?? DEFAULT_TRACES_DIR
   }
 
-  static async listTraces(dir?: string): Promise<Array<{ sessionId: string; file: string; trace: TraceFile }>> {
+  // altimate_change start — recap: pagination support for listTraces
+  static async listTraces(
+    dir?: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<{ items: Array<{ sessionId: string; file: string; trace: TraceFile }>; total: number }> {
     const tracesDir = dir ?? DEFAULT_TRACES_DIR
     try {
       await fs.mkdir(tracesDir, { recursive: true })
@@ -976,11 +980,21 @@ export class Recap {
       }
 
       traces.sort((a, b) => new Date(b.trace.startedAt).getTime() - new Date(a.trace.startedAt).getTime())
-      return traces
+
+      const total = traces.length
+      // Sanitize offset/limit: clamp to non-negative integers
+      const rawOffset = options?.offset ?? 0
+      const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0
+      const rawLimit = options?.limit
+      const limit = rawLimit != null && Number.isFinite(rawLimit) ? Math.max(0, Math.floor(rawLimit)) : undefined
+      const sliced = limit != null ? traces.slice(offset, offset + limit) : traces.slice(offset)
+
+      return { items: sliced, total }
     } catch {
-      return []
+      return { items: [], total: 0 }
     }
   }
+  // altimate_change end
 
   static async loadTrace(sessionId: string, dir?: string): Promise<TraceFile | null> {
     const tracesDir = dir ?? DEFAULT_TRACES_DIR

@@ -28,9 +28,10 @@ export function DialogRecapList(props: {
 }) {
   const dialog = useDialog()
 
-  // altimate_change start — recap: use Recap.listTraces
+  // altimate_change start — recap: use Recap.listTraces with pagination (cap at 200 for UI perf)
   const [traces] = createResource(async () => {
-    return Recap.listTraces(props.tracesDir)
+    const { items } = await Recap.listTraces(props.tracesDir, { limit: 200 })
+    return items
   })
   // altimate_change end
 
@@ -61,7 +62,9 @@ export function DialogRecapList(props: {
       })
     }
 
-    result.push(...items.slice(0, 50).map((item) => {
+    // altimate_change start — recap: removed hardcoded slice(0,50) to show all recaps
+    result.push(...items.map((item) => {
+    // altimate_change end
         const rawStartedAt = item.trace.startedAt
         const parsedDate = typeof rawStartedAt === "string" || typeof rawStartedAt === "number"
           ? new Date(rawStartedAt)

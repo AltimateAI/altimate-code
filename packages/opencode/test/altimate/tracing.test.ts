@@ -725,10 +725,10 @@ describe("Recap — static helpers", () => {
     expect(typeof Recap.getTracesDir()).toBe("string")
   })
 
-  test("listTraces returns empty array when no traces exist", async () => {
-    const traces = await Recap.listTraces()
+  test("listTraces returns empty items when no traces exist", async () => {
+    const { items } = await Recap.listTraces()
     // May have traces from other tests, but should not throw
-    expect(Array.isArray(traces)).toBe(true)
+    expect(Array.isArray(items)).toBe(true)
   })
 
   test("loadTrace returns null for non-existent session", async () => {

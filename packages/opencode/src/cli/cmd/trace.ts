@@ -48,13 +48,23 @@ function truncate(str: string, len: number): string {
   return str.slice(0, len - 1) + "…"
 }
 
-// altimate_change start — recap: rename listTraces → listRecaps
-function listRecaps(traces: Array<{ sessionId: string; trace: TraceFile }>, tracesDir?: string) {
+// altimate_change start — recap: rename listTraces → listRecaps, add pagination info
+function listRecaps(
+  traces: Array<{ sessionId: string; trace: TraceFile }>,
+  tracesDir?: string,
+  pagination?: { offset: number; limit: number; total: number },
+) {
+  // altimate_change start — recap: distinguish empty page from no recaps at all
   if (traces.length === 0) {
-    UI.println("No recaps found. Run a command with tracing enabled:")
-    UI.println("  altimate-code run \"your prompt here\"")
+    if (pagination && pagination.total > 0) {
+      UI.println(`No recaps on this page (offset ${pagination.offset}). Total: ${pagination.total} in ${Recap.getTracesDir(tracesDir)}`)
+    } else {
+      UI.println("No recaps found. Run a command with tracing enabled:")
+      UI.println("  altimate-code run \"your prompt here\"")
+    }
     return
   }
+  // altimate_change end
 
   // Header
   const header = [
@@ -97,8 +107,19 @@ function listRecaps(traces: Array<{ sessionId: string; trace: TraceFile }>, trac
   }
 
   UI.empty()
-  // altimate_change start — recap: renamed messages and Recap.getTracesDir
-  UI.println(UI.Style.TEXT_DIM + `${traces.length} recap(s) in ${Recap.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
+  // altimate_change start — recap: pagination-aware footer
+  if (pagination && pagination.total > 0) {
+    const start = pagination.offset + 1
+    const end = pagination.offset + traces.length
+    UI.println(UI.Style.TEXT_DIM + `Showing ${start}-${end} of ${pagination.total} recap(s) in ${Recap.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
+    if (pagination.offset + pagination.limit < pagination.total) {
+      const nextOffset = pagination.offset + pagination.limit
+      const limitFlag = pagination.limit !== 20 ? ` --limit ${pagination.limit}` : ""
+      UI.println(UI.Style.TEXT_DIM + `Next page: altimate-code recap list --offset ${nextOffset}${limitFlag}` + UI.Style.TEXT_NORMAL)
+    }
+  } else {
+    UI.println(UI.Style.TEXT_DIM + `${traces.length} recap(s) in ${Recap.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
+  }
   UI.println(UI.Style.TEXT_DIM + "View a recap: altimate-code recap view <session-id>" + UI.Style.TEXT_NORMAL)
   // altimate_change end
 }
@@ -134,6 +155,13 @@ export const RecapCommand = cmd({
         describe: "number of recaps to show",
         default: 20,
       })
+      // altimate_change start — recap: add offset option for pagination
+      .option("offset", {
+        type: "number",
+        describe: "number of recaps to skip (for pagination)",
+        default: 0,
+      })
+      // altimate_change end
       .option("live", {
         type: "boolean",
         describe: "auto-refresh the viewer as the recap updates (for in-progress sessions)",
@@ -147,11 +175,15 @@ export const RecapCommand = cmd({
     const cfg = await Config.get().catch(() => ({} as Record<string, any>))
     const tracesDir = (cfg as any).tracing?.dir as string | undefined
 
+    // altimate_change start — recap: use paginated listTraces
     if (action === "list") {
-      const traces = await Recap.listTraces(tracesDir)
-      listRecaps(traces.slice(0, args.limit || 20), tracesDir)
+      const limit = args.limit || 20
+      const offset = args.offset || 0
+      const { items, total } = await Recap.listTraces(tracesDir, { offset, limit })
+      listRecaps(items, tracesDir, { offset, limit, total })
       return
     }
+    // altimate_change end
 
     if (action === "view") {
       if (!args.id) {
@@ -159,16 +191,18 @@ export const RecapCommand = cmd({
         process.exit(1)
       }
 
+      // altimate_change start — recap: use paginated listTraces return type
       // Support partial session ID matching
-      const traces = await Recap.listTraces(tracesDir)
-      const match = traces.find(
+      const { items: allTraces } = await Recap.listTraces(tracesDir)
+      const match = allTraces.find(
         (t) => t.sessionId === args.id || t.sessionId.startsWith(args.id!) || t.file.startsWith(args.id!),
       )
 
       if (!match) {
         UI.error(`Recap not found: ${args.id}`)
         UI.println("Available recaps:")
-        listRecaps(traces.slice(0, 10), tracesDir)
+        listRecaps(allTraces.slice(0, 10), tracesDir)
+        // altimate_change end
         process.exit(1)
       }
 
