@@ -17,7 +17,7 @@ function makeAPICallError(opts: {
     statusCode: opts.statusCode,
     responseBody: opts.responseBody,
     isRetryable: opts.isRetryable ?? false,
-    url: opts.url,
+    url: opts.url ?? "",
     responseHeaders: opts.responseHeaders,
     requestBodyValues: {},
   })
