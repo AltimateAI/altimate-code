@@ -10,7 +10,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   type TraceFile,
 } from "../../src/altimate/observability/tracing"
@@ -39,7 +39,7 @@ const ZERO_STEP = {
 
 describe("Title metadata", () => {
   test("title is captured from startTrace", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", {
       title: "Optimize expensive queries",
       prompt: "Find and fix the top 10 most expensive queries in Snowflake",
@@ -51,7 +51,7 @@ describe("Title metadata", () => {
   })
 
   test("title defaults to undefined when not provided", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -59,7 +59,7 @@ describe("Title metadata", () => {
   })
 
   test("empty string title is stored as empty string", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { title: "", prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -68,7 +68,7 @@ describe("Title metadata", () => {
 
   test("very long title is stored in full (truncation is display-only)", async () => {
     const longTitle = "A".repeat(500)
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { title: longTitle, prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -77,7 +77,7 @@ describe("Title metadata", () => {
   })
 
   test("title with special characters", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", {
       title: 'Fix "broken" model — stg_orders (🐛)',
       prompt: "test",
@@ -94,7 +94,7 @@ describe("Title metadata", () => {
 
 describe("flushSync — crash recovery", () => {
   test("flushSync writes a valid trace file with crashed status", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-crash", {
       title: "Long running task",
       prompt: "This will crash",
@@ -122,7 +122,7 @@ describe("flushSync — crash recovery", () => {
   })
 
   test("flushSync before startTrace is a no-op", () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     // No startTrace called — flushSync should silently do nothing
     tracer.flushSync("crash")
     // No crash = pass
@@ -130,7 +130,7 @@ describe("flushSync — crash recovery", () => {
   })
 
   test("flushSync after endTrace overwrites with crashed status", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-double", { prompt: "test" })
     const filePath = await tracer.endTrace()
 
@@ -142,7 +142,7 @@ describe("flushSync — crash recovery", () => {
   })
 
   test("flushSync with no FileExporter is a no-op", () => {
-    const tracer = Tracer.withExporters([])
+    const tracer = Recap.withExporters([])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.flushSync("crash")
     // No crash = pass
@@ -150,7 +150,7 @@ describe("flushSync — crash recovery", () => {
   })
 
   test("flushSync with null error uses default message", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-null-err", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50))
 
@@ -162,7 +162,7 @@ describe("flushSync — crash recovery", () => {
   })
 
   test("flushSync preserves all accumulated data", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-preserve", {
       title: "Preserved trace",
       prompt: "complex task",
@@ -208,7 +208,7 @@ describe("flushSync — crash recovery", () => {
 
 describe("Initial snapshot from startTrace", () => {
   test("trace file exists immediately after startTrace", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-initial", { prompt: "hello" })
 
     await new Promise((r) => setTimeout(r, 50))
@@ -228,7 +228,7 @@ describe("Initial snapshot from startTrace", () => {
   })
 
   test("initial snapshot has metadata populated", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-meta-snap", {
       title: "My Task",
       prompt: "Do things",
@@ -378,7 +378,7 @@ describe("Format function edge cases", () => {
   test("duration edge cases produce valid strings in trace", async () => {
     const durations = [0, 1, 999, 1000, 1001, 59999, 60000, 60001, 3600000]
     for (const dur of durations) {
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(`dur-${dur}`, { prompt: "test" })
       const filePath = await tracer.endTrace()
       const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -391,7 +391,7 @@ describe("Format function edge cases", () => {
   test("cost edge cases produce valid JSON", async () => {
     const costs = [0, 0.001, 0.009999, 0.01, 0.1, 1.0, 100, 0.123456789]
     for (const cost of costs) {
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(`cost-${cost}`, { prompt: "test" })
       tracer.logStepStart({ id: "1" })
       tracer.logStepFinish({
@@ -480,7 +480,7 @@ describe("Partial ID matching", () => {
 
 describe("flushSync — multiple calls", () => {
   test("calling flushSync multiple times doesn't crash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-multi-flush", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50))
 
@@ -494,7 +494,7 @@ describe("flushSync — multiple calls", () => {
   })
 
   test("flushSync then endTrace — endTrace overwrites crashed status", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-flush-then-end", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50))
 
@@ -631,7 +631,7 @@ describe("Historical traces", () => {
 
 describe("Crash recovery — data integrity", () => {
   test("flushSync after multiple tool calls preserves all tools", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-multi-tool-crash", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50))
 
@@ -656,7 +656,7 @@ describe("Crash recovery — data integrity", () => {
   })
 
   test("crashed trace can be viewed without errors", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-view-crash", {
       title: "Crashed but viewable",
       prompt: "This crashed",

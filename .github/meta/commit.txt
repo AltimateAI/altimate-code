@@ -1,22 +1,14 @@
-<<<<<<< Updated upstream
-fix: add missing `altimate_change` markers for `experimental` block in `opencode.jsonc`
+fix: viewer UX improvements from 100-trace analysis
 
-The `experimental` config added in #311 was missing upstream markers,
-causing the Marker Guard CI check to fail on main.
-=======
-fix: add try/catch and input sanitization to TUI install/create (#341)
+- Collapse Files Changed after 5 entries with "Show all N files" toggle
+- Rename "GENS" → "LLM Calls" in header cards
+- Hide Tokens card when cost is $0 (not actionable without cost context)
+- Hide Cost metric card when $0.00 (wasted space)
+- Add prominent error summary banner right after header metrics
+- Improved dbt outcome detection: catch [PASS], [ERROR], N of M, Compilation Error
+- Outcome detection rate improved from 18% → 33% across 100 real traces
+- Updated doc screenshots with cleaner samples
 
-Root cause of silent failures: `onConfirm` async callbacks had no
-try/catch, so any thrown error was swallowed and no result toast shown.
-
-Fixes:
-- Wrap all install/create logic in try/catch with error toast
-- Strip trailing dots from input (textarea was appending `.`)
-- Strip `.git` suffix from URLs (users paste from browser)
-- Trim whitespace and validate before proceeding
-- "Installing..." toast now shows 60s duration with helpful text
-  ("This may take a moment while the repo is cloned")
-- Empty input shows immediate error instead of proceeding
->>>>>>> Stashed changes
+Tested across 100 real production traces: 0 crashes, 0 JS errors.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

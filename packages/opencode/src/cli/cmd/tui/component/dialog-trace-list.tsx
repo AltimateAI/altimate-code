@@ -1,8 +1,8 @@
-// altimate_change start - trace history dialog
+// altimate_change start — recap: session recap history dialog
 import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { createMemo, createResource, onMount } from "solid-js"
-import { Tracer } from "@/altimate/observability/tracing"
+import { Recap } from "@/altimate/observability/tracing"
 import { Locale } from "@/util/locale"
 
 function cleanTitle(raw: unknown): string {
@@ -21,27 +21,31 @@ function formatDuration(ms: number): string {
   return `${mins}m${secs}s`
 }
 
-export function DialogTraceList(props: {
+export function DialogRecapList(props: {
   currentSessionID?: string
   tracesDir?: string
   onSelect: (sessionID: string) => void
 }) {
   const dialog = useDialog()
 
+  // altimate_change start — recap: use Recap.listTraces
   const [traces] = createResource(async () => {
-    return Tracer.listTraces(props.tracesDir)
+    return Recap.listTraces(props.tracesDir)
   })
+  // altimate_change end
 
+  // altimate_change start — recap: renamed text and Recap references
   const options = createMemo(() => {
     if (traces.state === "errored") {
       return [
         {
-          title: "Failed to load traces",
+          title: "Failed to load recaps",
           value: "__error__",
-          description: `Check ${Tracer.getTracesDir(props.tracesDir)}`,
+          description: `Check ${Recap.getTracesDir(props.tracesDir)}`,
         },
       ]
     }
+    // altimate_change end
 
     const items = traces() ?? []
     const today = new Date().toDateString()
@@ -99,9 +103,13 @@ export function DialogTraceList(props: {
     dialog.setSize("large")
   })
 
+  // altimate_change start — recap: renamed title text
+  const dialogTitle = traces.state === "pending" ? "Recaps (loading...)" : "Recaps"
+  // altimate_change end
+
   return (
     <DialogSelect
-      title={traces.state === "pending" ? "Traces (loading...)" : "Traces"}
+      title={dialogTitle}
       options={options()}
       current={props.currentSessionID}
       onSelect={(option) => {
@@ -115,4 +123,9 @@ export function DialogTraceList(props: {
     />
   )
 }
+
+// altimate_change start — recap: backward-compat alias
+/** @deprecated Use DialogRecapList instead */
+export const DialogTraceList = DialogRecapList
+// altimate_change end
 // altimate_change end

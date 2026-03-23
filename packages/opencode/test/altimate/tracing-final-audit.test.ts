@@ -10,7 +10,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   HttpExporter,
   type TraceFile,
@@ -42,7 +42,7 @@ const ZERO_STEP = {
 
 describe("startTrace — instance_id handling", () => {
   test("instance_id overrides sessionId for root span name", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session-123", { instance_id: "run-456", prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -51,7 +51,7 @@ describe("startTrace — instance_id handling", () => {
   })
 
   test("empty string instance_id falls back to sessionId", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session-123", { instance_id: "", prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -61,7 +61,7 @@ describe("startTrace — instance_id handling", () => {
   })
 
   test("undefined instance_id falls back to sessionId", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session-123", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -76,7 +76,7 @@ describe("startTrace — instance_id handling", () => {
 
 describe("enrichFromAssistant — providerID edge cases", () => {
   test("undefined providerID creates model string with leading slash", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: "claude-sonnet" })
     const filePath = await tracer.endTrace()
@@ -86,7 +86,7 @@ describe("enrichFromAssistant — providerID edge cases", () => {
   })
 
   test("both providerID and modelID set produces clean model string", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: "claude-sonnet", providerID: "anthropic" })
     const filePath = await tracer.endTrace()
@@ -95,7 +95,7 @@ describe("enrichFromAssistant — providerID edge cases", () => {
   })
 
   test("only providerID set (no modelID) does not update model", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { model: "original", prompt: "test" })
     tracer.enrichFromAssistant({ providerID: "openai" })
     const filePath = await tracer.endTrace()
@@ -112,7 +112,7 @@ describe("enrichFromAssistant — providerID edge cases", () => {
 
 describe("logStepFinish — null/undefined tokens object", () => {
   test("entire tokens object is null", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -130,7 +130,7 @@ describe("logStepFinish — null/undefined tokens object", () => {
   })
 
   test("entire tokens object is undefined", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -144,7 +144,7 @@ describe("logStepFinish — null/undefined tokens object", () => {
   })
 
   test("tokens present but cache is null", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({
@@ -167,7 +167,7 @@ describe("logStepFinish — null/undefined tokens object", () => {
 
 describe("logToolCall — tool name edge cases", () => {
   test("empty string tool name defaults to 'unknown'", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -183,7 +183,7 @@ describe("logToolCall — tool name edge cases", () => {
   })
 
   test("tool input is a primitive (string)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -204,7 +204,7 @@ describe("logToolCall — tool name edge cases", () => {
   })
 
   test("tool input is a number", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -225,7 +225,7 @@ describe("logToolCall — tool name edge cases", () => {
   })
 
   test("tool input is an array", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -250,7 +250,7 @@ describe("logToolCall — tool name edge cases", () => {
 
 describe("logText — null/undefined text", () => {
   test("null text is skipped", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: null as any })
@@ -263,7 +263,7 @@ describe("logText — null/undefined text", () => {
   })
 
   test("undefined text is skipped", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: undefined as any })
@@ -276,7 +276,7 @@ describe("logText — null/undefined text", () => {
   })
 
   test("numeric text is coerced to string", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: 42 as any })
@@ -294,7 +294,7 @@ describe("logText — null/undefined text", () => {
 
 describe("setSpanAttributes — non-serializable values", () => {
   test("function values are stringified", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.setSpanAttributes({
       callback: () => "hello",
@@ -309,7 +309,7 @@ describe("setSpanAttributes — non-serializable values", () => {
   })
 
   test("circular reference in attribute value is stringified", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const circ: any = { a: 1 }
     circ.self = circ
@@ -323,7 +323,7 @@ describe("setSpanAttributes — non-serializable values", () => {
   })
 
   test("BigInt attribute value is stringified", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.setSpanAttributes({ big: BigInt(999) }, "session")
     const filePath = await tracer.endTrace()
@@ -339,7 +339,7 @@ describe("setSpanAttributes — non-serializable values", () => {
 
 describe("setSpanAttributes — tool targeting edge cases", () => {
   test("explicit 'tool' target with no tool spans is a no-op", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.setSpanAttributes({ key: "val" }, "tool")
     const filePath = await tracer.endTrace()
@@ -350,7 +350,7 @@ describe("setSpanAttributes — tool targeting edge cases", () => {
   })
 
   test("auto-target with multiple tool spans targets the LAST one", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -380,7 +380,7 @@ describe("setSpanAttributes — tool targeting edge cases", () => {
 
 describe("sessionId sanitization", () => {
   test("unicode session ID is preserved (no path-unsafe chars)", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("세션-αβγ-会议", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -389,7 +389,7 @@ describe("sessionId sanitization", () => {
   })
 
   test("session ID with only unsafe chars becomes all underscores", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("/.\\:.", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -397,7 +397,7 @@ describe("sessionId sanitization", () => {
   })
 
   test("session ID with mixed safe/unsafe chars", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("project:env/session.123", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -412,11 +412,11 @@ describe("sessionId sanitization", () => {
 describe("withExporters — maxFiles edge cases", () => {
   test("maxFiles: 0 propagates to FileExporter (means unlimited)", async () => {
     const fe = new FileExporter(tmpDir)
-    const tracer = Tracer.withExporters([fe], { maxFiles: 0 })
+    const tracer = Recap.withExporters([fe], { maxFiles: 0 })
 
     // Write 5 traces
     for (let i = 0; i < 5; i++) {
-      const t = Tracer.withExporters([new FileExporter(tmpDir, 0)])
+      const t = Recap.withExporters([new FileExporter(tmpDir, 0)])
       t.startTrace(`s-${i}`, { prompt: `test-${i}` })
       await t.endTrace()
     }
@@ -429,7 +429,7 @@ describe("withExporters — maxFiles edge cases", () => {
   test("withExporters with no FileExporter ignores maxFiles", () => {
     const httpExporter = new HttpExporter("test", "http://localhost:1")
     // Should not crash when no FileExporter is found
-    const tracer = Tracer.withExporters([httpExporter], { maxFiles: 5 })
+    const tracer = Recap.withExporters([httpExporter], { maxFiles: 5 })
     expect(tracer).toBeDefined()
   })
 })
@@ -489,7 +489,7 @@ describe("FileExporter — sessionId in TraceFile", () => {
 
 describe("Generation span — input from previous tool results", () => {
   test("second generation's input contains previous tool results", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
 
     // First generation with a tool call
@@ -517,7 +517,7 @@ describe("Generation span — input from previous tool results", () => {
   })
 
   test("error tool result appears in next generation's input", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
 
     tracer.logStepStart({ id: "1" })
@@ -545,7 +545,7 @@ describe("Generation span — input from previous tool results", () => {
 
 describe("Generation output composition", () => {
   test("text output takes priority over tool call summary", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -563,7 +563,7 @@ describe("Generation output composition", () => {
   })
 
   test("empty text falls through to tool call summary", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -581,7 +581,7 @@ describe("Generation output composition", () => {
   })
 
   test("no text and no tool calls produces undefined output", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(ZERO_STEP)
@@ -592,7 +592,7 @@ describe("Generation output composition", () => {
   })
 
   test("multiple text parts are concatenated", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logText({ text: "Part 1. " })
@@ -663,7 +663,7 @@ describe("HttpExporter — trace with problematic attributes", () => {
 
 describe("endTrace — error string variations", () => {
   test("empty string error still marks as error", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace("")
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -674,7 +674,7 @@ describe("endTrace — error string variations", () => {
   })
 
   test("very long error string", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const longError = "Error: " + "x".repeat(100000)
     const filePath = await tracer.endTrace(longError)
@@ -684,7 +684,7 @@ describe("endTrace — error string variations", () => {
   })
 
   test("error with newlines and special chars", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace("Line 1\nLine 2\tTabbed\r\nWindows line")
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -698,7 +698,7 @@ describe("endTrace — error string variations", () => {
 
 describe("Structural invariants", () => {
   test("traceId is always a valid UUIDv7", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace()
     const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
@@ -707,7 +707,7 @@ describe("Structural invariants", () => {
   })
 
   test("all span IDs are valid UUIDv7", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -727,7 +727,7 @@ describe("Structural invariants", () => {
   })
 
   test("endedAt is always >= startedAt", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     // Add some work to create a measurable gap
     tracer.logStepStart({ id: "1" })
@@ -738,7 +738,7 @@ describe("Structural invariants", () => {
   })
 
   test("summary duration matches startedAt/endedAt difference", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50))
     const filePath = await tracer.endTrace()
@@ -749,7 +749,7 @@ describe("Structural invariants", () => {
   })
 
   test("summary totals are consistent with span data", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({

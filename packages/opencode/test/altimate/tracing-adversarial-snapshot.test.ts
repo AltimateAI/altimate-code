@@ -12,7 +12,7 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import {
-  Tracer,
+  Recap,
   FileExporter,
   HttpExporter,
   type TraceFile,
@@ -43,7 +43,7 @@ const ZERO_STEP = {
 
 describe("buildTraceFile — snapshot isolation", () => {
   test("enrichFromAssistant after snapshot doesn't modify the snapshot", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-isolate", {
       model: "original-model",
       prompt: "test",
@@ -74,7 +74,7 @@ describe("buildTraceFile — snapshot isolation", () => {
   })
 
   test("adding spans after snapshot doesn't modify the snapshot's span array", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-span-isolate", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -108,7 +108,7 @@ describe("buildTraceFile — snapshot isolation", () => {
   })
 
   test("buildTraceFile shows 'running' status during active generation", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-running", { prompt: "test" })
     // Wait for initial snapshot to complete
     await new Promise((r) => setTimeout(r, 50))
@@ -141,7 +141,7 @@ describe("buildTraceFile — snapshot isolation", () => {
 
 describe("snapshot — debouncing and atomicity", () => {
   test("rapid tool calls don't create multiple .tmp files", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-rapid-snap", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -172,7 +172,7 @@ describe("snapshot — debouncing and atomicity", () => {
 
   test("snapshot with unwritable directory doesn't crash", async () => {
     // Create a FileExporter pointing to an impossible path
-    const tracer = Tracer.withExporters([new FileExporter("/dev/null/impossible")])
+    const tracer = Recap.withExporters([new FileExporter("/dev/null/impossible")])
     tracer.startTrace("s-unwritable", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -191,7 +191,7 @@ describe("snapshot — debouncing and atomicity", () => {
   })
 
   test("endTrace waits for in-flight snapshot before writing", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-wait-snap", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
@@ -213,7 +213,7 @@ describe("snapshot — debouncing and atomicity", () => {
   })
 
   test("snapshot after endTrace is a no-op", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-post-end-snap", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(ZERO_STEP)
@@ -247,25 +247,25 @@ describe("snapshot — debouncing and atomicity", () => {
 
 describe("Worker tracing — session lifecycle simulation", () => {
   test("multiple prompt cycles on same session create separate traces", async () => {
-    // Simulate the worker's getOrCreateTracer + endedSessions logic
-    const tracers = new Map<string, Tracer>()
+    // Simulate the worker's getOrCreateRecap + endedSessions logic
+    const tracers = new Map<string, Recap>()
     const endedSessions = new Set<string>()
 
-    function getOrCreateTracer(sessionID: string): Tracer | null {
+    function getOrCreateRecap(sessionID: string): Recap | null {
       if (!sessionID) return null
       if (endedSessions.has(sessionID)) {
         endedSessions.delete(sessionID)
         tracers.delete(sessionID)
       }
       if (tracers.has(sessionID)) return tracers.get(sessionID)!
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(sessionID, {})
       tracers.set(sessionID, tracer)
       return tracer
     }
 
     // Prompt cycle 1
-    const t1 = getOrCreateTracer("session-lifecycle")!
+    const t1 = getOrCreateRecap("session-lifecycle")!
     t1.logStepStart({ id: "1" })
     t1.logToolCall({
       tool: "bash", callID: "c1",
@@ -276,7 +276,7 @@ describe("Worker tracing — session lifecycle simulation", () => {
     endedSessions.add("session-lifecycle")
 
     // Prompt cycle 2 — should create a fresh tracer
-    const t2 = getOrCreateTracer("session-lifecycle")!
+    const t2 = getOrCreateRecap("session-lifecycle")!
     expect(t2).not.toBe(t1) // Different tracer instance
     t2.logStepStart({ id: "1" })
     t2.logToolCall({
@@ -294,10 +294,10 @@ describe("Worker tracing — session lifecycle simulation", () => {
   })
 
   test("tracer eviction when MAX_TRACERS is exceeded", async () => {
-    const tracers = new Map<string, Tracer>()
+    const tracers = new Map<string, Recap>()
     const MAX = 5
 
-    function getOrCreateTracer(sessionID: string): Tracer {
+    function getOrCreateRecap(sessionID: string): Recap {
       if (tracers.has(sessionID)) return tracers.get(sessionID)!
       if (tracers.size >= MAX) {
         const oldest = tracers.keys().next().value
@@ -306,7 +306,7 @@ describe("Worker tracing — session lifecycle simulation", () => {
           tracers.delete(oldest)
         }
       }
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+      const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(sessionID, {})
       tracers.set(sessionID, tracer)
       return tracer
@@ -314,7 +314,7 @@ describe("Worker tracing — session lifecycle simulation", () => {
 
     // Create MAX+2 tracers
     for (let i = 0; i < MAX + 2; i++) {
-      getOrCreateTracer(`session-${i}`)
+      getOrCreateRecap(`session-${i}`)
     }
 
     // Only MAX should remain
@@ -329,26 +329,26 @@ describe("Worker tracing — session lifecycle simulation", () => {
     for (const t of tracers.values()) await t.endTrace().catch(() => {})
   })
 
-  test("undefined/empty sessionID is handled by getOrCreateTracer", () => {
-    const tracers = new Map<string, Tracer>()
+  test("undefined/empty sessionID is handled by getOrCreateRecap", () => {
+    const tracers = new Map<string, Recap>()
 
-    function getOrCreateTracer(sessionID: string): Tracer | null {
+    function getOrCreateRecap(sessionID: string): Recap | null {
       if (!sessionID) return null
       if (tracers.has(sessionID)) return tracers.get(sessionID)!
-      const tracer = Tracer.withExporters([])
+      const tracer = Recap.withExporters([])
       tracer.startTrace(sessionID, {})
       tracers.set(sessionID, tracer)
       return tracer
     }
 
-    expect(getOrCreateTracer("")).toBeNull()
-    expect(getOrCreateTracer(undefined as any)).toBeNull()
-    expect(getOrCreateTracer(null as any)).toBeNull()
+    expect(getOrCreateRecap("")).toBeNull()
+    expect(getOrCreateRecap(undefined as any)).toBeNull()
+    expect(getOrCreateRecap(null as any)).toBeNull()
     expect(tracers.size).toBe(0)
   })
 
   test("events for non-existent session are silently dropped", () => {
-    const tracers = new Map<string, Tracer>()
+    const tracers = new Map<string, Recap>()
 
     // Simulate receiving events for a session we haven't seen
     const part = {
@@ -376,7 +376,7 @@ describe("Concurrent snapshot + endTrace race", () => {
     for (let attempt = 0; attempt < 10; attempt++) {
       const dir = path.join(tmpDir, `race-${attempt}`)
       await fs.mkdir(dir, { recursive: true })
-      const tracer = Tracer.withExporters([new FileExporter(dir)])
+      const tracer = Recap.withExporters([new FileExporter(dir)])
       tracer.startTrace(`race-${attempt}`, { prompt: "test" })
       tracer.logStepStart({ id: "1" })
 
@@ -400,7 +400,7 @@ describe("Concurrent snapshot + endTrace race", () => {
   })
 
   test("multiple endTrace calls on the same tracer don't corrupt", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-double-end", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(ZERO_STEP)
@@ -430,7 +430,7 @@ describe("Concurrent snapshot + endTrace race", () => {
 
 describe("getTracePath edge cases", () => {
   test("getTracePath sanitizes session ID consistently with endTrace", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session/with:special.chars\\here", { prompt: "test" })
 
     const tracePath = tracer.getTracePath()
@@ -442,13 +442,13 @@ describe("getTracePath edge cases", () => {
   })
 
   test("getTracePath with HttpExporter only returns undefined", () => {
-    const tracer = Tracer.withExporters([new HttpExporter("test", "http://localhost:1")])
+    const tracer = Recap.withExporters([new HttpExporter("test", "http://localhost:1")])
     tracer.startTrace("s1", { prompt: "test" })
     expect(tracer.getTracePath()).toBeUndefined()
   })
 
   test("getTracePath with mixed exporters uses FileExporter dir", () => {
-    const tracer = Tracer.withExporters([
+    const tracer = Recap.withExporters([
       new HttpExporter("cloud", "http://localhost:1"),
       new FileExporter(tmpDir),
     ])
@@ -463,7 +463,7 @@ describe("getTracePath edge cases", () => {
 
 describe("Live trace viewer — /api/trace", () => {
   test("viewer shows updated data after new spans", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-live-viewer", { prompt: "test" })
     const tracePath = tracer.getTracePath()!
 
@@ -556,7 +556,7 @@ describe("Live trace viewer — /api/trace", () => {
 
 describe("Snapshot with non-serializable data in spans", () => {
   test("span with function in attributes survives snapshot", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-func-attr", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -591,7 +591,7 @@ describe("Snapshot with non-serializable data in spans", () => {
   })
 
   test("snapshot handles span with undefined output gracefully", async () => {
-    const tracer = Tracer.withExporters([new FileExporter(tmpDir)])
+    const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-undef-output", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50)) // wait for initial snapshot
     tracer.logStepStart({ id: "1" })
@@ -616,7 +616,7 @@ describe("Snapshot with non-serializable data in spans", () => {
 describe("Stress test — snapshot interleaving", () => {
   test("100 tracers created and ended rapidly all produce valid files", async () => {
     const promises = Array.from({ length: 100 }, async (_, i) => {
-      const tracer = Tracer.withExporters([new FileExporter(tmpDir, 0)]) // unlimited files
+      const tracer = Recap.withExporters([new FileExporter(tmpDir, 0)]) // unlimited files
       tracer.startTrace(`stress-${i}`, { prompt: `prompt-${i}` })
       tracer.logStepStart({ id: "1" })
       tracer.logToolCall({
