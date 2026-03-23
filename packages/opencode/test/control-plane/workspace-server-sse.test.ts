@@ -13,6 +13,7 @@ afterEach(async () => {
 Log.init({ print: false })
 
 describe("control-plane/workspace-server SSE", () => {
+  // InstanceBootstrap (git ops, LSP init) can take 10–20s under full-suite load
   test("streams GlobalBus events and parseSSE reads them", async () => {
     await using tmp = await tmpdir({ git: true })
     const app = WorkspaceServer.App()
@@ -33,7 +34,7 @@ describe("control-plane/workspace-server SSE", () => {
       const done = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error("timed out waiting for workspace.test event"))
-        }, 3000)
+        }, 20000)
 
         void parseSSE(response.body!, stop.signal, (event) => {
           seen.push(event)
@@ -66,5 +67,5 @@ describe("control-plane/workspace-server SSE", () => {
     } finally {
       stop.abort()
     }
-  })
+  }, { timeout: 30000 })
 })

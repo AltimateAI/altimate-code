@@ -83,11 +83,13 @@ jobs:
         run: bun install
 
       - name: Run tests
-        run: bun test
+        run: bun test --timeout 30000
         working-directory: packages/opencode
         # Cloud E2E tests (Snowflake, BigQuery, Databricks) auto-skip when
         # ALTIMATE_CODE_CONN_* env vars are not set. Docker E2E tests auto-skip
         # when Docker is not available. No exclusion needed — skipIf handles it.
+        # --timeout 30000: matches package.json "test" script; prevents 5s default
+        # from cutting off tests that run bun install or bootstrap git instances.
 
   # ---------------------------------------------------------------------------
   # Driver E2E tests — only when driver code changes.
