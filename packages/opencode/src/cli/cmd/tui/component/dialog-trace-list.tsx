@@ -28,10 +28,13 @@ export function DialogRecapList(props: {
 }) {
   const dialog = useDialog()
 
+  // altimate_change start — recap: use Recap.listTraces
   const [traces] = createResource(async () => {
     return Recap.listTraces(props.tracesDir)
   })
+  // altimate_change end
 
+  // altimate_change start — recap: renamed text and Recap references
   const options = createMemo(() => {
     if (traces.state === "errored") {
       return [
@@ -42,6 +45,7 @@ export function DialogRecapList(props: {
         },
       ]
     }
+    // altimate_change end
 
     const items = traces() ?? []
     const today = new Date().toDateString()
@@ -101,7 +105,9 @@ export function DialogRecapList(props: {
 
   return (
     <DialogSelect
+      {/* altimate_change start — recap: renamed title text */}
       title={traces.state === "pending" ? "Recaps (loading...)" : "Recaps"}
+      {/* altimate_change end */}
       options={options()}
       current={props.currentSessionID}
       onSelect={(option) => {
@@ -116,6 +122,8 @@ export function DialogRecapList(props: {
   )
 }
 
+// altimate_change start — recap: backward-compat alias
 /** @deprecated Use DialogRecapList instead */
 export const DialogTraceList = DialogRecapList
+// altimate_change end
 // altimate_change end

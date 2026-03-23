@@ -60,7 +60,9 @@ function getRecapViewerUrl(sessionID: string, tracesDir?: string): string {
         }
 
         const safeId = sid.replace(/[/\\.:]/g, "_")
+        // altimate_change start — recap: use renamed recapViewerTracesDir
         const traceFile = `${recapViewerTracesDir}/${safeId}.json`
+        // altimate_change end
 
         if (action === "api") {
           try {
@@ -84,7 +86,9 @@ function getRecapViewerUrl(sessionID: string, tracesDir?: string): string {
       },
     })
   }
+  // altimate_change start — recap: renamed recapViewerServer
   return `http://127.0.0.1:${recapViewerServer.port}/view/${encodeURIComponent(sessionID)}`
+  // altimate_change end
 }
 
 // altimate_change end
@@ -289,6 +293,7 @@ function App() {
     }
   })
 
+  // altimate_change start — recap: renamed openTraceInBrowser → openRecapInBrowser
   async function openRecapInBrowser(sessionID: string) {
     try {
       // Check if recap file exists on disk before opening browser
@@ -307,6 +312,7 @@ function App() {
       toast.show({ variant: "warning", message: `Failed to open browser. Recap files: ${Recap.getTracesDir(tracesDir())}`, duration: 8000 })
     }
   }
+  // altimate_change end
   // altimate_change end
 
   useKeyboard((evt) => {

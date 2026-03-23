@@ -97,8 +97,10 @@ function listRecaps(traces: Array<{ sessionId: string; trace: TraceFile }>, trac
   }
 
   UI.empty()
+  // altimate_change start — recap: renamed messages and Recap.getTracesDir
   UI.println(UI.Style.TEXT_DIM + `${traces.length} recap(s) in ${Recap.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
   UI.println(UI.Style.TEXT_DIM + "View a recap: altimate-code recap view <session-id>" + UI.Style.TEXT_NORMAL)
+  // altimate_change end
 }
 // altimate_change end
 
@@ -120,6 +122,7 @@ export const RecapCommand = cmd({
         describe: "session ID for view action",
         type: "string",
       })
+      // altimate_change start — recap: renamed option descriptions
       .option("port", {
         type: "number",
         describe: "port for recap viewer server",
@@ -136,7 +139,9 @@ export const RecapCommand = cmd({
         describe: "auto-refresh the viewer as the recap updates (for in-progress sessions)",
         default: false,
       })
+      // altimate_change end
   },
+  // altimate_change start — recap: renamed handler body (Tracer→Recap, listTraces→listRecaps, trace→recap messages)
   handler: async (args) => {
     const action = args.action || "list"
     const cfg = await Config.get().catch(() => ({} as Record<string, any>))
@@ -202,7 +207,9 @@ export const RecapCommand = cmd({
       })
 
       const url = `http://localhost:${server.port}`
+      // altimate_change start — recap: renamed viewer message
       UI.println(`Recap viewer: ${url}`)
+      // altimate_change end
       if (live) {
         UI.println(UI.Style.TEXT_DIM + "Live mode: auto-refreshing every 2s" + UI.Style.TEXT_NORMAL)
       }
@@ -228,8 +235,11 @@ export const RecapCommand = cmd({
       await new Promise(() => {})
     }
   },
+  // altimate_change end
 })
+// altimate_change end
 
+// altimate_change start — recap: backward-compat alias
 /** @deprecated Use RecapCommand instead */
 export const TraceCommand = RecapCommand
 // altimate_change end

@@ -194,7 +194,9 @@ let cli = yargs(hideBin(process.argv))
   .command(PrCommand)
   .command(SessionCommand)
   .command(DbCommand)
+  // altimate_change start — recap: renamed TraceCommand → RecapCommand
   .command(RecapCommand)
+  // altimate_change end
   // altimate_change start — top-level skill command
   .command(SkillCommand)
   // altimate_change end

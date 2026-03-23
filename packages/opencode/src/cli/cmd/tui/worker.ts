@@ -77,7 +77,9 @@ async function loadTracingConfig() {
     // Config failure should not prevent TUI from working
   }
 }
+// altimate_change end
 
+// altimate_change start — recap: renamed getOrCreateTracer → getOrCreateRecap
 function getOrCreateRecap(sessionID: string): Recap | null {
   if (!sessionID || !tracingEnabled) return null
   if (sessionRecaps.has(sessionID)) return sessionRecaps.get(sessionID)!
@@ -184,6 +186,8 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
               }
             }
           }
+          // altimate_change end
+          // altimate_change start — recap: renamed tracer→recap, sessionTracers→sessionRecaps in part events
           if (event.type === "message.part.updated") {
             const part = (event as any).properties?.part
             if (part) {
@@ -208,6 +212,8 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
               }
             }
           }
+          // altimate_change end
+          // altimate_change start — recap: session title capture and finalization (renamed variables)
           // Capture session title from session.updated events
           if (event.type === "session.updated") {
             const info = (event as any).properties?.info
