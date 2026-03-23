@@ -261,6 +261,167 @@ PATCH`
     })
   })
 
+  describe("maybeParseApplyPatchVerified", () => {
+    test("detects implicit invocation (raw patch without apply_patch command)", async () => {
+      const patchText = `*** Begin Patch
+*** Add File: test.txt
++Content
+*** End Patch`
+
+      const result = await Patch.maybeParseApplyPatchVerified([patchText], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.CorrectnessError)
+      if (result.type === Patch.MaybeApplyPatchVerified.CorrectnessError) {
+        expect(result.error.message).toBe(Patch.ApplyPatchError.ImplicitInvocation)
+      }
+    })
+
+    test("returns NotApplyPatch for single arg that is not a valid patch", async () => {
+      const result = await Patch.maybeParseApplyPatchVerified(["echo hello"], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.NotApplyPatch)
+    })
+
+    test("returns NotApplyPatch for unrelated multi-arg commands", async () => {
+      const result = await Patch.maybeParseApplyPatchVerified(["ls", "-la", "/tmp"], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.NotApplyPatch)
+    })
+
+    test("returns Body with add change for apply_patch add hunk", async () => {
+      const patchText = `*** Begin Patch
+*** Add File: new-file.txt
++line one
++line two
+*** End Patch`
+
+      const result = await Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.Body)
+      if (result.type === Patch.MaybeApplyPatchVerified.Body) {
+        const resolvedPath = path.resolve(tempDir, "new-file.txt")
+        const change = result.action.changes.get(resolvedPath)
+        expect(change).toBeDefined()
+        expect(change!.type).toBe("add")
+        if (change!.type === "add") {
+          expect(change!.content).toBe("line one\nline two")
+        }
+        expect(result.action.cwd).toBe(tempDir)
+      }
+    })
+
+    test("returns Body with delete change including file content", async () => {
+      const filePath = path.join(tempDir, "to-delete.txt")
+      await fs.writeFile(filePath, "original content here")
+
+      const patchText = `*** Begin Patch
+*** Delete File: to-delete.txt
+*** End Patch`
+
+      const result = await Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.Body)
+      if (result.type === Patch.MaybeApplyPatchVerified.Body) {
+        const resolvedPath = path.resolve(tempDir, "to-delete.txt")
+        const change = result.action.changes.get(resolvedPath)
+        expect(change).toBeDefined()
+        expect(change!.type).toBe("delete")
+        if (change!.type === "delete") {
+          expect(change!.content).toBe("original content here")
+        }
+      }
+    })
+
+    test("returns CorrectnessError when deleting non-existent file", async () => {
+      const patchText = `*** Begin Patch
+*** Delete File: no-such-file.txt
+*** End Patch`
+
+      const result = await Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.CorrectnessError)
+      if (result.type === Patch.MaybeApplyPatchVerified.CorrectnessError) {
+        expect(result.error.message).toContain("Failed to read file for deletion")
+      }
+    })
+
+    test("returns Body with update change including unified_diff and new_content", async () => {
+      const filePath = path.join(tempDir, "to-update.txt")
+      await fs.writeFile(filePath, "alpha\nbeta\ngamma\n")
+
+      const patchText = `*** Begin Patch
+*** Update File: to-update.txt
+@@
+ alpha
+-beta
++BETA
+ gamma
+*** End Patch`
+
+      const result = await Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.Body)
+      if (result.type === Patch.MaybeApplyPatchVerified.Body) {
+        const resolvedPath = path.resolve(tempDir, "to-update.txt")
+        const change = result.action.changes.get(resolvedPath)
+        expect(change).toBeDefined()
+        expect(change!.type).toBe("update")
+        if (change!.type === "update") {
+          expect(change!.new_content).toBe("alpha\nBETA\ngamma\n")
+          expect(change!.unified_diff).toContain("-beta")
+          expect(change!.unified_diff).toContain("+BETA")
+          expect(change!.move_path).toBeUndefined()
+        }
+      }
+    })
+
+    test("returns CorrectnessError when updating file with non-matching old_lines", async () => {
+      const filePath = path.join(tempDir, "mismatch.txt")
+      await fs.writeFile(filePath, "actual content\n")
+
+      const patchText = `*** Begin Patch
+*** Update File: mismatch.txt
+@@
+-completely different content
++replacement
+*** End Patch`
+
+      const result = await Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.CorrectnessError)
+      if (result.type === Patch.MaybeApplyPatchVerified.CorrectnessError) {
+        expect(result.error.message).toContain("Failed to find expected lines")
+      }
+    })
+
+    test("resolves move_path for update with move directive", async () => {
+      const filePath = path.join(tempDir, "old-name.txt")
+      await fs.writeFile(filePath, "keep this\n")
+
+      const patchText = `*** Begin Patch
+*** Update File: old-name.txt
+*** Move to: new-name.txt
+@@
+-keep this
++keep that
+*** End Patch`
+
+      const result = await Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.Body)
+      if (result.type === Patch.MaybeApplyPatchVerified.Body) {
+        // The change is keyed by the resolved move_path, not the original path
+        const resolvedMovePath = path.resolve(tempDir, "new-name.txt")
+        const change = result.action.changes.get(resolvedMovePath)
+        expect(change).toBeDefined()
+        expect(change!.type).toBe("update")
+        if (change!.type === "update") {
+          expect(change!.move_path).toBe(resolvedMovePath)
+          expect(change!.new_content).toBe("keep that\n")
+        }
+      }
+    })
+
+    test("returns CorrectnessError for invalid patch syntax", async () => {
+      const result = await Patch.maybeParseApplyPatchVerified(
+        ["apply_patch", "this is not a valid patch at all"],
+        tempDir,
+      )
+      expect(result.type).toBe(Patch.MaybeApplyPatchVerified.CorrectnessError)
+    })
+  })
+
   describe("error handling", () => {
     test("should throw error when updating non-existent file", async () => {
       const nonExistent = path.join(tempDir, "does-not-exist.txt")
