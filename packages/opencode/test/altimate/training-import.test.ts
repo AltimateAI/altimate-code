@@ -56,6 +56,8 @@ function setupMocks(opts: {
     context: opts.currentCount ?? 0,
     rule: opts.currentCount ?? 0,
     pattern: opts.currentCount ?? 0,
+    context: opts.currentCount ?? 0,
+    rule: opts.currentCount ?? 0,
   }))
   saveSpy = spyOn(TrainingStore, "save").mockImplementation(async () => {
     if (opts.saveShouldFail) throw new Error("store write failed")
