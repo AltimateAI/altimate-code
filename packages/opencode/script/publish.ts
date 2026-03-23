@@ -38,6 +38,8 @@ const driverPeerDependenciesMeta: Record<string, { optional: true }> = Object.fr
 const binaries: Record<string, string> = {}
 for (const filepath of new Bun.Glob("**/package.json").scanSync({ cwd: "./dist" })) {
   const pkg = await Bun.file(`./dist/${filepath}`).json()
+  // Skip synthesized package.json files (e.g. dbt-tools) that lack name/version
+  if (!pkg.name || !pkg.version) continue
   binaries[pkg.name] = pkg.version
 }
 console.log("binaries", binaries)
@@ -63,6 +65,13 @@ async function copyAssets(targetDir: string) {
   await $`cp ../dbt-tools/bin/altimate-dbt ${targetDir}/dbt-tools/bin/altimate-dbt`
   await $`mkdir -p ${targetDir}/dbt-tools/dist`
   await $`cp ../dbt-tools/dist/index.js ${targetDir}/dbt-tools/dist/`
+  // A package.json with "type": "module" must be present so Node loads
+  // dist/index.js as ESM instead of CJS. We synthesize a minimal one rather
+  // than copying the full source package.json (which contains devDependencies
+  // with Bun catalog: versions that would confuse vulnerability scanners).
+  await Bun.file(`${targetDir}/dbt-tools/package.json`).write(
+    JSON.stringify({ type: "module" }, null, 2) + "\n",
+  )
   if (fs.existsSync("../dbt-tools/dist/altimate_python_packages")) {
     await $`cp -r ../dbt-tools/dist/altimate_python_packages ${targetDir}/dbt-tools/dist/`
   }

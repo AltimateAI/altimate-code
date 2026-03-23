@@ -64,6 +64,8 @@ describe("publish package validation", () => {
     expect(publishScript).toContain("cp -r ../../.opencode/skills")
     expect(publishScript).toContain("dbt-tools/bin/altimate-dbt")
     expect(publishScript).toContain("dbt-tools/dist")
+    // package.json needed for "type": "module" so Node loads ESM correctly
+    expect(publishScript).toContain("dbt-tools/package.json")
   })
 
   test("source scripts exist and use expected patterns", () => {

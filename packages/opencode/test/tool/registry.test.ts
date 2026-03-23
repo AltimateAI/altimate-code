@@ -6,6 +6,7 @@ import { Instance } from "../../src/project/instance"
 import { ToolRegistry } from "../../src/tool/registry"
 
 describe("tool.registry", () => {
+  // bun install runs in .opencode dir for @opencode-ai/plugin — can take 10–20s under load
   test("loads tools from .opencode/tool (singular)", async () => {
     await using tmp = await tmpdir({
       git: true,
@@ -39,7 +40,7 @@ describe("tool.registry", () => {
         expect(ids).toContain("hello")
       },
     })
-  })
+  }, { timeout: 30000 })
 
   test("loads tools from .opencode/tools (plural)", async () => {
     await using tmp = await tmpdir({
@@ -74,7 +75,7 @@ describe("tool.registry", () => {
         expect(ids).toContain("hello")
       },
     })
-  })
+  }, { timeout: 30000 })
 
   test("loads tools with external dependencies without crashing", async () => {
     await using tmp = await tmpdir({

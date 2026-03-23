@@ -132,6 +132,54 @@ describe("Protected.isSensitiveWrite", () => {
     expect(Protected.isSensitiveWrite("package.json")).toBeUndefined()
     expect(Protected.isSensitiveWrite("models/schema.sql")).toBeUndefined()
   })
+
+  test("detects private key and certificate extensions", () => {
+    expect(Protected.isSensitiveWrite("certs/server.pem")).toBe("server.pem")
+    expect(Protected.isSensitiveWrite("ssl/private.key")).toBe("private.key")
+    expect(Protected.isSensitiveWrite("auth/cert.p12")).toBe("cert.p12")
+    expect(Protected.isSensitiveWrite("deploy/signing.pfx")).toBe("signing.pfx")
+  })
+
+  test("detects remaining sensitive directories", () => {
+    expect(Protected.isSensitiveWrite(".gnupg/pubring.kbx")).toBe(".gnupg")
+    expect(Protected.isSensitiveWrite(".gcloud/credentials.db")).toBe(".gcloud")
+    expect(Protected.isSensitiveWrite(".kube/config")).toBe(".kube")
+    expect(Protected.isSensitiveWrite(".docker/config.json")).toBe(".docker")
+  })
+
+  test("detects remaining sensitive files", () => {
+    expect(Protected.isSensitiveWrite(".npmrc")).toBe(".npmrc")
+    expect(Protected.isSensitiveWrite(".pypirc")).toBe(".pypirc")
+    expect(Protected.isSensitiveWrite(".netrc")).toBe(".netrc")
+    expect(Protected.isSensitiveWrite(".htpasswd")).toBe(".htpasswd")
+    expect(Protected.isSensitiveWrite(".pgpass")).toBe(".pgpass")
+    expect(Protected.isSensitiveWrite("id_rsa")).toBe("id_rsa")
+    expect(Protected.isSensitiveWrite("id_ed25519")).toBe("id_ed25519")
+  })
+
+  test("detects sensitive files in subdirectories", () => {
+    expect(Protected.isSensitiveWrite("config/subdir/.npmrc")).toBe(".npmrc")
+    expect(Protected.isSensitiveWrite("deploy/certs/server.key")).toBe("server.key")
+  })
+
+  test("handles Windows backslash paths", () => {
+    expect(Protected.isSensitiveWrite(".git\\config")).toBe(".git")
+    expect(Protected.isSensitiveWrite("config\\.env")).toBe(".env")
+    expect(Protected.isSensitiveWrite(".ssh\\id_rsa")).toBe(".ssh")
+  })
+
+  test("detects .env variant files via startsWith check", () => {
+    expect(Protected.isSensitiveWrite(".env.production.local")).toBe(".env.production.local")
+    expect(Protected.isSensitiveWrite(".env.test")).toBe(".env.test")
+    expect(Protected.isSensitiveWrite(".env.custom")).toBe(".env.custom")
+  })
+
+  test("does not flag files that merely contain sensitive substrings", () => {
+    expect(Protected.isSensitiveWrite("src/git-helper.ts")).toBeUndefined()
+    expect(Protected.isSensitiveWrite("docs/env-setup.md")).toBeUndefined()
+    expect(Protected.isSensitiveWrite("lib/ssh-utils.js")).toBeUndefined()
+    expect(Protected.isSensitiveWrite("my-key-manager.ts")).toBeUndefined()
+  })
 })
 
 /*

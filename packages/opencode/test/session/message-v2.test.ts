@@ -896,3 +896,141 @@ describe("session.message-v2.fromError", () => {
     })
   })
 })
+
+// ─── filterCompacted ────────────────────────────────────────────────────────
+
+describe("session.message-v2.filterCompacted", () => {
+  // Helper to create a user message with optional compaction part
+  function userMsg(id: string, opts?: { compaction?: boolean }): MessageV2.WithParts {
+    const parts: MessageV2.Part[] = []
+    if (opts?.compaction) {
+      parts.push({
+        ...basePart(id, `${id}-compact`),
+        type: "compaction",
+        auto: true,
+      } as unknown as MessageV2.Part)
+    }
+    parts.push({
+      ...basePart(id, `${id}-text`),
+      type: "text",
+      content: `user message ${id}`,
+    } as unknown as MessageV2.Part)
+    return {
+      info: { ...userInfo(id) } as MessageV2.User,
+      parts,
+    }
+  }
+
+  // Helper to create an assistant message
+  function assistantMsg(
+    id: string,
+    parentID: string,
+    opts?: { summary?: boolean; finish?: string; error?: boolean },
+  ): MessageV2.WithParts {
+    const info = assistantInfo(id, parentID) as any
+    if (opts?.summary) info.summary = true
+    if (opts?.finish) info.finish = opts.finish
+    if (opts?.error) {
+      info.error = { name: "UnknownError", data: { message: "something went wrong" } }
+    }
+    return {
+      info: info as MessageV2.Assistant,
+      parts: [
+        {
+          ...basePart(id, `${id}-text`),
+          type: "text",
+          content: `assistant response ${id}`,
+        } as unknown as MessageV2.Part,
+      ],
+    }
+  }
+
+  async function* toStream(msgs: MessageV2.WithParts[]) {
+    for (const msg of msgs) yield msg
+  }
+
+  test("returns all messages reversed when no compaction point exists", async () => {
+    const u1 = userMsg("u1")
+    const a1 = assistantMsg("a1", "u1", { summary: true, finish: "stop" })
+    const u2 = userMsg("u2")
+    const a2 = assistantMsg("a2", "u2", { summary: true, finish: "stop" })
+
+    // Stream is newest-first (reverse chronological, as the DB query returns)
+    const result = await MessageV2.filterCompacted(toStream([a2, u2, a1, u1]))
+
+    // Reversed: oldest-first
+    expect(result.length).toBe(4)
+    expect(String(result[0].info.id)).toBe("u1")
+    expect(String(result[1].info.id)).toBe("a1")
+    expect(String(result[2].info.id)).toBe("u2")
+    expect(String(result[3].info.id)).toBe("a2")
+  })
+
+  test("stops at compaction boundary and returns slice reversed", async () => {
+    // Stream (newest-first): a3, u3, a2, u2(compacted), a1, u1
+    // u2 has a compaction part AND a1 completed successfully with parentID=u1
+    // But a2 completed with parentID=u2, so u2 is in completed set
+    const u1 = userMsg("u1")
+    const a1 = assistantMsg("a1", "u1", { summary: true, finish: "stop" })
+    const u2 = userMsg("u2", { compaction: true })
+    const a2 = assistantMsg("a2", "u2", { summary: true, finish: "stop" })
+    const u3 = userMsg("u3")
+    const a3 = assistantMsg("a3", "u3", { summary: true, finish: "stop" })
+
+    const result = await MessageV2.filterCompacted(toStream([a3, u3, a2, u2, a1, u1]))
+
+    // Should stop at u2 (has compaction part and is in completed set via a2)
+    // Collected: [a3, u3, a2, u2] then reversed
+    expect(result.length).toBe(4)
+    expect(String(result[0].info.id)).toBe("u2")
+    expect(String(result[1].info.id)).toBe("a2")
+    expect(String(result[2].info.id)).toBe("u3")
+    expect(String(result[3].info.id)).toBe("a3")
+  })
+
+  test("does not stop at user message with compaction part if no matching assistant completion", async () => {
+    // u2 has compaction part but no assistant completed with parentID=u2
+    const u1 = userMsg("u1")
+    const a1 = assistantMsg("a1", "u1", { summary: true, finish: "stop" })
+    const u2 = userMsg("u2", { compaction: true })
+    // a2 is still running (no summary, no finish)
+    const a2 = assistantMsg("a2", "u2")
+    const u3 = userMsg("u3")
+
+    const result = await MessageV2.filterCompacted(toStream([u3, a2, u2, a1, u1]))
+
+    // Should NOT stop at u2 because u2 is not in the completed set
+    // All 5 messages returned, reversed
+    expect(result.length).toBe(5)
+    expect(String(result[0].info.id)).toBe("u1")
+    expect(String(result[4].info.id)).toBe("u3")
+  })
+
+  test("errored assistant does not mark parent as completed", async () => {
+    // a2 has error, summary, finish — but error should prevent marking u2 as completed
+    const u1 = userMsg("u1")
+    const a1 = assistantMsg("a1", "u1", { summary: true, finish: "stop" })
+    const u2 = userMsg("u2", { compaction: true })
+    const a2 = assistantMsg("a2", "u2", { summary: true, finish: "stop", error: true })
+    const u3 = userMsg("u3")
+
+    const result = await MessageV2.filterCompacted(toStream([u3, a2, u2, a1, u1]))
+
+    // Should NOT stop at u2 because a2 has an error
+    expect(result.length).toBe(5)
+    expect(String(result[0].info.id)).toBe("u1")
+    expect(String(result[4].info.id)).toBe("u3")
+  })
+
+  test("requires both compaction part and completed set membership to stop", async () => {
+    // a1 completes for u1, so u1 is in completed set, but u1 has NO compaction part
+    const u1 = userMsg("u1") // no compaction part
+    const a1 = assistantMsg("a1", "u1", { summary: true, finish: "stop" })
+    const u2 = userMsg("u2")
+
+    const result = await MessageV2.filterCompacted(toStream([u2, a1, u1]))
+
+    // Should NOT stop at u1 because u1 has no compaction part
+    expect(result.length).toBe(3)
+  })
+})
