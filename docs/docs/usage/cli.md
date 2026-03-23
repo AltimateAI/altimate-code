@@ -68,7 +68,7 @@ Configuration can be controlled via environment variables:
 
 | Variable                               | Description                          |
 | -------------------------------------- | ------------------------------------ |
-| `ALTIMATE_CLI_DISABLE_AUTOUPDATE`      | Disable automatic updates            |
+| `ALTIMATE_CLI_DISABLE_AUTOUPDATE`      | Disable automatic updates (still shows upgrade indicator) |
 | `ALTIMATE_CLI_DISABLE_LSP_DOWNLOAD`    | Don't auto-download LSP servers      |
 | `ALTIMATE_CLI_DISABLE_AUTOCOMPACT`     | Disable automatic context compaction |
 | `ALTIMATE_CLI_DISABLE_DEFAULT_PLUGINS` | Skip loading default plugins         |

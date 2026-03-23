@@ -104,13 +104,22 @@ Disable auto-update if it causes problems:
 export ALTIMATE_CLI_DISABLE_AUTOUPDATE=true
 ```
 
-Or set to notification only:
+Or set to notification only in your config:
 
 ```json
 {
   "autoupdate": "notify"
 }
 ```
+
+Both options still show an upgrade indicator in the footer when a new version is available. To upgrade manually, run:
+
+```bash
+altimate upgrade
+```
+
+!!! note
+    When an update is available, you'll see `↑ <version> update available · altimate upgrade` in the bottom-right corner of the TUI.
 
 ### Context Too Large
 

@@ -44,7 +44,7 @@ Configuration is loaded from multiple sources, with later sources overriding ear
 | `default_agent` | `string` | Default agent to use on startup |
 | `logLevel` | `string` | Log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `share` | `string` | Session sharing: `"manual"`, `"auto"`, `"disabled"` |
-| `autoupdate` | `boolean \| "notify"` | Auto-update behavior |
+| `autoupdate` | `boolean \| "notify"` | Auto-update behavior: `true` (default) auto-upgrades, `"notify"` shows an indicator without upgrading, `false` disables auto-upgrade but still shows the update indicator |
 | `provider` | `object` | Provider configurations (see [Providers](providers.md)) |
 | `mcp` | `object` | MCP server configurations (see [MCP Servers](mcp-servers.md)) |
 | `formatter` | `object \| false` | Formatter settings (see [Formatters](formatters.md)) |
