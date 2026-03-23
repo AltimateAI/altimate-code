@@ -48,16 +48,14 @@ function setupMocks(opts: {
   saveSpy?.mockRestore()
   budgetSpy?.mockRestore()
 
-  readFileSpy = spyOn(fs, "readFile").mockImplementation(async () => opts.fileContent as any)
+  readFileSpy = spyOn(fs, "readFile").mockImplementation(async () => Buffer.from(opts.fileContent) as any)
   countSpy = spyOn(TrainingStore, "count").mockImplementation(async () => ({
     standard: opts.currentCount ?? 0,
     glossary: opts.currentCount ?? 0,
     playbook: opts.currentCount ?? 0,
-    context: opts.currentCount ?? 0,
     rule: opts.currentCount ?? 0,
     pattern: opts.currentCount ?? 0,
     context: opts.currentCount ?? 0,
-    rule: opts.currentCount ?? 0,
   }))
   saveSpy = spyOn(TrainingStore, "save").mockImplementation(async () => {
     if (opts.saveShouldFail) throw new Error("store write failed")
