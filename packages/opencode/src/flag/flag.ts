@@ -28,7 +28,9 @@ export namespace Flag {
   export declare const OPENCODE_TUI_CONFIG: string | undefined
   export declare const OPENCODE_CONFIG_DIR: string | undefined
   export const OPENCODE_CONFIG_CONTENT = process.env["OPENCODE_CONFIG_CONTENT"]
-  export const OPENCODE_DISABLE_AUTOUPDATE = truthy("OPENCODE_DISABLE_AUTOUPDATE")
+  // altimate_change start — support ALTIMATE_CLI_DISABLE_AUTOUPDATE env var (documented name)
+  export const OPENCODE_DISABLE_AUTOUPDATE = altTruthy("ALTIMATE_CLI_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_AUTOUPDATE")
+  // altimate_change end
   export const OPENCODE_DISABLE_PRUNE = truthy("OPENCODE_DISABLE_PRUNE")
   // altimate_change start - global opt-out for Altimate Memory
   export const ALTIMATE_DISABLE_MEMORY = altTruthy("ALTIMATE_DISABLE_MEMORY", "OPENCODE_DISABLE_MEMORY")
