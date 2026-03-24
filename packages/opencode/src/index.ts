@@ -36,6 +36,9 @@ import { RecapCommand } from "./cli/cmd/trace"
 // altimate_change start — top-level skill command
 import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change end
+// altimate_change start — check: deterministic SQL check command
+import { CheckCommand } from "./cli/cmd/check"
+// altimate_change end
 import path from "path"
 import { Global } from "./global"
 import { JsonMigration } from "./storage/json-migration"
@@ -126,7 +129,7 @@ let cli = yargs(hideBin(process.argv))
 
     // altimate_change start - app name in logs
     Log.Default.info("altimate-code", {
-    // altimate_change end
+      // altimate_change end
       version: Installation.VERSION,
       args: process.argv.slice(2),
     })
@@ -200,6 +203,9 @@ let cli = yargs(hideBin(process.argv))
   // altimate_change start — top-level skill command
   .command(SkillCommand)
   // altimate_change end
+  // altimate_change start — check: register deterministic SQL check command
+  .command(CheckCommand)
+// altimate_change end
 
 if (Installation.isLocal()) {
   cli = cli.command(WorkspaceServeCommand)
