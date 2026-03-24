@@ -54,7 +54,9 @@ export namespace Command {
     const result: string[] = []
     const numbered = template.match(/\$\d+/g)
     if (numbered) {
-      for (const match of [...new Set(numbered)].sort()) result.push(match)
+      // altimate_change start — fix lexicographic sort of multi-digit placeholders ($10 before $2)
+      for (const match of [...new Set(numbered)].sort((a, b) => parseInt(a.slice(1), 10) - parseInt(b.slice(1), 10))) result.push(match)
+      // altimate_change end
     }
     if (template.includes("$ARGUMENTS")) result.push("$ARGUMENTS")
     return result

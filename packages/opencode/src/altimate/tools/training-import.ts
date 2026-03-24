@@ -159,12 +159,12 @@ export const TrainingImportTool = Tool.define("training_import", {
   },
 })
 
-interface MarkdownSection {
+export interface MarkdownSection {
   name: string
   content: string
 }
 
-function parseMarkdownSections(markdown: string): MarkdownSection[] {
+export function parseMarkdownSections(markdown: string): MarkdownSection[] {
   const sections: MarkdownSection[] = []
   const lines = markdown.split("\n")
   let currentH1 = ""
@@ -222,11 +222,14 @@ function parseMarkdownSections(markdown: string): MarkdownSection[] {
   return sections
 }
 
-function slugify(text: string): string {
-  return text
+export function slugify(text: string): string {
+  const result = text
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, "")
     .replace(/\s+/g, "-")
-    .replace(/^-+|-+$/g, "")
     .slice(0, 64)
+    .replace(/^-+|-+$/g, "")
+  return result || "untitled"
 }
