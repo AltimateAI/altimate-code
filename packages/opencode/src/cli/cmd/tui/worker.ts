@@ -108,6 +108,13 @@ function getOrCreateTrace(sessionID: string): Trace | null {
 
 const startEventStream = (input: { directory: string; workspaceID?: string }) => {
   if (eventStream.abort) eventStream.abort.abort()
+  // Clear stale per-stream trace state before starting a new stream instance
+  for (const [, trace] of sessionTraces) {
+    void trace.endTrace().catch(() => {})
+  }
+  sessionTraces.clear()
+  sessionUserMsgIds.clear()
+
   const abort = new AbortController()
   eventStream.abort = abort
   const signal = abort.signal

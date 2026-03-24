@@ -3,11 +3,11 @@
  *
  * These tests simulate real agent sessions — not mocked — to verify:
  *   1. Incremental snapshots are written during a session (partial traces)
- *   2. The traceFile file is valid and complete at every point
+ *   2. The trace file is valid and complete at every point
  *   3. Concurrent sessions don't interfere with each other
  *   4. Performance: tracing adds negligible overhead (<5ms per operation)
  *   5. The TUI worker's tracing code doesn't crash on malformed events
- *   6. The traceFile viewer server works correctly
+ *   6. The trace viewer server works correctly
  *   7. The full write→snapshot→read→render pipeline works end-to-end
  */
 

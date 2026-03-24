@@ -4,7 +4,7 @@
  *
  * Each test targets a specific code path or race condition found during
  * line-by-line audit of snapshot(), buildTraceFile(), worker.ts tracing,
- * and the live traceFile viewer.
+ * and the live trace viewer.
  */
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test"

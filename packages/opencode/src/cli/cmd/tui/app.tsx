@@ -40,8 +40,11 @@ import fsAsync from "fs/promises"
 let traceViewerServer: ReturnType<typeof Bun.serve> | undefined
 let traceViewerTracesDir: string | undefined
 function getTraceViewerUrl(sessionID: string, tracesDir?: string): string {
+  // Always update the traces dir so subsequent calls with a new tracesDir
+  // don't serve stale paths from the initial server creation.
+  traceViewerTracesDir = Trace.getTracesDir(tracesDir)
+
   if (!traceViewerServer) {
-    traceViewerTracesDir = Trace.getTracesDir(tracesDir)
     traceViewerServer = Bun.serve({
       port: 0, // random available port
       hostname: "127.0.0.1",

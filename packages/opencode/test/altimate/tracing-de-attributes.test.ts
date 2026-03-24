@@ -1,5 +1,5 @@
 /**
- * Tests for data engineering domain-specific traceFile attributes.
+ * Tests for data engineering domain-specific trace file attributes.
  *
  * Verifies that:
  *   1. Domain attributes are purely optional — traces work without them

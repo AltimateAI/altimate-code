@@ -1,5 +1,5 @@
 /**
- * Tests for traceFile list display, title handling, formatting utilities,
+ * Tests for trace list display, title handling, formatting utilities,
  * flushSync crash recovery, initial snapshot, and sorting.
  *
  * These test the latest additions that were previously uncovered.
