@@ -19,10 +19,32 @@ describe("formatBytes: normal cases", () => {
   })
 })
 
+describe("formatBytes: higher units (TB, PB)", () => {
+  test("TB boundary", () => {
+    expect(formatBytes(1024 ** 4)).toBe("1.00 TB")
+  })
+
+  test("PB boundary", () => {
+    expect(formatBytes(1024 ** 5)).toBe("1.00 PB")
+  })
+
+  test("values beyond PB stay at PB (no EB unit)", () => {
+    expect(formatBytes(1024 ** 6)).toBe("1024.00 PB")
+  })
+
+  test("multi-PB value", () => {
+    expect(formatBytes(2 * 1024 ** 5)).toBe("2.00 PB")
+  })
+})
+
 describe("formatBytes: edge cases", () => {
   test("negative bytes displays with sign", () => {
     expect(formatBytes(-100)).toBe("-100 B")
     expect(formatBytes(-1536)).toBe("-1.50 KB")
+  })
+
+  test("negative KB", () => {
+    expect(formatBytes(-1024)).toBe("-1.00 KB")
   })
 
   test("fractional bytes clamps to B unit", () => {
