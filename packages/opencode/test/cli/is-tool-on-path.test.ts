@@ -99,7 +99,8 @@ describe("isToolOnPath", () => {
     delete process.env.ALTIMATE_BIN_DIR
 
     savedEnv.PATH = process.env.PATH
-    process.env.PATH = path.join(tmp.path, "path-bin") + ":" + (process.env.PATH ?? "")
+    const sep = process.platform === "win32" ? ";" : ":"
+    process.env.PATH = path.join(tmp.path, "path-bin") + sep + (process.env.PATH ?? "")
 
     await Instance.provide({
       directory: tmp.path,

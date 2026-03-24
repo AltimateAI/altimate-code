@@ -152,14 +152,14 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
   },
 })
 
-interface DownstreamModel {
+export interface DownstreamModel {
   name: string
   depth: number
   materialized?: string
   path: string[]
 }
 
-function findDownstream(
+export function findDownstream(
   targetName: string,
   models: Array<{ name: string; depends_on: string[]; materialized?: string }>,
 ): DownstreamModel[] {
@@ -188,7 +188,7 @@ function findDownstream(
   return results
 }
 
-function formatImpactReport(data: {
+export function formatImpactReport(data: {
   model: string
   column?: string
   changeType: string

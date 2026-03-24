@@ -1,8 +1,8 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test"
+import { describe, test, expect } from "bun:test"
 import { Patch } from "../../src/patch"
 import * as fs from "fs/promises"
 import * as path from "path"
-import { tmpdir } from "os"
+import { tmpdir } from "../fixture/fixture"
 
 /**
  * Tests for Patch.deriveNewContentsFromChunks — the core function that applies
@@ -21,20 +21,11 @@ import { tmpdir } from "os"
  */
 
 describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
-  let tempDir: string
-
-  beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(tmpdir(), "seek-test-"))
-  })
-
-  afterEach(async () => {
-    await fs.rm(tempDir, { recursive: true, force: true })
-  })
-
-  test("exact match: replaces old_lines with new_lines", () => {
-    const filePath = path.join(tempDir, "exact.txt")
+  test("exact match: replaces old_lines with new_lines", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "exact.txt")
     const content = "line1\nline2\nline3\n"
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
@@ -48,13 +39,12 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     expect(result.unified_diff).toContain("+REPLACED")
   })
 
-  test("rstrip pass: matches despite trailing whitespace differences", () => {
-    const filePath = path.join(tempDir, "rstrip.txt")
-    // File has trailing spaces on line2
+  test("rstrip pass: matches despite trailing whitespace differences", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "rstrip.txt")
     const content = "line1\nline2   \nline3\n"
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
-    // Patch references line2 without trailing spaces
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
         old_lines: ["line2"],
@@ -65,13 +55,12 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     expect(result.content).toContain("REPLACED")
   })
 
-  test("trim pass: matches despite leading whitespace differences", () => {
-    const filePath = path.join(tempDir, "trim.txt")
-    // File has extra leading spaces
+  test("trim pass: matches despite leading whitespace differences", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "trim.txt")
     const content = "  function foo() {\n    return 1\n  }\n"
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
-    // Patch references without leading spaces
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
         old_lines: ["return 1"],
@@ -82,13 +71,12 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     expect(result.content).toContain("return 42")
   })
 
-  test("unicode pass: matches smart quotes to ASCII quotes", () => {
-    const filePath = path.join(tempDir, "unicode.txt")
-    // File uses Unicode smart quotes (common in copy-pasted code)
+  test("unicode pass: matches smart quotes to ASCII quotes", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "unicode.txt")
     const content = 'const msg = \u201CHello World\u201D\n'
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
-    // Patch uses ASCII double quotes
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
         old_lines: ['const msg = "Hello World"'],
@@ -99,13 +87,12 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     expect(result.content).toContain("Goodbye World")
   })
 
-  test("unicode pass: matches em-dash to hyphen", () => {
-    const filePath = path.join(tempDir, "emdash.txt")
-    // File uses Unicode em-dash
+  test("unicode pass: matches em-dash to hyphen", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "emdash.txt")
     const content = "value \u2014 description\n"
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
-    // Patch uses ASCII hyphen
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
         old_lines: ["value - description"],
@@ -116,12 +103,12 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     expect(result.content).toContain("updated")
   })
 
-  test("is_end_of_file: anchors match to end of file", () => {
-    const filePath = path.join(tempDir, "eof.txt")
+  test("is_end_of_file: anchors match to end of file", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "eof.txt")
     const content = "line1\nline2\nline3\nline2\n"
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
-    // Should match the LAST occurrence of "line2" because is_end_of_file is true
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
         old_lines: ["line2"],
@@ -130,16 +117,15 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
       },
     ])
 
-    // Exact expected output: first "line2" untouched, last "line2" replaced
     expect(result.content).toBe("line1\nline2\nline3\nLAST\n")
   })
 
-  test("change_context: seeks to context line before matching old_lines", () => {
-    const filePath = path.join(tempDir, "context.txt")
+  test("change_context: seeks to context line before matching old_lines", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "context.txt")
     const content = "function foo() {\n  return 1\n}\nfunction bar() {\n  return 1\n}\n"
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
-    // Use change_context to target the return inside bar(), not foo()
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
         old_lines: ["  return 1"],
@@ -152,9 +138,10 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     expect(result.content).toContain("function bar() {\n  return 99")
   })
 
-  test("throws when old_lines cannot be found", () => {
-    const filePath = path.join(tempDir, "missing.txt")
-    require("fs").writeFileSync(filePath, "hello\nworld\n")
+  test("throws when old_lines cannot be found", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "missing.txt")
+    await fs.writeFile(filePath, "hello\nworld\n")
 
     expect(() =>
       Patch.deriveNewContentsFromChunks(filePath, [
@@ -166,9 +153,10 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     ).toThrow("Failed to find expected lines")
   })
 
-  test("throws when file does not exist", () => {
+  test("throws when file does not exist", async () => {
+    await using tmp = await tmpdir()
     expect(() =>
-      Patch.deriveNewContentsFromChunks("/tmp/nonexistent-file-12345.txt", [
+      Patch.deriveNewContentsFromChunks(path.join(tmp.path, "nonexistent-file.txt"), [
         {
           old_lines: ["x"],
           new_lines: ["y"],
@@ -177,10 +165,11 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     ).toThrow("Failed to read file")
   })
 
-  test("multiple chunks applied in sequence", () => {
-    const filePath = path.join(tempDir, "multi.txt")
+  test("multiple chunks applied in sequence", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "multi.txt")
     const content = "alpha\nbeta\ngamma\ndelta\n"
-    require("fs").writeFileSync(filePath, content)
+    await fs.writeFile(filePath, content)
 
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {
@@ -196,9 +185,10 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
     expect(result.content).toBe("alpha\nBETA\ngamma\nDELTA\n")
   })
 
-  test("pure addition chunk (empty old_lines) appends content", () => {
-    const filePath = path.join(tempDir, "append.txt")
-    require("fs").writeFileSync(filePath, "existing\n")
+  test("pure addition chunk (empty old_lines) appends content", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "append.txt")
+    await fs.writeFile(filePath, "existing\n")
 
     const result = Patch.deriveNewContentsFromChunks(filePath, [
       {

@@ -1,76 +1,8 @@
 import { describe, test, expect } from "bun:test"
-
-// Copy of parseMarkdownSections and slugify from
-// src/altimate/tools/training-import.ts (not exported, tested standalone)
-
-interface MarkdownSection {
-  name: string
-  content: string
-}
-
-function parseMarkdownSections(markdown: string): MarkdownSection[] {
-  const sections: MarkdownSection[] = []
-  const lines = markdown.split("\n")
-  let currentH1 = ""
-  let currentName = ""
-  let currentContent: string[] = []
-
-  for (const line of lines) {
-    if (line.match(/^#\s+/)) {
-      if (currentName && currentContent.length > 0) {
-        sections.push({
-          name: slugify(currentName),
-          content: currentContent.join("\n").trim(),
-        })
-      }
-      currentH1 = line.replace(/^#\s+/, "").trim()
-      currentName = ""
-      currentContent = []
-      continue
-    }
-
-    if (line.match(/^##\s+/)) {
-      if (currentName && currentContent.length > 0) {
-        sections.push({
-          name: slugify(currentName),
-          content: currentContent.join("\n").trim(),
-        })
-      }
-      currentName = line.replace(/^##\s+/, "").trim()
-      if (currentH1) {
-        currentContent = [`Context: ${currentH1}`, ""]
-      } else {
-        currentContent = []
-      }
-      continue
-    }
-
-    if (currentName) {
-      currentContent.push(line)
-    }
-  }
-
-  if (currentName && currentContent.length > 0) {
-    sections.push({
-      name: slugify(currentName),
-      content: currentContent.join("\n").trim(),
-    })
-  }
-
-  return sections
-}
-
-function slugify(text: string): string {
-  const result = text
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .slice(0, 64)
-    .replace(/^-+|-+$/g, "")
-  return result || "untitled"
-}
+import {
+  parseMarkdownSections,
+  slugify,
+} from "../../../src/altimate/tools/training-import"
 
 describe("slugify", () => {
   test("lowercases and replaces spaces with hyphens", () => {
