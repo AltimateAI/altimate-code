@@ -81,7 +81,9 @@ function getRecapViewerUrl(sessionID: string, tracesDir?: string): string {
           const html = renderTraceViewer(trace, { live: true, apiPath: "/api/" + encodeURIComponent(sid) })
           return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })
         } catch {
-          return new Response("Trace not found. Try again after the agent responds.", { status: 404 })
+          // altimate_change start — recap: renamed error message
+          return new Response("Recap not found. Try again after the agent responds.", { status: 404 })
+          // altimate_change end
         }
       },
     })
