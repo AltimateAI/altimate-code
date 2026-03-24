@@ -45,6 +45,7 @@ register("sql.analyze", async (params) => {
     for (const f of lint.findings ?? []) {
       issues.push({
         type: "lint",
+        rule: f.rule,
         severity: f.severity ?? "warning",
         message: f.message ?? f.rule ?? "",
         recommendation: f.suggestion ?? "",

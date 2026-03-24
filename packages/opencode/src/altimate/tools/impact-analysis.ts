@@ -5,6 +5,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 
 export const ImpactAnalysisTool = Tool.define("impact_analysis", {
   description: [
@@ -129,6 +130,18 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
               ? "MEDIUM"
               : "HIGH"
 
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = []
+      if (totalAffected > 0) {
+        findings.push({ category: `impact_${severity.toLowerCase()}` })
+        for (const d of direct) {
+          findings.push({ category: "impact_direct_dependent" })
+        }
+        for (const t of transitive) {
+          findings.push({ category: "impact_transitive_dependent" })
+        }
+      }
+      // altimate_change end
       return {
         title: `Impact: ${severity} — ${totalAffected} downstream model${totalAffected !== 1 ? "s" : ""} affected`,
         metadata: {
@@ -138,6 +151,9 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           transitive_count: transitive.length,
           test_count: affectedTestCount,
           column_impact: columnImpact.length,
+          has_schema: false,
+          dialect: args.dialect,
+          ...(findings.length > 0 && { findings }),
         },
         output,
       }
@@ -145,7 +161,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Impact: ERROR",
-        metadata: { success: false, error: msg },
+        metadata: { success: false, has_schema: false, dialect: args.dialect, error: msg },
         output: `Failed to analyze impact: ${msg}\n\nEnsure the dbt manifest exists (run \`dbt compile\`) and the dispatcher is running.`,
       }
     }

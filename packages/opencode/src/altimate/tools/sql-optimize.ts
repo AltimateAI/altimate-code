@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlOptimizeResult, SqlOptimizeSuggestion, SqlAntiPattern } from "../native/types"
+import type { Telemetry } from "../telemetry"
 
 export const SqlOptimizeTool = Tool.define("sql_optimize", {
   description:
@@ -31,6 +32,13 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
       const suggestionCount = result.suggestions.length
       const antiPatternCount = result.anti_patterns.length
 
+      // altimate_change start — sql quality findings for telemetry
+      const hasSchema = !!(args.schema_context && Object.keys(args.schema_context).length > 0)
+      const findings: Telemetry.Finding[] = [
+        ...result.anti_patterns.map((ap) => ({ category: ap.type ?? "anti_pattern" })),
+        ...result.suggestions.map((s) => ({ category: s.type ?? "optimization_suggestion" })),
+      ]
+      // altimate_change end
       return {
         title: `Optimize: ${result.success ? `${suggestionCount} suggestion${suggestionCount !== 1 ? "s" : ""}, ${antiPatternCount} anti-pattern${antiPatternCount !== 1 ? "s" : ""}` : "PARSE ERROR"} [${result.confidence}]`,
         metadata: {
@@ -39,6 +47,9 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
           antiPatternCount,
           hasOptimizedSql: !!result.optimized_sql,
           confidence: result.confidence,
+          has_schema: hasSchema,
+          dialect: args.dialect,
+          ...(findings.length > 0 && { findings }),
         },
         output: formatOptimization(result),
       }
@@ -46,7 +57,7 @@ export const SqlOptimizeTool = Tool.define("sql_optimize", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Optimize: ERROR",
-        metadata: { success: false, suggestionCount: 0, antiPatternCount: 0, hasOptimizedSql: false, confidence: "unknown", error: msg },
+        metadata: { success: false, suggestionCount: 0, antiPatternCount: 0, hasOptimizedSql: false, confidence: "unknown", has_schema: false, dialect: args.dialect, error: msg },
         output: `Failed to optimize SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }

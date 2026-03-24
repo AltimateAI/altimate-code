@@ -35,7 +35,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       const isRealFailure = !!result.error
       // altimate_change start — sql quality findings for telemetry
       const findings: Telemetry.Finding[] = result.issues.map((issue) => ({
-        category: issue.type,
+        category: issue.rule ?? issue.type,
       }))
       // altimate_change end
       return {

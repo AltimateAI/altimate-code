@@ -87,17 +87,21 @@ describe("sql_quality event shape", () => {
 // 3. Finding extraction patterns (validates what tools produce)
 // ---------------------------------------------------------------------------
 describe("tool finding extraction patterns", () => {
-  test("sql_analyze issues map to findings via issue.type", () => {
-    // issue.type is coarse: "lint", "semantic", "safety"
+  test("sql_analyze issues use rule for lint, fall back to type otherwise", () => {
+    // Lint issues have rule (e.g. "select_star"), semantic/safety don't
     const issues = [
-      { type: "lint", severity: "warning", message: "...", recommendation: "...", confidence: "high" },
+      { type: "lint", rule: "select_star", severity: "warning", message: "...", recommendation: "...", confidence: "high" },
+      { type: "lint", rule: "filter_has_func", severity: "warning", message: "...", recommendation: "...", confidence: "high" },
+      { type: "semantic", severity: "warning", message: "...", recommendation: "...", confidence: "medium" },
       { type: "safety", severity: "high", message: "...", recommendation: "...", confidence: "high" },
     ]
-    const findings: Telemetry.Finding[] = issues.map((i) => ({
-      category: i.type,
+    const findings: Telemetry.Finding[] = issues.map((i: any) => ({
+      category: i.rule ?? i.type,
     }))
     expect(findings).toEqual([
-      { category: "lint" },
+      { category: "select_star" },
+      { category: "filter_has_func" },
+      { category: "semantic" },
       { category: "safety" },
     ])
   })
@@ -194,6 +198,111 @@ describe("tool finding extraction patterns", () => {
     expect(findings.length).toBe(2)
     const by_category = Telemetry.aggregateFindings(findings)
     expect(by_category).toEqual({ correction_applied: 2 })
+  })
+
+  test("check tool aggregates validation, lint, safety, and pii findings", () => {
+    const data = {
+      validation: { valid: false, errors: [{ message: "syntax error" }] },
+      lint: { clean: false, findings: [{ rule: "select_star", severity: "warning", message: "..." }, { rule: "filter_has_func", severity: "warning", message: "..." }] },
+      safety: { safe: false, threats: [{ type: "sql_injection", severity: "high", description: "..." }] },
+      pii: { findings: [{ column: "email", category: "email", confidence: "high" }] },
+    }
+    const findings: Telemetry.Finding[] = []
+    for (const _ of data.validation.errors) findings.push({ category: "validation_error" })
+    for (const f of data.lint.findings) findings.push({ category: f.rule ?? "lint" })
+    for (const t of data.safety.threats) findings.push({ category: (t as any).type ?? "safety_threat" })
+    for (const _ of data.pii.findings) findings.push({ category: "pii_detected" })
+    const by_category = Telemetry.aggregateFindings(findings)
+    expect(by_category).toEqual({
+      validation_error: 1,
+      select_star: 1,
+      filter_has_func: 1,
+      sql_injection: 1,
+      pii_detected: 1,
+    })
+  })
+
+  test("policy violations use rule as category", () => {
+    const data = {
+      pass: false,
+      violations: [
+        { rule: "no_select_star", severity: "error", message: "..." },
+        { rule: "require_where", severity: "error", message: "..." },
+        { severity: "warning", message: "..." }, // no rule
+      ],
+    }
+    const findings: Telemetry.Finding[] = data.violations.map((v: any) => ({
+      category: v.rule ?? "policy_violation",
+    }))
+    const by_category = Telemetry.aggregateFindings(findings)
+    expect(by_category).toEqual({
+      no_select_star: 1,
+      require_where: 1,
+      policy_violation: 1,
+    })
+  })
+
+  test("schema diff uses change_type as category", () => {
+    const changes = [
+      { severity: "breaking", change_type: "column_dropped", message: "..." },
+      { severity: "warning", change_type: "type_changed", message: "..." },
+      { severity: "info", change_type: "column_added", message: "..." },
+      { severity: "breaking", change_type: "column_dropped", message: "..." },
+    ]
+    const findings: Telemetry.Finding[] = changes.map((c) => ({
+      category: c.change_type ?? (c.severity === "breaking" ? "breaking_change" : "schema_change"),
+    }))
+    const by_category = Telemetry.aggregateFindings(findings)
+    expect(by_category).toEqual({
+      column_dropped: 2,
+      type_changed: 1,
+      column_added: 1,
+    })
+  })
+
+  test("optimize tool combines anti-patterns and suggestions", () => {
+    const result = {
+      anti_patterns: [
+        { type: "cartesian_product", severity: "error", message: "..." },
+        { type: "select_star", severity: "warning", message: "..." },
+      ],
+      suggestions: [
+        { type: "cte_elimination", impact: "high", description: "..." },
+      ],
+    }
+    const findings: Telemetry.Finding[] = [
+      ...result.anti_patterns.map((ap) => ({ category: ap.type ?? "anti_pattern" })),
+      ...result.suggestions.map((s) => ({ category: s.type ?? "optimization_suggestion" })),
+    ]
+    const by_category = Telemetry.aggregateFindings(findings)
+    expect(by_category).toEqual({
+      cartesian_product: 1,
+      select_star: 1,
+      cte_elimination: 1,
+    })
+  })
+
+  test("impact analysis produces findings only when downstream affected", () => {
+    // No impact — no findings
+    const safeFindings: Telemetry.Finding[] = []
+    expect(safeFindings).toEqual([])
+
+    // High impact — findings per dependent
+    const findings: Telemetry.Finding[] = []
+    const direct = [{ name: "model_a" }, { name: "model_b" }]
+    const transitive = [{ name: "model_c" }]
+    const totalAffected = direct.length + transitive.length
+    if (totalAffected > 0) {
+      findings.push({ category: "impact_medium" })
+      for (const _ of direct) findings.push({ category: "impact_direct_dependent" })
+      for (const _ of transitive) findings.push({ category: "impact_transitive_dependent" })
+    }
+    const by_category = Telemetry.aggregateFindings(findings)
+    expect(by_category).toEqual({
+      impact_medium: 1,
+      impact_direct_dependent: 2,
+      impact_transitive_dependent: 1,
+    })
   })
 })
 

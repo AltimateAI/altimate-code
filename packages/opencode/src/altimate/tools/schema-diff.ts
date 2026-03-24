@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SchemaDiffResult, ColumnChange } from "../native/types"
+import type { Telemetry } from "../telemetry"
 
 export const SchemaDiffTool = Tool.define("schema_diff", {
   description:
@@ -31,6 +32,11 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
       const changeCount = result.changes.length
       const breakingCount = result.changes.filter((c) => c.severity === "breaking").length
 
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = result.changes.map((c) => ({
+        category: c.change_type ?? (c.severity === "breaking" ? "breaking_change" : "schema_change"),
+      }))
+      // altimate_change end
       return {
         title: `Schema Diff: ${result.success ? `${changeCount} change${changeCount !== 1 ? "s" : ""}${breakingCount > 0 ? ` (${breakingCount} BREAKING)` : ""}` : "PARSE ERROR"}`,
         metadata: {
@@ -38,6 +44,9 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
           changeCount,
           breakingCount,
           hasBreakingChanges: result.has_breaking_changes,
+          has_schema: false,
+          dialect: args.dialect,
+          ...(findings.length > 0 && { findings }),
         },
         output: formatSchemaDiff(result),
       }
@@ -45,7 +54,7 @@ export const SchemaDiffTool = Tool.define("schema_diff", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Schema Diff: ERROR",
-        metadata: { success: false, changeCount: 0, breakingCount: 0, hasBreakingChanges: false, error: msg },
+        metadata: { success: false, changeCount: 0, breakingCount: 0, hasBreakingChanges: false, has_schema: false, dialect: args.dialect, error: msg },
         output: `Failed to diff schema: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }

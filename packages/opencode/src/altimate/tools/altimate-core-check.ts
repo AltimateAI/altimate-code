@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
   description:
@@ -11,6 +12,7 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
   async execute(args, ctx) {
+    const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
       const result = await Dispatcher.call("altimate_core.check", {
         sql: args.sql,
@@ -19,14 +21,35 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
       })
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = []
+      for (const err of data.validation?.errors ?? []) {
+        findings.push({ category: "validation_error" })
+      }
+      for (const f of data.lint?.findings ?? []) {
+        findings.push({ category: f.rule ?? "lint" })
+      }
+      for (const t of data.safety?.threats ?? []) {
+        findings.push({ category: t.type ?? "safety_threat" })
+      }
+      for (const p of data.pii?.findings ?? []) {
+        findings.push({ category: "pii_detected" })
+      }
+      // altimate_change end
       return {
         title: `Check: ${formatCheckTitle(data)}`,
-        metadata: { success: result.success, ...(error && { error }) },
+        metadata: {
+          success: result.success,
+          has_schema: hasSchema,
+          dialect: "snowflake",
+          ...(error && { error }),
+          ...(findings.length > 0 && { findings }),
+        },
         output: formatCheck(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Check: ERROR", metadata: { success: false, error: msg }, output: `Failed: ${msg}` }
+      return { title: "Check: ERROR", metadata: { success: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

@@ -30,6 +30,7 @@ export interface SqlAnalyzeParams {
 
 export interface SqlAnalyzeIssue {
   type: string
+  rule?: string
   severity: string
   message: string
   recommendation: string
