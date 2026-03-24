@@ -257,14 +257,14 @@ describe("formatText", () => {
     expect(text).not.toContain("suggestion:")
   })
 
-  test('shows PASS when summary.pass is true', () => {
+  test("shows PASS when summary.pass is true", () => {
     const output = makeOutput({ summary: { total_findings: 0, errors: 0, warnings: 0, info: 0, pass: true } })
     const text = formatText(output)
     expect(text).toContain("PASS")
     expect(text).not.toContain("FAIL")
   })
 
-  test('shows FAIL when summary.pass is false', () => {
+  test("shows FAIL when summary.pass is false", () => {
     const output = makeOutput({ summary: { total_findings: 1, errors: 1, warnings: 0, info: 0, pass: false } })
     const text = formatText(output)
     expect(text).toContain("FAIL")
@@ -364,13 +364,8 @@ describe("buildCheckOutput", () => {
 
   test("summary totals match finding counts", () => {
     const results: Record<string, CheckCategoryResult> = {
-      lint: toCategoryResult([
-        makeFinding({ severity: "error" }),
-        makeFinding({ severity: "warning" }),
-      ]),
-      safety: toCategoryResult([
-        makeFinding({ severity: "info" }),
-      ]),
+      lint: toCategoryResult([makeFinding({ severity: "error" }), makeFinding({ severity: "warning" })]),
+      safety: toCategoryResult([makeFinding({ severity: "info" })]),
     }
     const output = buildCheckOutput({
       filesChecked: 2,
@@ -575,17 +570,9 @@ describe("edge cases", () => {
 
   test("buildCheckOutput aggregates findings across multiple categories", () => {
     const results = {
-      lint: toCategoryResult([
-        makeFinding({ severity: "error" }),
-        makeFinding({ severity: "warning" }),
-      ]),
-      safety: toCategoryResult([
-        makeFinding({ severity: "error" }),
-      ]),
-      pii: toCategoryResult([
-        makeFinding({ severity: "warning" }),
-        makeFinding({ severity: "info" }),
-      ]),
+      lint: toCategoryResult([makeFinding({ severity: "error" }), makeFinding({ severity: "warning" })]),
+      safety: toCategoryResult([makeFinding({ severity: "error" })]),
+      pii: toCategoryResult([makeFinding({ severity: "warning" }), makeFinding({ severity: "info" })]),
     }
     const output = buildCheckOutput({
       filesChecked: 3,

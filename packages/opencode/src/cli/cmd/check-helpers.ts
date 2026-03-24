@@ -49,8 +49,8 @@ export const VALID_CHECKS = new Set(["lint", "validate", "safety", "policy", "pi
 // Helpers
 // ---------------------------------------------------------------------------
 
-export function normalizeSeverity(s?: string): Severity {
-  if (!s) return "warning"
+export function normalizeSeverity(s?: string | unknown): Severity {
+  if (!s || typeof s !== "string") return "warning"
   const lower = s.toLowerCase()
   if (lower === "error" || lower === "fatal" || lower === "critical") return "error"
   if (lower === "warning" || lower === "warn") return "warning"
