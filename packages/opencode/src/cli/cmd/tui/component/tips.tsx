@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For } from "solid-js"
+import { createMemo, For } from "solid-js"
 import { DEFAULT_THEMES, useTheme } from "@tui/context/theme"
 
 const themeCount = Object.keys(DEFAULT_THEMES).length
@@ -47,12 +47,16 @@ const BEGINNER_TIPS = [
 ]
 // altimate_change end
 
-// altimate_change start — first-time user beginner tips
+// altimate_change start — first-time user beginner tips with reactive pool
 export function Tips(props: { isFirstTime?: boolean }) {
   const theme = useTheme().theme
-  const pool = props.isFirstTime ? BEGINNER_TIPS : TIPS
-  const parts = parse(pool[Math.floor(Math.random() * pool.length)])
-  // altimate_change end
+  // Pick random tip index once on mount instead of recalculating randomly when props change
+  // Use useMemo without dependencies so it only evaluates once
+  const tipIndex = Math.random()
+  const tip = createMemo(() => {
+    const pool = props.isFirstTime ? BEGINNER_TIPS : TIPS
+    return parse(pool[Math.floor(tipIndex * pool.length)])
+  })
 
   return (
     <box flexDirection="row" maxWidth="100%">
@@ -60,13 +64,14 @@ export function Tips(props: { isFirstTime?: boolean }) {
         ● Tip{" "}
       </text>
       <text flexShrink={1}>
-        <For each={parts}>
+        <For each={tip()}>
           {(part) => <span style={{ fg: part.highlight ? theme.text : theme.textMuted }}>{part.text}</span>}
         </For>
       </text>
     </box>
   )
 }
+// altimate_change end
 
 const TIPS = [
   "Type {highlight}@{/highlight} followed by a filename to fuzzy search and attach files",

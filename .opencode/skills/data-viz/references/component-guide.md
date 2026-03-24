@@ -422,7 +422,7 @@ activateTab('overview'); // init the default visible tab on page load
 Library-specific notes:
 - **Chart.js**: canvas reads as `0×0` inside `display:none` — bars/lines never appear
 - **Recharts `ResponsiveContainer`**: reads `clientWidth = 0` — chart collapses to nothing
-- **Nivo `Responsive*`**: uses `ResizeObserver` — fires once at `0×0`, never re-fires on show
+- **Nivo `Responsive*`**: uses `ResizeObserver` via `useMeasure`/`useDimensions` in `@nivo/core` — initially measures `0×0` when hidden and skips rendering; re-measures and re-renders correctly when container becomes visible, but the initial blank frame can cause a flash
 - **React conditional rendering**: prefer `visibility:hidden` + `position:absolute` over toggling `display:none` if you want charts to stay mounted and pre-rendered
 
 ---

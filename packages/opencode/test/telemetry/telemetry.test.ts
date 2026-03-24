@@ -231,8 +231,12 @@ describe("telemetry.event-types", () => {
       "warehouse_discovery",
       "warehouse_census",
       "core_failure",
+      "first_launch",
+      "skill_created",
+      "skill_installed",
+      "skill_removed",
     ]
-    expect(eventTypes.length).toBe(33)
+    expect(eventTypes.length).toBe(37)
   })
 })
 
@@ -352,6 +356,10 @@ describe("telemetry.naming-convention", () => {
       "warehouse_discovery",
       "warehouse_census",
       "core_failure",
+      "first_launch",
+      "skill_created",
+      "skill_installed",
+      "skill_removed",
     ]
     for (const t of types) {
       expect(t).toMatch(/^[a-z][a-z0-9_]*$/)
@@ -418,8 +426,7 @@ describe("telemetry.parseConnectionString (indirect)", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "IngestionEndpoint=https://example.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "IngestionEndpoint=https://example.com"
       await Telemetry.init()
 
       Telemetry.track({
@@ -734,8 +741,7 @@ describe("telemetry.flush", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       Telemetry.track({
@@ -770,8 +776,7 @@ describe("telemetry.flush", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       Telemetry.track({
@@ -810,8 +815,7 @@ describe("telemetry.flush", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       Telemetry.track({
@@ -858,8 +862,7 @@ describe("telemetry.flush", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       Telemetry.track({
@@ -894,8 +897,7 @@ describe("telemetry.flush", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       // Fill buffer beyond MAX_BUFFER_SIZE (200) to trigger drops
@@ -917,8 +919,8 @@ describe("telemetry.flush", () => {
       const envelopes = JSON.parse(fetchBodies[0])
       // Should include a TelemetryBufferOverflow error event
       const overflowEvent = envelopes.find(
-        (e: any) => e.data?.baseData?.name === "error" &&
-          e.data?.baseData?.properties?.error_name === "TelemetryBufferOverflow",
+        (e: any) =>
+          e.data?.baseData?.name === "error" && e.data?.baseData?.properties?.error_name === "TelemetryBufferOverflow",
       )
       expect(overflowEvent).toBeDefined()
       expect(overflowEvent.data.baseData.properties.error_message).toContain("10 events dropped")
@@ -970,8 +972,7 @@ describe("telemetry.shutdown", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       Telemetry.track({
@@ -1005,8 +1006,7 @@ describe("telemetry.shutdown", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       Telemetry.setContext({ sessionId: "sess-1", projectId: "proj-1" })
@@ -1060,8 +1060,7 @@ describe("telemetry.shutdown", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
       await Telemetry.shutdown()
 
@@ -1101,8 +1100,7 @@ describe("telemetry.buffer overflow", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       // Track 250 events — first 50 should be dropped
@@ -1158,8 +1156,7 @@ describe("telemetry.buffer overflow", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       // Exactly 205 events — 5 should be dropped
@@ -1211,8 +1208,7 @@ describe("telemetry.init with enabled telemetry", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
 
       // If flush timer is set up, tracking + waiting should eventually trigger flush
@@ -1316,8 +1312,7 @@ describe("telemetry.init with enabled telemetry", () => {
 
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
 
       const p1 = Telemetry.init()
       const p2 = Telemetry.init()
@@ -1450,6 +1445,18 @@ describe("telemetry.memory", () => {
       })
     }).not.toThrow()
   })
+
+  test("track accepts first_launch event without throwing", () => {
+    expect(() => {
+      Telemetry.track({
+        type: "first_launch",
+        timestamp: Date.now(),
+        session_id: "",
+        version: "0.5.9",
+        is_upgrade: false,
+      })
+    }).not.toThrow()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1483,8 +1490,7 @@ describe("Telemetry.isEnabled()", () => {
     spyOn(global, "fetch").mockImplementation(async () => new Response("", { status: 200 }))
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
       expect(Telemetry.isEnabled()).toBe(true)
     } finally {
@@ -1501,8 +1507,7 @@ describe("Telemetry.isEnabled()", () => {
     spyOn(global, "fetch").mockImplementation(async () => new Response("", { status: 200 }))
     try {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
-        "InstrumentationKey=k;IngestionEndpoint=https://e.com"
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=k;IngestionEndpoint=https://e.com"
       await Telemetry.init()
       expect(Telemetry.isEnabled()).toBe(true)
       await Telemetry.shutdown()

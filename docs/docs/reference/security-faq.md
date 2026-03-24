@@ -126,6 +126,23 @@ Or via environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
+### How does Altimate Code identify users for analytics?
+
+- **Logged-in users:** Your email is SHA-256 hashed before sending. We never see your raw email.
+- **Anonymous users:** A random UUID (`crypto.randomUUID()`) is generated on first run and stored at `~/.altimate/machine-id`. This is NOT tied to your hardware, OS, or identity — it's purely random.
+- **Both identifiers** are only sent when telemetry is enabled. Disable with `ALTIMATE_TELEMETRY_DISABLED=true`.
+- **No fingerprinting:** We do not use browser fingerprinting, hardware IDs, MAC addresses, or IP-based tracking.
+
+### What happens on first launch?
+
+A single `first_launch` event is sent containing only:
+
+- The installed version (e.g., "0.5.9")
+- Whether this is a fresh install or upgrade (boolean)
+- Your anonymous machine ID (random UUID)
+
+No code, queries, file paths, or personal information is included. This event helps us understand adoption and is fully opt-out-able.
+
 ## What happens when I authenticate via a well-known URL?
 
 When you run `altimate auth login <url>`, the CLI fetches `<url>/.well-known/altimate-code` to discover the server's auth command. Before executing anything:
