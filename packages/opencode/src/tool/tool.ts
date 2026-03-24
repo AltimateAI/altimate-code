@@ -159,9 +159,10 @@ export namespace Tool {
               })
             }
             // altimate_change start — emit sql_quality when tools report findings
+            // Only emit for successful tool runs — soft failures already emit core_failure
             const findings = result.metadata?.findings as Telemetry.Finding[] | undefined
-            if (Array.isArray(findings) && findings.length > 0) {
-              const { by_severity, by_category } = Telemetry.aggregateFindings(findings)
+            if (!isSoftFailure && Array.isArray(findings) && findings.length > 0) {
+              const by_category = Telemetry.aggregateFindings(findings)
               Telemetry.track({
                 type: "sql_quality",
                 timestamp: Date.now(),
@@ -169,7 +170,6 @@ export namespace Tool {
                 tool_name: id,
                 tool_category: toolCategory,
                 finding_count: findings.length,
-                by_severity: JSON.stringify(by_severity),
                 by_category: JSON.stringify(by_category),
                 has_schema: result.metadata?.has_schema ?? false,
                 dialect: (result.metadata?.dialect as string) ?? "unknown",

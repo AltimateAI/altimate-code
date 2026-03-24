@@ -413,8 +413,6 @@ export namespace Telemetry {
         tool_name: string
         tool_category: string
         finding_count: number
-        /** JSON-encoded Record<string, number> — count per severity level */
-        by_severity: string
         /** JSON-encoded Record<string, number> — count per issue category */
         by_category: string
         has_schema: boolean
@@ -792,24 +790,18 @@ export namespace Telemetry {
   }
 
   // altimate_change start — sql quality telemetry types
-  /** Lightweight finding record for quality telemetry. Only category/severity — never SQL content. */
+  /** Lightweight finding record for quality telemetry. Only category — never SQL content. */
   export interface Finding {
     category: string
-    severity: string
   }
 
-  /** Aggregate an array of findings into counts suitable for the sql_quality event. */
-  export function aggregateFindings(findings: Finding[]): {
-    by_severity: Record<string, number>
-    by_category: Record<string, number>
-  } {
-    const by_severity: Record<string, number> = {}
+  /** Aggregate an array of findings into category counts suitable for the sql_quality event. */
+  export function aggregateFindings(findings: Finding[]): Record<string, number> {
     const by_category: Record<string, number> = {}
     for (const f of findings) {
-      by_severity[f.severity] = (by_severity[f.severity] ?? 0) + 1
       by_category[f.category] = (by_category[f.category] ?? 0) + 1
     }
-    return { by_severity, by_category }
+    return by_category
   }
   // altimate_change end
 
