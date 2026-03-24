@@ -90,6 +90,49 @@ describe("Command module", () => {
         expect(cmd).toBeUndefined()
       })
     })
+
+    test("altimate builtin commands are registered", async () => {
+      await withInstance(async () => {
+        const commands = await Command.list()
+        const names = commands.map((c) => c.name)
+        expect(names).toContain("configure-claude")
+        expect(names).toContain("configure-codex")
+        expect(names).toContain("discover-and-add-mcps")
+      })
+    })
+
+    test("discover-and-add-mcps has correct metadata", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("discover-and-add-mcps")
+        expect(cmd).toBeDefined()
+        expect(cmd.source).toBe("command")
+        expect(cmd.description).toBe("discover MCP servers from external AI tool configs and add them")
+      })
+    })
+
+    test("discover-and-add-mcps template references mcp_discover tool", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("discover-and-add-mcps")
+        const template = await cmd.template
+        expect(template).toContain("mcp_discover")
+      })
+    })
+
+    test("discover-and-add-mcps has $ARGUMENTS hint", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("discover-and-add-mcps")
+        expect(cmd.hints).toContain("$ARGUMENTS")
+      })
+    })
+
+    test("configure-claude has correct metadata", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("configure-claude")
+        expect(cmd).toBeDefined()
+        expect(cmd.source).toBe("command")
+        expect(cmd.description).toBe("configure /altimate command in Claude Code")
+      })
+    })
   })
 
   describe("user-defined commands from config", () => {
