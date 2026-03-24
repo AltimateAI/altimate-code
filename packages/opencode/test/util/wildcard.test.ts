@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test"
+import { describe, test, expect } from "bun:test"
 import { Wildcard } from "../../src/util/wildcard"
 
 test("match handles glob tokens", () => {
@@ -87,4 +87,65 @@ test("match handles case-insensitivity on Windows", () => {
     // Unix paths are case-sensitive
     expect(Wildcard.match("/users/test/file", "/Users/test/*")).toBe(false)
   }
+})
+
+// --- Edge cases found during test-discovery audit ---
+
+describe("Wildcard.match — star crosses path separators", () => {
+  test("star matches across directory boundaries unlike shell glob", () => {
+    // Wildcard.match uses .* which crosses /, unlike shell globs where * stops at /
+    // This is relied on by the permission system: "src/*" must match "src/deep/nested/file.ts"
+    expect(Wildcard.match("src/deep/nested/file.ts", "src/*")).toBe(true)
+    expect(Wildcard.match("src/a/b/c/d.ts", "src/*/d.ts")).toBe(true)
+  })
+})
+
+describe("Wildcard.match — special regex characters", () => {
+  test("dots in pattern are literal, not regex any-char", () => {
+    expect(Wildcard.match("file.txt", "file.txt")).toBe(true)
+    expect(Wildcard.match("filextxt", "file.txt")).toBe(false)
+  })
+
+  test("parentheses and pipes in pattern are literal", () => {
+    expect(Wildcard.match("(a|b)", "(a|b)")).toBe(true)
+    expect(Wildcard.match("a", "(a|b)")).toBe(false)
+  })
+
+  test("brackets in pattern are literal", () => {
+    expect(Wildcard.match("[abc]", "[abc]")).toBe(true)
+    expect(Wildcard.match("a", "[abc]")).toBe(false)
+  })
+
+  test("dollar and caret in pattern are literal", () => {
+    expect(Wildcard.match("$HOME", "$HOME")).toBe(true)
+    expect(Wildcard.match("^start", "^start")).toBe(true)
+  })
+})
+
+describe("Wildcard.match — empty and boundary cases", () => {
+  test("empty pattern matches only empty string", () => {
+    expect(Wildcard.match("", "")).toBe(true)
+    expect(Wildcard.match("something", "")).toBe(false)
+  })
+})
+
+describe("Wildcard.allStructured — non-contiguous tail matching", () => {
+  test("non-contiguous tail tokens match if in correct order", () => {
+    // matchSequence scans non-contiguously: finds "push" then skips "extra" and finds "--force"
+    const result = Wildcard.allStructured(
+      { head: "git", tail: ["push", "extra", "--force"] },
+      { "git push --force": "deny" },
+    )
+    expect(result).toBe("deny")
+  })
+
+  test("reversed tail tokens do not match when items exhausted", () => {
+    // Pattern expects push then --force; tail has them reversed
+    // "push" found at i=1, but no items remain after for "--force"
+    const result = Wildcard.allStructured(
+      { head: "git", tail: ["--force", "push"] },
+      { "git push --force": "deny" },
+    )
+    expect(result).toBeUndefined()
+  })
 })
