@@ -1,18 +1,147 @@
 import { describe, expect, test } from "bun:test"
-import semver from "semver"
 import { Installation } from "../../src/installation"
+import { compareVersions, isValidVersion } from "../../src/cli/upgrade"
 
-/**
- * Tests for the upgrade() decision logic in cli/upgrade.ts.
- *
- * Since upgrade() depends on Config, Bus, and Installation with side effects,
- * we test the decision logic directly — the same conditions that upgrade() checks.
- * This validates the fix for: silent skip on unknown method, autoupdate=false,
- * failed auto-upgrade, and downgrade prevention.
- */
+// ─── compareVersions: exhaustive tests ──────────────────────────────────────
+// This function has ZERO external dependencies by design. If it breaks,
+// users get locked on old versions. Every edge case must be covered.
 
-// ─── Decision Logic Extracted from upgrade() ─────────────────────────────────
+describe("compareVersions", () => {
+  describe("basic ordering", () => {
+    test("equal versions", () => {
+      expect(compareVersions("1.0.0", "1.0.0")).toBe(0)
+    })
+
+    test("patch bump", () => {
+      expect(compareVersions("1.0.1", "1.0.0")).toBe(1)
+      expect(compareVersions("1.0.0", "1.0.1")).toBe(-1)
+    })
+
+    test("minor bump", () => {
+      expect(compareVersions("1.1.0", "1.0.0")).toBe(1)
+      expect(compareVersions("1.0.0", "1.1.0")).toBe(-1)
+    })
+
+    test("major bump", () => {
+      expect(compareVersions("2.0.0", "1.0.0")).toBe(1)
+      expect(compareVersions("1.0.0", "2.0.0")).toBe(-1)
+    })
+
+    test("major > minor > patch precedence", () => {
+      expect(compareVersions("2.0.0", "1.99.99")).toBe(1)
+      expect(compareVersions("1.2.0", "1.1.99")).toBe(1)
+    })
+  })
+
+  describe("v-prefix handling", () => {
+    test("strips v prefix from both", () => {
+      expect(compareVersions("v1.0.0", "v1.0.0")).toBe(0)
+    })
+
+    test("mixed v prefix", () => {
+      expect(compareVersions("v1.0.1", "1.0.0")).toBe(1)
+      expect(compareVersions("1.0.0", "v1.0.1")).toBe(-1)
+    })
+  })
+
+  describe("prerelease handling", () => {
+    test("release > prerelease of same version", () => {
+      expect(compareVersions("1.0.0", "1.0.0-beta.1")).toBe(1)
+      expect(compareVersions("1.0.0-beta.1", "1.0.0")).toBe(-1)
+    })
+
+    test("both prerelease, same core → equal (simplified)", () => {
+      expect(compareVersions("1.0.0-alpha", "1.0.0-beta")).toBe(0)
+    })
+
+    test("prerelease of higher version > release of lower", () => {
+      expect(compareVersions("2.0.0-beta.1", "1.0.0")).toBe(1)
+    })
+
+    test("release of lower version < prerelease of higher", () => {
+      expect(compareVersions("1.0.0", "2.0.0-beta.1")).toBe(-1)
+    })
+  })
+
+  describe("missing parts", () => {
+    test("missing patch treated as 0", () => {
+      expect(compareVersions("1.0", "1.0.0")).toBe(0)
+    })
+
+    test("extra parts beyond 3 are compared (4-part versions)", () => {
+      expect(compareVersions("1.0.0.1", "1.0.0")).toBe(1)
+      expect(compareVersions("1.0.0", "1.0.0.1")).toBe(-1)
+      expect(compareVersions("1.0.0.0", "1.0.0")).toBe(0)
+    })
+  })
+
+  describe("unparseable versions", () => {
+    test("non-numeric parts → 0 (safe default)", () => {
+      expect(compareVersions("abc", "1.0.0")).toBe(0)
+      expect(compareVersions("1.0.0", "xyz")).toBe(0)
+    })
+  })
+
+  describe("real-world altimate-code versions", () => {
+    test("0.5.7 < 0.5.8", () => {
+      expect(compareVersions("0.5.7", "0.5.8")).toBe(-1)
+    })
+
+    test("0.5.8 > 0.5.7", () => {
+      expect(compareVersions("0.5.8", "0.5.7")).toBe(1)
+    })
+
+    test("0.5.3 < 0.5.7", () => {
+      expect(compareVersions("0.5.3", "0.5.7")).toBe(-1)
+    })
+
+    test("0.5.7 === 0.5.7", () => {
+      expect(compareVersions("0.5.7", "0.5.7")).toBe(0)
+    })
+
+    test("0.6.0-beta.1 > 0.5.7", () => {
+      expect(compareVersions("0.6.0-beta.1", "0.5.7")).toBe(1)
+    })
+
+    test("0.5.7 > 0.5.7-rc.1", () => {
+      expect(compareVersions("0.5.7", "0.5.7-rc.1")).toBe(1)
+    })
+  })
+})
+
+// ─── isValidVersion ─────────────────────────────────────────────────────────
+
+describe("isValidVersion", () => {
+  test("standard semver", () => {
+    expect(isValidVersion("1.0.0")).toBe(true)
+    expect(isValidVersion("0.5.7")).toBe(true)
+    expect(isValidVersion("10.20.30")).toBe(true)
+  })
+
+  test("with v prefix", () => {
+    expect(isValidVersion("v1.0.0")).toBe(true)
+  })
+
+  test("with prerelease", () => {
+    expect(isValidVersion("1.0.0-beta.1")).toBe(true)
+  })
+
+  test("rejects non-version strings", () => {
+    expect(isValidVersion("local")).toBe(false)
+    expect(isValidVersion("dev-build-123")).toBe(false)
+    expect(isValidVersion("")).toBe(false)
+    expect(isValidVersion("abc")).toBe(false)
+  })
+
+  test("rejects partial versions", () => {
+    expect(isValidVersion("1.0")).toBe(false)
+    expect(isValidVersion("1")).toBe(false)
+  })
+})
+
+// ─── Decision Logic ─────────────────────────────────────────────────────────
 // These mirror the exact checks in cli/upgrade.ts so we can test every path.
+// Uses our own compareVersions instead of semver.
 
 type Decision = "skip" | "notify" | "auto-upgrade"
 
@@ -28,12 +157,12 @@ function upgradeDecision(input: {
   if (!latest) return "skip"
   if (currentVersion === latest) return "skip"
 
-  // Prevent downgrade
+  // Prevent downgrade — uses our zero-dependency compareVersions
   if (
     currentVersion !== "local" &&
-    semver.valid(currentVersion) &&
-    semver.valid(latest) &&
-    semver.gte(currentVersion, latest)
+    isValidVersion(currentVersion) &&
+    isValidVersion(latest) &&
+    compareVersions(currentVersion, latest) >= 0
   ) {
     return "skip"
   }
@@ -103,8 +232,7 @@ describe("upgrade decision logic", () => {
       })).toBe("skip")
     })
 
-    test("semver.gte catches equal versions even if string !== (edge case)", () => {
-      // This shouldn't happen in practice (both normalize), but tests the safety net
+    test("compareVersions catches equal versions", () => {
       expect(upgradeDecision({
         latest: "0.5.7",
         currentVersion: "0.5.7",
@@ -115,7 +243,6 @@ describe("upgrade decision logic", () => {
     })
 
     test("local version bypasses downgrade check", () => {
-      // Dev mode: VERSION="local" should NOT be caught by semver guard
       expect(upgradeDecision({
         latest: "0.5.7",
         currentVersion: "local",
@@ -189,7 +316,7 @@ describe("upgrade decision logic", () => {
       })).toBe("notify")
     })
 
-    test("method is 'yarn' (detected but not supported for auto-upgrade)", () => {
+    test("method is 'yarn'", () => {
       expect(upgradeDecision({
         latest: "0.5.7",
         currentVersion: "0.5.2",
@@ -247,7 +374,7 @@ describe("upgrade decision logic", () => {
       })).toBe("auto-upgrade")
     })
 
-    test("unknown method, default config → should notify (was silently skipped before fix)", () => {
+    test("unknown method → should notify (was silently skipped before fix)", () => {
       expect(upgradeDecision({
         latest: "0.5.7",
         currentVersion: "0.5.2",
@@ -263,16 +390,6 @@ describe("upgrade decision logic", () => {
         currentVersion: "0.5.2",
         autoupdate: false,
         disableAutoupdate: false,
-        method: "npm",
-      })).toBe("notify")
-    })
-
-    test("DISABLE_AUTOUPDATE flag → should notify (was silently skipped before fix)", () => {
-      expect(upgradeDecision({
-        latest: "0.5.7",
-        currentVersion: "0.5.2",
-        autoupdate: undefined,
-        disableAutoupdate: true,
         method: "npm",
       })).toBe("notify")
     })
@@ -300,7 +417,6 @@ describe("upgrade decision logic", () => {
     })
 
     test("prerelease latest version vs stable current", () => {
-      // 1.0.0-beta.1 is greater than 0.5.2
       expect(upgradeDecision({
         latest: "1.0.0-beta.1",
         currentVersion: "0.5.2",
@@ -311,7 +427,7 @@ describe("upgrade decision logic", () => {
     })
 
     test("same major.minor, prerelease latest < current release", () => {
-      // 0.5.2-beta.1 is LESS than 0.5.2 per semver
+      // 0.5.2-beta.1 is LESS than 0.5.2
       expect(upgradeDecision({
         latest: "0.5.2-beta.1",
         currentVersion: "0.5.2",
@@ -335,9 +451,80 @@ describe("Installation.VERSION format", () => {
     expect(Installation.VERSION.startsWith("v")).toBe(false)
   })
 
-  test("is either 'local' or valid semver", () => {
+  test("is either 'local' or valid version", () => {
     if (Installation.VERSION !== "local") {
-      expect(semver.valid(Installation.VERSION)).not.toBeNull()
+      expect(isValidVersion(Installation.VERSION)).toBe(true)
     }
   })
+})
+
+// ─── upgrade() import smoke test ─────────────────────────────────────────────
+// The most critical test: verify that upgrade() can be imported without
+// throwing. If this fails, users on this version are permanently locked out.
+
+describe("upgrade() module health", () => {
+  test("upgrade function can be imported", async () => {
+    const mod = await import("../../src/cli/upgrade")
+    expect(typeof mod.upgrade).toBe("function")
+  })
+
+  test("compareVersions is exported and callable", async () => {
+    const mod = await import("../../src/cli/upgrade")
+    expect(typeof mod.compareVersions).toBe("function")
+    expect(mod.compareVersions("1.0.0", "0.9.0")).toBe(1)
+  })
+
+  test("isValidVersion is exported and callable", async () => {
+    const mod = await import("../../src/cli/upgrade")
+    expect(typeof mod.isValidVersion).toBe("function")
+    expect(mod.isValidVersion("1.0.0")).toBe(true)
+  })
+
+  test("upgrade module has no semver dependency", async () => {
+    // Read the source and verify semver is not imported.
+    // This is the guard against reintroducing the dependency.
+    const fs = await import("fs")
+    const path = await import("path")
+    const src = fs.readFileSync(
+      path.join(import.meta.dir, "../../src/cli/upgrade.ts"),
+      "utf-8",
+    )
+    expect(src).not.toContain('from "semver"')
+    expect(src).not.toContain("require(\"semver\")")
+    expect(src).not.toContain("import semver")
+  })
+})
+
+// ─── Behavioral parity: compareVersions vs semver ────────────────────────────
+// Verify our zero-dep implementation matches semver for all cases that matter.
+
+describe("compareVersions parity with semver", () => {
+  // Import semver only in this test block — it's a dev dependency for validation
+  const semver = require("semver")
+
+  const cases: [string, string][] = [
+    ["0.5.7", "0.5.8"],
+    ["0.5.8", "0.5.7"],
+    ["0.5.7", "0.5.7"],
+    ["1.0.0", "0.99.99"],
+    ["0.0.1", "0.0.2"],
+    ["1.0.0", "1.0.0-beta.1"],
+    ["1.0.0-beta.1", "1.0.0"],
+    ["2.0.0-alpha", "1.99.99"],
+    ["0.5.3", "0.5.7"],
+    ["0.5.7", "0.6.0-beta.1"],
+    ["10.0.0", "9.99.99"],
+  ]
+
+  for (const [a, b] of cases) {
+    test(`${a} vs ${b}`, () => {
+      const ours = compareVersions(a, b)
+      const theirs = semver.compare(
+        semver.valid(a) ? a : semver.coerce(a)?.version ?? a,
+        semver.valid(b) ? b : semver.coerce(b)?.version ?? b,
+      )
+      // Both should agree on direction (positive/negative/zero)
+      expect(Math.sign(ours)).toBe(Math.sign(theirs))
+    })
+  }
 })

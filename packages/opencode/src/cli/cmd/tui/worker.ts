@@ -286,7 +286,11 @@ export const rpc = {
       directory: input.directory,
       init: InstanceBootstrap,
       fn: async () => {
-        await upgrade().catch(() => {})
+        await upgrade().catch((err) => {
+          // Never silently swallow upgrade errors — if this fails, users
+          // get locked on old versions with no way to self-heal.
+          console.error("[upgrade] check failed:", String(err))
+        })
       },
     })
   },
