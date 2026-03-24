@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", {
   description:
@@ -11,9 +12,10 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
   async execute(args, ctx) {
-    if (!args.schema_path && (!args.schema_context || Object.keys(args.schema_context).length === 0)) {
+    const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
+    if (!hasSchema) {
       const error = "No schema provided. Provide schema_context or schema_path so table/column references can be resolved."
-      return { title: "Semantics: NO SCHEMA", metadata: { success: false, valid: false, issue_count: 0, error }, output: `Error: ${error}` }
+      return { title: "Semantics: NO SCHEMA", metadata: { success: false, valid: false, issue_count: 0, has_schema: false, dialect: "snowflake", error }, output: `Error: ${error}` }
     }
     try {
       const result = await Dispatcher.call("altimate_core.semantics", {
@@ -25,14 +27,27 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
       const issueCount = data.issues?.length ?? 0
       const error = result.error ?? data.error ?? extractSemanticsErrors(data)
       const hasError = Boolean(error)
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = (data.issues ?? []).map(() => ({
+        category: "semantic_issue",
+      }))
+      // altimate_change end
       return {
         title: hasError ? "Semantics: ERROR" : `Semantics: ${data.valid ? "VALID" : `${issueCount} issues`}`,
-        metadata: { success: result.success, valid: data.valid, issue_count: issueCount, ...(error && { error }) },
+        metadata: {
+          success: result.success,
+          valid: data.valid,
+          issue_count: issueCount,
+          has_schema: hasSchema,
+          dialect: "snowflake",
+          ...(error && { error }),
+          ...(findings.length > 0 && { findings }),
+        },
         output: formatSemantics(hasError ? { ...data, error } : data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Semantics: ERROR", metadata: { success: false, valid: false, issue_count: 0, error: msg }, output: `Failed: ${msg}` }
+      return { title: "Semantics: ERROR", metadata: { success: false, valid: false, issue_count: 0, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

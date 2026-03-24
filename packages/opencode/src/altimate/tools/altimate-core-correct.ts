@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
   description:
@@ -11,6 +12,7 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
   async execute(args, ctx) {
+    const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
       const result = await Dispatcher.call("altimate_core.correct", {
         sql: args.sql,
@@ -19,14 +21,26 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
       })
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error ?? extractCorrectErrors(data)
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = (data.changes ?? []).map(() => ({
+        category: "correction_applied",
+      }))
+      // altimate_change end
       return {
         title: `Correct: ${data.success ? "CORRECTED" : "COULD NOT CORRECT"}`,
-        metadata: { success: result.success, iterations: data.iterations, ...(error && { error }) },
+        metadata: {
+          success: result.success,
+          iterations: data.iterations,
+          has_schema: hasSchema,
+          dialect: "snowflake",
+          ...(error && { error }),
+          ...(findings.length > 0 && { findings }),
+        },
         output: formatCorrect(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Correct: ERROR", metadata: { success: false, iterations: 0, error: msg }, output: `Failed: ${msg}` }
+      return { title: "Correct: ERROR", metadata: { success: false, iterations: 0, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
   description:
@@ -12,6 +13,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
     max_iterations: z.number().optional().describe("Maximum fix iterations (default: 5)"),
   }),
   async execute(args, ctx) {
+    const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
       const result = await Dispatcher.call("altimate_core.fix", {
         sql: args.sql,
@@ -24,14 +26,30 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
       // post_fix_valid=true with no errors means SQL was already valid (nothing to fix)
       const alreadyValid = data.post_fix_valid && !error
       const success = result.success || alreadyValid
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = []
+      for (const fix of data.fixes_applied ?? data.changes ?? []) {
+        findings.push({ category: "fix_applied" })
+      }
+      for (const err of data.unfixable_errors ?? []) {
+        findings.push({ category: "unfixable_error" })
+      }
+      // altimate_change end
       return {
         title: `Fix: ${alreadyValid ? "ALREADY VALID" : data.fixed ? "FIXED" : "COULD NOT FIX"}`,
-        metadata: { success, fixed: !!data.fixed_sql, ...(error && { error }) },
+        metadata: {
+          success,
+          fixed: !!data.fixed_sql,
+          has_schema: hasSchema,
+          dialect: "snowflake",
+          ...(error && { error }),
+          ...(findings.length > 0 && { findings }),
+        },
         output: formatFix(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Fix: ERROR", metadata: { success: false, fixed: false, error: msg }, output: `Failed: ${msg}` }
+      return { title: "Fix: ERROR", metadata: { success: false, fixed: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

@@ -405,6 +405,23 @@ export namespace Telemetry {
         masked_args?: string
         duration_ms: number
       }
+    // altimate_change start — sql quality telemetry for issue prevention metrics
+    | {
+        type: "sql_quality"
+        timestamp: number
+        session_id: string
+        tool_name: string
+        tool_category: string
+        finding_count: number
+        /** JSON-encoded Record<string, number> — count per severity level */
+        by_severity: string
+        /** JSON-encoded Record<string, number> — count per issue category */
+        by_category: string
+        has_schema: boolean
+        dialect: string
+        duration_ms: number
+      }
+    // altimate_change end
 
   const ERROR_PATTERNS: Array<{
     class: Telemetry.Event & { type: "core_failure" } extends { error_class: infer C } ? C : never
@@ -773,6 +790,28 @@ export namespace Telemetry {
       clearTimeout(timeout)
     }
   }
+
+  // altimate_change start — sql quality telemetry types
+  /** Lightweight finding record for quality telemetry. Only category/severity — never SQL content. */
+  export interface Finding {
+    category: string
+    severity: string
+  }
+
+  /** Aggregate an array of findings into counts suitable for the sql_quality event. */
+  export function aggregateFindings(findings: Finding[]): {
+    by_severity: Record<string, number>
+    by_category: Record<string, number>
+  } {
+    const by_severity: Record<string, number> = {}
+    const by_category: Record<string, number> = {}
+    for (const f of findings) {
+      by_severity[f.severity] = (by_severity[f.severity] ?? 0) + 1
+      by_category[f.category] = (by_category[f.category] ?? 0) + 1
+    }
+    return { by_severity, by_category }
+  }
+  // altimate_change end
 
   export async function shutdown() {
     // Wait for init to complete so we know whether telemetry is enabled

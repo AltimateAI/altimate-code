@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 
 export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
   description:
@@ -12,6 +13,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
   async execute(args, ctx) {
+    const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
       const result = await Dispatcher.call("altimate_core.policy", {
         sql: args.sql,
@@ -21,14 +23,26 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
       })
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = (data.violations ?? []).map((v: any) => ({
+        category: v.rule ?? "policy_violation",
+      }))
+      // altimate_change end
       return {
         title: `Policy: ${data.pass ? "PASS" : "VIOLATIONS FOUND"}`,
-        metadata: { success: result.success, pass: data.pass, ...(error && { error }) },
+        metadata: {
+          success: result.success,
+          pass: data.pass,
+          has_schema: hasSchema,
+          dialect: "snowflake",
+          ...(error && { error }),
+          ...(findings.length > 0 && { findings }),
+        },
         output: formatPolicy(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Policy: ERROR", metadata: { success: false, pass: false, error: msg }, output: `Failed: ${msg}` }
+      return { title: "Policy: ERROR", metadata: { success: false, pass: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

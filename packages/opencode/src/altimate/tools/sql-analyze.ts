@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 import type { SqlAnalyzeResult } from "../native/types"
 
 export const SqlAnalyzeTool = Tool.define("sql_analyze", {
@@ -32,13 +33,21 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       // reported via issues/issue_count). Only treat it as a failure when
       // there's an actual error (e.g. parse failure).
       const isRealFailure = !!result.error
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = result.issues.map((issue) => ({
+        category: issue.type,
+      }))
+      // altimate_change end
       return {
         title: `Analyze: ${result.error ? "ERROR" : `${result.issue_count} issue${result.issue_count !== 1 ? "s" : ""}`} [${result.confidence}]`,
         metadata: {
           success: !isRealFailure,
           issueCount: result.issue_count,
           confidence: result.confidence,
+          dialect: args.dialect,
+          has_schema: false,
           ...(result.error && { error: result.error }),
+          ...(findings.length > 0 && { findings }),
         },
         output: formatAnalysis(result),
       }
@@ -46,7 +55,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Analyze: ERROR",
-        metadata: { success: false, issueCount: 0, confidence: "unknown", error: msg },
+        metadata: { success: false, issueCount: 0, confidence: "unknown", dialect: args.dialect, has_schema: false, error: msg },
         output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }

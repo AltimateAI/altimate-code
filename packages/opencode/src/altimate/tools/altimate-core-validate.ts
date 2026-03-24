@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
   description:
@@ -11,10 +12,11 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
   async execute(args, ctx) {
-    const noSchema = !args.schema_path && (!args.schema_context || Object.keys(args.schema_context).length === 0)
+    const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
+    const noSchema = !hasSchema
     if (noSchema) {
       const error = "No schema provided. Provide schema_context or schema_path so table/column references can be resolved."
-      return { title: "Validate: NO SCHEMA", metadata: { success: false, valid: false, error }, output: `Error: ${error}` }
+      return { title: "Validate: NO SCHEMA", metadata: { success: false, valid: false, has_schema: false, dialect: "snowflake", error }, output: `Error: ${error}` }
     }
     try {
       const result = await Dispatcher.call("altimate_core.validate", {
@@ -24,14 +26,26 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
       })
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error ?? extractValidationErrors(data)
+      // altimate_change start — sql quality findings for telemetry
+      const findings: Telemetry.Finding[] = (data.errors ?? []).map((err: any) => ({
+        category: classifyValidationError(err.message ?? ""),
+      }))
+      // altimate_change end
       return {
         title: `Validate: ${data.valid ? "VALID" : "INVALID"}`,
-        metadata: { success: result.success, valid: data.valid, ...(error && { error }) },
+        metadata: {
+          success: result.success,
+          valid: data.valid,
+          has_schema: hasSchema,
+          dialect: "snowflake",
+          ...(error && { error }),
+          ...(findings.length > 0 && { findings }),
+        },
         output: formatValidate(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Validate: ERROR", metadata: { success: false, valid: false, error: msg }, output: `Failed: ${msg}` }
+      return { title: "Validate: ERROR", metadata: { success: false, valid: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
     }
   },
 })
@@ -42,6 +56,16 @@ function extractValidationErrors(data: Record<string, any>): string | undefined 
     return msgs.length > 0 ? msgs.join("; ") : undefined
   }
   return undefined
+}
+
+function classifyValidationError(message: string): string {
+  const lower = message.toLowerCase()
+  // Column check before table — "column not found in table" would match both
+  if (lower.includes("column") && lower.includes("not found")) return "missing_column"
+  if (lower.includes("table") && lower.includes("not found")) return "missing_table"
+  if (lower.includes("syntax")) return "syntax_error"
+  if (lower.includes("type")) return "type_mismatch"
+  return "validation_error"
 }
 
 function formatValidate(data: Record<string, any>): string {

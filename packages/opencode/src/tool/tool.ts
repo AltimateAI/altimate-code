@@ -158,6 +158,25 @@ export namespace Tool {
                 duration_ms: durationMs,
               })
             }
+            // altimate_change start — emit sql_quality when tools report findings
+            const findings = result.metadata?.findings as Telemetry.Finding[] | undefined
+            if (Array.isArray(findings) && findings.length > 0) {
+              const { by_severity, by_category } = Telemetry.aggregateFindings(findings)
+              Telemetry.track({
+                type: "sql_quality",
+                timestamp: Date.now(),
+                session_id: ctx.sessionID,
+                tool_name: id,
+                tool_category: toolCategory,
+                finding_count: findings.length,
+                by_severity: JSON.stringify(by_severity),
+                by_category: JSON.stringify(by_category),
+                has_schema: result.metadata?.has_schema ?? false,
+                dialect: (result.metadata?.dialect as string) ?? "unknown",
+                duration_ms: durationMs,
+              })
+            }
+            // altimate_change end
           } catch {
             // Telemetry must never break tool execution
           }
