@@ -2,14 +2,14 @@
  * Trace viewer HTML renderer.
  *
  * Generates a self-contained HTML page with 5 visualization modes:
- *   1. Summary — shareable recap with narrative, metrics, and charts (default)
+ *   1. Summary — shareable trace summary with narrative, metrics, and charts (default)
  *   2. Waterfall — Gantt-style timeline bars (Datadog/Jaeger-style)
  *   3. Tree — nested indentation with expandable detail (Langfuse-style)
  *   4. Chat — conversation flow with user/agent messages (LangSmith-style)
  *   5. Log — flat scrollable list, Ctrl+F searchable (Langfuse Log View)
  *
  * All modes share a common summary header with metrics cards.
- * Branded with Altimate Recap colors. Includes share/export features for virality.
+ * Branded with Altimate Trace colors. Includes share/export features for virality.
  */
 
 import type { TraceFile } from "./tracing"
@@ -24,7 +24,7 @@ export function renderTraceViewer(trace: TraceFile, options?: { live?: boolean; 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Altimate Recap</title>
+<title>Altimate Trace</title>
 <style>
 :root {
   --bg: #0c1222; --s1: #131c30; --s2: #1a2540; --s3: #223050;
@@ -284,11 +284,11 @@ pre.io { background: var(--bg); border: 1px solid var(--border); border-radius: 
 </head>
 <body>
 <div class="hdr">
-  <div class="logo"><div class="logo-mark">A</div><div class="logo-text"><span>Altimate</span> Recap</div></div>
+  <div class="logo"><div class="logo-mark">A</div><div class="logo-text"><span>Altimate</span> Trace</div></div>
   <div class="tags" id="tags"></div>
 </div>
 <div class="toolbar">
-  <button class="toolbar-btn primary" id="btn-share" title="Download self-contained HTML recap">Share Recap</button>
+  <button class="toolbar-btn primary" id="btn-share" title="Download self-contained HTML trace (session recording)">Share Trace</button>
   <button class="toolbar-btn" id="btn-copy-summary" title="Copy markdown summary to clipboard">Copy Summary</button>
   <button class="toolbar-btn" id="btn-copy-link" title="Copy current URL to clipboard">Copy Link</button>
   <div class="toolbar-spacer"></div>
@@ -312,7 +312,7 @@ pre.io { background: var(--bg); border: 1px solid var(--border); border-radius: 
   <div class="view" id="v-log"></div>
 </div>
 <div id="detail"></div>
-<div class="footer">Generated with <span style="color:var(--primary);font-weight:600">Altimate Code</span> &mdash; Try it free at <a href="https://altimate.ai/recap" target="_blank" rel="noopener">altimate.ai/recap</a></div>
+<div class="footer">Generated with <span style="color:var(--primary);font-weight:600">Altimate Code</span> &mdash; Try it free at <a href="https://altimate.ai/trace" target="_blank" rel="noopener">altimate.ai/trace</a></div>
 
 <script>
 var t = ${traceJSON};
@@ -1228,7 +1228,7 @@ function showDetail(span) {
   }
 
   el.innerHTML = html;
-  } catch(err) { el.innerHTML = '<div style="color:var(--red);padding:20px">Summary rendering error: ' + (err.message || err) + '</div>'; console.error('[recap] Summary error:', err); }
+  } catch(err) { el.innerHTML = '<div style="color:var(--red);padding:20px">Summary rendering error: ' + (err.message || err) + '</div>'; console.error('[trace] Summary error:', err); }
 })();
 
 // ===================== WATERFALL VIEW =====================
@@ -1404,7 +1404,7 @@ function showDetail(span) {
     var s = t.summary || {};
     var title = t.metadata.title || t.sessionId || 'Session';
     var lines = [];
-    lines.push('## Recap: ' + title);
+    lines.push('## Trace: ' + title);
     lines.push('**Duration:** ' + fd(s.duration) + ' | **Cost:** ' + fc(s.totalCost) + ' | **Status:** ' + (s.status || 'unknown'));
     lines.push('');
 
@@ -1460,24 +1460,24 @@ function showDetail(span) {
     if (mdErrCount > 0) lines.push('- ' + mdErrCount + ' error(s) encountered');
     lines.push('');
     lines.push('---');
-    lines.push('_Generated with [Altimate Code](https://altimate.ai/recap)_');
+    lines.push('_Generated with [Altimate Code](https://altimate.ai/trace)_');
     return lines.join('\\n');
   }
 
-  // Share Recap — download self-contained HTML
+  // Share Trace — download self-contained HTML
   document.getElementById('btn-share').addEventListener('click', function() {
     var html = document.documentElement.outerHTML;
     var blob = new Blob([html], { type: 'text/html' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
-    var title = (t.metadata.title || t.sessionId || 'recap').replace(/[^a-zA-Z0-9_-]/g, '_');
+    var title = (t.metadata.title || t.sessionId || 'trace').replace(/[^a-zA-Z0-9_-]/g, '_');
     a.href = url;
-    a.download = 'altimate-recap-' + title + '.html';
+    a.download = 'altimate-trace-' + title + '.html';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    showToast('\\u2714 Recap downloaded!');
+    showToast('\\u2714 Trace downloaded!');
   });
 
   // Copy Summary — markdown to clipboard

@@ -63,11 +63,11 @@ describe("Adversarial — malformed input", () => {
 
     const content = await fs.readFile(filePath!, "utf-8")
     // Must be valid JSON (NaN/Infinity would break JSON.stringify)
-    const trace: TraceFile = JSON.parse(content)
-    expect(trace.summary.totalTokens).toBe(0)
-    expect(trace.summary.totalCost).toBe(0)
-    expect(Number.isFinite(trace.summary.tokens.input)).toBe(true)
-    expect(Number.isFinite(trace.summary.tokens.output)).toBe(true)
+    const traceFile: TraceFile = JSON.parse(content)
+    expect(traceFile.summary.totalTokens).toBe(0)
+    expect(traceFile.summary.totalCost).toBe(0)
+    expect(Number.isFinite(traceFile.summary.tokens.input)).toBe(true)
+    expect(Number.isFinite(traceFile.summary.tokens.output)).toBe(true)
   })
 
   test("undefined/null token cache object doesn't crash", async () => {
@@ -120,8 +120,8 @@ describe("Adversarial — malformed input", () => {
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     // Input should be sanitized, not the raw circular object
     expect(toolSpan.input).toBeDefined()
   })
@@ -147,10 +147,10 @@ describe("Adversarial — malformed input", () => {
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Slashes and dots should be replaced
-    expect(trace.sessionId).not.toContain("/")
-    expect(trace.sessionId).not.toContain("\\")
+    expect(traceFile.sessionId).not.toContain("/")
+    expect(traceFile.sessionId).not.toContain("\\")
   })
 
   test("empty string session ID defaults to 'unknown'", async () => {
@@ -159,8 +159,8 @@ describe("Adversarial — malformed input", () => {
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.sessionId).toBe("unknown")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.sessionId).toBe("unknown")
   })
 
   test("extremely long session ID doesn't cause issues", async () => {
@@ -297,8 +297,8 @@ describe("Adversarial — unicode and special characters", () => {
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.prompt).toContain("🐛")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.prompt).toContain("🐛")
   })
 
   test("null bytes in strings", async () => {
@@ -315,8 +315,8 @@ describe("Adversarial — unicode and special characters", () => {
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
     // File should be valid JSON
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.version).toBe(2)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.version).toBe(2)
   })
 
   test("CJK characters in metadata", async () => {
@@ -326,9 +326,9 @@ describe("Adversarial — unicode and special characters", () => {
       agent: "分析师",
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.prompt).toContain("修复")
-    expect(trace.metadata.agent).toBe("分析师")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.prompt).toContain("修复")
+    expect(traceFile.metadata.agent).toBe("分析师")
   })
 
   test("very long tool output with mixed encodings", async () => {
@@ -390,10 +390,10 @@ describe("Adversarial — extreme scale", () => {
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.totalToolCalls).toBe(1000)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.totalToolCalls).toBe(1000)
     // 1 session + 1 generation + 1000 tools
-    expect(trace.spans).toHaveLength(1002)
+    expect(traceFile.spans).toHaveLength(1002)
   })
 
   test("50 generations in sequence", async () => {
@@ -412,9 +412,9 @@ describe("Adversarial — extreme scale", () => {
     }
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.totalGenerations).toBe(50)
-    expect(trace.summary.totalCost).toBeCloseTo(0.05, 5)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.totalGenerations).toBe(50)
+    expect(traceFile.summary.totalCost).toBeCloseTo(0.05, 5)
   })
 
   test("5MB tool output is truncated and doesn't OOM", async () => {
@@ -442,8 +442,8 @@ describe("Adversarial — extreme scale", () => {
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect((toolSpan.output as string).length).toBeLessThanOrEqual(10000)
   })
 })
@@ -473,8 +473,8 @@ describe("Adversarial — concurrency", () => {
 
     for (const file of files) {
       const content = await fs.readFile(path.join(tmpDir, file), "utf-8")
-      const trace: TraceFile = JSON.parse(content)
-      expect(trace.version).toBe(2)
+      const traceFile: TraceFile = JSON.parse(content)
+      expect(traceFile.version).toBe(2)
     }
   })
 
@@ -504,8 +504,8 @@ describe("Adversarial — concurrency", () => {
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.totalToolCalls).toBe(100)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.totalToolCalls).toBe(100)
   })
 })
 
@@ -583,7 +583,7 @@ describe("Adversarial — exporter failures", () => {
 
   test("HttpExporter with invalid URL doesn't crash", async () => {
     const exporter = new HttpExporter("bad", "not-a-url")
-    const trace: TraceFile = {
+    const traceFile: TraceFile = {
       version: 2,
       traceId: "t",
       sessionId: "s",
@@ -600,7 +600,7 @@ describe("Adversarial — exporter failures", () => {
         tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
       },
     }
-    const result = await exporter.export(trace)
+    const result = await exporter.export(traceFile)
     expect(result).toBeUndefined()
   })
 
@@ -613,7 +613,7 @@ describe("Adversarial — exporter failures", () => {
     })
     try {
       const exporter = new HttpExporter("bad-json", `http://localhost:${server.port}`)
-      const trace: TraceFile = {
+      const traceFile: TraceFile = {
         version: 2,
         traceId: "t",
         sessionId: "s",
@@ -631,7 +631,7 @@ describe("Adversarial — exporter failures", () => {
         },
       }
       // Should not throw
-      const result = await exporter.export(trace)
+      const result = await exporter.export(traceFile)
       // Falls back to "name: exported"
       expect(result).toBe("bad-json: exported")
     } finally {
@@ -650,12 +650,12 @@ describe("Adversarial — state machine", () => {
     tracer.startTrace("first", { prompt: "first" })
     tracer.startTrace("second", { prompt: "second" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Second startTrace wins
-    expect(trace.sessionId).toBe("second")
-    expect(trace.metadata.prompt).toBe("second")
+    expect(traceFile.sessionId).toBe("second")
+    expect(traceFile.metadata.prompt).toBe("second")
     // Should have 2 session spans (both pushes)
-    expect(trace.spans.filter((s) => s.kind === "session")).toHaveLength(2)
+    expect(traceFile.spans.filter((s) => s.kind === "session")).toHaveLength(2)
   })
 
   test("logStepFinish called twice for same generation", async () => {
@@ -676,10 +676,10 @@ describe("Adversarial — state machine", () => {
       tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Should only count once
-    expect(trace.summary.totalGenerations).toBe(1)
-    expect(trace.summary.totalTokens).toBe(150)
+    expect(traceFile.summary.totalGenerations).toBe(1)
+    expect(traceFile.summary.totalTokens).toBe(150)
   })
 
   test("logStepStart without matching logStepFinish", async () => {
@@ -688,9 +688,9 @@ describe("Adversarial — state machine", () => {
     tracer.logStepStart({ id: "1" })
     // Never call logStepFinish — generation span left open
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Generation span should exist but without endTime
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen).toBeDefined()
     expect(gen.endTime).toBeUndefined()
   })
@@ -718,10 +718,10 @@ describe("Adversarial — state machine", () => {
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Should have 2 generation spans
-    expect(trace.spans.filter((s) => s.kind === "generation")).toHaveLength(2)
-    expect(trace.summary.totalGenerations).toBe(2)
+    expect(traceFile.spans.filter((s) => s.kind === "generation")).toHaveLength(2)
+    expect(traceFile.summary.totalGenerations).toBe(2)
   })
 
   test("endTrace called twice is safe", async () => {

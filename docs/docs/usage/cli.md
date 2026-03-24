@@ -33,7 +33,7 @@ altimate --agent analyst
 | `export`    | Export session data            |
 | `import`    | Import session data            |
 | `session`   | Session management             |
-| `recap`     | List and view session recaps (formerly `trace`) |
+| `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
 | `upgrade`   | Upgrade to latest version      |
@@ -149,22 +149,20 @@ altimate run --model anthropic/claude-sonnet-4-6 "optimize my warehouse"
 # Print logs for debugging
 altimate --print-logs --log-level DEBUG run "test query"
 
-# Disable recap for a single run (--no-trace is the backward-compatible flag name)
+# Disable tracing for a single run
 altimate run --no-trace "quick question"
 ```
 
 For CI pipelines and headless automation, see [CI & Automation](ci-headless.md).
 
-## Recap
+## Trace
 
-Every `run` command automatically saves a recap file with the full session details, including generations, tool calls, tokens, cost, and timing. See [Recap](../configure/recap.md) for configuration options.
+Every `run` command automatically saves a trace file (a recording of the agent session) with the full session details, including generations, tool calls, tokens, cost, and timing. See [Trace](../configure/trace.md) for configuration options.
 
 ```bash
-# List recent recaps
-altimate recap list
+# List recent traces
+altimate trace list
 
-# View a recap in the browser
-altimate recap view <session-id>
+# View a trace in the browser
+altimate trace view <session-id>
 ```
-
-> **Note:** The `trace` command still works as a backward-compatible alias for `recap`.

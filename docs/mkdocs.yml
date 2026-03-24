@@ -97,7 +97,7 @@ nav:
           - Custom Tools: configure/tools/custom.md
       - Skills: configure/skills.md
       - Commands: configure/commands.md
-      - Recap: configure/recap.md
+      - Trace: configure/trace.md
       - Interfaces:
           - TUI: usage/tui.md
           - CLI: usage/cli.md

@@ -62,13 +62,13 @@ describe("Clock skew and timing", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     // Duration should not be negative — our sanitizer clamps to 0
     expect(toolSpan.tool!.durationMs).toBeLessThanOrEqual(0)
     // But should not crash
-    expect(trace.version).toBe(2)
+    expect(traceFile.version).toBe(2)
   })
 
   test("tool call with zero-duration (instant)", async () => {
@@ -87,8 +87,8 @@ describe("Clock skew and timing", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.spans.find((s) => s.kind === "tool")!.tool!.durationMs).toBe(0)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.spans.find((s) => s.kind === "tool")!.tool!.durationMs).toBe(0)
   })
 
   test("tool call with epoch 0 timestamps", async () => {
@@ -178,8 +178,8 @@ describe("Prototype pollution and exotic objects", () => {
     // Verify no prototype pollution occurred
     expect(({} as any).polluted).toBeUndefined()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.version).toBe(2)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.version).toBe(2)
   })
 
   test("Symbol keys in tool input are silently dropped by JSON.stringify", async () => {
@@ -201,8 +201,8 @@ describe("Prototype pollution and exotic objects", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     // Symbol key should be silently dropped
     expect((toolSpan.input as any).normal).toBe("value")
   })
@@ -367,8 +367,8 @@ describe("Attribute and metadata explosion", () => {
     const tags = Array.from({ length: 10000 }, (_, i) => `tag-${i}`)
     tracer.startTrace("s-10k-tags", { prompt: "test", tags })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.tags).toHaveLength(10000)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.tags).toHaveLength(10000)
   })
 
   test("very long prompt (1MB)", async () => {
@@ -415,10 +415,10 @@ describe("Re-entrant and recursive calls", () => {
   test("exporter that calls tracer methods doesn't deadlock", async () => {
     const reentrantExporter: TraceExporter = {
       name: "reentrant",
-      export: async (trace) => {
+      export: async (traceFile) => {
         // This exporter creates ANOTHER tracer inside — should not deadlock
         const inner = Recap.withExporters([new FileExporter(tmpDir)])
-        inner.startTrace("inner-" + trace.sessionId, { prompt: "inception" })
+        inner.startTrace("inner-" + traceFile.sessionId, { prompt: "inception" })
         await inner.endTrace()
         return "reentrant-done"
       },
@@ -455,8 +455,8 @@ describe("Numeric edge cases", () => {
       },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.tokens.input).toBe(Number.MAX_SAFE_INTEGER)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.tokens.input).toBe(Number.MAX_SAFE_INTEGER)
   })
 
   test("negative token counts are passed through (not our job to validate)", async () => {
@@ -475,9 +475,9 @@ describe("Numeric edge cases", () => {
       },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Negative numbers are finite, so they pass through — caller's problem
-    expect(trace.summary.tokens.input).toBe(-100)
+    expect(traceFile.summary.tokens.input).toBe(-100)
   })
 
   test("fractional token counts", async () => {
@@ -496,8 +496,8 @@ describe("Numeric edge cases", () => {
       },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.totalCost).toBeCloseTo(0.123456789, 8)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.totalCost).toBeCloseTo(0.123456789, 8)
   })
 })
 
@@ -510,7 +510,7 @@ describe("FileExporter robustness", () => {
     const exporter = new FileExporter(tmpDir)
 
     const writes = Array.from({ length: 5 }, (_, i) => {
-      const trace: TraceFile = {
+      const traceFile: TraceFile = {
         version: 2,
         traceId: `t-${i}`,
         sessionId: "same-session",
@@ -527,7 +527,7 @@ describe("FileExporter robustness", () => {
           tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
         },
       }
-      return exporter.export(trace)
+      return exporter.export(traceFile)
     })
 
     await Promise.all(writes)
@@ -593,7 +593,7 @@ describe("HttpExporter robustness", () => {
 
     try {
       const exporter = new HttpExporter("unstable", `http://localhost:${server.port}`)
-      const trace: TraceFile = {
+      const traceFile: TraceFile = {
         version: 2,
         traceId: "t",
         sessionId: "s",
@@ -611,7 +611,7 @@ describe("HttpExporter robustness", () => {
         },
       }
       // Should not throw
-      const result = await exporter.export(trace)
+      const result = await exporter.export(traceFile)
       // May return "unstable: exported" (200 OK received) or undefined
       expect(typeof result === "string" || result === undefined).toBe(true)
     } finally {
@@ -703,7 +703,7 @@ describe("HttpExporter robustness", () => {
         "X-Trace-Source": "test",
       })
 
-      const trace: TraceFile = {
+      const traceFile: TraceFile = {
         version: 2,
         traceId: "verify-id",
         sessionId: "verify-session",
@@ -731,7 +731,7 @@ describe("HttpExporter robustness", () => {
         },
       }
 
-      await exporter.export(trace)
+      await exporter.export(traceFile)
 
       // Verify the server received exactly what we sent
       expect(receivedBody.version).toBe(2)
@@ -760,10 +760,10 @@ describe("enrichFromAssistant edge cases", () => {
     // Empty modelID should update (truthy check: empty string is falsy)
     tracer.enrichFromAssistant({ modelID: "", providerID: "", agent: "", variant: "" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Original values should be preserved since empty strings are falsy
-    expect(trace.metadata.model).toBe("original-model")
-    expect(trace.metadata.agent).toBe("original-agent")
+    expect(traceFile.metadata.model).toBe("original-model")
+    expect(traceFile.metadata.agent).toBe("original-agent")
   })
 
   test("multiple enrichFromAssistant calls — last one wins", async () => {
@@ -773,9 +773,9 @@ describe("enrichFromAssistant edge cases", () => {
     tracer.enrichFromAssistant({ modelID: "model-2", providerID: "p2" })
     tracer.enrichFromAssistant({ modelID: "model-3", providerID: "p3" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.model).toBe("p3/model-3")
-    expect(trace.metadata.providerId).toBe("p3")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.model).toBe("p3/model-3")
+    expect(traceFile.metadata.providerId).toBe("p3")
   })
 })
 
@@ -788,24 +788,24 @@ describe("Empty and minimal traces", () => {
     const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-minimal", {})
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.version).toBe(2)
-    expect(trace.spans).toHaveLength(1) // Just root
-    expect(trace.summary.totalGenerations).toBe(0)
-    expect(trace.summary.totalToolCalls).toBe(0)
-    expect(trace.metadata.prompt).toBeUndefined()
-    expect(trace.metadata.model).toBeUndefined()
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.version).toBe(2)
+    expect(traceFile.spans).toHaveLength(1) // Just root
+    expect(traceFile.summary.totalGenerations).toBe(0)
+    expect(traceFile.summary.totalToolCalls).toBe(0)
+    expect(traceFile.metadata.prompt).toBeUndefined()
+    expect(traceFile.metadata.model).toBeUndefined()
   })
 
   test("trace with empty metadata object", async () => {
     const tracer = Recap.withExporters([makeExporter()])
     tracer.startTrace("s-empty-meta", {})
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // All metadata fields should be undefined, not null
-    expect(trace.metadata.model).toBeUndefined()
-    expect(trace.metadata.agent).toBeUndefined()
-    expect(trace.metadata.prompt).toBeUndefined()
+    expect(traceFile.metadata.model).toBeUndefined()
+    expect(traceFile.metadata.agent).toBeUndefined()
+    expect(traceFile.metadata.prompt).toBeUndefined()
   })
 
   test("generation with only text (no tool calls)", async () => {
@@ -815,8 +815,8 @@ describe("Empty and minimal traces", () => {
     tracer.logText({ text: "Here is my answer." })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("Here is my answer.")
   })
 
@@ -836,8 +836,8 @@ describe("Empty and minimal traces", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("[tool calls: bash, read]")
   })
 })

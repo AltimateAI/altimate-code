@@ -30,8 +30,8 @@ import { WebCommand } from "./cli/cmd/web"
 import { PrCommand } from "./cli/cmd/pr"
 import { SessionCommand } from "./cli/cmd/session"
 import { DbCommand } from "./cli/cmd/db"
-// altimate_change start — recap: rename TraceCommand → RecapCommand
-import { RecapCommand } from "./cli/cmd/trace"
+// altimate_change start — trace: session trace command
+import { TraceCommand } from "./cli/cmd/trace"
 // altimate_change end
 // altimate_change start — top-level skill command
 import { SkillCommand } from "./cli/cmd/skill"
@@ -194,8 +194,8 @@ let cli = yargs(hideBin(process.argv))
   .command(PrCommand)
   .command(SessionCommand)
   .command(DbCommand)
-  // altimate_change start — recap: renamed TraceCommand → RecapCommand
-  .command(RecapCommand)
+  // altimate_change start — trace: session trace command
+  .command(TraceCommand)
   // altimate_change end
   // altimate_change start — top-level skill command
   .command(SkillCommand)
