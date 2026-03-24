@@ -75,7 +75,7 @@ register("sql.analyze", async (params) => {
     }
 
     return {
-      success: issues.length === 0,
+      success: true,
       issues,
       issue_count: issues.length,
       confidence: "high",

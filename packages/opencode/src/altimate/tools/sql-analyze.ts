@@ -22,11 +22,12 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       })
 
       return {
-        title: `Analyze: ${result.success ? `${result.issue_count} issue${result.issue_count !== 1 ? "s" : ""}` : "PARSE ERROR"} [${result.confidence}]`,
+        title: `Analyze: ${result.error ? "PARSE ERROR" : `${result.issue_count} issue${result.issue_count !== 1 ? "s" : ""}`} [${result.confidence}]`,
         metadata: {
           success: result.success,
           issueCount: result.issue_count,
           confidence: result.confidence,
+          ...(result.error && { error: result.error }),
         },
         output: formatAnalysis(result),
       }
@@ -34,7 +35,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Analyze: ERROR",
-        metadata: { success: false, issueCount: 0, confidence: "unknown" },
+        metadata: { success: false, issueCount: 0, confidence: "unknown", error: msg },
         output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
       }
     }
