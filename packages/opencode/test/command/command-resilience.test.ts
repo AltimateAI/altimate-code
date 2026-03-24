@@ -90,6 +90,63 @@ describe("Command module", () => {
         expect(cmd).toBeUndefined()
       })
     })
+
+    test("all 7 default commands are present", async () => {
+      await withInstance(async () => {
+        const commands = await Command.list()
+        const names = commands.map((c) => c.name)
+        for (const expected of [
+          "init",
+          "discover",
+          "review",
+          "feedback",
+          "configure-claude",
+          "configure-codex",
+          "discover-and-add-mcps",
+        ]) {
+          expect(names).toContain(expected)
+        }
+      })
+    })
+
+    test("discover-and-add-mcps is registered with correct metadata", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("discover-and-add-mcps")
+        expect(cmd).toBeDefined()
+        expect(cmd.name).toBe("discover-and-add-mcps")
+        expect(cmd.source).toBe("command")
+        expect(cmd.description).toBe("discover MCP servers from external AI tool configs and add them")
+      })
+    })
+
+    test("configure-claude is registered with correct metadata", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("configure-claude")
+        expect(cmd).toBeDefined()
+        expect(cmd.name).toBe("configure-claude")
+        expect(cmd.source).toBe("command")
+        expect(cmd.description).toBe("configure /altimate command in Claude Code")
+      })
+    })
+
+    test("configure-codex is registered with correct metadata", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("configure-codex")
+        expect(cmd).toBeDefined()
+        expect(cmd.name).toBe("configure-codex")
+        expect(cmd.source).toBe("command")
+        expect(cmd.description).toBe("configure altimate skill in Codex CLI")
+      })
+    })
+
+    test("discover-and-add-mcps template references --scope for scope selection", async () => {
+      await withInstance(async () => {
+        const cmd = await Command.get("discover-and-add-mcps")
+        const template = await cmd.template
+        expect(template).toContain("--scope")
+        expect(template).toContain("mcp_discover")
+      })
+    })
   })
 
   describe("user-defined commands from config", () => {
