@@ -27,7 +27,8 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error ?? extractValidationErrors(data)
       // altimate_change start — sql quality findings for telemetry
-      const findings: Telemetry.Finding[] = (data.errors ?? []).map((err: any) => ({
+      const errors = Array.isArray(data.errors) ? data.errors : []
+      const findings: Telemetry.Finding[] = errors.map((err: any) => ({
         category: classifyValidationError(err.message ?? ""),
       }))
       // altimate_change end

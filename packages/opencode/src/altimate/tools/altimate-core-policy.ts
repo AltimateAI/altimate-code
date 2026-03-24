@@ -24,7 +24,8 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error
       // altimate_change start — sql quality findings for telemetry
-      const findings: Telemetry.Finding[] = (data.violations ?? []).map((v: any) => ({
+      const violations = Array.isArray(data.violations) ? data.violations : []
+      const findings: Telemetry.Finding[] = violations.map((v: any) => ({
         category: v.rule ?? "policy_violation",
       }))
       // altimate_change end

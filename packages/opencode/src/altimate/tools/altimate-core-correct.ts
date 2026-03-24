@@ -22,7 +22,8 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error ?? extractCorrectErrors(data)
       // altimate_change start — sql quality findings for telemetry
-      const findings: Telemetry.Finding[] = (data.changes ?? []).map(() => ({
+      const changes = Array.isArray(data.changes) ? data.changes : []
+      const findings: Telemetry.Finding[] = changes.map(() => ({
         category: "correction_applied",
       }))
       // altimate_change end

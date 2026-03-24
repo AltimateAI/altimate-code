@@ -28,7 +28,8 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
       const error = result.error ?? data.error ?? extractSemanticsErrors(data)
       const hasError = Boolean(error)
       // altimate_change start — sql quality findings for telemetry
-      const findings: Telemetry.Finding[] = (data.issues ?? []).map(() => ({
+      const issues = Array.isArray(data.issues) ? data.issues : []
+      const findings: Telemetry.Finding[] = issues.map(() => ({
         category: "semantic_issue",
       }))
       // altimate_change end
