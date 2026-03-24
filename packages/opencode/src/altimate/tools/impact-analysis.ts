@@ -152,7 +152,6 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           test_count: affectedTestCount,
           column_impact: columnImpact.length,
           has_schema: false,
-          dialect: args.dialect,
           ...(findings.length > 0 && { findings }),
         },
         output,
@@ -161,7 +160,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Impact: ERROR",
-        metadata: { success: false, has_schema: false, dialect: args.dialect, error: msg },
+        metadata: { success: false, has_schema: false, error: msg },
         output: `Failed to analyze impact: ${msg}\n\nEnsure the dbt manifest exists (run \`dbt compile\`) and the dispatcher is running.`,
       }
     }

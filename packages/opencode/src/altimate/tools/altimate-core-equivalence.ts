@@ -16,7 +16,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
     const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     if (!hasSchema) {
       const error = "No schema provided. Provide schema_context or schema_path so table/column references can be resolved."
-      return { title: "Equivalence: NO SCHEMA", metadata: { success: false, equivalent: false, has_schema: false, dialect: "snowflake", error }, output: `Error: ${error}` }
+      return { title: "Equivalence: NO SCHEMA", metadata: { success: false, equivalent: false, has_schema: false, error }, output: `Error: ${error}` }
     }
     try {
       const result = await Dispatcher.call("altimate_core.equivalence", {
@@ -44,7 +44,6 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
           success: !isRealFailure,
           equivalent: data.equivalent,
           has_schema: hasSchema,
-          dialect: "snowflake",
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
@@ -52,7 +51,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Equivalence: ERROR", metadata: { success: false, equivalent: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
+      return { title: "Equivalence: ERROR", metadata: { success: false, equivalent: false, has_schema: hasSchema, error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

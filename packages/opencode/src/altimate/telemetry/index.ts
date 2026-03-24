@@ -416,7 +416,7 @@ export namespace Telemetry {
         /** JSON-encoded Record<string, number> — count per issue category */
         by_category: string
         has_schema: boolean
-        dialect: string
+        dialect?: string
         duration_ms: number
       }
     // altimate_change end

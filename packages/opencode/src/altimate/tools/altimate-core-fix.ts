@@ -41,7 +41,6 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
           success,
           fixed: !!data.fixed_sql,
           has_schema: hasSchema,
-          dialect: "snowflake",
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
@@ -49,7 +48,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Fix: ERROR", metadata: { success: false, fixed: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
+      return { title: "Fix: ERROR", metadata: { success: false, fixed: false, has_schema: hasSchema, error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

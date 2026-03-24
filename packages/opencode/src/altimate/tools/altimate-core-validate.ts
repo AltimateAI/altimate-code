@@ -16,7 +16,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
     const noSchema = !hasSchema
     if (noSchema) {
       const error = "No schema provided. Provide schema_context or schema_path so table/column references can be resolved."
-      return { title: "Validate: NO SCHEMA", metadata: { success: false, valid: false, has_schema: false, dialect: "snowflake", error }, output: `Error: ${error}` }
+      return { title: "Validate: NO SCHEMA", metadata: { success: false, valid: false, has_schema: false, error }, output: `Error: ${error}` }
     }
     try {
       const result = await Dispatcher.call("altimate_core.validate", {
@@ -37,7 +37,6 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
           success: true, // engine ran — validation errors are findings, not failures
           valid: data.valid,
           has_schema: hasSchema,
-          dialect: "snowflake",
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
@@ -45,7 +44,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Validate: ERROR", metadata: { success: false, valid: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
+      return { title: "Validate: ERROR", metadata: { success: false, valid: false, has_schema: hasSchema, error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

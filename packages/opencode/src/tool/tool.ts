@@ -172,7 +172,7 @@ export namespace Tool {
                 finding_count: findings.length,
                 by_category: JSON.stringify(by_category),
                 has_schema: result.metadata?.has_schema ?? false,
-                dialect: (result.metadata?.dialect as string) ?? "unknown",
+                ...(result.metadata?.dialect && { dialect: result.metadata.dialect as string }),
                 duration_ms: durationMs,
               })
             }

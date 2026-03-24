@@ -41,7 +41,6 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
         metadata: {
           success: result.success,
           has_schema: hasSchema,
-          dialect: "snowflake",
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
@@ -49,7 +48,7 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Check: ERROR", metadata: { success: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
+      return { title: "Check: ERROR", metadata: { success: false, has_schema: hasSchema, error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

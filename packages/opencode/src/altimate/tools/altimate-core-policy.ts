@@ -34,7 +34,6 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
           success: true, // engine ran — violations are findings, not failures
           pass: data.pass,
           has_schema: hasSchema,
-          dialect: "snowflake",
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
@@ -42,7 +41,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Policy: ERROR", metadata: { success: false, pass: false, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
+      return { title: "Policy: ERROR", metadata: { success: false, pass: false, has_schema: hasSchema, error: msg }, output: `Failed: ${msg}` }
     }
   },
 })

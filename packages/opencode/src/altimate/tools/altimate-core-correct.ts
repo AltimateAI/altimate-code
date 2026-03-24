@@ -32,7 +32,6 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
           success: result.success,
           iterations: data.iterations,
           has_schema: hasSchema,
-          dialect: "snowflake",
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
@@ -40,7 +39,7 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return { title: "Correct: ERROR", metadata: { success: false, iterations: 0, has_schema: hasSchema, dialect: "snowflake", error: msg }, output: `Failed: ${msg}` }
+      return { title: "Correct: ERROR", metadata: { success: false, iterations: 0, has_schema: hasSchema, error: msg }, output: `Failed: ${msg}` }
     }
   },
 })
