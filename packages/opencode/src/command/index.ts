@@ -11,6 +11,7 @@ import PROMPT_FEEDBACK from "./template/feedback.txt"
 // altimate_change start — configure commands for external AI CLIs
 import PROMPT_CONFIGURE_CLAUDE from "./template/configure-claude.txt"
 import PROMPT_CONFIGURE_CODEX from "./template/configure-codex.txt"
+import PROMPT_DISCOVER_MCPS from "./template/discover-and-add-mcps.txt"
 // altimate_change end
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
@@ -67,6 +68,7 @@ export namespace Command {
     // altimate_change start
     CONFIGURE_CLAUDE: "configure-claude",
     CONFIGURE_CODEX: "configure-codex",
+    DISCOVER_MCPS: "discover-and-add-mcps",
     // altimate_change end
   } as const
 
@@ -129,6 +131,15 @@ export namespace Command {
           return PROMPT_CONFIGURE_CODEX
         },
         hints: hints(PROMPT_CONFIGURE_CODEX),
+      },
+      [Default.DISCOVER_MCPS]: {
+        name: Default.DISCOVER_MCPS,
+        description: "discover MCP servers from external AI tool configs and add them",
+        source: "command",
+        get template() {
+          return PROMPT_DISCOVER_MCPS
+        },
+        hints: hints(PROMPT_DISCOVER_MCPS),
       },
       // altimate_change end
     }
