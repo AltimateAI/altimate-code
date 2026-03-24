@@ -22,6 +22,7 @@ altimate --agent analyst
 | Command     | Description                    |
 | ----------- | ------------------------------ |
 | `run`       | Run a prompt non-interactively |
+| `check`     | Run deterministic SQL checks (no LLM required) -- see [SQL Check](check.md) |
 | `serve`     | Start the HTTP API server      |
 | `web`       | Start the web UI               |
 | `agent`     | Agent management               |

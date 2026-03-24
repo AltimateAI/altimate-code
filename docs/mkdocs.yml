@@ -101,6 +101,7 @@ nav:
       - Interfaces:
           - TUI: usage/tui.md
           - CLI: usage/cli.md
+          - SQL Check: usage/check.md
           - Web UI: usage/web.md
           - CI: usage/ci-headless.md
           - IDE: usage/ide.md

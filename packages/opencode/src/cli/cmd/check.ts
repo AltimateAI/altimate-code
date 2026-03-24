@@ -5,49 +5,18 @@ import { Dispatcher } from "../../altimate/native"
 import { readFileSync, existsSync } from "fs"
 import { Glob } from "../../util/glob"
 import path from "path"
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface Finding {
-  file: string
-  line?: number
-  column?: number
-  code?: string
-  rule?: string
-  severity: "error" | "warning" | "info"
-  message: string
-  suggestion?: string
-}
-
-interface CheckCategoryResult {
-  findings: Finding[]
-  error_count: number
-  warning_count: number
-  [key: string]: unknown
-}
-
-interface CheckOutput {
-  version: 1
-  files_checked: number
-  checks_run: string[]
-  schema_resolved: boolean
-  results: Record<string, CheckCategoryResult>
-  summary: {
-    total_findings: number
-    errors: number
-    warnings: number
-    info: number
-    pass: boolean
-  }
-}
-
-type Severity = "error" | "warning" | "info"
-
-const SEVERITY_RANK: Record<Severity, number> = { error: 2, warning: 1, info: 0 }
-
-const VALID_CHECKS = new Set(["lint", "validate", "safety", "policy", "pii", "semantic", "grade"])
+import {
+  type Finding,
+  type CheckCategoryResult,
+  type CheckOutput,
+  type Severity,
+  SEVERITY_RANK,
+  VALID_CHECKS,
+  normalizeSeverity,
+  filterBySeverity,
+  toCategoryResult,
+  formatText,
+} from "./check-helpers"
 
 // ---------------------------------------------------------------------------
 // Check runners — each calls Dispatcher.call() and normalizes to Finding[]
@@ -274,65 +243,6 @@ async function runGrade(sql: string, file: string, schemaPath?: string): Promise
     console.error(`[grade] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
     return []
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function normalizeSeverity(s?: string): Severity {
-  if (!s) return "warning"
-  const lower = s.toLowerCase()
-  if (lower === "error" || lower === "fatal" || lower === "critical") return "error"
-  if (lower === "warning" || lower === "warn") return "warning"
-  return "info"
-}
-
-function filterBySeverity(findings: Finding[], minSeverity: Severity): Finding[] {
-  const minRank = SEVERITY_RANK[minSeverity]
-  return findings.filter((f) => SEVERITY_RANK[f.severity] >= minRank)
-}
-
-function toCategoryResult(findings: Finding[]): CheckCategoryResult {
-  return {
-    findings,
-    error_count: findings.filter((f) => f.severity === "error").length,
-    warning_count: findings.filter((f) => f.severity === "warning").length,
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Text formatter
-// ---------------------------------------------------------------------------
-
-function formatText(output: CheckOutput): string {
-  const lines: string[] = []
-
-  lines.push(`Checked ${output.files_checked} file(s) with [${output.checks_run.join(", ")}]`)
-  if (output.schema_resolved) {
-    lines.push("Schema: resolved")
-  }
-  lines.push("")
-
-  for (const [category, catResult] of Object.entries(output.results)) {
-    if (catResult.findings.length === 0) continue
-    lines.push(`--- ${category.toUpperCase()} ---`)
-    for (const f of catResult.findings) {
-      const loc = f.line ? `:${f.line}${f.column ? `:${f.column}` : ""}` : ""
-      const rule = f.rule ? ` [${f.rule}]` : ""
-      lines.push(`  ${f.severity.toUpperCase()} ${f.file}${loc}${rule}: ${f.message}`)
-      if (f.suggestion) {
-        lines.push(`    suggestion: ${f.suggestion}`)
-      }
-    }
-    lines.push("")
-  }
-
-  const s = output.summary
-  lines.push(`${s.total_findings} finding(s): ${s.errors} error(s), ${s.warnings} warning(s), ${s.info} info`)
-  lines.push(s.pass ? "PASS" : "FAIL")
-
-  return lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
