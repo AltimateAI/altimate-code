@@ -274,6 +274,24 @@ describe("training_import: slugify edge cases", () => {
     // Slugified name should strip special chars and use hyphens
     expect(result.output).toContain("cte-best-practices-v20-updated")
   })
+
+  test("handles pure non-ASCII headings with fallback", async () => {
+    setupMocks({
+      fileContent: [
+        "## \u65E5\u672C\u8A9E\u30B9\u30BF\u30A4\u30EB\u30AC\u30A4\u30C9",
+        "Use consistent naming.",
+      ].join("\n"),
+    })
+
+    const tool = await TrainingImportTool.init()
+    const result = await tool.execute(
+      { file_path: "japanese.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
+      ctx,
+    )
+    expect(result.metadata.count).toBe(1)
+    // Non-ASCII heading should produce a fallback slug, not an empty string
+    expect(result.output).toContain("entry-")
+  })
 })
 
 describe("training_import: error handling", () => {
