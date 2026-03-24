@@ -34,7 +34,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
       return {
         title: `Validate: ${data.valid ? "VALID" : "INVALID"}`,
         metadata: {
-          success: result.success,
+          success: true, // engine ran — validation errors are findings, not failures
           valid: data.valid,
           has_schema: hasSchema,
           dialect: "snowflake",

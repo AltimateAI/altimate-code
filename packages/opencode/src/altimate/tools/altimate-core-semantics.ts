@@ -35,7 +35,7 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
       return {
         title: hasError ? "Semantics: ERROR" : `Semantics: ${data.valid ? "VALID" : `${issueCount} issues`}`,
         metadata: {
-          success: result.success,
+          success: true, // engine ran — semantic issues are findings, not failures
           valid: data.valid,
           issue_count: issueCount,
           has_schema: hasSchema,

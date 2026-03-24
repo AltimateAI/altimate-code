@@ -31,7 +31,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
       return {
         title: `Policy: ${data.pass ? "PASS" : "VIOLATIONS FOUND"}`,
         metadata: {
-          success: result.success,
+          success: true, // engine ran — violations are findings, not failures
           pass: data.pass,
           has_schema: hasSchema,
           dialect: "snowflake",
