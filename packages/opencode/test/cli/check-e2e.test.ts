@@ -1,8 +1,14 @@
 // altimate_change start — E2E + adversarial tests for check CLI command
-import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test"
+//
+// IMPORTANT: This file uses Dispatcher.register() / Dispatcher.reset() instead
+// of mock.module("@/altimate/native") to avoid Bun's mock.module leaking across
+// test files and breaking Glob/Dispatcher for all subsequent tests in CI.
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
 import * as fs from "fs/promises"
 import path from "path"
 import os from "os"
+import * as Dispatcher from "../../src/altimate/native/dispatcher"
+import type { BridgeMethod } from "../../src/altimate/native/types"
 import {
   normalizeSeverity,
   filterBySeverity,
@@ -44,7 +50,7 @@ async function writeSql(dir: string, name: string, content: string): Promise<str
 }
 
 // ---------------------------------------------------------------------------
-// Mock infrastructure
+// Dispatcher test handler registration (no mock.module — no leak)
 // ---------------------------------------------------------------------------
 
 const mockDispatcherResults: Map<string, (params: any) => any> = new Map()
@@ -71,32 +77,18 @@ function resetDispatcherMocks() {
   }
 }
 
-// Mock all transitive dependencies that check.ts pulls in via Dispatcher
-mock.module("@/altimate/native", () => ({
-  Dispatcher: {
-    call: async (method: string, params: any) => {
-      const handler = mockDispatcherResults.get(method)
-      if (!handler) throw new Error(`Unmocked Dispatcher method: ${method}`)
-      return handler(params)
-    },
-  },
-}))
-
-mock.module("@/util/glob", () => ({
-  Glob: {
-    scan: async (pattern: string, opts: any) => {
-      const glob = new Bun.Glob(pattern)
-      const results: string[] = []
-      for await (const entry of glob.scan({ cwd: opts?.cwd ?? process.cwd(), absolute: opts?.absolute ?? false })) {
-        results.push(entry)
-      }
-      return results
-    },
-  },
-}))
+/** Register mock handlers with the real Dispatcher (no module replacement). */
+function installDispatcherMocks() {
+  Dispatcher.reset()
+  // Disable the lazy registration hook so it doesn't load real altimate-core handlers
+  Dispatcher.setRegistrationHook(async () => {})
+  for (const [method, handler] of mockDispatcherResults) {
+    Dispatcher.register(method as BridgeMethod, handler)
+  }
+}
 
 // ---------------------------------------------------------------------------
-// Import command AFTER mocks
+// Import command (uses real Dispatcher — we register mock handlers via API)
 // ---------------------------------------------------------------------------
 
 const { CheckCommand } = await import("../../src/cli/cmd/check")
@@ -126,16 +118,19 @@ let stdoutData = ""
 let stderrData = ""
 let tmpDir: { dir: string; cleanup: () => Promise<void> }
 const origExit = process.exit
+let savedHandlers: Map<string, any> | undefined
 
 beforeEach(async () => {
+  // Save existing Dispatcher handlers so we can restore them after
+  savedHandlers = new Map()
   resetDispatcherMocks()
+  installDispatcherMocks()
   exitCode = undefined
   process.exitCode = 0
   stdoutData = ""
   stderrData = ""
   tmpDir = await mktmp()
 
-  // Keep process.exit mock as safety net
   process.exit = ((code?: number) => {
     exitCode = code ?? 0
     throw new Error(`__EXIT_${code ?? 0}__`)
@@ -157,7 +152,18 @@ beforeEach(async () => {
 afterEach(async () => {
   process.exit = origExit
   process.exitCode = 0
-  mock.restore()
+  // Restore Dispatcher: clear our mocks and re-enable lazy registration
+  Dispatcher.reset()
+  // Re-install the registration hook so subsequent tests get real handlers
+  Dispatcher.setRegistrationHook(async () => {
+    await import("../../src/altimate/native/altimate-core")
+    await import("../../src/altimate/native/sql/register")
+    await import("../../src/altimate/native/schema/register")
+    await import("../../src/altimate/native/connections/register")
+    await import("../../src/altimate/native/dbt/register")
+    await import("../../src/altimate/native/finops/register")
+    await import("../../src/altimate/native/local/register")
+  })
   await tmpDir.cleanup()
 })
 
@@ -166,6 +172,8 @@ async function runHandler(
 ): Promise<{ exitCode: number | undefined; stdout: string; stderr: string }> {
   exitCode = undefined
   process.exitCode = 0
+  // Re-install mocks before each handler call (afterEach may have restored real handlers)
+  installDispatcherMocks()
   try {
     const savedCwd = process.cwd
     ;(process as any).cwd = () => tmpDir.dir
@@ -176,13 +184,11 @@ async function runHandler(
     }
   } catch (e) {
     if (e instanceof Error && e.message.startsWith("__EXIT_")) {
-      // expected — from legacy process.exit() mock
+      // expected
     } else {
       throw e
     }
   }
-  // Handler uses process.exitCode (preferred) or process.exit() (mocked to set exitCode)
-  // Note: Bun doesn't support process.exitCode = undefined, so we use 0 as "no error"
   const code = exitCode ?? (process.exitCode === 0 ? undefined : (process.exitCode as number))
   process.exitCode = 0
   return { exitCode: code, stdout: stdoutData, stderr: stderrData }
@@ -208,6 +214,7 @@ describe("check command E2E", () => {
         violations: [{ rule: "L001", severity: "warning", message: "SELECT * detected", line: 1, column: 1 }],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", format: "json" }))
     const j = parseJson(r.stdout)
@@ -227,6 +234,7 @@ describe("check command E2E", () => {
       success: true,
       data: { errors: [] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint,safety,validate", format: "json" }))
     const j = parseJson(r.stdout)
@@ -253,6 +261,7 @@ describe("check command E2E", () => {
       success: true,
       data: { violations: [{ rule: "L005", severity: "warning", message: "Missing alias" }] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", format: "text" }))
     expect(r.stderr).toContain("Checked 1 file(s)")
@@ -267,6 +276,7 @@ describe("check command E2E", () => {
       success: true,
       data: { violations: [{ rule: "L020", severity: "error", message: "DROP TABLE" }] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", "fail-on": "error", failOn: "error" }))
     expect(r.exitCode).toBe(1)
@@ -278,6 +288,7 @@ describe("check command E2E", () => {
       success: true,
       data: { violations: [{ rule: "L001", severity: "warning", message: "SELECT *" }] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", "fail-on": "error", failOn: "error" }))
     expect(r.exitCode).toBeUndefined()
@@ -289,6 +300,7 @@ describe("check command E2E", () => {
       success: true,
       data: { violations: [{ rule: "L001", severity: "warning", message: "star" }] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", "fail-on": "warning", failOn: "warning" }))
     expect(r.exitCode).toBe(1)
@@ -305,6 +317,7 @@ describe("check command E2E", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     expect(r.exitCode).toBeUndefined()
@@ -324,6 +337,7 @@ describe("check command E2E", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", severity: "warning" }))
     const j = parseJson(r.stdout)
@@ -344,6 +358,7 @@ describe("check command E2E", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", severity: "error" }))
     const j = parseJson(r.stdout)
@@ -364,16 +379,13 @@ describe("check command E2E", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
-    // severity=error filters warnings from output, but fail-on=warning
-    // should still detect warnings in unfiltered findings
     const r = await runHandler(
       baseArgs({ files: [file], checks: "lint", severity: "error", "fail-on": "warning", failOn: "warning" }),
     )
-    // Output only shows 1 error (severity filter hides warning)
     const j = parseJson(r.stdout)
     expect(j.summary.total_findings).toBe(1)
-    // But exit code is 1 because warnings exist in unfiltered findings
     expect(r.exitCode).toBe(1)
     expect(j.summary.pass).toBe(false)
   })
@@ -386,11 +398,11 @@ describe("check command E2E", () => {
         violations: [{ rule: "L001", severity: "warning", message: "A warning" }],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(
       baseArgs({ files: [file], checks: "lint", severity: "error", "fail-on": "error", failOn: "error" }),
     )
-    // No errors, only warnings — should pass even with fail-on=error
     expect(r.exitCode).toBeUndefined()
   })
 
@@ -403,6 +415,7 @@ describe("check command E2E", () => {
       error: "PII engine unavailable",
       data: {},
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
     const j = parseJson(r.stdout)
@@ -418,6 +431,7 @@ describe("check command E2E", () => {
     setDispatcherResponse("altimate_core.lint", () => {
       throw new Error("native binding missing")
     })
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint", "fail-on": "error", failOn: "error" }))
     expect(r.exitCode).toBe(1)
@@ -448,6 +462,7 @@ describe("check command E2E", () => {
       success: true,
       data: { allowed: true, violations: [] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile }))
     const j = parseJson(r.stdout)
@@ -486,7 +501,6 @@ describe("check command E2E", () => {
 
   test("returns cleanly when no SQL files found (exit 0)", async () => {
     const r = await runHandler(baseArgs({ files: ["/nonexistent.sql"], checks: "lint" }))
-    // No exitCode set — handler just returns without error
     expect(r.exitCode).toBeUndefined()
     expect(r.stderr).toContain("No SQL files found")
   })
@@ -498,11 +512,12 @@ describe("check command E2E", () => {
       success: true,
       data: { violations: [{ rule: "L001", severity: "info", message: "found" }] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [empty, real], checks: "lint" }))
     const j = parseJson(r.stdout)
     expect(j.files_checked).toBe(2)
-    expect(j.results.lint.findings).toHaveLength(1) // only non-empty file
+    expect(j.results.lint.findings).toHaveLength(1)
   })
 
   test("skips whitespace-only SQL files", async () => {
@@ -519,11 +534,11 @@ describe("check command E2E", () => {
     setDispatcherResponse("altimate_core.lint", () => {
       throw new Error("napi-rs binding crashed")
     })
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     expect(r.stderr).toContain("napi-rs binding crashed")
     const j = parseJson(r.stdout)
-    // Dispatcher failure now emits an error-severity finding instead of returning []
     expect(j.results.lint.findings).toHaveLength(1)
     expect(j.results.lint.findings[0].severity).toBe("error")
     expect(j.results.lint.findings[0].message).toContain("napi-rs binding crashed")
@@ -537,6 +552,7 @@ describe("check command E2E", () => {
       error: "Parse error at line 1",
       data: { errors: [] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "validate" }))
     const j = parseJson(r.stdout)
@@ -551,6 +567,7 @@ describe("check command E2E", () => {
       success: true,
       data: {},
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     const j = parseJson(r.stdout)
@@ -568,6 +585,7 @@ describe("check command E2E", () => {
         issues: [{ rule: "sql-injection", severity: "error", message: "Possible SQL injection" }],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
     const j = parseJson(r.stdout)
@@ -586,6 +604,7 @@ describe("check command E2E", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
     const j = parseJson(r.stdout)
@@ -602,6 +621,7 @@ describe("check command E2E", () => {
         issues: [{ rule: "cartesian-join", severity: "warning", message: "Cartesian join" }],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "semantic" }))
     const j = parseJson(r.stdout)
@@ -618,6 +638,7 @@ describe("check command E2E", () => {
         recommendations: [{ rule: "selectivity", severity: "info", message: "Add WHERE clause" }],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
     const j = parseJson(r.stdout)
@@ -662,6 +683,7 @@ describe("check command E2E", () => {
       success: true,
       data: { violations: [{ rule: "L001", severity: "info", message: "found" }] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files, checks: "lint" }))
     const j = parseJson(r.stdout)
@@ -677,7 +699,7 @@ describe("check command E2E", () => {
     expect(r.stderr).toMatch(/Completed in \d+ms/)
   })
 
-  // --- Safety fallback (safe=false, no structured issues) ---
+  // --- Fallback paths ---
 
   test("safety: generic finding when safe=false with no issues", async () => {
     const file = await writeSql(tmpDir.dir, "unsafe2.sql", "SELECT 1;")
@@ -686,14 +708,13 @@ describe("check command E2E", () => {
       data: { safe: false, issues: [] },
       error: "Injection vector detected",
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
     const j = parseJson(r.stdout)
     expect(j.results.safety.findings).toHaveLength(1)
     expect(j.results.safety.findings[0].message).toContain("Injection vector")
   })
-
-  // --- Semantic fallback ---
 
   test("semantic: generic finding when valid=false with no issues", async () => {
     const file = await writeSql(tmpDir.dir, "sem.sql", "SELECT * FROM a, b;")
@@ -702,14 +723,13 @@ describe("check command E2E", () => {
       data: { valid: false, issues: [] },
       error: "Cartesian product",
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "semantic" }))
     const j = parseJson(r.stdout)
     expect(j.results.semantic.findings).toHaveLength(1)
     expect(j.results.semantic.findings[0].message).toContain("Cartesian product")
   })
-
-  // --- Policy fallback ---
 
   test("policy: generic finding when allowed=false with no violations", async () => {
     const file = await writeSql(tmpDir.dir, "pol.sql", "SELECT 1;")
@@ -721,6 +741,7 @@ describe("check command E2E", () => {
       data: { allowed: false, violations: [] },
       error: "Policy violation: SELECT * not allowed",
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile }))
     const j = parseJson(r.stdout)
@@ -728,7 +749,7 @@ describe("check command E2E", () => {
     expect(j.results.policy.findings[0].severity).toBe("error")
   })
 
-  // --- Mixed success/failure across checks ---
+  // --- Mixed ---
 
   test("handles some checks passing and some failing", async () => {
     const file = await writeSql(tmpDir.dir, "mixed.sql", "SELECT * FROM users;")
@@ -744,12 +765,13 @@ describe("check command E2E", () => {
       success: true,
       data: { errors: [] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint,safety,validate" }))
     expect(r.stderr).toContain("Safety engine unavailable")
     const j = parseJson(r.stdout)
     expect(j.results.lint.findings).toHaveLength(1)
-    expect(j.results.safety.findings).toHaveLength(1) // error finding emitted
+    expect(j.results.safety.findings).toHaveLength(1)
     expect(j.results.safety.findings[0].severity).toBe("error")
     expect(j.results.validate.findings).toHaveLength(0)
   })
@@ -760,8 +782,6 @@ describe("check command E2E", () => {
 // ===========================================================================
 
 describe("check command adversarial", () => {
-  // --- Malicious SQL content ---
-
   test("handles SQL with embedded null bytes", async () => {
     const file = await writeSql(tmpDir.dir, "null.sql", "SELECT 1;\0DROP TABLE users;")
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
@@ -798,8 +818,6 @@ describe("check command adversarial", () => {
     expect(j.files_checked).toBe(1)
   })
 
-  // --- Path edge cases ---
-
   test("handles filenames with spaces", async () => {
     const file = await writeSql(tmpDir.dir, "my model file.sql", "SELECT 1;")
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
@@ -821,8 +839,6 @@ describe("check command adversarial", () => {
     expect(j.files_checked).toBe(1)
   })
 
-  // --- Malicious policy ---
-
   test("handles malformed policy JSON gracefully", async () => {
     const file = await writeSql(tmpDir.dir, "m.sql", "SELECT 1;")
     const policyFile = path.join(tmpDir.dir, "bad.json")
@@ -830,11 +846,11 @@ describe("check command adversarial", () => {
     setDispatcherResponse("altimate_core.policy", () => {
       throw new Error("Invalid policy JSON")
     })
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile }))
     expect(r.stderr).toContain("Invalid policy JSON")
     const j = parseJson(r.stdout)
-    // Dispatcher failure now emits an error finding
     expect(j.results.policy.findings).toHaveLength(1)
     expect(j.results.policy.findings[0].severity).toBe("error")
   })
@@ -848,13 +864,12 @@ describe("check command adversarial", () => {
       success: true,
       data: { allowed: true, violations: [] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile }))
     const j = parseJson(r.stdout)
     expect(j.summary.total_findings).toBe(0)
   })
-
-  // --- Adversarial Dispatcher responses ---
 
   test("handles findings with undefined/null fields", async () => {
     const file = await writeSql(tmpDir.dir, "nulls.sql", "SELECT 1;")
@@ -874,11 +889,12 @@ describe("check command adversarial", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     const j = parseJson(r.stdout)
     expect(j.results.lint.findings).toHaveLength(1)
-    expect(j.results.lint.findings[0].severity).toBe("warning") // normalizeSeverity(undefined)
+    expect(j.results.lint.findings[0].severity).toBe("warning")
     expect(j.results.lint.findings[0].message).toBe("")
   })
 
@@ -894,6 +910,7 @@ describe("check command adversarial", () => {
       success: true,
       data: { violations },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     const j = parseJson(r.stdout)
@@ -916,6 +933,7 @@ describe("check command adversarial", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     const j = parseJson(r.stdout)
@@ -935,17 +953,15 @@ describe("check command adversarial", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
-    // normalizeSeverity now handles non-string inputs by returning "warning"
     const j = parseJson(r.stdout)
     expect(j.results.lint.findings).toHaveLength(3)
     expect(j.results.lint.findings[0].severity).toBe("warning")
     expect(j.results.lint.findings[1].severity).toBe("warning")
     expect(j.results.lint.findings[2].severity).toBe("warning")
   })
-
-  // --- File I/O errors ---
 
   test("handles directory with .sql extension", async () => {
     const good = await writeSql(tmpDir.dir, "good.sql", "SELECT 1;")
@@ -958,22 +974,19 @@ describe("check command adversarial", () => {
     expect(j.files_checked).toBe(2)
   })
 
-  // --- Duplicate files ---
-
   test("processes duplicate file args (each checked separately)", async () => {
     const file = await writeSql(tmpDir.dir, "dup.sql", "SELECT 1;")
     setDispatcherResponse("altimate_core.lint", () => ({
       success: true,
       data: { violations: [{ rule: "L001", severity: "info", message: "found" }] },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file, file, file], checks: "lint" }))
     const j = parseJson(r.stdout)
     expect(j.files_checked).toBe(3)
     expect(j.results.lint.findings).toHaveLength(3)
   })
-
-  // --- JSON output integrity ---
 
   test("JSON output is always valid", async () => {
     const file = await writeSql(tmpDir.dir, "j.sql", "SELECT 'It\\'s a \"test\"';")
@@ -983,13 +996,12 @@ describe("check command adversarial", () => {
         violations: [{ rule: "L001", severity: "warning", message: "quotes and \nnewlines" }],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     const j = JSON.parse(r.stdout.trim())
     expect(j.version).toBe(1)
   })
-
-  // --- Prototype pollution attempt ---
 
   test("handles __proto__ in Dispatcher response without pollution", async () => {
     const file = await writeSql(tmpDir.dir, "proto.sql", "SELECT 1;")
@@ -1007,15 +1019,13 @@ describe("check command adversarial", () => {
         ],
       },
     }))
+    installDispatcherMocks()
 
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     const j = parseJson(r.stdout)
     expect(j.results.lint.findings).toHaveLength(1)
-    // Prototype pollution should not affect global Object
     expect(({} as any).isAdmin).toBeUndefined()
   })
-
-  // --- Empty checks string ---
 
   test("handles empty string for --checks", async () => {
     const file = await writeSql(tmpDir.dir, "m.sql", "SELECT 1;")
@@ -1024,16 +1034,12 @@ describe("check command adversarial", () => {
     expect(r.stderr).toContain("no valid checks")
   })
 
-  // --- Checks with extra whitespace/commas ---
-
   test("handles checks with extra whitespace", async () => {
     const file = await writeSql(tmpDir.dir, "m.sql", "SELECT 1;")
     const r = await runHandler(baseArgs({ files: [file], checks: " lint , safety " }))
     const j = parseJson(r.stdout)
     expect(j.checks_run).toEqual(["lint", "safety"])
   })
-
-  // --- Symlink handling ---
 
   test("handles symlinked SQL files", async () => {
     const real = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
@@ -1045,11 +1051,8 @@ describe("check command adversarial", () => {
     expect(j.files_checked).toBe(1)
   })
 
-  // --- Binary file content ---
-
   test("handles binary content in .sql file without crashing", async () => {
     const file = path.join(tmpDir.dir, "binary.sql")
-    // Write some binary data
     const buf = Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0x89, 0x50, 0x4e, 0x47])
     await fs.writeFile(file, buf)
 
@@ -1057,8 +1060,6 @@ describe("check command adversarial", () => {
     const j = parseJson(r.stdout)
     expect(j.files_checked).toBe(1)
   })
-
-  // --- Very many files ---
 
   test("handles 50 files concurrently across batches", async () => {
     const files: string[] = []
