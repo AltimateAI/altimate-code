@@ -8,19 +8,28 @@ import path from "path"
 import {
   type Finding,
   type CheckCategoryResult,
-  type CheckOutput,
   type Severity,
-  SEVERITY_RANK,
   VALID_CHECKS,
   normalizeSeverity,
   filterBySeverity,
   toCategoryResult,
   formatText,
+  buildCheckOutput,
 } from "./check-helpers"
 
 // ---------------------------------------------------------------------------
 // Check runners — each calls Dispatcher.call() and normalizes to Finding[]
+// On Dispatcher failure, emit an error-severity finding so CI doesn't false-pass.
 // ---------------------------------------------------------------------------
+
+function dispatcherErrorFinding(check: string, file: string, e: unknown): Finding {
+  return {
+    file,
+    rule: `${check}-error`,
+    severity: "error",
+    message: `[${check}] check failed: ${e instanceof Error ? e.message : String(e)}`,
+  }
+}
 
 async function runLint(sql: string, file: string, schemaPath?: string): Promise<Finding[]> {
   try {
@@ -29,7 +38,9 @@ async function runLint(sql: string, file: string, schemaPath?: string): Promise<
       schema_path: schemaPath ?? "",
       schema_context: undefined as any,
     })
-    if (!result.success) return []
+    if (!result.success) {
+      return [dispatcherErrorFinding("lint", file, result.error ?? "altimate_core.lint failed")]
+    }
     const violations = (result.data.violations ?? result.data.findings ?? []) as Array<Record<string, unknown>>
     return violations.map((f) => ({
       file,
@@ -43,7 +54,7 @@ async function runLint(sql: string, file: string, schemaPath?: string): Promise<
     }))
   } catch (e) {
     console.error(`[lint] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return []
+    return [dispatcherErrorFinding("lint", file, e)]
   }
 }
 
@@ -63,7 +74,7 @@ async function runValidate(sql: string, file: string, schemaPath?: string): Prom
         column: f.column as number | undefined,
         code: f.code as string | undefined,
         rule: "validate",
-        severity: normalizeSeverity(f.severity as string) || ("error" as const),
+        severity: normalizeSeverity(f.severity as string),
         message: (f.message ?? f.description ?? "") as string,
         suggestion: f.suggestion as string | undefined,
       }))
@@ -80,7 +91,7 @@ async function runValidate(sql: string, file: string, schemaPath?: string): Prom
     ]
   } catch (e) {
     console.error(`[validate] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return []
+    return [dispatcherErrorFinding("validate", file, e)]
   }
 }
 
@@ -96,7 +107,7 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
         column: f.column as number | undefined,
         code: f.code as string | undefined,
         rule: (f.rule ?? f.category ?? "safety") as string,
-        severity: normalizeSeverity(f.severity as string) || ("warning" as const),
+        severity: normalizeSeverity(f.severity as string),
         message: (f.message ?? f.description ?? "") as string,
         suggestion: f.suggestion as string | undefined,
       }))
@@ -114,7 +125,7 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
     return []
   } catch (e) {
     console.error(`[safety] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return []
+    return [dispatcherErrorFinding("safety", file, e)]
   }
 }
 
@@ -135,7 +146,7 @@ async function runPolicy(sql: string, file: string, policyJson: string, schemaPa
         column: f.column as number | undefined,
         code: f.code as string | undefined,
         rule: (f.rule ?? f.policy ?? "policy") as string,
-        severity: normalizeSeverity(f.severity as string) || ("error" as const),
+        severity: normalizeSeverity(f.severity as string),
         message: (f.message ?? f.description ?? "") as string,
         suggestion: f.suggestion as string | undefined,
       }))
@@ -153,7 +164,7 @@ async function runPolicy(sql: string, file: string, policyJson: string, schemaPa
     return []
   } catch (e) {
     console.error(`[policy] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return []
+    return [dispatcherErrorFinding("policy", file, e)]
   }
 }
 
@@ -164,6 +175,9 @@ async function runPii(sql: string, file: string, schemaPath?: string): Promise<F
       schema_path: schemaPath ?? "",
       schema_context: undefined as any,
     })
+    if (!result.success) {
+      return [dispatcherErrorFinding("pii", file, result.error ?? "altimate_core.query_pii failed")]
+    }
     const piiFindings = (result.data.pii_columns ?? result.data.findings ?? []) as Array<Record<string, unknown>>
     return piiFindings.map((f) => ({
       file,
@@ -177,7 +191,7 @@ async function runPii(sql: string, file: string, schemaPath?: string): Promise<F
     }))
   } catch (e) {
     console.error(`[pii] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return []
+    return [dispatcherErrorFinding("pii", file, e)]
   }
 }
 
@@ -197,7 +211,7 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
         column: f.column as number | undefined,
         code: f.code as string | undefined,
         rule: (f.rule ?? "semantic") as string,
-        severity: normalizeSeverity(f.severity as string) || ("warning" as const),
+        severity: normalizeSeverity(f.severity as string),
         message: (f.message ?? f.description ?? "") as string,
         suggestion: f.suggestion as string | undefined,
       }))
@@ -215,7 +229,7 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
     return []
   } catch (e) {
     console.error(`[semantic] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return []
+    return [dispatcherErrorFinding("semantic", file, e)]
   }
 }
 
@@ -235,13 +249,13 @@ async function runGrade(sql: string, file: string, schemaPath?: string): Promise
       column: f.column as number | undefined,
       code: f.code as string | undefined,
       rule: (f.rule ?? f.category ?? "grade") as string,
-      severity: normalizeSeverity(f.severity as string) || ("info" as const),
+      severity: normalizeSeverity(f.severity as string),
       message: (f.message ?? f.description ?? "") as string,
       suggestion: f.suggestion as string | undefined,
     }))
   } catch (e) {
     console.error(`[grade] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return []
+    return [dispatcherErrorFinding("grade", file, e)]
   }
 }
 
@@ -273,10 +287,6 @@ export const CheckCommand = cmd({
         describe: "path to policy JSON file for policy checks",
         type: "string",
       })
-      .option("dialect", {
-        describe: "SQL dialect (snowflake, bigquery, postgres, etc.)",
-        type: "string",
-      })
       .option("severity", {
         describe: "minimum severity level to report",
         choices: ["info", "warning", "error"] as const,
@@ -286,14 +296,6 @@ export const CheckCommand = cmd({
         describe: "exit 1 if findings at this level or above are found",
         choices: ["none", "warning", "error"] as const,
         default: "none" as const,
-      })
-      .option("dbt-project", {
-        describe: "path to dbt project directory",
-        type: "string",
-      })
-      .option("manifest", {
-        describe: "path to dbt manifest.json",
-        type: "string",
       }),
 
   handler: async (args: {
@@ -302,12 +304,9 @@ export const CheckCommand = cmd({
     checks?: string
     schema?: string
     policy?: string
-    dialect?: string
     severity?: "info" | "warning" | "error"
     "fail-on"?: "none" | "warning" | "error"
     failOn?: "none" | "warning" | "error"
-    "dbt-project"?: string
-    manifest?: string
   }) => {
     const startTime = Date.now()
 
@@ -436,40 +435,35 @@ export const CheckCommand = cmd({
       await Promise.all(batchPromises)
     }
 
-    // 6. Filter by severity
+    // 6. Compute pass/fail on UNFILTERED findings (before severity filtering)
+    // This ensures --severity only controls output display, not exit code logic.
+    const failOn = args["fail-on"] ?? args.failOn ?? "none"
+    const allUnfiltered = Object.values(allResults).flat()
+    const unfilteredErrors = allUnfiltered.filter((f) => f.severity === "error").length
+    const unfilteredWarnings = allUnfiltered.filter((f) => f.severity === "warning").length
+    let pass = true
+    if (failOn === "error" && unfilteredErrors > 0) pass = false
+    if (failOn === "warning" && (unfilteredErrors > 0 || unfilteredWarnings > 0)) pass = false
+
+    // 7. Filter by severity for display
     const minSeverity = args.severity as Severity
     const results: Record<string, CheckCategoryResult> = {}
     for (const [check, findings] of Object.entries(allResults)) {
       results[check] = toCategoryResult(filterBySeverity(findings, minSeverity))
     }
 
-    // 7. Build output
-    const allFindings = Object.values(results).flatMap((r) => r.findings)
-    const errors = allFindings.filter((f) => f.severity === "error").length
-    const warnings = allFindings.filter((f) => f.severity === "warning").length
-    const info = allFindings.filter((f) => f.severity === "info").length
-
-    const failOn = args["fail-on"] ?? args.failOn ?? "none"
-    let pass = true
-    if (failOn === "error" && errors > 0) pass = false
-    if (failOn === "warning" && (errors > 0 || warnings > 0)) pass = false
-
-    const output: CheckOutput = {
-      version: 1,
-      files_checked: files.length,
-      checks_run: checks,
-      schema_resolved: schemaPath !== undefined,
+    // 8. Build output using the helper
+    const output = buildCheckOutput({
+      filesChecked: files.length,
+      checksRun: checks,
+      schemaResolved: schemaPath !== undefined,
       results,
-      summary: {
-        total_findings: allFindings.length,
-        errors,
-        warnings,
-        info,
-        pass,
-      },
-    }
+      failOn: "none", // pass is already computed above from unfiltered findings
+    })
+    // Override pass with our pre-computed value from unfiltered findings
+    output.summary.pass = pass
 
-    // 8. Output
+    // 9. Output
     const duration = Date.now() - startTime
     if (args.format === "json") {
       process.stdout.write(JSON.stringify(output, null, 2) + "\n")
@@ -478,7 +472,7 @@ export const CheckCommand = cmd({
     }
     console.error(`Completed in ${duration}ms`)
 
-    // 9. Exit code
+    // 10. Exit code
     if (!pass) {
       process.exit(1)
     }

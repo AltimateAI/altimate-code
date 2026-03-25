@@ -342,6 +342,78 @@ describe("check command E2E", () => {
     expect(j.results.lint.findings[0].rule).toBe("L003")
   })
 
+  // --- --severity + --fail-on interaction ---
+
+  test("--severity=error --fail-on=warning still fails when warnings exist (unfiltered)", async () => {
+    const file = await writeSql(tmpDir.dir, "sev-fail.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.lint", () => ({
+      success: true,
+      data: {
+        violations: [
+          { rule: "L001", severity: "warning", message: "A warning" },
+          { rule: "L002", severity: "error", message: "An error" },
+        ],
+      },
+    }))
+
+    // severity=error filters warnings from output, but fail-on=warning
+    // should still detect warnings in unfiltered findings
+    const r = await runHandler(
+      baseArgs({ files: [file], checks: "lint", severity: "error", "fail-on": "warning", failOn: "warning" }),
+    )
+    // Output only shows 1 error (severity filter hides warning)
+    const j = parseJson(r.stdout)
+    expect(j.summary.total_findings).toBe(1)
+    // But exit code is 1 because warnings exist in unfiltered findings
+    expect(r.exitCode).toBe(1)
+    expect(j.summary.pass).toBe(false)
+  })
+
+  test("--severity=error --fail-on=error passes when only warnings exist", async () => {
+    const file = await writeSql(tmpDir.dir, "sev-pass.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.lint", () => ({
+      success: true,
+      data: {
+        violations: [{ rule: "L001", severity: "warning", message: "A warning" }],
+      },
+    }))
+
+    const r = await runHandler(
+      baseArgs({ files: [file], checks: "lint", severity: "error", "fail-on": "error", failOn: "error" }),
+    )
+    // No errors, only warnings — should pass even with fail-on=error
+    expect(r.exitCode).toBeUndefined()
+  })
+
+  // --- runPii with success=false ---
+
+  test("pii check with dispatcher failure emits error finding", async () => {
+    const file = await writeSql(tmpDir.dir, "pii-fail.sql", "SELECT email FROM users;")
+    setDispatcherResponse("altimate_core.query_pii", () => ({
+      success: false,
+      error: "PII engine unavailable",
+      data: {},
+    }))
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.pii.findings).toHaveLength(1)
+    expect(j.results.pii.findings[0].severity).toBe("error")
+    expect(j.results.pii.findings[0].message).toContain("PII engine unavailable")
+  })
+
+  // --- Dispatcher failure triggers --fail-on exit code ---
+
+  test("Dispatcher failure exits 1 with --fail-on=error", async () => {
+    const file = await writeSql(tmpDir.dir, "fail-exit.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.lint", () => {
+      throw new Error("native binding missing")
+    })
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "lint", "fail-on": "error", failOn: "error" }))
+    expect(r.exitCode).toBe(1)
+  })
+
   // --- Policy check ---
 
   test("policy check requires --policy flag", async () => {
@@ -432,7 +504,7 @@ describe("check command E2E", () => {
 
   // --- Dispatcher error handling ---
 
-  test("gracefully handles Dispatcher.call() throwing", async () => {
+  test("Dispatcher.call() throwing emits error finding (no false pass)", async () => {
     const file = await writeSql(tmpDir.dir, "crash.sql", "SELECT 1;")
     setDispatcherResponse("altimate_core.lint", () => {
       throw new Error("napi-rs binding crashed")
@@ -441,8 +513,11 @@ describe("check command E2E", () => {
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
     expect(r.stderr).toContain("napi-rs binding crashed")
     const j = parseJson(r.stdout)
-    expect(j.results.lint.findings).toHaveLength(0)
-    expect(j.summary.pass).toBe(true)
+    // Dispatcher failure now emits an error-severity finding instead of returning []
+    expect(j.results.lint.findings).toHaveLength(1)
+    expect(j.results.lint.findings[0].severity).toBe("error")
+    expect(j.results.lint.findings[0].message).toContain("napi-rs binding crashed")
+    expect(j.summary.errors).toBe(1)
   })
 
   test("validate: success=false with error message emits finding", async () => {
@@ -664,7 +739,8 @@ describe("check command E2E", () => {
     expect(r.stderr).toContain("Safety engine unavailable")
     const j = parseJson(r.stdout)
     expect(j.results.lint.findings).toHaveLength(1)
-    expect(j.results.safety.findings).toHaveLength(0) // error caught
+    expect(j.results.safety.findings).toHaveLength(1) // error finding emitted
+    expect(j.results.safety.findings[0].severity).toBe("error")
     expect(j.results.validate.findings).toHaveLength(0)
   })
 })
@@ -748,7 +824,9 @@ describe("check command adversarial", () => {
     const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile }))
     expect(r.stderr).toContain("Invalid policy JSON")
     const j = parseJson(r.stdout)
-    expect(j.results.policy.findings).toHaveLength(0)
+    // Dispatcher failure now emits an error finding
+    expect(j.results.policy.findings).toHaveLength(1)
+    expect(j.results.policy.findings[0].severity).toBe("error")
   })
 
   test("handles very large policy file (1MB)", async () => {
