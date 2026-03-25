@@ -555,4 +555,149 @@ describe("filesystem", () => {
       expect(() => Filesystem.resolve(path.join(file, "child"))).toThrow()
     })
   })
+
+  describe("findUp()", () => {
+    test("finds file at start directory", async () => {
+      await using tmp = await tmpdir()
+      const target = path.join(tmp.path, "AGENTS.md")
+      await fs.writeFile(target, "root instructions")
+
+      const results = await Filesystem.findUp("AGENTS.md", tmp.path)
+      expect(results).toEqual([target])
+    })
+
+    test("finds files at multiple levels walking upward", async () => {
+      await using tmp = await tmpdir()
+      // Create nested dirs: root/a/b/c
+      const dirA = path.join(tmp.path, "a")
+      const dirB = path.join(tmp.path, "a", "b")
+      const dirC = path.join(tmp.path, "a", "b", "c")
+      await fs.mkdir(dirC, { recursive: true })
+
+      // Place AGENTS.md at root and at a/b (but not at a or a/b/c)
+      await fs.writeFile(path.join(tmp.path, "AGENTS.md"), "root")
+      await fs.writeFile(path.join(dirB, "AGENTS.md"), "mid")
+
+      // Start from a/b/c, walk up to root
+      const results = await Filesystem.findUp("AGENTS.md", dirC, tmp.path)
+      // Should find mid-level first (closer to start), then root
+      expect(results).toEqual([
+        path.join(dirB, "AGENTS.md"),
+        path.join(tmp.path, "AGENTS.md"),
+      ])
+    })
+
+    test("stop directory is inclusive (file at stop level is found)", async () => {
+      await using tmp = await tmpdir()
+      const child = path.join(tmp.path, "child")
+      await fs.mkdir(child)
+      await fs.writeFile(path.join(tmp.path, "AGENTS.md"), "at stop level")
+
+      const results = await Filesystem.findUp("AGENTS.md", child, tmp.path)
+      expect(results).toEqual([path.join(tmp.path, "AGENTS.md")])
+    })
+
+    test("returns empty when file does not exist anywhere", async () => {
+      await using tmp = await tmpdir()
+      const child = path.join(tmp.path, "nested")
+      await fs.mkdir(child)
+
+      const results = await Filesystem.findUp("AGENTS.md", child, tmp.path)
+      expect(results).toEqual([])
+    })
+
+    test("does not traverse past stop directory", async () => {
+      await using tmp = await tmpdir()
+      const stopDir = path.join(tmp.path, "stop")
+      const startDir = path.join(tmp.path, "stop", "deep")
+      await fs.mkdir(startDir, { recursive: true })
+
+      // Place file above the stop directory — should NOT be found
+      await fs.writeFile(path.join(tmp.path, "AGENTS.md"), "above stop")
+
+      const results = await Filesystem.findUp("AGENTS.md", startDir, stopDir)
+      expect(results).toEqual([])
+    })
+  })
+
+  describe("globUp()", () => {
+    test("finds files matching glob pattern at multiple levels", async () => {
+      await using tmp = await tmpdir()
+      const child = path.join(tmp.path, "sub")
+      await fs.mkdir(child)
+
+      await fs.writeFile(path.join(tmp.path, "notes.md"), "root notes")
+      await fs.writeFile(path.join(child, "readme.md"), "sub readme")
+
+      const results = await Filesystem.globUp("*.md", child, tmp.path)
+      // Child level first, then root level
+      expect(results.length).toBe(2)
+      expect(results).toContain(path.join(child, "readme.md"))
+      expect(results).toContain(path.join(tmp.path, "notes.md"))
+    })
+
+    test("wildcard matches multiple files at one level", async () => {
+      await using tmp = await tmpdir()
+      await fs.writeFile(path.join(tmp.path, "a.md"), "a")
+      await fs.writeFile(path.join(tmp.path, "b.md"), "b")
+      await fs.writeFile(path.join(tmp.path, "c.txt"), "c")
+
+      const results = await Filesystem.globUp("*.md", tmp.path, tmp.path)
+      expect(results.length).toBe(2)
+      expect(results.some((r) => r.endsWith("a.md"))).toBe(true)
+      expect(results.some((r) => r.endsWith("b.md"))).toBe(true)
+    })
+
+    test("returns empty when no matches exist", async () => {
+      await using tmp = await tmpdir()
+      const results = await Filesystem.globUp("*.md", tmp.path, tmp.path)
+      expect(results).toEqual([])
+    })
+
+    test("does not traverse past stop directory", async () => {
+      await using tmp = await tmpdir()
+      const stopDir = path.join(tmp.path, "stop")
+      const startDir = path.join(tmp.path, "stop", "deep")
+      await fs.mkdir(startDir, { recursive: true })
+
+      await fs.writeFile(path.join(tmp.path, "notes.md"), "above stop")
+
+      const results = await Filesystem.globUp("*.md", startDir, stopDir)
+      expect(results).toEqual([])
+    })
+  })
+
+  describe("overlaps()", () => {
+    test("same path overlaps with itself", () => {
+      expect(Filesystem.overlaps("/a/b", "/a/b")).toBe(true)
+    })
+
+    test("parent and child overlap", () => {
+      expect(Filesystem.overlaps("/a", "/a/b")).toBe(true)
+      expect(Filesystem.overlaps("/a/b", "/a")).toBe(true)
+    })
+
+    test("sibling directories do not overlap", () => {
+      expect(Filesystem.overlaps("/a/b", "/a/c")).toBe(false)
+    })
+
+    test("unrelated paths do not overlap", () => {
+      expect(Filesystem.overlaps("/foo", "/bar")).toBe(false)
+    })
+
+    test("path that is a string prefix but not an ancestor does not overlap", () => {
+      // /foo/bar and /foo/barbaz — "barbaz" starts with "bar" but is a sibling
+      expect(Filesystem.overlaps("/foo/bar", "/foo/barbaz")).toBe(false)
+    })
+
+    test("trailing slash does not affect result", () => {
+      expect(Filesystem.overlaps("/a/b/", "/a/b")).toBe(true)
+      expect(Filesystem.overlaps("/a/b", "/a/b/")).toBe(true)
+    })
+
+    test("root overlaps with everything", () => {
+      expect(Filesystem.overlaps("/", "/any/path")).toBe(true)
+      expect(Filesystem.overlaps("/any/path", "/")).toBe(true)
+    })
+  })
 })

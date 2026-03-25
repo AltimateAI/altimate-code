@@ -37,9 +37,9 @@ const ZERO_STEP = {
 }
 
 // Helper: write a trace file directly (bypassing Recap)
-async function writeTraceFile(dir: string, trace: TraceFile) {
+async function writeTraceFile(dir: string, traceFile: TraceFile) {
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(path.join(dir, `${trace.sessionId}.json`), JSON.stringify(trace, null, 2))
+  await fs.writeFile(path.join(dir, `${traceFile.sessionId}.json`), JSON.stringify(traceFile, null, 2))
 }
 
 function makeTrace(overrides: Partial<TraceFile> & { sessionId: string }): TraceFile {
@@ -161,49 +161,49 @@ describe("Write → Read round-trip", () => {
 
     // Read it back
     const content = await fs.readFile(filePath!, "utf-8")
-    const trace: TraceFile = JSON.parse(content)
+    const traceFile: TraceFile = JSON.parse(content)
 
     // Verify every field survived
-    expect(trace.version).toBe(2)
-    expect(trace.sessionId).toBe("roundtrip-1")
-    expect(trace.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
-    expect(trace.metadata.providerId).toBe("anthropic")
-    expect(trace.metadata.agent).toBe("builder")
-    expect(trace.metadata.variant).toBe("high")
-    expect(trace.metadata.prompt).toBe("Build the pipeline")
-    expect(trace.metadata.userId).toBe("user-42")
-    expect(trace.metadata.environment).toBe("staging")
-    expect(trace.metadata.version).toBe("2.0.0")
-    expect(trace.metadata.tags).toEqual(["benchmark", "ci", "nightly"])
+    expect(traceFile.version).toBe(2)
+    expect(traceFile.sessionId).toBe("roundtrip-1")
+    expect(traceFile.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
+    expect(traceFile.metadata.providerId).toBe("anthropic")
+    expect(traceFile.metadata.agent).toBe("builder")
+    expect(traceFile.metadata.variant).toBe("high")
+    expect(traceFile.metadata.prompt).toBe("Build the pipeline")
+    expect(traceFile.metadata.userId).toBe("user-42")
+    expect(traceFile.metadata.environment).toBe("staging")
+    expect(traceFile.metadata.version).toBe("2.0.0")
+    expect(traceFile.metadata.tags).toEqual(["benchmark", "ci", "nightly"])
 
-    expect(trace.summary.totalGenerations).toBe(2)
-    expect(trace.summary.totalToolCalls).toBe(3)
-    expect(trace.summary.totalCost).toBeCloseTo(0.013, 5)
-    expect(trace.summary.tokens.input).toBe(3500)
-    expect(trace.summary.tokens.output).toBe(800)
-    expect(trace.summary.tokens.reasoning).toBe(150)
-    expect(trace.summary.tokens.cacheRead).toBe(800)
-    expect(trace.summary.tokens.cacheWrite).toBe(50)
+    expect(traceFile.summary.totalGenerations).toBe(2)
+    expect(traceFile.summary.totalToolCalls).toBe(3)
+    expect(traceFile.summary.totalCost).toBeCloseTo(0.013, 5)
+    expect(traceFile.summary.tokens.input).toBe(3500)
+    expect(traceFile.summary.tokens.output).toBe(800)
+    expect(traceFile.summary.tokens.reasoning).toBe(150)
+    expect(traceFile.summary.tokens.cacheRead).toBe(800)
+    expect(traceFile.summary.tokens.cacheWrite).toBe(50)
 
     // 1 session + 2 generations + 3 tools = 6 spans
-    expect(trace.spans).toHaveLength(6)
+    expect(traceFile.spans).toHaveLength(6)
 
     // Verify DE attributes on tool spans
-    const sqlTool = trace.spans.find((s) => s.name === "sql_execute")!
+    const sqlTool = traceFile.spans.find((s) => s.name === "sql_execute")!
     expect(sqlTool.attributes![DE.WAREHOUSE.SYSTEM]).toBe("snowflake")
     expect(sqlTool.attributes![DE.SQL.VALIDATION_VALID]).toBe(true)
 
-    const dbtTool = trace.spans.find((s) => s.name === "bash" && s.status === "error")!
+    const dbtTool = traceFile.spans.find((s) => s.name === "bash" && s.status === "error")!
     expect(dbtTool.attributes![DE.DBT.COMMAND]).toBe("run")
     expect(dbtTool.attributes![DE.DBT.JINJA_RENDER_SUCCESS]).toBe(false)
 
     // Session-level cost attributes
-    const session = trace.spans.find((s) => s.kind === "session")!
+    const session = traceFile.spans.find((s) => s.kind === "session")!
     expect(session.attributes![DE.COST.TOTAL_USD]).toBe(0.015)
 
     // Write it again and verify idempotency
-    const rewritten = JSON.parse(JSON.stringify(trace))
-    expect(rewritten).toEqual(trace)
+    const rewritten = JSON.parse(JSON.stringify(traceFile))
+    expect(rewritten).toEqual(traceFile)
   })
 })
 
@@ -225,14 +225,14 @@ describe("listTraces — with real files", () => {
 
     // Use FileExporter's dir to write, then read with a custom listTraces
     const files = await fs.readdir(tmpDir)
-    const loaded: Array<{ sessionId: string; file: string; trace: TraceFile }> = []
+    const loaded: Array<{ sessionId: string; file: string; traceFile: TraceFile }> = []
     for (const file of files) {
       if (!file.endsWith(".json")) continue
       const content = await fs.readFile(path.join(tmpDir, file), "utf-8")
-      const trace = JSON.parse(content) as TraceFile
-      loaded.push({ sessionId: trace.sessionId, file, trace })
+      const traceFile = JSON.parse(content) as TraceFile
+      loaded.push({ sessionId: traceFile.sessionId, file, traceFile })
     }
-    loaded.sort((a, b) => new Date(b.trace.startedAt).getTime() - new Date(a.trace.startedAt).getTime())
+    loaded.sort((a, b) => new Date(b.traceFile.startedAt).getTime() - new Date(a.traceFile.startedAt).getTime())
 
     expect(loaded[0]!.sessionId).toBe("new")
     expect(loaded[1]!.sessionId).toBe("mid")
@@ -246,13 +246,13 @@ describe("listTraces — with real files", () => {
     await fs.writeFile(path.join(tmpDir, "not-a-trace.json"), '"just a string"')
 
     const files = await fs.readdir(tmpDir)
-    const loaded: Array<{ sessionId: string; trace: TraceFile }> = []
+    const loaded: Array<{ sessionId: string; traceFile: TraceFile }> = []
     for (const file of files) {
       if (!file.endsWith(".json")) continue
       try {
         const content = await fs.readFile(path.join(tmpDir, file), "utf-8")
-        const trace = JSON.parse(content) as TraceFile
-        if (trace.version && trace.sessionId) loaded.push({ sessionId: trace.sessionId, trace })
+        const traceFile = JSON.parse(content) as TraceFile
+        if (traceFile.version && traceFile.sessionId) loaded.push({ sessionId: traceFile.sessionId, traceFile })
       } catch {
         // Skip corrupted
       }
@@ -284,10 +284,10 @@ describe("HTML renderer — XSS prevention", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace('</title><script>alert("xss")</script>', { prompt: "evil" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // The sessionId should be sanitized (slashes replaced, angle brackets are safe for JSON)
-    expect(trace.sessionId).not.toContain("/")
+    expect(traceFile.sessionId).not.toContain("/")
     // < and > are not path-unsafe, so they survive — but the HTML title is escaped separately
   })
 
@@ -297,10 +297,10 @@ describe("HTML renderer — XSS prevention", () => {
       prompt: '<img src=x onerror=alert(1)> <script>alert("xss")</script>',
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // The prompt is stored as JSON data, not interpolated into HTML
     // The viewer uses textContent/escapeHtml for display
-    expect(trace.metadata.prompt).toContain("<script>")
+    expect(traceFile.metadata.prompt).toContain("<script>")
     // JSON.stringify doesn't escape < inside strings — the XSS protection is in
     // renderTraceViewerHTML which replaces </ with <\/ to prevent </script> breakout
     // The trace file itself is safe because it's never rendered as HTML directly
@@ -322,9 +322,9 @@ describe("HTML renderer — XSS prevention", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // The output contains </script> but it's safely in JSON
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect((toolSpan.output as string)).toContain("</script>")
   })
 })
@@ -396,8 +396,8 @@ describe("Recap reuse patterns", () => {
       const t = Recap.withExporters([new FileExporter(tmpDir, 0)])
       t.startTrace(`unique-${i}`, { prompt: "test" })
       const filePath = await t.endTrace()
-      const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-      traceIds.add(trace.traceId)
+      const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+      traceIds.add(traceFile.traceId)
     }
     expect(traceIds.size).toBe(20)
   })
@@ -467,16 +467,16 @@ describe("Complex span trees", () => {
     })
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Verify structure
-    expect(trace.summary.totalGenerations).toBe(3)
-    expect(trace.summary.totalToolCalls).toBe(6) // 5 + 1 retry
-    expect(trace.spans).toHaveLength(10) // 1 session + 3 gens + 6 tools
+    expect(traceFile.summary.totalGenerations).toBe(3)
+    expect(traceFile.summary.totalToolCalls).toBe(6) // 5 + 1 retry
+    expect(traceFile.spans).toHaveLength(10) // 1 session + 3 gens + 6 tools
 
     // Verify all tool spans have correct parent (their generation)
-    const gens = trace.spans.filter((s) => s.kind === "generation")
-    const tools = trace.spans.filter((s) => s.kind === "tool")
+    const gens = traceFile.spans.filter((s) => s.kind === "generation")
+    const tools = traceFile.spans.filter((s) => s.kind === "tool")
 
     // Gen 1 has 0 tools
     const gen1Tools = tools.filter((t) => t.parentSpanId === gens[0]!.spanId)
@@ -496,12 +496,12 @@ describe("Complex span trees", () => {
     expect(errorTool.statusMessage).toBe("Step 3 failed")
 
     // Verify token accumulation
-    expect(trace.summary.totalCost).toBeCloseTo(0.009, 5)
-    expect(trace.summary.tokens.input).toBe(900) // 100 + 500 + 300
-    expect(trace.summary.tokens.output).toBe(350) // 50 + 200 + 100
-    expect(trace.summary.tokens.reasoning).toBe(20) // Only gen 1
-    expect(trace.summary.tokens.cacheRead).toBe(300) // 0 + 100 + 200
-    expect(trace.summary.tokens.cacheWrite).toBe(50) // 0 + 50 + 0
+    expect(traceFile.summary.totalCost).toBeCloseTo(0.009, 5)
+    expect(traceFile.summary.tokens.input).toBe(900) // 100 + 500 + 300
+    expect(traceFile.summary.tokens.output).toBe(350) // 50 + 200 + 100
+    expect(traceFile.summary.tokens.reasoning).toBe(20) // Only gen 1
+    expect(traceFile.summary.tokens.cacheRead).toBe(300) // 0 + 100 + 200
+    expect(traceFile.summary.tokens.cacheWrite).toBe(50) // 0 + 50 + 0
 
     // Gen 2 output should be the text (takes priority over tool summary)
     expect(gens[1]!.output).toBe("Step 3 failed, let me retry.")
@@ -565,21 +565,21 @@ describe("DE attributes on different span types in same trace", () => {
     }, "session")
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // SQL tool has warehouse attrs
-    const sqlTool = trace.spans.find((s) => s.name === "sql_execute")!
+    const sqlTool = traceFile.spans.find((s) => s.name === "sql_execute")!
     expect(sqlTool.attributes![DE.WAREHOUSE.SYSTEM]).toBe("bigquery")
     expect(sqlTool.attributes![DE.WAREHOUSE.CACHE_HIT]).toBe(true)
     expect(sqlTool.attributes![DE.WAREHOUSE.QUERY_ID]).toBe("bq-job-12345")
 
     // dbt tool has dbt + quality attrs
-    const dbtTool = trace.spans.find((s) => s.name === "bash")!
+    const dbtTool = traceFile.spans.find((s) => s.name === "bash")!
     expect(dbtTool.attributes![DE.DBT.COMMAND]).toBe("test")
     expect(dbtTool.attributes![DE.QUALITY.TESTS_PASSED]).toBe(4)
 
     // Session has cost attrs
-    const session = trace.spans.find((s) => s.kind === "session")!
+    const session = traceFile.spans.find((s) => s.kind === "session")!
     expect(session.attributes![DE.COST.TOTAL_USD]).toBe(0.006)
     expect(session.attributes![DE.COST.ATTRIBUTION_TEAM]).toBe("analytics")
 
@@ -636,37 +636,37 @@ describe("Complete pipeline edge cases", () => {
     tracer.setSpanAttributes({ [DE.COST.TOTAL_USD]: 0.012 }, "session")
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Every field should be present
-    expect(trace.version).toBe(2)
-    expect(trace.traceId).toBeTruthy()
-    expect(trace.sessionId).toBe("s-all-fields")
-    expect(trace.startedAt).toBeTruthy()
-    expect(trace.endedAt).toBeTruthy()
-    expect(trace.metadata.model).toBeTruthy()
-    expect(trace.metadata.providerId).toBeTruthy()
-    expect(trace.metadata.agent).toBeTruthy()
-    expect(trace.metadata.variant).toBeTruthy()
-    expect(trace.metadata.prompt).toBeTruthy()
-    expect(trace.metadata.userId).toBeTruthy()
-    expect(trace.metadata.environment).toBeTruthy()
-    expect(trace.metadata.version).toBeTruthy()
-    expect(trace.metadata.tags).toBeTruthy()
+    expect(traceFile.version).toBe(2)
+    expect(traceFile.traceId).toBeTruthy()
+    expect(traceFile.sessionId).toBe("s-all-fields")
+    expect(traceFile.startedAt).toBeTruthy()
+    expect(traceFile.endedAt).toBeTruthy()
+    expect(traceFile.metadata.model).toBeTruthy()
+    expect(traceFile.metadata.providerId).toBeTruthy()
+    expect(traceFile.metadata.agent).toBeTruthy()
+    expect(traceFile.metadata.variant).toBeTruthy()
+    expect(traceFile.metadata.prompt).toBeTruthy()
+    expect(traceFile.metadata.userId).toBeTruthy()
+    expect(traceFile.metadata.environment).toBeTruthy()
+    expect(traceFile.metadata.version).toBeTruthy()
+    expect(traceFile.metadata.tags).toBeTruthy()
 
     // Root span name should be instance_id
-    const root = trace.spans.find((s) => s.kind === "session")!
+    const root = traceFile.spans.find((s) => s.kind === "session")!
     expect(root.name).toBe("inst-1")
 
     // Gen span should have model info
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.model?.modelId).toBeTruthy()
     expect(gen.finishReason).toBe("stop")
     expect(gen.tokens).toBeTruthy()
     expect(gen.cost).toBe(0.01)
 
     // Tool span should have DE + custom attrs
-    const tool = trace.spans.find((s) => s.kind === "tool")!
+    const tool = traceFile.spans.find((s) => s.kind === "tool")!
     expect(tool.tool?.callId).toBe("c1")
     expect(tool.attributes![DE.WAREHOUSE.SYSTEM]).toBe("snowflake")
     expect(tool.attributes!.custom_field).toBe("custom_value")
@@ -676,16 +676,16 @@ describe("Complete pipeline edge cases", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-instant-error", { prompt: "fail immediately" })
     const filePath = await tracer.endTrace("Provider authentication failed")
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    expect(trace.summary.status).toBe("error")
-    expect(trace.summary.error).toBe("Provider authentication failed")
-    expect(trace.summary.totalGenerations).toBe(0)
-    expect(trace.summary.totalToolCalls).toBe(0)
-    expect(trace.summary.totalTokens).toBe(0)
-    expect(trace.summary.totalCost).toBe(0)
-    expect(trace.spans).toHaveLength(1)
-    expect(trace.spans[0]!.status).toBe("error")
-    expect(trace.spans[0]!.statusMessage).toBe("Provider authentication failed")
+    expect(traceFile.summary.status).toBe("error")
+    expect(traceFile.summary.error).toBe("Provider authentication failed")
+    expect(traceFile.summary.totalGenerations).toBe(0)
+    expect(traceFile.summary.totalToolCalls).toBe(0)
+    expect(traceFile.summary.totalTokens).toBe(0)
+    expect(traceFile.summary.totalCost).toBe(0)
+    expect(traceFile.spans).toHaveLength(1)
+    expect(traceFile.spans[0]!.status).toBe("error")
+    expect(traceFile.spans[0]!.statusMessage).toBe("Provider authentication failed")
   })
 })

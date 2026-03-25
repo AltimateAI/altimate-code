@@ -43,7 +43,7 @@ const ZERO_STEP = {
 describe("FileExporter — sessionId robustness", () => {
   test("trace with undefined sessionId doesn't crash", async () => {
     const exporter = new FileExporter(tmpDir)
-    const trace = {
+    const traceFile = {
       version: 2 as const,
       traceId: "t1",
       sessionId: undefined as any,
@@ -56,14 +56,14 @@ describe("FileExporter — sessionId robustness", () => {
         tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
       },
     }
-    const result = await exporter.export(trace)
+    const result = await exporter.export(traceFile)
     expect(result).toBeDefined()
     expect(result).toContain("unknown.json")
   })
 
   test("trace with null sessionId doesn't crash", async () => {
     const exporter = new FileExporter(tmpDir)
-    const trace = {
+    const traceFile = {
       version: 2 as const,
       traceId: "t1",
       sessionId: null as any,
@@ -76,14 +76,14 @@ describe("FileExporter — sessionId robustness", () => {
         tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
       },
     }
-    const result = await exporter.export(trace)
+    const result = await exporter.export(traceFile)
     expect(result).toBeDefined()
     expect(result).toContain("unknown.json")
   })
 
   test("trace with numeric sessionId doesn't crash", async () => {
     const exporter = new FileExporter(tmpDir)
-    const trace = {
+    const traceFile = {
       version: 2 as const,
       traceId: "t1",
       sessionId: 12345 as any,
@@ -97,7 +97,7 @@ describe("FileExporter — sessionId robustness", () => {
       },
     }
     // Should not crash — .replace on a number would throw without the ?? "unknown" guard
-    const result = await exporter.export(trace)
+    const result = await exporter.export(traceFile)
     // May succeed or fail depending on type coercion, but must not crash
     expect(true).toBe(true)
   })
@@ -125,8 +125,8 @@ describe("logToolCall — state.time null/undefined", () => {
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
     expect(filePath).toBeDefined()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const tool = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const tool = traceFile.spans.find((s) => s.kind === "tool")!
     expect(tool).toBeDefined()
     expect(tool.tool!.durationMs).toBe(0)
   })
@@ -204,8 +204,8 @@ describe("logToolCall — tool name edge cases", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     // Should show "unknown" not "null"
     expect(gen.output).toBe("[tool calls: unknown]")
   })
@@ -221,8 +221,8 @@ describe("logToolCall — tool name edge cases", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.name).toBe("unknown")
   })
 })
@@ -236,9 +236,9 @@ describe("startTrace — both instance_id and sessionId edge cases", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("", { instance_id: "", prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Empty || empty = empty, then sessionId sanitized to "unknown"
-    expect(trace.sessionId).toBe("unknown")
+    expect(traceFile.sessionId).toBe("unknown")
   })
 })
 
@@ -251,8 +251,8 @@ describe("endTrace — statusMessage precision", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const root = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const root = traceFile.spans.find((s) => s.kind === "session")!
     // statusMessage should NOT be present (not even as undefined key)
     expect(root.statusMessage).toBeUndefined()
     const rawJson = await fs.readFile(filePath!, "utf-8")
@@ -263,8 +263,8 @@ describe("endTrace — statusMessage precision", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace("something broke")
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const root = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const root = traceFile.spans.find((s) => s.kind === "session")!
     expect(root.statusMessage).toBe("something broke")
   })
 })
@@ -308,8 +308,8 @@ describe("logStepFinish — completely malformed input", () => {
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish({ id: "1", reason: "stop" } as any)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.tokens!.total).toBe(0)
     expect(gen.cost).toBe(0)
   })
@@ -326,8 +326,8 @@ describe("logStepStart — part.id edge cases", () => {
     tracer.logStepStart({ id: null as any })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.name).toBe("generation-unknown")
   })
 
@@ -346,8 +346,8 @@ describe("logStepStart — part.id edge cases", () => {
     tracer.logStepStart({ id: 42 as any })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.name).toBe("generation-42")
   })
 
@@ -383,8 +383,8 @@ describe("logText — thorough edge cases", () => {
     tracer.logText({ text: false as any })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("truefalse")
   })
 
@@ -395,8 +395,8 @@ describe("logText — thorough edge cases", () => {
     tracer.logText({ text: { key: "value" } as any })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("[object Object]")
   })
 
@@ -433,33 +433,33 @@ describe("endTrace — sessionId regex correctness", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("path\\to\\session", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.sessionId).toBe("path_to_session")
-    expect(trace.sessionId).not.toContain("\\")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.sessionId).toBe("path_to_session")
+    expect(traceFile.sessionId).not.toContain("\\")
   })
 
   test("colon in sessionId is replaced", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("C:\\Users\\session:v2", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.sessionId).toBe("C__Users_session_v2")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.sessionId).toBe("C__Users_session_v2")
   })
 
   test("dot in sessionId is replaced", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session.with.dots", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.sessionId).toBe("session_with_dots")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.sessionId).toBe("session_with_dots")
   })
 
   test("hyphens and underscores are preserved", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("my-session_123-abc", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.sessionId).toBe("my-session_123-abc")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.sessionId).toBe("my-session_123-abc")
   })
 })
 
@@ -476,8 +476,8 @@ describe("setSpanAttributes — timing relative to generation lifecycle", () => 
     // currentGenerationSpanId is now null
     tracer.setSpanAttributes({ late: "value" }, "generation")
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     // Should NOT have the attribute since generation was already closed
     expect(gen.attributes?.late).toBeUndefined()
   })
@@ -489,8 +489,8 @@ describe("setSpanAttributes — timing relative to generation lifecycle", () => 
     tracer.setSpanAttributes({ active: "yes" }, "generation")
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.attributes!.active).toBe("yes")
   })
 })
@@ -505,9 +505,9 @@ describe("enrichFromAssistant — wrong types", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: 42 as any, providerID: true as any })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Should coerce via template literal: `${true}/42`
-    expect(trace.metadata.model).toBe("true/42")
+    expect(traceFile.metadata.model).toBe("true/42")
   })
 
   test("null values don't overwrite", async () => {
@@ -520,10 +520,10 @@ describe("enrichFromAssistant — wrong types", () => {
       variant: null as any,
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // null is falsy → none of the if guards pass → originals preserved
-    expect(trace.metadata.model).toBe("original")
-    expect(trace.metadata.agent).toBe("original-agent")
+    expect(traceFile.metadata.model).toBe("original")
+    expect(traceFile.metadata.agent).toBe("original-agent")
   })
 })
 
@@ -544,10 +544,10 @@ describe("JSON validity — every trace must be parseable", () => {
     // NaN/Infinity are passed through setSpanAttributes (they're valid JS values
     // that JSON.stringify converts to null), so the trace should still be valid JSON
     const content = await fs.readFile(filePath!, "utf-8")
-    const trace = JSON.parse(content)
+    const traceFile = JSON.parse(content)
     // JSON.stringify converts NaN/Infinity to null
-    expect(trace.spans[0].attributes.nan_val).toBeNull()
-    expect(trace.spans[0].attributes.inf_val).toBeNull()
+    expect(traceFile.spans[0].attributes.nan_val).toBeNull()
+    expect(traceFile.spans[0].attributes.inf_val).toBeNull()
   })
 
   test("trace with all edge cases combined is valid JSON", async () => {
@@ -589,10 +589,10 @@ describe("JSON validity — every trace must be parseable", () => {
     const filePath = await tracer.endTrace()
     const content = await fs.readFile(filePath!, "utf-8")
     // Must be valid JSON
-    const trace: TraceFile = JSON.parse(content)
-    expect(trace.version).toBe(2)
+    const traceFile: TraceFile = JSON.parse(content)
+    expect(traceFile.version).toBe(2)
     // Re-stringify and re-parse to verify idempotency
-    const reparsed = JSON.parse(JSON.stringify(trace))
+    const reparsed = JSON.parse(JSON.stringify(traceFile))
     expect(reparsed.version).toBe(2)
     expect(reparsed.metadata.prompt).toContain("quotes")
     expect(reparsed.metadata.tags).toContain("tag with spaces")

@@ -36,6 +36,7 @@ We collect the following categories of events:
 | `skill_used` | A skill is loaded (skill name and source — `builtin`, `global`, or `project` — no skill content) |
 | `sql_execute_failure` | A SQL execution fails (warehouse type, query type, error message, PII-masked SQL — no raw values) |
 | `core_failure` | An internal tool error occurs (tool name, category, error class, truncated error message, PII-safe input signature, and optionally masked arguments — no raw values or credentials) |
+| `first_launch` | Fired once on first CLI run after installation. Contains version and is_upgrade flag. No PII. |
 
 Each event includes a timestamp, anonymous session ID, CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
 
@@ -87,6 +88,19 @@ We take your privacy seriously. Altimate Code telemetry **never** collects:
 - AI prompt content or responses
 
 Error messages are truncated to 500 characters and scrubbed of file paths before sending.
+
+### New User Identification
+
+Altimate Code uses two types of anonymous identifiers for analytics, depending on whether you are logged in:
+
+- **Anonymous users (not logged in):** A random UUID is generated using `crypto.randomUUID()` on first run and stored at `~/.altimate/machine-id`. This ID is not tied to your hardware, operating system, or identity — it is purely random and serves only to distinguish one machine from another in aggregate analytics.
+- **Logged-in users (OAuth):** Your email address is SHA-256 hashed before sending. The raw email is never transmitted.
+
+Both identifiers are only sent when telemetry is enabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
+
+### Data Retention
+
+Telemetry data is sent to Azure Application Insights and retained according to [Microsoft's data retention policies](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure). We do not maintain a separate data store. To request deletion of your telemetry data, contact privacy@altimate.ai.
 
 ## Network
 

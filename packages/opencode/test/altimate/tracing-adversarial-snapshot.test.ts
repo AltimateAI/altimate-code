@@ -207,9 +207,9 @@ describe("snapshot — debouncing and atomicity", () => {
     const filePath = await tracer.endTrace()
 
     // File should be valid and complete
-    const trace = JSON.parse(await fs.readFile(filePath!, "utf-8")) as TraceFile
-    expect(trace.summary.status).toBe("completed")
-    expect(trace.summary.totalToolCalls).toBe(1)
+    const traceFile = JSON.parse(await fs.readFile(filePath!, "utf-8")) as TraceFile
+    expect(traceFile.summary.status).toBe("completed")
+    expect(traceFile.summary.totalToolCalls).toBe(1)
   })
 
   test("snapshot after endTrace is a no-op", async () => {
@@ -287,10 +287,10 @@ describe("Worker tracing — session lifecycle simulation", () => {
     await t2.endTrace()
 
     // File should contain cycle 2's data (overwrites cycle 1)
-    const trace = JSON.parse(
+    const traceFile = JSON.parse(
       await fs.readFile(path.join(tmpDir, "session-lifecycle.json"), "utf-8"),
     ) as TraceFile
-    expect(trace.spans.find((s) => s.kind === "tool")!.name).toBe("read") // cycle 2's tool
+    expect(traceFile.spans.find((s) => s.kind === "tool")!.name).toBe("read") // cycle 2's tool
   })
 
   test("tracer eviction when MAX_TRACERS is exceeded", async () => {
@@ -393,9 +393,9 @@ describe("Concurrent snapshot + endTrace race", () => {
 
       // File MUST be valid JSON
       const content = await fs.readFile(filePath!, "utf-8")
-      const trace = JSON.parse(content) as TraceFile
-      expect(trace.version).toBe(2)
-      expect(trace.summary.status).toBe("completed")
+      const traceFile = JSON.parse(content) as TraceFile
+      expect(traceFile.version).toBe(2)
+      expect(traceFile.summary.status).toBe("completed")
     }
   })
 
@@ -638,10 +638,10 @@ describe("Stress test — snapshot interleaving", () => {
     for (let i = 0; i < 10; i++) {
       const idx = Math.floor(Math.random() * successful.length)
       const content = await fs.readFile(successful[idx]!, "utf-8")
-      const trace = JSON.parse(content) as TraceFile
-      expect(trace.version).toBe(2)
-      expect(trace.summary.totalToolCalls).toBe(1)
-      expect(trace.summary.totalGenerations).toBe(1)
+      const traceFile = JSON.parse(content) as TraceFile
+      expect(traceFile.version).toBe(2)
+      expect(traceFile.summary.totalToolCalls).toBe(1)
+      expect(traceFile.summary.totalGenerations).toBe(1)
     }
 
     // Check for leftover .tmp files

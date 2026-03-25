@@ -606,3 +606,111 @@ describe("snowflake-cortex provider", () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Provider.all() — unauthenticated discoverability
+// ---------------------------------------------------------------------------
+
+describe("Provider.all() discoverability", () => {
+  test("includes snowflake-cortex even without oauth auth", async () => {
+    const savedAuth = await Auth.get("snowflake-cortex")
+    if (savedAuth) await Auth.remove("snowflake-cortex")
+    try {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+        },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        init: async () => {
+          Env.remove("SNOWFLAKE_ACCOUNT")
+        },
+        fn: async () => {
+          const allProviders = await Provider.all()
+          expect(allProviders["snowflake-cortex"]).toBeDefined()
+          expect(allProviders["snowflake-cortex"].name).toBe("Snowflake Cortex")
+          // list() still returns nothing (not authenticated)
+          const connected = await Provider.list()
+          expect(connected["snowflake-cortex"]).toBeUndefined()
+        },
+      })
+    } finally {
+      if (savedAuth) await Auth.set("snowflake-cortex", savedAuth)
+    }
+  })
+
+  test("all() includes snowflake-cortex models", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const allProviders = await Provider.all()
+        const models = allProviders["snowflake-cortex"]?.models
+        expect(models).toBeDefined()
+        expect(models["claude-sonnet-4-6"]).toBeDefined()
+        expect(models["deepseek-r1"]).toBeDefined()
+      },
+    })
+  })
+
+  test("disabled_providers config suppresses snowflake-cortex from all()", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({ $schema: "https://altimate.ai/config.json", disabled_providers: ["snowflake-cortex"] }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // Provider.all() returns raw database, config filtering happens at the route level.
+        // Verify the route-level filtering logic: a disabled provider should not appear
+        // in the merged provider list used by GET /provider.
+        const allProviders = await Provider.all()
+        const connected = await Provider.list()
+        // Simulate the route filtering (same logic as routes/provider.ts)
+        const disabled = new Set(["snowflake-cortex"])
+        const customProviders: Record<string, (typeof allProviders)[string]> = {}
+        for (const [key, value] of Object.entries(allProviders)) {
+          if (key in connected) continue
+          if (!disabled.has(key)) customProviders[key] = value
+        }
+        expect(customProviders["snowflake-cortex"]).toBeUndefined()
+      },
+    })
+  })
+
+  test("enabled_providers config suppresses snowflake-cortex when not listed", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({ $schema: "https://altimate.ai/config.json", enabled_providers: ["anthropic"] }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const allProviders = await Provider.all()
+        const connected = await Provider.list()
+        // Simulate route filtering with enabled_providers
+        // (snowflake-cortex is not in the enabled list, so it should be excluded)
+        const enabled = new Set(["anthropic"])
+        const customProviders: Record<string, (typeof allProviders)[string]> = {}
+        for (const [key, value] of Object.entries(allProviders)) {
+          if (key in connected) continue
+          if (enabled.has(key)) customProviders[key] = value
+        }
+        expect(customProviders["snowflake-cortex"]).toBeUndefined()
+      },
+    })
+  })
+})

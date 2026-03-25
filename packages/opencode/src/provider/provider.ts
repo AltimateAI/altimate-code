@@ -1247,6 +1247,9 @@ export namespace Provider {
     return {
       models: languages,
       providers,
+      // altimate_change start — expose full provider database (including unauthenticated custom providers)
+      database,
+      // altimate_change end
       sdk,
       modelLoaders,
       varsLoaders,
@@ -1256,6 +1259,12 @@ export namespace Provider {
   export async function list() {
     return state().then((state) => state.providers)
   }
+
+  // altimate_change start — expose full provider database (including unauthenticated custom providers)
+  export async function all() {
+    return state().then((state) => state.database)
+  }
+  // altimate_change end
 
   async function getSDK(model: Model) {
     try {

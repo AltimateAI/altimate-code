@@ -48,10 +48,10 @@ describe("Trace persistence across sessions", () => {
       expect(listedIds).toContain(sessionId)
     }
 
-    for (const { sessionId, trace } of traces) {
-      expect(trace.metadata.title).toBe(`Session ${sessionId}`)
-      expect(trace.metadata.prompt).toBe(`prompt for ${sessionId}`)
-      expect(trace.summary.status).toBe("completed")
+    for (const { sessionId, trace: traceFile } of traces) {
+      expect(traceFile.metadata.title).toBe(`Session ${sessionId}`)
+      expect(traceFile.metadata.prompt).toBe(`prompt for ${sessionId}`)
+      expect(traceFile.summary.status).toBe("completed")
     }
   })
 
@@ -126,10 +126,10 @@ describe("Trace persistence across sessions", () => {
     expect(exists).toBe(true)
 
     const content = await fs.readFile(expectedFile, "utf-8")
-    const trace = JSON.parse(content) as TraceFile
-    expect(trace.sessionId).toBe(sessionId)
-    expect(trace.metadata.title).toBe("Unique Session")
-    expect(trace.summary.totalTokens).toBeGreaterThan(0)
+    const traceFile = JSON.parse(content) as TraceFile
+    expect(traceFile.sessionId).toBe(sessionId)
+    expect(traceFile.metadata.title).toBe("Unique Session")
+    expect(traceFile.summary.totalTokens).toBeGreaterThan(0)
   })
 
   test("listTraces returns empty array when no traces exist", async () => {

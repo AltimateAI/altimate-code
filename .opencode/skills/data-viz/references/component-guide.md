@@ -392,3 +392,70 @@ const CalloutLabel = ({ viewBox, label, color = "#1e293b" }: { viewBox?: { x: nu
 ```
 
 **Rules:** Never overlap data. Use `position: "insideTopRight"/"insideTopLeft"` on labels. Pair annotations with tooltips — annotation names the event, tooltip shows the value.
+
+---
+
+## Multi-Tab Dashboard — Lazy Chart Initialization
+
+Charts initialized inside a hidden container (`display:none`) render blank. Chart.js, Recharts, and Nivo all read container dimensions at mount time — a hidden container measures as `0×0`.
+
+**Rule: never initialize a chart until its container is visible.**
+
+```js
+// Vanilla JS pattern
+var _inited = {};
+
+function activateTab(name) {
+  // 1. make the tab visible first
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  // 2. then initialize charts — only on first visit
+  if (!_inited[name]) {
+    _inited[name] = true;
+    initChartsFor(name);
+  }
+}
+
+activateTab('overview'); // init the default visible tab on page load
+```
+
+Library-specific notes:
+- **Chart.js**: canvas reads as `0×0` inside `display:none` — bars/lines never appear
+- **Recharts `ResponsiveContainer`**: reads `clientWidth = 0` — chart collapses to nothing
+- **Nivo `Responsive*`**: uses `ResizeObserver` via `useMeasure`/`useDimensions` in `@nivo/core` — initially measures `0×0` when hidden and skips rendering; re-measures and re-renders correctly when container becomes visible, but the initial blank frame can cause a flash
+- **React conditional rendering**: prefer `visibility:hidden` + `position:absolute` over toggling `display:none` if you want charts to stay mounted and pre-rendered
+
+---
+
+## Programmatic Dashboard Generation — Data-Code Separation
+
+When generating a standalone HTML dashboard from a script (Python, shell, etc.), never embed JSON data inside a template string that also contains JavaScript. Curly-brace collisions in f-strings / template literals cause silent JS parse failures that are hard to debug.
+
+**Wrong** — data and JS logic share one f-string, every `{` in JS must be escaped as `{{`:
+
+```python
+html = f"""
+<script>
+  const data = {json.dumps(data)};          // fine
+  const fn = () => {{ return x; }}           // must escape — easy to miss
+  const obj = {{ key: getValue() }};         // one missed escape = blank page
+</script>
+"""
+```
+
+**Right** — separate data from logic entirely:
+
+```python
+# Step 1: write data to its own file — no template string needed
+with open('data.js', 'w') as f:
+    f.write('const DATA = ' + json.dumps(data) + ';')
+
+# Step 2: HTML loads both files; app.js is static and never needs escaping
+```
+
+```html
+<script src="data.js"></script>   <!-- generated, data only -->
+<script src="app.js"></script>    <!-- static, logic only   -->
+```
+
+Benefits: `app.js` is static and independently testable; `data.js` is regenerated without touching logic; no escaping required in either file.

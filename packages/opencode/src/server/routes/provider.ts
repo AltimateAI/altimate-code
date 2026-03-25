@@ -49,8 +49,19 @@ export const ProviderRoutes = lazy(() =>
         }
 
         const connected = await Provider.list()
+        // altimate_change start — include custom providers (e.g. Snowflake Cortex) even when not yet authenticated
+        const allDatabase = await Provider.all()
+        const customProviders: Record<string, Provider.Info> = {}
+        for (const [key, value] of Object.entries(allDatabase)) {
+          if (key in filteredProviders || key in connected) continue
+          if ((enabled ? enabled.has(key) : true) && !disabled.has(key)) {
+            customProviders[key] = value
+          }
+        }
+        // altimate_change end
         const providers = Object.assign(
           mapValues(filteredProviders, (x) => Provider.fromModelsDevProvider(x)),
+          customProviders,
           connected,
         )
         return c.json({

@@ -1,5 +1,5 @@
 /**
- * Tests for data engineering domain-specific trace attributes.
+ * Tests for data engineering domain-specific trace file attributes.
  *
  * Verifies that:
  *   1. Domain attributes are purely optional — traces work without them
@@ -110,8 +110,8 @@ describe("setSpanAttributes — targeting", () => {
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.attributes![DE.WAREHOUSE.SYSTEM]).toBe("snowflake")
     expect(toolSpan.attributes![DE.WAREHOUSE.BYTES_SCANNED]).toBe(1_500_000)
     expect(toolSpan.attributes![DE.WAREHOUSE.ESTIMATED_COST_USD]).toBe(0.003)
@@ -126,8 +126,8 @@ describe("setSpanAttributes — targeting", () => {
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const genSpan = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const genSpan = traceFile.spans.find((s) => s.kind === "generation")!
     expect(genSpan.attributes!.custom).toBe("on-generation")
   })
 
@@ -140,8 +140,8 @@ describe("setSpanAttributes — targeting", () => {
     }, "session")
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const sessionSpan = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const sessionSpan = traceFile.spans.find((s) => s.kind === "session")!
     expect(sessionSpan.attributes![DE.COST.TOTAL_USD]).toBe(0.15)
     expect(sessionSpan.attributes![DE.COST.ATTRIBUTION_PROJECT]).toBe("analytics")
   })
@@ -153,8 +153,8 @@ describe("setSpanAttributes — targeting", () => {
     tracer.setSpanAttributes({ fallthrough: "to-session" })
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const sessionSpan = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const sessionSpan = traceFile.spans.find((s) => s.kind === "session")!
     expect(sessionSpan.attributes!.fallthrough).toBe("to-session")
   })
 })
@@ -180,8 +180,8 @@ describe("setSpanAttributes — graceful degradation", () => {
     }, "session")
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const sessionSpan = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const sessionSpan = traceFile.spans.find((s) => s.kind === "session")!
     expect(sessionSpan.attributes![DE.WAREHOUSE.SYSTEM]).toBe("bigquery")
     expect(DE.WAREHOUSE.BYTES_SCANNED in (sessionSpan.attributes ?? {})).toBe(false)
   })
@@ -194,8 +194,8 @@ describe("setSpanAttributes — graceful degradation", () => {
     }, "session")
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const sessionSpan = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const sessionSpan = traceFile.spans.find((s) => s.kind === "session")!
     expect(sessionSpan.attributes![DE.DBT.MODEL_ERROR]).toBeNull()
   })
 
@@ -205,8 +205,8 @@ describe("setSpanAttributes — graceful degradation", () => {
     tracer.setSpanAttributes({}, "session")
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const sessionSpan = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const sessionSpan = traceFile.spans.find((s) => s.kind === "session")!
     expect(Object.keys(sessionSpan.attributes ?? {}).length).toBe(0)
   })
 
@@ -218,8 +218,8 @@ describe("setSpanAttributes — graceful degradation", () => {
     tracer.setSpanAttributes({ [DE.COST.TOTAL_USD]: 0.05 }, "session")
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const attrs = trace.spans.find((s) => s.kind === "session")!.attributes!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const attrs = traceFile.spans.find((s) => s.kind === "session")!.attributes!
     expect(attrs[DE.WAREHOUSE.SYSTEM]).toBe("snowflake")
     expect(attrs[DE.WAREHOUSE.BYTES_SCANNED]).toBe(5000)
     expect(attrs[DE.COST.TOTAL_USD]).toBe(0.05)
@@ -232,8 +232,8 @@ describe("setSpanAttributes — graceful degradation", () => {
     tracer.setSpanAttributes({ [DE.WAREHOUSE.SYSTEM]: "bigquery" }, "session")
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const attrs = trace.spans.find((s) => s.kind === "session")!.attributes!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const attrs = traceFile.spans.find((s) => s.kind === "session")!.attributes!
     expect(attrs[DE.WAREHOUSE.SYSTEM]).toBe("bigquery")
   })
 
@@ -295,8 +295,8 @@ describe("Real-world data engineering scenarios", () => {
     })
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.attributes![DE.WAREHOUSE.SYSTEM]).toBe("snowflake")
     expect(toolSpan.attributes![DE.WAREHOUSE.BYTES_SCANNED]).toBe(45_000_000)
     expect(toolSpan.attributes![DE.SQL.VALIDATION_VALID]).toBe(true)
@@ -345,15 +345,15 @@ describe("Real-world data engineering scenarios", () => {
     })
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Tool span has dbt-specific attributes
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.attributes![DE.DBT.COMMAND]).toBe("run")
     expect(toolSpan.attributes![DE.DBT.DAG_NODES_EXECUTED]).toBe(2)
 
     // Session has cost attribution
-    const sessionSpan = trace.spans.find((s) => s.kind === "session")!
+    const sessionSpan = traceFile.spans.find((s) => s.kind === "session")!
     expect(sessionSpan.attributes![DE.COST.TOTAL_USD]).toBe(0.058)
   })
 
@@ -380,8 +380,8 @@ describe("Real-world data engineering scenarios", () => {
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.status).toBe("error")
     expect(toolSpan.attributes![DE.SQL.VALIDATION_VALID]).toBe(false)
     expect(toolSpan.attributes![DE.SQL.VALIDATION_ERROR]).toContain("SELCT")
@@ -404,12 +404,12 @@ describe("Real-world data engineering scenarios", () => {
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // No DE attributes — trace is still perfectly valid
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     const deKeys = Object.keys(toolSpan.attributes ?? {}).filter((k) => k.startsWith("de."))
     expect(deKeys).toHaveLength(0)
-    expect(trace.version).toBe(2)
+    expect(traceFile.version).toBe(2)
   })
 
   test("mixed DE and non-DE attributes coexist", async () => {
@@ -435,8 +435,8 @@ describe("Real-world data engineering scenarios", () => {
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const attrs = trace.spans.find((s) => s.kind === "tool")!.attributes!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const attrs = traceFile.spans.find((s) => s.kind === "tool")!.attributes!
     // DE attributes
     expect(attrs[DE.WAREHOUSE.SYSTEM]).toBe("bigquery")
     // Custom attributes

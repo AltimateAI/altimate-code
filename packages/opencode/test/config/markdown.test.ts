@@ -211,6 +211,102 @@ Always structure your responses using clear markdown formatting:
   })
 })
 
+describe("ConfigMarkdown.shell", () => {
+  test("extracts shell commands from template", () => {
+    const template = "Run !`git status` and then !`npm test`"
+    const matches = ConfigMarkdown.shell(template)
+    expect(matches.length).toBe(2)
+    expect(matches[0][1]).toBe("git status")
+    expect(matches[1][1]).toBe("npm test")
+  })
+
+  test("does not match regular backticks without bang", () => {
+    const template = "Use `git status` command"
+    const matches = ConfigMarkdown.shell(template)
+    expect(matches.length).toBe(0)
+  })
+
+  test("does not match empty bang-backtick", () => {
+    const template = "Empty !`` should not match"
+    const matches = ConfigMarkdown.shell(template)
+    expect(matches.length).toBe(0)
+  })
+
+  test("extracts command with pipes and flags", () => {
+    const template = "Run !`cat file.txt | grep error` to find issues"
+    const matches = ConfigMarkdown.shell(template)
+    expect(matches.length).toBe(1)
+    expect(matches[0][1]).toBe("cat file.txt | grep error")
+  })
+})
+
+describe("ConfigMarkdown.fallbackSanitization", () => {
+  test("converts value with colon to block scalar", () => {
+    const input = "---\nurl: https://example.com:8080\n---\nContent"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("url: |-")
+    expect(result).toContain("  https://example.com:8080")
+  })
+
+  test("preserves already double-quoted values with colons", () => {
+    const input = '---\nurl: "https://example.com:8080"\n---\nContent'
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain('"https://example.com:8080"')
+    expect(result).not.toContain("|-")
+  })
+
+  test("preserves already single-quoted values with colons", () => {
+    const input = "---\nurl: 'https://example.com:8080'\n---\nContent"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("'https://example.com:8080'")
+    expect(result).not.toContain("|-")
+  })
+
+  test("passes through content without frontmatter unchanged", () => {
+    const input = "Just some content"
+    expect(ConfigMarkdown.fallbackSanitization(input)).toBe(input)
+  })
+
+  test("preserves comments in frontmatter", () => {
+    const input = "---\n# comment\nname: John\n---\nContent"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("# comment")
+    expect(result).toContain("name: John")
+  })
+
+  test("preserves indented continuation lines", () => {
+    const input = "---\nsummary: >\n  This is multiline\n  content\n---\nBody"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("  This is multiline")
+    expect(result).toContain("  content")
+  })
+
+  test("preserves block scalar indicators", () => {
+    const input = "---\nnotes: |\n  line1\n  line2\n---\nContent"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("notes: |")
+  })
+
+  test("handles empty frontmatter values", () => {
+    const input = "---\nempty:\n---\nContent"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("empty:")
+  })
+
+  test("does not modify content after frontmatter", () => {
+    const input = "---\nname: John\n---\nContent with url: http://example.com:3000"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("Content with url: http://example.com:3000")
+  })
+
+  test("handles CRLF line endings in frontmatter regex", () => {
+    const input = "---\r\nurl: https://example.com:8080\r\n---\r\nContent"
+    const result = ConfigMarkdown.fallbackSanitization(input)
+    expect(result).toContain("url: |-")
+    expect(result).toContain("  https://example.com:8080")
+  })
+})
+
 describe("ConfigMarkdown: frontmatter has weird model id", async () => {
   const result = await ConfigMarkdown.parse(import.meta.dir + "/fixtures/weird-model-id.md")
 

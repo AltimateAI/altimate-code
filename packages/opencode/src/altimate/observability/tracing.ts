@@ -1,5 +1,5 @@
 /**
- * Recap (session tracing) for Altimate CLI.
+ * Session tracing (recording/recap) for Altimate CLI.
  *
  * Trace schema aligned with industry standards (OpenTelemetry GenAI semantic
  * conventions, Arize Phoenix / OpenInference, Langfuse).
@@ -126,7 +126,7 @@ export interface TraceFile {
       cacheRead: number
       cacheWrite: number
     }
-    // altimate_change start — recap: loop detection + post-session summary
+    // altimate_change start — trace: loop detection + post-session summary
     /** Detected tool call loops (same tool+input repeated 3+ times). */
     loops?: Array<{ tool: string; inputHash?: string; count: number; description: string }>
     /** Human-readable session narrative generated at endTrace. */
@@ -174,7 +174,7 @@ export class FileExporter implements TraceExporter {
   async export(trace: TraceFile): Promise<string | undefined> {
     try {
       await fs.mkdir(this.dir, { recursive: true })
-      // Sanitize sessionId for safe file name (defense-in-depth — also sanitized in Recap)
+      // Sanitize sessionId for safe file name (defense-in-depth — also sanitized in Trace)
       const safeId = (trace.sessionId ?? "unknown").replace(/[/\\.:]/g, "_") || "unknown"
       const filePath = path.join(this.dir, `${safeId}.json`)
       await fs.writeFile(filePath, JSON.stringify(trace, null, 2))
@@ -247,14 +247,14 @@ export class HttpExporter implements TraceExporter {
 }
 
 // ---------------------------------------------------------------------------
-// Recap (formerly Tracer)
+// Trace — session recording/recap
 // ---------------------------------------------------------------------------
 
 interface TracerOptions {
   maxFiles?: number
 }
 
-// altimate_change start — recap: helper utilities for loop detection and narrative
+// altimate_change start — trace: helper utilities for loop detection and narrative
 function simpleHash(str: string): string {
   try {
     let hash = 0
@@ -277,11 +277,11 @@ function formatDurationShort(ms: number): string {
 }
 // altimate_change end
 
-export class Recap {
-  // Global active recap — set when a session starts, cleared on end.
-  private static _active: Recap | null = null
-  static get active(): Recap | null { return Recap._active }
-  static setActive(recap: Recap | null) { Recap._active = recap }
+export class Trace {
+  // Global active trace — set when a session starts, cleared on end.
+  private static _active: Trace | null = null
+  static get active(): Trace | null { return Trace._active }
+  static setActive(trace: Trace | null) { Trace._active = trace }
 
   private traceId: string
   private sessionId: string | undefined
@@ -301,7 +301,7 @@ export class Recap {
   private generationCount = 0
   private tokensBreakdown = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
 
-  // altimate_change start — recap: loop detection state
+  // altimate_change start — trace: loop detection state
   private toolCallHistory: Array<{ tool: string; inputHash: string; time: number }> = []
   private loopsDetected: Array<{ tool: string; inputHash: string; count: number; firstSeen: number; lastSeen: number }> = []
   // altimate_change end
@@ -326,16 +326,16 @@ export class Recap {
   }
 
   /**
-   * Create a recap with the default local file exporter.
+   * Create a trace with the default local file exporter.
    */
-  static create(extraExporters: TraceExporter[] = []): Recap {
-    return new Recap([new FileExporter(), ...extraExporters])
+  static create(extraExporters: TraceExporter[] = []): Trace {
+    return new Trace([new FileExporter(), ...extraExporters])
   }
 
   /**
-   * Create a recap with explicit exporters (no defaults).
+   * Create a trace with explicit exporters (no defaults).
    */
-  static withExporters(exporters: TraceExporter[], options?: TracerOptions): Recap {
+  static withExporters(exporters: TraceExporter[], options?: TracerOptions): Trace {
     if (options?.maxFiles != null) {
       for (const exp of exporters) {
         if (exp instanceof FileExporter) {
@@ -345,7 +345,7 @@ export class Recap {
         }
       }
     }
-    return new Recap(exporters)
+    return new Trace(exporters)
   }
 
   /**
@@ -591,7 +591,7 @@ export class Recap {
       })
       this.toolCallCount++
 
-      // altimate_change start — recap: loop detection
+      // altimate_change start — trace: loop detection
       try {
         const inputStr = safeInput != null ? JSON.stringify(safeInput) : ""
         const inputHash = simpleHash(toolName + inputStr)
@@ -622,7 +622,7 @@ export class Recap {
           }
         }
       } catch {
-        // Loop detection must never crash the recap
+        // Loop detection must never crash the trace
       }
       // altimate_change end
 
@@ -847,7 +847,7 @@ export class Recap {
 
     const trace = this.buildTraceFile(error)
 
-    // altimate_change start — recap: post-session summary (narrative, loops, topTools)
+    // altimate_change start — trace: post-session summary (narrative, loops, topTools)
     try {
       // Top tools by call count
       const toolCounts = new Map<string, { count: number; totalDuration: number }>()
@@ -886,7 +886,7 @@ export class Recap {
       const llmStr = this.generationCount > 0 ? `. Made ${this.generationCount} LLM call${this.generationCount > 1 ? "s" : ""}` : ""
       trace.summary.narrative = `${statusPrefix}${llmStr}${toolsStr}.${loopWarning} Total cost: ${costStr}.`
     } catch {
-      // Narrative generation must never crash the recap
+      // Narrative generation must never crash the trace
     }
     // altimate_change end
 
@@ -994,9 +994,13 @@ export class Recap {
   }
 }
 
-// altimate_change start — recap: backward-compat alias (value + type)
-/** @deprecated Use Recap instead */
-export const Tracer = Recap
-/** @deprecated Use Recap instead */
-export type Tracer = Recap
+// altimate_change start — trace: backward-compat aliases
+/** @deprecated Use Trace instead */
+export const Tracer = Trace
+/** @deprecated Use Trace instead */
+export type Tracer = Trace
+/** @deprecated Use Trace instead */
+export const Recap = Trace
+/** @deprecated Use Trace instead */
+export type Recap = Trace
 // altimate_change end

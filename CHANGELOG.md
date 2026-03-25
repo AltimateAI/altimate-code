@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Recap (renamed from Tracer)** — session recap with loop detection and enhanced viewer (#381)
+- **Trace (session recording)** — session trace with loop detection and enhanced viewer (#381)
 - **ESM bundling regression tests** — 9 e2e tests verifying Node can load `altimate-dbt` via symlink, wrapper, and direct invocation paths
 
 ### Testing

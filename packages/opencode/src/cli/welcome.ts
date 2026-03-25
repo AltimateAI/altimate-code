@@ -3,6 +3,9 @@ import path from "path"
 import os from "os"
 import { Installation } from "../installation"
 import { EOL } from "os"
+// altimate_change start — import Telemetry for first_launch event
+import { Telemetry } from "../altimate/telemetry"
+// altimate_change end
 
 const APP_NAME = "altimate-code"
 const MARKER_FILE = ".installed-version"
@@ -36,10 +39,23 @@ export function showWelcomeBannerIfNeeded(): void {
     // Remove marker first to avoid showing twice even if display fails
     fs.unlinkSync(markerPath)
 
-    // altimate_change start — VERSION is already normalized (no "v" prefix)
-    const currentVersion = Installation.VERSION
+    // altimate_change start — use ~/.altimate/machine-id existence as a proxy for upgrade vs fresh install
+    // Since postinstall.mjs always writes the current version to the marker file, we can't reliably
+    // use installedVersion !== currentVersion for release builds. Instead, if machine-id exists,
+    // they've run the CLI before.
+    const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
+    const isUpgrade = fs.existsSync(machineIdPath)
     // altimate_change end
-    const isUpgrade = installedVersion === currentVersion && installedVersion !== "local"
+
+    // altimate_change start — track first launch for new user counting (privacy-safe: only version + machine_id)
+    Telemetry.track({
+      type: "first_launch",
+      timestamp: Date.now(),
+      session_id: "",
+      version: installedVersion,
+      is_upgrade: isUpgrade,
+    })
+    // altimate_change end
 
     if (!isUpgrade) return
 
@@ -51,7 +67,9 @@ export function showWelcomeBannerIfNeeded(): void {
     const reset = "\x1b[0m"
     const bold = "\x1b[1m"
 
-    const v = `altimate-code v${currentVersion} installed`
+    // altimate_change start — use installedVersion (from marker) instead of currentVersion for accurate banner
+    const v = `altimate-code v${installedVersion} installed`
+    // altimate_change end
     const lines = [
       "",
       "  Get started:",

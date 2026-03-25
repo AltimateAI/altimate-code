@@ -45,25 +45,25 @@ describe("Title metadata", () => {
       prompt: "Find and fix the top 10 most expensive queries in Snowflake",
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.title).toBe("Optimize expensive queries")
-    expect(trace.metadata.prompt).toBe("Find and fix the top 10 most expensive queries in Snowflake")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.title).toBe("Optimize expensive queries")
+    expect(traceFile.metadata.prompt).toBe("Find and fix the top 10 most expensive queries in Snowflake")
   })
 
   test("title defaults to undefined when not provided", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.title).toBeUndefined()
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.title).toBeUndefined()
   })
 
   test("empty string title is stored as empty string", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { title: "", prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.title).toBe("")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.title).toBe("")
   })
 
   test("very long title is stored in full (truncation is display-only)", async () => {
@@ -71,9 +71,9 @@ describe("Title metadata", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { title: longTitle, prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.title).toBe(longTitle)
-    expect(trace.metadata.title!.length).toBe(500)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.title).toBe(longTitle)
+    expect(traceFile.metadata.title!.length).toBe(500)
   })
 
   test("title with special characters", async () => {
@@ -83,8 +83,8 @@ describe("Title metadata", () => {
       prompt: "test",
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.title).toBe('Fix "broken" model — stg_orders (🐛)')
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.title).toBe('Fix "broken" model — stg_orders (🐛)')
   })
 })
 
@@ -113,12 +113,12 @@ describe("flushSync — crash recovery", () => {
     tracer.flushSync("SIGINT received")
 
     const filePath = tracer.getTracePath()!
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
 
-    expect(trace.summary.status).toBe("crashed")
-    expect(trace.metadata.title).toBe("Long running task")
+    expect(traceFile.summary.status).toBe("crashed")
+    expect(traceFile.metadata.title).toBe("Long running task")
     // Should have spans from before the crash
-    expect(trace.spans.length).toBeGreaterThanOrEqual(1)
+    expect(traceFile.spans.length).toBeGreaterThanOrEqual(1)
   })
 
   test("flushSync before startTrace is a no-op", () => {
@@ -137,8 +137,8 @@ describe("flushSync — crash recovery", () => {
     // Now flushSync — this overwrites the completed trace with crashed
     tracer.flushSync("late crash")
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.status).toBe("crashed")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.status).toBe("crashed")
   })
 
   test("flushSync with no FileExporter is a no-op", () => {
@@ -156,9 +156,9 @@ describe("flushSync — crash recovery", () => {
 
     tracer.flushSync()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
-    expect(trace.summary.status).toBe("crashed")
-    expect(trace.summary.error).toBe("Process exited before trace completed")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
+    expect(traceFile.summary.status).toBe("crashed")
+    expect(traceFile.summary.error).toBe("Process exited before trace completed")
   })
 
   test("flushSync preserves all accumulated data", async () => {
@@ -188,17 +188,17 @@ describe("flushSync — crash recovery", () => {
     // Crash mid-generation
     tracer.flushSync("SIGTERM")
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
-    expect(trace.summary.status).toBe("crashed")
-    expect(trace.metadata.title).toBe("Preserved trace")
-    expect(trace.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
+    expect(traceFile.summary.status).toBe("crashed")
+    expect(traceFile.metadata.title).toBe("Preserved trace")
+    expect(traceFile.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
     // Completed generation's data should be preserved
-    expect(trace.summary.tokens.input).toBe(1000)
-    expect(trace.summary.totalToolCalls).toBe(1)
-    expect(trace.summary.totalGenerations).toBe(2) // gen 1 finished, gen 2 started
+    expect(traceFile.summary.tokens.input).toBe(1000)
+    expect(traceFile.summary.totalToolCalls).toBe(1)
+    expect(traceFile.summary.totalGenerations).toBe(2) // gen 1 finished, gen 2 started
     // Spans from before crash
-    expect(trace.spans.filter((s) => s.kind === "tool")).toHaveLength(1)
-    expect(trace.spans.filter((s) => s.kind === "generation")).toHaveLength(2)
+    expect(traceFile.spans.filter((s) => s.kind === "tool")).toHaveLength(1)
+    expect(traceFile.spans.filter((s) => s.kind === "generation")).toHaveLength(2)
   })
 })
 
@@ -217,12 +217,12 @@ describe("Initial snapshot from startTrace", () => {
     const exists = await fs.stat(filePath).then(() => true).catch(() => false)
     expect(exists).toBe(true)
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
-    expect(trace.version).toBe(2)
-    expect(trace.sessionId).toBe("s-initial")
-    expect(trace.spans).toHaveLength(1) // Just the session span
-    expect(trace.spans[0]!.kind).toBe("session")
-    expect(trace.summary.status).toBe("completed") // No active generation
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
+    expect(traceFile.version).toBe(2)
+    expect(traceFile.sessionId).toBe("s-initial")
+    expect(traceFile.spans).toHaveLength(1) // Just the session span
+    expect(traceFile.spans[0]!.kind).toBe("session")
+    expect(traceFile.summary.status).toBe("completed") // No active generation
 
     await tracer.endTrace()
   })
@@ -238,11 +238,11 @@ describe("Initial snapshot from startTrace", () => {
     })
     await new Promise((r) => setTimeout(r, 50))
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
-    expect(trace.metadata.title).toBe("My Task")
-    expect(trace.metadata.prompt).toBe("Do things")
-    expect(trace.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
-    expect(trace.metadata.tags).toEqual(["test"])
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
+    expect(traceFile.metadata.title).toBe("My Task")
+    expect(traceFile.metadata.prompt).toBe("Do things")
+    expect(traceFile.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
+    expect(traceFile.metadata.tags).toEqual(["test"])
 
     await tracer.endTrace()
   })
@@ -262,7 +262,7 @@ describe("Trace sorting", () => {
     ]
 
     for (const t of traces) {
-      const trace: TraceFile = {
+      const traceFile: TraceFile = {
         version: 2,
         traceId: `t-${t.sessionId}`,
         sessionId: t.sessionId,
@@ -275,19 +275,19 @@ describe("Trace sorting", () => {
           tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
         },
       }
-      await fs.writeFile(path.join(tmpDir, `${t.sessionId}.json`), JSON.stringify(trace))
+      await fs.writeFile(path.join(tmpDir, `${t.sessionId}.json`), JSON.stringify(traceFile))
     }
 
     // Read and sort like listTraces does
     const files = await fs.readdir(tmpDir)
-    const loaded: Array<{ sessionId: string; trace: TraceFile }> = []
+    const loaded: Array<{ sessionId: string; traceFile: TraceFile }> = []
     for (const file of files) {
       if (!file.endsWith(".json")) continue
       const content = await fs.readFile(path.join(tmpDir, file), "utf-8")
-      const trace = JSON.parse(content) as TraceFile
-      loaded.push({ sessionId: trace.sessionId, trace })
+      const traceFile = JSON.parse(content) as TraceFile
+      loaded.push({ sessionId: traceFile.sessionId, traceFile })
     }
-    loaded.sort((a, b) => new Date(b.trace.startedAt).getTime() - new Date(a.trace.startedAt).getTime())
+    loaded.sort((a, b) => new Date(b.traceFile.startedAt).getTime() - new Date(a.traceFile.startedAt).getTime())
 
     expect(loaded[0]!.sessionId).toBe("newest")
     expect(loaded[1]!.sessionId).toBe("middle")
@@ -302,7 +302,7 @@ describe("Trace sorting", () => {
     ]
 
     for (const t of traces) {
-      const trace: TraceFile = {
+      const traceFile: TraceFile = {
         version: 2,
         traceId: `t-${t.sessionId}`,
         sessionId: t.sessionId,
@@ -315,19 +315,19 @@ describe("Trace sorting", () => {
           tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
         },
       }
-      await fs.writeFile(path.join(tmpDir, `${t.sessionId}.json`), JSON.stringify(trace))
+      await fs.writeFile(path.join(tmpDir, `${t.sessionId}.json`), JSON.stringify(traceFile))
     }
 
     const files = await fs.readdir(tmpDir)
-    const loaded: Array<{ sessionId: string; trace: TraceFile }> = []
+    const loaded: Array<{ sessionId: string; traceFile: TraceFile }> = []
     for (const file of files) {
       if (!file.endsWith(".json")) continue
       const content = await fs.readFile(path.join(tmpDir, file), "utf-8")
-      const trace = JSON.parse(content) as TraceFile
-      loaded.push({ sessionId: trace.sessionId, trace })
+      const traceFile = JSON.parse(content) as TraceFile
+      loaded.push({ sessionId: traceFile.sessionId, traceFile })
     }
     // Should not throw even with invalid date — NaN from new Date("not-a-date")
-    loaded.sort((a, b) => new Date(b.trace.startedAt).getTime() - new Date(a.trace.startedAt).getTime())
+    loaded.sort((a, b) => new Date(b.traceFile.startedAt).getTime() - new Date(a.traceFile.startedAt).getTime())
 
     // Invalid date sorts to the end (NaN comparisons return false)
     expect(loaded).toHaveLength(3)
@@ -381,10 +381,10 @@ describe("Format function edge cases", () => {
       const tracer = Recap.withExporters([new FileExporter(tmpDir)])
       tracer.startTrace(`dur-${dur}`, { prompt: "test" })
       const filePath = await tracer.endTrace()
-      const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+      const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
       // Duration should be a non-negative number
-      expect(trace.summary.duration).toBeGreaterThanOrEqual(0)
-      expect(Number.isFinite(trace.summary.duration)).toBe(true)
+      expect(traceFile.summary.duration).toBeGreaterThanOrEqual(0)
+      expect(Number.isFinite(traceFile.summary.duration)).toBe(true)
     }
   })
 
@@ -399,8 +399,8 @@ describe("Format function edge cases", () => {
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       })
       const filePath = await tracer.endTrace()
-      const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-      expect(Number.isFinite(trace.summary.totalCost)).toBe(true)
+      const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+      expect(Number.isFinite(traceFile.summary.totalCost)).toBe(true)
     }
   })
 })
@@ -423,8 +423,8 @@ describe("Partial ID matching", () => {
     const files = await fs.readdir(tmpDir)
     const traces = await Promise.all(
       files.filter((f) => f.endsWith(".json")).map(async (file) => {
-        const trace = JSON.parse(await fs.readFile(path.join(tmpDir, file), "utf-8")) as TraceFile
-        return { sessionId: trace.sessionId, file, trace }
+        const traceFile = JSON.parse(await fs.readFile(path.join(tmpDir, file), "utf-8")) as TraceFile
+        return { sessionId: traceFile.sessionId, file, traceFile }
       }),
     )
 
@@ -460,8 +460,8 @@ describe("Partial ID matching", () => {
     const files = await fs.readdir(tmpDir)
     const traces = await Promise.all(
       files.filter((f) => f.endsWith(".json")).map(async (file) => {
-        const trace = JSON.parse(await fs.readFile(path.join(tmpDir, file), "utf-8")) as TraceFile
-        return { sessionId: trace.sessionId, file, trace }
+        const traceFile = JSON.parse(await fs.readFile(path.join(tmpDir, file), "utf-8")) as TraceFile
+        return { sessionId: traceFile.sessionId, file, traceFile }
       }),
     )
 
@@ -470,7 +470,7 @@ describe("Partial ID matching", () => {
       t.sessionId === "ses_abc" || t.sessionId.startsWith("ses_abc") || t.file.startsWith("ses_abc"),
     )
     expect(match).toBeDefined()
-    expect(match!.trace.metadata.title).toBe("Found by prefix")
+    expect(match!.traceFile.metadata.title).toBe("Found by prefix")
   })
 })
 
@@ -488,9 +488,9 @@ describe("flushSync — multiple calls", () => {
     tracer.flushSync("crash 2")
     tracer.flushSync("crash 3")
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
     // Last flushSync wins
-    expect(trace.summary.status).toBe("crashed")
+    expect(traceFile.summary.status).toBe("crashed")
   })
 
   test("flushSync then endTrace — endTrace overwrites crashed status", async () => {
@@ -502,9 +502,9 @@ describe("flushSync — multiple calls", () => {
 
     // But actually the process survived — endTrace completes normally
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // endTrace should overwrite with "completed"
-    expect(trace.summary.status).toBe("completed")
+    expect(traceFile.summary.status).toBe("completed")
   })
 })
 
@@ -648,11 +648,11 @@ describe("Crash recovery — data integrity", () => {
     // Crash mid-generation
     tracer.flushSync("SIGKILL")
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
-    expect(trace.summary.status).toBe("crashed")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8"))
+    expect(traceFile.summary.status).toBe("crashed")
     // All 5 tools should be present
-    expect(trace.spans.filter((s) => s.kind === "tool")).toHaveLength(5)
-    expect(trace.summary.totalToolCalls).toBe(5)
+    expect(traceFile.spans.filter((s) => s.kind === "tool")).toHaveLength(5)
+    expect(traceFile.summary.totalToolCalls).toBe(5)
   })
 
   test("crashed trace can be viewed without errors", async () => {
@@ -667,19 +667,19 @@ describe("Crash recovery — data integrity", () => {
 
     const filePath = tracer.getTracePath()!
     const content = await fs.readFile(filePath, "utf-8")
-    const trace: TraceFile = JSON.parse(content)
+    const traceFile: TraceFile = JSON.parse(content)
 
     // All required fields should be present for the viewer
-    expect(trace.version).toBe(2)
-    expect(trace.traceId).toBeTruthy()
-    expect(trace.sessionId).toBeTruthy()
-    expect(trace.startedAt).toBeTruthy()
-    expect(trace.endedAt).toBeTruthy()
-    expect(trace.metadata).toBeDefined()
-    expect(trace.spans).toBeDefined()
-    expect(trace.summary).toBeDefined()
-    expect(trace.summary.tokens).toBeDefined()
-    expect(trace.summary.status).toBe("crashed")
-    expect(trace.metadata.title).toBe("Crashed but viewable")
+    expect(traceFile.version).toBe(2)
+    expect(traceFile.traceId).toBeTruthy()
+    expect(traceFile.sessionId).toBeTruthy()
+    expect(traceFile.startedAt).toBeTruthy()
+    expect(traceFile.endedAt).toBeTruthy()
+    expect(traceFile.metadata).toBeDefined()
+    expect(traceFile.spans).toBeDefined()
+    expect(traceFile.summary).toBeDefined()
+    expect(traceFile.summary.tokens).toBeDefined()
+    expect(traceFile.summary.status).toBe("crashed")
+    expect(traceFile.metadata.title).toBe("Crashed but viewable")
   })
 })

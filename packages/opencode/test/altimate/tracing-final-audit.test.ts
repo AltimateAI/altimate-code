@@ -45,8 +45,8 @@ describe("startTrace — instance_id handling", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session-123", { instance_id: "run-456", prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const root = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const root = traceFile.spans.find((s) => s.kind === "session")!
     expect(root.name).toBe("run-456")
   })
 
@@ -54,8 +54,8 @@ describe("startTrace — instance_id handling", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session-123", { instance_id: "", prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const root = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const root = traceFile.spans.find((s) => s.kind === "session")!
     // Empty string is falsy, so || falls through to sessionId
     expect(root.name).toBe("session-123")
   })
@@ -64,8 +64,8 @@ describe("startTrace — instance_id handling", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("session-123", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const root = trace.spans.find((s) => s.kind === "session")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const root = traceFile.spans.find((s) => s.kind === "session")!
     expect(root.name).toBe("session-123")
   })
 })
@@ -80,9 +80,9 @@ describe("enrichFromAssistant — providerID edge cases", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: "claude-sonnet" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // providerID is undefined, so model = "/claude-sonnet"
-    expect(trace.metadata.model).toBe("/claude-sonnet")
+    expect(traceFile.metadata.model).toBe("/claude-sonnet")
   })
 
   test("both providerID and modelID set produces clean model string", async () => {
@@ -90,8 +90,8 @@ describe("enrichFromAssistant — providerID edge cases", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.enrichFromAssistant({ modelID: "claude-sonnet", providerID: "anthropic" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.metadata.model).toBe("anthropic/claude-sonnet")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.metadata.model).toBe("anthropic/claude-sonnet")
   })
 
   test("only providerID set (no modelID) does not update model", async () => {
@@ -99,10 +99,10 @@ describe("enrichFromAssistant — providerID edge cases", () => {
     tracer.startTrace("s1", { model: "original", prompt: "test" })
     tracer.enrichFromAssistant({ providerID: "openai" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // modelID is falsy, so the model field isn't updated
-    expect(trace.metadata.model).toBe("original")
-    expect(trace.metadata.providerId).toBe("openai")
+    expect(traceFile.metadata.model).toBe("original")
+    expect(traceFile.metadata.providerId).toBe("openai")
   })
 })
 
@@ -122,8 +122,8 @@ describe("logStepFinish — null/undefined tokens object", () => {
       tokens: null as any,
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     // Should gracefully default everything to 0
     expect(gen.tokens!.total).toBe(0)
     expect(gen.cost).toBe(0.01)
@@ -154,10 +154,10 @@ describe("logStepFinish — null/undefined tokens object", () => {
       tokens: { input: 100, output: 50, reasoning: 10, cache: null as any },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.tokens.input).toBe(100)
-    expect(trace.summary.tokens.cacheRead).toBe(0)
-    expect(trace.summary.tokens.cacheWrite).toBe(0)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.tokens.input).toBe(100)
+    expect(traceFile.summary.tokens.cacheRead).toBe(0)
+    expect(traceFile.summary.tokens.cacheWrite).toBe(0)
   })
 })
 
@@ -177,8 +177,8 @@ describe("logToolCall — tool name edge cases", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.name).toBe("unknown")
   })
 
@@ -198,8 +198,8 @@ describe("logToolCall — tool name edge cases", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.input).toBe("just a string")
   })
 
@@ -219,8 +219,8 @@ describe("logToolCall — tool name edge cases", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const toolSpan = trace.spans.find((s) => s.kind === "tool")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const toolSpan = traceFile.spans.find((s) => s.kind === "tool")!
     expect(toolSpan.input).toBe(42)
   })
 
@@ -257,8 +257,8 @@ describe("logText — null/undefined text", () => {
     tracer.logText({ text: "real text" })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("real text")
   })
 
@@ -269,8 +269,8 @@ describe("logText — null/undefined text", () => {
     tracer.logText({ text: undefined as any })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     // No text was added, so output falls through to the tool calls branch
     expect(gen.output).toBeUndefined()
   })
@@ -282,8 +282,8 @@ describe("logText — null/undefined text", () => {
     tracer.logText({ text: 42 as any })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("42")
   })
 })
@@ -301,8 +301,8 @@ describe("setSpanAttributes — non-serializable values", () => {
       normal: "value",
     }, "session")
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const attrs = trace.spans.find((s) => s.kind === "session")!.attributes!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const attrs = traceFile.spans.find((s) => s.kind === "session")!.attributes!
     expect(attrs.normal).toBe("value")
     // Function should be stringified since JSON.stringify returns undefined for functions
     expect(typeof attrs.callback).toBe("string")
@@ -315,8 +315,8 @@ describe("setSpanAttributes — non-serializable values", () => {
     circ.self = circ
     tracer.setSpanAttributes({ circ, safe: "ok" }, "session")
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const attrs = trace.spans.find((s) => s.kind === "session")!.attributes!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const attrs = traceFile.spans.find((s) => s.kind === "session")!.attributes!
     expect(attrs.safe).toBe("ok")
     // Circular ref should be caught and stringified
     expect(typeof attrs.circ).toBe("string")
@@ -327,8 +327,8 @@ describe("setSpanAttributes — non-serializable values", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.setSpanAttributes({ big: BigInt(999) }, "session")
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const attrs = trace.spans.find((s) => s.kind === "session")!.attributes!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const attrs = traceFile.spans.find((s) => s.kind === "session")!.attributes!
     expect(attrs.big).toBe("999")
   })
 })
@@ -343,9 +343,9 @@ describe("setSpanAttributes — tool targeting edge cases", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.setSpanAttributes({ key: "val" }, "tool")
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Session span should NOT have the attribute (it was targeted to tool)
-    const session = trace.spans.find((s) => s.kind === "session")!
+    const session = traceFile.spans.find((s) => s.kind === "session")!
     expect(session.attributes?.key).toBeUndefined()
   })
 
@@ -366,9 +366,9 @@ describe("setSpanAttributes — tool targeting edge cases", () => {
     tracer.setSpanAttributes({ target: "should-be-on-second" })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    const tools = trace.spans.filter((s) => s.kind === "tool")
+    const tools = traceFile.spans.filter((s) => s.kind === "tool")
     expect(tools[0]!.attributes?.target).toBeUndefined()
     expect(tools[1]!.attributes?.target).toBe("should-be-on-second")
   })
@@ -383,25 +383,25 @@ describe("sessionId sanitization", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("세션-αβγ-会议", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Unicode chars are safe for file names, only /\.: are replaced
-    expect(trace.sessionId).toBe("세션-αβγ-会议")
+    expect(traceFile.sessionId).toBe("세션-αβγ-会议")
   })
 
   test("session ID with only unsafe chars becomes all underscores", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("/.\\:.", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.sessionId).toBe("_____")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.sessionId).toBe("_____")
   })
 
   test("session ID with mixed safe/unsafe chars", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("project:env/session.123", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.sessionId).toBe("project_env_session_123")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.sessionId).toBe("project_env_session_123")
   })
 })
 
@@ -441,7 +441,7 @@ describe("withExporters — maxFiles edge cases", () => {
 describe("FileExporter — sessionId in TraceFile", () => {
   test("empty sessionId in trace file", async () => {
     const exporter = new FileExporter(tmpDir)
-    const trace: TraceFile = {
+    const traceFile: TraceFile = {
       version: 2,
       traceId: "t1",
       sessionId: "",
@@ -454,7 +454,7 @@ describe("FileExporter — sessionId in TraceFile", () => {
         tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
       },
     }
-    const result = await exporter.export(trace)
+    const result = await exporter.export(traceFile)
     expect(result).toBeDefined()
     // Should create a file named ".json" (empty prefix)
     expect(result).toContain(".json")
@@ -462,7 +462,7 @@ describe("FileExporter — sessionId in TraceFile", () => {
 
   test("sessionId with slashes in trace file is sanitized by exporter", async () => {
     const exporter = new FileExporter(tmpDir)
-    const trace: TraceFile = {
+    const traceFile: TraceFile = {
       version: 2,
       traceId: "t1",
       sessionId: "../../etc/passwd",
@@ -475,7 +475,7 @@ describe("FileExporter — sessionId in TraceFile", () => {
         tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
       },
     }
-    const result = await exporter.export(trace)
+    const result = await exporter.export(traceFile)
     expect(result).toBeDefined()
     // Must be inside tmpDir
     expect(result!.startsWith(tmpDir)).toBe(true)
@@ -506,9 +506,9 @@ describe("Generation span — input from previous tool results", () => {
     tracer.logStepFinish(ZERO_STEP)
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    const gens = trace.spans.filter((s) => s.kind === "generation")
+    const gens = traceFile.spans.filter((s) => s.kind === "generation")
     // First generation has no input (no pending results at that point)
     expect(gens[0]!.input).toBeUndefined()
     // Second generation has the bash tool result as input
@@ -532,8 +532,8 @@ describe("Generation span — input from previous tool results", () => {
     tracer.logStepFinish(ZERO_STEP)
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen2 = trace.spans.filter((s) => s.kind === "generation")[1]!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen2 = traceFile.spans.filter((s) => s.kind === "generation")[1]!
     expect(gen2.input).toContain("[bash]")
     expect(gen2.input).toContain("error: Permission denied")
   })
@@ -556,8 +556,8 @@ describe("Generation output composition", () => {
     tracer.logText({ text: "Here is my analysis." })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     // Text wins over tool call summary
     expect(gen.output).toBe("Here is my analysis.")
   })
@@ -574,8 +574,8 @@ describe("Generation output composition", () => {
     tracer.logText({ text: "" })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     // Empty string is falsy, so it falls through to tool call summary
     expect(gen.output).toBe("[tool calls: read]")
   })
@@ -586,8 +586,8 @@ describe("Generation output composition", () => {
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBeUndefined()
   })
 
@@ -600,8 +600,8 @@ describe("Generation output composition", () => {
     tracer.logText({ text: "Part 3." })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("Part 1. Part 2. Part 3.")
   })
 })
@@ -624,7 +624,7 @@ describe("HttpExporter — trace with problematic attributes", () => {
     try {
       // Build a trace that has a function in span attributes
       // (setSpanAttributes now catches this, but test the HttpExporter path too)
-      const trace: TraceFile = {
+      const traceFile: TraceFile = {
         version: 2,
         traceId: "t1",
         sessionId: "s1",
@@ -647,7 +647,7 @@ describe("HttpExporter — trace with problematic attributes", () => {
       }
 
       const exporter = new HttpExporter("test", `http://localhost:${server.port}`)
-      const result = await exporter.export(trace)
+      const result = await exporter.export(traceFile)
       expect(receivedBody).toBeTruthy()
       // Should be valid JSON
       JSON.parse(receivedBody)
@@ -666,11 +666,11 @@ describe("endTrace — error string variations", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace("")
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // Empty string is falsy, so ...(error && { error }) won't add it
     // But the status check is `error ? "error" : "completed"`
     // Empty string is falsy, so status should be "completed"
-    expect(trace.summary.status).toBe("completed")
+    expect(traceFile.summary.status).toBe("completed")
   })
 
   test("very long error string", async () => {
@@ -678,17 +678,17 @@ describe("endTrace — error string variations", () => {
     tracer.startTrace("s1", { prompt: "test" })
     const longError = "Error: " + "x".repeat(100000)
     const filePath = await tracer.endTrace(longError)
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.status).toBe("error")
-    expect(trace.summary.error!.length).toBe(longError.length)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.status).toBe("error")
+    expect(traceFile.summary.error!.length).toBe(longError.length)
   })
 
   test("error with newlines and special chars", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace("Line 1\nLine 2\tTabbed\r\nWindows line")
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(trace.summary.error).toContain("Line 1\nLine 2")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(traceFile.summary.error).toContain("Line 1\nLine 2")
   })
 })
 
@@ -701,9 +701,9 @@ describe("Structural invariants", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
     // UUIDv7 format: 8-4-4-4-12 hex digits
-    expect(trace.traceId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    expect(traceFile.traceId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   })
 
   test("all span IDs are valid UUIDv7", async () => {
@@ -716,9 +716,9 @@ describe("Structural invariants", () => {
     })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    for (const span of trace.spans) {
+    for (const span of traceFile.spans) {
       expect(span.spanId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
       if (span.parentSpanId) {
         expect(span.parentSpanId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
@@ -733,8 +733,8 @@ describe("Structural invariants", () => {
     tracer.logStepStart({ id: "1" })
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    expect(new Date(trace.endedAt!).getTime()).toBeGreaterThanOrEqual(new Date(trace.startedAt).getTime())
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    expect(new Date(traceFile.endedAt!).getTime()).toBeGreaterThanOrEqual(new Date(traceFile.startedAt).getTime())
   })
 
   test("summary duration matches startedAt/endedAt difference", async () => {
@@ -742,10 +742,10 @@ describe("Structural invariants", () => {
     tracer.startTrace("s1", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50))
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const timeDiff = new Date(trace.endedAt!).getTime() - new Date(trace.startedAt).getTime()
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const timeDiff = new Date(traceFile.endedAt!).getTime() - new Date(traceFile.startedAt).getTime()
     // Duration should be close to the time diff (within a few ms)
-    expect(Math.abs(trace.summary.duration - timeDiff)).toBeLessThan(50)
+    expect(Math.abs(traceFile.summary.duration - timeDiff)).toBeLessThan(50)
   })
 
   test("summary totals are consistent with span data", async () => {
@@ -774,29 +774,29 @@ describe("Structural invariants", () => {
       tokens: { input: 200, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
     })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Tool counts
-    const toolSpans = trace.spans.filter((s) => s.kind === "tool")
-    expect(trace.summary.totalToolCalls).toBe(toolSpans.length)
+    const toolSpans = traceFile.spans.filter((s) => s.kind === "tool")
+    expect(traceFile.summary.totalToolCalls).toBe(toolSpans.length)
 
     // Generation counts
-    const genSpans = trace.spans.filter((s) => s.kind === "generation")
-    expect(trace.summary.totalGenerations).toBe(genSpans.length)
+    const genSpans = traceFile.spans.filter((s) => s.kind === "generation")
+    expect(traceFile.summary.totalGenerations).toBe(genSpans.length)
 
     // Token totals = sum of all generation tokens
     const genTokenTotals = genSpans.map((g) => g.tokens?.total ?? 0).reduce((a, b) => a + b, 0)
-    expect(trace.summary.totalTokens).toBe(genTokenTotals)
+    expect(traceFile.summary.totalTokens).toBe(genTokenTotals)
 
     // Cost totals = sum of all generation costs
     const genCosts = genSpans.map((g) => g.cost ?? 0).reduce((a, b) => a + b, 0)
-    expect(trace.summary.totalCost).toBeCloseTo(genCosts, 10)
+    expect(traceFile.summary.totalCost).toBeCloseTo(genCosts, 10)
 
     // Token breakdown should equal sum of per-generation breakdowns
-    expect(trace.summary.tokens.input).toBe(300) // 100 + 200
-    expect(trace.summary.tokens.output).toBe(150) // 50 + 100
-    expect(trace.summary.tokens.reasoning).toBe(10)
-    expect(trace.summary.tokens.cacheRead).toBe(20)
-    expect(trace.summary.tokens.cacheWrite).toBe(5)
+    expect(traceFile.summary.tokens.input).toBe(300) // 100 + 200
+    expect(traceFile.summary.tokens.output).toBe(150) // 50 + 100
+    expect(traceFile.summary.tokens.reasoning).toBe(10)
+    expect(traceFile.summary.tokens.cacheRead).toBe(20)
+    expect(traceFile.summary.tokens.cacheWrite).toBe(5)
   })
 })

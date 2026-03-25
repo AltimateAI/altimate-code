@@ -11,8 +11,8 @@ import { createOpencodeClient, type Event } from "@opencode-ai/sdk/v2"
 import type { BunWebSocketData } from "hono/bun"
 import { Flag } from "@/flag/flag"
 import { setTimeout as sleep } from "node:timers/promises"
-// altimate_change start — recap: tracing in TUI
-import { Recap, FileExporter, HttpExporter, type TraceExporter } from "@/altimate/observability/tracing"
+// altimate_change start — trace: session tracing in TUI
+import { Trace, FileExporter, HttpExporter, type TraceExporter } from "@/altimate/observability/tracing"
 // altimate_change end
 
 await Log.init({
@@ -47,10 +47,10 @@ const eventStream = {
   abort: undefined as AbortController | undefined,
 }
 
-// altimate_change start — recap: per-session recaps
-const sessionRecaps = new Map<string, Recap>()
+// altimate_change start — trace: per-session traces
+const sessionTraces = new Map<string, Trace>()
 const sessionUserMsgIds = new Map<string, Set<string>>() // Per-session user message IDs (cleaned up on session end)
-const MAX_RECAPS = 100
+const MAX_TRACES = 100
 
 // Cached tracing config — loaded once at first use
 let tracingConfigLoaded = false
@@ -79,27 +79,27 @@ async function loadTracingConfig() {
 }
 // altimate_change end
 
-// altimate_change start — recap: renamed getOrCreateTracer → getOrCreateRecap
-function getOrCreateRecap(sessionID: string): Recap | null {
+// altimate_change start — trace: get or create per-session trace
+function getOrCreateTrace(sessionID: string): Trace | null {
   if (!sessionID || !tracingEnabled) return null
-  if (sessionRecaps.has(sessionID)) return sessionRecaps.get(sessionID)!
+  if (sessionTraces.has(sessionID)) return sessionTraces.get(sessionID)!
   try {
-    if (sessionRecaps.size >= MAX_RECAPS) {
-      const oldest = sessionRecaps.keys().next().value
+    if (sessionTraces.size >= MAX_TRACES) {
+      const oldest = sessionTraces.keys().next().value
       if (oldest) {
-        Log.Default.warn(`[tracing] Evicting recap for session ${oldest} — ${MAX_RECAPS} concurrent sessions reached`)
-        sessionRecaps.get(oldest)?.endTrace().catch(() => {})
-        sessionRecaps.delete(oldest)
+        Log.Default.warn(`[tracing] Evicting trace for session ${oldest} — ${MAX_TRACES} concurrent sessions reached`)
+        sessionTraces.get(oldest)?.endTrace().catch(() => {})
+        sessionTraces.delete(oldest)
         sessionUserMsgIds.delete(oldest)
       }
     }
-    const recap = tracingExporters
-      ? Recap.withExporters([...tracingExporters], { maxFiles: tracingMaxFiles })
-      : Recap.create()
-    recap.startTrace(sessionID, {})
-    Recap.setActive(recap)
-    sessionRecaps.set(sessionID, recap)
-    return recap
+    const trace = tracingExporters
+      ? Trace.withExporters([...tracingExporters], { maxFiles: tracingMaxFiles })
+      : Trace.create()
+    trace.startTrace(sessionID, {})
+    Trace.setActive(trace)
+    sessionTraces.set(sessionID, trace)
+    return trace
   } catch {
     return null
   }
@@ -108,6 +108,13 @@ function getOrCreateRecap(sessionID: string): Recap | null {
 
 const startEventStream = (input: { directory: string; workspaceID?: string }) => {
   if (eventStream.abort) eventStream.abort.abort()
+  // Clear stale per-stream trace state before starting a new stream instance
+  for (const [, trace] of sessionTraces) {
+    void trace.endTrace().catch(() => {})
+  }
+  sessionTraces.clear()
+  sessionUserMsgIds.clear()
+
   const abort = new AbortController()
   eventStream.abort = abort
   const signal = abort.signal
@@ -146,7 +153,7 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
       }
 
       for await (const event of events.stream) {
-        // altimate_change start — recap: feed events to per-session recap
+        // altimate_change start — trace: feed events to per-session trace
         try {
           if (event.type === "message.updated") {
             const info = (event as any).properties?.info
@@ -163,20 +170,20 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
               }
             }
             if (resolvedSessionID) {
-              // Create recap eagerly on user message (arrives before part events)
-              const recap = sessionRecaps.get(resolvedSessionID) ?? (info.role === "user" ? getOrCreateRecap(resolvedSessionID) : null)
+              // Create trace eagerly on user message (arrives before part events)
+              const trace = sessionTraces.get(resolvedSessionID) ?? (info.role === "user" ? getOrCreateTrace(resolvedSessionID) : null)
               if (info.role === "user") {
                 if (info.id) {
                   if (!sessionUserMsgIds.has(resolvedSessionID)) sessionUserMsgIds.set(resolvedSessionID, new Set())
                   sessionUserMsgIds.get(resolvedSessionID)!.add(info.id)
                 }
-                if (recap) {
+                if (trace) {
                   const title = (info as any).summary?.title || (info as any).summary?.body
-                  if (title) recap.setTitle(String(title).slice(0, 80), String(title))
+                  if (title) trace.setTitle(String(title).slice(0, 80), String(title))
                 }
               }
               if (info.role === "assistant") {
-                const r = recap ?? getOrCreateRecap(resolvedSessionID)
+                const r = trace ?? getOrCreateTrace(resolvedSessionID)
                 r?.enrichFromAssistant({
                   modelID: info.modelID,
                   providerID: info.providerID,
@@ -187,56 +194,56 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
             }
           }
           // altimate_change end
-          // altimate_change start — recap: renamed tracer→recap, sessionTracers→sessionRecaps in part events
+          // altimate_change start — trace: part events
           if (event.type === "message.part.updated") {
             const part = (event as any).properties?.part
             if (part) {
-              // Create recap on first event for this session (lazy creation)
-              const recap = sessionRecaps.get(part.sessionID) ?? getOrCreateRecap(part.sessionID)
-              if (recap) {
-                if (part.type === "step-start") recap.logStepStart(part)
-                if (part.type === "step-finish") recap.logStepFinish(part)
+              // Create trace on first event for this session (lazy creation)
+              const trace = sessionTraces.get(part.sessionID) ?? getOrCreateTrace(part.sessionID)
+              if (trace) {
+                if (part.type === "step-start") trace.logStepStart(part)
+                if (part.type === "step-finish") trace.logStepFinish(part)
                 if (part.type === "text" && part.time?.end) {
                   if (part.messageID && sessionUserMsgIds.get(part.sessionID)?.has(part.messageID)) {
                     // This is user prompt text — capture as title/prompt
                     const text = String(part.text || "")
-                    if (text) recap.setTitle(text.slice(0, 80), text)
+                    if (text) trace.setTitle(text.slice(0, 80), text)
                   } else {
                     // This is assistant response text
-                    recap.logText(part)
+                    trace.logText(part)
                   }
                 }
                 if (part.type === "tool" && (part.state?.status === "completed" || part.state?.status === "error")) {
-                  recap.logToolCall(part)
+                  trace.logToolCall(part)
                 }
               }
             }
           }
           // altimate_change end
-          // altimate_change start — recap: session title capture and finalization (renamed variables)
+          // altimate_change start — trace: session title capture and finalization
           // Capture session title from session.updated events
           if (event.type === "session.updated") {
             const info = (event as any).properties?.info
             if (info?.id && info?.title) {
-              const recap = sessionRecaps.get(info.id)
-              if (recap) recap.setTitle(String(info.title))
+              const trace = sessionTraces.get(info.id)
+              if (trace) trace.setTitle(String(info.title))
             }
           }
-          // Finalize recap when session reaches idle (completed)
+          // Finalize trace when session reaches idle (completed)
           if (event.type === "session.status") {
             const sid = (event as any).properties?.sessionID
             const status = (event as any).properties?.status?.type
             if (status === "idle" && sid) {
-              const recap = sessionRecaps.get(sid)
-              if (recap) {
-                void recap.endTrace().catch(() => {})
-                sessionRecaps.delete(sid)
+              const trace = sessionTraces.get(sid)
+              if (trace) {
+                void trace.endTrace().catch(() => {})
+                sessionTraces.delete(sid)
                 sessionUserMsgIds.delete(sid)
               }
             }
           }
         } catch {
-          // Recap must never interrupt event forwarding
+          // Trace must never interrupt event forwarding
         }
         // altimate_change end
 
@@ -304,11 +311,11 @@ export const rpc = {
   async shutdown() {
     Log.Default.info("worker shutting down")
     if (eventStream.abort) eventStream.abort.abort()
-    // altimate_change start — recap: flush all active recaps on shutdown
-    for (const [sid, recap] of sessionRecaps) {
-      await recap.endTrace().catch(() => {})
+    // altimate_change start — trace: flush all active traces on shutdown
+    for (const [sid, trace] of sessionTraces) {
+      await trace.endTrace().catch(() => {})
     }
-    sessionRecaps.clear()
+    sessionTraces.clear()
     sessionUserMsgIds.clear()
     // altimate_change end
     await Instance.disposeAll()

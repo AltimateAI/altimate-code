@@ -100,6 +100,8 @@ A single insight might just be one chart with a headline and annotation. Scale c
 - **Responsive**: `min-h-[VALUE]` on all charts. Grid stacks on mobile
 - **Animation**: Entry transitions only, `duration-300` to `duration-500`. Never continuous
 - **Accessibility**: `aria-label` on charts, WCAG AA contrast, don't rely on color alone
+- **Dynamic color safety**: When colors come from external sources (brand palettes, category maps, API data, user config), never apply them directly as text color without a contrast check. Dark colors are invisible on dark card backgrounds. Safe pattern: use the external color only for non-text elements (left border, dot, underline); always use the standard text color (white / `var(--text)`) for the label itself. If color-coded text is required, apply a minimum lightness floor: `color: hsl(from brandColor h s max(l, 60%))`
+- **Icon semantics**: Verify every icon matches its label's actual meaning, not just its visual shape. Common traps: using a rising-trend icon (📈) for metrics where lower is better (latency, error rate, cost); using achievement icons (🏆) for plain counts. When in doubt, use a neutral descriptive icon over a thematic one that could mislead
 
 ### Step 5: Interactivity & Annotations
 
@@ -133,3 +135,16 @@ A single insight might just be one chart with a headline and annotation. Scale c
 - Pie charts > 5 slices — use horizontal bar
 - Unlabeled dual y-axes — use two separate charts
 - Truncated bar axes — always start at zero
+- Filtering or mapping over a field not confirmed to exist in the data export — an undefined field in `.filter()` or `.map()` produces empty arrays or NaN silently, not an error; always validate the exported schema matches what the chart code consumes
+
+## Pre-Delivery Checklist
+
+Before marking a dashboard complete:
+
+- [ ] Every tab / view activated — all charts render (no blank canvases, no unexpected 0–1 axes)
+- [ ] Every field referenced in chart/filter code confirmed present in the data export
+- [ ] All text readable on its background — check explicitly when colors come from external data
+- [ ] All icons match their label's meaning
+- [ ] Tooltips appear on hover for every chart
+- [ ] No chart silently receives an empty dataset — add a visible empty state or console warning
+- [ ] Mobile: grid stacks correctly, no body-level horizontal overflow

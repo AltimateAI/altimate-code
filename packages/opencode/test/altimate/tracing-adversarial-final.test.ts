@@ -96,11 +96,11 @@ describe("toolCallCount accuracy", () => {
 
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Count should be 1, not 2 — the failed call shouldn't increment
-    expect(trace.summary.totalToolCalls).toBe(1)
-    expect(trace.spans.filter((s) => s.kind === "tool")).toHaveLength(1)
+    expect(traceFile.summary.totalToolCalls).toBe(1)
+    expect(traceFile.spans.filter((s) => s.kind === "tool")).toHaveLength(1)
   })
 
   test("failed logToolCall (undefined state) doesn't inflate count", async () => {
@@ -117,9 +117,9 @@ describe("toolCallCount accuracy", () => {
 
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    expect(trace.summary.totalToolCalls).toBe(1)
+    expect(traceFile.summary.totalToolCalls).toBe(1)
   })
 
   test("totalToolCalls equals number of tool spans", async () => {
@@ -137,11 +137,11 @@ describe("toolCallCount accuracy", () => {
 
     tracer.logStepFinish(ZERO_STEP)
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    const toolSpans = trace.spans.filter((s) => s.kind === "tool")
-    expect(trace.summary.totalToolCalls).toBe(toolSpans.length)
-    expect(trace.summary.totalToolCalls).toBe(5)
+    const toolSpans = traceFile.spans.filter((s) => s.kind === "tool")
+    expect(traceFile.summary.totalToolCalls).toBe(toolSpans.length)
+    expect(traceFile.summary.totalToolCalls).toBe(5)
   })
 })
 
@@ -161,14 +161,14 @@ describe("generationCount accuracy", () => {
     tracer.logStepFinish(ZERO_STEP)
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Both logStepStart calls succeed — count is 2
-    expect(trace.summary.totalGenerations).toBe(2)
-    expect(trace.spans.filter((s) => s.kind === "generation")).toHaveLength(2)
+    expect(traceFile.summary.totalGenerations).toBe(2)
+    expect(traceFile.spans.filter((s) => s.kind === "generation")).toHaveLength(2)
     // First gen has "unknown" id
-    expect(trace.spans.find((s) => s.name === "generation-unknown")).toBeDefined()
-    expect(trace.spans.find((s) => s.name === "generation-real")).toBeDefined()
+    expect(traceFile.spans.find((s) => s.name === "generation-unknown")).toBeDefined()
+    expect(traceFile.spans.find((s) => s.name === "generation-real")).toBeDefined()
   })
 
   test("totalGenerations equals number of generation spans", async () => {
@@ -181,11 +181,11 @@ describe("generationCount accuracy", () => {
     }
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    const genSpans = trace.spans.filter((s) => s.kind === "generation")
-    expect(trace.summary.totalGenerations).toBe(genSpans.length)
-    expect(trace.summary.totalGenerations).toBe(3)
+    const genSpans = traceFile.spans.filter((s) => s.kind === "generation")
+    expect(traceFile.summary.totalGenerations).toBe(genSpans.length)
+    expect(traceFile.summary.totalGenerations).toBe(3)
   })
 })
 
@@ -201,10 +201,10 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
     // Never call logStepFinish — generation is orphaned
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // endTrace should force status to "completed" even with orphaned generation
-    expect(trace.summary.status).toBe("completed")
+    expect(traceFile.summary.status).toBe("completed")
   })
 
   test("endTrace with error + orphaned generation produces 'error' status", async () => {
@@ -214,10 +214,10 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
     // Never finish — orphaned generation
 
     const filePath = await tracer.endTrace("Provider crashed")
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    expect(trace.summary.status).toBe("error")
-    expect(trace.summary.error).toBe("Provider crashed")
+    expect(traceFile.summary.status).toBe("error")
+    expect(traceFile.summary.error).toBe("Provider crashed")
   })
 
   test("snapshot mid-generation shows 'running', endTrace shows 'completed'", async () => {
@@ -298,10 +298,10 @@ describe("Worker race — events after endTrace", () => {
 
     // Verify the late event was NOT added to the trace
     const filePath = path.join(tmpDir, "race-session.json")
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
-    const lateTools = trace.spans.filter((s) => s.name === "late-tool")
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
+    const lateTools = traceFile.spans.filter((s) => s.name === "late-tool")
     expect(lateTools).toHaveLength(0)
-    expect(trace.summary.totalToolCalls).toBe(1) // Only the original tool
+    expect(traceFile.summary.totalToolCalls).toBe(1) // Only the original tool
   })
 
   test("new prompt cycle after idle creates fresh tracer", async () => {
@@ -345,11 +345,11 @@ describe("Worker race — events after endTrace", () => {
     await t2.endTrace()
 
     // File should have cycle 2 data
-    const trace: TraceFile = JSON.parse(
+    const traceFile: TraceFile = JSON.parse(
       await fs.readFile(path.join(tmpDir, "cycle-test.json"), "utf-8"),
     )
-    expect(trace.spans.filter((s) => s.kind === "tool")).toHaveLength(1)
-    expect(trace.spans.find((s) => s.kind === "tool")!.name).toBe("read")
+    expect(traceFile.spans.filter((s) => s.kind === "tool")).toHaveLength(1)
+    expect(traceFile.spans.find((s) => s.kind === "tool")!.name).toBe("read")
   })
 })
 
@@ -369,10 +369,10 @@ describe("logStepStart — state consistency", () => {
     tracer.logStepFinish(ZERO_STEP)
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
-    const genSpans = trace.spans.filter((s) => s.kind === "generation")
-    expect(trace.summary.totalGenerations).toBe(genSpans.length)
+    const genSpans = traceFile.spans.filter((s) => s.kind === "generation")
+    expect(traceFile.summary.totalGenerations).toBe(genSpans.length)
   })
 
   test("logStepStart before startTrace is a no-op (no spans, no count)", async () => {
@@ -384,11 +384,11 @@ describe("logStepStart — state consistency", () => {
     // Now start properly
     tracer.startTrace("s1", { prompt: "test" })
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Only the session span should exist — no generations
-    expect(trace.summary.totalGenerations).toBe(0)
-    expect(trace.spans.filter((s) => s.kind === "generation")).toHaveLength(0)
+    expect(traceFile.summary.totalGenerations).toBe(0)
+    expect(traceFile.spans.filter((s) => s.kind === "generation")).toHaveLength(0)
   })
 })
 
@@ -504,14 +504,14 @@ describe("Snapshot debounce under load", () => {
     await new Promise((r) => setTimeout(r, 100))
 
     const filePath = await tracer.endTrace()
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // All data should be present in the final trace
-    expect(trace.summary.totalGenerations).toBe(10)
-    expect(trace.summary.totalToolCalls).toBe(10)
-    expect(trace.summary.totalCost).toBeCloseTo(0.01, 5)
-    expect(trace.spans.filter((s) => s.kind === "generation")).toHaveLength(10)
-    expect(trace.spans.filter((s) => s.kind === "tool")).toHaveLength(10)
+    expect(traceFile.summary.totalGenerations).toBe(10)
+    expect(traceFile.summary.totalToolCalls).toBe(10)
+    expect(traceFile.summary.totalCost).toBeCloseTo(0.01, 5)
+    expect(traceFile.spans.filter((s) => s.kind === "generation")).toHaveLength(10)
+    expect(traceFile.spans.filter((s) => s.kind === "tool")).toHaveLength(10)
   })
 })
 

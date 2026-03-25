@@ -276,25 +276,25 @@ describe("Realistic session simulation", () => {
     })
     const filePath = await tracer.endTrace()
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
 
     // Structure checks
-    expect(trace.version).toBe(2)
-    expect(trace.sessionId).toBe("real-session-1")
-    expect(trace.summary.totalGenerations).toBe(3)
-    expect(trace.summary.totalToolCalls).toBe(12) // 3 gens * 4 tools
-    expect(trace.summary.status).toBe("completed")
+    expect(traceFile.version).toBe(2)
+    expect(traceFile.sessionId).toBe("real-session-1")
+    expect(traceFile.summary.totalGenerations).toBe(3)
+    expect(traceFile.summary.totalToolCalls).toBe(12) // 3 gens * 4 tools
+    expect(traceFile.summary.status).toBe("completed")
 
     // Token accumulation
-    expect(trace.summary.totalTokens).toBeGreaterThan(0)
-    expect(trace.summary.totalCost).toBeGreaterThan(0)
-    expect(trace.summary.tokens.input).toBeGreaterThan(0)
-    expect(trace.summary.tokens.output).toBeGreaterThan(0)
+    expect(traceFile.summary.totalTokens).toBeGreaterThan(0)
+    expect(traceFile.summary.totalCost).toBeGreaterThan(0)
+    expect(traceFile.summary.tokens.input).toBeGreaterThan(0)
+    expect(traceFile.summary.tokens.output).toBeGreaterThan(0)
 
     // Span hierarchy
-    const session = trace.spans.find((s) => s.kind === "session")!
-    const gens = trace.spans.filter((s) => s.kind === "generation")
-    const tools = trace.spans.filter((s) => s.kind === "tool")
+    const session = traceFile.spans.find((s) => s.kind === "session")!
+    const gens = traceFile.spans.filter((s) => s.kind === "generation")
+    const tools = traceFile.spans.filter((s) => s.kind === "tool")
 
     expect(session.parentSpanId).toBeNull()
     for (const gen of gens) {
@@ -326,11 +326,11 @@ describe("Realistic session simulation", () => {
     expect(session.attributes?.[DE.COST.ATTRIBUTION_PROJECT]).toBe("data-platform")
 
     // Metadata
-    expect(trace.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
-    expect(trace.metadata.providerId).toBe("anthropic")
-    expect(trace.metadata.agent).toBe("builder")
-    expect(trace.metadata.userId).toBe("user@test.com")
-    expect(trace.metadata.tags).toContain("e2e")
+    expect(traceFile.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
+    expect(traceFile.metadata.providerId).toBe("anthropic")
+    expect(traceFile.metadata.agent).toBe("builder")
+    expect(traceFile.metadata.userId).toBe("user@test.com")
+    expect(traceFile.metadata.tags).toContain("e2e")
 
     // Generation inputs (pending tool results)
     // Gen 1 has no input (no pending tool results before first gen)
@@ -499,19 +499,19 @@ describe("Concurrent sessions", () => {
 
     // Each trace should be independent
     for (let i = 0; i < 10; i++) {
-      const trace: TraceFile = JSON.parse(await fs.readFile(paths[i]!, "utf-8"))
-      expect(trace.sessionId).toBe(`concurrent-${i}`)
-      expect(trace.summary.totalGenerations).toBe(2)
-      expect(trace.summary.totalToolCalls).toBe(6)
+      const traceFile: TraceFile = JSON.parse(await fs.readFile(paths[i]!, "utf-8"))
+      expect(traceFile.sessionId).toBe(`concurrent-${i}`)
+      expect(traceFile.summary.totalGenerations).toBe(2)
+      expect(traceFile.summary.totalToolCalls).toBe(6)
 
       // Verify no spans from other sessions leaked in
-      const sessionSpan = trace.spans.find((s) => s.kind === "session")!
-      for (const span of trace.spans) {
+      const sessionSpan = traceFile.spans.find((s) => s.kind === "session")!
+      for (const span of traceFile.spans) {
         if (span.kind === "session") continue
         // All spans should ultimately trace back to this session's root
         let current = span
         while (current.parentSpanId) {
-          const parent = trace.spans.find((s) => s.spanId === current.parentSpanId)
+          const parent = traceFile.spans.find((s) => s.spanId === current.parentSpanId)
           expect(parent).toBeDefined()
           current = parent!
         }
@@ -541,8 +541,8 @@ describe("Concurrent sessions", () => {
     expect(files.filter((f) => f.startsWith("same-session"))).toHaveLength(1)
 
     // File should be valid JSON
-    const trace: TraceFile = JSON.parse(await fs.readFile(path.join(tmpDir, files.find((f) => f.startsWith("same-session"))!), "utf-8"))
-    expect(trace.version).toBe(2)
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(path.join(tmpDir, files.find((f) => f.startsWith("same-session"))!), "utf-8"))
+    expect(traceFile.version).toBe(2)
   })
 })
 
@@ -615,13 +615,13 @@ describe("Worker event simulation", () => {
     const files = (await fs.readdir(tmpDir)).filter((f) => f.endsWith(".json") && !f.includes(".tmp"))
     expect(files).toHaveLength(1)
 
-    const trace: TraceFile = JSON.parse(await fs.readFile(path.join(tmpDir, files[0]!), "utf-8"))
-    expect(trace.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
-    expect(trace.summary.totalGenerations).toBe(1)
-    expect(trace.summary.totalToolCalls).toBe(1)
-    expect(trace.summary.totalTokens).toBe(600) // 500 + 100
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(path.join(tmpDir, files[0]!), "utf-8"))
+    expect(traceFile.metadata.model).toBe("anthropic/claude-sonnet-4-20250514")
+    expect(traceFile.summary.totalGenerations).toBe(1)
+    expect(traceFile.summary.totalToolCalls).toBe(1)
+    expect(traceFile.summary.totalTokens).toBe(600) // 500 + 100
 
-    const gen = trace.spans.find((s) => s.kind === "generation")!
+    const gen = traceFile.spans.find((s) => s.kind === "generation")!
     expect(gen.output).toBe("Found files.")
   })
 
@@ -771,8 +771,8 @@ describe("HttpExporter e2e", () => {
 
       // File export should still succeed
       expect(result).toContain("http-fail.json")
-      const trace: TraceFile = JSON.parse(await fs.readFile(result!, "utf-8"))
-      expect(trace.version).toBe(2)
+      const traceFile: TraceFile = JSON.parse(await fs.readFile(result!, "utf-8"))
+      expect(traceFile.version).toBe(2)
     } finally {
       server.stop()
     }

@@ -350,6 +350,15 @@ export namespace Telemetry {
         skill_source: "builtin" | "global" | "project"
         duration_ms: number
       }
+    // altimate_change start — first_launch event for new user counting (privacy-safe: only version + machine_id)
+    | {
+        type: "first_launch"
+        timestamp: number
+        session_id: string
+        version: string
+        is_upgrade: boolean
+      }
+    // altimate_change end
     // altimate_change start — telemetry for skill management operations
     | {
         type: "skill_created"
@@ -618,7 +627,13 @@ export namespace Telemetry {
         iKey: cfg.iKey,
         tags: {
           "ai.session.id": sid || "startup",
-          "ai.user.id": userEmail,
+          // altimate_change start — use machine_id as fallback for anonymous user identification
+          // This IMPROVES privacy: previously all anonymous users shared ai.user.id=""
+          // which made them appear as one mega-user in analytics. Using the random UUID
+          // (already sent as a custom property) gives each machine a distinct identity
+          // without any PII. machine_id is a crypto.randomUUID() stored locally.
+          "ai.user.id": userEmail || machineId || "",
+          // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": Installation.VERSION,
         },
