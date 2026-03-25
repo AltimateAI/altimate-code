@@ -140,7 +140,9 @@ let cli = yargs(hideBin(process.argv))
     // altimate_change start - db marker name
     const marker = path.join(Global.Path.data, "altimate-code.db")
     // altimate_change end
+    // altimate_change start — check: skip DB migration for stateless check command
     if (!isStatelessCommand && !(await Filesystem.exists(marker))) {
+    // altimate_change end
       const tty = process.stderr.isTTY
       process.stderr.write("Performing one time database migration, may take a few minutes..." + EOL)
       const width = 36
