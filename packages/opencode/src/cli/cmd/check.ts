@@ -233,7 +233,11 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
   }
 }
 
-async function runGrade(sql: string, file: string, schemaPath?: string): Promise<Finding[]> {
+async function runGrade(
+  sql: string,
+  file: string,
+  schemaPath?: string,
+): Promise<{ findings: Finding[]; grade?: string; score?: number }> {
   try {
     const result = await Dispatcher.call("altimate_core.grade", {
       sql,
@@ -243,7 +247,7 @@ async function runGrade(sql: string, file: string, schemaPath?: string): Promise
     const issues = (result.data.issues ?? result.data.findings ?? result.data.recommendations ?? []) as Array<
       Record<string, unknown>
     >
-    return issues.map((f) => ({
+    const findings = issues.map((f) => ({
       file,
       line: f.line as number | undefined,
       column: f.column as number | undefined,
@@ -253,9 +257,13 @@ async function runGrade(sql: string, file: string, schemaPath?: string): Promise
       message: (f.message ?? f.description ?? "") as string,
       suggestion: f.suggestion as string | undefined,
     }))
+    // Preserve the primary A-F grade value from the backend
+    const grade = (result.data.grade ?? result.data.letter_grade) as string | undefined
+    const score = (result.data.score ?? result.data.numeric_score) as number | undefined
+    return { findings, grade, score }
   } catch (e) {
     console.error(`[grade] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
-    return [dispatcherErrorFinding("grade", file, e)]
+    return { findings: [dispatcherErrorFinding("grade", file, e)] }
   }
 }
 
@@ -321,18 +329,21 @@ export const CheckCommand = cmd({
     })
     if (checks.length === 0) {
       console.error("Error: no valid checks specified.")
-      process.exit(1)
+      process.exitCode = 1
+      return
     }
 
     // 2. Validate policy requirement
     if (checks.includes("policy")) {
       if (!args.policy) {
         console.error("Error: --policy is required when running the policy check.")
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
       if (!existsSync(args.policy)) {
         console.error(`Error: policy file not found: ${args.policy}`)
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
     }
 
@@ -366,7 +377,7 @@ export const CheckCommand = cmd({
 
     if (files.length === 0) {
       console.error("No SQL files found to check.")
-      process.exit(0)
+      return
     }
 
     console.error(`Found ${files.length} SQL file(s) to check with [${checks.join(", ")}]`)
@@ -379,13 +390,16 @@ export const CheckCommand = cmd({
         policyJson = readFileSync(args.policy, "utf-8")
       } catch (e) {
         console.error(`Error reading policy file: ${e instanceof Error ? e.message : String(e)}`)
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
     }
 
     // 5. Run checks on all files in batches of 10
     const BATCH_SIZE = 10
     const allResults: Record<string, Finding[]> = {}
+    let gradeValue: string | undefined
+    let gradeScore: number | undefined
     for (const check of checks) {
       allResults[check] = []
     }
@@ -425,9 +439,13 @@ export const CheckCommand = cmd({
             case "semantic":
               findings = await runSemantic(sql, relFile, schemaPath)
               break
-            case "grade":
-              findings = await runGrade(sql, relFile, schemaPath)
+            case "grade": {
+              const gradeResult = await runGrade(sql, relFile, schemaPath)
+              findings = gradeResult.findings
+              if (gradeResult.grade) gradeValue = gradeResult.grade
+              if (gradeResult.score != null) gradeScore = gradeResult.score
               break
+            }
           }
           allResults[check].push(...findings)
         }
@@ -452,7 +470,13 @@ export const CheckCommand = cmd({
       results[check] = toCategoryResult(filterBySeverity(findings, minSeverity))
     }
 
-    // 8. Build output using the helper
+    // 8. Attach grade metadata if available
+    if (results.grade) {
+      if (gradeValue) results.grade.grade = gradeValue
+      if (gradeScore != null) results.grade.score = gradeScore
+    }
+
+    // 9. Build output using the helper
     const output = buildCheckOutput({
       filesChecked: files.length,
       checksRun: checks,
@@ -463,7 +487,7 @@ export const CheckCommand = cmd({
     // Override pass with our pre-computed value from unfiltered findings
     output.summary.pass = pass
 
-    // 9. Output
+    // 10. Output
     const duration = Date.now() - startTime
     if (args.format === "json") {
       process.stdout.write(JSON.stringify(output, null, 2) + "\n")
@@ -472,9 +496,10 @@ export const CheckCommand = cmd({
     }
     console.error(`Completed in ${duration}ms`)
 
-    // 10. Exit code
+    // 11. Exit code — use process.exitCode instead of process.exit() to allow
+    // the outer finally block in index.ts to run Telemetry.shutdown().
     if (!pass) {
-      process.exit(1)
+      process.exitCode = 1
     }
   },
 })

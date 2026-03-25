@@ -130,10 +130,12 @@ const origExit = process.exit
 beforeEach(async () => {
   resetDispatcherMocks()
   exitCode = undefined
+  process.exitCode = 0
   stdoutData = ""
   stderrData = ""
   tmpDir = await mktmp()
 
+  // Keep process.exit mock as safety net
   process.exit = ((code?: number) => {
     exitCode = code ?? 0
     throw new Error(`__EXIT_${code ?? 0}__`)
@@ -154,6 +156,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   process.exit = origExit
+  process.exitCode = 0
   mock.restore()
   await tmpDir.cleanup()
 })
@@ -161,6 +164,8 @@ afterEach(async () => {
 async function runHandler(
   args: HandlerArgs,
 ): Promise<{ exitCode: number | undefined; stdout: string; stderr: string }> {
+  exitCode = undefined
+  process.exitCode = 0
   try {
     const savedCwd = process.cwd
     ;(process as any).cwd = () => tmpDir.dir
@@ -171,12 +176,16 @@ async function runHandler(
     }
   } catch (e) {
     if (e instanceof Error && e.message.startsWith("__EXIT_")) {
-      // expected
+      // expected — from legacy process.exit() mock
     } else {
       throw e
     }
   }
-  return { exitCode, stdout: stdoutData, stderr: stderrData }
+  // Handler uses process.exitCode (preferred) or process.exit() (mocked to set exitCode)
+  // Note: Bun doesn't support process.exitCode = undefined, so we use 0 as "no error"
+  const code = exitCode ?? (process.exitCode === 0 ? undefined : (process.exitCode as number))
+  process.exitCode = 0
+  return { exitCode: code, stdout: stdoutData, stderr: stderrData }
 }
 
 function parseJson(stdout: string): any {
@@ -475,9 +484,10 @@ describe("check command E2E", () => {
     expect(j.files_checked).toBe(1)
   })
 
-  test("exits 0 when no SQL files found", async () => {
+  test("returns cleanly when no SQL files found (exit 0)", async () => {
     const r = await runHandler(baseArgs({ files: ["/nonexistent.sql"], checks: "lint" }))
-    expect(r.exitCode).toBe(0)
+    // No exitCode set — handler just returns without error
+    expect(r.exitCode).toBeUndefined()
     expect(r.stderr).toContain("No SQL files found")
   })
 

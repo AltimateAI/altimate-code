@@ -67,11 +67,8 @@ altimate-code check --checks lint
 | `--checks`      | string   | `lint,safety` | Comma-separated list of checks to run                     |
 | `--schema`      | string   | -             | Path to schema file for validation context                |
 | `--policy`      | string   | -             | Path to policy JSON file (required for `policy` check)    |
-| `--dialect`     | string   | -             | SQL dialect (`snowflake`, `bigquery`, `postgres`, etc.)   |
 | `--severity`    | string   | `info`        | Minimum severity level to report: `info`, `warning`, `error` |
 | `--fail-on`     | string   | `none`        | Exit 1 if findings at this level or above: `none`, `warning`, `error` |
-| `--dbt-project` | string   | -             | Path to dbt project directory                             |
-| `--manifest`    | string   | -             | Path to dbt `manifest.json`                               |
 
 ---
 
@@ -151,7 +148,7 @@ When using `--format json`, the command writes structured JSON to stdout (diagno
 
 The default `text` format is designed for human consumption:
 
-```
+```text
 Checked 3 file(s) with [lint, safety]
 
 --- LINT ---
