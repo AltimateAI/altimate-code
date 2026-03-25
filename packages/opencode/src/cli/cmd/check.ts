@@ -36,7 +36,6 @@ async function runLint(sql: string, file: string, schemaPath?: string): Promise<
     const result = await Dispatcher.call("altimate_core.lint", {
       sql,
       schema_path: schemaPath ?? "",
-      schema_context: undefined as any,
     })
     if (!result.success) {
       return [dispatcherErrorFinding("lint", file, result.error ?? "altimate_core.lint failed")]
@@ -63,7 +62,6 @@ async function runValidate(sql: string, file: string, schemaPath?: string): Prom
     const result = await Dispatcher.call("altimate_core.validate", {
       sql,
       schema_path: schemaPath ?? "",
-      schema_context: undefined as any,
     })
     if (result.success) return []
     const errors = (result.data.errors ?? result.data.findings ?? []) as Array<Record<string, unknown>>
@@ -135,7 +133,6 @@ async function runPolicy(sql: string, file: string, policyJson: string, schemaPa
       sql,
       policy_json: policyJson,
       schema_path: schemaPath ?? "",
-      schema_context: undefined as any,
     })
     if (result.success && result.data.allowed !== false) return []
     const violations = (result.data.violations ?? result.data.findings ?? []) as Array<Record<string, unknown>>
@@ -173,7 +170,6 @@ async function runPii(sql: string, file: string, schemaPath?: string): Promise<F
     const result = await Dispatcher.call("altimate_core.query_pii", {
       sql,
       schema_path: schemaPath ?? "",
-      schema_context: undefined as any,
     })
     if (!result.success) {
       return [dispatcherErrorFinding("pii", file, result.error ?? "altimate_core.query_pii failed")]
@@ -200,7 +196,6 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
     const result = await Dispatcher.call("altimate_core.semantics", {
       sql,
       schema_path: schemaPath ?? "",
-      schema_context: undefined as any,
     })
     if (result.success && result.data.valid !== false) return []
     const issues = (result.data.issues ?? result.data.findings ?? []) as Array<Record<string, unknown>>
@@ -242,7 +237,6 @@ async function runGrade(
     const result = await Dispatcher.call("altimate_core.grade", {
       sql,
       schema_path: schemaPath ?? "",
-      schema_context: undefined as any,
     })
     const issues = (result.data.issues ?? result.data.findings ?? result.data.recommendations ?? []) as Array<
       Record<string, unknown>
