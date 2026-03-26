@@ -89,6 +89,32 @@ describe("tool.write", () => {
   })
 
   describe("existing file overwrite", () => {
+    test("overwrites existing file content without an explicit prior read", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "existing.txt")
+      await fs.writeFile(filepath, "old content", "utf-8")
+
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const write = await WriteTool.init()
+          const result = await write.execute(
+            {
+              filePath: filepath,
+              content: "new content",
+            },
+            ctx,
+          )
+
+          expect(result.output).toContain("Wrote file successfully")
+          expect(result.metadata.exists).toBe(true)
+
+          const content = await fs.readFile(filepath, "utf-8")
+          expect(content).toBe("new content")
+        },
+      })
+    })
+
     test("overwrites existing file content", async () => {
       await using tmp = await tmpdir()
       const filepath = path.join(tmp.path, "existing.txt")

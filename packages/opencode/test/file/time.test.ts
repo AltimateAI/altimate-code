@@ -70,6 +70,22 @@ describe("file/time", () => {
         },
       })
     })
+
+    test("stores an explicit read timestamp when provided", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "file.txt")
+      await fs.writeFile(filepath, "content", "utf-8")
+      const explicit = new Date("2026-01-01T00:00:00.000Z")
+
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          FileTime.read(sessionID, filepath, explicit)
+
+          expect(FileTime.get(sessionID, filepath)?.toISOString()).toBe(explicit.toISOString())
+        },
+      })
+    })
   })
 
   describe("assert()", () => {

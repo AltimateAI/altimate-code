@@ -27,30 +27,39 @@ export const WriteTool = Tool.define("write", {
     await assertExternalDirectory(ctx, filepath)
     await assertSensitiveWrite(ctx, filepath)
 
-    const exists = await Filesystem.exists(filepath)
-    const contentOld = exists ? await Filesystem.readText(filepath) : ""
-    if (exists) await FileTime.assert(ctx.sessionID, filepath)
+    // altimate_change start — serialize write-tool overwrites and count the tool's own file read so existing files can be rewritten without a separate Read tool call
+    let exists = false
+    await FileTime.withLock(filepath, async () => {
+      exists = await Filesystem.exists(filepath)
+      const contentOldReadAt = exists ? new Date() : undefined
+      const contentOld = exists ? await Filesystem.readText(filepath) : ""
+      if (contentOldReadAt) {
+        FileTime.read(ctx.sessionID, filepath, contentOldReadAt)
+        await FileTime.assert(ctx.sessionID, filepath)
+      }
 
-    const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, params.content))
-    await ctx.ask({
-      permission: "edit",
-      patterns: [path.relative(Instance.worktree, filepath)],
-      always: ["*"],
-      metadata: {
-        filepath,
-        diff,
-      },
-    })
+      const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, params.content))
+      await ctx.ask({
+        permission: "edit",
+        patterns: [path.relative(Instance.worktree, filepath)],
+        always: ["*"],
+        metadata: {
+          filepath,
+          diff,
+        },
+      })
 
-    await Filesystem.write(filepath, params.content)
-    await Bus.publish(File.Event.Edited, {
-      file: filepath,
+      await Filesystem.write(filepath, params.content)
+      await Bus.publish(File.Event.Edited, {
+        file: filepath,
+      })
+      await Bus.publish(FileWatcher.Event.Updated, {
+        file: filepath,
+        event: exists ? "change" : "add",
+      })
+      FileTime.read(ctx.sessionID, filepath)
     })
-    await Bus.publish(FileWatcher.Event.Updated, {
-      file: filepath,
-      event: exists ? "change" : "add",
-    })
-    FileTime.read(ctx.sessionID, filepath)
+    // altimate_change end
 
     let output = "Wrote file successfully."
     await LSP.touchFile(filepath, true)

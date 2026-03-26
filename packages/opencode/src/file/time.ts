@@ -22,12 +22,14 @@ export namespace FileTime {
     }
   })
 
-  export function read(sessionID: string, file: string) {
+  // altimate_change start — allow callers to record the exact timestamp associated with a file read so write-tool self-reads can satisfy stale-file checks without a separate Read tool call
+  export function read(sessionID: string, file: string, time: Date = new Date()) {
     log.info("read", { sessionID, file })
     const { read } = state()
     read[sessionID] = read[sessionID] || {}
-    read[sessionID][file] = new Date()
+    read[sessionID][file] = time
   }
+  // altimate_change end
 
   export function get(sessionID: string, file: string) {
     return state().read[sessionID]?.[file]
