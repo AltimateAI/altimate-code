@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.12] - 2026-03-25
+
+### Added
+
+- **`altimate-dbt` auto-discover config** — `altimate-dbt` commands now auto-detect `dbt_project.yml` and Python from the current directory without requiring `altimate-dbt init` first; supports Windows paths (`Scripts/`, `.exe`, `path.delimiter`) (#464)
+- **Local E2E sanity test harness** — Docker-based test suite (`test/sanity/`) for install verification, smoke tests, upgrade scenarios, and resilience checks; runnable via `bun run sanity` (#461)
+
+### Fixed
+
+- **`altimate-dbt` commands fail with hardcoded CI path** — published binary contained a baked-in `/home/runner/work/...` path for the Python bridge; `copy-python.ts` now patches `__dirname` to use `import.meta.dirname` at runtime (#467)
+
+### Testing
+
+- 42 adversarial tests for config auto-discovery and dbt resolution: `findProjectRoot` edge cases (deep nesting, symlinks, nonexistent dirs), `discoverPython` with broken symlinks and malicious env vars, `resolveDbt` with conflicting env vars and priority ordering, `validateDbt` timeout/garbage handling, Windows constant correctness, `path.delimiter` usage, `buildDbtEnv` mutation safety
+- 484-line adversarial test suite for the `__dirname` patch: regex edge cases, ReDoS protection, mutation testing, idempotency, CI smoke test parity, bundle runtime structure validation
+
 ## [0.5.11] - 2026-03-25
 
 ### Fixed

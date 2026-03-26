@@ -18,13 +18,6 @@ import { homedir } from "os"
 import type { Connector } from "@altimateai/drivers/types"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-// Import native/index.ts to ensure the lazy registration hook is set.
-// In Bun's multi-file runner, test execution order is unpredictable —
-// if dispatcher.test.ts runs first and clears the hook, this file's
-// Dispatcher.call() would fail with "No native handler" errors.
-// Re-importing here ensures the hook is always available.
-import "../../src/altimate/native"
-
 // Mock DuckDB driver so tests don't require the native duckdb package.
 // NOTE: mock.module leaks across test files in Bun — we spread the real
 // module exports to minimize damage to other test files.
@@ -119,6 +112,16 @@ const HAS_DBT = !!DBT_PROJECT
 // Tests: dbt profiles auto-discovery
 // ---------------------------------------------------------------------------
 describe("dbt Profiles Auto-Discovery", () => {
+  // Explicitly import registration modules instead of relying on the lazy
+  // hook from native/index.ts. dispatcher.test.ts nullifies the hook via
+  // setRegistrationHook(null), and Bun's non-deterministic file ordering
+  // means that file may run first — leaving _ensureRegistered permanently
+  // null for all subsequent test files in the same process.
+  beforeAll(async () => {
+    await import("../../src/altimate/native/connections/register")
+    await import("../../src/altimate/native/schema/register")
+  })
+
   test("parseDbtProfiles finds connections from ~/.dbt/profiles.yml", async () => {
     const { parseDbtProfiles } = await import("../../src/altimate/native/connections/dbt-profiles")
     const profiles = await parseDbtProfiles()
