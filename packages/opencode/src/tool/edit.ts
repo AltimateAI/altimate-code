@@ -108,6 +108,9 @@ export const EditTool = Tool.define("edit", {
         },
       })
 
+      // altimate_change start — re-check file freshness after the permission prompt so an external save during approval cannot be overwritten with a stale edit
+      await FileTime.assert(ctx.sessionID, filePath)
+      // altimate_change end
       await Filesystem.write(filePath, contentNew)
       await Bus.publish(File.Event.Edited, {
         file: filePath,

@@ -259,6 +259,39 @@ describe("tool.edit", () => {
       })
     })
 
+    test("does not overwrite external changes made during the approval window", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "file.txt")
+      await fs.writeFile(filepath, "original content", "utf-8")
+
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          FileTime.read(ctx.sessionID, filepath)
+
+          const edit = await EditTool.init()
+          await expect(
+            edit.execute(
+              {
+                filePath: filepath,
+                oldString: "original content",
+                newString: "edited content",
+              },
+              {
+                ...ctx,
+                ask: async () => {
+                  await new Promise((resolve) => setTimeout(resolve, 100))
+                  await fs.writeFile(filepath, "modified externally", "utf-8")
+                },
+              },
+            ),
+          ).rejects.toThrow("modified since it was last read")
+
+          expect(await fs.readFile(filepath, "utf-8")).toBe("modified externally")
+        },
+      })
+    })
+
     test("replaces all occurrences with replaceAll option", async () => {
       await using tmp = await tmpdir()
       const filepath = path.join(tmp.path, "file.txt")

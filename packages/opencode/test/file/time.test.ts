@@ -89,6 +89,33 @@ describe("file/time", () => {
       })
     })
 
+    test("passes when unchanged file mtime is ahead of the local read timestamp", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "file.txt")
+      await fs.writeFile(filepath, "content", "utf-8")
+
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const originalStat = Filesystem.stat
+          const futureMtime = new Date(Date.now() + 1000)
+          ;(Filesystem as { stat: typeof Filesystem.stat }).stat = ((file) => {
+            if (file !== filepath) return originalStat(file)
+            return { mtime: futureMtime } as ReturnType<typeof Filesystem.stat>
+          }) as typeof Filesystem.stat
+
+          try {
+            FileTime.read(sessionID, filepath)
+
+            // Should not throw because the file snapshot observed at read time is unchanged.
+            await FileTime.assert(sessionID, filepath)
+          } finally {
+            ;(Filesystem as { stat: typeof Filesystem.stat }).stat = originalStat
+          }
+        },
+      })
+    })
+
     test("throws when file was not read first", async () => {
       await using tmp = await tmpdir()
       const filepath = path.join(tmp.path, "file.txt")
