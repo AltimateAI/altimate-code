@@ -32,6 +32,7 @@ type MqlCommand =
   | "dropCollection"
   | "createIndex"
   | "listIndexes"
+  | "ping"
 
 interface MqlQuery {
   database?: string
@@ -110,8 +111,8 @@ function inferType(value: unknown): string {
 }
 
 /**
- * Flatten a document's fields into column entries, handling nested objects
- * with dot notation (1 level deep only to keep it manageable).
+ * Extract field names and their observed types from a set of documents.
+ * Only inspects top-level fields — nested objects are reported as type "object".
  */
 function extractFields(
   docs: Record<string, unknown>[],
@@ -260,6 +261,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const cmd = parsed.command
 
       // Commands that don't need a collection
+      if (cmd === "ping") {
+        const result = await db.command({ ping: 1 })
+        return { columns: ["ok"], rows: [[result.ok]], row_count: 1, truncated: false }
+      }
+
       if (cmd === "createCollection") {
         const name = parsed.name ?? parsed.collection
         if (!name) {
@@ -274,7 +280,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           throw new Error("dropCollection requires 'collection'")
         }
         const dropped = await db.collection(parsed.collection).drop().catch((e: any) => {
-          if (e.codeName === "NamespaceNotFound") return false
+          if (e.codeName === "NamespaceNotFound" || e.code === 26) return false
           throw e
         })
         return {
@@ -297,8 +303,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (parsed.projection) cursor = cursor.project(parsed.projection)
           if (parsed.sort) cursor = cursor.sort(parsed.sort)
           if (parsed.skip) cursor = cursor.skip(parsed.skip)
-          // Fetch one extra to detect truncation
-          const queryLimit = parsed.limit ?? effectiveLimit
+          // Cap user-specified limit against effectiveLimit to prevent OOM
+          const queryLimit = parsed.limit
+            ? Math.min(parsed.limit, effectiveLimit)
+            : effectiveLimit
           cursor = cursor.limit(queryLimit + 1)
           const docs = await cursor.toArray()
 

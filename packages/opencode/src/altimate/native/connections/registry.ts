@@ -362,12 +362,9 @@ export async function test(
     const config = configs.get(name)
     const dbType = config?.type?.toLowerCase()
     if (dbType === "mongodb" || dbType === "mongo") {
-      // MongoDB doesn't support SQL — use a ping-equivalent MQL command
+      // MongoDB doesn't support SQL — use the standard ping command
       await connector.execute(JSON.stringify({
-        command: "find",
-        database: (config?.database as string) || "admin",
-        collection: "system.version",
-        limit: 1,
+        command: "ping",
       }))
     } else {
       await connector.execute("SELECT 1")
