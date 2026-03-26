@@ -45,6 +45,7 @@ jobs:
               - 'packages/opencode/src/altimate/native/connections/**'
               - 'packages/opencode/test/altimate/drivers-e2e.test.ts'
               - 'packages/opencode/test/altimate/drivers-docker-e2e.test.ts'
+              - 'packages/opencode/test/altimate/drivers-mongodb-e2e.test.ts'
               - 'packages/opencode/test/altimate/connections.test.ts'
             dbt-tools:
               - 'packages/dbt-tools/**'
@@ -155,6 +156,16 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ping:1})' --quiet"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -194,6 +205,13 @@ jobs:
           TEST_REDSHIFT_HOST: 127.0.0.1
           TEST_REDSHIFT_PORT: "15439"
           TEST_REDSHIFT_PASSWORD: testpass123
+
+      - name: Run MongoDB driver E2E
+        run: bun test test/altimate/drivers-mongodb-e2e.test.ts
+        working-directory: packages/opencode
+        env:
+          TEST_MONGODB_HOST: 127.0.0.1
+          TEST_MONGODB_PORT: "27017"
 
       # Cloud tests NOT included — they require real credentials
       # Run locally with:

@@ -126,6 +126,8 @@ const DRIVER_MAP: Record<string, string> = {
   duckdb: "@altimateai/drivers/duckdb",
   oracle: "@altimateai/drivers/oracle",
   sqlite: "@altimateai/drivers/sqlite",
+  mongodb: "@altimateai/drivers/mongodb",
+  mongo: "@altimateai/drivers/mongodb",
 }
 
 async function createConnector(
@@ -193,6 +195,9 @@ async function createConnector(
       case "@altimateai/drivers/sqlite":
         mod = await import("@altimateai/drivers/sqlite")
         break
+      case "@altimateai/drivers/mongodb":
+        mod = await import("@altimateai/drivers/mongodb")
+        break
       default:
         throw new Error(`No static import available for driver: ${driverPath}`)
     }
@@ -222,6 +227,7 @@ export function detectAuthMethod(config: ConnectionConfig | null | undefined): s
   if (config.password) return "password"
   const t = typeof config.type === "string" ? config.type.toLowerCase() : ""
   if (t === "duckdb" || t === "sqlite") return "file"
+  if (t === "mongodb" || t === "mongo") return config.password ? "password" : "connection_string"
   return "unknown"
 }
 
@@ -347,13 +353,25 @@ export function list(): { warehouses: WarehouseInfo[] } {
   return { warehouses }
 }
 
-/** Test a connection by running SELECT 1. */
+/** Test a connection by running a simple query. */
 export async function test(
   name: string,
 ): Promise<{ connected: boolean; error?: string }> {
   try {
     const connector = await get(name)
-    await connector.execute("SELECT 1")
+    const config = configs.get(name)
+    const dbType = config?.type?.toLowerCase()
+    if (dbType === "mongodb" || dbType === "mongo") {
+      // MongoDB doesn't support SQL — use a ping-equivalent MQL command
+      await connector.execute(JSON.stringify({
+        command: "find",
+        database: (config?.database as string) || "admin",
+        collection: "system.version",
+        limit: 1,
+      }))
+    } else {
+      await connector.execute("SELECT 1")
+    }
     return { connected: true }
   } catch (e) {
     return { connected: false, error: String(e) }

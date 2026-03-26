@@ -73,6 +73,17 @@ const ORACLE_ALIASES: AliasMap = {
   service_name: ["serviceName"],
 }
 
+const MONGODB_ALIASES: AliasMap = {
+  user: ["username"],
+  database: ["dbname", "db"],
+  connection_string: ["connectionString", "uri", "url"],
+  auth_source: ["authSource"],
+  replica_set: ["replicaSet"],
+  direct_connection: ["directConnection"],
+  connect_timeout: ["connectTimeoutMS"],
+  server_selection_timeout: ["serverSelectionTimeoutMS"],
+}
+
 /** Map of warehouse type to its alias map. */
 const DRIVER_ALIASES: Record<string, AliasMap> = {
   snowflake: SNOWFLAKE_ALIASES,
@@ -86,6 +97,8 @@ const DRIVER_ALIASES: Record<string, AliasMap> = {
   sqlserver: SQLSERVER_ALIASES,
   mssql: SQLSERVER_ALIASES,
   oracle: ORACLE_ALIASES,
+  mongodb: MONGODB_ALIASES,
+  mongo: MONGODB_ALIASES,
   // duckdb and sqlite have simple configs — no aliases needed
 }
 
