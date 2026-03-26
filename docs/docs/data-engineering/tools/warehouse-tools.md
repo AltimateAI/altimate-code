@@ -70,6 +70,7 @@ env_bigquery  | bigquery | GOOGLE_APPLICATION_CREDENTIALS
 | Databricks | `DATABRICKS_HOST`, `DATABRICKS_SERVER_HOSTNAME` |
 | PostgreSQL | `PGHOST`, `PGDATABASE`, `DATABASE_URL` |
 | MySQL | `MYSQL_HOST`, `MYSQL_DATABASE` |
+| MongoDB | `MONGODB_URI`, `MONGO_URL` |
 | Redshift | `REDSHIFT_HOST` |
 
 ### Parameters
@@ -164,7 +165,7 @@ Remove an existing warehouse connection.
 
 ## warehouse_discover
 
-Discover database containers running in Docker. Detects PostgreSQL, MySQL/MariaDB, and SQL Server containers with their connection details.
+Discover database containers running in Docker. Detects PostgreSQL, MySQL/MariaDB, SQL Server, and MongoDB containers with their connection details.
 
 ```
 > warehouse_discover

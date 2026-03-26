@@ -1,6 +1,6 @@
 # Warehouses
 
-Altimate Code connects to 8 warehouse types. Configure them in `.altimate-code/connections.json` (project-local) or `~/.altimate-code/connections.json` (global).
+Altimate Code connects to 9 warehouse types. Configure them in `.altimate-code/connections.json` (project-local) or `~/.altimate-code/connections.json` (global).
 
 ## Configuration
 
@@ -236,6 +236,51 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 | `ssl_ca` | No | Path to CA certificate file |
 | `ssl_cert` | No | Path to client certificate file |
 | `ssl_key` | No | Path to client key file |
+
+## MongoDB
+
+```json
+{
+  "my-mongodb": {
+    "type": "mongodb",
+    "host": "localhost",
+    "port": 27017,
+    "database": "analytics",
+    "user": "analyst",
+    "password": "{env:MONGO_PASSWORD}"
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `connection_string` | No | Full connection string (alternative to individual fields) |
+| `host` | No | Hostname (default: `127.0.0.1`) |
+| `port` | No | Port (default: `27017`) |
+| `database` | No | Database name |
+| `user` | No | Username |
+| `password` | No | Password |
+| `auth_source` | No | Authentication database (default: `admin`) |
+| `replica_set` | No | Replica set name |
+| `tls` | No | Enable TLS (default: `false`) |
+| `direct_connection` | No | Connect directly to a single host |
+
+### Using a connection string
+
+```json
+{
+  "my-mongodb": {
+    "type": "mongodb",
+    "connection_string": "mongodb://analyst:secret@localhost:27017/analytics"
+  }
+}
+```
+
+!!! note
+    MongoDB uses MQL (MongoDB Query Language) instead of SQL. Queries are submitted as JSON objects via the `execute` method. Supported commands: `find`, `aggregate`, `countDocuments`, `distinct`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`, `createIndex`, `listIndexes`, `createCollection`, `dropCollection`, `ping`.
+
+!!! info "Server compatibility"
+    The MongoDB driver (v6.x) supports MongoDB server versions 3.6 through 8.0, covering all releases from the last 3+ years.
 
 ## SQL Server
 

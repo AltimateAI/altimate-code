@@ -74,8 +74,7 @@ const ORACLE_ALIASES: AliasMap = {
 }
 
 const MONGODB_ALIASES: AliasMap = {
-  user: ["username"],
-  database: ["dbname", "db"],
+  ...COMMON_ALIASES,
   connection_string: ["connectionString", "uri", "url"],
   auth_source: ["authSource"],
   replica_set: ["replicaSet"],

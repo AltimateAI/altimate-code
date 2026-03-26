@@ -2,7 +2,7 @@
 
 ## Overview
 
-Altimate Code connects to 10 databases natively via TypeScript drivers. No Python dependency required. Drivers are loaded lazily, so only the driver you need is imported at runtime.
+Altimate Code connects to 11 databases natively via TypeScript drivers. No Python dependency required. Drivers are loaded lazily, so only the driver you need is imported at runtime.
 
 ## Support Matrix
 
@@ -17,6 +17,7 @@ Altimate Code connects to 10 databases natively via TypeScript drivers. No Pytho
 | Snowflake | `snowflake-sdk` | Password, Key-Pair (unencrypted + encrypted), OAuth | ✅ Live account | 37 E2E tests, key-pair with passphrase support |
 | BigQuery | `@google-cloud/bigquery` | Service Account, ADC | ✅ Live account | 25 E2E tests, UNNEST/STRUCT/DATE types |
 | Databricks | `@databricks/sql` | PAT, OAuth | ✅ Live account | 24 E2E tests, Unity Catalog support |
+| MongoDB | `mongodb` | Password, Connection String | ✅ Docker | 90 E2E tests, MQL queries, aggregation pipelines |
 | Oracle | `oracledb` (thin) | Password | ❌ Needs Oracle 12.1+ | Thin mode only, no Instant Client |
 
 ## Installation
@@ -32,6 +33,9 @@ bun add duckdb
 bun add pg                        # PostgreSQL + Redshift
 bun add mysql2                    # MySQL
 bun add mssql                     # SQL Server
+
+# Document databases
+bun add mongodb                   # MongoDB
 
 # Cloud warehouses
 bun add snowflake-sdk             # Snowflake
@@ -129,6 +133,14 @@ altimate-dbt init --project-root /path/to/dbt/project --python-path $(which pyth
 |--------|--------------|
 | Password | `host`, `port`, `service_name`, `user`, `password` |
 
+### MongoDB
+| Method | Config Fields |
+|--------|--------------|
+| Password | `host`, `port`, `database`, `user`, `password` |
+| Connection String | `connection_string: "mongodb://user:pass@host:port/db"` |
+
+MongoDB supports server versions 3.6 through 8.0. Queries use MQL (MongoDB Query Language) via JSON, not SQL. The driver supports `find`, `aggregate`, CRUD operations, index management, and schema introspection via document sampling.
+
 ### DuckDB
 | Method | Config Fields |
 |--------|--------------|
@@ -167,7 +179,7 @@ SSH auth types: `"key"` (default) or `"password"` (set `ssh_password`).
 
 The CLI auto-discovers connections from:
 
-1. **Docker containers**: detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle containers
+1. **Docker containers**: detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, MongoDB containers
 2. **dbt profiles**: parses `~/.dbt/profiles.yml` for all supported adapters
 3. **Environment variables**: detects `SNOWFLAKE_ACCOUNT`, `PGHOST`, `MYSQL_HOST`, `MSSQL_HOST`, `ORACLE_HOST`, `DUCKDB_PATH`, `SQLITE_PATH`, etc.
 

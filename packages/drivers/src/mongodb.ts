@@ -197,6 +197,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   return {
     async connect() {
       // Support connection_string or individual fields
+      // SECURITY: URI may contain credentials — never log it
       let uri: string
       if (config.connection_string) {
         uri = config.connection_string as string
@@ -205,11 +206,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         const port = (config.port as number) ?? 27017
         const user = config.user as string | undefined
         const password = config.password as string | undefined
+        // Include database in URI for correct auth-source resolution
+        const dbPath = explicitDb ? `/${encodeURIComponent(explicitDb)}` : ""
 
         if (user && password) {
-          uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}`
+          uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}${dbPath}`
         } else {
-          uri = `mongodb://${host}:${port}`
+          uri = `mongodb://${host}:${port}${dbPath}`
         }
       }
 
@@ -337,11 +340,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.pipeline || !Array.isArray(parsed.pipeline)) {
             throw new Error("aggregate requires a 'pipeline' array")
           }
-          // Append $limit if the pipeline doesn't already end with one
+          // Append $limit if the pipeline doesn't already contain one anywhere.
+          // Also skip for $out/$merge pipelines which write results.
           const pipeline = [...parsed.pipeline]
-          const lastStage = pipeline[pipeline.length - 1]
-          const hasLimit = lastStage && "$limit" in lastStage
-          if (!hasLimit) {
+          const hasLimit = pipeline.some((stage) => "$limit" in stage)
+          const hasWrite = pipeline.some((stage) => "$out" in stage || "$merge" in stage)
+          if (!hasLimit && !hasWrite) {
             pipeline.push({ $limit: effectiveLimit + 1 })
           }
 
