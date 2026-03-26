@@ -114,9 +114,7 @@ function inferType(value: unknown): string {
  * Extract field names and their observed types from a set of documents.
  * Only inspects top-level fields — nested objects are reported as type "object".
  */
-function extractFields(
-  docs: Record<string, unknown>[],
-): Map<string, Set<string>> {
+function extractFields(docs: Record<string, unknown>[]): Map<string, Set<string>> {
   const fieldTypes = new Map<string, Set<string>>()
 
   for (const doc of docs) {
@@ -136,9 +134,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     mongoModule = await import("mongodb")
     mongoModule = mongoModule.default || mongoModule
   } catch {
-    throw new Error(
-      "MongoDB driver not installed. Run: npm install mongodb",
-    )
+    throw new Error("MongoDB driver not installed. Run: npm install mongodb")
   }
 
   const MongoClient = mongoModule.MongoClient
@@ -167,8 +163,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       return (val as any).toString()
     }
     // BSON Decimal128, Long, Int32, Double
-    if ((val as any)._bsontype === "Decimal128" || (val as any)._bsontype === "Long" ||
-        (val as any)._bsontype === "Int32" || (val as any)._bsontype === "Double") {
+    if (
+      (val as any)._bsontype === "Decimal128" ||
+      (val as any)._bsontype === "Long" ||
+      (val as any)._bsontype === "Int32" ||
+      (val as any)._bsontype === "Double"
+    ) {
       return (val as any).toString()
     }
     // BSON UUID
@@ -241,18 +241,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       await client.connect()
     },
 
-    async execute(
-      query: string,
-      limit?: number,
-      _binds?: any[],
-    ): Promise<ConnectorResult> {
+    async execute(query: string, limit?: number, _binds?: any[]): Promise<ConnectorResult> {
       let parsed: MqlQuery
       try {
         parsed = JSON.parse(query) as MqlQuery
       } catch (e) {
-        throw new Error(
-          `Invalid MQL query — must be valid JSON. Error: ${(e as Error).message}`,
-        )
+        throw new Error(`Invalid MQL query — must be valid JSON. Error: ${(e as Error).message}`)
       }
 
       if (!parsed.command) {
@@ -282,10 +276,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         if (!parsed.collection) {
           throw new Error("dropCollection requires 'collection'")
         }
-        const dropped = await db.collection(parsed.collection).drop().catch((e: any) => {
-          if (e.codeName === "NamespaceNotFound" || e.code === 26) return false
-          throw e
-        })
+        const dropped = await db
+          .collection(parsed.collection)
+          .drop()
+          .catch((e: any) => {
+            if (e.codeName === "NamespaceNotFound" || e.code === 26) return false
+            throw e
+          })
         return {
           columns: ["dropped"],
           rows: [[dropped]],
@@ -307,9 +304,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (parsed.sort) cursor = cursor.sort(parsed.sort)
           if (parsed.skip) cursor = cursor.skip(parsed.skip)
           // Cap user-specified limit against effectiveLimit to prevent OOM
-          const queryLimit = parsed.limit
-            ? Math.min(parsed.limit, effectiveLimit)
-            : effectiveLimit
+          const queryLimit = parsed.limit ? Math.min(parsed.limit, effectiveLimit) : effectiveLimit
           cursor = cursor.limit(queryLimit + 1)
           const docs = await cursor.toArray()
 
@@ -329,9 +324,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           }
           const columns = Array.from(colSet)
 
-          const rows = limited.map((doc: any) =>
-            columns.map((col) => serializeValue(doc[col])),
-          )
+          const rows = limited.map((doc: any) => columns.map((col) => serializeValue(doc[col])))
 
           return { columns, rows, row_count: limited.length, truncated }
         }
@@ -366,9 +359,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           }
           const columns = Array.from(colSet)
 
-          const rows = limited.map((doc: any) =>
-            columns.map((col) => serializeValue(doc[col])),
-          )
+          const rows = limited.map((doc: any) => columns.map((col) => serializeValue(doc[col])))
 
           return { columns, rows, row_count: limited.length, truncated }
         }
@@ -489,11 +480,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             return { columns: [], rows: [], row_count: 0, truncated: false }
           }
           const columns = ["name", "key", "unique"]
-          const rows = indexes.map((idx: any) => [
-            idx.name,
-            JSON.stringify(idx.key),
-            idx.unique ?? false,
-          ])
+          const rows = indexes.map((idx: any) => [idx.name, JSON.stringify(idx.key), idx.unique ?? false])
           return { columns, rows, row_count: rows.length, truncated: false }
         }
 
@@ -517,9 +504,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
     },
 
-    async listTables(
-      schema: string,
-    ): Promise<Array<{ name: string; type: string }>> {
+    async listTables(schema: string): Promise<Array<{ name: string; type: string }>> {
       const db = client.db(schema)
       const collections = await db.listCollections().toArray()
       return collections
@@ -527,15 +512,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           name: c.name as string,
           type: c.type === "view" ? "view" : "collection",
         }))
-        .sort((a: { name: string }, b: { name: string }) =>
-          a.name.localeCompare(b.name),
-        )
+        .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name))
     },
 
-    async describeTable(
-      schema: string,
-      table: string,
-    ): Promise<SchemaColumn[]> {
+    async describeTable(schema: string, table: string): Promise<SchemaColumn[]> {
       const db = client.db(schema)
       const coll = db.collection(table)
 
@@ -561,11 +541,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         const hasNull = typeArr.includes("null")
         const nonNullTypes = typeArr.filter((t) => t !== "null")
         const dataType =
-          nonNullTypes.length === 0
-            ? "null"
-            : nonNullTypes.length === 1
-              ? nonNullTypes[0]
-              : nonNullTypes.join(" | ")
+          nonNullTypes.length === 0 ? "null" : nonNullTypes.length === 1 ? nonNullTypes[0] : nonNullTypes.join(" | ")
 
         // Field is nullable if it has null values OR is missing from some documents
         const presentIn = fieldPresence.get(name) ?? 0
