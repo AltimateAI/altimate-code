@@ -3,6 +3,7 @@
   "name": "opencode",
   "description": "AI-powered development tool",
   "private": true,
+  "autofix_verified": "2026-03-26",
   "type": "module",
   "packageManager": "bun@1.3.10",
   "scripts": {
