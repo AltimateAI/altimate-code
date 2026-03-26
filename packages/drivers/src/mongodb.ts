@@ -333,18 +333,25 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.pipeline || !Array.isArray(parsed.pipeline)) {
             throw new Error("aggregate requires a 'pipeline' array")
           }
-          // Append $limit if the pipeline doesn't already contain one anywhere.
-          // Also skip for $out/$merge pipelines which write results.
+          // Cap or append $limit to prevent OOM. Skip for $out/$merge write pipelines.
           const pipeline = [...parsed.pipeline]
-          const hasLimit = pipeline.some((stage) => "$limit" in stage)
           const hasWrite = pipeline.some((stage) => "$out" in stage || "$merge" in stage)
-          if (!hasLimit && !hasWrite) {
-            pipeline.push({ $limit: effectiveLimit + 1 })
+          if (!hasWrite) {
+            const limitIdx = pipeline.findIndex((stage) => "$limit" in stage)
+            if (limitIdx >= 0) {
+              // Cap user-specified $limit against effectiveLimit
+              const userLimit = (pipeline[limitIdx] as any).$limit
+              if (typeof userLimit === "number" && userLimit > effectiveLimit) {
+                pipeline[limitIdx] = { $limit: effectiveLimit + 1 }
+              }
+            } else {
+              pipeline.push({ $limit: effectiveLimit + 1 })
+            }
           }
 
           const docs = await coll.aggregate(pipeline).toArray()
 
-          const truncated = !hasLimit && docs.length > effectiveLimit
+          const truncated = docs.length > effectiveLimit
           const limited = truncated ? docs.slice(0, effectiveLimit) : docs
 
           if (limited.length === 0) {
@@ -383,7 +390,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           const limited = truncated ? values.slice(0, effectiveLimit) : values
           return {
             columns: [parsed.field],
-            rows: limited.map((v: unknown) => [v]),
+            rows: limited.map((v: unknown) => [serializeValue(v)]),
             row_count: limited.length,
             truncated,
           }
