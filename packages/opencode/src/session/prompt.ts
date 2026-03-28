@@ -325,6 +325,7 @@ export namespace SessionPrompt {
     let planHasWritten = false
     let planLastUserMsgId: string | undefined
     // altimate_change end
+    let tracedAgent = ""
     let emergencySessionEndFired = false
     // altimate_change start — quality signal, tool chain, error fingerprint tracking
     let lastToolCategory = ""
@@ -855,11 +856,10 @@ export namespace SessionPrompt {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
 
-      // altimate_change start - trace system prompt once per loop() call.
-      // The system prompt is functionally identical across steps within a single
-      // loop() invocation (same agent, same environment). Agent switches re-enter
-      // loop() with step reset to 0, so each agent's prompt is traced separately.
-      if (step === 1) {
+      // altimate_change start - trace system prompt once per agent.
+      // The step counter is never reset on agent switches, so we track the
+      // last-traced agent to ensure each agent's system prompt is logged.
+      if (step === 1 || agent.name !== tracedAgent) {
         Tracer.active?.logSpan({
           name: "system-prompt",
           startTime: Date.now(),
@@ -867,6 +867,7 @@ export namespace SessionPrompt {
           input: { agent: agent.name, step },
           output: { parts: system.length, content: system.join("\n\n") },
         })
+        tracedAgent = agent.name
       }
       // altimate_change end
 
