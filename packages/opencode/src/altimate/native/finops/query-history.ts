@@ -158,7 +158,13 @@ function buildHistoryQuery(
     }
   }
   if (whType === "postgres" || whType === "postgresql") {
-    return { sql: POSTGRES_HISTORY_SQL.replace("{limit}", String(Math.floor(Number(limit)))), binds: [] }
+    // The Postgres connector (packages/drivers/src/postgres.ts) does not yet
+    // pass binds through to pg — its execute() ignores the _binds parameter.
+    // Render LIMIT inline with Math.floor to prevent injection.
+    return {
+      sql: POSTGRES_HISTORY_SQL.replace("{limit}", String(Math.floor(Number(limit)))),
+      binds: [],
+    }
   }
   if (whType === "bigquery") {
     return { sql: BIGQUERY_HISTORY_SQL, binds: [days, limit] }

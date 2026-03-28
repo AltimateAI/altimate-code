@@ -22,7 +22,7 @@ SELECT
     MAX(avg_queued_load) as peak_queue_load,
     COUNT(*) as sample_count
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY
-WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
 GROUP BY warehouse_name
 ORDER BY avg_queue_load DESC
 `
@@ -36,7 +36,7 @@ SELECT
     AVG(bytes_scanned) as avg_bytes_scanned,
     SUM(credits_used_cloud_services) as total_credits
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE start_time >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE start_time >= DATEADD('day', ?, CURRENT_TIMESTAMP())
   AND execution_status = 'SUCCESS'
 GROUP BY warehouse_name
 ORDER BY total_credits DESC
@@ -59,7 +59,7 @@ SELECT
     MAX(period_slot_ms / 1000.0) as peak_queue_load,
     COUNT(*) as sample_count
 FROM \`region-US.INFORMATION_SCHEMA.JOBS_TIMELINE\`
-WHERE period_start >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+WHERE period_start >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY)
 GROUP BY reservation_id
 ORDER BY avg_concurrency DESC
 `
@@ -74,7 +74,7 @@ SELECT
     AVG(total_bytes_billed) as avg_bytes_scanned,
     SUM(total_bytes_billed) / 1099511627776.0 * 5.0 as total_credits
 FROM \`region-US.INFORMATION_SCHEMA.JOBS\`
-WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ? DAY)
   AND job_type = 'QUERY'
   AND state = 'DONE'
 GROUP BY reservation_id
@@ -94,7 +94,7 @@ SELECT
     MAX(num_queued_queries) as peak_queue_load,
     COUNT(*) as sample_count
 FROM system.compute.warehouse_events
-WHERE event_time >= DATE_SUB(CURRENT_DATE(), {days})
+WHERE event_time >= DATE_SUB(CURRENT_DATE(), ?)
 GROUP BY warehouse_id
 ORDER BY avg_queue_load DESC
 `
@@ -109,7 +109,7 @@ SELECT
     AVG(read_bytes) as avg_bytes_scanned,
     0 as total_credits
 FROM system.query.history
-WHERE start_time >= DATE_SUB(CURRENT_DATE(), {days})
+WHERE start_time >= DATE_SUB(CURRENT_DATE(), ?)
   AND status = 'FINISHED'
 GROUP BY warehouse_id
 ORDER BY query_count DESC
@@ -127,17 +127,17 @@ function getWhType(warehouse: string): string {
   return wh?.type || "unknown"
 }
 
-function buildLoadSql(whType: string, days: number): string | null {
-  if (whType === "snowflake") return SNOWFLAKE_LOAD_SQL.replace("{days}", String(days))
-  if (whType === "bigquery") return BIGQUERY_LOAD_SQL.replace("{days}", String(days))
-  if (whType === "databricks") return DATABRICKS_LOAD_SQL.replace(/{days}/g, String(days))
+function buildLoadSql(whType: string, days: number): { sql: string; binds: any[] } | null {
+  if (whType === "snowflake") return { sql: SNOWFLAKE_LOAD_SQL, binds: [-days] }
+  if (whType === "bigquery") return { sql: BIGQUERY_LOAD_SQL, binds: [days] }
+  if (whType === "databricks") return { sql: DATABRICKS_LOAD_SQL, binds: [days] }
   return null
 }
 
-function buildSizingSql(whType: string, days: number): string | null {
-  if (whType === "snowflake") return SNOWFLAKE_SIZING_SQL.replace("{days}", String(days))
-  if (whType === "bigquery") return BIGQUERY_SIZING_SQL.replace("{days}", String(days))
-  if (whType === "databricks") return DATABRICKS_SIZING_SQL.replace(/{days}/g, String(days))
+function buildSizingSql(whType: string, days: number): { sql: string; binds: any[] } | null {
+  if (whType === "snowflake") return { sql: SNOWFLAKE_SIZING_SQL, binds: [-days] }
+  if (whType === "bigquery") return { sql: BIGQUERY_SIZING_SQL, binds: [days] }
+  if (whType === "databricks") return { sql: DATABRICKS_SIZING_SQL, binds: [days] }
   return null
 }
 
@@ -218,10 +218,10 @@ export async function adviseWarehouse(params: WarehouseAdvisorParams): Promise<W
   const whType = getWhType(params.warehouse)
   const days = params.days ?? 14
 
-  const loadSql = buildLoadSql(whType, days)
-  const sizingSql = buildSizingSql(whType, days)
+  const loadBuilt = buildLoadSql(whType, days)
+  const sizingBuilt = buildSizingSql(whType, days)
 
-  if (!loadSql || !sizingSql) {
+  if (!loadBuilt || !sizingBuilt) {
     return {
       success: false,
       warehouse_load: [],
@@ -237,8 +237,8 @@ export async function adviseWarehouse(params: WarehouseAdvisorParams): Promise<W
 
     // Run load and sizing queries in parallel
     const [loadResult, sizingResult] = await Promise.all([
-      connector.execute(loadSql, 1000),
-      connector.execute(sizingSql, 1000),
+      connector.execute(loadBuilt.sql, 1000, loadBuilt.binds),
+      connector.execute(sizingBuilt.sql, 1000, sizingBuilt.binds),
     ])
 
     // Build warehouse name → size map from SHOW WAREHOUSES (Snowflake only).

@@ -141,7 +141,9 @@ describe("FinOps: SQL template generation", () => {
     test("builds PostgreSQL history SQL", () => {
       const built = HistoryTemplates.buildHistoryQuery("postgres", 7, 50)
       expect(built?.sql).toContain("pg_stat_statements")
-      expect(built?.sql).toContain("50")  // postgres still uses string interpolation
+      // Postgres connector does not yet pass binds — LIMIT rendered inline
+      expect(built?.sql).toContain("LIMIT 50")
+      expect(built?.binds).toEqual([])
     })
 
     test("returns null for DuckDB (no query history)", () => {
@@ -209,18 +211,21 @@ describe("FinOps: SQL template generation", () => {
 
   describe("warehouse-advisor", () => {
     test("builds Snowflake load SQL", () => {
-      const sql = AdvisorTemplates.buildLoadSql("snowflake", 14)
-      expect(sql).toContain("WAREHOUSE_LOAD_HISTORY")
+      const built = AdvisorTemplates.buildLoadSql("snowflake", 14)
+      expect(built?.sql).toContain("WAREHOUSE_LOAD_HISTORY")
+      expect(built?.binds).toEqual([-14])
     })
 
     test("builds Snowflake sizing SQL", () => {
-      const sql = AdvisorTemplates.buildSizingSql("snowflake", 14)
-      expect(sql).toContain("PERCENTILE_CONT")
+      const built = AdvisorTemplates.buildSizingSql("snowflake", 14)
+      expect(built?.sql).toContain("PERCENTILE_CONT")
+      expect(built?.binds).toEqual([-14])
     })
 
     test("builds BigQuery load SQL", () => {
-      const sql = AdvisorTemplates.buildLoadSql("bigquery", 14)
-      expect(sql).toContain("JOBS_TIMELINE")
+      const built = AdvisorTemplates.buildLoadSql("bigquery", 14)
+      expect(built?.sql).toContain("JOBS_TIMELINE")
+      expect(built?.binds).toEqual([14])
     })
 
     test("returns null for unsupported types", () => {
