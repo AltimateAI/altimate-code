@@ -775,6 +775,7 @@ export interface SchemaDiffResult {
 
 export interface AltimateCoreValidateParams {
   sql: string
+  dialect?: string
   schema_path?: string
   schema_context?: Record<string, any>
 }
@@ -803,6 +804,7 @@ export interface AltimateCoreExplainParams {
 
 export interface AltimateCoreCheckParams {
   sql: string
+  dialect?: string
   schema_path?: string
   schema_context?: Record<string, any>
 }
@@ -817,6 +819,7 @@ export interface AltimateCoreResult {
 
 export interface AltimateCoreFixParams {
   sql: string
+  dialect?: string
   schema_path?: string
   schema_context?: Record<string, any>
   max_iterations?: number
@@ -824,6 +827,7 @@ export interface AltimateCoreFixParams {
 
 export interface AltimateCorePolicyParams {
   sql: string
+  dialect?: string
   policy_json: string
   schema_path?: string
   schema_context?: Record<string, any>
@@ -831,6 +835,7 @@ export interface AltimateCorePolicyParams {
 
 export interface AltimateCoreSemanticsParams {
   sql: string
+  dialect?: string
   schema_path?: string
   schema_context?: Record<string, any>
 }
@@ -846,6 +851,7 @@ export interface AltimateCoreTestgenParams {
 export interface AltimateCoreEquivalenceParams {
   sql1: string
   sql2: string
+  dialect?: string
   schema_path?: string
   schema_context?: Record<string, any>
 }
@@ -871,6 +877,7 @@ export interface AltimateCoreRewriteParams {
 
 export interface AltimateCoreCorrectParams {
   sql: string
+  dialect?: string
   schema_path?: string
   schema_context?: Record<string, any>
 }

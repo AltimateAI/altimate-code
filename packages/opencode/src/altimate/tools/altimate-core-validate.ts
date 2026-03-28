@@ -8,6 +8,11 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
     "Validate SQL syntax and schema references. Checks if tables/columns exist in the schema and if SQL is valid for the target dialect. If no schema_path or schema_context is provided, validation still runs but schema-dependent checks (table/column existence) are skipped — syntax and dialect checks still apply. For full validation, run `schema_inspect` first on the referenced tables or pass `schema_context` inline.",
   parameters: z.object({
     sql: z.string().describe("SQL query to validate"),
+    dialect: z
+      .string()
+      .optional()
+      .default("snowflake")
+      .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
@@ -16,6 +21,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
     try {
       const result = await Dispatcher.call("altimate_core.validate", {
         sql: args.sql,
+        dialect: args.dialect,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
       })
@@ -32,6 +38,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
         metadata: {
           success: true, // engine ran — validation errors are findings, not failures
           valid: data.valid,
+          dialect: args.dialect,
           has_schema: hasSchema,
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
@@ -42,7 +49,7 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Validate: ERROR",
-        metadata: { success: false, valid: false, has_schema: hasSchema, error: msg, error_class: "engine_failure" },
+        metadata: { success: false, valid: false, dialect: args.dialect, has_schema: hasSchema, error: msg, error_class: "engine_failure" },
         output: `Failed: ${msg}`,
       }
     }

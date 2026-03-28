@@ -64,7 +64,7 @@ describe("altimate_core_validate error propagation", () => {
 
     const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
     const tool = await AltimateCoreValidateTool.init()
-    const result = await tool.execute({ sql: "SELECT * FROM users" }, stubCtx())
+    const result = await tool.execute({ sql: "SELECT * FROM users", dialect: "snowflake" }, stubCtx())
 
     // The engine ran (success=true), schema-less mode is flagged, and the
     // output warns the caller that existence checks were skipped.
@@ -97,7 +97,7 @@ describe("altimate_core_validate error propagation", () => {
     const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
     const tool = await AltimateCoreValidateTool.init()
     const result = await tool.execute(
-      { sql: "SELECT * FROM users", schema_context: { orders: { id: "INT" } } },
+      { sql: "SELECT * FROM users", dialect: "snowflake", schema_context: { orders: { id: "INT" } } },
       stubCtx(),
     )
 
@@ -119,7 +119,7 @@ describe("altimate_core_semantics error propagation", () => {
   test("returns early with clear error when no schema provided", async () => {
     const { AltimateCoreSemanticsTool } = await import("../../src/altimate/tools/altimate-core-semantics")
     const tool = await AltimateCoreSemanticsTool.init()
-    const result = await tool.execute({ sql: "SELECT * FROM users" }, stubCtx())
+    const result = await tool.execute({ sql: "SELECT * FROM users", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.success).toBe(false)
     expect(result.metadata.error).toContain("No schema provided")
@@ -142,7 +142,7 @@ describe("altimate_core_semantics error propagation", () => {
     const { AltimateCoreSemanticsTool } = await import("../../src/altimate/tools/altimate-core-semantics")
     const tool = await AltimateCoreSemanticsTool.init()
     const result = await tool.execute(
-      { sql: "SELECT * FROM users", schema_context: { orders: { id: "INT" } } },
+      { sql: "SELECT * FROM users", dialect: "snowflake", schema_context: { orders: { id: "INT" } } },
       stubCtx(),
     )
 
@@ -162,7 +162,7 @@ describe("altimate_core_equivalence error propagation", () => {
   test("returns early with clear error when no schema provided", async () => {
     const { AltimateCoreEquivalenceTool } = await import("../../src/altimate/tools/altimate-core-equivalence")
     const tool = await AltimateCoreEquivalenceTool.init()
-    const result = await tool.execute({ sql1: "SELECT * FROM users", sql2: "SELECT * FROM users" }, stubCtx())
+    const result = await tool.execute({ sql1: "SELECT * FROM users", sql2: "SELECT * FROM users", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.success).toBe(false)
     expect(result.metadata.error).toContain("No schema provided")
@@ -184,7 +184,7 @@ describe("altimate_core_equivalence error propagation", () => {
     const { AltimateCoreEquivalenceTool } = await import("../../src/altimate/tools/altimate-core-equivalence")
     const tool = await AltimateCoreEquivalenceTool.init()
     const result = await tool.execute(
-      { sql1: "SELECT * FROM users", sql2: "SELECT * FROM users", schema_context: { orders: { id: "INT" } } },
+      { sql1: "SELECT * FROM users", sql2: "SELECT * FROM users", dialect: "snowflake", schema_context: { orders: { id: "INT" } } },
       stubCtx(),
     )
 
@@ -228,7 +228,7 @@ describe("altimate_core_fix error propagation", () => {
 
     const { AltimateCoreFixTool } = await import("../../src/altimate/tools/altimate-core-fix")
     const tool = await AltimateCoreFixTool.init()
-    const result = await tool.execute({ sql: "SELCT * FORM users" }, stubCtx())
+    const result = await tool.execute({ sql: "SELCT * FORM users", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.error).toContain("Syntax error")
     expect(telemetryWouldExtract(result.metadata)).not.toBe("unknown error")
@@ -269,7 +269,7 @@ describe("altimate_core_correct error propagation", () => {
 
     const { AltimateCoreCorrectTool } = await import("../../src/altimate/tools/altimate-core-correct")
     const tool = await AltimateCoreCorrectTool.init()
-    const result = await tool.execute({ sql: "SELCT * FORM users" }, stubCtx())
+    const result = await tool.execute({ sql: "SELCT * FORM users", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.error).toContain("Syntax error")
     expect(telemetryWouldExtract(result.metadata)).not.toBe("unknown error")
@@ -488,7 +488,7 @@ describe("extractors handle empty message fields", () => {
     const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
     const tool = await AltimateCoreValidateTool.init()
     const result = await tool.execute(
-      { sql: "SELECT * FROM nonexistent_table", schema_context: { users: { id: "INT" } } },
+      { sql: "SELECT * FROM nonexistent_table", dialect: "snowflake", schema_context: { users: { id: "INT" } } },
       stubCtx(),
     )
     // The error should never be empty string — .filter(Boolean) removes it

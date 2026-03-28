@@ -9,6 +9,11 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
   parameters: z.object({
     sql1: z.string().describe("First SQL query"),
     sql2: z.string().describe("Second SQL query"),
+    dialect: z
+      .string()
+      .optional()
+      .default("snowflake")
+      .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
@@ -27,6 +32,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
       const result = await Dispatcher.call("altimate_core.equivalence", {
         sql1: args.sql1,
         sql2: args.sql2,
+        dialect: args.dialect,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
       })
@@ -48,6 +54,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
         metadata: {
           success: !isRealFailure,
           equivalent: data.equivalent,
+          dialect: args.dialect,
           has_schema: hasSchema,
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
@@ -58,7 +65,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Equivalence: ERROR",
-        metadata: { success: false, equivalent: false, has_schema: hasSchema, error: msg },
+        metadata: { success: false, equivalent: false, dialect: args.dialect, has_schema: hasSchema, error: msg },
         output: `Failed: ${msg}`,
       }
     }

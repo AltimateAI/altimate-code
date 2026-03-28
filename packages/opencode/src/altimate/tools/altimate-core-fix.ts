@@ -8,6 +8,11 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
     "Auto-fix SQL errors using fuzzy matching and iterative re-validation. Corrects syntax errors, typos, and schema reference issues. IMPORTANT: Provide schema_context or schema_path — without schema, table/column references cannot be resolved or fixed.",
   parameters: z.object({
     sql: z.string().describe("SQL query to fix"),
+    dialect: z
+      .string()
+      .optional()
+      .default("snowflake")
+      .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
     max_iterations: z.number().optional().describe("Maximum fix iterations (default: 5)"),
@@ -17,6 +22,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
     try {
       const result = await Dispatcher.call("altimate_core.fix", {
         sql: args.sql,
+        dialect: args.dialect,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
         max_iterations: args.max_iterations ?? 5,
@@ -40,6 +46,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
         metadata: {
           success,
           fixed: !!data.fixed_sql,
+          dialect: args.dialect,
           has_schema: hasSchema,
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
@@ -50,7 +57,7 @@ export const AltimateCoreFixTool = Tool.define("altimate_core_fix", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Fix: ERROR",
-        metadata: { success: false, fixed: false, has_schema: hasSchema, error: msg },
+        metadata: { success: false, fixed: false, dialect: args.dialect, has_schema: hasSchema, error: msg },
         output: `Failed: ${msg}`,
       }
     }

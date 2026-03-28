@@ -174,7 +174,7 @@ async function main() {
   await check(
     "validate: no schema → early return with 'No schema provided'",
     async () => {
-      return validateTool.execute({ sql: testSql }, stubCtx())
+      return validateTool.execute({ sql: testSql, dialect: "snowflake" }, stubCtx())
     },
     { metadataSuccess: false, metadataErrorContains: "No schema provided", noUnknownError: true },
   )
@@ -182,7 +182,7 @@ async function main() {
   await check(
     "validate: with schema_context (flat) → success",
     async () => {
-      return validateTool.execute({ sql: testSql, schema_context: flatSchema }, stubCtx())
+      return validateTool.execute({ sql: testSql, dialect: "snowflake", schema_context: flatSchema }, stubCtx())
     },
     { metadataSuccess: true },
   )
@@ -190,7 +190,7 @@ async function main() {
   await check(
     "validate: with schema_path (JSON file) → success",
     async () => {
-      return validateTool.execute({ sql: testSql, schema_path: schemaJsonPath }, stubCtx())
+      return validateTool.execute({ sql: testSql, dialect: "snowflake", schema_path: schemaJsonPath }, stubCtx())
     },
     { metadataSuccess: true },
   )
@@ -198,7 +198,7 @@ async function main() {
   await check(
     "validate: with schema_path (YAML file) → success",
     async () => {
-      return validateTool.execute({ sql: testSql, schema_path: schemaYamlPath }, stubCtx())
+      return validateTool.execute({ sql: testSql, dialect: "snowflake", schema_path: schemaYamlPath }, stubCtx())
     },
     { metadataSuccess: true },
   )
@@ -206,7 +206,7 @@ async function main() {
   await check(
     "validate: with schema_path (nonexistent file) → error",
     async () => {
-      return validateTool.execute({ sql: testSql, schema_path: "/tmp/nonexistent-schema-abc123.json" }, stubCtx())
+      return validateTool.execute({ sql: testSql, dialect: "snowflake", schema_path: "/tmp/nonexistent-schema-abc123.json" }, stubCtx())
     },
     { metadataSuccess: false, noUnknownError: true },
   )
@@ -214,7 +214,7 @@ async function main() {
   await check(
     "validate: syntax error SQL with schema → error propagated",
     async () => {
-      return validateTool.execute({ sql: badSql, schema_context: flatSchema }, stubCtx())
+      return validateTool.execute({ sql: badSql, dialect: "snowflake", schema_context: flatSchema }, stubCtx())
     },
     { metadataSuccess: true, metadataErrorContains: "Syntax error", noUnknownError: true },
   )
@@ -230,7 +230,7 @@ async function main() {
   await check(
     "semantics: no schema → early return with 'No schema provided'",
     async () => {
-      return semanticsTool.execute({ sql: testSql }, stubCtx())
+      return semanticsTool.execute({ sql: testSql, dialect: "snowflake" }, stubCtx())
     },
     { metadataSuccess: false, metadataErrorContains: "No schema provided", noUnknownError: true },
   )
@@ -238,7 +238,7 @@ async function main() {
   await check(
     "semantics: with schema_context → runs (may find issues)",
     async () => {
-      return semanticsTool.execute({ sql: testSql, schema_context: flatSchema }, stubCtx())
+      return semanticsTool.execute({ sql: testSql, dialect: "snowflake", schema_context: flatSchema }, stubCtx())
     },
     { noUnknownError: true },
   )
@@ -246,7 +246,7 @@ async function main() {
   await check(
     "semantics: with schema_path → runs",
     async () => {
-      return semanticsTool.execute({ sql: testSql, schema_path: schemaJsonPath }, stubCtx())
+      return semanticsTool.execute({ sql: testSql, dialect: "snowflake", schema_path: schemaJsonPath }, stubCtx())
     },
     { noUnknownError: true },
   )
@@ -264,7 +264,7 @@ async function main() {
   await check(
     "equivalence: no schema → early return with 'No schema provided'",
     async () => {
-      return equivTool.execute({ sql1: testSql, sql2 }, stubCtx())
+      return equivTool.execute({ sql1: testSql, sql2, dialect: "snowflake" }, stubCtx())
     },
     { metadataSuccess: false, metadataErrorContains: "No schema provided", noUnknownError: true },
   )
@@ -272,7 +272,7 @@ async function main() {
   await check(
     "equivalence: with schema_context → runs",
     async () => {
-      return equivTool.execute({ sql1: testSql, sql2, schema_context: flatSchema }, stubCtx())
+      return equivTool.execute({ sql1: testSql, sql2, dialect: "snowflake", schema_context: flatSchema }, stubCtx())
     },
     { noUnknownError: true },
   )
@@ -280,7 +280,7 @@ async function main() {
   await check(
     "equivalence: with schema_path → runs",
     async () => {
-      return equivTool.execute({ sql1: testSql, sql2, schema_path: schemaJsonPath }, stubCtx())
+      return equivTool.execute({ sql1: testSql, sql2, dialect: "snowflake", schema_path: schemaJsonPath }, stubCtx())
     },
     { noUnknownError: true },
   )
@@ -296,7 +296,7 @@ async function main() {
   await check(
     "fix: unfixable syntax error → error propagated",
     async () => {
-      return fixTool.execute({ sql: badSql }, stubCtx())
+      return fixTool.execute({ sql: badSql, dialect: "snowflake" }, stubCtx())
     },
     { metadataSuccess: true, noUnknownError: true },
   )
@@ -304,7 +304,7 @@ async function main() {
   await check(
     "fix: valid SQL → success (already valid)",
     async () => {
-      return fixTool.execute({ sql: "SELECT 1", schema_context: flatSchema }, stubCtx())
+      return fixTool.execute({ sql: "SELECT 1", dialect: "snowflake", schema_context: flatSchema }, stubCtx())
     },
     { metadataSuccess: true },
   )
@@ -320,7 +320,7 @@ async function main() {
   await check(
     "correct: unfixable syntax error → error propagated",
     async () => {
-      return correctTool.execute({ sql: badSql }, stubCtx())
+      return correctTool.execute({ sql: badSql, dialect: "snowflake" }, stubCtx())
     },
     { metadataSuccess: true, noUnknownError: true },
   )
@@ -470,7 +470,7 @@ async function main() {
   await check(
     "schema_path: empty string → treated as no schema",
     async () => {
-      return validateTool.execute({ sql: testSql, schema_path: "" }, stubCtx())
+      return validateTool.execute({ sql: testSql, dialect: "snowflake", schema_path: "" }, stubCtx())
     },
     { metadataSuccess: false, metadataErrorContains: "No schema provided", noUnknownError: true },
   )
@@ -478,7 +478,7 @@ async function main() {
   await check(
     "schema_context: empty object → treated as no schema",
     async () => {
-      return validateTool.execute({ sql: testSql, schema_context: {} }, stubCtx())
+      return validateTool.execute({ sql: testSql, dialect: "snowflake", schema_context: {} }, stubCtx())
     },
     { metadataSuccess: false, metadataErrorContains: "No schema provided", noUnknownError: true },
   )
@@ -489,6 +489,7 @@ async function main() {
       return validateTool.execute(
         {
           sql: "SELECT id FROM users",
+          dialect: "snowflake",
           schema_context: {
             users: [
               { name: "id", type: "INTEGER" },
@@ -508,6 +509,7 @@ async function main() {
       return validateTool.execute(
         {
           sql: "SELECT id FROM users",
+          dialect: "snowflake",
           schema_context: {
             tables: {
               users: {

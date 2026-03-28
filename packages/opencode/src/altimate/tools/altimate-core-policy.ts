@@ -8,6 +8,11 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
     "Check SQL against YAML-based governance policy guardrails. Validates compliance with custom rules like allowed tables, forbidden operations, and data access restrictions. Provide schema_context or schema_path for accurate table/column resolution.",
   parameters: z.object({
     sql: z.string().describe("SQL query to check against policy"),
+    dialect: z
+      .string()
+      .optional()
+      .default("snowflake")
+      .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
     policy_json: z.string().describe("JSON string defining the policy rules"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
@@ -17,6 +22,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
     try {
       const result = await Dispatcher.call("altimate_core.policy", {
         sql: args.sql,
+        dialect: args.dialect,
         policy_json: args.policy_json,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
@@ -34,6 +40,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
         metadata: {
           success: true, // engine ran — violations are findings, not failures
           pass: data.pass,
+          dialect: args.dialect,
           has_schema: hasSchema,
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
@@ -44,7 +51,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Policy: ERROR",
-        metadata: { success: false, pass: false, has_schema: hasSchema, error: msg },
+        metadata: { success: false, pass: false, dialect: args.dialect, has_schema: hasSchema, error: msg },
         output: `Failed: ${msg}`,
       }
     }

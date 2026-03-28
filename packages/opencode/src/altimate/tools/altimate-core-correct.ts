@@ -8,6 +8,11 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
     "Iteratively correct SQL using a propose-verify-refine loop. More thorough than fix — applies multiple correction rounds to produce valid SQL. Provide schema_context or schema_path for accurate table/column resolution.",
   parameters: z.object({
     sql: z.string().describe("SQL query to correct"),
+    dialect: z
+      .string()
+      .optional()
+      .default("snowflake")
+      .describe("SQL dialect (snowflake, postgres, bigquery, duckdb, etc.)"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
@@ -16,6 +21,7 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
     try {
       const result = await Dispatcher.call("altimate_core.correct", {
         sql: args.sql,
+        dialect: args.dialect,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
       })
@@ -32,6 +38,7 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
         metadata: {
           success: result.success,
           iterations: data.iterations,
+          dialect: args.dialect,
           has_schema: hasSchema,
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
@@ -42,7 +49,7 @@ export const AltimateCoreCorrectTool = Tool.define("altimate_core_correct", {
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Correct: ERROR",
-        metadata: { success: false, iterations: 0, has_schema: hasSchema, error: msg },
+        metadata: { success: false, iterations: 0, dialect: args.dialect, has_schema: hasSchema, error: msg },
         output: `Failed: ${msg}`,
       }
     }
