@@ -99,8 +99,8 @@ describe("tui thread", () => {
       port: 0,
       hostname: "127.0.0.1",
       mdns: false,
-      "mdns-domain": "opencode.local",
-      mdnsDomain: "opencode.local",
+      "mdns-domain": "altimate-code.local",
+      mdnsDomain: "altimate-code.local",
       cors: [],
     }
     return TuiThreadCommand.handler(args)
