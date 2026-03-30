@@ -136,6 +136,7 @@ altimate-dbt init --project-root /path/to/dbt/project --python-path $(which pyth
 | Password | `host`, `port`, `service_name`, `user`, `password` |
 
 ### ClickHouse
+
 | Method | Config Fields |
 |--------|--------------|
 | Password | `host`, `port`, `database`, `user`, `password` |

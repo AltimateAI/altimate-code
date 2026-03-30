@@ -167,9 +167,11 @@ function buildHistoryQuery(
     return { sql: DATABRICKS_HISTORY_SQL, binds: [days, limit] }
   }
   if (whType === "clickhouse") {
-    const sql = CLICKHOUSE_HISTORY_SQL.replace("{days:UInt32}", String(Math.floor(Number(days)))).replace(
+    const clampedDays = Math.max(1, Math.min(Math.floor(Number(days)) || 30, 365))
+    const clampedLimit = Math.max(1, Math.min(Math.floor(Number(limit)) || 100, 10000))
+    const sql = CLICKHOUSE_HISTORY_SQL.replace("{days:UInt32}", String(clampedDays)).replace(
       "{limit:UInt32}",
-      String(Math.floor(Number(limit))),
+      String(clampedLimit),
     )
     return { sql, binds: [] }
   }

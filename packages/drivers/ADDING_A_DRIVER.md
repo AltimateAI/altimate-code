@@ -178,7 +178,7 @@ bun run script/upstream/analyze.ts --markers --base main --strict
 
 ## File Map
 
-```
+```text
 packages/drivers/
   src/
     {database}.ts          ← NEW: driver implementation

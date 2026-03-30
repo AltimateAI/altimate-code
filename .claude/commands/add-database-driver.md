@@ -130,12 +130,12 @@ Work through all 9 phases from the checklist. Use parallel edits where possible.
 
 ```bash
 # Tests (from packages/opencode/)
-cd packages/opencode && bun test test/altimate/driver-normalize.test.ts test/altimate/connections.test.ts
+cd packages/opencode && bun test test/altimate/driver-normalize.test.ts test/altimate/connections.test.ts test/altimate/drivers-{database}-e2e.test.ts
 
-# Typecheck
-bun turbo typecheck
+# Typecheck (from repo root)
+cd "$(git rev-parse --show-toplevel)" && bun turbo typecheck
 
-# Marker check
+# Marker check (from repo root)
 bun run script/upstream/analyze.ts --markers --base main --strict
 ```
 

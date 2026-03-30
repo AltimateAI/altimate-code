@@ -902,6 +902,24 @@ describe("normalizeConfig — ClickHouse", () => {
     expect(result.ssl_ca).toBeUndefined()
   })
 
+  test("ca_cert → tls_ca_cert", () => {
+    const result = normalizeConfig({
+      type: "clickhouse",
+      ca_cert: "/path/to/ca.pem",
+    })
+    expect(result.tls_ca_cert).toBe("/path/to/ca.pem")
+    expect(result.ca_cert).toBeUndefined()
+  })
+
+  test("ssl_cert → tls_cert", () => {
+    const result = normalizeConfig({
+      type: "clickhouse",
+      ssl_cert: "/path/to/cert.pem",
+    })
+    expect(result.tls_cert).toBe("/path/to/cert.pem")
+    expect(result.ssl_cert).toBeUndefined()
+  })
+
   test("tlsCert → tls_cert", () => {
     const result = normalizeConfig({
       type: "clickhouse",
@@ -918,5 +936,14 @@ describe("normalizeConfig — ClickHouse", () => {
     })
     expect(result.tls_key).toBe("/path/to/key.pem")
     expect(result.tlsKey).toBeUndefined()
+  })
+
+  test("ssl_key → tls_key", () => {
+    const result = normalizeConfig({
+      type: "clickhouse",
+      ssl_key: "/path/to/key.pem",
+    })
+    expect(result.tls_key).toBe("/path/to/key.pem")
+    expect(result.ssl_key).toBeUndefined()
   })
 })

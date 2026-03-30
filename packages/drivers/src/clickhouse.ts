@@ -60,7 +60,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       client = createClient(clientConfig)
     },
 
-    async execute(sql: string, limit?: number, _binds?: any[]): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, binds?: any[]): Promise<ConnectorResult> {
+      if (binds && binds.length > 0) {
+        throw new Error("ClickHouse driver does not support parameterized binds — use ClickHouse query parameters instead")
+      }
       const effectiveLimit = limit === undefined ? 1000 : limit
       let query = sql
       // Only SELECT and WITH...SELECT support LIMIT — SHOW/DESCRIBE/EXPLAIN/EXISTS do not

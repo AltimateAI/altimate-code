@@ -380,7 +380,6 @@ The following databases are not yet natively supported, but workarounds are avai
 
 | Database | Workaround |
 |----------|------------|
-| ClickHouse | Use the bash tool with `clickhouse-client` or `curl` to query directly |
 | Cassandra | Use the bash tool with `cqlsh` to query directly |
 | CockroachDB | PostgreSQL-compatible — use `type: postgres` |
 | TimescaleDB | PostgreSQL extension — use `type: postgres` |
@@ -422,7 +421,7 @@ The `/discover` command can automatically detect warehouse connections from:
 | Source | Detection |
 |--------|-----------|
 | dbt profiles | Parses `~/.dbt/profiles.yml` |
-| Docker containers | Finds running PostgreSQL, MySQL, and SQL Server containers |
+| Docker containers | Finds running PostgreSQL, MySQL, SQL Server, and ClickHouse containers |
 | Environment variables | Scans for `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABRICKS_HOST`, etc. |
 
 See [Warehouse Tools](../data-engineering/tools/warehouse-tools.md) for the full list of environment variable signals.

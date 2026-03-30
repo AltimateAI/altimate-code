@@ -31,6 +31,9 @@ const SENSITIVE_FIELDS = new Set([
   "ssl_key",
   "ssl_cert",
   "ssl_ca",
+  "tls_key",
+  "tls_cert",
+  "tls_ca_cert",
 ])
 
 /** Cached keytar module (or null if unavailable). */

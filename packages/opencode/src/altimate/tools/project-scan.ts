@@ -293,6 +293,9 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
       oracle: "oracle",
       duckdb: "duckdb",
       databricks: "databricks",
+      clickhouse: "clickhouse",
+      "clickhouse+http": "clickhouse",
+      "clickhouse+https": "clickhouse",
     }
     const dbType = schemeTypeMap[scheme] ?? "postgres"
     // Only add if we don't already have this type detected from other env vars

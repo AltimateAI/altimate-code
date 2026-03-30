@@ -22,11 +22,11 @@ function isDockerAvailable(): boolean {
   }
 }
 
-function waitForPort(port: number, timeout = 30000): Promise<void> {
+function waitForPort(port: number, timeout = 30000, host = "127.0.0.1"): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now()
     const attempt = () => {
-      const sock = createConnection({ host: "127.0.0.1", port })
+      const sock = createConnection({ host, port })
       sock.once("connect", () => {
         sock.destroy()
         resolve()
@@ -55,13 +55,16 @@ async function waitForDbReady(
   const start = Date.now()
   let lastErr: any
   while (Date.now() - start < timeout) {
+    let connector: any
     try {
-      const { connector, testQuery } = await connectFn()
+      const result = await connectFn()
+      connector = result.connector
       await connector.connect()
-      await connector.execute(testQuery)
+      await connector.execute(result.testQuery)
       return connector
     } catch (e: any) {
       lastErr = e
+      try { connector?.disconnect?.() } catch {}
       await new Promise((r) => setTimeout(r, 2000))
     }
   }
