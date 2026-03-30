@@ -44,10 +44,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
 
   const cost = createMemo(() => {
     const total = messages().reduce((sum, x) => sum + (x.role === "assistant" ? x.cost : 0), 0)
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    }).format(total)
+    return Locale.cost(total)
   })
 
   const context = createMemo(() => {

@@ -8,6 +8,7 @@ import { renderTraceViewer } from "../../altimate/observability/viewer"
 import { Config } from "../../config/config"
 import fs from "fs/promises"
 import path from "path"
+import { Locale } from "../../util/locale"
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
@@ -18,8 +19,7 @@ function formatDuration(ms: number): string {
 }
 
 function formatCost(cost: number): string {
-  if (cost < 0.01) return `$${cost.toFixed(4)}`
-  return `$${cost.toFixed(2)}`
+  return Locale.cost(cost)
 }
 
 function formatTimestamp(iso: string): string {

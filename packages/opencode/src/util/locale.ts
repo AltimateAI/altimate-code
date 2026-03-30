@@ -80,4 +80,38 @@ export namespace Locale {
     const template = count === 1 ? singular : plural
     return template.replace("{}", count.toString())
   }
+
+  /**
+   * Format a USD cost value with appropriate precision.
+   *
+   * The standard Intl.NumberFormat currency formatter rounds to 2 decimal
+   * places, which causes any cost below $0.005 to display as "$0.00".
+   * For LLM usage this is misleading — a single message with 1K input
+   * tokens on Claude Sonnet costs ~$0.003, which would round to "$0.00"
+   * even though the user is being charged.
+   *
+   * This function uses tiered precision:
+   *   $0         → "$0.00"
+   *   < $0.01    → "$0.0012" (4 decimal places so sub-cent costs are visible)
+   *   < $0.10    → "$0.0123" (4 decimal places for precision)
+   *   >= $0.10   → "$0.12"   (standard 2 decimal places)
+   */
+  export function cost(amount: number): string {
+    if (amount === 0) return "$0.00"
+    if (amount < 0.10) {
+      // Use 4 decimal places so sub-cent costs are visible.
+      // Strip trailing zeros but keep at least 2 decimal places.
+      const raw = amount.toFixed(4)
+      const trimmed = raw.replace(/0+$/, "")
+      // Ensure at least 2 decimal places after the dot
+      const dot = trimmed.indexOf(".")
+      const decimals = dot === -1 ? 0 : trimmed.length - dot - 1
+      const padded = decimals < 2 ? trimmed + "0".repeat(2 - decimals) : trimmed
+      return "$" + padded
+    }
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+    }).format(amount)
+  }
 }

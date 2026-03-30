@@ -66,6 +66,41 @@ describe("Locale.truncateMiddle", () => {
   })
 })
 
+describe("Locale.cost", () => {
+  test("shows $0.00 for zero cost", () => {
+    expect(Locale.cost(0)).toBe("$0.00")
+  })
+
+  test("shows 4 decimal places for sub-cent costs", () => {
+    // 1K input tokens on Claude Sonnet ($3/M) = $0.003
+    expect(Locale.cost(0.003)).toBe("$0.003")
+    // Tiny cost that would round to $0.00 with 2 decimals
+    expect(Locale.cost(0.001)).toBe("$0.001")
+    expect(Locale.cost(0.0001)).toBe("$0.0001")
+  })
+
+  test("shows 4 decimal places for costs under 10 cents", () => {
+    expect(Locale.cost(0.015)).toBe("$0.015")
+    expect(Locale.cost(0.0567)).toBe("$0.0567")
+    expect(Locale.cost(0.09)).toBe("$0.09")
+  })
+
+  test("shows standard 2 decimal places for costs >= 10 cents", () => {
+    expect(Locale.cost(0.10)).toBe("$0.10")
+    expect(Locale.cost(0.50)).toBe("$0.50")
+    expect(Locale.cost(1.23)).toBe("$1.23")
+    expect(Locale.cost(42.00)).toBe("$42.00")
+  })
+
+  test("handles typical session costs", () => {
+    // Single message: 5K input + 1K output on Claude Sonnet
+    // $3 * 5000/1M + $15 * 1000/1M = $0.015 + $0.015 = $0.03
+    expect(Locale.cost(0.03)).toBe("$0.03")
+    // Multi-message session: accumulated ~$0.25
+    expect(Locale.cost(0.25)).toBe("$0.25")
+  })
+})
+
 describe("Locale.pluralize", () => {
   test("uses singular for count=1", () => {
     expect(Locale.pluralize(1, "{} item", "{} items")).toBe("1 item")

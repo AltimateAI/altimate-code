@@ -208,7 +208,7 @@ function printTrajectoryTable(summaries: SessionSummary[]) {
       s.id.slice(-idW).padEnd(idW),
       Locale.truncate(s.title, titleW).padEnd(titleW),
       (s.agent || "-").slice(0, agentW).padEnd(agentW),
-      `$${s.cost.toFixed(2)}`.padStart(costW),
+      Locale.cost(s.cost).padStart(costW),
       String(s.tool_calls).padStart(toolsW),
       String(s.generations).padStart(gensW),
       formatDuration(s.duration_ms).padStart(durW),

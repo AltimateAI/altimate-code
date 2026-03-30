@@ -372,6 +372,54 @@ describe("session.getUsage", () => {
     expect(result.cost).toBe(3 + 1.5)
   })
 
+  test("calculates non-zero cost for small token counts (single message)", () => {
+    // Simulates a typical single LLM response:
+    // 5K input tokens, 1K output tokens on Claude Sonnet ($3/$15 per M)
+    const model = createModel({
+      context: 200_000,
+      output: 64_000,
+      cost: {
+        input: 3,
+        output: 15,
+        cache: { read: 0.3, write: 3.75 },
+      },
+    })
+    const result = Session.getUsage({
+      model,
+      usage: {
+        inputTokens: 5000,
+        outputTokens: 1000,
+        totalTokens: 6000,
+      },
+    })
+
+    // 3 * 5000/1M + 15 * 1000/1M = 0.015 + 0.015 = 0.03
+    expect(result.cost).toBeCloseTo(0.03, 6)
+    expect(result.cost).toBeGreaterThan(0)
+  })
+
+  test("returns zero cost for free models", () => {
+    const model = createModel({
+      context: 200_000,
+      output: 64_000,
+      cost: {
+        input: 0,
+        output: 0,
+        cache: { read: 0, write: 0 },
+      },
+    })
+    const result = Session.getUsage({
+      model,
+      usage: {
+        inputTokens: 10000,
+        outputTokens: 2000,
+        totalTokens: 12000,
+      },
+    })
+
+    expect(result.cost).toBe(0)
+  })
+
   test.each(["@ai-sdk/anthropic", "@ai-sdk/amazon-bedrock", "@ai-sdk/google-vertex/anthropic"])(
     "computes total from components for %s models",
     (npm) => {

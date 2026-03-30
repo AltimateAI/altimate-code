@@ -8,6 +8,7 @@ import type { AssistantMessage, Session } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Flag } from "@/flag/flag"
+import { Locale } from "@/util/locale"
 import { useTerminalDimensions } from "@opentui/solid"
 
 const Title = (props: { session: Accessor<Session> }) => {
@@ -52,10 +53,7 @@ export function Header() {
       messages(),
       sumBy((x) => (x.role === "assistant" ? x.cost : 0)),
     )
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    }).format(total)
+    return Locale.cost(total)
   })
 
   const context = createMemo(() => {
