@@ -1014,8 +1014,10 @@ export class Trace {
     limit: number
   }> {
     const all = await Trace.listTraces(dir)
-    const offset = Math.max(0, options?.offset ?? 0)
-    const limit = Math.max(1, options?.limit ?? 20)
+    const rawOffset = options?.offset ?? 0
+    const rawLimit = options?.limit ?? 20
+    const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.trunc(rawLimit)) : 20
     return {
       traces: all.slice(offset, offset + limit),
       total: all.length,
