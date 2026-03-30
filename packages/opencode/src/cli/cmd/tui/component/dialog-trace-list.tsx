@@ -61,7 +61,7 @@ export function DialogTraceList(props: {
       })
     }
 
-    result.push(...items.slice(0, 50).map((item) => {
+    result.push(...items.map((item) => {
         const rawStartedAt = item.trace.startedAt
         const parsedDate = typeof rawStartedAt === "string" || typeof rawStartedAt === "number"
           ? new Date(rawStartedAt)
