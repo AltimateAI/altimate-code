@@ -203,6 +203,38 @@ describe("ClickHouse driver unit tests", () => {
       await connector.execute("SELECT 'it''s -- LIMIT 5' FROM t", 10)
       expect(mockQueryCalls[0].query).toContain("LIMIT 11")
     })
+
+    test("leading block comment does NOT bypass LIMIT injection", async () => {
+      mockQueryResult = [{ id: 1 }]
+      await connector.execute("/* analytics query */ SELECT * FROM t", 10)
+      expect(mockQueryCalls[0].query).toContain("LIMIT 11")
+    })
+
+    test("multi-line block comment before SELECT does NOT bypass LIMIT", async () => {
+      mockQueryResult = [{ id: 1 }]
+      await connector.execute("/*\n * Report query\n * Author: test\n */\nSELECT * FROM t", 10)
+      expect(mockQueryCalls[0].query).toContain("LIMIT 11")
+    })
+
+    test("backslash-escaped string does NOT break LIMIT check", async () => {
+      mockQueryResult = [{ id: 1 }]
+      await connector.execute("SELECT 'path\\\\to\\'s -- LIMIT 5' FROM t", 10)
+      expect(mockQueryCalls[0].query).toContain("LIMIT 11")
+    })
+
+    test("leading comment does NOT misroute SELECT as DDL", async () => {
+      mockQueryResult = [{ id: 1 }]
+      await connector.execute("-- INSERT note\nSELECT * FROM t", 10)
+      expect(mockQueryCalls.length).toBe(1)
+      expect(mockCommandCalls.length).toBe(0)
+    })
+
+    test("block comment containing DDL keyword does NOT misroute SELECT", async () => {
+      mockQueryResult = [{ id: 1 }]
+      await connector.execute("/* DROP TABLE note */ SELECT * FROM t", 10)
+      expect(mockQueryCalls.length).toBe(1)
+      expect(mockCommandCalls.length).toBe(0)
+    })
   })
 
   // --- Truncation detection ---
@@ -282,6 +314,31 @@ describe("ClickHouse driver unit tests", () => {
 
     test("LowCardinality(String) is NOT nullable", async () => {
       mockQueryResult = [{ name: "col1", type: "LowCardinality(String)" }]
+      const cols = await connector.describeTable("default", "t")
+      expect(cols[0].nullable).toBe(false)
+    })
+
+    test("LowCardinality(Nullable(FixedString(32))) IS nullable — nested inner type", async () => {
+      mockQueryResult = [{ name: "col1", type: "LowCardinality(Nullable(FixedString(32)))" }]
+      const cols = await connector.describeTable("default", "t")
+      expect(cols[0].nullable).toBe(true)
+    })
+
+    test("Map(String, Nullable(UInt32)) is NOT nullable at column level", async () => {
+      // The map values are nullable, but the column itself is not
+      mockQueryResult = [{ name: "col1", type: "Map(String, Nullable(UInt32))" }]
+      const cols = await connector.describeTable("default", "t")
+      expect(cols[0].nullable).toBe(false)
+    })
+
+    test("Tuple(Nullable(String), UInt32) is NOT nullable at column level", async () => {
+      mockQueryResult = [{ name: "col1", type: "Tuple(Nullable(String), UInt32)" }]
+      const cols = await connector.describeTable("default", "t")
+      expect(cols[0].nullable).toBe(false)
+    })
+
+    test("handles empty/missing type gracefully", async () => {
+      mockQueryResult = [{ name: "col1", type: undefined }]
       const cols = await connector.describeTable("default", "t")
       expect(cols[0].nullable).toBe(false)
     })
