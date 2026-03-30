@@ -98,7 +98,7 @@ export namespace Locale {
    */
   export function cost(amount: number): string {
     if (amount === 0) return "$0.00"
-    if (amount < 0.10) {
+    if (amount > 0 && amount < 0.10) {
       // Use 4 decimal places so sub-cent costs are visible.
       // Strip trailing zeros but keep at least 2 decimal places.
       const raw = amount.toFixed(4)

@@ -92,6 +92,12 @@ describe("Locale.cost", () => {
     expect(Locale.cost(42.00)).toBe("$42.00")
   })
 
+  test("negative amounts use standard Intl formatting", () => {
+    // Negative costs should not go through the sub-cent branch
+    expect(Locale.cost(-0.003)).toBe("-$0.00")
+    expect(Locale.cost(-1.50)).toBe("-$1.50")
+  })
+
   test("handles typical session costs", () => {
     // Single message: 5K input + 1K output on Claude Sonnet
     // $3 * 5000/1M + $15 * 1000/1M = $0.015 + $0.015 = $0.03
