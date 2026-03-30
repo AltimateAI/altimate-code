@@ -37,7 +37,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       if (!manifest.models || manifest.models.length === 0) {
         return {
           title: "Impact: NO MANIFEST",
-          metadata: { success: false },
+          metadata: { success: false, dialect: args.dialect },
           output: `No models found in manifest at ${args.manifest_path}. Run \`dbt compile\` first to generate the manifest.`,
         }
       }
@@ -54,7 +54,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           .join(", ")
         return {
           title: "Impact: MODEL NOT FOUND",
-          metadata: { success: false },
+          metadata: { success: false, dialect: args.dialect },
           output: `Model "${args.model}" not found in manifest. Available models: ${available}${manifest.models.length > 10 ? ` (+${manifest.models.length - 10} more)` : ""}`,
         }
       }

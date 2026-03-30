@@ -23,7 +23,7 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
         "No schema provided. Provide schema_context or schema_path so table/column references can be resolved."
       return {
         title: "Semantics: NO SCHEMA",
-        metadata: { success: false, valid: false, issue_count: 0, has_schema: false, error },
+        metadata: { success: false, valid: false, issue_count: 0, dialect: args.dialect, has_schema: false, error },
         output: `Error: ${error}`,
       }
     }

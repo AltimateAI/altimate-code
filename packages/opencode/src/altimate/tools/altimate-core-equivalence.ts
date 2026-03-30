@@ -24,7 +24,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
         "No schema provided. Provide schema_context or schema_path so table/column references can be resolved."
       return {
         title: "Equivalence: NO SCHEMA",
-        metadata: { success: false, equivalent: false, has_schema: false, error },
+        metadata: { success: false, equivalent: false, dialect: args.dialect, has_schema: false, error },
         output: `Error: ${error}`,
       }
     }
