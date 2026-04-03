@@ -1363,6 +1363,12 @@ export namespace Config {
     const normalized = (() => {
       if (!data || typeof data !== "object" || Array.isArray(data)) return data
       const copy = { ...(data as Record<string, unknown>) }
+      // Alias mcpServers → mcp (Claude Code / Copilot format compatibility)
+      if ("mcpServers" in copy && !("mcp" in copy)) {
+        copy.mcp = copy.mcpServers
+        delete copy.mcpServers
+        log.info("aliased mcpServers to mcp in config", { path: source })
+      }
       const hadLegacy = "theme" in copy || "keybinds" in copy || "tui" in copy
       if (!hadLegacy) return copy
       delete copy.theme
