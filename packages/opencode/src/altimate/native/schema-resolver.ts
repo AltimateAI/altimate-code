@@ -111,12 +111,15 @@ export function resolveSchema(
 /**
  * Resolve a Schema, falling back to a minimal empty schema when none is provided.
  * Use this for functions that require a non-null Schema argument.
+ * When a dialect is provided, it is passed to Schema.fromDdl() so the fallback
+ * empty schema uses the correct SQL dialect for validation/analysis.
  */
 export function schemaOrEmpty(
   schemaPath?: string,
   schemaContext?: Record<string, any>,
+  dialect?: string,
 ): Schema {
   const s = resolveSchema(schemaPath, schemaContext)
   if (s !== null) return s
-  return Schema.fromDdl("CREATE TABLE _empty_ (id INT);")
+  return Schema.fromDdl("CREATE TABLE _empty_ (id INT);", dialect || undefined)
 }

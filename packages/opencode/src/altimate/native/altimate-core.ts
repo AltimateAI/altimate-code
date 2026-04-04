@@ -88,7 +88,7 @@ export function registerAll(): void {
   // 1. altimate_core.validate
   register("altimate_core.validate", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const schema = schemaOrEmpty(params.schema_path, params.schema_context, params.dialect)
       const raw = await core.validate(params.sql, schema)
       const data = toData(raw)
       return ok(true, data)
@@ -167,7 +167,7 @@ export function registerAll(): void {
   // 6. altimate_core.check — composite: validate + lint + scan_sql
   register("altimate_core.check", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const schema = schemaOrEmpty(params.schema_path, params.schema_context, params.dialect)
       const validation = await core.validate(params.sql, schema)
       const lintResult = core.lint(params.sql, schema)
       const safety = core.scanSql(params.sql)
@@ -185,7 +185,7 @@ export function registerAll(): void {
   // 7. altimate_core.fix
   register("altimate_core.fix", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const schema = schemaOrEmpty(params.schema_path, params.schema_context, params.dialect)
       const raw = await core.fix(params.sql, schema, params.max_iterations ?? undefined)
       const data = toData(raw)
       return ok(true, data)
@@ -209,7 +209,7 @@ export function registerAll(): void {
   // 9. altimate_core.semantics
   register("altimate_core.semantics", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const schema = schemaOrEmpty(params.schema_path, params.schema_context, params.dialect)
       const raw = await core.checkSemantics(params.sql, schema)
       const data = toData(raw)
       return ok(true, data)
@@ -232,7 +232,7 @@ export function registerAll(): void {
   // 11. altimate_core.equivalence
   register("altimate_core.equivalence", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const schema = schemaOrEmpty(params.schema_path, params.schema_context, params.dialect)
       const raw = await core.checkEquivalence(params.sql1, params.sql2, schema)
       const data = toData(raw)
       return ok(true, data)
@@ -280,7 +280,7 @@ export function registerAll(): void {
   // 15. altimate_core.correct
   register("altimate_core.correct", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const schema = schemaOrEmpty(params.schema_path, params.schema_context, params.dialect)
       const raw = await core.correct(params.sql, schema)
       const data = toData(raw)
       return ok(true, data)
