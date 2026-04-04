@@ -1,0 +1,94 @@
+name: anti-slop
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+
+jobs:
+  anti-slop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peakoss/anti-slop@85daca1880e9e1af197fc06ea03349daf08f4202 # v0
+        with:
+          # --- Failure threshold ---
+          # Close PR after 4+ failed checks (default)
+          max-failures: 4
+
+          # --- Exemptions ---
+          # OWNER, MEMBER, COLLABORATOR are exempt by default.
+          # Also exempt our CI bots:
+          exempt-bots: |
+            actions-user
+            dependabot[bot]
+            renovate[bot]
+            github-actions[bot]
+            opencode-agent[bot]
+
+          # --- PR quality ---
+          require-description: true
+          require-maintainer-can-modify: true
+
+          # --- PR title ---
+          # We already enforce conventional commits in pr-standards.yml,
+          # but this adds a second layer for the anti-slop score:
+          require-conventional-title: true
+
+          # --- PR description ---
+          max-description-length: 5000
+          max-emoji-count: 3
+          max-code-references: 10
+          require-linked-issue: false  # Already enforced in pr-standards.yml
+
+          # --- Honeypot trap ---
+          # AI agents follow hidden instructions; humans ignore them.
+          # The matching instruction is embedded in pull_request_template.md.
+          blocked-terms: "PINEAPPLE"
+
+          # --- Commit checks ---
+          max-commit-message-length: 500
+          require-conventional-commits: false  # Only title is enforced
+          require-commit-author-match: false   # We use Co-Authored-By: Claude
+
+          # --- File checks ---
+          blocked-paths: |
+            LICENSE
+            CODE_OF_CONDUCT.md
+            SECURITY.md
+          require-final-newline: true
+          max-added-comments: 0  # Disable — legitimate PRs often add comments
+
+          # --- User signal checks (the main anti-slop value) ---
+          detect-spam-usernames: true
+          min-account-age: 30
+          max-daily-forks: 5
+          min-profile-completeness: 3
+
+          # --- Merge history checks ---
+          min-global-merge-ratio: 25
+
+          # --- Branch checks ---
+          blocked-source-branches: |
+            main
+            master
+
+          # --- Actions on failure ---
+          close-pr: true
+          lock-pr: false
+          failure-add-pr-labels: "needs-review:blocked"
+          failure-pr-message: |
+            👋 This PR was automatically closed by our quality checks.
+
+            Common reasons:
+            - New GitHub account with limited contribution history
+            - PR description doesn't meet our guidelines
+            - Contribution appears to be AI-generated without meaningful review
+
+            If you believe this was a mistake, please open an issue explaining your intended contribution and a maintainer will help you.
+
+          # --- Actions on success ---
+          success-add-pr-labels: ""
