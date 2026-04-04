@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.18] - 2026-04-04
+
+### Added
+
+- **Native GitLab MR review** — review merge requests directly from your terminal with `altimate gitlab review <MR_URL>`. Supports self-hosted GitLab instances, nested group paths, and comment deduplication (updates existing review instead of posting duplicates). Requires `GITLAB_PERSONAL_ACCESS_TOKEN` or `GITLAB_TOKEN` env var. (#622)
+- **Altimate LLM Gateway provider** — connect to Altimate's managed model gateway via the TUI provider dialog (`/connect` → Altimate). Credentials validated before save, stored at `~/.altimate/altimate.json` with `0600` permissions. (#606)
+
+### Fixed
+
+- **Glob tool: timeout, home/root blocking, default exclusions** — glob searches now timeout after 30s (returning partial results) instead of hanging indefinitely. Scanning `/` or `~` is blocked with a helpful message. Common directories (`node_modules`, `.git`, `dist`, `.venv`) are excluded by default. (#637)
+- **MCP config normalization** — configs using `mcpServers` (Claude Code, Cursor format) are auto-converted to `mcp` at load time. External server entries with `command` + `args` + `env` are transformed to altimate-code's native format. (#639)
+- **Light theme readability** — fixed white-on-white text in light terminal themes by adding explicit foreground colors to markdown and code blocks. (#640)
+
 ## [0.5.17] - 2026-04-02
 
 ### Added

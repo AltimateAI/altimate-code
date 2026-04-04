@@ -202,6 +202,22 @@ Some debug methods that can be problematic:
 
 With that said, you may want to try these methods, as they might work for you.
 
+## AI Contributions Policy
+
+We welcome contributions from developers who use AI tools as part of their workflow. However, we require that all contributions reflect genuine understanding and effort from the contributor.
+
+### What we expect
+
+- **Review what you submit.** Whether you wrote it by hand or with AI, you should be able to explain your changes if asked.
+- **Keep PR descriptions in your own words.** Short and focused beats long and generated.
+- **No drive-by agent PRs.** Autonomous agents opening PRs without human review will be closed automatically.
+
+### What's totally fine
+
+- Using Copilot, Claude, or any AI tool as part of your workflow
+- AI-assisted refactoring, test generation, or boilerplate
+- Asking an LLM to help you understand the codebase before contributing
+
 ## Pull Request Expectations
 
 ### Issue First Policy
