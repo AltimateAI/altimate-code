@@ -50,6 +50,9 @@ import { ModelID, ProviderID } from "./schema"
 // altimate_change start — snowflake cortex account validation
 import { VALID_ACCOUNT_RE } from "../altimate/plugin/snowflake"
 // altimate_change end
+// altimate_change start — databricks host validation
+import { VALID_HOST_RE } from "../altimate/plugin/databricks"
+// altimate_change end
 
 const DEFAULT_CHUNK_TIMEOUT = 120_000
 
@@ -733,6 +736,32 @@ export namespace Provider {
       }
     },
     // altimate_change end
+    // altimate_change start — databricks provider loader
+    databricks: async () => {
+      const auth = await Auth.get("databricks")
+      if (auth?.type !== "oauth") {
+        // Fall back to env-based config
+        const host = Env.get("DATABRICKS_HOST")
+        const token = Env.get("DATABRICKS_TOKEN")
+        if (!host || !token) return { autoload: false }
+        return {
+          autoload: true,
+          options: {
+            baseURL: `https://${host}/serving-endpoints`,
+            apiKey: token,
+          },
+        }
+      }
+      const host = auth.accountId ?? Env.get("DATABRICKS_HOST")
+      if (!host || !VALID_HOST_RE.test(host)) return { autoload: false }
+      return {
+        autoload: true,
+        options: {
+          baseURL: `https://${host}/serving-endpoints`,
+        },
+      }
+    },
+    // altimate_change end
   }
 
   export const Model = z
@@ -1015,6 +1044,70 @@ export namespace Provider {
         "mistral-7b": makeSnowflakeModel("mistral-7b", "Mistral 7B", { context: 32000, output: 4096 }, { toolcall: false }),
         // DeepSeek — no tool calling
         "deepseek-r1": makeSnowflakeModel("deepseek-r1", "DeepSeek R1", { context: 64000, output: 32000 }, { reasoning: true, toolcall: false }),
+      },
+    }
+    // altimate_change end
+
+    // altimate_change start — databricks provider models
+    function makeDatabricksModel(
+      id: string,
+      name: string,
+      limits: { context: number; output: number },
+      caps?: { reasoning?: boolean; attachment?: boolean; toolcall?: boolean; image?: boolean },
+    ): Model {
+      const m: Model = {
+        id: ModelID.make(id),
+        providerID: ProviderID.databricks,
+        api: {
+          id,
+          url: "",
+          npm: "@ai-sdk/openai-compatible",
+        },
+        name,
+        capabilities: {
+          temperature: true,
+          reasoning: caps?.reasoning ?? false,
+          attachment: caps?.attachment ?? false,
+          toolcall: caps?.toolcall ?? true,
+          input: { text: true, audio: false, image: caps?.image ?? false, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: limits.context, output: limits.output },
+        status: "active" as const,
+        options: {},
+        headers: {},
+        release_date: "2024-01-01",
+        variants: {},
+      }
+      m.variants = mapValues(ProviderTransform.variants(m), (v) => v)
+      return m
+    }
+
+    database["databricks"] = {
+      id: ProviderID.databricks,
+      source: "custom",
+      name: "Databricks",
+      env: ["DATABRICKS_TOKEN"],
+      options: {},
+      models: {
+        // Meta Llama models — tool calling supported
+        "databricks-meta-llama-3-1-405b-instruct": makeDatabricksModel("databricks-meta-llama-3-1-405b-instruct", "Meta Llama 3.1 405B Instruct", { context: 128000, output: 4096 }),
+        "databricks-meta-llama-3-1-70b-instruct": makeDatabricksModel("databricks-meta-llama-3-1-70b-instruct", "Meta Llama 3.1 70B Instruct", { context: 128000, output: 4096 }),
+        "databricks-meta-llama-3-1-8b-instruct": makeDatabricksModel("databricks-meta-llama-3-1-8b-instruct", "Meta Llama 3.1 8B Instruct", { context: 128000, output: 4096 }),
+        // Claude models via Databricks AI Gateway
+        "databricks-claude-sonnet-4-6": makeDatabricksModel("databricks-claude-sonnet-4-6", "Claude Sonnet 4.6", { context: 200000, output: 64000 }),
+        "databricks-claude-opus-4-6": makeDatabricksModel("databricks-claude-opus-4-6", "Claude Opus 4.6", { context: 200000, output: 32000 }),
+        // GPT models via Databricks AI Gateway
+        "databricks-gpt-5-4": makeDatabricksModel("databricks-gpt-5-4", "GPT-5-4", { context: 128000, output: 16384 }),
+        "databricks-gpt-5-mini": makeDatabricksModel("databricks-gpt-5-mini", "GPT-5 Mini", { context: 128000, output: 16384 }),
+        // Gemini models via Databricks AI Gateway
+        "databricks-gemini-3-1-pro": makeDatabricksModel("databricks-gemini-3-1-pro", "Gemini 3.1 Pro", { context: 1000000, output: 8192 }),
+        // DBRX — Databricks native model
+        "databricks-dbrx-instruct": makeDatabricksModel("databricks-dbrx-instruct", "DBRX Instruct", { context: 32768, output: 4096 }),
+        // Mixtral via Databricks
+        "databricks-mixtral-8x7b-instruct": makeDatabricksModel("databricks-mixtral-8x7b-instruct", "Mixtral 8x7B Instruct", { context: 32768, output: 4096 }, { toolcall: false }),
       },
     }
     // altimate_change end

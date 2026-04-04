@@ -15,6 +15,9 @@ import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-au
 // altimate_change start — snowflake cortex plugin import
 import { SnowflakeCortexAuthPlugin } from "../altimate/plugin/snowflake"
 // altimate_change end
+// altimate_change start — databricks plugin import
+import { DatabricksAuthPlugin } from "../altimate/plugin/databricks"
+// altimate_change end
 // altimate_change start — altimate backend auth plugin
 import { AltimateAuthPlugin } from "../altimate/plugin/altimate"
 // altimate_change end
@@ -28,8 +31,8 @@ export namespace Plugin {
   // GitlabAuthPlugin uses a different version of @opencode-ai/plugin (from npm)
   // vs the workspace version, causing a type mismatch on internal HeyApiClient.
   // The types are structurally compatible at runtime.
-  // altimate_change start — snowflake cortex and altimate backend internal plugins
-  const INTERNAL_PLUGINS: PluginInstance[] = [CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin as unknown as PluginInstance, SnowflakeCortexAuthPlugin, AltimateAuthPlugin]
+  // altimate_change start — snowflake cortex, databricks, and altimate backend internal plugins
+  const INTERNAL_PLUGINS: PluginInstance[] = [CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin as unknown as PluginInstance, SnowflakeCortexAuthPlugin, DatabricksAuthPlugin, AltimateAuthPlugin]
   // altimate_change end
 
   const state = Instance.state(async () => {

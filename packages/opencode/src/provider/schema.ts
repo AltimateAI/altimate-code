@@ -26,6 +26,9 @@ export const ProviderID = providerIdSchema.pipe(
     // altimate_change start — snowflake cortex provider ID
     snowflakeCortex: schema.makeUnsafe("snowflake-cortex"),
     // altimate_change end
+    // altimate_change start — databricks provider ID
+    databricks: schema.makeUnsafe("databricks"),
+    // altimate_change end
   })),
 )
 
