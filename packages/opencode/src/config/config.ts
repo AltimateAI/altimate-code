@@ -143,10 +143,10 @@ export namespace Config {
     for (const dir of unique(directories)) {
       // altimate_change start - support both .altimate-code and .opencode config dirs
       if (dir.endsWith(".altimate-code") || dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
-      // altimate_change end
+        // altimate_change end
         // altimate_change start - support altimate-code.json config filename
         for (const file of ["altimate-code.json", "opencode.jsonc", "opencode.json"]) {
-        // altimate_change end
+          // altimate_change end
           log.debug(`loading config from ${path.join(dir, file)}`)
           result = mergeConfigConcatArrays(result, await loadFile(path.join(dir, file)))
           // to satisfy the type checker
@@ -214,7 +214,7 @@ export namespace Config {
     if (existsSync(managedDir)) {
       // altimate_change start - support altimate-code.json config filename
       for (const file of ["altimate-code.json", "opencode.jsonc", "opencode.json"]) {
-      // altimate_change end
+        // altimate_change end
         result = mergeConfigConcatArrays(result, await loadFile(path.join(managedDir, file)))
       }
     }
@@ -1237,7 +1237,9 @@ export namespace Config {
           enabled: z
             .boolean()
             .optional()
-            .describe("Enable session tracing (default: true). Traces are saved locally and can be viewed with `altimate-code trace`."),
+            .describe(
+              "Enable session tracing (default: true). Traces are saved locally and can be viewed with `altimate-code trace`.",
+            ),
           dir: z
             .string()
             .optional()
@@ -1247,7 +1249,9 @@ export namespace Config {
             .int()
             .nonnegative()
             .optional()
-            .describe("Maximum number of trace files to keep. 0 for unlimited. Oldest files are removed when exceeded (default: 100)."),
+            .describe(
+              "Maximum number of trace files to keep. 0 for unlimited. Oldest files are removed when exceeded (default: 100).",
+            ),
           exporters: z
             .array(
               z.object({
@@ -1292,13 +1296,17 @@ export namespace Config {
           env_fingerprint_skill_selection: z
             .boolean()
             .optional()
-            .describe("Use environment fingerprint to select relevant skills once per session (default: false). Set to true to enable LLM-based skill filtering."),
+            .describe(
+              "Use environment fingerprint to select relevant skills once per session (default: false). Set to true to enable LLM-based skill filtering.",
+            ),
           // altimate_change end
           // altimate_change start - auto MCP discovery toggle
           auto_mcp_discovery: z
             .boolean()
             .default(true)
-            .describe("Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup. Set to false to disable."),
+            .describe(
+              "Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup. Set to false to disable.",
+            ),
           // altimate_change end
         })
         .optional(),
@@ -1351,6 +1359,68 @@ export namespace Config {
     return load(text, { path: filepath })
   }
 
+  // altimate_change start — shared normalization for external MCP config formats
+  /**
+   * Normalize a raw config object to handle common misconfigurations:
+   * 1. Top-level "mcpServers" key → "mcp" (used by Claude Code, Cursor, etc.)
+   * 2. Individual server entries in external format (string command + args + env)
+   *    → altimate-code format (command array + environment)
+   *
+   * Returns a new object with normalized config, leaving the original unchanged.
+   * This prevents disk mutation when configs are written back via updateGlobal().
+   */
+  function normalizeMcpConfig(data: Record<string, unknown>, source: string): Record<string, unknown> {
+    const result = { ...data }
+    // Normalize top-level key — always delete mcpServers to prevent strict schema rejection
+    if ("mcpServers" in result) {
+      if (!("mcp" in result)) {
+        result.mcp = result.mcpServers
+        log.warn("'mcpServers' is not a valid config key; use 'mcp' instead — auto-correcting", { path: source })
+      } else {
+        log.debug("Both 'mcp' and 'mcpServers' exist; ignoring 'mcpServers'", { path: source })
+      }
+      delete result.mcpServers
+    }
+    // Normalize individual MCP server entries from external formats
+    if (result.mcp && typeof result.mcp === "object" && !Array.isArray(result.mcp)) {
+      const servers = { ...(result.mcp as Record<string, any>) }
+      for (const [name, entry] of Object.entries(servers)) {
+        if (!entry || typeof entry !== "object") {
+          delete servers[name]
+          continue
+        }
+        // Build a normalized entry — handles both untyped and typed entries with external fields
+        if (entry.command || entry.args) {
+          const cmd = Array.isArray(entry.command)
+            ? entry.command.map(String)
+            : [
+                String(entry.command),
+                ...(Array.isArray(entry.args)
+                  ? entry.args.map(String)
+                  : typeof entry.args === "string"
+                    ? [entry.args]
+                    : []),
+              ]
+          const transformed: Record<string, any> = { type: "local", command: cmd }
+          if (entry.env && typeof entry.env === "object") transformed.environment = entry.env
+          if (entry.environment && typeof entry.environment === "object") transformed.environment = entry.environment
+          if (typeof entry.timeout === "number") transformed.timeout = entry.timeout
+          if (typeof entry.enabled === "boolean") transformed.enabled = entry.enabled
+          servers[name] = transformed
+        } else if (entry.url && typeof entry.url === "string") {
+          const transformed: Record<string, any> = { type: "remote", url: entry.url }
+          if (entry.headers && typeof entry.headers === "object") transformed.headers = entry.headers
+          if (typeof entry.timeout === "number") transformed.timeout = entry.timeout
+          if (typeof entry.enabled === "boolean") transformed.enabled = entry.enabled
+          servers[name] = transformed
+        }
+      }
+      result.mcp = servers
+    }
+    return result
+  }
+  // altimate_change end
+
   async function load(text: string, options: { path: string } | { dir: string; source: string }) {
     const original = text
     const source = "path" in options ? options.path : options.source
@@ -1370,12 +1440,15 @@ export namespace Config {
         log.info("aliased mcpServers to mcp in config", { path: source })
       }
       const hadLegacy = "theme" in copy || "keybinds" in copy || "tui" in copy
-      if (!hadLegacy) return copy
-      delete copy.theme
-      delete copy.keybinds
-      delete copy.tui
-      log.warn("tui keys in opencode config are deprecated; move them to tui.json", { path: source })
-      return copy
+      if (hadLegacy) {
+        delete copy.theme
+        delete copy.keybinds
+        delete copy.tui
+        log.warn("tui keys in opencode config are deprecated; move them to tui.json", { path: source })
+      }
+      // altimate_change start — normalize mcpServers to mcp (common key used by other AI tools)
+      return normalizeMcpConfig(copy, source)
+      // altimate_change end
     })()
 
     const parsed = Info.safeParse(normalized)
@@ -1495,7 +1568,14 @@ export namespace Config {
       })
     }
 
-    const parsed = Info.safeParse(data)
+    // altimate_change start — normalize mcpServers to mcp in parseConfig
+    const normalized =
+      data && typeof data === "object" && !Array.isArray(data)
+        ? normalizeMcpConfig(data as Record<string, unknown>, filepath)
+        : data
+    // altimate_change end
+
+    const parsed = Info.safeParse(normalized)
     if (parsed.success) return parsed.data
 
     throw new InvalidError({

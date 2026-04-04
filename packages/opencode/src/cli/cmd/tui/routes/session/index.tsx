@@ -1494,12 +1494,16 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
             />
           </Match>
           <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+            {/* altimate_change start — upstream_fix: add fg={theme.text} to markdown element to fix white-on-white text in light terminal themes */}
             <markdown
               syntaxStyle={syntax()}
               streaming={!props.message.time.completed}
               content={trimmed()}
               conceal={ctx.conceal()}
+              // @ts-expect-error — fg works at runtime (opentui commit 157193a) but MarkdownOptions types not yet updated
+              fg={theme.text}
             />
+            {/* altimate_change end */}
           </Match>
           <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
             <code
