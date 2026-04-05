@@ -127,49 +127,77 @@ const DRIVER_ALIASES: Record<string, AliasMap> = {
  * passwords (containing %XX sequences) are left untouched.
  */
 export function sanitizeConnectionString(connectionString: string): string {
-  // Match scheme://userinfo@host... — we only touch the userinfo part.
-  // Schemes: postgresql, postgres, mongodb, mongodb+srv, clickhouse, http, https, redshift
+  // Only touch scheme://... URIs.
+  const schemeMatch = connectionString.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//)
+  if (!schemeMatch) return connectionString
+
+  const scheme = schemeMatch[0]
+  const afterScheme = connectionString.slice(scheme.length)
+
+  // Find the userinfo/host separator. A password can legitimately contain
+  // '@', '#', '/', '?', or ':' characters, so the URI spec is ambiguous
+  // when those are unencoded. We use the LAST '@' as the separator because
+  // that correctly handles the common case of passwords with special
+  // characters (the stated purpose of this function — see issue #589).
   //
-  // IMPORTANT: The password itself may contain '@' characters, so we must
-  // split on the LAST '@' before the host portion.  The regex below uses a
-  // greedy (.+) for userinfo so it consumes everything up to the final '@'.
-  const uriMatch = connectionString.match(
-    /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(.+)@([^@]+)$/,
-  )
-  if (!uriMatch) return connectionString // No userinfo section — nothing to fix
+  // The known trade-off: if the query string or path also contains an
+  // unencoded '@' (e.g. `?email=alice@example.com`), the rightmost '@'
+  // is NOT the userinfo separator. We detect this ambiguous case below
+  // with a guard and bail to avoid corrupting the URI.
+  const lastAt = afterScheme.lastIndexOf("@")
+  if (lastAt < 0) return connectionString // No userinfo — nothing to fix
 
-  const [, scheme, userinfo, rest] = uriMatch
+  const beforeAt = afterScheme.slice(0, lastAt)
+  const afterAt = afterScheme.slice(lastAt + 1)
 
-  // Split userinfo into user:password on the FIRST colon only
-  const colonIdx = userinfo.indexOf(":")
-  if (colonIdx < 0) return connectionString // No password in userinfo
-
-  const user = userinfo.slice(0, colonIdx)
-  const password = userinfo.slice(colonIdx + 1)
-
-  // If the password already contains percent-encoded sequences, assume
-  // the caller encoded it properly and leave it alone.
-  if (/%[0-9A-Fa-f]{2}/.test(password)) return connectionString
-
-  // Check if the password contains characters that need encoding.
-  // RFC 3986 unreserved: A-Z a-z 0-9 - . _ ~
-  // We also allow ! * ' ( ) which are sub-delimiters often safe in passwords.
-  // Everything else (especially @ : / ? # [ ]) MUST be encoded.
-  const needsEncoding = /[@:#/?[\]%]/.test(password)
-  if (!needsEncoding) return connectionString
-
-  // Re-encode both user and password to be safe.
-  // decodeURIComponent can throw on malformed percent sequences — fall back to
-  // encoding the raw value if that happens.
-  let encodedUser: string
-  try {
-    encodedUser = encodeURIComponent(decodeURIComponent(user))
-  } catch {
-    encodedUser = encodeURIComponent(user)
+  // Ambiguity guard: if the content AFTER the '@' has no path/query/
+  // fragment delimiter ('/', '?', or '#') but the content BEFORE the
+  // '@' does, then the '@' is almost certainly inside a path, query,
+  // or fragment — not the userinfo separator. Bail and leave the URI
+  // untouched so the caller can pre-encode explicitly.
+  //
+  // Examples that trigger the guard (correctly left alone):
+  //   postgresql://u:p@host/db?email=alice@example.com   ('@' in query)
+  //   postgresql://u:p@host:5432/db@archive              ('@' in path)
+  //   postgresql://u:p@host/db#at@frag                   ('@' in fragment)
+  //
+  // Examples that pass the guard (correctly encoded):
+  //   postgresql://u:p@ss@host/db            (last '@' has '/' after)
+  //   postgresql://u:f@ke#PLACEHOLDER@host/db (last '@' has '/' after)
+  const afterAtHasDelim = /[/?#]/.test(afterAt)
+  const beforeAtHasDelim = /[/?#]/.test(beforeAt)
+  if (!afterAtHasDelim && beforeAtHasDelim) {
+    return connectionString
   }
-  const encodedPassword = encodeURIComponent(password)
 
-  return `${scheme}${encodedUser}:${encodedPassword}@${rest}`
+  // Idempotent re-encoding: decode any existing percent-escapes and
+  // re-encode. Already-encoded values round-trip unchanged; raw values
+  // with special characters get encoded. Malformed percent sequences
+  // fall back to encoding the raw input.
+  const encodeIdempotent = (v: string): string => {
+    if (v.length === 0) return v
+    try {
+      return encodeURIComponent(decodeURIComponent(v))
+    } catch {
+      return encodeURIComponent(v)
+    }
+  }
+
+  // Split userinfo on the FIRST ':' only (password may contain ':').
+  const colonIdx = beforeAt.indexOf(":")
+  let encodedUserinfo: string
+  if (colonIdx < 0) {
+    // Username-only userinfo: still encode if it contains special chars
+    // (e.g. email addresses used as usernames).
+    encodedUserinfo = encodeIdempotent(beforeAt)
+  } else {
+    const user = beforeAt.slice(0, colonIdx)
+    const password = beforeAt.slice(colonIdx + 1)
+    encodedUserinfo = `${encodeIdempotent(user)}:${encodeIdempotent(password)}`
+  }
+
+  const rebuilt = `${scheme}${encodedUserinfo}@${afterAt}`
+  return rebuilt === connectionString ? connectionString : rebuilt
 }
 
 // ---------------------------------------------------------------------------

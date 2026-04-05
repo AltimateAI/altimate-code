@@ -1027,6 +1027,85 @@ describe("sanitizeConnectionString", () => {
     const input = "postgresql://testuser@localhost:5432/testdb"
     expect(sanitizeConnectionString(input)).toBe(input)
   })
+
+  test("preserves @ in query string (does not misinterpret as userinfo)", () => {
+    const input =
+      "postgresql://testuser:simpleval@localhost:5432/testdb?contact=alice@example.com"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("bails on ambiguous URIs where both password and query contain @", () => {
+    // When both the password and the query string contain unencoded '@',
+    // there's no way to deterministically pick the userinfo separator.
+    // We return the URI untouched and expect the caller to pre-encode.
+    const input =
+      "postgresql://testuser:p@ss@localhost:5432/testdb?contact=alice@example.com"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("encodes @ in username-only userinfo (no password)", () => {
+    // Email-as-username with no password: the '@' in the email must be
+    // encoded so the driver doesn't treat the domain as the host.
+    const input = "postgresql://alice@example.com@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe(
+      "postgresql://alice%40example.com@localhost:5432/testdb",
+    )
+  })
+
+  test("encodes @ in partially-encoded password (not short-circuited by %XX)", () => {
+    // Password contains an encoded space (%20) AND a raw '@'. Previous
+    // logic short-circuited on seeing %XX and left '@' unencoded,
+    // producing a broken URI.
+    const input = "postgresql://testuser:p%20ss@word@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe(
+      "postgresql://testuser:p%20ss%40word@localhost:5432/testdb",
+    )
+  })
+
+  test("encodes # in partially-encoded password", () => {
+    const input = "postgresql://testuser:pa%40ss#word@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    // %40 is preserved; raw '#' gets encoded to %23
+    expect(result).toBe(
+      "postgresql://testuser:pa%40ss%23word@localhost:5432/testdb",
+    )
+  })
+
+  test("handles malformed percent sequence in password gracefully", () => {
+    // '%ZZ' is not a valid percent-escape. Falls back to encoding raw.
+    const input = "postgresql://testuser:bad%ZZpass@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    // Raw-encoded password contains %25 (encoded '%') and ZZ literal
+    expect(result).toBe(
+      "postgresql://testuser:bad%25ZZpass@localhost:5432/testdb",
+    )
+  })
+
+  test("preserves @ in path after authority", () => {
+    // A path segment with '@' is unusual but valid and must not be
+    // treated as userinfo.
+    const input = "postgresql://testuser:simpleval@localhost:5432/db@archive"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("preserves @ in fragment", () => {
+    const input = "postgresql://testuser:simpleval@localhost:5432/testdb#at@frag"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("handles scheme-only URI with no path", () => {
+    const input = "postgresql://testuser:p@ss@localhost:5432"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:p%40ss@localhost:5432")
+  })
+
+  test("handles URI with no port", () => {
+    const input = "postgresql://testuser:p@ss@localhost/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:p%40ss@localhost/testdb")
+  })
 })
 
 // ---------------------------------------------------------------------------
