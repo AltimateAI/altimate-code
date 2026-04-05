@@ -197,7 +197,7 @@ export function registerAll(): void {
   // 8. altimate_core.policy
   register("altimate_core.policy", async (params) => {
     try {
-      const schema = schemaOrEmpty(params.schema_path, params.schema_context)
+      const schema = schemaOrEmpty(params.schema_path, params.schema_context, params.dialect)
       const raw = await core.checkPolicy(params.sql, schema, params.policy_json)
       const data = toData(raw)
       return ok(true, data)
