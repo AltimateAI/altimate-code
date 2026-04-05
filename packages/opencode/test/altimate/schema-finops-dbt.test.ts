@@ -158,6 +158,53 @@ describe("FinOps: SQL template generation", () => {
       const built = HistoryTemplates.buildHistoryQuery("databricks", 7, 50)
       expect(built?.sql).toContain("system.query.history")
     })
+
+    test("builds ClickHouse history SQL with clamped integer days and limit", () => {
+      const built = HistoryTemplates.buildHistoryQuery("clickhouse", 7, 100)
+      expect(built).not.toBeNull()
+      expect(built?.sql).toContain("system.query_log")
+      expect(built?.sql).toContain("QueryFinish")
+      // Days and limit should be integer-substituted, not bind params
+      expect(built?.binds).toEqual([])
+      // Verify the clamped values are in the SQL
+      expect(built?.sql).toContain("today() - 7")
+      expect(built?.sql).toContain("LIMIT 100")
+    })
+
+    test("ClickHouse buildHistoryQuery clamps extreme days and limit values", () => {
+      // Days clamped to [1, 365]
+      const extremeDays = HistoryTemplates.buildHistoryQuery("clickhouse", 9999, 50)
+      expect(extremeDays?.sql).toContain("today() - 365")
+
+      const zeroDays = HistoryTemplates.buildHistoryQuery("clickhouse", 0, 50)
+      // Math.floor(0) || 30 = 30 (0 is falsy), then Math.max(1, Math.min(30, 365)) = 30
+      expect(zeroDays?.sql).toContain("today() - 30")
+
+      // Limit clamped to [1, 10000]
+      const extremeLimit = HistoryTemplates.buildHistoryQuery("clickhouse", 7, 999999)
+      expect(extremeLimit?.sql).toContain("LIMIT 10000")
+
+      const zeroLimit = HistoryTemplates.buildHistoryQuery("clickhouse", 7, 0)
+      // Math.floor(0) || 100 = 100 (0 is falsy), then Math.max(1, Math.min(100, 10000)) = 100
+      expect(zeroLimit?.sql).toContain("LIMIT 100")
+    })
+
+    test("ClickHouse buildHistoryQuery handles NaN and float inputs safely", () => {
+      // NaN days defaults to 30 via || 30 fallback
+      const nanDays = HistoryTemplates.buildHistoryQuery("clickhouse", NaN, 50)
+      expect(nanDays?.sql).toContain("today() - 30")
+      expect(nanDays?.sql).not.toContain("NaN")
+
+      // NaN limit defaults to 100 via || 100 fallback
+      const nanLimit = HistoryTemplates.buildHistoryQuery("clickhouse", 7, NaN)
+      expect(nanLimit?.sql).toContain("LIMIT 100")
+      expect(nanLimit?.sql).not.toContain("NaN")
+
+      // Float values should be floored
+      const floatInputs = HistoryTemplates.buildHistoryQuery("clickhouse", 7.9, 50.5)
+      expect(floatInputs?.sql).toContain("today() - 7")
+      expect(floatInputs?.sql).toContain("LIMIT 50")
+    })
   })
 
   describe("warehouse-advisor", () => {

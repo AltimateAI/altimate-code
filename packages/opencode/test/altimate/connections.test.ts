@@ -51,6 +51,36 @@ describe("ConnectionRegistry", () => {
     )
   })
 
+  test("cassandra gives helpful hint instead of generic unsupported error", async () => {
+    Registry.setConfigs({
+      mydb: { type: "cassandra", host: "localhost" },
+    })
+    await expect(Registry.get("mydb")).rejects.toThrow("not yet supported")
+    await expect(Registry.get("mydb")).rejects.toThrow("cqlsh")
+  })
+
+  test("cockroachdb suggests using postgres type", async () => {
+    Registry.setConfigs({
+      mydb: { type: "cockroachdb", host: "localhost" },
+    })
+    await expect(Registry.get("mydb")).rejects.toThrow("postgres")
+  })
+
+  test("timescaledb suggests using postgres type", async () => {
+    Registry.setConfigs({
+      mydb: { type: "timescaledb", host: "localhost" },
+    })
+    await expect(Registry.get("mydb")).rejects.toThrow("postgres")
+  })
+
+  test("truly unknown type gives generic unsupported error with supported list", async () => {
+    Registry.setConfigs({
+      mydb: { type: "neo4j", host: "localhost" },
+    })
+    await expect(Registry.get("mydb")).rejects.toThrow("Unsupported database type")
+    await expect(Registry.get("mydb")).rejects.toThrow("Supported:")
+  })
+
   test("getConfig returns config for known connection", () => {
     Registry.setConfigs({
       mydb: { type: "postgres", host: "localhost" },
@@ -604,6 +634,44 @@ trino_project:
       expect(connections).toHaveLength(1)
       expect(connections[0].type).toBe("postgres")
       expect(connections[0].config.type).toBe("postgres")
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true })
+    }
+  })
+
+  test("clickhouse adapter maps correctly from dbt profiles", async () => {
+    const fs = await import("fs")
+    const os = await import("os")
+    const path = await import("path")
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dbt-test-"))
+    const profilesPath = path.join(tmpDir, "profiles.yml")
+
+    fs.writeFileSync(
+      profilesPath,
+      `
+ch_project:
+  outputs:
+    dev:
+      type: clickhouse
+      host: clickhouse.example.com
+      port: 8443
+      user: default
+      password: secret
+      database: analytics
+      schema: default
+`,
+    )
+
+    try {
+      const connections = await parseDbtProfiles(profilesPath)
+      expect(connections).toHaveLength(1)
+      expect(connections[0].type).toBe("clickhouse")
+      expect(connections[0].config.type).toBe("clickhouse")
+      expect(connections[0].config.host).toBe("clickhouse.example.com")
+      expect(connections[0].config.port).toBe(8443)
+      expect(connections[0].config.user).toBe("default")
+      expect(connections[0].config.database).toBe("analytics")
     } finally {
       fs.rmSync(tmpDir, { recursive: true })
     }
