@@ -86,9 +86,69 @@ export namespace ConfigPaths {
 
   /** Apply {env:VAR} and {file:path} substitutions to config text. */
   async function substitute(text: string, input: ParseSource, missing: "error" | "empty" = "error") {
-    text = text.replace(/\{env:([^}]+)\}/g, (_, varName) => {
-      return process.env[varName] || ""
-    })
+    // altimate_change start — unified env-var interpolation
+    // Single-pass substitution against the ORIGINAL text prevents output of one
+    // pattern being re-matched by another (e.g. {env:A}="${B}" expanding B).
+    // Syntaxes (order tried, in one regex via alternation):
+    //   1. $${VAR} or $${VAR:-default} — literal escape (docker-compose style)
+    //   2. ${VAR} or ${VAR:-default}   — string-safe, JSON-escaped (shell/dotenv)
+    //   3. {env:VAR}                    — raw text injection (backward compat)
+    // Users arriving from Claude Code / VS Code / dotenv / docker-compose expect
+    // ${VAR}. Use {env:VAR} for raw unquoted injection. See issue #635.
+    let dollarRefs = 0
+    let dollarUnresolved = 0
+    let dollarDefaulted = 0
+    let dollarEscaped = 0
+    let legacyBraceRefs = 0
+    let legacyBraceUnresolved = 0
+    text = text.replace(
+      /\$\$(\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\})|(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\{env:([^}]+)\}/g,
+      (match, escaped, dollarVar, dollarDefault, braceVar) => {
+        if (escaped !== undefined) {
+          // $${VAR} → literal ${VAR}
+          dollarEscaped++
+          return "$" + escaped
+        }
+        if (dollarVar !== undefined) {
+          // ${VAR} / ${VAR:-default} → JSON-escaped string-safe substitution
+          dollarRefs++
+          const envValue = process.env[dollarVar]
+          const resolved = envValue !== undefined && envValue !== ""
+          if (!resolved && dollarDefault !== undefined) dollarDefaulted++
+          if (!resolved && dollarDefault === undefined) dollarUnresolved++
+          const value = resolved ? envValue : (dollarDefault ?? "")
+          return JSON.stringify(value).slice(1, -1)
+        }
+        if (braceVar !== undefined) {
+          // {env:VAR} → raw text injection
+          legacyBraceRefs++
+          const v = process.env[braceVar]
+          if (v === undefined || v === "") legacyBraceUnresolved++
+          return v || ""
+        }
+        return match
+      },
+    )
+    // Emit telemetry if any env interpolation happened. Dynamic import avoids a
+    // circular dep with @/altimate/telemetry (which imports @/config/config).
+    if (dollarRefs > 0 || legacyBraceRefs > 0 || dollarEscaped > 0) {
+      import("@/altimate/telemetry")
+        .then(({ Telemetry }) => {
+          Telemetry.track({
+            type: "config_env_interpolation",
+            timestamp: Date.now(),
+            session_id: Telemetry.getContext().sessionId,
+            dollar_refs: dollarRefs,
+            dollar_unresolved: dollarUnresolved,
+            dollar_defaulted: dollarDefaulted,
+            dollar_escaped: dollarEscaped,
+            legacy_brace_refs: legacyBraceRefs,
+            legacy_brace_unresolved: legacyBraceUnresolved,
+          })
+        })
+        .catch(() => {})
+    }
+    // altimate_change end
 
     const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
     if (!fileMatches.length) return text

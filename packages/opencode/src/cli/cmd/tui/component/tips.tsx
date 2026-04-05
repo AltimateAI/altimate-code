@@ -147,7 +147,7 @@ const TIPS = [
   "Create JSON theme files in {highlight}.altimate-code/themes/{/highlight} directory",
   "Themes support dark/light variants for both modes",
   "Reference ANSI colors 0-255 in custom themes",
-  "Use {highlight}{env:VAR_NAME}{/highlight} syntax to reference environment variables in config",
+  "Use {highlight}${VAR_NAME}{/highlight} or {highlight}{env:VAR_NAME}{/highlight} to reference environment variables in config",
   "Use {highlight}{file:path}{/highlight} to include file contents in config values",
   "Use {highlight}instructions{/highlight} in config to load additional rules files",
   "Set agent {highlight}temperature{/highlight} from 0.0 (focused) to 1.0 (creative)",

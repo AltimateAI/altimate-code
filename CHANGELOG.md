@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.19] - 2026-04-04
+
+### Added
+
+- **`${VAR}` environment variable interpolation in configs** — use shell/dotenv-style `${DB_PASSWORD}`, `${MODE:-production}` (with defaults), or `$${VAR}` (literal escape) anywhere in `altimate.json` and MCP server configs. Values are JSON-escape-safe so passwords containing quotes or backslashes can't corrupt your config structure. The existing `{env:VAR}` syntax continues to work for raw text injection. (#655, closes #635)
+
+### Fixed
+
+- **Plan agent warns when the model refuses to tool-call** — if the plan agent's model returns text without invoking any tools, altimate-code now surfaces a one-shot TUI warning suggesting you switch models via `/model` instead of silently hanging. Telemetry event `plan_no_tool_generation` emitted for session-level diagnosis. (#653)
+- **GitLab MR review: large-diff guard & prompt-injection hardening** — MRs exceeding 50 files or 200 KB of diff text are truncated upfront with a user-visible warning, and the review prompt explicitly frames MR content as untrusted input. (#648)
+- **Atomic trace file writes** — `FileExporter` now writes to a temp file and renames, preventing partial/corrupt trace JSON on crash or SIGKILL. Stale `.tmp.*` artifacts older than 1 hour are swept during prune. (#646)
+- **15s timeout on credential validation** — `AltimateApi.validateCredentials()` no longer hangs indefinitely if the auth endpoint stalls. (#648)
+- **Shadow-mode SQL pre-validation telemetry** — measures catch-rate for structural errors (missing columns, tables) against cached schema before enabling user-visible blocking in a future release. Fire-and-forget, zero impact on the `sql_execute` hot path. No raw SQL, schema identifiers, or validator error text transmitted. (#643, #651)
+- **GitLab docs rewrite** — replaced "work in progress" warning with a complete guide: quick-start, authentication, self-hosted instances, model selection, CI example. (#648)
+
+### Testing
+
+- 25 new adversarial tests covering env-var interpolation (JSON-escape safety, single-pass substitution, ReDoS, escape hatch, defaults), atomic write hygiene (race conditions, tmp sweep, sessionId sanitization), and telemetry identifier-leak guards. New ClickHouse finops/profiles/registry coverage. (#624)
+
 ## [0.5.18] - 2026-04-04
 
 ### Added

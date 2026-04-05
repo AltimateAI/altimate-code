@@ -205,8 +205,7 @@ async function preValidateSql(sql: string, warehouse: string | undefined, queryT
 
     // If the dispatcher itself failed, don't treat missing data as "valid".
     if (!validationResult.success) {
-      const errMsg = typeof validationResult.error === "string" ? validationResult.error : undefined
-      trackPreValidation("error", "dispatcher_failed", 0, Date.now() - startTime, false, ctx, errMsg)
+      trackPreValidation("error", "dispatcher_failed", 0, Date.now() - startTime, false, ctx)
       return { blocked: false }
     }
 
@@ -231,8 +230,7 @@ async function preValidateSql(sql: string, warehouse: string | undefined, queryT
       return { blocked: false }
     }
 
-    const errorMsgs = structuralErrors.map((e: any) => e.message).join("\n")
-    trackPreValidation("blocked", "structural_error", columns.length, Date.now() - startTime, schemaTruncated, ctx, errorMsgs)
+    trackPreValidation("blocked", "structural_error", columns.length, Date.now() - startTime, schemaTruncated, ctx)
     // Shadow mode: caller discards the result. When blocking is enabled in the
     // future, build errorOutput here with the structural errors and
     // schemaContext keys for user-facing guidance.
@@ -258,12 +256,12 @@ function trackPreValidation(
   duration_ms: number,
   schema_truncated: boolean,
   ctx: TrackCtx,
-  error_message?: string,
 ) {
-  // Mask schema identifiers (table / column names, paths, user IDs) from the
-  // validator error BEFORE it leaves the process — these are PII-adjacent and
-  // must not land in App Insights as raw strings.
-  const masked = error_message ? Telemetry.maskString(error_message).slice(0, 500) : undefined
+  // Validator errors often embed raw schema identifiers (table / column names)
+  // and paths that are PII-adjacent. maskString() only strips string literals,
+  // not identifiers, so we intentionally drop the error text entirely from the
+  // shadow telemetry payload. The `reason` + `masked_sql_hash` fields are
+  // sufficient to correlate events with local logs for diagnosis.
   Telemetry.track({
     type: "sql_pre_validation",
     timestamp: Date.now(),
@@ -276,7 +274,6 @@ function trackPreValidation(
     schema_columns,
     schema_truncated,
     duration_ms,
-    ...(masked && { error_message: masked }),
   })
 }
 // altimate_change end

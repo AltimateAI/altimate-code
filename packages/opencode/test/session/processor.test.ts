@@ -455,6 +455,137 @@ describe("doom loop detection telemetry", () => {
 })
 
 // ---------------------------------------------------------------------------
+// 4b. Plan-agent tool-call refusal detection
+// ---------------------------------------------------------------------------
+describe("plan-agent no-tool-generation detection", () => {
+  /**
+   * Simulates the plan-no-tool detection from processor.ts finish-step handler.
+   * Mirrors the state machine: session-scoped tool-call counter and
+   * one-shot warning flag. Returns null when no warning should fire,
+   * or the telemetry event that would be emitted.
+   */
+  function simulateFinishStep(opts: {
+    agent: string
+    finishReason: string
+    sessionToolCallsMade: number
+    planNoToolWarningEmitted: boolean
+    sessionID: string
+    messageID: string
+    modelID: string
+    providerID: string
+    tokensOutput: number
+  }): { event: Telemetry.Event | null; warningEmitted: boolean } {
+    if (
+      opts.agent === "plan" &&
+      opts.finishReason === "stop" &&
+      opts.sessionToolCallsMade === 0 &&
+      !opts.planNoToolWarningEmitted
+    ) {
+      return {
+        event: {
+          type: "plan_no_tool_generation",
+          timestamp: Date.now(),
+          session_id: opts.sessionID,
+          message_id: opts.messageID,
+          model_id: opts.modelID,
+          provider_id: opts.providerID,
+          finish_reason: opts.finishReason,
+          tokens_output: opts.tokensOutput,
+        },
+        warningEmitted: true,
+      }
+    }
+    return { event: null, warningEmitted: opts.planNoToolWarningEmitted }
+  }
+
+  const baseOpts = {
+    sessionID: "sess-plan-1",
+    messageID: "msg-plan-1",
+    modelID: "qwen3-coder-next",
+    providerID: "ollama-cloud",
+    tokensOutput: 293,
+  }
+
+  test("fires when plan agent stops without tool calls", () => {
+    const result = simulateFinishStep({
+      ...baseOpts,
+      agent: "plan",
+      finishReason: "stop",
+      sessionToolCallsMade: 0,
+      planNoToolWarningEmitted: false,
+    })
+    expect(result.event).not.toBeNull()
+    expect(result.event?.type).toBe("plan_no_tool_generation")
+    expect(result.event?.model_id).toBe("qwen3-coder-next")
+    expect(result.event?.provider_id).toBe("ollama-cloud")
+    expect(result.event?.finish_reason).toBe("stop")
+    expect(result.event?.tokens_output).toBe(293)
+    expect(result.warningEmitted).toBe(true)
+  })
+
+  test("does not fire when session has already made tool calls", () => {
+    const result = simulateFinishStep({
+      ...baseOpts,
+      agent: "plan",
+      finishReason: "stop",
+      sessionToolCallsMade: 3,
+      planNoToolWarningEmitted: false,
+    })
+    expect(result.event).toBeNull()
+    expect(result.warningEmitted).toBe(false)
+  })
+
+  test("does not fire when finish_reason is tool-calls", () => {
+    const result = simulateFinishStep({
+      ...baseOpts,
+      agent: "plan",
+      finishReason: "tool-calls",
+      sessionToolCallsMade: 0,
+      planNoToolWarningEmitted: false,
+    })
+    expect(result.event).toBeNull()
+  })
+
+  test("does not fire for non-plan agents", () => {
+    for (const agent of ["builder", "analyst", "general", "explore"]) {
+      const result = simulateFinishStep({
+        ...baseOpts,
+        agent,
+        finishReason: "stop",
+        sessionToolCallsMade: 0,
+        planNoToolWarningEmitted: false,
+      })
+      expect(result.event).toBeNull()
+    }
+  })
+
+  test("fires at most once per session (one-shot flag)", () => {
+    const result = simulateFinishStep({
+      ...baseOpts,
+      agent: "plan",
+      finishReason: "stop",
+      sessionToolCallsMade: 0,
+      planNoToolWarningEmitted: true,
+    })
+    expect(result.event).toBeNull()
+    expect(result.warningEmitted).toBe(true)
+  })
+
+  test("does not fire when finish_reason is length/error/other", () => {
+    for (const reason of ["length", "error", "content-filter", "unknown"]) {
+      const result = simulateFinishStep({
+        ...baseOpts,
+        agent: "plan",
+        finishReason: reason,
+        sessionToolCallsMade: 0,
+        planNoToolWarningEmitted: false,
+      })
+      expect(result.event).toBeNull()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 5. Generation telemetry
 // ---------------------------------------------------------------------------
 describe("generation telemetry", () => {

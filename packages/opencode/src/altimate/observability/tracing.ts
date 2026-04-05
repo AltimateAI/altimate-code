@@ -201,6 +201,18 @@ export class FileExporter implements TraceExporter {
 
   private async pruneOldTraces() {
     const entries = await fs.readdir(this.dir, { withFileTypes: true })
+    // Sweep stale temp files (crashes between writeFile and rename leave .tmp.*
+    // artifacts). Older than 1 hour = definitely abandoned.
+    const staleCutoff = Date.now() - 60 * 60 * 1000
+    const tmpFiles = entries.filter((e) => e.isFile() && /\.json\.tmp\.[0-9]+\./.test(e.name))
+    await Promise.allSettled(
+      tmpFiles.map(async (e) => {
+        const p = path.join(this.dir, e.name)
+        const stat = await fs.stat(p).catch(() => undefined)
+        if (stat && stat.mtimeMs < staleCutoff) await fs.unlink(p).catch(() => undefined)
+      }),
+    )
+
     const jsonFiles = entries
       .filter((e) => e.isFile() && e.name.endsWith(".json"))
       .map((e) => e.name)

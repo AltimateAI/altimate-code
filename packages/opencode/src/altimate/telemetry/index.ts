@@ -656,7 +656,39 @@ export namespace Telemetry {
         /** true when schema scan hit the column-scan cap — flags samples biased by large-warehouse truncation */
         schema_truncated: boolean
         duration_ms: number
-        error_message?: string
+      }
+    // altimate_change end
+    // altimate_change start — config env-var interpolation telemetry
+    | {
+        type: "config_env_interpolation"
+        timestamp: number
+        session_id: string
+        /** ${VAR} / ${VAR:-default} references encountered */
+        dollar_refs: number
+        /** ${VAR} with no value and no default → resolved to empty string (footgun signal) */
+        dollar_unresolved: number
+        /** ${VAR:-default} where default was used */
+        dollar_defaulted: number
+        /** $${VAR} literal escape sequences found */
+        dollar_escaped: number
+        /** legacy {env:VAR} references (raw injection syntax) */
+        legacy_brace_refs: number
+        /** {env:VAR} with no value → empty string */
+        legacy_brace_unresolved: number
+      }
+    // altimate_change end
+    // altimate_change start — plan-agent model tool-call refusal detection
+    | {
+        type: "plan_no_tool_generation"
+        timestamp: number
+        session_id: string
+        message_id: string
+        model_id: string
+        provider_id: string
+        /** "stop" finish_reason without any tool calls in the session — flags models that refuse to tool-call in plan mode */
+        finish_reason: string
+        /** output tokens on the stop-without-tools generation — helps distinguish "refused" (low) from "wrote a long text plan" (high) */
+        tokens_output: number
       }
     // altimate_change end
 
