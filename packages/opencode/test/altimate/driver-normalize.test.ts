@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { normalizeConfig } from "@altimateai/drivers"
+import { normalizeConfig, sanitizeConnectionString } from "@altimateai/drivers"
 import { isSensitiveField } from "../../src/altimate/native/connections/credential-store"
 
 // ---------------------------------------------------------------------------
@@ -945,5 +945,214 @@ describe("normalizeConfig — ClickHouse", () => {
     })
     expect(result.tls_key).toBe("/path/to/key.pem")
     expect(result.ssl_key).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sanitizeConnectionString — special character encoding
+// ---------------------------------------------------------------------------
+
+describe("sanitizeConnectionString", () => {
+  test("encodes @ in password", () => {
+    const input = "postgresql://testuser:t@st@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:t%40st@localhost:5432/testdb")
+  })
+
+  test("encodes # in password", () => {
+    const input = "postgresql://testuser:test#val@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:test%23val@localhost:5432/testdb")
+  })
+
+  test("encodes : in password", () => {
+    const input = "postgresql://testuser:test:val@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:test%3Aval@localhost:5432/testdb")
+  })
+
+  test("encodes multiple special characters", () => {
+    const input = "postgresql://testuser:t@st#v:al@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:t%40st%23v%3Aal@localhost:5432/testdb")
+  })
+
+  test("encodes / in password", () => {
+    const input = "postgresql://testuser:test/val@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:test%2Fval@localhost:5432/testdb")
+  })
+
+  test("encodes ? in password", () => {
+    const input = "postgresql://testuser:test?val@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:test%3Fval@localhost:5432/testdb")
+  })
+
+  test("handles malformed percent sequence in username gracefully", () => {
+    const input = "postgresql://bad%ZZuser:t@st@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    // Should not throw — falls back to encoding the raw username
+    expect(result).toContain("@localhost:5432/testdb")
+  })
+
+  test("leaves already-encoded passwords untouched", () => {
+    const input = "postgresql://testuser:t%40st%23val@localhost:5432/testdb"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("leaves passwords without special characters untouched", () => {
+    const input = "postgresql://testuser:simpletestval@localhost:5432/testdb"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("leaves non-URI strings untouched", () => {
+    const input = "host=localhost dbname=mydb"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("handles mongodb scheme", () => {
+    const input = "mongodb://testuser:t@st@localhost:27017/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("mongodb://testuser:t%40st@localhost:27017/testdb")
+  })
+
+  test("handles mongodb+srv scheme", () => {
+    const input = "mongodb+srv://testuser:t@st@cluster.example.com/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("mongodb+srv://testuser:t%40st@cluster.example.com/testdb")
+  })
+
+  test("leaves URIs without password untouched", () => {
+    const input = "postgresql://testuser@localhost:5432/testdb"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("preserves @ in query string (does not misinterpret as userinfo)", () => {
+    const input =
+      "postgresql://testuser:simpleval@localhost:5432/testdb?contact=alice@example.com"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("bails on ambiguous URIs where both password and query contain @", () => {
+    // When both the password and the query string contain unencoded '@',
+    // there's no way to deterministically pick the userinfo separator.
+    // We return the URI untouched and expect the caller to pre-encode.
+    const input =
+      "postgresql://testuser:p@ss@localhost:5432/testdb?contact=alice@example.com"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("encodes @ in username-only userinfo (no password)", () => {
+    // Email-as-username with no password: the '@' in the email must be
+    // encoded so the driver doesn't treat the domain as the host.
+    const input = "postgresql://alice@example.com@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe(
+      "postgresql://alice%40example.com@localhost:5432/testdb",
+    )
+  })
+
+  test("encodes @ in partially-encoded password (not short-circuited by %XX)", () => {
+    // Password contains an encoded space (%20) AND a raw '@'. Previous
+    // logic short-circuited on seeing %XX and left '@' unencoded,
+    // producing a broken URI.
+    const input = "postgresql://testuser:p%20ss@word@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe(
+      "postgresql://testuser:p%20ss%40word@localhost:5432/testdb",
+    )
+  })
+
+  test("encodes # in partially-encoded password", () => {
+    const input = "postgresql://testuser:pa%40ss#word@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    // %40 is preserved; raw '#' gets encoded to %23
+    expect(result).toBe(
+      "postgresql://testuser:pa%40ss%23word@localhost:5432/testdb",
+    )
+  })
+
+  test("handles malformed percent sequence in password gracefully", () => {
+    // '%ZZ' is not a valid percent-escape. Falls back to encoding raw.
+    const input = "postgresql://testuser:bad%ZZpass@localhost:5432/testdb"
+    const result = sanitizeConnectionString(input)
+    // Raw-encoded password contains %25 (encoded '%') and ZZ literal
+    expect(result).toBe(
+      "postgresql://testuser:bad%25ZZpass@localhost:5432/testdb",
+    )
+  })
+
+  test("preserves @ in path after authority", () => {
+    // A path segment with '@' is unusual but valid and must not be
+    // treated as userinfo.
+    const input = "postgresql://testuser:simpleval@localhost:5432/db@archive"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("preserves @ in fragment", () => {
+    const input = "postgresql://testuser:simpleval@localhost:5432/testdb#at@frag"
+    expect(sanitizeConnectionString(input)).toBe(input)
+  })
+
+  test("handles scheme-only URI with no path", () => {
+    const input = "postgresql://testuser:p@ss@localhost:5432"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:p%40ss@localhost:5432")
+  })
+
+  test("handles URI with no port", () => {
+    const input = "postgresql://testuser:p@ss@localhost/testdb"
+    const result = sanitizeConnectionString(input)
+    expect(result).toBe("postgresql://testuser:p%40ss@localhost/testdb")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// normalizeConfig — connection_string sanitization integration
+// ---------------------------------------------------------------------------
+
+describe("normalizeConfig — connection_string sanitization", () => {
+  test("sanitizes connection_string with special chars in password", () => {
+    const result = normalizeConfig({
+      type: "postgres",
+      connection_string: "postgresql://testuser:f@ke#PLACEHOLDER@localhost:5432/testdb",
+    })
+    expect(result.connection_string).toBe(
+      "postgresql://testuser:f%40ke%23PLACEHOLDER@localhost:5432/testdb",
+    )
+  })
+
+  test("sanitizes connectionString alias with special chars", () => {
+    const result = normalizeConfig({
+      type: "postgres",
+      connectionString: "postgresql://testuser:t@st@localhost:5432/testdb",
+    })
+    // alias resolved to connection_string, then sanitized
+    expect(result.connection_string).toBe(
+      "postgresql://testuser:t%40st@localhost:5432/testdb",
+    )
+    expect(result.connectionString).toBeUndefined()
+  })
+
+  test("does not alter connection_string without special chars", () => {
+    const result = normalizeConfig({
+      type: "redshift",
+      connection_string: "postgresql://testuser:testval@localhost:5439/testdb",
+    })
+    expect(result.connection_string).toBe(
+      "postgresql://testuser:testval@localhost:5439/testdb",
+    )
+  })
+
+  test("does not alter config without connection_string", () => {
+    const result = normalizeConfig({
+      type: "postgres",
+      host: "localhost",
+      password: "f@ke#PLACEHOLDER",
+    })
+    // Individual fields are NOT URI-encoded — drivers handle them natively
+    expect(result.password).toBe("f@ke#PLACEHOLDER")
+    expect(result.connection_string).toBeUndefined()
   })
 })
