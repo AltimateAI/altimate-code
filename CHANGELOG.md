@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Native GitLab MR review** — review merge requests directly from your terminal with `altimate gitlab review <MR_URL>`. Supports self-hosted GitLab instances, nested group paths, and comment deduplication (updates existing review instead of posting duplicates). Requires `GITLAB_PERSONAL_ACCESS_TOKEN` or `GITLAB_TOKEN` env var. (#622)
-- **Altimate LLM Gateway provider** — connect to Altimate's managed model gateway via the TUI provider dialog (`/connect` → Altimate). Credentials validated before save, stored at `~/.altimate/altimate.json` with `0600` permissions. (#606)
+- **Altimate LLM Gateway provider** — connect to Altimate's managed model gateway via the TUI provider dialog (select a provider → "Altimate"). Credentials validated before save, stored at `~/.altimate/altimate.json` with `0600` permissions. (#606)
 
 ### Fixed
 

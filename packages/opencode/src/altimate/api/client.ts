@@ -127,6 +127,10 @@ export namespace AltimateApi {
     }
     try {
       const url = `${creds.altimateUrl.replace(/\/+$/, "")}/dbt/v3/validate-credentials`
+      // altimate_change start — upstream_fix: add timeout to prevent indefinite hang on network issues
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 15_000)
+      // altimate_change end
       const res = await fetch(url, {
         method: "GET",
         headers: {
@@ -134,7 +138,10 @@ export namespace AltimateApi {
           Authorization: `Bearer ${creds.altimateApiKey}`,
           "Content-Type": "application/json",
         },
-      })
+        // altimate_change start — upstream_fix: attach abort signal
+        signal: controller.signal,
+        // altimate_change end
+      }).finally(() => clearTimeout(timeout))
       if (res.status === 401) {
         const body = await res.text()
         return { ok: false, error: `Invalid API key - ${body}` }
