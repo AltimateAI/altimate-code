@@ -112,6 +112,67 @@ const DRIVER_ALIASES: Record<string, AliasMap> = {
 }
 
 // ---------------------------------------------------------------------------
+// Connection string password encoding
+// ---------------------------------------------------------------------------
+
+/**
+ * URI-style connection strings (postgres://, mongodb://, etc.) embed
+ * credentials in the userinfo section: `scheme://user:password@host/db`.
+ * If the password contains special characters (@, #, :, /, ?, etc.) and
+ * they are NOT percent-encoded, drivers will mis-parse the URI and fail
+ * with cryptic auth errors.
+ *
+ * This function detects an unencoded password in the userinfo portion and
+ * re-encodes it so the connection string is valid.  Already-encoded
+ * passwords (containing %XX sequences) are left untouched.
+ */
+export function sanitizeConnectionString(connectionString: string): string {
+  // Match scheme://userinfo@host... — we only touch the userinfo part.
+  // Schemes: postgresql, postgres, mongodb, mongodb+srv, clickhouse, http, https, redshift
+  //
+  // IMPORTANT: The password itself may contain '@' characters, so we must
+  // split on the LAST '@' before the host portion.  The regex below uses a
+  // greedy (.+) for userinfo so it consumes everything up to the final '@'.
+  const uriMatch = connectionString.match(
+    /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(.+)@([^@]+)$/,
+  )
+  if (!uriMatch) return connectionString // No userinfo section — nothing to fix
+
+  const [, scheme, userinfo, rest] = uriMatch
+
+  // Split userinfo into user:password on the FIRST colon only
+  const colonIdx = userinfo.indexOf(":")
+  if (colonIdx < 0) return connectionString // No password in userinfo
+
+  const user = userinfo.slice(0, colonIdx)
+  const password = userinfo.slice(colonIdx + 1)
+
+  // If the password already contains percent-encoded sequences, assume
+  // the caller encoded it properly and leave it alone.
+  if (/%[0-9A-Fa-f]{2}/.test(password)) return connectionString
+
+  // Check if the password contains characters that need encoding.
+  // RFC 3986 unreserved: A-Z a-z 0-9 - . _ ~
+  // We also allow ! * ' ( ) which are sub-delimiters often safe in passwords.
+  // Everything else (especially @ : / ? # [ ]) MUST be encoded.
+  const needsEncoding = /[@:#/?[\]%]/.test(password)
+  if (!needsEncoding) return connectionString
+
+  // Re-encode both user and password to be safe.
+  // decodeURIComponent can throw on malformed percent sequences — fall back to
+  // encoding the raw value if that happens.
+  let encodedUser: string
+  try {
+    encodedUser = encodeURIComponent(decodeURIComponent(user))
+  } catch {
+    encodedUser = encodeURIComponent(user)
+  }
+  const encodedPassword = encodeURIComponent(password)
+
+  return `${scheme}${encodedUser}:${encodedPassword}@${rest}`
+}
+
+// ---------------------------------------------------------------------------
 // Core logic
 // ---------------------------------------------------------------------------
 
@@ -177,6 +238,15 @@ export function normalizeConfig(config: ConnectionConfig): ConnectionConfig {
 
   const aliases = DRIVER_ALIASES[type]
   let result = aliases ? applyAliases(config, aliases) : { ...config }
+
+  // Sanitize connection_string: if the password contains special characters
+  // (@, #, :, /, etc.) that are not percent-encoded, URI-based drivers will
+  // mis-parse the string and fail with cryptic auth errors.  This is the
+  // single integration point — every caller of normalizeConfig() gets the
+  // fix automatically.
+  if (typeof result.connection_string === "string") {
+    result.connection_string = sanitizeConnectionString(result.connection_string)
+  }
 
   // Type-specific post-processing
   // Note: MySQL SSL fields (ssl_ca, ssl_cert, ssl_key) are NOT constructed
