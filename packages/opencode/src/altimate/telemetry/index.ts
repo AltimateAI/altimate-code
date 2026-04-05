@@ -644,8 +644,14 @@ export namespace Telemetry {
         session_id: string
         /** skipped = no cache or stale, passed = valid SQL, blocked = invalid SQL caught, error = validation itself failed */
         outcome: "skipped" | "passed" | "blocked" | "error"
-        /** why: no_cache, stale_cache, empty_cache, valid, non_structural, structural_error, validation_exception */
+        /** why: no_cache, stale_cache, empty_cache, valid, non_structural, structural_error, dispatcher_failed, validation_exception */
         reason: string
+        /** warehouse driver type (postgres, snowflake, bigquery, ...) — enables per-warehouse catch-rate analysis */
+        warehouse_type: string
+        /** read / write / unknown — enables per-query-type analysis */
+        query_type: string
+        /** SHA-256 prefix of masked SQL — join key to sql_execute_failure events for same query */
+        masked_sql_hash: string
         schema_columns: number
         /** true when schema scan hit the column-scan cap — flags samples biased by large-warehouse truncation */
         schema_truncated: boolean
