@@ -168,9 +168,14 @@ export const TraceCommand = cmd({
     const tracesDir = (cfg as any).tracing?.dir as string | undefined
 
     if (action === "list") {
+      // Use nullish coalescing so an explicit 0 is preserved and reaches
+      // listTracesPaginated() for clamping. `args.offset || 0` would
+      // treat `--offset 0` as unset (no semantic change, harmless), but
+      // `args.limit || 20` would promote `--limit 0` to 20 instead of
+      // letting the API clamp it to 1.
       const page = await Trace.listTracesPaginated(tracesDir, {
-        offset: args.offset || 0,
-        limit: args.limit || 20,
+        offset: args.offset ?? 0,
+        limit: args.limit ?? 20,
       })
       listTraces(page.traces, page, tracesDir)
       return

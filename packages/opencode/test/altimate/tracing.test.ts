@@ -742,15 +742,16 @@ describe("Recap — static helpers", () => {
 // ---------------------------------------------------------------------------
 
 describe("Recap.listTracesPaginated", () => {
-  // Seed a known set of traces in a fresh directory for each test
+  // Seed a known set of traces in a fresh directory for each test.
+  // A fresh tracer is created per iteration so spans don't accumulate
+  // across startTrace/endTrace cycles — matches the pattern used
+  // elsewhere in this file (see the maxFiles test above).
   async function seedTraces(count: number, dir: string): Promise<void> {
-    const exporter = new FileExporter(dir)
-    const tracer = Recap.withExporters([exporter])
     for (let i = 0; i < count; i++) {
+      const tracer = Recap.withExporters([new FileExporter(dir)])
       tracer.startTrace(`session-${String(i).padStart(4, "0")}`, {
         prompt: `prompt-${i}`,
       })
-      // Tiny delay to guarantee distinct mtimes where relevant
       await tracer.endTrace()
     }
   }
