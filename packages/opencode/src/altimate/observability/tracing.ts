@@ -172,12 +172,17 @@ export class FileExporter implements TraceExporter {
   }
 
   async export(trace: TraceFile): Promise<string | undefined> {
+    let tmpPath: string | undefined
     try {
       await fs.mkdir(this.dir, { recursive: true })
       // Sanitize sessionId for safe file name (defense-in-depth — also sanitized in Trace)
       const safeId = (trace.sessionId ?? "unknown").replace(/[/\\.:]/g, "_") || "unknown"
       const filePath = path.join(this.dir, `${safeId}.json`)
-      await fs.writeFile(filePath, JSON.stringify(trace, null, 2))
+      // Atomic write: write to temp file, then rename — prevents partial reads
+      // when concurrent snapshots or exports target the same file
+      tmpPath = filePath + `.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
+      await fs.writeFile(tmpPath, JSON.stringify(trace, null, 2))
+      await fs.rename(tmpPath, filePath)
 
       if (this.maxFiles > 0) {
         this.pruneOldTraces().catch(() => {})
@@ -185,6 +190,7 @@ export class FileExporter implements TraceExporter {
 
       return filePath
     } catch {
+      if (tmpPath) fs.unlink(tmpPath).catch(() => {})
       return undefined
     }
   }

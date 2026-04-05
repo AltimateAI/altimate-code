@@ -637,6 +637,22 @@ export namespace Telemetry {
         total_cost: number
       }
   // altimate_change end
+    // altimate_change start — pre-execution SQL validation telemetry
+    | {
+        type: "sql_pre_validation"
+        timestamp: number
+        session_id: string
+        /** skipped = no cache or stale, passed = valid SQL, blocked = invalid SQL caught, error = validation itself failed */
+        outcome: "skipped" | "passed" | "blocked" | "error"
+        /** why: no_cache, stale_cache, empty_cache, valid, non_structural, structural_error, validation_exception */
+        reason: string
+        schema_columns: number
+        /** true when schema scan hit the column-scan cap — flags samples biased by large-warehouse truncation */
+        schema_truncated: boolean
+        duration_ms: number
+        error_message?: string
+      }
+    // altimate_change end
 
   /** SHA256 hash a masked error message for anonymous grouping. */
   export function hashError(maskedMessage: string): string {
