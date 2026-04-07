@@ -738,6 +738,123 @@ describe("Recap — static helpers", () => {
 })
 
 // ---------------------------------------------------------------------------
+// listTracesPaginated — pagination boundary math
+// ---------------------------------------------------------------------------
+
+describe("Recap.listTracesPaginated", () => {
+  // Seed a known set of traces in a fresh directory for each test.
+  // A fresh tracer is created per iteration so spans don't accumulate
+  // across startTrace/endTrace cycles — matches the pattern used
+  // elsewhere in this file (see the maxFiles test above).
+  async function seedTraces(count: number, dir: string): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      const tracer = Recap.withExporters([new FileExporter(dir)])
+      tracer.startTrace(`session-${String(i).padStart(4, "0")}`, {
+        prompt: `prompt-${i}`,
+      })
+      await tracer.endTrace()
+    }
+  }
+
+  test("returns empty page when directory has no traces", async () => {
+    const result = await Recap.listTracesPaginated(tmpDir, { offset: 0, limit: 10 })
+    expect(result.traces).toEqual([])
+    expect(result.total).toBe(0)
+    expect(result.offset).toBe(0)
+    expect(result.limit).toBe(10)
+  })
+
+  test("returns a bounded page of the requested size", async () => {
+    await seedTraces(15, tmpDir)
+    const result = await Recap.listTracesPaginated(tmpDir, { offset: 0, limit: 5 })
+    expect(result.traces).toHaveLength(5)
+    expect(result.total).toBe(15)
+    expect(result.offset).toBe(0)
+    expect(result.limit).toBe(5)
+  })
+
+  test("applies offset to return later pages", async () => {
+    await seedTraces(10, tmpDir)
+    const page1 = await Recap.listTracesPaginated(tmpDir, { offset: 0, limit: 4 })
+    const page2 = await Recap.listTracesPaginated(tmpDir, { offset: 4, limit: 4 })
+    const page3 = await Recap.listTracesPaginated(tmpDir, { offset: 8, limit: 4 })
+    expect(page1.traces).toHaveLength(4)
+    expect(page2.traces).toHaveLength(4)
+    expect(page3.traces).toHaveLength(2) // only 2 left on the tail
+    // Pages must not overlap
+    const ids = new Set<string>()
+    for (const p of [page1, page2, page3]) {
+      for (const t of p.traces) {
+        expect(ids.has(t.sessionId)).toBe(false)
+        ids.add(t.sessionId)
+      }
+    }
+    expect(ids.size).toBe(10)
+  })
+
+  test("returns empty traces array when offset equals total", async () => {
+    await seedTraces(5, tmpDir)
+    const result = await Recap.listTracesPaginated(tmpDir, { offset: 5, limit: 10 })
+    expect(result.traces).toEqual([])
+    expect(result.total).toBe(5)
+    expect(result.offset).toBe(5)
+  })
+
+  test("returns empty traces array when offset exceeds total", async () => {
+    await seedTraces(3, tmpDir)
+    const result = await Recap.listTracesPaginated(tmpDir, { offset: 99, limit: 10 })
+    expect(result.traces).toEqual([])
+    expect(result.total).toBe(3)
+    expect(result.offset).toBe(99)
+  })
+
+  test("clamps negative offset to 0", async () => {
+    await seedTraces(5, tmpDir)
+    const result = await Recap.listTracesPaginated(tmpDir, { offset: -10, limit: 3 })
+    expect(result.offset).toBe(0)
+    expect(result.traces).toHaveLength(3)
+  })
+
+  test("clamps non-positive limit to 1", async () => {
+    await seedTraces(5, tmpDir)
+    const zero = await Recap.listTracesPaginated(tmpDir, { offset: 0, limit: 0 })
+    expect(zero.limit).toBe(1)
+    expect(zero.traces).toHaveLength(1)
+    const neg = await Recap.listTracesPaginated(tmpDir, { offset: 0, limit: -5 })
+    expect(neg.limit).toBe(1)
+    expect(neg.traces).toHaveLength(1)
+  })
+
+  test("truncates fractional offset and limit to integers", async () => {
+    await seedTraces(10, tmpDir)
+    const result = await Recap.listTracesPaginated(tmpDir, { offset: 2.9, limit: 3.7 })
+    expect(result.offset).toBe(2)
+    expect(result.limit).toBe(3)
+    expect(result.traces).toHaveLength(3)
+  })
+
+  test("clamps NaN offset and limit to defaults", async () => {
+    await seedTraces(5, tmpDir)
+    const result = await Recap.listTracesPaginated(tmpDir, {
+      offset: NaN,
+      limit: NaN,
+    })
+    expect(result.offset).toBe(0)
+    expect(result.limit).toBe(20) // default
+    expect(result.traces).toHaveLength(5) // all 5 fit in default page
+  })
+
+  test("uses defaults when no options provided", async () => {
+    await seedTraces(3, tmpDir)
+    const result = await Recap.listTracesPaginated(tmpDir)
+    expect(result.offset).toBe(0)
+    expect(result.limit).toBe(20)
+    expect(result.total).toBe(3)
+    expect(result.traces).toHaveLength(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Edge cases — schema integrity
 // ---------------------------------------------------------------------------
 

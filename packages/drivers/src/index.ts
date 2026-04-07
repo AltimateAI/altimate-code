@@ -2,7 +2,7 @@
 export type { Connector, ConnectorResult, SchemaColumn, ConnectionConfig } from "./types"
 
 // Re-export config normalization
-export { normalizeConfig } from "./normalize"
+export { normalizeConfig, sanitizeConnectionString } from "./normalize"
 
 // Re-export driver connect functions
 export { connect as connectPostgres } from "./postgres"

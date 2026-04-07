@@ -47,7 +47,16 @@ export function DialogTraceList(props: {
     }
     // altimate_change end
 
-    const items = traces() ?? []
+    // Cap rendered items for TUI perf — DialogSelect creates reactive
+    // nodes per item via <For>, so very large trace directories
+    // (thousands of entries) can cause noticeable lag. Users with more
+    // than MAX_TUI_ITEMS traces should use `altimate-code trace list
+    // --offset N` from the CLI to navigate the full set.
+    const MAX_TUI_ITEMS = 500
+    const allItems = traces() ?? []
+    const items =
+      allItems.length > MAX_TUI_ITEMS ? allItems.slice(0, MAX_TUI_ITEMS) : allItems
+    const truncated = allItems.length > MAX_TUI_ITEMS
     const today = new Date().toDateString()
     const result: Array<{ title: string; value: string; category: string; footer: string }> = []
 
@@ -61,7 +70,7 @@ export function DialogTraceList(props: {
       })
     }
 
-    result.push(...items.slice(0, 50).map((item) => {
+    result.push(...items.map((item) => {
         const rawStartedAt = item.trace.startedAt
         const parsedDate = typeof rawStartedAt === "string" || typeof rawStartedAt === "number"
           ? new Date(rawStartedAt)
@@ -96,6 +105,16 @@ export function DialogTraceList(props: {
         }
       }))
 
+    // Append truncation hint if we capped the list
+    if (truncated) {
+      result.push({
+        title: `... ${allItems.length - MAX_TUI_ITEMS} more not shown`,
+        value: "__truncated__",
+        category: "Older",
+        footer: `Showing ${MAX_TUI_ITEMS} of ${allItems.length} — use CLI --offset to navigate`,
+      })
+    }
+
     return result
   })
 
@@ -113,7 +132,7 @@ export function DialogTraceList(props: {
       options={options()}
       current={props.currentSessionID}
       onSelect={(option) => {
-        if (option.value === "__error__") {
+        if (option.value === "__error__" || option.value === "__truncated__") {
           dialog.clear()
           return
         }

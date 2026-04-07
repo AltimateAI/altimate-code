@@ -1000,6 +1000,32 @@ export class Trace {
     }
   }
 
+  /**
+   * List traces with pagination support.
+   * Returns a page of traces plus total count for building pagination UI.
+   */
+  static async listTracesPaginated(
+    dir?: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<{
+    traces: Array<{ sessionId: string; file: string; trace: TraceFile }>
+    total: number
+    offset: number
+    limit: number
+  }> {
+    const all = await Trace.listTraces(dir)
+    const rawOffset = options?.offset ?? 0
+    const rawLimit = options?.limit ?? 20
+    const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.trunc(rawLimit)) : 20
+    return {
+      traces: all.slice(offset, offset + limit),
+      total: all.length,
+      offset,
+      limit,
+    }
+  }
+
   static async loadTrace(sessionId: string, dir?: string): Promise<TraceFile | null> {
     const tracesDir = dir ?? DEFAULT_TRACES_DIR
     try {
