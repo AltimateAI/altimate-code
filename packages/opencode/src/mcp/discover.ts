@@ -117,6 +117,18 @@ async function readJsonSafe(filePath: string): Promise<any | undefined> {
   } catch {
     return undefined
   }
+  // altimate_change start — apply env-var interpolation to external MCP configs
+  // External configs (Claude Code, Cursor, Copilot, Gemini) may contain ${VAR}
+  // or {env:VAR} references that need resolving before JSON parsing.
+  // Uses ConfigPaths.parseText which runs substitute() then parses JSONC.
+  try {
+    const { ConfigPaths } = await import("../config/paths")
+    return await ConfigPaths.parseText(text, filePath, "empty")
+  } catch {
+    // Substitution or parse failure — fall back to direct parse without interpolation
+    log.debug("env-var interpolation failed for external MCP config, falling back to direct parse", { file: filePath })
+  }
+  // altimate_change end
   const errors: any[] = []
   const result = parseJsonc(text, errors, { allowTrailingComma: true })
   if (errors.length > 0) {
