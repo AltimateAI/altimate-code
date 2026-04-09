@@ -112,14 +112,16 @@ const HAS_DBT = !!DBT_PROJECT
 // Tests: dbt profiles auto-discovery
 // ---------------------------------------------------------------------------
 describe("dbt Profiles Auto-Discovery", () => {
-  // Explicitly import registration modules instead of relying on the lazy
-  // hook from native/index.ts. dispatcher.test.ts nullifies the hook via
-  // setRegistrationHook(null), and Bun's non-deterministic file ordering
-  // means that file may run first — leaving _ensureRegistered permanently
-  // null for all subsequent test files in the same process.
+  // Explicitly call registerAll() instead of relying on import side-effects.
+  // ES module imports are cached, so if dispatcher.test.ts runs first and
+  // calls Dispatcher.reset() (clearing all handlers + the lazy hook),
+  // re-importing the register modules is a no-op — handlers stay cleared.
+  // Calling registerAll() directly re-registers them every time.
   beforeAll(async () => {
-    await import("../../src/altimate/native/connections/register")
-    await import("../../src/altimate/native/schema/register")
+    const { registerAll: registerConnections } = await import("../../src/altimate/native/connections/register")
+    const { registerAll: registerSchema } = await import("../../src/altimate/native/schema/register")
+    registerConnections()
+    registerSchema()
   })
 
   test("parseDbtProfiles finds connections from ~/.dbt/profiles.yml", async () => {
@@ -253,6 +255,15 @@ describe.skipIf(!HAS_DBT)("Direct dbt Adapter Execution", () => {
 // Tests: fallback behavior
 // ---------------------------------------------------------------------------
 describe("dbt Fallback Behavior", () => {
+  // Re-register dispatcher handlers in case Dispatcher.reset() was called
+  // by another test file (e.g., dispatcher.test.ts, tool-error-propagation.test.ts).
+  beforeAll(async () => {
+    const { registerAll: registerConnections } = await import("../../src/altimate/native/connections/register")
+    const { registerAll: registerSchema } = await import("../../src/altimate/native/schema/register")
+    registerConnections()
+    registerSchema()
+  })
+
   test("when dbt not configured, falls back to native driver silently", async () => {
     const Registry = await import("../../src/altimate/native/connections/registry")
     Registry.reset()
