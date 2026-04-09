@@ -3,34 +3,11 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import path from "path"
+import { resolveEnvVars } from "../../src/mcp"
 
 // -------------------------------------------------------------------------
 // resolveEnvVars — safety-net resolver at MCP launch site
 // -------------------------------------------------------------------------
-
-// Import the module to access resolveEnvVars indirectly via the env spread.
-// Since resolveEnvVars is a module-level function (not inside the MCP namespace),
-// we test it directly by importing the file and extracting the function.
-// For now, inline the same logic here for unit testing.
-
-const ENV_VAR_PATTERN =
-  /\$\$(\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\})|(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\{env:([^}]+)\}/g
-
-function resolveEnvVars(environment: Record<string, string>): Record<string, string> {
-  const resolved: Record<string, string> = {}
-  for (const [key, value] of Object.entries(environment)) {
-    resolved[key] = value.replace(ENV_VAR_PATTERN, (match, escaped, dollarVar, dollarDefault, braceVar) => {
-      if (escaped !== undefined) return "$" + escaped
-      if (dollarVar !== undefined) {
-        const envValue = process.env[dollarVar]
-        return envValue !== undefined && envValue !== "" ? envValue : (dollarDefault ?? "")
-      }
-      if (braceVar !== undefined) return process.env[braceVar] || ""
-      return match
-    })
-  }
-  return resolved
-}
 
 describe("resolveEnvVars", () => {
   const ORIGINAL_ENV = { ...process.env }

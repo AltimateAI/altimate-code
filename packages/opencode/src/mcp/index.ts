@@ -31,7 +31,7 @@ import { Telemetry } from "@/telemetry"
 const ENV_VAR_PATTERN =
   /\$\$(\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\})|(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\{env:([^}]+)\}/g
 
-function resolveEnvVars(environment: Record<string, string>): Record<string, string> {
+export function resolveEnvVars(environment: Record<string, string>): Record<string, string> {
   const resolved: Record<string, string> = {}
   for (const [key, value] of Object.entries(environment)) {
     resolved[key] = value.replace(ENV_VAR_PATTERN, (match, escaped, dollarVar, dollarDefault, braceVar) => {
