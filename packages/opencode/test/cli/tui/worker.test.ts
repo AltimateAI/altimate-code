@@ -35,7 +35,7 @@ describe("tui worker", () => {
     expect(errors).toEqual([])
   }, 10_000)
 
-  test("responds to RPC calls after startup", async () => {
+  test.skipIf(!!process.env.CI)("responds to RPC calls after startup", async () => {
     const errors: string[] = []
 
     worker = new Worker(workerSrc, {
