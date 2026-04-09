@@ -48,22 +48,30 @@ describe("tui worker", () => {
       errors.push(e.message ?? String(e))
     }
 
-    // Wait for worker to be ready
-    await new Promise((r) => setTimeout(r, 3000))
-    expect(errors).toEqual([])
-
-    // Verify RPC communication works — the worker exports a `fetch` method
+    // Poll for worker readiness instead of a fixed sleep — CI runners
+    // are slower and 3s is often not enough for module loading.
     const client = Rpc.client<typeof rpc>(worker)
-    const result = await Promise.race([
-      client.call("fetch", {
-        url: "http://altimate-code.internal/health",
-        method: "GET",
-        headers: {},
-      }),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("RPC timeout")), 5000)),
-    ])
+    let result: any
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await new Promise((r) => setTimeout(r, 1000))
+      if (errors.length > 0) break
+      try {
+        result = await Promise.race([
+          client.call("fetch", {
+            url: "http://altimate-code.internal/health",
+            method: "GET",
+            headers: {},
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("RPC timeout")), 3000)),
+        ])
+        if (result?.status !== undefined) break
+      } catch {
+        // Worker not ready yet, retry
+      }
+    }
 
+    expect(errors).toEqual([])
     expect(result).toBeDefined()
     expect(typeof result.status).toBe("number")
-  }, 15_000)
+  }, 30_000)
 })
