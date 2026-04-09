@@ -1577,6 +1577,16 @@ export namespace ACP {
 
     if (specified && !providers.length) return specified
 
+    // altimate_change start — default to altimate-backend when configured and no model chosen yet
+    const altimateProvider = providers.find((p) => p.id === "altimate-backend")
+    if (altimateProvider && altimateProvider.models["altimate-default"]) {
+      return {
+        providerID: ProviderID.make("altimate-backend"),
+        modelID: ModelID.make("altimate-default"),
+      }
+    }
+    // altimate_change end
+
     const opencodeProvider = providers.find((p) => p.id === "opencode")
     if (opencodeProvider) {
       if (opencodeProvider.models["big-pickle"]) {

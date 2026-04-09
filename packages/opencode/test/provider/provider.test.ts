@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
 import path from "path"
+import fs from "fs/promises"
 
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
@@ -2327,6 +2328,160 @@ test("github-copilot is excluded when CODESPACES=true and only GITHUB_TOKEN is s
     fn: async () => {
       const providers = await Provider.list()
       expect(providers["github-copilot"]).toBeUndefined()
+    },
+  })
+})
+
+// altimate_change start — tests for altimate-backend default model preference
+test("defaultModel returns altimate-backend when altimate credentials exist and no model configured", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://altimate.ai/config.json",
+        }),
+      )
+    },
+  })
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
+  const altimateDir = path.join(tmp.path, ".altimate")
+  await fs.mkdir(altimateDir, { recursive: true })
+  await Bun.write(
+    path.join(altimateDir, "altimate.json"),
+    JSON.stringify({
+      altimateUrl: "https://test.altimate.ai",
+      altimateInstanceName: "test-instance",
+      altimateApiKey: "test-api-key",
+    }),
+  )
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = await Provider.defaultModel()
+        expect(String(model.providerID)).toBe("altimate-backend")
+        expect(String(model.modelID)).toBe("altimate-default")
+      },
+    })
+  } finally {
+    if (originalHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalHome
+  }
+})
+
+test("defaultModel prefers altimate-backend over other providers when altimate is configured", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://altimate.ai/config.json",
+        }),
+      )
+    },
+  })
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
+  const altimateDir = path.join(tmp.path, ".altimate")
+  await fs.mkdir(altimateDir, { recursive: true })
+  await Bun.write(
+    path.join(altimateDir, "altimate.json"),
+    JSON.stringify({
+      altimateUrl: "https://test.altimate.ai",
+      altimateInstanceName: "test-instance",
+      altimateApiKey: "test-api-key",
+    }),
+  )
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        Env.set("ANTHROPIC_API_KEY", "test-api-key")
+      },
+      fn: async () => {
+        const providers = await Provider.list()
+        // Both providers should be available
+        expect(providers["anthropic"]).toBeDefined()
+        expect(providers["altimate-backend"]).toBeDefined()
+        // But defaultModel should prefer altimate-backend
+        const model = await Provider.defaultModel()
+        expect(String(model.providerID)).toBe("altimate-backend")
+        expect(String(model.modelID)).toBe("altimate-default")
+      },
+    })
+  } finally {
+    if (originalHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalHome
+  }
+})
+
+test("defaultModel respects explicit config model over altimate-backend", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://altimate.ai/config.json",
+          model: "anthropic/claude-sonnet-4-20250514",
+        }),
+      )
+    },
+  })
+  const originalHome = process.env.OPENCODE_TEST_HOME
+  process.env.OPENCODE_TEST_HOME = tmp.path
+  const altimateDir = path.join(tmp.path, ".altimate")
+  await fs.mkdir(altimateDir, { recursive: true })
+  await Bun.write(
+    path.join(altimateDir, "altimate.json"),
+    JSON.stringify({
+      altimateUrl: "https://test.altimate.ai",
+      altimateInstanceName: "test-instance",
+      altimateApiKey: "test-api-key",
+    }),
+  )
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        Env.set("ANTHROPIC_API_KEY", "test-api-key")
+      },
+      fn: async () => {
+        const model = await Provider.defaultModel()
+        expect(String(model.providerID)).toBe("anthropic")
+        expect(String(model.modelID)).toBe("claude-sonnet-4-20250514")
+      },
+    })
+  } finally {
+    if (originalHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalHome
+  }
+})
+
+test("defaultModel falls through to other providers when altimate is not configured", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://altimate.ai/config.json",
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    init: async () => {
+      Env.set("ANTHROPIC_API_KEY", "test-api-key")
+    },
+    fn: async () => {
+      const providers = await Provider.list()
+      // altimate-backend should NOT be available (no credentials file)
+      expect(providers["altimate-backend"]).toBeUndefined()
+      const model = await Provider.defaultModel()
+      // Should fall through to anthropic
+      expect(String(model.providerID)).toBe("anthropic")
     },
   })
 })
