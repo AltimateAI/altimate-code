@@ -1,9 +1,9 @@
 // altimate_change start — tests for MCP env-var interpolation (closes #656)
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
-import { mkdtemp, rm, mkdir, writeFile } from "fs/promises"
-import { tmpdir } from "os"
+import { mkdir, writeFile } from "fs/promises"
 import path from "path"
 import { resolveEnvVars } from "../../src/mcp"
+import { tmpdir } from "../fixture/fixture"
 
 // -------------------------------------------------------------------------
 // resolveEnvVars — safety-net resolver at MCP launch site
@@ -110,24 +110,23 @@ describe("resolveEnvVars", () => {
 // -------------------------------------------------------------------------
 
 describe("discoverExternalMcp with env-var interpolation", () => {
-  let tempDir: string
   const ORIGINAL_ENV = { ...process.env }
 
-  beforeEach(async () => {
-    tempDir = await mkdtemp(path.join(tmpdir(), "mcp-envvar-"))
+  beforeEach(() => {
     process.env["TEST_MCP_TOKEN"] = "glpat-secret-token"
     process.env["TEST_MCP_HOST"] = "https://gitlab.internal.com"
   })
 
-  afterEach(async () => {
+  afterEach(() => {
     process.env = { ...ORIGINAL_ENV }
-    await rm(tempDir, { recursive: true, force: true })
   })
 
   test("resolves ${VAR} in discovered .vscode/mcp.json environment", async () => {
-    await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
+    await using tmp = await tmpdir()
+    const dir = tmp.path
+    await mkdir(path.join(dir, ".vscode"), { recursive: true })
     await writeFile(
-      path.join(tempDir, ".vscode/mcp.json"),
+      path.join(dir, ".vscode/mcp.json"),
       JSON.stringify({
         servers: {
           gitlab: {
@@ -144,7 +143,7 @@ describe("discoverExternalMcp with env-var interpolation", () => {
     )
 
     const { discoverExternalMcp } = await import("../../src/mcp/discover")
-    const { servers } = await discoverExternalMcp(tempDir)
+    const { servers } = await discoverExternalMcp(dir)
 
     expect(servers["gitlab"]).toBeDefined()
     expect(servers["gitlab"].type).toBe("local")
@@ -155,9 +154,11 @@ describe("discoverExternalMcp with env-var interpolation", () => {
   })
 
   test("resolves {env:VAR} in discovered .cursor/mcp.json environment", async () => {
-    await mkdir(path.join(tempDir, ".cursor"), { recursive: true })
+    await using tmp = await tmpdir()
+    const dir = tmp.path
+    await mkdir(path.join(dir, ".cursor"), { recursive: true })
     await writeFile(
-      path.join(tempDir, ".cursor/mcp.json"),
+      path.join(dir, ".cursor/mcp.json"),
       JSON.stringify({
         mcpServers: {
           "my-tool": {
@@ -172,7 +173,7 @@ describe("discoverExternalMcp with env-var interpolation", () => {
     )
 
     const { discoverExternalMcp } = await import("../../src/mcp/discover")
-    const { servers } = await discoverExternalMcp(tempDir)
+    const { servers } = await discoverExternalMcp(dir)
 
     expect(servers["my-tool"]).toBeDefined()
     const env = (servers["my-tool"] as any).environment
@@ -180,9 +181,11 @@ describe("discoverExternalMcp with env-var interpolation", () => {
   })
 
   test("resolves ${VAR:-default} with fallback in discovered config", async () => {
-    await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
+    await using tmp = await tmpdir()
+    const dir = tmp.path
+    await mkdir(path.join(dir, ".vscode"), { recursive: true })
     await writeFile(
-      path.join(tempDir, ".vscode/mcp.json"),
+      path.join(dir, ".vscode/mcp.json"),
       JSON.stringify({
         servers: {
           svc: {
@@ -197,7 +200,7 @@ describe("discoverExternalMcp with env-var interpolation", () => {
     )
 
     const { discoverExternalMcp } = await import("../../src/mcp/discover")
-    const { servers } = await discoverExternalMcp(tempDir)
+    const { servers } = await discoverExternalMcp(dir)
 
     const env = (servers["svc"] as any).environment
     expect(env.MODE).toBe("production")
