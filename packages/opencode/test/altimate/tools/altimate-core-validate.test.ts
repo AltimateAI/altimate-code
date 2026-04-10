@@ -133,6 +133,26 @@ describe("formatValidate", () => {
     expect(result).toContain("syntax error")
     expect(result).toContain("No schema was provided")
   })
+
+  test("no double blank line between valid SQL and the schema note", () => {
+    // Regression: previously the note started with `\n\n` which produced
+    // `SQL is valid.\n\n\n\nNote:` when concatenated. One blank separator is
+    // enough.
+    const result = formatValidate({ valid: true }, false)
+    expect(result).not.toContain("\n\n\n")
+  })
+
+  test("no extra blank line between failure list and the schema note", () => {
+    // Regression: pushing a note that starts with `\n\n` into the `lines`
+    // array and joining on `\n` produced three consecutive newlines.
+    const result = formatValidate(
+      { valid: false, errors: [{ message: "missing column foo" }] },
+      false,
+    )
+    expect(result).toContain("missing column foo")
+    expect(result).toContain("No schema was provided")
+    expect(result).not.toContain("\n\n\n")
+  })
 })
 
 // ---------------------------------------------------------------------------

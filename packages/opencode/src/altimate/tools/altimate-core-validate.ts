@@ -74,20 +74,31 @@ function classifyValidationError(message: string): string {
   return "validation_error"
 }
 
+// Warning appended when validation runs without a schema. Stored without a
+// leading blank so it can be pushed into a line array; a blank line is added
+// explicitly at each call site where spacing is desired.
+const NO_SCHEMA_NOTE =
+  "Note: No schema was provided, so table/column existence checks were skipped. " +
+  "To catch missing tables or columns, run `schema_inspect` on the referenced tables first " +
+  "or pass `schema_context` inline with {tables: {...}}."
+
 function formatValidate(data: Record<string, any>, hasSchema: boolean): string {
   if (data.error) return `Error: ${data.error}`
-  const schemaNote = hasSchema
-    ? ""
-    : "\n\nNote: No schema was provided, so table/column existence checks were skipped. " +
-      "To catch missing tables or columns, run `schema_inspect` on the referenced tables first " +
-      "or pass `schema_context` inline with {tables: {...}}."
-  if (data.valid) return `SQL is valid.${schemaNote}`
+  if (data.valid) {
+    return hasSchema ? "SQL is valid." : `SQL is valid.\n\n${NO_SCHEMA_NOTE}`
+  }
 
   const lines = ["Validation failed:\n"]
   for (const err of data.errors ?? []) {
     lines.push(`  • ${err.message}`)
     if (err.location) lines.push(`    at line ${err.location.line}`)
   }
-  if (schemaNote) lines.push(schemaNote)
+  if (!hasSchema) {
+    // Blank separator line, then the note — avoids the double newline that
+    // would appear if the note itself started with `\n\n` and was joined
+    // with `\n`.
+    lines.push("")
+    lines.push(NO_SCHEMA_NOTE)
+  }
   return lines.join("\n")
 }
