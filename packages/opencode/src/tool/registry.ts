@@ -47,6 +47,9 @@ import { WarehouseDiscoverTool } from "../altimate/tools/warehouse-discover"
 import { McpDiscoverTool } from "../altimate/tools/mcp-discover"
 
 import { DbtManifestTool } from "../altimate/tools/dbt-manifest"
+// altimate_change start - import dbt unit test generation tool
+import { DbtUnitTestGenTool } from "../altimate/tools/dbt-unit-test-gen"
+// altimate_change end
 import { DbtProfilesTool } from "../altimate/tools/dbt-profiles"
 import { DbtLineageTool } from "../altimate/tools/dbt-lineage"
 import { SchemaIndexTool } from "../altimate/tools/schema-index"
@@ -223,6 +226,9 @@ export namespace ToolRegistry {
       // altimate_change end
 
       DbtManifestTool,
+      // altimate_change start - register dbt unit test generation tool
+      DbtUnitTestGenTool,
+      // altimate_change end
       DbtProfilesTool,
       DbtLineageTool,
       SchemaIndexTool,

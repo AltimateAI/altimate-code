@@ -384,6 +384,10 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
     }
 
     const schemaName = params.schema_name ?? "public"
+    // NOTE: params.database is accepted in the type contract but the current
+    // Connector.describeTable signature only supports (schema, table). Wiring
+    // database through to each driver is a separate refactor. For connections
+    // that already scope to a single database (the common case), this is a no-op.
     const columns = await connector.describeTable(schemaName, params.table)
 
     return {

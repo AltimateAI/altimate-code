@@ -72,6 +72,69 @@ Source Freshness:
 
 ---
 
+## dbt_unit_test_gen
+
+Generate dbt unit tests (v1.8+) from a compiled manifest. Analyzes model SQL for testable logic (CASE/WHEN, JOINs, NULLs, window functions, division, incremental), generates type-correct mock inputs, and assembles complete YAML.
+
+```text
+> dbt_unit_test_gen --manifest_path target/manifest.json --model fct_orders --max_scenarios 5
+
+Unit Test Gen: 4 test(s) for fct_orders
+
+=== Unit Test Generation Summary ===
+Model: fct_orders
+Description: Daily order totals by order ID
+Materialization: table
+Upstream dependencies: 2
+Tests generated: 4
+
+=== Upstream Dependencies ===
+
+ref('stg_orders')
+  Staged orders from raw source
+  Columns:
+    order_id (INTEGER) — Primary key for orders
+    quantity (INTEGER) — Number of items ordered
+    unit_price (NUMERIC) — Price per unit in USD
+
+=== Column Lineage (output ← inputs) ===
+  order_total ← stg_orders.quantity, stg_orders.unit_price
+
+=== YAML (paste into schema.yml) ===
+unit_tests:
+  - name: test_fct_orders_happy_path
+    description: Verify correct output for standard input data
+    model: fct_orders
+    given:
+      - input: ref('stg_orders')
+        rows:
+          - { order_id: 1, quantity: 3, unit_price: 100 }
+          - { order_id: 2, quantity: 1, unit_price: 50 }
+    expect:
+      rows:
+        - { order_id: 1, order_total: 300 }
+        - { order_id: 2, order_total: 50 }
+  # ... null_handling, edge_case, incremental tests
+```
+
+**Parameters:**
+- `manifest_path` (required): Path to compiled `manifest.json` (run `dbt compile` first)
+- `model` (required): Model name or unique_id (e.g. `fct_orders` or `model.project.fct_orders`)
+- `dialect` (optional): SQL dialect override (auto-detected from manifest adapter_type)
+- `max_scenarios` (optional, default 3): Maximum number of test scenarios to generate
+
+**What it generates:**
+- **Scenarios:** `happy_path`, `null_handling` (for CASE/COALESCE), `edge_case` (for JOINs, window functions, division), `incremental` (for incremental models with `input: this` mock)
+- **Mock data:** Type-correct values from dialect-aware type mapping (Snowflake, BigQuery, Postgres, Redshift, Databricks, DuckDB, MySQL)
+- **Dependencies:** Handles `ref()` for models/seeds/snapshots, `source()` for raw tables, `format: sql` for ephemeral models
+- **Context:** Returns model/column descriptions, column lineage, and compiled SQL for the LLM to refine test values
+
+**Skill:** `/dbt-unit-tests` — 5-phase workflow (Analyze → Generate → Refine → Validate → Write) with reference guides for YAML spec, edge-case patterns, and incremental testing.
+
+**Important:** The tool generates scaffold tests with type-correct placeholder values. The LLM skill layer refines expected outputs by running SQL against mock data — always review and verify before committing.
+
+---
+
 ## altimate-dbt CLI
 
 `altimate-dbt` is a standalone CLI for dbt workflows. It auto-detects your dbt project directory, Python environment, and adapter type (Snowflake, BigQuery, Databricks, Redshift, etc.).
@@ -103,6 +166,27 @@ All commands provide friendly error diagnostics with actionable fix suggestions 
 ---
 
 ## dbt Skills
+
+### /dbt-unit-tests
+
+Automated dbt unit test generation (v1.8+). Uses `dbt_unit_test_gen` to produce scaffold YAML, then refines expected outputs by reading the compiled SQL and running it against the mock data.
+
+```text
+You: /dbt-unit-tests fct_orders
+
+> dbt_unit_test_gen --manifest_path target/manifest.json --model fct_orders
+> altimate-dbt test --select fct_orders
+
+Generated 4 unit tests for fct_orders:
+  ✓ test_fct_orders_happy_path
+  ✓ test_fct_orders_null_handling
+  ✓ test_fct_orders_edge_case_1 (division)
+  ✓ test_fct_orders_incremental
+
+All tests passing. YAML written to models/marts/_unit_tests.yml.
+```
+
+Workflow: Analyze → Generate → Refine → Validate → Write. See [reference guides](https://github.com/AltimateAI/altimate-code/tree/main/.opencode/skills/dbt-unit-tests/references) for edge-case patterns and incremental testing.
 
 ### /generate-tests
 

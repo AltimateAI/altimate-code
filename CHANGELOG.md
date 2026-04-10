@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Automated dbt unit test generation** — new `dbt_unit_test_gen` tool and `/dbt-unit-tests` skill for generating dbt unit tests (v1.8+) from a compiled manifest. Parses `manifest.json` via the shared `parseManifest()` helper, uses `dbtLineage()` for column lineage, detects testable SQL constructs (CASE/WHEN, JOINs, NULLs, window functions, division, incremental), and assembles complete YAML via the `yaml` library. Includes `input: this` mock for incremental models, `format: sql` fallback for ephemeral deps (even with no known columns), cross-database support via `database` param in `schema.inspect`, deterministic test names (no `Date.now()`), and rich `UnitTestContext` (descriptions, lineage, compiled SQL) for LLM-driven test value refinement. Handles seeds and snapshots as first-class ref() deps. Warns when upstream deps cannot be resolved. (#673)
+- **Manifest parse cache** — `loadRawManifest()` helper caches by path+mtime; `parseManifest()` and `dbtLineage()` both go through it, so a 128MB manifest is read and parsed once per request instead of once per call. Benefits any tool that makes multiple manifest-backed calls in sequence.
+- **`description` on `DbtModelInfo`/`DbtSourceInfo`** — surfaces model and source descriptions from schema.yml in the parsed manifest result, enabling downstream tools to provide richer semantic context to the LLM.
+- **`adapter_type` on `DbtManifestResult`** — exposes the dbt adapter type (snowflake, bigquery, etc.) from manifest metadata for dialect auto-detection.
+
 ## [0.5.20] - 2026-04-09
 
 ### Added
