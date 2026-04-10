@@ -182,6 +182,147 @@ function getWarehouseType(warehouseName?: string): string {
   return Registry.getConfig(warehouseName)?.type ?? "unknown"
 }
 
+/**
+ * Dialect-aware EXPLAIN plan describing how a warehouse should be asked for
+ * a query plan.
+ *
+ *   - `prefix`: the statement prefix to prepend to the SQL ("" means this
+ *     warehouse cannot be EXPLAIN'd via a simple statement prefix — the
+ *     handler will return a clear error instead of issuing a broken query)
+ *   - `actuallyAnalyzed`: whether the prefix actually runs the query and
+ *     reports runtime stats. The caller requested `analyze=true`, but some
+ *     warehouses silently downgrade to plan-only (e.g. Snowflake), so we
+ *     reflect the true mode back to the user in the result envelope.
+ */
+export interface ExplainPlan {
+  prefix: string
+  actuallyAnalyzed: boolean
+}
+
+/**
+ * Build a dialect-aware EXPLAIN plan for the given warehouse type.
+ *
+ * Warehouse-specific notes:
+ *   - Snowflake: `EXPLAIN USING TEXT`. No ANALYZE variant — silently downgraded.
+ *   - PostgreSQL: `EXPLAIN` or `EXPLAIN (ANALYZE, BUFFERS)` for runtime stats.
+ *   - Redshift: plain `EXPLAIN` only. Redshift does NOT support ANALYZE.
+ *   - MySQL / MariaDB: `EXPLAIN` or `EXPLAIN ANALYZE` (MySQL 8+).
+ *   - DuckDB: `EXPLAIN` or `EXPLAIN ANALYZE`.
+ *   - Databricks / Spark: `EXPLAIN` or `EXPLAIN FORMATTED`.
+ *   - ClickHouse: `EXPLAIN` (no ANALYZE form accepted via statement prefix).
+ *   - BigQuery: uses a dry-run API instead of any EXPLAIN statement. Not
+ *     supported via this code path — return empty prefix.
+ *   - Oracle: `EXPLAIN PLAN FOR` stores the plan in PLAN_TABLE rather than
+ *     returning it, so a bare prefix does not produce output. Not supported.
+ *   - SQL Server: requires `SET SHOWPLAN_TEXT ON` as a session setting.
+ *     Not supported via statement prefix.
+ */
+export function buildExplainPlan(warehouseType: string | undefined, analyze: boolean): ExplainPlan {
+  const type = (warehouseType ?? "").toLowerCase()
+  switch (type) {
+    case "snowflake":
+      // Snowflake: no ANALYZE; USING TEXT returns a readable plan.
+      return { prefix: "EXPLAIN USING TEXT", actuallyAnalyzed: false }
+    case "postgres":
+    case "postgresql":
+      return analyze
+        ? { prefix: "EXPLAIN (ANALYZE, BUFFERS)", actuallyAnalyzed: true }
+        : { prefix: "EXPLAIN", actuallyAnalyzed: false }
+    case "redshift":
+      // Redshift supports only plain EXPLAIN — no ANALYZE/BUFFERS.
+      return { prefix: "EXPLAIN", actuallyAnalyzed: false }
+    case "mysql":
+    case "mariadb":
+      // MySQL 8+ supports `EXPLAIN ANALYZE`. Older versions will reject it
+      // at the warehouse and the error will be surfaced to the caller.
+      return analyze
+        ? { prefix: "EXPLAIN ANALYZE", actuallyAnalyzed: true }
+        : { prefix: "EXPLAIN", actuallyAnalyzed: false }
+    case "duckdb":
+      return analyze
+        ? { prefix: "EXPLAIN ANALYZE", actuallyAnalyzed: true }
+        : { prefix: "EXPLAIN", actuallyAnalyzed: false }
+    case "databricks":
+    case "spark":
+      // Databricks/Spark `EXPLAIN FORMATTED` returns a more detailed plan but
+      // does not actually execute the query — still a plan-only mode.
+      return { prefix: analyze ? "EXPLAIN FORMATTED" : "EXPLAIN", actuallyAnalyzed: false }
+    case "clickhouse":
+      return { prefix: "EXPLAIN", actuallyAnalyzed: false }
+    case "bigquery":
+      // BigQuery has no EXPLAIN statement — the correct answer is a dry-run
+      // job via the BigQuery API, which this tool does not support today.
+      return { prefix: "", actuallyAnalyzed: false }
+    case "oracle":
+      // Oracle's `EXPLAIN PLAN FOR` stores the plan in PLAN_TABLE and returns
+      // no rows, so a statement-prefix approach does not work. Callers would
+      // need a follow-up `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY)`.
+      return { prefix: "", actuallyAnalyzed: false }
+    case "mssql":
+    case "sqlserver":
+      // SQL Server requires `SET SHOWPLAN_TEXT ON` as a session setting,
+      // not a statement prefix. Not supported via this code path.
+      return { prefix: "", actuallyAnalyzed: false }
+    default:
+      // Unknown warehouse — fall back to plain EXPLAIN and let the driver
+      // surface a real error if it does not understand the syntax.
+      return analyze
+        ? { prefix: "EXPLAIN ANALYZE", actuallyAnalyzed: true }
+        : { prefix: "EXPLAIN", actuallyAnalyzed: false }
+  }
+}
+
+/** @deprecated Use buildExplainPlan for richer metadata about the plan mode. */
+export function buildExplainPrefix(warehouseType: string | undefined, analyze: boolean): string {
+  return buildExplainPlan(warehouseType, analyze).prefix
+}
+
+/**
+ * Translate a raw warehouse/Registry error into an actionable message.
+ *
+ * Verbatim driver errors like "Connection ? not found. Available: (none)" are
+ * useless to an LLM caller that has no way to fix them. Detect common patterns
+ * and rewrite them with concrete next steps.
+ */
+export function translateExplainError(
+  raw: unknown,
+  warehouseName: string | undefined,
+  availableWarehouses: string[],
+): string {
+  const msg = raw instanceof Error ? raw.message : String(raw)
+
+  // Connection/warehouse lookup failures.
+  if (/Connection\s+.+\s+not found/i.test(msg) || /warehouse\s+.+\s+not found/i.test(msg)) {
+    if (availableWarehouses.length > 0) {
+      return `Warehouse ${JSON.stringify(warehouseName ?? "")} is not configured. Available warehouses: ${availableWarehouses.join(", ")}. Pass one of these as the 'warehouse' parameter, or omit it to use the default.`
+    }
+    return "No warehouses are configured. Run `warehouse_add` to set one up before calling sql_explain."
+  }
+
+  // Unsubstituted-placeholder compilation errors from Snowflake / PG / MySQL.
+  if (/syntax error.*unexpected\s*\?/i.test(msg) || /syntax error.*position\s+\d+.*\?/i.test(msg)) {
+    return "SQL compilation error: the query contains an unsubstituted `?` placeholder. sql_explain does not support parameterized queries — inline the literal value before calling."
+  }
+
+  // Snowflake-specific: ANALYZE not supported.
+  if (/EXPLAIN\s+ANALYZE/i.test(msg) && /not\s+supported/i.test(msg)) {
+    return "This warehouse does not support EXPLAIN ANALYZE. Retry with analyze=false to get a plan-only EXPLAIN."
+  }
+
+  // Permission denials.
+  if (/permission\s+denied/i.test(msg) || /access\s+denied/i.test(msg) || /insufficient\s+privilege/i.test(msg)) {
+    return `The warehouse user lacks permission to EXPLAIN this query. Check role grants for the objects referenced in the SQL. Original error: ${msg}`
+  }
+
+  // Generic SQL compilation error fallback.
+  if (/SQL compilation error/i.test(msg) || /syntax error/i.test(msg)) {
+    return `SQL compilation error in the query passed to sql_explain. Fix the SQL and retry. Original error: ${msg}`
+  }
+
+  // Fall through: return the original but with a hint to aid debugging.
+  return msg
+}
+
 /** Register all connection-related handlers. Exported for test re-registration. */
 export function registerAll(): void {
 
@@ -261,10 +402,11 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
 
 // --- sql.explain ---
 register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResult> => {
+  let warehouseName: string | undefined
+  let warehouseType: string | undefined
   try {
-    const warehouseName = params.warehouse
+    warehouseName = params.warehouse
     let connector
-    let warehouseType: string | undefined
 
     if (warehouseName) {
       connector = await Registry.get(warehouseName)
@@ -276,13 +418,25 @@ register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResu
       }
       connector = await Registry.get(warehouses[0].name)
       warehouseType = warehouses[0].type
+      warehouseName = warehouses[0].name
     }
 
-    const explainPrefix = params.analyze ? "EXPLAIN ANALYZE" : "EXPLAIN"
-    const result = await connector.execute(
-      `${explainPrefix} ${params.sql}`,
-      10000,
-    )
+    const plan = buildExplainPlan(warehouseType, params.analyze ?? false)
+    if (plan.prefix === "") {
+      // Warehouse does not support EXPLAIN via a simple statement prefix —
+      // return a clear error rather than sending a bare statement to the
+      // driver. BigQuery needs a dry-run job, SQL Server needs SHOWPLAN_TEXT,
+      // Oracle needs DBMS_XPLAN, etc.
+      return {
+        success: false,
+        plan_rows: [],
+        error: `sql_explain is not supported for warehouse type ${JSON.stringify(warehouseType)}. This warehouse requires a different plan mechanism (e.g. dry-run API, SET SHOWPLAN_TEXT ON, or DBMS_XPLAN) that sql_explain cannot issue directly.`,
+        warehouse_type: warehouseType,
+        analyzed: false,
+      }
+    }
+
+    const result = await connector.execute(`${plan.prefix} ${params.sql}`, 10000)
 
     const planText = result.rows.map((r) => String(r[0])).join("\n")
     const planRows = result.rows.map((r, i) => ({
@@ -295,13 +449,18 @@ register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResu
       plan_text: planText,
       plan_rows: planRows,
       warehouse_type: warehouseType,
-      analyzed: params.analyze ?? false,
+      // Reflect the true mode: if Snowflake silently downgraded ANALYZE to a
+      // plan-only EXPLAIN, the caller should know the plan is estimated, not
+      // observed.
+      analyzed: plan.actuallyAnalyzed,
     }
   } catch (e) {
+    const available = Registry.list().warehouses.map((w) => w.name)
     return {
       success: false,
       plan_rows: [],
-      error: String(e),
+      error: translateExplainError(e, warehouseName, available),
+      warehouse_type: warehouseType,
       analyzed: params.analyze ?? false,
     }
   }
