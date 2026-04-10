@@ -46,7 +46,7 @@
     "@types/which": "3.0.4",
     "@types/yargs": "17.0.33",
     "@typescript/native-preview": "catalog:",
-    "drizzle-kit": "1.0.0-beta.16-ea816b6",
+    "drizzle-kit": "1.0.0-beta.22-41a7d21",
     "drizzle-orm": "1.0.0-beta.16-ea816b6",
     "duckdb": "1.4.4",
     "playwright-core": "1.58.2",
