@@ -6,6 +6,7 @@ import { register } from "../dispatcher"
 import { runDbt } from "./runner"
 import { parseManifest } from "./manifest"
 import { dbtLineage } from "./lineage"
+import { generateDbtUnitTests } from "./unit-tests"
 import type {
   DbtRunParams,
   DbtRunResult,
@@ -13,6 +14,8 @@ import type {
   DbtManifestResult,
   DbtLineageParams,
   DbtLineageResult,
+  DbtUnitTestGenParams,
+  DbtUnitTestGenResult,
 } from "../types"
 
 /** Register all dbt.* native handlers. Exported for test re-registration. */
@@ -28,6 +31,10 @@ register("dbt.manifest", async (params: DbtManifestParams): Promise<DbtManifestR
 
 register("dbt.lineage", async (params: DbtLineageParams): Promise<DbtLineageResult> => {
   return dbtLineage(params)
+})
+
+register("dbt.unit_test_gen", async (params: DbtUnitTestGenParams): Promise<DbtUnitTestGenResult> => {
+  return generateDbtUnitTests(params)
 })
 
 } // end registerAll

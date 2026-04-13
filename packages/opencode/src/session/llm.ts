@@ -149,25 +149,27 @@ export namespace LLM {
 
     const tools = await resolveTools(input)
 
-    // LiteLLM and some Anthropic proxies require the tools parameter to be present
-    // when message history contains tool calls, even if no tools are being used.
-    // Add a dummy tool that is never called to satisfy this validation.
-    // This is enabled for:
-    // 1. Providers with "litellm" in their ID or API ID (auto-detected)
-    // 2. Providers with explicit "litellmProxy: true" option (opt-in for custom gateways)
-    const isLiteLLMProxy =
-      provider.options?.["litellmProxy"] === true ||
-      input.model.providerID.toLowerCase().includes("litellm") ||
-      input.model.api.id.toLowerCase().includes("litellm")
-
-    if (isLiteLLMProxy && Object.keys(tools).length === 0 && hasToolCalls(input.messages)) {
-      tools["_noop"] = tool({
-        description:
-          "Placeholder for LiteLLM/Anthropic proxy compatibility - required when message history contains tool calls but no active tools are needed",
-        inputSchema: jsonSchema({ type: "object", properties: {} }),
-        execute: async () => ({ output: "", title: "", metadata: {} }),
-      })
+    // altimate_change start — ensure tool definitions exist for all tool_use blocks in history
+    // The Anthropic API (and proxies like LiteLLM) require every tool_use block in
+    // message history to have a matching tool definition. When agents switch (Plan→Builder),
+    // MCP tools disconnect, or tools are filtered by permissions, the history may reference
+    // tools absent from the current set. Add stub definitions for any missing tools.
+    // Fixes: https://github.com/AltimateAI/altimate-code/issues/678
+    const referencedTools = toolNamesFromMessages(input.messages)
+    for (const name of referencedTools) {
+      if (!Object.hasOwn(tools, name)) {
+        tools[name] = tool({
+          description: `[Historical] Tool no longer available in this session`,
+          inputSchema: jsonSchema({ type: "object", properties: {} }),
+          execute: async () => ({
+            output: "This tool is no longer available. Please use an alternative approach.",
+            title: "",
+            metadata: {},
+          }),
+        })
+      }
     }
+    // altimate_change end
 
     return streamText({
       onError(error) {
@@ -265,15 +267,20 @@ export namespace LLM {
     return input.tools
   }
 
-  // Check if messages contain any tool-call content
-  // Used to determine if a dummy tool should be added for LiteLLM proxy compatibility
-  export function hasToolCalls(messages: ModelMessage[]): boolean {
+  // altimate_change start — collect tool names from message history to prevent API validation errors
+  // Anthropic API requires every tool_use block in message history to have a matching tool
+  // definition. When agents switch (e.g. Plan→Builder) or MCP tools disconnect, the history
+  // may reference tools no longer in the active set. This function extracts those names so
+  // stub definitions can be added. Fixes #678.
+  export function toolNamesFromMessages(messages: ModelMessage[]): Set<string> {
+    const names = new Set<string>()
     for (const msg of messages) {
       if (!Array.isArray(msg.content)) continue
       for (const part of msg.content) {
-        if (part.type === "tool-call" || part.type === "tool-result") return true
+        if (part.type === "tool-call" || part.type === "tool-result") names.add(part.toolName)
       }
     }
-    return false
+    return names
   }
+  // altimate_change end
 }

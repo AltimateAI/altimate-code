@@ -81,6 +81,8 @@ altimate-dbt build --model <name>         # build + test together
 
 ## Unit Test Workflow
 
+**For automated unit test generation, use the `dbt-unit-tests` skill instead.** It analyzes model SQL, generates type-correct mock data, and assembles complete YAML automatically.
+
 See [references/unit-test-guide.md](references/unit-test-guide.md) for the full unit test framework.
 
 ### Quick Pattern

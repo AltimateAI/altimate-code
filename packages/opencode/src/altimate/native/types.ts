@@ -104,6 +104,8 @@ export interface SqlOptimizeResult {
 export interface SchemaInspectParams {
   table: string
   schema_name?: string
+  /** Database/catalog name — needed for cross-database queries (Snowflake, BigQuery) */
+  database?: string
   warehouse?: string
 }
 
@@ -172,6 +174,7 @@ export interface ModelColumn {
 export interface DbtModelInfo {
   unique_id: string
   name: string
+  description?: string
   schema_name?: string
   database?: string
   materialized?: string
@@ -182,6 +185,7 @@ export interface DbtModelInfo {
 export interface DbtSourceInfo {
   unique_id: string
   name: string
+  description?: string
   source_name: string
   schema_name?: string
   database?: string
@@ -198,11 +202,102 @@ export interface DbtManifestResult {
   models: DbtModelInfo[]
   sources: DbtSourceInfo[]
   tests: DbtTestInfo[]
+  /** Seeds parsed from the manifest (extracted like models for ref() resolution) */
+  seeds: DbtModelInfo[]
+  /** Snapshots parsed from the manifest (extracted like models for ref() resolution) */
+  snapshots: DbtModelInfo[]
   source_count: number
   model_count: number
   test_count: number
   snapshot_count: number
   seed_count: number
+  /** Adapter type from manifest metadata (e.g. "snowflake", "bigquery") */
+  adapter_type?: string
+}
+
+// --- dbt Unit Test Generation ---
+
+export interface DbtUnitTestGenParams {
+  /** Path to dbt manifest.json (must be compiled first) */
+  manifest_path: string
+  /** Model name or unique_id to generate tests for */
+  model: string
+  /** SQL dialect override (auto-detected from manifest if omitted) */
+  dialect?: string
+  /** Number of test scenarios to generate (default: 3) */
+  max_scenarios?: number
+}
+
+/** A single mock input for a ref() or source() dependency */
+export interface UnitTestMockInput {
+  /** e.g. ref('stg_orders') or source('raw', 'orders') */
+  input: string
+  /** Mock rows in dict format */
+  rows: Record<string, unknown>[]
+  /** Use sql format instead of dict (required for ephemeral models) */
+  format?: "dict" | "sql"
+  /** Raw SQL when format is "sql" */
+  sql?: string
+}
+
+/** A single generated unit test case */
+export interface UnitTestCase {
+  /** Test name (snake_case, descriptive) */
+  name: string
+  /** Human-readable description of what this test verifies */
+  description: string
+  /** Category: happy_path, null_handling, edge_case, boundary, incremental */
+  category: string
+  /** Which logic branch or SQL construct this test targets */
+  target_logic: string
+  /** Mock inputs for upstream dependencies */
+  given: UnitTestMockInput[]
+  /** Expected output rows */
+  expect_rows: Record<string, unknown>[]
+  /** Macro overrides (e.g., is_incremental) */
+  overrides?: {
+    macros?: Record<string, unknown>
+    vars?: Record<string, unknown>
+  }
+}
+
+/** Semantic context about the model and its lineage for LLM-assisted refinement */
+export interface UnitTestContext {
+  /** Model-level description from schema.yml */
+  model_description?: string
+  /** Compiled SQL of the model under test */
+  compiled_sql: string
+  /** Column lineage: output_col → ["input_table.input_col", ...] */
+  column_lineage: Record<string, string[]>
+  /** Upstream dependency context: name, description, columns with descriptions */
+  upstream: Array<{
+    name: string
+    ref: string // e.g. "ref('stg_orders')" or "source('raw', 'orders')"
+    description?: string
+    columns: Array<{ name: string; data_type: string; description?: string }>
+  }>
+  /** Output column descriptions */
+  output_columns: Array<{ name: string; data_type: string; description?: string }>
+}
+
+export interface DbtUnitTestGenResult {
+  success: boolean
+  model_name: string
+  model_unique_id?: string
+  materialized?: string
+  /** Number of upstream dependencies */
+  dependency_count: number
+  /** Generated test cases */
+  tests: UnitTestCase[]
+  /** Complete YAML output ready to paste into schema.yml */
+  yaml: string
+  /** Semantic context for LLM-assisted test refinement */
+  context?: UnitTestContext
+  /** SQL anti-patterns that informed edge case generation */
+  anti_patterns: string[]
+  /** Warnings (e.g., missing compiled SQL, ephemeral deps) */
+  warnings: string[]
+  error?: string
 }
 
 // --- Warehouse ---
@@ -983,6 +1078,7 @@ export const BridgeMethods = {
   "dbt.run": {} as { params: DbtRunParams; result: DbtRunResult },
   "dbt.manifest": {} as { params: DbtManifestParams; result: DbtManifestResult },
   "dbt.lineage": {} as { params: DbtLineageParams; result: DbtLineageResult },
+  "dbt.unit_test_gen": {} as { params: DbtUnitTestGenParams; result: DbtUnitTestGenResult },
   "warehouse.list": {} as { params: WarehouseListParams; result: WarehouseListResult },
   "warehouse.test": {} as { params: WarehouseTestParams; result: WarehouseTestResult },
   "warehouse.add": {} as { params: WarehouseAddParams; result: WarehouseAddResult },

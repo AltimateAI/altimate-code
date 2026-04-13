@@ -14,90 +14,72 @@ import type { Agent } from "../../src/agent/agent"
 import type { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID } from "../../src/session/schema"
 
-describe("session.llm.hasToolCalls", () => {
-  test("returns false for empty messages array", () => {
-    expect(LLM.hasToolCalls([])).toBe(false)
+describe("session.llm.toolNamesFromMessages", () => {
+  test("returns empty set for empty messages", () => {
+    expect(LLM.toolNamesFromMessages([])).toEqual(new Set())
   })
 
-  test("returns false for messages with only text content", () => {
+  test("returns empty set for messages with no tool calls", () => {
     const messages: ModelMessage[] = [
-      {
-        role: "user",
-        content: [{ type: "text", text: "Hello" }],
-      },
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "Hi there" }],
-      },
+      { role: "user", content: [{ type: "text", text: "Hello" }] },
+      { role: "assistant", content: [{ type: "text", text: "Hi" }] },
     ]
-    expect(LLM.hasToolCalls(messages)).toBe(false)
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set())
   })
 
-  test("returns true when messages contain tool-call", () => {
+  test("extracts tool names from tool-call blocks", () => {
     const messages = [
-      {
-        role: "user",
-        content: [{ type: "text", text: "Run a command" }],
-      },
       {
         role: "assistant",
         content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-123",
-            toolName: "bash",
-          },
+          { type: "tool-call", toolCallId: "call-1", toolName: "bash" },
+          { type: "tool-call", toolCallId: "call-2", toolName: "read" },
         ],
       },
     ] as ModelMessage[]
-    expect(LLM.hasToolCalls(messages)).toBe(true)
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
   })
 
-  test("returns true when messages contain tool-result", () => {
+  test("deduplicates tool names across messages", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-2", toolName: "bash" }],
+      },
+    ] as ModelMessage[]
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash"]))
+  })
+
+  test("extracts tool names from tool-result blocks", () => {
     const messages = [
       {
         role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-123",
-            toolName: "bash",
-          },
-        ],
+        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash" }],
       },
     ] as ModelMessage[]
-    expect(LLM.hasToolCalls(messages)).toBe(true)
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash"]))
   })
 
-  test("returns false for messages with string content", () => {
-    const messages: ModelMessage[] = [
-      {
-        role: "user",
-        content: "Hello world",
-      },
-      {
-        role: "assistant",
-        content: "Hi there",
-      },
-    ]
-    expect(LLM.hasToolCalls(messages)).toBe(false)
-  })
-
-  test("returns true when tool-call is mixed with text content", () => {
+  test("extracts from both tool-call and tool-result blocks", () => {
     const messages = [
       {
         role: "assistant",
-        content: [
-          { type: "text", text: "Let me run that command" },
-          {
-            type: "tool-call",
-            toolCallId: "call-456",
-            toolName: "read",
-          },
-        ],
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash" }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash" }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call-2", toolName: "read" }],
       },
     ] as ModelMessage[]
-    expect(LLM.hasToolCalls(messages)).toBe(true)
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
   })
 })
 

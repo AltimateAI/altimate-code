@@ -3,9 +3,40 @@ import path from "path"
 import { parse as parseJsonc } from "jsonc-parser"
 import { Log } from "../util/log"
 import { Filesystem } from "../util/filesystem"
+import { ConfigPaths } from "../config/paths"
 import type { Config } from "../config/config"
 
 const log = Log.create({ service: "mcp.discover" })
+
+// altimate_change start — per-field env-var resolution for discovered MCP configs
+// Discovered configs (.vscode/mcp.json, .cursor/mcp.json, ~/.claude.json, etc.)
+// are parsed with plain parseJsonc and thus never pass through ConfigPaths.substitute.
+// Resolve ${VAR} / {env:VAR} patterns only on the env and headers fields so that
+// scoping is narrow (we don't touch command args, URLs, or server names) and so
+// that the launch site does NOT need a second resolution pass.
+// See PR #666 review — double-interpolation regression fixed by doing this once,
+// here, rather than twice.
+function resolveServerEnvVars(
+  obj: Record<string, unknown>,
+  context: { server: string; source: string; field: "env" | "headers" },
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  const stats = ConfigPaths.newEnvSubstitutionStats()
+  for (const [key, raw] of Object.entries(obj)) {
+    if (typeof raw !== "string") continue
+    out[key] = ConfigPaths.resolveEnvVarsInString(raw, stats)
+  }
+  if (stats.unresolvedNames.length > 0) {
+    log.warn("unresolved env var references in MCP config — substituting empty string", {
+      server: context.server,
+      source: context.source,
+      field: context.field,
+      unresolved: stats.unresolvedNames.join(", "),
+    })
+  }
+  return out
+}
+// altimate_change end
 
 interface ExternalMcpSource {
   /** Relative path from base directory */
@@ -32,8 +63,16 @@ const SOURCES: ExternalMcpSource[] = [
  * Transform a single external MCP entry into our Config.Mcp shape.
  * Returns undefined if the entry is invalid (no command or url).
  * Preserves recognized fields: timeout, enabled.
+ *
+ * altimate_change — `context` is used to scope env-var resolution to the
+ * `env` and `headers` fields and to tag warnings with the source + server name.
  */
-function transform(entry: Record<string, any>): Config.Mcp | undefined {
+function transform(
+  entry: Record<string, any>,
+  // altimate_change start — context for env-var resolution warnings
+  context: { server: string; source: string },
+  // altimate_change end
+): Config.Mcp | undefined {
   // Remote server — handle both "url" and Claude Code's "type: http" format
   if (entry.url && typeof entry.url === "string") {
     const result: Record<string, any> = {
@@ -41,7 +80,12 @@ function transform(entry: Record<string, any>): Config.Mcp | undefined {
       url: entry.url,
     }
     if (entry.headers && typeof entry.headers === "object") {
-      result.headers = entry.headers
+      // altimate_change start — resolve env vars in headers (e.g. Authorization: Bearer ${TOKEN})
+      result.headers = resolveServerEnvVars(entry.headers as Record<string, unknown>, {
+        ...context,
+        field: "headers",
+      })
+      // altimate_change end
     }
     if (typeof entry.timeout === "number") result.timeout = entry.timeout
     if (typeof entry.enabled === "boolean") result.enabled = entry.enabled
@@ -63,7 +107,12 @@ function transform(entry: Record<string, any>): Config.Mcp | undefined {
       command: cmd,
     }
     if (entry.env && typeof entry.env === "object") {
-      result.environment = entry.env
+      // altimate_change start — resolve env vars in environment block
+      result.environment = resolveServerEnvVars(entry.env as Record<string, unknown>, {
+        ...context,
+        field: "env",
+      })
+      // altimate_change end
     }
     if (typeof entry.timeout === "number") result.timeout = entry.timeout
     if (typeof entry.enabled === "boolean") result.enabled = entry.enabled
@@ -93,7 +142,10 @@ function addServersFromFile(
     if (Object.prototype.hasOwnProperty.call(result, name)) continue // first source wins
     if (!entry || typeof entry !== "object") continue
 
-    const transformed = transform(entry as Record<string, any>)
+    const transformed = transform(entry as Record<string, any>, {
+      server: name,
+      source: sourceLabel,
+    })
     if (transformed) {
       // Project-scoped servers are discovered but disabled by default for security.
       // User-owned home-directory configs are auto-enabled.

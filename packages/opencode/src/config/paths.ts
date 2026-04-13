@@ -84,51 +84,127 @@ export namespace ConfigPaths {
     return typeof input === "string" ? path.dirname(input) : input.dir
   }
 
+  // altimate_change start — shared env-var interpolation primitives
+  // Unified regex for env-var interpolation, single source of truth.
+  // Syntaxes (alternation, left-to-right):
+  //   1. $${VAR} or $${VAR:-default} — literal escape (docker-compose style)
+  //   2. ${VAR} or ${VAR:-default}   — shell/dotenv substitution
+  //   3. {env:VAR}                    — raw text injection (backward compat)
+  // Exported so other modules (e.g. mcp/discover) can reuse the exact same grammar
+  // without forking the regex. See issue #635, #656.
+  export const ENV_VAR_PATTERN =
+    /\$\$(\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\})|(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g
+
+  export interface EnvSubstitutionStats {
+    dollarRefs: number
+    dollarUnresolved: number
+    dollarDefaulted: number
+    dollarEscaped: number
+    legacyBraceRefs: number
+    legacyBraceUnresolved: number
+    unresolvedNames: string[]
+  }
+
+  /**
+   * Resolve ${VAR}, ${VAR:-default}, {env:VAR}, and $${VAR} patterns in a raw
+   * string value (i.e. a value that is already a parsed JS string, NOT JSON text).
+   * Returns the resolved string without any JSON escaping — safe for direct use in
+   * process environments, HTTP headers, or anywhere a plain string is needed.
+   *
+   * Does NOT JSON-escape — use the internal `substitute()` wrapper below if you
+   * need that (substitute() operates on raw JSON text pre-parse).
+   */
+  export function resolveEnvVarsInString(
+    value: string,
+    stats?: EnvSubstitutionStats,
+  ): string {
+    return value.replace(ENV_VAR_PATTERN, (match, escaped, dollarVar, dollarDefault, braceVar) => {
+      if (escaped !== undefined) {
+        // $${VAR} → literal ${VAR}
+        if (stats) stats.dollarEscaped++
+        return "$" + escaped
+      }
+      if (dollarVar !== undefined) {
+        // ${VAR} / ${VAR:-default}
+        if (stats) stats.dollarRefs++
+        const envValue = process.env[dollarVar]
+        const resolved = envValue !== undefined && envValue !== ""
+        if (!resolved && dollarDefault !== undefined && stats) stats.dollarDefaulted++
+        if (!resolved && dollarDefault === undefined) {
+          if (stats) {
+            stats.dollarUnresolved++
+            stats.unresolvedNames.push(dollarVar)
+          }
+        }
+        return resolved ? envValue : (dollarDefault ?? "")
+      }
+      if (braceVar !== undefined) {
+        // {env:VAR} → raw text injection
+        if (stats) stats.legacyBraceRefs++
+        const v = process.env[braceVar]
+        if ((v === undefined || v === "") && stats) {
+          stats.legacyBraceUnresolved++
+          stats.unresolvedNames.push(braceVar)
+        }
+        return v || ""
+      }
+      return match
+    })
+  }
+
+  export function newEnvSubstitutionStats(): EnvSubstitutionStats {
+    return {
+      dollarRefs: 0,
+      dollarUnresolved: 0,
+      dollarDefaulted: 0,
+      dollarEscaped: 0,
+      legacyBraceRefs: 0,
+      legacyBraceUnresolved: 0,
+      unresolvedNames: [],
+    }
+  }
+  // altimate_change end
+
   /** Apply {env:VAR} and {file:path} substitutions to config text. */
   async function substitute(text: string, input: ParseSource, missing: "error" | "empty" = "error") {
     // altimate_change start — unified env-var interpolation
     // Single-pass substitution against the ORIGINAL text prevents output of one
     // pattern being re-matched by another (e.g. {env:A}="${B}" expanding B).
-    // Syntaxes (order tried, in one regex via alternation):
-    //   1. $${VAR} or $${VAR:-default} — literal escape (docker-compose style)
-    //   2. ${VAR} or ${VAR:-default}   — string-safe, JSON-escaped (shell/dotenv)
-    //   3. {env:VAR}                    — raw text injection (backward compat)
-    // Users arriving from Claude Code / VS Code / dotenv / docker-compose expect
-    // ${VAR}. Use {env:VAR} for raw unquoted injection. See issue #635.
-    let dollarRefs = 0
-    let dollarUnresolved = 0
-    let dollarDefaulted = 0
-    let dollarEscaped = 0
-    let legacyBraceRefs = 0
-    let legacyBraceUnresolved = 0
-    text = text.replace(
-      /\$\$(\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\})|(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\{env:([^}]+)\}/g,
-      (match, escaped, dollarVar, dollarDefault, braceVar) => {
-        if (escaped !== undefined) {
-          // $${VAR} → literal ${VAR}
-          dollarEscaped++
-          return "$" + escaped
+    // Uses the shared ENV_VAR_PATTERN grammar, adding JSON-escaping for values
+    // substituted into raw JSON text (which is then parsed). This is the ONLY
+    // call site that applies JSON escaping; raw-string callers should use
+    // `resolveEnvVarsInString` instead.
+    const stats = newEnvSubstitutionStats()
+    text = text.replace(ENV_VAR_PATTERN, (match, escaped, dollarVar, dollarDefault, braceVar) => {
+      if (escaped !== undefined) {
+        stats.dollarEscaped++
+        return "$" + escaped
+      }
+      if (dollarVar !== undefined) {
+        stats.dollarRefs++
+        const envValue = process.env[dollarVar]
+        const resolved = envValue !== undefined && envValue !== ""
+        if (!resolved && dollarDefault !== undefined) stats.dollarDefaulted++
+        if (!resolved && dollarDefault === undefined) {
+          stats.dollarUnresolved++
+          stats.unresolvedNames.push(dollarVar)
         }
-        if (dollarVar !== undefined) {
-          // ${VAR} / ${VAR:-default} → JSON-escaped string-safe substitution
-          dollarRefs++
-          const envValue = process.env[dollarVar]
-          const resolved = envValue !== undefined && envValue !== ""
-          if (!resolved && dollarDefault !== undefined) dollarDefaulted++
-          if (!resolved && dollarDefault === undefined) dollarUnresolved++
-          const value = resolved ? envValue : (dollarDefault ?? "")
-          return JSON.stringify(value).slice(1, -1)
+        const value = resolved ? envValue : (dollarDefault ?? "")
+        // JSON-escape because this substitution happens against raw JSON text.
+        return JSON.stringify(value).slice(1, -1)
+      }
+      if (braceVar !== undefined) {
+        stats.legacyBraceRefs++
+        const v = process.env[braceVar]
+        if (v === undefined || v === "") {
+          stats.legacyBraceUnresolved++
+          stats.unresolvedNames.push(braceVar)
         }
-        if (braceVar !== undefined) {
-          // {env:VAR} → raw text injection
-          legacyBraceRefs++
-          const v = process.env[braceVar]
-          if (v === undefined || v === "") legacyBraceUnresolved++
-          return v || ""
-        }
-        return match
-      },
-    )
+        return v || ""
+      }
+      return match
+    })
+    const { dollarRefs, dollarUnresolved, dollarDefaulted, dollarEscaped, legacyBraceRefs, legacyBraceUnresolved } = stats
     // Emit telemetry if any env interpolation happened. Dynamic import avoids a
     // circular dep with @/altimate/telemetry (which imports @/config/config).
     if (dollarRefs > 0 || legacyBraceRefs > 0 || dollarEscaped > 0) {

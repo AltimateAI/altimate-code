@@ -188,8 +188,16 @@ test("BrowserOpenFailed event is NOT published when open() succeeds", async () =
       // Run authenticate with a timeout to avoid waiting forever for the callback
       const authPromise = MCP.authenticate("test-oauth-server-2").catch(() => undefined)
 
-      // The source code waits 500ms to detect browser-open failures.
-      // Allow enough time for that plus event propagation.
+      // Poll for open() to be called (instead of a fixed sleep, which is flaky
+      // on slow CI runners). The source code waits up to 500ms after calling
+      // open() to detect browser-open failures, so we need open() to be called
+      // AND the detection window to complete before asserting.
+      const pollStart = Date.now()
+      while (openCalledWith === undefined && Date.now() - pollStart < 5000) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      // Allow the 500ms detection window to elapse so any BrowserOpenFailed
+      // event would have fired by now. Add a small propagation buffer.
       await new Promise((resolve) => setTimeout(resolve, 600))
 
       // Stop the callback server and cancel any pending auth

@@ -1550,17 +1550,17 @@ export namespace ACP {
 
     const directory = cwd ?? process.cwd()
 
-    const specified = await sdk.config
+    // altimate_change start — capture provider filter alongside model config
+    const userConfig = await sdk.config
       .get({ directory }, { throwOnError: true })
-      .then((resp) => {
-        const cfg = resp.data
-        if (!cfg || !cfg.model) return undefined
-        return Provider.parseModel(cfg.model)
-      })
+      .then((resp) => resp.data)
       .catch((error) => {
         log.error("failed to load user config for default model", { error })
         return undefined
       })
+    const specified = userConfig?.model ? Provider.parseModel(userConfig.model) : undefined
+    const providerFilter = userConfig?.provider as Record<string, unknown> | undefined
+    // altimate_change end
 
     const providers = await sdk.config
       .providers({ directory }, { throwOnError: true })
@@ -1579,7 +1579,11 @@ export namespace ACP {
 
     // altimate_change start — default to altimate-backend when configured and no model chosen yet
     const altimateProvider = providers.find((p) => p.id === "altimate-backend")
-    if (altimateProvider && altimateProvider.models["altimate-default"]) {
+    if (
+      altimateProvider &&
+      altimateProvider.models["altimate-default"] &&
+      (!providerFilter || Object.keys(providerFilter).includes("altimate-backend"))
+    ) {
       return {
         providerID: ProviderID.make("altimate-backend"),
         modelID: ModelID.make("altimate-default"),

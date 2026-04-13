@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.21] - 2026-04-13
+
+### Added
+
+- **Automated dbt unit test generation** — generate dbt unit tests (v1.8+) from your terminal with `/dbt-unit-tests` or the `dbt_unit_test_gen` tool. Detects testable SQL constructs (CASE/WHEN, JOINs, NULLs, window functions, division, incremental models) and assembles complete YAML with type-correct mock data across 7 dialects. Includes `input: this` mocks for incremental models, `format: sql` for ephemeral deps, and handles seeds/snapshots as first-class `ref()` deps. Five-phase skill workflow: Analyze → Generate → Refine → Validate → Write. Requires dbt-core 1.8+. (#673)
+- **Manifest parse cache** — `loadRawManifest()` caches by path+mtime so large manifests (100MB+) are parsed once per session, not once per tool call.
+- **Model/source descriptions in manifest** — `DbtModelInfo` and `DbtSourceInfo` now surface descriptions from `schema.yml`, giving downstream tools richer semantic context.
+- **`adapter_type` on `DbtManifestResult`** — exposes the dbt adapter type (snowflake, bigquery, etc.) from manifest metadata for dialect auto-detection.
+
+### Fixed
+
+- **MCP env-var `$${VAR}` escape and chain-injection vulnerability** — the two-layer env-var resolution design allowed `$${VAR}` escapes to be re-resolved (breaking literal `${VAR}` passthrough) and enabled variable-chain injection where `EVIL_VAR="${SECRET}"` could exfiltrate secrets the config never referenced. Collapsed to a single resolution pass scoped to `env` and `headers` fields only. (#697, relates to #656)
+- **MCP server environment variables passed as literals** — `${VAR}`, `${VAR:-default}`, and `{env:VAR}` patterns in MCP server `env` blocks were passed as literal strings to child processes, causing auth failures for tools like `gitlab-mcp-server`. (#666, closes #656)
+- **`sql_explain` and `altimate_core_validate` input hardening** — reject empty/placeholder SQL and warehouse names before hitting the warehouse. `sql_explain` now generates dialect-aware EXPLAIN statements for 12+ warehouse types. Driver errors are translated into actionable guidance (e.g., "No warehouses configured — run `warehouse_add`"). `altimate_core_validate` now runs even without a schema (previously hard-failed), with a `(no schema)` indicator and clear instructions for providing schema context. (#693, closes #691)
+- **`sql_explain` alternatives for unsupported warehouses** — BigQuery, Oracle, and SQL Server now return specific guidance (dry-run API, `DBMS_XPLAN`, `SET SHOWPLAN_TEXT ON`) instead of a generic "not supported" message.
+
+## [0.5.20] - 2026-04-09
+
+### Added
+
+- **Altimate model auto-selection** — when Altimate credentials are configured and no model is explicitly chosen, `altimate-backend/altimate-default` is selected automatically. Respects the `provider` filter in config if set. No manual `/model` selection needed for first-time Altimate users. (#665)
+
+### Fixed
+
+- **Connection string passwords with special characters** — passwords containing `@`, `#`, `:`, `/`, or other URI-reserved characters are now automatically percent-encoded in `connection_string` configs. Previously these caused cryptic authentication failures because the URI parser split on the wrong delimiter. Already-encoded passwords (`%XX`) are left untouched. Affects all URI-based drivers (PostgreSQL, MongoDB, ClickHouse). (#597, closes #589)
+- **`trace list` pagination** — `trace list` now supports `--offset` for navigating large trace histories, displays "Showing X-Y of N" with a next-page hint, and caps the TUI trace dialog at 500 items (up from 50) with an overflow message pointing to the CLI for the full set. (#596, closes #418)
+- **ClickHouse edge-case hardening** — added tests for `LowCardinality(Nullable(...))` nullability detection, `Map`/`Tuple` wrapper handling, undefined type fallback, and SQL comment/string-escape edge cases in the LIMIT injection guard. (#599, closes #592)
+
+### Testing
+
+- 31 new adversarial tests covering connection string sanitization (injection, encoding edge cases, ReDoS, Unicode, null bytes), pagination boundary math (Infinity, NaN, fractional, negative inputs), and `Provider.parseModel` edge cases.
+
 ## [0.5.19] - 2026-04-04
 
 ### Added

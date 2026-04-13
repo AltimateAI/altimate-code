@@ -81,7 +81,8 @@ altimate ships with built-in skills for common data engineering tasks. Type `/` 
 | `/query-optimize` | Query optimization suggestions |
 | `/data-viz` | Interactive data visualization and dashboards |
 | `/dbt-develop` | dbt model development and scaffolding |
-| `/dbt-test` | dbt test generation |
+| `/dbt-test` | dbt schema test generation |
+| `/dbt-unit-tests` | Automated dbt unit test generation (v1.8+) |
 | `/dbt-docs` | dbt documentation generation |
 | `/dbt-analyze` | dbt project analysis |
 | `/dbt-troubleshoot` | dbt issue diagnosis |

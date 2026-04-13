@@ -52,14 +52,26 @@ function telemetryWouldExtract(metadata: Record<string, any>): string {
 describe("altimate_core_validate error propagation", () => {
   beforeEach(() => Dispatcher.reset())
 
-  test("returns early with clear error when no schema provided", async () => {
+  test("runs engine and warns in output when no schema provided", async () => {
+    // Previous behavior hard-gated on missing schema and returned an error before
+    // calling the engine, leading to a terse unrecoverable failure. The new
+    // contract dispatches to the engine with an empty schema and surfaces a
+    // warning in the output so schema-less syntax/dialect checks still run.
+    Dispatcher.register("altimate_core.validate" as any, async () => ({
+      success: true,
+      data: { valid: true, errors: [] },
+    }))
+
     const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
     const tool = await AltimateCoreValidateTool.init()
     const result = await tool.execute({ sql: "SELECT * FROM users" }, stubCtx())
 
-    expect(result.metadata.success).toBe(false)
-    expect(result.metadata.error).toContain("No schema provided")
-    expect(telemetryWouldExtract(result.metadata)).not.toBe("unknown error")
+    // The engine ran (success=true), schema-less mode is flagged, and the
+    // output warns the caller that existence checks were skipped.
+    expect(result.metadata.success).toBe(true)
+    expect(result.metadata.has_schema).toBe(false)
+    expect(result.title).toContain("no schema")
+    expect(String(result.output)).toContain("No schema was provided")
   })
 
   test("surfaces errors when schema provided but table missing from schema", async () => {

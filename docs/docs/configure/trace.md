@@ -346,6 +346,9 @@ All traces are stored in the traces directory and persist across sessions. Use `
 # Show the last 50 traces
 altimate-code trace list -n 50
 
+# Navigate to the next page
+altimate-code trace list --offset 50 -n 50
+
 # View any historical trace
 altimate-code trace view <session-id>
 ```

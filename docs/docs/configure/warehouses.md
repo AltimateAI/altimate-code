@@ -153,6 +153,9 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 }
 ```
 
+!!! tip "Special characters in passwords"
+    Passwords with special characters (`@`, `#`, `:`, `/`) are automatically percent-encoded. No manual escaping required.
+
 ## Redshift
 
 ```json

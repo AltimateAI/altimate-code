@@ -509,7 +509,13 @@ export namespace MCP {
         env: {
           ...process.env,
           ...(cmd === "altimate" || cmd === "altimate-code" ? { BUN_BE_BUN: "1" } : {}),
-          ...mcp.environment,
+          // altimate_change start — env-var references in mcp.environment are resolved once
+          // at config load time: `ConfigPaths.substitute()` for `opencode.json`, and
+          // `resolveServerEnvVars()` for discovered external configs (`.vscode/mcp.json`,
+          // `.cursor/mcp.json`, etc.). A second pass here would re-expand already-resolved
+          // values and break the `$${VAR}` escape convention — see PR #666 review.
+          ...(mcp.environment ?? {}),
+          // altimate_change end
         },
       })
       transport.stderr?.on("data", (chunk: Buffer) => {

@@ -167,6 +167,9 @@ export function sanitizeConnectionString(connectionString: string): string {
   const afterAtHasDelim = /[/?#]/.test(afterAt)
   const beforeAtHasDelim = /[/?#]/.test(beforeAt)
   if (!afterAtHasDelim && beforeAtHasDelim) {
+    // Ambiguous '@' — likely in query/path/fragment, not userinfo separator.
+    // Return unchanged; caller should pre-encode the password if auth fails.
+    console.debug?.("sanitizeConnectionString: ambiguous '@' detected, skipping encoding")
     return connectionString
   }
 

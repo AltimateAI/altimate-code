@@ -1738,6 +1738,9 @@ export namespace Provider {
       altimateProvider.models[ModelID.make("altimate-default")] &&
       (!cfg.provider || Object.keys(cfg.provider).includes(String(altimateProviderID)))
     ) {
+      // altimate_change start — log when altimate-backend auto-selected
+      log.info("defaulting to altimate-backend/altimate-default (no model configured)")
+      // altimate_change end
       return {
         providerID: altimateProviderID,
         modelID: ModelID.make("altimate-default"),

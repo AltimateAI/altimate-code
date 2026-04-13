@@ -123,7 +123,8 @@ Skills are specialized workflows that compose multiple tools. Invoke them proact
 | Skill | Invoke When |
 |-------|-------------|
 | `/dbt-develop` | User wants to create, modify, or scaffold dbt models (staging, intermediate, marts, incremental). Always use for model creation. |
-| `/dbt-test` | User wants to add tests (schema tests, unit tests, data quality checks). Also auto-generates edge-case tests via `altimate_core_testgen`. |
+| `/dbt-test` | User wants to add schema tests (not_null, unique, relationships, accepted_values) or debug a failing test. |
+| `/dbt-unit-tests` | User wants to generate dbt unit tests (v1.8+) — mock inputs + expected outputs for testing model logic. Uses `dbt_unit_test_gen` to scaffold YAML from compiled manifest. |
 | `/dbt-docs` | User wants to document models — column descriptions, model descriptions, doc blocks in schema.yml. |
 | `/dbt-troubleshoot` | Something is broken — compilation errors, runtime failures, wrong data, slow builds. Uses `altimate_core_fix` and `sql_fix` for auto-repair. |
 | `/dbt-analyze` | User wants to understand impact before shipping — downstream consumers, breaking changes, blast radius. Uses `dbt_lineage` for column-level analysis. |
