@@ -61,8 +61,9 @@ function listTraces(
   }
 
   if (traces.length === 0 && pagination.total > 0) {
+    const totalPages = Math.ceil(pagination.total / pagination.limit)
     UI.println(`No traces on this page (offset ${pagination.offset} past end of ${pagination.total} traces).`)
-    UI.println(UI.Style.TEXT_DIM + `Try: altimate-code trace list --offset 0 --limit ${pagination.limit}` + UI.Style.TEXT_NORMAL)
+    UI.println(UI.Style.TEXT_DIM + `Try: altimate-code trace list --page 1  (${totalPages} page(s) available)` + UI.Style.TEXT_NORMAL)
     return
   }
 
@@ -110,9 +111,11 @@ function listTraces(
   // altimate_change start — trace: session trace messages with pagination footer
   const rangeStart = pagination.offset + 1
   const rangeEnd = pagination.offset + traces.length
-  UI.println(UI.Style.TEXT_DIM + `Showing ${rangeStart}-${rangeEnd} of ${pagination.total} trace(s) in ${Trace.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
+  const currentPage = Math.floor(pagination.offset / pagination.limit) + 1
+  const totalPages = Math.ceil(pagination.total / pagination.limit)
+  UI.println(UI.Style.TEXT_DIM + `Showing ${rangeStart}-${rangeEnd} of ${pagination.total} trace(s) (page ${currentPage}/${totalPages}) in ${Trace.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
   if (rangeEnd < pagination.total) {
-    UI.println(UI.Style.TEXT_DIM + `Next page: altimate-code trace list --offset ${rangeEnd} --limit ${pagination.limit}` + UI.Style.TEXT_NORMAL)
+    UI.println(UI.Style.TEXT_DIM + `Next page: altimate-code trace list --page ${currentPage + 1}` + UI.Style.TEXT_NORMAL)
   }
   UI.println(UI.Style.TEXT_DIM + "View a trace: altimate-code trace view <session-id>" + UI.Style.TEXT_NORMAL)
   // altimate_change end
@@ -154,6 +157,11 @@ export const TraceCommand = cmd({
         describe: "number of traces to skip (for pagination)",
         default: 0,
       })
+      .option("page", {
+        alias: ["p"],
+        type: "number",
+        describe: "page number (1-based, converts to offset automatically)",
+      })
       .option("live", {
         type: "boolean",
         describe: "auto-refresh the viewer as the trace updates (for in-progress sessions)",
@@ -173,10 +181,11 @@ export const TraceCommand = cmd({
       // treat `--offset 0` as unset (no semantic change, harmless), but
       // `args.limit || 20` would promote `--limit 0` to 20 instead of
       // letting the API clamp it to 1.
-      const page = await Trace.listTracesPaginated(tracesDir, {
-        offset: args.offset ?? 0,
-        limit: args.limit ?? 20,
-      })
+      const limit = args.limit ?? 20
+      const offset = args.page != null
+        ? (Math.max(1, Math.trunc(args.page)) - 1) * limit
+        : (args.offset ?? 0)
+      const page = await Trace.listTracesPaginated(tracesDir, { offset, limit })
       listTraces(page.traces, page, tracesDir)
       return
     }
