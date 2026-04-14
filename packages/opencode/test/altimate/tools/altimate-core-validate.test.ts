@@ -189,7 +189,7 @@ describe("AltimateCoreValidateTool.execute", () => {
     })
 
     const tool = await AltimateCoreValidateTool.init()
-    const result = await tool.execute({ sql: "SELECT 1" }, ctx as any)
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     // The engine ran, so success should be true.
     expect(result.metadata.success).toBe(true)
@@ -211,6 +211,7 @@ describe("AltimateCoreValidateTool.execute", () => {
     const result = await tool.execute(
       {
         sql: "SELECT id FROM users",
+        dialect: "snowflake",
         schema_context: {
           users: { id: "INTEGER", name: "VARCHAR" },
         },
@@ -233,7 +234,7 @@ describe("AltimateCoreValidateTool.execute", () => {
 
     const tool = await AltimateCoreValidateTool.init()
     const result = await tool.execute(
-      { sql: "SELECT 1", schema_path: "/tmp/schema.yaml" },
+      { sql: "SELECT 1", dialect: "snowflake", schema_path: "/tmp/schema.yaml" },
       ctx as any,
     )
 
@@ -247,7 +248,7 @@ describe("AltimateCoreValidateTool.execute", () => {
     })
 
     const tool = await AltimateCoreValidateTool.init()
-    const result = await tool.execute({ sql: "SELECT 1", schema_context: {} }, ctx as any)
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake", schema_context: {} }, ctx as any)
 
     expect(result.metadata.has_schema).toBe(false)
   })
@@ -268,6 +269,7 @@ describe("AltimateCoreValidateTool.execute", () => {
     const result = await tool.execute(
       {
         sql: "SELECT xyz FROOM users",
+        dialect: "snowflake",
         schema_context: { users: { id: "INTEGER" } },
       },
       ctx as any,
@@ -292,7 +294,7 @@ describe("AltimateCoreValidateTool.execute", () => {
     })
 
     const tool = await AltimateCoreValidateTool.init()
-    const result = await tool.execute({ sql: "SELECT 1" }, ctx as any)
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
     expect(result.metadata.error_class).toBe("engine_failure")
@@ -308,7 +310,7 @@ describe("AltimateCoreValidateTool.execute", () => {
     )
 
     const tool = await AltimateCoreValidateTool.init()
-    await tool.execute({ sql: "SELECT 1" }, ctx as any)
+    await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(spy).toHaveBeenCalledTimes(1)
     spy.mockRestore()
