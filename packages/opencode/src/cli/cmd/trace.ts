@@ -115,7 +115,11 @@ function listTraces(
   const totalPages = Math.ceil(pagination.total / pagination.limit)
   UI.println(UI.Style.TEXT_DIM + `Showing ${rangeStart}-${rangeEnd} of ${pagination.total} trace(s) (page ${currentPage}/${totalPages}) in ${Trace.getTracesDir(tracesDir)}` + UI.Style.TEXT_NORMAL)
   if (rangeEnd < pagination.total) {
-    UI.println(UI.Style.TEXT_DIM + `Next page: altimate-code trace list --page ${currentPage + 1}` + UI.Style.TEXT_NORMAL)
+    const isPageAligned = pagination.offset % pagination.limit === 0
+    const nextHint = isPageAligned
+      ? `altimate-code trace list --page ${currentPage + 1} --limit ${pagination.limit}`
+      : `altimate-code trace list --offset ${rangeEnd} --limit ${pagination.limit}`
+    UI.println(UI.Style.TEXT_DIM + `Next page: ${nextHint}` + UI.Style.TEXT_NORMAL)
   }
   UI.println(UI.Style.TEXT_DIM + "View a trace: altimate-code trace view <session-id>" + UI.Style.TEXT_NORMAL)
   // altimate_change end
@@ -182,8 +186,9 @@ export const TraceCommand = cmd({
       // `args.limit || 20` would promote `--limit 0` to 20 instead of
       // letting the API clamp it to 1.
       const limit = args.limit ?? 20
-      const offset = args.page != null
-        ? (Math.max(1, Math.trunc(args.page)) - 1) * limit
+      const rawPage = args.page != null ? args.page : undefined
+      const offset = rawPage != null && Number.isFinite(rawPage)
+        ? (Math.max(1, Math.trunc(rawPage)) - 1) * limit
         : (args.offset ?? 0)
       const page = await Trace.listTracesPaginated(tracesDir, { offset, limit })
       listTraces(page.traces, page, tracesDir)
