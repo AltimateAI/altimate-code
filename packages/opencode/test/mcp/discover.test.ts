@@ -363,4 +363,8 @@ describe("discoverExternalMcp", () => {
     expect(result["project-server"]).toBeDefined()
     expect((result["project-server"] as any).enabled).toBe(false)
   })
+
+  // NOTE: env-var interpolation in discover only applies to `env` and `headers`
+  // fields (see resolveServerEnvVars in discover.ts), NOT to `command` args.
+  // Tests for command-level interpolation were removed as invalid.
 })
