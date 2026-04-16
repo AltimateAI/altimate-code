@@ -30,13 +30,28 @@ The monorepo workspace packages are:
 - `packages/dbt-tools` — dbt integration tools
 - `packages/drivers` — database driver adapters (optional deps)
 
+## Two-phase sandbox lifecycle
+
+| Phase | Marker file | What's available |
+|---|---|---|
+| **Phase 1: code-ready** | `/workspace/.code-ready` | Source code, `node_modules`, linters, `bun test` |
+| **Phase 2: server-ready** | `/workspace/.server-ready` | Server on :4096, `curl /global/health`, hot reload active |
+
+`harness spawn` returns at phase 1 (~10s with base image). Server starts with `bun --hot` for live module reloading — file changes reflect immediately without restart.
+
+**Before running curl or verifying server behavior**, check phase 2:
+```bash
+test -f /workspace/.server-ready && echo "ready" || echo "still starting..."
+```
+
 ## What happens on sandbox create
 
 1. The init containers mint a GitHub token and clone the repo into `/workspace/altimate-code`.
-2. The main container runs `bun install` to ensure all workspace dependencies are resolved (most are pre-baked in the base image, so this is a fast delta install).
+2. The main container runs `bun install` (near-instant with base image pre-baking deps).
 3. `.code-ready` is touched — the agent can now read/write code, run linters, run tests.
-4. The server is started via `bun run --cwd packages/opencode --conditions=browser src/index.ts serve --port 4096 --hostname 0.0.0.0`.
-5. `.server-ready` is touched — the agent can now interact with the HTTP API.
+4. The server starts with `bun --hot` for live module reloading on file changes.
+5. Once the server binds port 4096, `.server-ready` is touched.
+6. Agent edits source → bun hot-swaps modules → `curl` shows updated response immediately.
 
 ## Sandbox Contract
 
@@ -46,7 +61,7 @@ repo_url: https://github.com/AltimateAI/altimate-code.git
 base_image: altimateacr.azurecr.io/altimate-code-base:latest
 working_dir: /workspace/altimate-code
 port: 4096
-health_path: ""
+health_path: /global/health
 
 # altimate-code is a standalone tool — it does not expose services consumed
 # by other sandboxes in the typical Altimate stack.
@@ -63,7 +78,47 @@ setup_commands:
   - name: install-deps
     cmd: bun install
 
-start_command: bun run --cwd packages/opencode --conditions=browser src/index.ts serve --port 4096 --hostname 0.0.0.0
+start_command: bun --hot run --cwd packages/opencode --conditions=browser src/index.ts serve --port 4096 --hostname 0.0.0.0
+```
+
+## Verification
+
+Before creating a PR, verify in the running sandbox. Use the `verify-changes` skill for the full process.
+
+### Always check
+
+```bash
+# 1. Run tests
+cd /workspace/altimate-code/packages/opencode && bun test --timeout 30000
+# Include output summary in PR body
+
+# 2. Health endpoint
+curl -sf localhost:4096/global/health
+# Expected: {"healthy":true,"version":"local"}
+```
+
+### For server/API changes
+
+```bash
+# Make change → bun --hot reloads automatically (~1-3s)
+# Then curl the affected endpoint
+curl -sf localhost:4096/<endpoint>
+# Include request + response in PR body
+```
+
+### For CLI changes
+
+```bash
+# Run the CLI command and capture output
+cd /workspace/altimate-code
+bun run --cwd packages/opencode --conditions=browser src/index.ts <command>
+# Include output in PR body
+```
+
+### Test command
+
+```bash
+cd /workspace/altimate-code/packages/opencode && bun test --timeout 30000
 ```
 
 ## Troubleshooting
