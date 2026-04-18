@@ -1,0 +1,11 @@
+flowchart LR
+    A["TraceFile JSON"] --> B["PII Engine"]
+    B --> C["Publisher\n(HTTP)"]
+    B --> D["DuckDB\nData Lake"]
+    D --> E["Analytics"]
+    E --> F["Web UI\n(React + Hono)"]
+    B --> F
+    F -.->|"--share"| G["ngrok"]
+
+    style A fill:#f9f,stroke:#333
+    style F fill:#bbf,stroke:#333

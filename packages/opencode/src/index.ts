@@ -42,6 +42,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
+// altimate_change start — trace-manager: PII review, publish, analytics dashboard
+import { TraceManageCommand } from "@altimateai/trace-manager/src/cli"
+// altimate_change end
 import path from "path"
 import { Global } from "./global"
 import { JsonMigration } from "./storage/json-migration"
@@ -216,6 +219,9 @@ let cli = yargs(hideBin(process.argv))
   // altimate_change end
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
+// altimate_change end
+// altimate_change start — trace-manager
+  .command(TraceManageCommand)
 // altimate_change end
 
 if (Installation.isLocal()) {

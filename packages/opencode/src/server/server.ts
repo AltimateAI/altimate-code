@@ -43,6 +43,7 @@ import { Filesystem } from "@/util/filesystem"
 import { QuestionRoutes } from "./routes/question"
 import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
+import { TraceManagerRoutes } from "./routes/trace-manager"
 import { MDNS } from "./mdns"
 import { lazy } from "@/util/lazy"
 
@@ -560,6 +561,7 @@ export namespace Server {
           })
         },
       )
+      .route("/trace-manager", TraceManagerRoutes())
       .all("/*", async (c) => {
         const path = c.req.path
 

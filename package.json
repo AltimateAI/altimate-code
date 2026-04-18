@@ -29,7 +29,8 @@
       "packages/util",
       "packages/sdk/js",
       "packages/dbt-tools",
-      "packages/drivers"
+      "packages/drivers",
+      "packages/trace-manager"
     ],
     "catalog": {
       "@types/bun": "1.3.9",

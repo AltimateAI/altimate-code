@@ -87,6 +87,7 @@
         "@ai-sdk/xai": "2.0.51",
         "@altimateai/altimate-core": "0.3.0",
         "@altimateai/drivers": "workspace:*",
+        "@altimateai/trace-manager": "workspace:*",
         "@aws-sdk/credential-providers": "3.993.0",
         "@clack/prompts": "1.0.0-alpha.1",
         "@gitlab/gitlab-ai-provider": "3.6.0",
@@ -216,6 +217,21 @@
         "@types/node": "catalog:",
         "@typescript/native-preview": "catalog:",
         "typescript": "catalog:",
+      },
+    },
+    "packages/trace-manager": {
+      "name": "@altimateai/trace-manager",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opencode-ai/plugin": "workspace:*",
+        "duckdb": "^1.3.0",
+        "hono": "^4.7.10",
+        "zod": "^3.24.4",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.2.14",
+        "@types/yargs": "^17.0.33",
+        "typescript": "^5.8.3",
       },
     },
     "packages/util": {
@@ -367,6 +383,8 @@
     "@altimateai/dbt-tools": ["@altimateai/dbt-tools@workspace:packages/dbt-tools"],
 
     "@altimateai/drivers": ["@altimateai/drivers@workspace:packages/drivers"],
+
+    "@altimateai/trace-manager": ["@altimateai/trace-manager@workspace:packages/trace-manager"],
 
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],
 
@@ -2549,6 +2567,12 @@
     "@altimateai/dbt-integration/@altimateai/altimate-core": ["@altimateai/altimate-core@0.1.6", "", { "optionalDependencies": { "@altimateai/altimate-core-darwin-arm64": "0.1.6", "@altimateai/altimate-core-darwin-x64": "0.1.6", "@altimateai/altimate-core-linux-arm64-gnu": "0.1.6", "@altimateai/altimate-core-linux-x64-gnu": "0.1.6", "@altimateai/altimate-core-win32-x64-msvc": "0.1.6" } }, "sha512-Kl0hjT88Q56AdGxKJyCcPElxcpZYDYmLhDHK7ZeZIn2oVaXyynExLcIHn+HktUe9USuWtba3tZA/52jJsMyrGg=="],
 
     "@altimateai/dbt-integration/yaml": ["yaml@2.8.2", "", { "bin": { "yaml": "bin.mjs" } }, "sha512-mplynKqc1C2hTVYxd0PU2xQAc22TI1vShAYGksCCfxbn/dFwnHTNi1bvYsBTkhdUNtGIf5xNOg938rrSSYvS9A=="],
+
+    "@altimateai/trace-manager/hono": ["hono@4.12.8", "", {}, "sha512-VJCEvtrezO1IAR+kqEYnxUOoStaQPGrCmX3j4wDTNOcD1uRPFpGlwQUIW8niPuvHXaTUxeOUl5MMDGrl+tmO9A=="],
+
+    "@altimateai/trace-manager/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "@altimateai/trace-manager/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
 
     "@aws-crypto/crc32/@aws-sdk/types": ["@aws-sdk/types@3.930.0", "", { "dependencies": { "@smithy/types": "^4.9.0", "tslib": "^2.6.2" } }, "sha512-we/vaAgwlEFW7IeftmCLlLMw+6hFs3DzZPJw7lVHbj/5HJ0bz9gndxEsS2lQoeJ1zhiiLqAqvXxmM43s0MBg0A=="],
 
