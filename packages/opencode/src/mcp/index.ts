@@ -13,6 +13,12 @@ import { Config } from "../config/config"
 import { Log } from "../util/log"
 import { NamedError } from "@opencode-ai/util/error"
 import z from "zod/v4"
+// altimate_change start — needed to resolve `headersCommand` for remote MCP
+// servers that require bearer tokens with short TTLs (Microsoft Fabric, etc.)
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+const execFileAsync = promisify(execFile)
+// altimate_change end
 import { Instance } from "../project/instance"
 import { Installation } from "../installation"
 // altimate_change start — persist enabled flag
@@ -123,6 +129,118 @@ export namespace MCP {
   // doesn't re-call listTools() on every invocation. Invalidated on
   // tool-list-changed notifications.
   const toolListCache = new Map<string, MCPToolDef[]>()
+  // altimate_change end
+
+  // altimate_change start — Microsoft Fabric Core MCP returns `null` for
+  // `tool.annotations.{readOnlyHint,destructiveHint,idempotentHint,openWorldHint}`,
+  // which the SDK's `ListToolsResultSchema` (z.boolean().optional()) rejects via
+  // Zod, blocking listTools() entirely. We accept `null` as "hint absent" by
+  // calling `client.request()` with a permissive schema in place of the SDK's
+  // strict one. See https://github.com/AltimateAI/altimate-code/issues/792.
+  const LenientToolAnnotationsSchema = z
+    .object({
+      title: z.string().optional(),
+      readOnlyHint: z.boolean().nullable().optional(),
+      destructiveHint: z.boolean().nullable().optional(),
+      idempotentHint: z.boolean().nullable().optional(),
+      openWorldHint: z.boolean().nullable().optional(),
+    })
+    .loose()
+
+  const LenientToolSchema = z
+    .object({
+      name: z.string(),
+      title: z.string().optional(),
+      description: z.string().optional(),
+      inputSchema: z.any(),
+      outputSchema: z.any().optional(),
+      annotations: LenientToolAnnotationsSchema.optional(),
+      _meta: z.record(z.string(), z.unknown()).optional(),
+    })
+    .loose()
+
+  const LenientListToolsResultSchema = z
+    .object({
+      tools: z.array(LenientToolSchema),
+      nextCursor: z.string().optional(),
+      _meta: z.record(z.string(), z.unknown()).optional(),
+    })
+    .loose()
+
+  function isSchemaError(err: unknown): boolean {
+    if (!err) return false
+    if (err instanceof Error && (err.name === "ZodError" || err.constructor?.name === "$ZodError")) return true
+    if (typeof err === "object" && err !== null && "issues" in err) return true
+    return false
+  }
+
+  /**
+   * Calls the SDK's strict `listTools()` first; on a Zod schema-validation
+   * failure (e.g. server emits non-spec values like `null` annotation hints),
+   * retries via `client.request()` with a permissive schema. This keeps the
+   * fast path unchanged for compliant servers while letting non-compliant
+   * ones (Microsoft Fabric, etc.) still register their tools.
+   */
+  async function listToolsLenient(client: MCPClient): Promise<{ tools: MCPToolDef[] }> {
+    try {
+      return await client.listTools()
+    } catch (err) {
+      if (!isSchemaError(err)) throw err
+      log.info("listTools strict schema rejected response, retrying with lenient schema", {
+        error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+      })
+      const result = await client.request(
+        { method: "tools/list", params: {} },
+        LenientListToolsResultSchema as any,
+      )
+      return result as { tools: MCPToolDef[] }
+    }
+  }
+
+  /** @internal — exported only for unit tests. Prefer using `tools()` in production code. */
+  export const _testing = {
+    LenientListToolsResultSchema,
+    isSchemaError,
+    resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") =>
+      resolveHeadersCommand(spec, key),
+    hasAuthorizationHeader,
+  }
+  // altimate_change end
+
+  // altimate_change start — resolve dynamic header values produced by shell
+  // commands (e.g. `az account get-access-token`). Runs via execFile (not a
+  // shell) so values aren't subject to shell injection. Re-runs on every
+  // connect so expiring bearer tokens refresh without manual config edits.
+  // See https://github.com/AltimateAI/altimate-code/issues/791.
+  async function resolveHeadersCommand(
+    spec: Record<string, string[]> | undefined,
+    serverKey: string,
+  ): Promise<Record<string, string>> {
+    if (!spec) return {}
+    const out: Record<string, string> = {}
+    for (const [name, argv] of Object.entries(spec)) {
+      if (!Array.isArray(argv) || argv.length === 0) {
+        throw new Error(`headersCommand[${name}] must be a non-empty argv array`)
+      }
+      const [cmd, ...args] = argv
+      const { stdout } = await execFileAsync(cmd, args, {
+        encoding: "utf-8",
+        maxBuffer: 1024 * 1024,
+        timeout: 30_000,
+      })
+      const value = stdout.trim()
+      if (!value) {
+        throw new Error(`headersCommand[${name}] produced empty output`)
+      }
+      log.info("resolved dynamic header", { server: serverKey, header: name })
+      out[name] = value
+    }
+    return out
+  }
+
+  function hasAuthorizationHeader(headers: Record<string, string>): boolean {
+    return Object.keys(headers).some((k) => k.toLowerCase() === "authorization")
+  }
   // altimate_change end
 
   // Register notification handlers for MCP client
@@ -368,8 +486,36 @@ export namespace MCP {
     let connectedTransport: "stdio" | "sse" | "streamable-http" | undefined = undefined
 
     if (mcp.type === "remote") {
-      // OAuth is enabled by default for remote servers unless explicitly disabled with oauth: false
-      const oauthDisabled = mcp.oauth === false
+      // altimate_change start — resolve dynamic headers (e.g. bearer tokens
+      // produced by `az account get-access-token`) before constructing
+      // transports. Failure to resolve aborts the connect attempt with a
+      // clear error so the user sees `failed: headersCommand[...] failed`
+      // in `mcp list` rather than a generic transport error.
+      let dynamicHeaders: Record<string, string> = {}
+      try {
+        dynamicHeaders = await resolveHeadersCommand(mcp.headersCommand, key)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        log.error("headersCommand resolution failed", { key, error: message })
+        return {
+          mcpClient: undefined,
+          status: { status: "failed" as const, error: `headersCommand failed: ${message}` },
+        }
+      }
+      const mergedHeaders: Record<string, string> = { ...(mcp.headers ?? {}), ...dynamicHeaders }
+      // altimate_change end
+
+      // altimate_change start — OAuth is enabled by default for remote servers,
+      // BUT if the user provided an explicit Authorization header (statically or
+      // via headersCommand) and didn't ask for OAuth, skip OAuth so the bearer
+      // header isn't pre-empted by an OAuth flow that fails (e.g. Microsoft
+      // Entra ID rejects RFC 7591 dynamic client registration). See #792.
+      const oauthExplicitlyDisabled = mcp.oauth === false
+      const oauthExplicitlyConfigured = typeof mcp.oauth === "object"
+      const oauthDisabled =
+        oauthExplicitlyDisabled ||
+        (!oauthExplicitlyConfigured && hasAuthorizationHeader(mergedHeaders))
+      // altimate_change end
       const oauthConfig = typeof mcp.oauth === "object" ? mcp.oauth : undefined
       let authProvider: McpOAuthProvider | undefined
 
@@ -391,22 +537,25 @@ export namespace MCP {
         )
       }
 
+      // altimate_change start — pass merged (static + dynamic) headers to transports
+      const requestInit = Object.keys(mergedHeaders).length > 0 ? { headers: mergedHeaders } : undefined
       const transports: Array<{ name: string; transport: TransportWithAuth }> = [
         {
           name: "StreamableHTTP",
           transport: new StreamableHTTPClientTransport(new URL(mcp.url), {
             authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+            requestInit,
           }),
         },
         {
           name: "SSE",
           transport: new SSEClientTransport(new URL(mcp.url), {
             authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+            requestInit,
           }),
         },
       ]
+      // altimate_change end
 
       let lastError: Error | undefined
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
@@ -433,8 +582,10 @@ export namespace MCP {
             duration_ms: Date.now() - connectStart,
           })
           // altimate_change start — bridge merge: prefetch tool list synchronously
-          // for cache so MCP.tools() doesn't re-call listTools.
-          const toolsList = await client.listTools().catch(() => undefined)
+          // for cache so MCP.tools() doesn't re-call listTools. Use lenient
+          // schema so servers that emit `null` annotation hints (e.g. Fabric)
+          // don't trip Zod validation. See #792.
+          const toolsList = await listToolsLenient(client).catch(() => undefined)
           if (toolsList) toolListCache.set(key, toolsList.tools)
           // altimate_change end
           // Census: collect resource counts (fire-and-forget, never block connect)
@@ -571,8 +722,9 @@ export namespace MCP {
           duration_ms: Date.now() - localConnectStart,
         })
         // altimate_change start — bridge merge: prefetch tool list synchronously
-        // for cache so MCP.tools() doesn't re-call listTools.
-        const toolsListSync = await client.listTools().catch(() => undefined)
+        // for cache so MCP.tools() doesn't re-call listTools. Use lenient schema
+        // so non-compliant annotation hints (`null`) don't fail validation.
+        const toolsListSync = await listToolsLenient(client).catch(() => undefined)
         if (toolsListSync) toolListCache.set(key, toolsListSync.tools)
         // altimate_change end
         // Census: collect resource counts (fire-and-forget, never block connect)
@@ -639,7 +791,7 @@ export namespace MCP {
     const cachedTools = toolListCache.get(key)
     const result = cachedTools
       ? { tools: cachedTools }
-      : await withTimeout(mcpClient.listTools(), mcp.timeout ?? DEFAULT_TIMEOUT).catch((err) => {
+      : await withTimeout(listToolsLenient(mcpClient), mcp.timeout ?? DEFAULT_TIMEOUT).catch((err) => {
           log.error("failed to get tools from client", { key, error: err })
           return undefined
         })
@@ -836,7 +988,7 @@ export namespace MCP {
         if (cached) {
           return { clientName, client, toolsResult: { tools: cached } }
         }
-        const toolsResult = await client.listTools().catch((e) => {
+        const toolsResult = await listToolsLenient(client).catch((e) => {
           log.error("failed to get tools", { clientName, error: e.message })
           const failedStatus = {
             status: "failed" as const,
