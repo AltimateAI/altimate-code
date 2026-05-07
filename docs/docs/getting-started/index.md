@@ -58,7 +58,7 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
     ---
 
-    Optimize a Snowflake query in the morning. Migrate a SQL Server pipeline to BigQuery in the afternoon. Same agent, same tools. No warehouse subscription required. First-class support for :material-snowflake: Snowflake, :material-google-cloud: BigQuery, :simple-databricks: Databricks, :material-elephant: PostgreSQL, :material-aws: Redshift, :material-database: ClickHouse, :material-duck: DuckDB, :material-database: MySQL, :material-microsoft: SQL Server, and :material-leaf: MongoDB.
+    Optimize a Snowflake query in the morning. Migrate a SQL Server pipeline to BigQuery in the afternoon. Same agent, same tools. No warehouse subscription required. First-class support for :material-snowflake: Snowflake, :material-google-cloud: BigQuery, :simple-databricks: Databricks, :material-elephant: PostgreSQL, :material-aws: Redshift, :material-database: Trino, :material-database: ClickHouse, :material-duck: DuckDB, :material-database: MySQL, :material-microsoft: SQL Server, and :material-leaf: MongoDB.
 
 -   :material-cloud-outline:{ .lg .middle } **Works with any LLM**
 

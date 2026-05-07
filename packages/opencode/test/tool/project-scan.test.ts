@@ -314,6 +314,9 @@ describe("detectEnvVars", () => {
       "REDSHIFT_HOST", "REDSHIFT_PORT", "REDSHIFT_DATABASE", "REDSHIFT_USER", "REDSHIFT_PASSWORD",
       "CLICKHOUSE_HOST", "CLICKHOUSE_URL", "CLICKHOUSE_PORT", "CLICKHOUSE_DB",
       "CLICKHOUSE_DATABASE", "CLICKHOUSE_USER", "CLICKHOUSE_USERNAME", "CLICKHOUSE_PASSWORD",
+      "TRINO_HOST", "TRINO_SERVER", "TRINO_URL", "TRINO_PORT", "TRINO_CATALOG",
+      "TRINO_DATABASE", "TRINO_SCHEMA", "TRINO_USER", "TRINO_USERNAME", "TRINO_PASSWORD",
+      "TRINO_TOKEN", "TRINO_ACCESS_TOKEN",
     ]
     for (const v of vars) {
       delete process.env[v]
@@ -558,6 +561,43 @@ describe("detectEnvVars", () => {
       expect(ch!.signal).toBe("DATABASE_URL")
       expect(ch!.type).toBe("clickhouse")
       expect(ch!.config.connection_string).toBe("***")
+    }
+  })
+
+  test("detects Trino via TRINO_HOST", async () => {
+    clearWarehouseEnvVars()
+    process.env.TRINO_HOST = "trino.example.com"
+    process.env.TRINO_PORT = "8443"
+    process.env.TRINO_CATALOG = "iceberg"
+    process.env.TRINO_SCHEMA = "analytics"
+    process.env.TRINO_USER = "analyst"
+    process.env.TRINO_PASSWORD = "secret"
+
+    const result = await detectEnvVars()
+    const trino = result.find((r) => r.type === "trino")
+    expect(trino).toBeDefined()
+    expect(trino!.name).toBe("env_trino")
+    expect(trino!.source).toBe("env-var")
+    expect(trino!.signal).toBe("TRINO_HOST")
+    expect(trino!.config.host).toBe("trino.example.com")
+    expect(trino!.config.port).toBe("8443")
+    expect(trino!.config.catalog).toBe("iceberg")
+    expect(trino!.config.schema).toBe("analytics")
+    expect(trino!.config.user).toBe("analyst")
+    expect(trino!.config.password).toBe("***")
+  })
+
+  test("detects Trino via DATABASE_URL with trino schemes", async () => {
+    for (const scheme of ["trino", "trino+http", "trino+https", "presto"]) {
+      clearWarehouseEnvVars()
+      process.env.DATABASE_URL = `${scheme}://trino.example.com:8080`
+
+      const result = await detectEnvVars()
+      const trino = result.find((r) => r.type === "trino")
+      expect(trino).toBeDefined()
+      expect(trino!.signal).toBe("DATABASE_URL")
+      expect(trino!.type).toBe("trino")
+      expect(trino!.config.connection_string).toBe("***")
     }
   })
 

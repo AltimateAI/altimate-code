@@ -192,6 +192,9 @@ function buildHistoryQuery(
   if (whType === "duckdb") {
     return null // DuckDB has no native query history
   }
+  if (whType === "trino") {
+    return null // Trino exposes live runtime query state, not durable query history
+  }
   return null
 }
 

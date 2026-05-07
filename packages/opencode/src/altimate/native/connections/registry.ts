@@ -130,6 +130,7 @@ const DRIVER_MAP: Record<string, string> = {
   mongodb: "@altimateai/drivers/mongodb",
   mongo: "@altimateai/drivers/mongodb",
   clickhouse: "@altimateai/drivers/clickhouse",
+  trino: "@altimateai/drivers/trino",
 }
 
 async function createConnector(name: string, config: ConnectionConfig): Promise<Connector> {
@@ -170,6 +171,7 @@ async function createConnector(name: string, config: ConnectionConfig): Promise<
     "oracle",
     "snowflake",
     "clickhouse",
+    "trino",
   ])
   if (
     PASSWORD_DRIVERS.has(resolvedConfig.type.toLowerCase()) &&
@@ -236,6 +238,9 @@ async function createConnector(name: string, config: ConnectionConfig): Promise<
         break
       case "@altimateai/drivers/clickhouse":
         mod = await import("@altimateai/drivers/clickhouse")
+        break
+      case "@altimateai/drivers/trino":
+        mod = await import("@altimateai/drivers/trino")
         break
       default:
         throw new Error(`No static import available for driver: ${driverPath}`)

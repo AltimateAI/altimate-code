@@ -624,7 +624,7 @@ spark_project:
     }
   })
 
-  test("trino adapter maps to postgres (wire-compatible)", async () => {
+  test("trino adapter maps to native trino connector", async () => {
     const fs = await import("fs")
     const os = await import("os")
     const path = await import("path")
@@ -643,14 +643,17 @@ trino_project:
       port: 8080
       user: analyst
       dbname: hive
+      schema: analytics
 `,
     )
 
     try {
       const connections = await parseDbtProfiles(profilesPath)
       expect(connections).toHaveLength(1)
-      expect(connections[0].type).toBe("postgres")
-      expect(connections[0].config.type).toBe("postgres")
+      expect(connections[0].type).toBe("trino")
+      expect(connections[0].config.type).toBe("trino")
+      expect(connections[0].config.database).toBe("hive")
+      expect(connections[0].config.schema).toBe("analytics")
     } finally {
       fs.rmSync(tmpDir, { recursive: true })
     }

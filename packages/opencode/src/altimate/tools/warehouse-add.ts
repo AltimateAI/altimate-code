@@ -24,6 +24,7 @@ export const WarehouseAddTool = Tool.define("warehouse_add", {
 - duckdb: path (file path or ":memory:")
 - sqlite: path (file path)
 - clickhouse: host, port, database, user, password, protocol (http/https), connection_string, request_timeout, tls_ca_cert, tls_cert, tls_key, clickhouse_settings
+- trino: host, port, catalog, schema, user, password, protocol (http/https), connection_string, access_token, extra_headers
 Snowflake auth examples: (1) Password: {"type":"snowflake","account":"xy12345","user":"admin","password":"secret","warehouse":"WH","database":"db"}. (2) Key-pair: {"type":"snowflake","account":"xy12345","user":"admin","private_key_path":"/path/rsa_key.p8","warehouse":"WH","database":"db"}. (3) OAuth: {"type":"snowflake","account":"xy12345","authenticator":"oauth","token":"<token>","warehouse":"WH","database":"db"}. (4) SSO: {"type":"snowflake","account":"xy12345","user":"admin","authenticator":"externalbrowser","warehouse":"WH","database":"db"}.
 IMPORTANT: For private key file paths, always use "private_key_path" (not "private_key").`,
     ),
@@ -33,7 +34,7 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
       return {
         title: `Add '${args.name}': FAILED`,
         metadata: { success: false, name: args.name, type: "" },
-        output: `Missing required field "type" in config. Specify the database type (postgres, snowflake, bigquery, databricks, redshift, clickhouse, duckdb, mysql, sqlserver, oracle, sqlite, mongodb).`,
+        output: `Missing required field "type" in config. Specify the database type (postgres, snowflake, bigquery, databricks, redshift, clickhouse, trino, duckdb, mysql, sqlserver, oracle, sqlite, mongodb).`,
       }
     }
 

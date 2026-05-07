@@ -98,6 +98,15 @@ const CLICKHOUSE_ALIASES: AliasMap = {
   tls_key: ["tlsKey", "ssl_key"],
 }
 
+const TRINO_ALIASES: AliasMap = {
+  user: ["username"],
+  catalog: ["database", "dbname", "db"],
+  connection_string: ["connectionString", "server", "url", "uri"],
+  access_token: ["token", "accessToken", "jwt", "bearer_token", "bearerToken"],
+  extra_headers: ["extraHeaders", "headers"],
+  extra_credential: ["extraCredential"],
+}
+
 /** Map of warehouse type to its alias map. */
 const DRIVER_ALIASES: Record<string, AliasMap> = {
   snowflake: SNOWFLAKE_ALIASES,
@@ -115,6 +124,7 @@ const DRIVER_ALIASES: Record<string, AliasMap> = {
   mongodb: MONGODB_ALIASES,
   mongo: MONGODB_ALIASES,
   clickhouse: CLICKHOUSE_ALIASES,
+  trino: TRINO_ALIASES,
   // duckdb and sqlite have simple configs — no aliases needed
 }
 

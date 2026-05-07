@@ -233,6 +233,20 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
         connection_string: "CLICKHOUSE_URL",
       },
     },
+    {
+      type: "trino",
+      signals: ["TRINO_HOST", "TRINO_SERVER", "TRINO_URL"],
+      configMap: {
+        host: "TRINO_HOST",
+        port: "TRINO_PORT",
+        user: ["TRINO_USER", "TRINO_USERNAME"],
+        password: "TRINO_PASSWORD",
+        catalog: ["TRINO_CATALOG", "TRINO_DATABASE"],
+        schema: "TRINO_SCHEMA",
+        connection_string: ["TRINO_URL", "TRINO_SERVER"],
+        access_token: ["TRINO_TOKEN", "TRINO_ACCESS_TOKEN"],
+      },
+    },
   ]
 
   for (const wh of warehouses) {
@@ -296,6 +310,10 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
       clickhouse: "clickhouse",
       "clickhouse+http": "clickhouse",
       "clickhouse+https": "clickhouse",
+      trino: "trino",
+      "trino+http": "trino",
+      "trino+https": "trino",
+      presto: "trino",
     }
     const dbType = schemeTypeMap[scheme] ?? "postgres"
     // Only add if we don't already have this type detected from other env vars

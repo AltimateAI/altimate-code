@@ -210,6 +210,7 @@ export interface ExplainPlan {
  *   - DuckDB: `EXPLAIN` or `EXPLAIN ANALYZE`.
  *   - Databricks / Spark: `EXPLAIN` or `EXPLAIN FORMATTED`.
  *   - ClickHouse: `EXPLAIN` (no ANALYZE form accepted via statement prefix).
+ *   - Trino: `EXPLAIN` or `EXPLAIN ANALYZE`.
  *   - BigQuery: uses a dry-run API instead of any EXPLAIN statement. Not
  *     supported via this code path — return empty prefix.
  *   - Oracle: `EXPLAIN PLAN FOR` stores the plan in PLAN_TABLE rather than
@@ -249,6 +250,10 @@ export function buildExplainPlan(warehouseType: string | undefined, analyze: boo
       return { prefix: analyze ? "EXPLAIN FORMATTED" : "EXPLAIN", actuallyAnalyzed: false }
     case "clickhouse":
       return { prefix: "EXPLAIN", actuallyAnalyzed: false }
+    case "trino":
+      return analyze
+        ? { prefix: "EXPLAIN ANALYZE", actuallyAnalyzed: true }
+        : { prefix: "EXPLAIN", actuallyAnalyzed: false }
     case "bigquery":
       // BigQuery has no EXPLAIN statement — the correct answer is a dry-run
       // job via the BigQuery API, which this tool does not support today.

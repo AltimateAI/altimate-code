@@ -30,6 +30,7 @@ const driverPeerDependencies: Record<string, string> = {
   oracledb: ">=6",
   duckdb: ">=1",
   "@clickhouse/client": ">=1",
+  "trino-client": ">=0.2",
 }
 
 const driverPeerDependenciesMeta: Record<string, { optional: true }> = Object.fromEntries(

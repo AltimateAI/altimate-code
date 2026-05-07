@@ -18,6 +18,7 @@ const IMAGE_MAP: Array<{ pattern: RegExp; type: string }> = [
   { pattern: /oracle/i, type: "oracle" },
   { pattern: /gvenzl\/oracle/i, type: "oracle" },
   { pattern: /clickhouse/i, type: "clickhouse" },
+  { pattern: /trinodb\/trino|prestosql|presto/i, type: "trino" },
 ]
 
 /** Map environment variable names to connection config fields by db type. */
@@ -48,6 +49,11 @@ const ENV_MAP: Record<string, Record<string, string>> = {
     CLICKHOUSE_PASSWORD: "password",
     CLICKHOUSE_DB: "database",
   },
+  trino: {
+    TRINO_USER: "user",
+    TRINO_PASSWORD: "password",
+    TRINO_CATALOG: "database",
+  },
 }
 
 /** Default ports by database type. */
@@ -57,6 +63,7 @@ const DEFAULT_PORTS: Record<string, number> = {
   sqlserver: 1433,
   oracle: 1521,
   clickhouse: 8123,
+  trino: 8080,
 }
 
 /** Default users by database type. */
@@ -66,6 +73,7 @@ const DEFAULT_USERS: Record<string, string> = {
   sqlserver: "sa",
   oracle: "system",
   clickhouse: "default",
+  trino: "trino",
 }
 
 function detectDbType(image: string): string | null {
