@@ -47,8 +47,7 @@ function formatColumnLineage(data: Record<string, any>): string {
   if (data.column_dict && Object.keys(data.column_dict).length > 0) {
     lines.push("Column Mappings:")
     for (const [target, sources] of Object.entries(data.column_dict)) {
-      const srcList = Array.isArray(sources) ? (sources as string[]).join(", ") : JSON.stringify(sources)
-      lines.push(`  ${target} ← ${srcList}`)
+      lines.push(`  ${target} ← ${formatLineageValue(sources)}`)
     }
     lines.push("")
   }
@@ -56,10 +55,51 @@ function formatColumnLineage(data: Record<string, any>): string {
   if (data.column_lineage?.length) {
     lines.push("Lineage Edges:")
     for (const edge of data.column_lineage) {
-      const transform = edge.lens_type ?? edge.transform_type ?? edge.transform ?? ""
-      lines.push(`  ${edge.source ?? "?"} → ${edge.target ?? "?"}${transform ? ` (${transform})` : ""}`)
+      const source = formatLineageEndpoint(edge, "source")
+      const target = formatLineageEndpoint(edge, "target")
+      const transform = formatLineageValue(edge.lens_type ?? edge.transform_type ?? edge.transform ?? "")
+      lines.push(`  ${source} → ${target}${transform ? ` (${transform})` : ""}`)
     }
   }
 
   return lines.length ? lines.join("\n") : "No column lineage edges found."
+}
+
+function formatLineageEndpoint(edge: Record<string, any>, side: "source" | "target"): string {
+  if (edge[side] !== null && edge[side] !== undefined) return formatLineageValue(edge[side])
+
+  const table = edge[`${side}_table`] ?? edge[`${side}Table`]
+  const column = edge[`${side}_column`] ?? edge[`${side}Column`]
+  if (table !== null && table !== undefined && column !== null && column !== undefined) {
+    return `${formatLineageValue(table)}.${formatLineageValue(column)}`
+  }
+  return "?"
+}
+
+function formatLineageValue(value: unknown): string {
+  if (value === null || value === undefined) return ""
+  if (typeof value === "string") return value
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value)
+
+  if (Array.isArray(value)) {
+    return value.map(formatLineageValue).filter(Boolean).join(", ")
+  }
+
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>
+    const table = obj.source_table ?? obj.sourceTable ?? obj.target_table ?? obj.targetTable ?? obj.table
+    const column = obj.source_column ?? obj.sourceColumn ?? obj.target_column ?? obj.targetColumn ?? obj.column ?? obj.name
+    if (table !== null && table !== undefined && column !== null && column !== undefined) {
+      return `${formatLineageValue(table)}.${formatLineageValue(column)}`
+    }
+    if (obj.source !== null && obj.source !== undefined) return formatLineageValue(obj.source)
+    if (obj.target !== null && obj.target !== undefined) return formatLineageValue(obj.target)
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return "unserializable object"
+    }
+  }
+
+  return String(value)
 }

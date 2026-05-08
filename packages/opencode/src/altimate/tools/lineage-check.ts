@@ -20,22 +20,24 @@ export const LineageCheckTool = Tool.define("lineage_check", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Dispatcher.call("lineage.check", {
+      const rawResult = (await Dispatcher.call("lineage.check", {
         sql: args.sql,
         dialect: args.dialect,
         schema_context: args.schema_context,
-      })
+      })) as unknown
 
-      const data = (result.data ?? {}) as Record<string, any>
-      if (result.error) {
-        return {
-          title: "Lineage: ERROR",
-          metadata: { success: false, error: result.error },
-          output: `Error: ${result.error}`,
-        }
+      if (!isRecord(rawResult)) {
+        return lineageError("Invalid lineage response from dispatcher.")
       }
 
-      const error = data.error
+      const result = rawResult as Partial<LineageCheckResult>
+
+      const data = isRecord(result.data) ? result.data : {}
+      if (result.error) {
+        return lineageError(result.error)
+      }
+
+      const error = normalizeError(data.error)
       return {
         title: `Lineage: ${result.success ? "OK" : "PARTIAL"}`,
         metadata: { success: result.success, ...(error && { error }) },
@@ -43,14 +45,29 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
-        title: "Lineage: ERROR",
-        metadata: { success: false, error: msg },
-        output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
-      }
+      return lineageError(msg)
     }
   },
 })
+
+function lineageError(msg: string) {
+  return {
+    title: "Lineage: ERROR",
+    metadata: { success: false, error: msg },
+    output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function normalizeError(value: unknown): string | undefined {
+  if (value instanceof Error) return value.message
+  if (typeof value === "string") return value
+  if (value === null || value === undefined) return undefined
+  return String(value)
+}
 
 function formatLineage(data: Record<string, any>): string {
   const lines: string[] = []

@@ -26,12 +26,18 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
   async execute(args, ctx) {
     const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
-      const result = await Dispatcher.call("sql.analyze", {
+      const rawResult = (await Dispatcher.call("sql.analyze", {
         sql: args.sql,
         dialect: args.dialect,
         schema_path: args.schema_path,
         schema_context: args.schema_context,
-      })
+      })) as unknown
+
+      if (!isRecord(rawResult)) {
+        return analysisError(args, hasSchema, "Invalid analysis response from dispatcher.")
+      }
+
+      const result = rawResult as Partial<SqlAnalyzeResult>
 
       // The handler returns success=true when analysis completes (issues are
       // reported via issues/issue_count). Only treat it as a failure when
@@ -70,23 +76,31 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
-        title: "Analyze: ERROR",
-        metadata: {
-          success: false,
-          issueCount: 0,
-          confidence: "unknown",
-          dialect: args.dialect,
-          has_schema: hasSchema,
-          error: msg,
-        },
-        output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
-      }
+      return analysisError(args, hasSchema, msg)
     }
   },
 })
 
-function formatAnalysis(result: SqlAnalyzeResult): string {
+function analysisError(args: { dialect?: string }, hasSchema: boolean, msg: string) {
+  return {
+    title: "Analyze: ERROR",
+    metadata: {
+      success: false,
+      issueCount: 0,
+      confidence: "unknown",
+      dialect: args.dialect,
+      has_schema: hasSchema,
+      error: msg,
+    },
+    output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function formatAnalysis(result: Partial<SqlAnalyzeResult>): string {
   if (result.error) {
     return `Analysis failed: ${result.error}`
   }
