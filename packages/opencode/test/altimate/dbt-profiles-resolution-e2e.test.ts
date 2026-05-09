@@ -459,7 +459,7 @@ describe("adapter type mapping via resolution chain", () => {
     { dbtType: "mysql", expectedType: "mysql" },
     { dbtType: "sqlserver", expectedType: "sqlserver" },
     { dbtType: "spark", expectedType: "databricks" },
-    { dbtType: "trino", expectedType: "postgres" },
+    { dbtType: "trino", expectedType: "trino" },
     { dbtType: "clickhouse", expectedType: "clickhouse" },
   ]
 
