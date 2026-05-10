@@ -324,6 +324,17 @@ export namespace Telemetry {
         sources: string[]
       }
     | {
+        // altimate_change — issue #701: track when user is shown the unresolved
+        // MCP env-var warning toast (so we can measure whether the toast actually
+        // helps users self-recover vs. landing in the failed-server flow).
+        type: "mcp_unresolved_env_vars"
+        timestamp: number
+        session_id: string
+        server_count: number
+        var_count: number
+        servers: string[]
+      }
+    | {
         type: "memory_operation"
         timestamp: number
         session_id: string

@@ -186,9 +186,12 @@ export namespace MCP {
 
       // altimate_change start — auto-discover MCP servers from external AI tool configs
       let discoveryResult: { serverNames: string[]; sources: string[] } | null = null
+      // altimate_change — issue #701: surface unresolved env-var warnings to user
+      let unresolvedEnvVars: Awaited<ReturnType<typeof import("./discover").consumeUnresolvedEnvVars>> = []
       try {
-        const { consumeDiscoveryResult } = await import("./discover")
+        const { consumeDiscoveryResult, consumeUnresolvedEnvVars } = await import("./discover")
         discoveryResult = consumeDiscoveryResult()
+        unresolvedEnvVars = consumeUnresolvedEnvVars()
       } catch {
         // Discovery module not loaded — skip
       }
@@ -238,6 +241,48 @@ export namespace MCP {
           server_count: discoveryResult.serverNames.length,
           server_names: discoveryResult.serverNames,
           sources: discoveryResult.sources,
+        })
+      }
+      // altimate_change end
+
+      // altimate_change start — issue #701: surface unresolved env-var warnings to user
+      // An unresolved `${VAR}` in an MCP server's env/headers block silently becomes "",
+      // which then fails downstream with a confusing error. Show a warning toast naming
+      // the server and the missing vars so the user can set/export them and reload.
+      if (unresolvedEnvVars.length > 0) {
+        // Group by server so the message stays readable when one config has multiple
+        // unresolved vars across env + headers (e.g. a Snowflake remote server).
+        const grouped = new Map<string, { source: string; vars: Set<string> }>()
+        for (const record of unresolvedEnvVars) {
+          const key = record.server
+          const existing = grouped.get(key)
+          if (existing) {
+            for (const v of record.vars) existing.vars.add(v)
+          } else {
+            grouped.set(key, { source: record.source, vars: new Set(record.vars) })
+          }
+        }
+        const lines = Array.from(grouped.entries()).map(
+          ([server, { source, vars }]) =>
+            `${server} (${source}): ${Array.from(vars).join(", ")}`,
+        )
+        Bus.publish(TuiEvent.ToastShow, {
+          title: "MCP env vars unresolved",
+          message:
+            `Substituted "" for these — server may fail to start. Set the env vars and reload, ` +
+            `or use \${VAR:-default} for an explicit fallback.\n` +
+            lines.join("\n"),
+          variant: "warning",
+          duration: 12000,
+        }).catch(() => {})
+        const totalVars = Array.from(grouped.values()).reduce((sum, g) => sum + g.vars.size, 0)
+        Telemetry.track({
+          type: "mcp_unresolved_env_vars",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          server_count: grouped.size,
+          var_count: totalVars,
+          servers: Array.from(grouped.keys()),
         })
       }
       // altimate_change end

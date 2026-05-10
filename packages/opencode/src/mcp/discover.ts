@@ -16,6 +16,20 @@ const log = Log.create({ service: "mcp.discover" })
 // that the launch site does NOT need a second resolution pass.
 // See PR #666 review — double-interpolation regression fixed by doing this once,
 // here, rather than twice.
+
+/**
+ * Per-server unresolved env-var accumulator. Populated during discovery,
+ * drained once at MCP startup so the user gets a visible warning toast
+ * instead of a silently-empty `${VAR}` becoming `""`. See issue #701.
+ */
+export interface UnresolvedEnvVarRecord {
+  server: string
+  source: string
+  field: "env" | "headers"
+  vars: string[]
+}
+let _unresolvedEnvVars: UnresolvedEnvVarRecord[] = []
+
 function resolveServerEnvVars(
   obj: Record<string, unknown>,
   context: { server: string; source: string; field: "env" | "headers" },
@@ -27,11 +41,19 @@ function resolveServerEnvVars(
     out[key] = ConfigPaths.resolveEnvVarsInString(raw, stats)
   }
   if (stats.unresolvedNames.length > 0) {
+    // Dedupe — the same VAR can appear in multiple values within one block.
+    const dedupedVars = Array.from(new Set(stats.unresolvedNames))
     log.warn("unresolved env var references in MCP config — substituting empty string", {
       server: context.server,
       source: context.source,
       field: context.field,
-      unresolved: stats.unresolvedNames.join(", "),
+      unresolved: dedupedVars.join(", "),
+    })
+    _unresolvedEnvVars.push({
+      server: context.server,
+      source: context.source,
+      field: context.field,
+      vars: dedupedVars,
     })
   }
   return out
@@ -229,6 +251,9 @@ export async function discoverExternalMcp(worktree: string): Promise<{
   sources: string[]
 }> {
   log.info("Discovering MCP servers from external AI tool configs...")
+  // altimate_change — reset per-discovery accumulator so a re-discovery (e.g. config
+  // reload) does not show stale warnings from a prior run. See issue #701.
+  _unresolvedEnvVars = []
   const result: Record<string, Config.Mcp> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()
@@ -283,3 +308,17 @@ export function consumeDiscoveryResult() {
   _lastDiscovery = null
   return result
 }
+
+// altimate_change start — issue #701: surface unresolved env-var warnings to user
+/**
+ * Returns and clears the unresolved env-var records accumulated during the most
+ * recent `discoverExternalMcp()` call. Drained once by MCP startup so the user
+ * sees a single warning toast per server instead of a silent empty-string
+ * substitution that fails downstream with a confusing error.
+ */
+export function consumeUnresolvedEnvVars(): UnresolvedEnvVarRecord[] {
+  const result = _unresolvedEnvVars
+  _unresolvedEnvVars = []
+  return result
+}
+// altimate_change end
