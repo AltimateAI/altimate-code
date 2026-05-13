@@ -104,6 +104,28 @@ describe("tool response normalization", () => {
     expect(result.output).toContain("parser exploded")
   })
 
+  test("sql_analyze does not stringify object errors without messages", async () => {
+    Dispatcher.register("sql.analyze" as any, async () => ({
+      success: false,
+      data: {
+        success: false,
+        error: { token: "secret-token", connection: { password: "secret-password" } },
+        issues: [],
+        issue_count: 0,
+        confidence: "unknown",
+        confidence_factors: [],
+      },
+    }))
+
+    const tool = await SqlAnalyzeTool.init()
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
+
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.error).toBe("Error details unavailable.")
+    expect(result.output).not.toContain("secret-token")
+    expect(result.output).not.toContain("secret-password")
+  })
+
   test("schema_inspect unwraps dispatcher data envelopes", async () => {
     Dispatcher.register("schema.inspect" as any, async () => ({
       success: true,

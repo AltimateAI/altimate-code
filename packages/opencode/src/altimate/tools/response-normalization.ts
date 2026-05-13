@@ -8,11 +8,7 @@ export function normalizeError(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined
   if (isRecord(value)) {
     if (typeof value.message === "string") return value.message
-    try {
-      return JSON.stringify(value)
-    } catch {
-      return String(value)
-    }
+    return "Error details unavailable."
   }
   return String(value)
 }
