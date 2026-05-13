@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { isRecord, normalizeError } from "./response-normalization"
 
 export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_lineage", {
   description:
@@ -27,10 +28,12 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
       const data = (isRecord(result.data) ? result.data : result) as Record<string, any>
       const edgeCount = data.column_lineage?.length ?? 0
       const error = normalizeError(result.error) ?? normalizeError(data.error)
+      const failureMessage = error?.trim() || "Column lineage failed."
+      const isFailure = error !== undefined || result.success === false
       return {
-        title: error || result.success === false ? "Column Lineage: ERROR" : `Column Lineage: ${edgeCount} edge(s)`,
-        metadata: { success: !(error || result.success === false), edge_count: edgeCount, ...(error && { error }) },
-        output: error ? `Failed: ${error}` : formatColumnLineage(data),
+        title: isFailure ? "Column Lineage: ERROR" : `Column Lineage: ${edgeCount} edge(s)`,
+        metadata: { success: !isFailure, edge_count: edgeCount, ...(isFailure && { error: failureMessage }) },
+        output: isFailure ? `Failed: ${failureMessage}` : formatColumnLineage(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -45,17 +48,6 @@ function columnLineageError(msg: string) {
     metadata: { success: false, edge_count: 0, error: msg },
     output: `Failed: ${msg}`,
   }
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function normalizeError(value: unknown): string | undefined {
-  if (value instanceof Error) return value.message
-  if (typeof value === "string") return value
-  if (value === null || value === undefined) return undefined
-  return String(value)
 }
 
 function formatColumnLineage(data: Record<string, any>): string {

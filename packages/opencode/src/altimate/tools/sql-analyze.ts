@@ -6,6 +6,7 @@ import type { SqlAnalyzeResult } from "../native/types"
 // altimate_change start — progressive disclosure suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
+import { isRecord, normalizeError } from "./response-normalization"
 
 export const SqlAnalyzeTool = Tool.define("sql_analyze", {
   description:
@@ -97,17 +98,6 @@ function analysisError(args: { dialect?: string }, hasSchema: boolean, msg: stri
     },
     output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
   }
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function normalizeError(value: unknown): string | undefined {
-  if (value instanceof Error) return value.message
-  if (typeof value === "string") return value
-  if (value === null || value === undefined) return undefined
-  return String(value)
 }
 
 function normalizeFailureMessage(value: unknown): string | undefined {

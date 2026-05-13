@@ -5,6 +5,7 @@ import type { SchemaInspectResult } from "../native/types"
 // altimate_change start — progressive disclosure suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
+import { isRecord, normalizeError } from "./response-normalization"
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
   description: "Inspect database schema — list columns, types, and constraints for a table.",
@@ -26,8 +27,8 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       }
 
       const responseError = normalizeError(result.error)
-      if (result.success === false || responseError) {
-        return schemaError(responseError || "Schema inspection failed.")
+      if (result.success === false || responseError !== undefined) {
+        return schemaError(responseError?.trim() || "Schema inspection failed.")
       }
 
       const schemaResult = (isRecord(result.data) ? result.data : result) as Partial<SchemaInspectResult>
@@ -62,17 +63,6 @@ function schemaError(msg: string) {
     metadata: { success: false, columnCount: 0, rowCount: undefined, error: msg },
     output: `Failed to inspect schema: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
   }
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function normalizeError(value: unknown): string | undefined {
-  if (value instanceof Error) return value.message
-  if (typeof value === "string") return value
-  if (value === null || value === undefined) return undefined
-  return String(value)
 }
 
 function formatSchema(result: Partial<SchemaInspectResult>): string {

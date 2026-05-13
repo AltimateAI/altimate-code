@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { LineageCheckResult } from "../native/types"
+import { isRecord, normalizeError } from "./response-normalization"
 
 export const LineageCheckTool = Tool.define("lineage_check", {
   description:
@@ -33,8 +34,9 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       const result = rawResult as Partial<LineageCheckResult>
 
       const data = isRecord(result.data) ? result.data : {}
-      if (result.error) {
-        return lineageError(result.error)
+      const responseError = normalizeError(result.error)
+      if (responseError !== undefined) {
+        return lineageError(responseError.trim() || "Lineage check failed.")
       }
 
       const error = normalizeError(data.error)
@@ -56,17 +58,6 @@ function lineageError(msg: string) {
     metadata: { success: false, error: msg },
     output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
   }
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function normalizeError(value: unknown): string | undefined {
-  if (value instanceof Error) return value.message
-  if (typeof value === "string") return value
-  if (value === null || value === undefined) return undefined
-  return String(value)
 }
 
 function formatLineage(data: Record<string, any>): string {
