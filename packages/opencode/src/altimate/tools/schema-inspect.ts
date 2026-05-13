@@ -30,7 +30,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
         return schemaError(responseError || "Schema inspection failed.")
       }
 
-      const schemaResult = result as Partial<SchemaInspectResult>
+      const schemaResult = (isRecord(result.data) ? result.data : result) as Partial<SchemaInspectResult>
 
       // altimate_change start — progressive disclosure suggestions
       let output = formatSchema(schemaResult)
@@ -46,7 +46,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // altimate_change end
       return {
         title: `Schema: ${schemaResult.table ?? args.table}`,
-        metadata: { columnCount: (schemaResult.columns ?? []).length, rowCount: schemaResult.row_count },
+        metadata: { success: true, columnCount: (schemaResult.columns ?? []).length, rowCount: schemaResult.row_count },
         output,
       }
     } catch (e) {
@@ -59,7 +59,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
 function schemaError(msg: string) {
   return {
     title: "Schema: ERROR",
-    metadata: { columnCount: 0, rowCount: undefined, error: msg },
+    metadata: { success: false, columnCount: 0, rowCount: undefined, error: msg },
     output: `Failed to inspect schema: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
   }
 }

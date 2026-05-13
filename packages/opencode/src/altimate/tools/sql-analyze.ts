@@ -37,12 +37,14 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
         return analysisError(args, hasSchema, "Invalid analysis response from dispatcher.")
       }
 
-      const result = rawResult as Partial<SqlAnalyzeResult>
+      const envelopeError = normalizeError(rawResult.error)
+      const result = (isRecord(rawResult.data) ? rawResult.data : rawResult) as Partial<SqlAnalyzeResult>
 
       // The handler returns success=true when analysis completes (issues are
       // reported via issues/issue_count). Only treat it as a failure when
       // there's an actual error (e.g. parse failure).
-      const isRealFailure = !!result.error
+      const error = normalizeError(result.error) ?? envelopeError
+      const isRealFailure = !!error || rawResult.success === false
       // altimate_change start — sql quality findings for telemetry
       const findings: Telemetry.Finding[] = (result.issues ?? []).map((issue) => ({
         category: issue.rule ?? issue.type ?? "analysis_issue",
@@ -50,8 +52,8 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       // altimate_change end
 
       // altimate_change start — progressive disclosure suggestions
-      let output = formatAnalysis(result)
-      const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_analyze")
+      let output = error ? `Analysis failed: ${error}` : formatAnalysis(result)
+      const suggestion = !isRealFailure && PostConnectSuggestions.getProgressiveSuggestion("sql_analyze")
       if (suggestion) {
         output += "\n\n" + suggestion
         PostConnectSuggestions.trackSuggestions({
@@ -62,14 +64,14 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       }
       // altimate_change end
       return {
-        title: `Analyze: ${result.error ? "ERROR" : `${result.issue_count ?? 0} issue${(result.issue_count ?? 0) !== 1 ? "s" : ""}`} [${result.confidence ?? "unknown"}]`,
+        title: `Analyze: ${isRealFailure ? "ERROR" : `${result.issue_count ?? 0} issue${(result.issue_count ?? 0) !== 1 ? "s" : ""}`} [${result.confidence ?? "unknown"}]`,
         metadata: {
           success: !isRealFailure,
           issueCount: result.issue_count,
           confidence: result.confidence,
           dialect: args.dialect,
           has_schema: hasSchema,
-          ...(result.error && { error: result.error }),
+          ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
         output,
@@ -98,6 +100,13 @@ function analysisError(args: { dialect?: string }, hasSchema: boolean, msg: stri
 
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function normalizeError(value: unknown): string | undefined {
+  if (value instanceof Error) return value.message
+  if (typeof value === "string") return value
+  if (value === null || value === undefined) return undefined
+  return String(value)
 }
 
 function formatAnalysis(result: Partial<SqlAnalyzeResult>): string {

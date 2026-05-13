@@ -13,30 +13,50 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
   }),
   async execute(args, ctx) {
     try {
-      const result = await Dispatcher.call("altimate_core.column_lineage", {
+      const rawResult = (await Dispatcher.call("altimate_core.column_lineage", {
         sql: args.sql,
         dialect: args.dialect ?? "",
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
-      })
-      const data = (result.data ?? {}) as Record<string, any>
+      })) as unknown
+      if (!isRecord(rawResult)) {
+        return columnLineageError("Invalid column lineage response from dispatcher.")
+      }
+
+      const result = rawResult as Record<string, any>
+      const data = (isRecord(result.data) ? result.data : result) as Record<string, any>
       const edgeCount = data.column_lineage?.length ?? 0
-      const error = result.error ?? data.error
+      const error = normalizeError(result.error) ?? normalizeError(data.error)
       return {
-        title: `Column Lineage: ${edgeCount} edge(s)`,
-        metadata: { success: result.success, edge_count: edgeCount, ...(error && { error }) },
-        output: formatColumnLineage(data),
+        title: error || result.success === false ? "Column Lineage: ERROR" : `Column Lineage: ${edgeCount} edge(s)`,
+        metadata: { success: !(error || result.success === false), edge_count: edgeCount, ...(error && { error }) },
+        output: error ? `Failed: ${error}` : formatColumnLineage(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
-        title: "Column Lineage: ERROR",
-        metadata: { success: false, edge_count: 0, error: msg },
-        output: `Failed: ${msg}`,
-      }
+      return columnLineageError(msg)
     }
   },
 })
+
+function columnLineageError(msg: string) {
+  return {
+    title: "Column Lineage: ERROR",
+    metadata: { success: false, edge_count: 0, error: msg },
+    output: `Failed: ${msg}`,
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function normalizeError(value: unknown): string | undefined {
+  if (value instanceof Error) return value.message
+  if (typeof value === "string") return value
+  if (value === null || value === undefined) return undefined
+  return String(value)
+}
 
 function formatColumnLineage(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
