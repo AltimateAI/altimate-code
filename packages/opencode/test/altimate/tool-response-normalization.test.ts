@@ -41,6 +41,27 @@ describe("tool response normalization", () => {
     expect(result.output).toContain("Trailing whitespace")
   })
 
+  test("sql_analyze renders success=false without an error string as failure", async () => {
+    Dispatcher.register("sql.analyze" as any, async () => ({
+      success: false,
+      data: {
+        success: false,
+        issues: [],
+        issue_count: 0,
+        confidence: "unknown",
+        confidence_factors: [],
+      },
+    }))
+
+    const tool = await SqlAnalyzeTool.init()
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
+
+    expect(result.title).toContain("ERROR")
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.error).toBe("Analysis failed.")
+    expect(result.output).toContain("Analysis failed.")
+  })
+
   test("schema_inspect unwraps dispatcher data envelopes", async () => {
     Dispatcher.register("schema.inspect" as any, async () => ({
       success: true,

@@ -43,8 +43,9 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       // The handler returns success=true when analysis completes (issues are
       // reported via issues/issue_count). Only treat it as a failure when
       // there's an actual error (e.g. parse failure).
-      const error = normalizeError(result.error) ?? envelopeError
-      const isRealFailure = !!error || rawResult.success === false
+      const error = normalizeFailureMessage(result.error) ?? envelopeError
+      const isRealFailure = error !== undefined || rawResult.success === false || result.success === false
+      const failureMessage = error ?? "Analysis failed."
       // altimate_change start — sql quality findings for telemetry
       const findings: Telemetry.Finding[] = (result.issues ?? []).map((issue) => ({
         category: issue.rule ?? issue.type ?? "analysis_issue",
@@ -52,7 +53,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       // altimate_change end
 
       // altimate_change start — progressive disclosure suggestions
-      let output = error ? `Analysis failed: ${error}` : formatAnalysis(result)
+      let output = isRealFailure ? formatFailure(failureMessage) : formatAnalysis(result)
       const suggestion = !isRealFailure && PostConnectSuggestions.getProgressiveSuggestion("sql_analyze")
       if (suggestion) {
         output += "\n\n" + suggestion
@@ -71,7 +72,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
           confidence: result.confidence,
           dialect: args.dialect,
           has_schema: hasSchema,
-          ...(error && { error }),
+          ...(isRealFailure && { error: failureMessage }),
           ...(findings.length > 0 && { findings }),
         },
         output,
@@ -107,6 +108,16 @@ function normalizeError(value: unknown): string | undefined {
   if (typeof value === "string") return value
   if (value === null || value === undefined) return undefined
   return String(value)
+}
+
+function normalizeFailureMessage(value: unknown): string | undefined {
+  const message = normalizeError(value)
+  if (message === undefined) return undefined
+  return message.trim() || "Analysis failed."
+}
+
+function formatFailure(message: string): string {
+  return message === "Analysis failed." ? message : `Analysis failed: ${message}`
 }
 
 function formatAnalysis(result: Partial<SqlAnalyzeResult>): string {
