@@ -103,7 +103,7 @@ function analysisError(args: { dialect?: string }, hasSchema: boolean, msg: stri
 function normalizeFailureMessage(value: unknown): string | undefined {
   const message = normalizeError(value)
   if (message === undefined) return undefined
-  return message.trim() || "Analysis failed."
+  return message.trim() || undefined
 }
 
 function formatFailure(message: string): string {
@@ -111,8 +111,9 @@ function formatFailure(message: string): string {
 }
 
 function formatAnalysis(result: Partial<SqlAnalyzeResult>): string {
-  if (result.error) {
-    return `Analysis failed: ${result.error}`
+  const error = normalizeFailureMessage(result.error)
+  if (error) {
+    return formatFailure(error)
   }
 
   const issues = result.issues ?? []

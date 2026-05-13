@@ -62,6 +62,48 @@ describe("tool response normalization", () => {
     expect(result.output).toContain("Analysis failed.")
   })
 
+  test("sql_analyze ignores blank error strings on successful analysis", async () => {
+    Dispatcher.register("sql.analyze" as any, async () => ({
+      success: true,
+      data: {
+        success: true,
+        error: "   ",
+        issues: [],
+        issue_count: 0,
+        confidence: "high",
+        confidence_factors: [],
+      },
+    }))
+
+    const tool = await SqlAnalyzeTool.init()
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
+
+    expect(result.metadata.success).toBe(true)
+    expect(result.metadata.error).toBeUndefined()
+    expect(result.output).toContain("No anti-patterns or issues detected.")
+  })
+
+  test("sql_analyze extracts object error messages", async () => {
+    Dispatcher.register("sql.analyze" as any, async () => ({
+      success: false,
+      data: {
+        success: false,
+        error: { message: "parser exploded" },
+        issues: [],
+        issue_count: 0,
+        confidence: "unknown",
+        confidence_factors: [],
+      },
+    }))
+
+    const tool = await SqlAnalyzeTool.init()
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
+
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.error).toBe("parser exploded")
+    expect(result.output).toContain("parser exploded")
+  })
+
   test("schema_inspect unwraps dispatcher data envelopes", async () => {
     Dispatcher.register("schema.inspect" as any, async () => ({
       success: true,
