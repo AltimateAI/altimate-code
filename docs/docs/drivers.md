@@ -134,6 +134,13 @@ Optional: `location` (e.g. `us`, `eu`, `us-central1`, `asia-northeast1`). Requir
 
 Trino uses the official `trino-client` package over HTTP(S). Set `catalog` for schema/table introspection. Query history is not exposed as a durable history source by the native driver.
 
+> **Migration note:** earlier versions mapped the dbt `trino` adapter onto the PostgreSQL driver. It now uses this native Trino driver. If you have an existing `trino` connection or dbt profile, switch `database`/`dbname` to `catalog` (the `database` alias still resolves) and use `access_token` (aliased from `token`) for bearer auth. Behavior is otherwise compatible.
+
+**Troubleshooting:**
+- *Catalog required* — `listTables`/`describeTable` need `catalog` set; without it, introspection errors. Set `catalog` (or `database`, which is aliased to it).
+- *Auth conflict* — configuring both `password` (Basic) and `access_token` (Bearer) is rejected; use exactly one.
+- *Connection refused / TLS* — confirm the `protocol` (`http` vs `https`) and port; the driver defaults to `8080` for HTTP and `8443` for HTTPS.
+
 ### MySQL
 | Method | Config Fields |
 |--------|--------------|
@@ -206,7 +213,7 @@ SSH auth types: `"key"` (default) or `"password"` (set `ssh_password`).
 
 The CLI auto-discovers connections from:
 
-1. **Docker containers**: detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, Trino, ClickHouse, MongoDB containers
+1. **Docker containers**: detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, ClickHouse, Trino containers
 2. **dbt profiles**: parses `~/.dbt/profiles.yml` for all supported adapters
 3. **Environment variables**: detects `SNOWFLAKE_ACCOUNT`, `PGHOST`, `MYSQL_HOST`, `MSSQL_HOST`, `ORACLE_HOST`, `DUCKDB_PATH`, `SQLITE_PATH`, etc.
 
