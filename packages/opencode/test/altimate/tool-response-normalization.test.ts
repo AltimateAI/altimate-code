@@ -175,4 +175,44 @@ describe("tool response normalization", () => {
     expect(result.metadata.edge_count).toBe(1)
     expect(result.output).toContain("orders.id")
   })
+
+  test("altimate_core_column_lineage treats inner data.success=false as failure", async () => {
+    Dispatcher.register("altimate_core.column_lineage" as any, async () => ({
+      success: true,
+      data: { success: false, column_lineage: [] },
+    }))
+
+    const tool = await AltimateCoreColumnLineageTool.init()
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
+
+    expect(result.title).toContain("ERROR")
+    expect(result.metadata.success).toBe(false)
+  })
+
+  test("altimate_core_column_lineage does not leak object data.error in output", async () => {
+    Dispatcher.register("altimate_core.column_lineage" as any, async () => ({
+      success: true,
+      data: { error: { token: "secret-token" }, column_lineage: [{ source: "a", target: "b" }] },
+    }))
+
+    const tool = await AltimateCoreColumnLineageTool.init()
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
+
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).not.toContain("secret-token")
+    expect(result.output).not.toContain("[object Object]")
+  })
+
+  test("lineage_check treats inner data.success=false as PARTIAL", async () => {
+    Dispatcher.register("lineage.check" as any, async () => ({
+      success: true,
+      data: { success: false },
+    }))
+
+    const tool = await LineageCheckTool.init()
+    const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
+
+    expect(result.title).toContain("PARTIAL")
+    expect(result.metadata.success).toBe(false)
+  })
 })

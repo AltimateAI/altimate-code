@@ -14,14 +14,20 @@ type QueryResult = {
 }
 
 function cleanSql(sql: string): string {
+  // Trino escapes single quotes by doubling them ('') and does not use
+  // backslash escapes, so the literal pattern must not treat \' as an escape.
   return sql
-    .replace(/'(?:[^'\\]|\\.|'{2})*'/g, "")
+    .replace(/'(?:[^']|'{2})*'/g, "")
     .replace(/--[^\n]*/g, "")
     .replace(/\/\*[\s\S]*?\*\//g, "")
 }
 
+// Escapes a value for use inside a single-quoted SQL string literal. Doubling
+// single quotes is the complete and correct escape in Trino — used for the
+// schema/table predicates in information_schema introspection queries, whose
+// inputs originate from the driver's own catalog walks, not raw user SQL.
 function escapeStringLiteral(value: string): string {
-  return value.replace(/'/g, "''")
+  return String(value ?? "").replace(/'/g, "''")
 }
 
 function quoteIdent(value: unknown): string {
@@ -44,7 +50,9 @@ function serverUrl(config: ConnectionConfig): string {
 
   const protocol = typeof config.protocol === "string" ? config.protocol : config.ssl || config.tls ? "https" : "http"
   const host = String(config.host ?? "localhost")
-  const port = Number(config.port ?? (protocol === "https" ? 8443 : 8080))
+  const defaultPort = protocol === "https" ? 8443 : 8080
+  const parsedPort = Number(config.port)
+  const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : defaultPort
   return `${protocol}://${host}:${port}`
 }
 
@@ -95,6 +103,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   const connector: Connector = {
     async connect() {
+      // Basic (password) and Bearer (access_token) auth are mutually exclusive;
+      // sending both produces ambiguous, silently-wrong authentication.
+      const bearerToken = config.access_token ?? config.token
+      if (config.password && typeof bearerToken === "string" && bearerToken.trim()) {
+        throw new Error(
+          "Trino: both 'password' (Basic auth) and 'access_token' (Bearer) are set. Configure only one authentication method.",
+        )
+      }
+
       const headers = extraHeaders(config)
       const options: Record<string, unknown> = {
         server: serverUrl(config),
@@ -135,11 +152,16 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         throw new Error("Trino client not connected — call connect() first")
       }
 
-      const effectiveLimit = options?.noLimit ? 0 : (limit ?? 1000)
+      // Coerce/clamp the limit so a non-numeric or negative value can never be
+      // interpolated into the query as `LIMIT NaN` / `LIMIT -5`.
+      const requestedLimit = options?.noLimit ? 0 : Math.floor(Number(limit ?? 1000))
+      const effectiveLimit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? requestedLimit : 0
       const sqlCleaned = cleanSql(sql)
       const isSelectLike = /^\s*(SELECT|WITH|VALUES|TABLE)\b/i.test(sqlCleaned)
       const hasDML = /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|CALL|GRANT|REVOKE)\b/i.test(sqlCleaned)
-      const hasLimit = /\b(LIMIT|FETCH\s+FIRST)\b/i.test(sqlCleaned)
+      // NOTE: this matches LIMIT/FETCH anywhere, so a subquery/CTE LIMIT suppresses
+      // outer-LIMIT injection. Acceptable: results are still truncated client-side below.
+      const hasLimit = /\b(LIMIT|FETCH\s+(FIRST|NEXT))\b/i.test(sqlCleaned)
 
       let query = sql
       if (isSelectLike && !hasDML && effectiveLimit > 0 && !hasLimit) {
@@ -233,6 +255,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     },
 
     async close() {
+      // trino-client is a stateless HTTP client (no close/destroy method and no
+      // persistent connection pool), so dropping the reference is sufficient.
       client = null
     },
   }

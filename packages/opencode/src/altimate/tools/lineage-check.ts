@@ -40,9 +40,12 @@ export const LineageCheckTool = Tool.define("lineage_check", {
       }
 
       const error = normalizeError(data.error)
+      // Treat the result as OK only when both the envelope and the inner payload
+      // report success, matching the two-layer check used by sql_analyze.
+      const success = result.success === true && data.success !== false
       return {
-        title: `Lineage: ${result.success ? "OK" : "PARTIAL"}`,
-        metadata: { success: result.success, ...(error && { error }) },
+        title: `Lineage: ${success ? "OK" : "PARTIAL"}`,
+        metadata: { success, ...(error && { error }) },
         output: formatLineage(data),
       }
     } catch (e) {

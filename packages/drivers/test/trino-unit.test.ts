@@ -116,6 +116,47 @@ describe("Trino driver unit tests", () => {
     expect(mockQueryCalls[1]).toBe("INSERT INTO t VALUES (1)")
   })
 
+  test("throws when both password and access_token are configured", async () => {
+    const connector = await connect({ type: "trino", user: "analyst", password: "secret", access_token: "jwt" })
+    await expect(connector.connect()).rejects.toThrow(/only one authentication method/i)
+  })
+
+  test("does not inject LIMIT for FETCH NEXT queries", async () => {
+    mockResults = [[{ columns: [{ name: "id", type: "integer" }], data: [[1]] }]]
+    const connector = await connect({ type: "trino", catalog: "iceberg" })
+    await connector.connect()
+
+    await connector.execute("SELECT id FROM orders OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY", 2)
+    expect(mockQueryCalls[0]).toBe("SELECT id FROM orders OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY")
+  })
+
+  test("does not inject LIMIT or truncate when noLimit is set", async () => {
+    mockResults = [[{ columns: [{ name: "id", type: "integer" }], data: [[1], [2], [3]] }]]
+    const connector = await connect({ type: "trino", catalog: "iceberg" })
+    await connector.connect()
+
+    const result = await connector.execute("SELECT id FROM orders", 2, undefined, { noLimit: true })
+    expect(mockQueryCalls[0]).toBe("SELECT id FROM orders")
+    expect(result.rows).toEqual([[1], [2], [3]])
+    expect(result.truncated).toBe(false)
+  })
+
+  test("never interpolates a non-numeric limit into the query", async () => {
+    mockResults = [[{ columns: [{ name: "id", type: "integer" }], data: [[1]] }]]
+    const connector = await connect({ type: "trino", catalog: "iceberg" })
+    await connector.connect()
+
+    await connector.execute("SELECT id FROM orders", Number("not-a-number"))
+    expect(mockQueryCalls[0]).toBe("SELECT id FROM orders")
+    expect(mockQueryCalls[0]).not.toContain("NaN")
+  })
+
+  test("falls back to default port when port is non-numeric", async () => {
+    const connector = await connect({ type: "trino", host: "trino.example.com", port: "oops" as unknown as number })
+    await connector.connect()
+    expect(mockCreateCalls[0].server).toBe("http://trino.example.com:8080")
+  })
+
   test("listTables and describeTable use catalog-scoped information_schema", async () => {
     mockResults = [
       [

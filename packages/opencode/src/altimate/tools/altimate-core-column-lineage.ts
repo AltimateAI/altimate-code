@@ -29,7 +29,7 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
       const edgeCount = data.column_lineage?.length ?? 0
       const error = normalizeError(result.error) ?? normalizeError(data.error)
       const failureMessage = error?.trim() || "Column lineage failed."
-      const isFailure = error !== undefined || result.success === false
+      const isFailure = error !== undefined || result.success === false || data.success === false
       return {
         title: isFailure ? "Column Lineage: ERROR" : `Column Lineage: ${edgeCount} edge(s)`,
         metadata: { success: !isFailure, edge_count: edgeCount, ...(isFailure && { error: failureMessage }) },
@@ -51,7 +51,8 @@ function columnLineageError(msg: string) {
 }
 
 function formatColumnLineage(data: Record<string, any>): string {
-  if (data.error) return `Error: ${data.error}`
+  const dataError = normalizeError(data.error)
+  if (dataError) return `Error: ${dataError}`
   if (!data.column_lineage?.length && !data.column_dict) return "No column lineage edges found."
   const lines: string[] = []
 
