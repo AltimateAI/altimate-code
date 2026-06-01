@@ -366,10 +366,14 @@ export function list(): { warehouses: WarehouseInfo[] } {
   ensureLoaded()
   const warehouses: WarehouseInfo[] = []
   for (const [name, config] of configs) {
+    const type = typeof config.type === "string" ? config.type.toLowerCase() : ""
     warehouses.push({
       name,
       type: config.type,
-      database: config.database as string | undefined,
+      database:
+        type === "trino"
+          ? ((config.catalog as string | undefined) ?? (config.database as string | undefined))
+          : (config.database as string | undefined),
     })
   }
 

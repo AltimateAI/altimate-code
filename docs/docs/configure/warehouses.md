@@ -515,7 +515,7 @@ The `/discover` command can automatically detect warehouse connections from:
 | Source | Detection |
 |--------|-----------|
 | dbt profiles | Searches for `profiles.yml` (see resolution order below) |
-| Docker containers | Finds running PostgreSQL, MySQL, SQL Server, Trino, and ClickHouse containers |
+| Docker containers | Finds running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, ClickHouse, and Trino containers |
 | Environment variables | Scans for `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABRICKS_HOST`, etc. |
 
 ### dbt profiles.yml resolution order

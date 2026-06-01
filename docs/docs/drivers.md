@@ -124,6 +124,7 @@ Optional: `location` (e.g. `us`, `eu`, `us-central1`, `asia-northeast1`). Requir
 | PAT | `server_hostname`, `http_path`, `access_token` |
 
 ### Trino
+
 | Method | Config Fields |
 |--------|--------------|
 | No auth | `host`, `port`, `catalog`, `schema`, `user` |

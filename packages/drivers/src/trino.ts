@@ -79,15 +79,16 @@ function trinoError(result: QueryResult): Error | null {
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let Trino: any
   let BasicAuth: any
+  let mod: any
   try {
-    const mod = await import("trino-client")
-    Trino = mod.Trino ?? mod.default?.Trino ?? mod.default
-    BasicAuth = mod.BasicAuth ?? mod.default?.BasicAuth
-    if (!Trino?.create) {
-      throw new Error("Trino.create export not found in trino-client")
-    }
+    mod = await import("trino-client")
   } catch {
     throw new Error("Trino driver not installed. Run: npm install trino-client")
+  }
+  Trino = mod.Trino ?? mod.default?.Trino ?? mod.default
+  BasicAuth = mod.BasicAuth ?? mod.default?.BasicAuth
+  if (!Trino?.create) {
+    throw new Error("Trino.create export not found in trino-client — check the installed package version")
   }
 
   let client: any

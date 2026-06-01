@@ -54,7 +54,7 @@ env_bigquery  | bigquery | GOOGLE_APPLICATION_CREDENTIALS
 | **dbt project** | Walks up directories for `dbt_project.yml`, reads name/profile |
 | **dbt manifest** | Parses `target/manifest.json` for model/source/test counts |
 | **dbt profiles** | Searches for `profiles.yml`: `DBT_PROFILES_DIR` env var → project root → `<home>/.dbt/profiles.yml` |
-| **Docker DBs** | Bridge call to discover running PostgreSQL/MySQL/MSSQL/Trino containers |
+| **Docker DBs** | Bridge call to discover running PostgreSQL/MySQL/MariaDB/MSSQL/Oracle/ClickHouse/Trino containers |
 | **Existing connections** | Bridge call to list already-configured warehouses |
 | **Environment variables** | Scans `process.env` for warehouse signals (see table below) |
 | **Schema cache** | Bridge call for indexed warehouse status |
