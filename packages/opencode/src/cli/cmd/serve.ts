@@ -5,6 +5,9 @@ import { Flag } from "../../flag/flag"
 import { Workspace } from "../../control-plane/workspace"
 import { Project } from "../../project/project"
 import { Installation } from "../../installation"
+// altimate_change start — trace: session tracing in headless serve
+import { subscribeTraceConsumer } from "../../altimate/observability/trace-consumer"
+// altimate_change end
 
 export const ServeCommand = cmd({
   command: "serve",
@@ -18,6 +21,15 @@ export const ServeCommand = cmd({
     const opts = await resolveNetworkOptions(args)
     const server = await Server.listen(opts)
     console.log(`altimate-code server listening on http://${server.hostname}:${server.port}`)
+    // altimate_change end
+
+    // altimate_change start — trace: session tracing in headless serve
+    // Sessions driven over HTTP (e.g. the VS Code chat panel) have no TUI
+    // worker observing the event stream, so traces were never written in
+    // serve mode. Subscribe the shared trace consumer to the in-process
+    // event stream so serve sessions produce the same trace files as the
+    // terminal entrypoints.
+    subscribeTraceConsumer({ directory: process.cwd() })
     // altimate_change end
 
     await new Promise(() => {})
