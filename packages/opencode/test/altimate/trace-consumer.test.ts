@@ -26,7 +26,7 @@ afterEach(async () => {
 })
 
 function makeConsumer() {
-  return new TraceConsumer({ exporters: [new FileExporter(tmpDir)] })
+  return new TraceConsumer({ exporters: [new FileExporter(tmpDir)], finalizeGraceMs: 50 })
 }
 
 async function readTraceFile(sessionID: string): Promise<TraceFile> {
@@ -166,8 +166,45 @@ describe("TraceConsumer", () => {
     }
   })
 
+  test("post-idle straggler events don't clobber the finalized trace", async () => {
+    const consumer = makeConsumer()
+    const sessionID = "ses_consumer_straggler"
+    for (const event of sessionEvents(sessionID)) {
+      consumer.handleEvent(event)
+    }
+    // Straggler: the user message re-published with its generated summary
+    // arrives AFTER session.status idle (observed in real `serve` sessions —
+    // title generation completes after the session goes idle). Without the
+    // finalize grace window this re-created an empty trace whose
+    // finalization overwrote the rich trace file.
+    consumer.handleEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg-user-1",
+          sessionID,
+          role: "user",
+          summary: { title: "Straggler title" },
+          time: { created: Date.now() },
+        },
+      },
+    })
+    consumer.handleEvent({ type: "session.status", properties: { sessionID, status: { type: "idle" } } })
+    // Wait past the grace window for finalization
+    await new Promise((r) => setTimeout(r, 300))
+
+    const trace = await readTraceFile(sessionID)
+    expect(trace.summary.status).toBe("completed")
+    // The rich content survived — generation + tool spans intact
+    expect(trace.spans.some((s) => s.kind === "tool")).toBe(true)
+    expect(trace.summary.totalToolCalls).toBe(1)
+    expect(trace.summary.totalCost).toBeCloseTo(0.005)
+    // And the straggler was absorbed into the live trace
+    expect(trace.metadata.title).toBe("Straggler title")
+  })
+
   test("disabled consumer writes nothing", async () => {
-    const consumer = new TraceConsumer({ exporters: [new FileExporter(tmpDir)], enabled: false })
+    const consumer = new TraceConsumer({ exporters: [new FileExporter(tmpDir)], enabled: false, finalizeGraceMs: 50 })
     for (const event of sessionEvents("ses_consumer_off")) {
       consumer.handleEvent(event)
     }

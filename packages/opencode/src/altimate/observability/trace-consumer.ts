@@ -25,6 +25,19 @@ import { Trace, FileExporter, HttpExporter, type TraceExporter } from "./tracing
 
 const MAX_TRACES = 100
 
+/**
+ * How long to wait after `session.status: idle` before finalizing a trace.
+ *
+ * Sessions emit trailing events after going idle — e.g. the user message is
+ * re-published with its generated `summary` once title generation completes.
+ * Finalizing immediately on idle would delete the trace from the map, and
+ * the straggler would then lazily re-create an EMPTY trace for the same
+ * sessionID whose finalization overwrites the rich `<sessionId>.json` file.
+ * Any event arriving during the grace window is absorbed into the live
+ * trace and pushes the finalization back.
+ */
+const FINALIZE_GRACE_MS = 2_000
+
 /** Minimal structural view of a bus event — narrowed at each read site. */
 interface BusEventLike {
   type?: string
@@ -35,23 +48,33 @@ export class TraceConsumer {
   private sessionTraces = new Map<string, Trace>()
   // Per-session user message IDs (cleaned up on session end)
   private sessionUserMsgIds = new Map<string, Set<string>>()
+  // Sessions that went idle and are waiting out the finalize grace window
+  private pendingEnd = new Map<string, ReturnType<typeof setTimeout>>()
 
   // Cached tracing config — loaded once at first use
   private configLoaded = false
   private enabled = true
   private exporters: TraceExporter[] | undefined
   private maxFiles: number | undefined
+  private finalizeGraceMs = FINALIZE_GRACE_MS
 
   /**
    * Optional overrides bypass config loading entirely — used by tests to
-   * inject a FileExporter pointed at a temp directory.
+   * inject a FileExporter pointed at a temp directory and shrink the
+   * finalize grace window.
    */
-  constructor(overrides?: { exporters?: TraceExporter[]; maxFiles?: number; enabled?: boolean }) {
+  constructor(overrides?: {
+    exporters?: TraceExporter[]
+    maxFiles?: number
+    enabled?: boolean
+    finalizeGraceMs?: number
+  }) {
     if (overrides) {
       this.configLoaded = true
       this.enabled = overrides.enabled ?? true
       this.exporters = overrides.exporters
       this.maxFiles = overrides.maxFiles
+      if (overrides.finalizeGraceMs !== undefined) this.finalizeGraceMs = overrides.finalizeGraceMs
     }
   }
 
@@ -93,6 +116,11 @@ export class TraceConsumer {
             .catch(() => {})
           this.sessionTraces.delete(oldest)
           this.sessionUserMsgIds.delete(oldest)
+          const pendingTimer = this.pendingEnd.get(oldest)
+          if (pendingTimer) {
+            clearTimeout(pendingTimer)
+            this.pendingEnd.delete(oldest)
+          }
         }
       }
       const trace = this.exporters
@@ -107,10 +135,40 @@ export class TraceConsumer {
     }
   }
 
+  /**
+   * Schedule (or push back) finalization of a session's trace. Fires after
+   * the grace window unless another event for the session arrives first.
+   */
+  private scheduleEnd(sessionID: string) {
+    const existing = this.pendingEnd.get(sessionID)
+    if (existing) clearTimeout(existing)
+    this.pendingEnd.set(
+      sessionID,
+      setTimeout(() => {
+        this.pendingEnd.delete(sessionID)
+        const trace = this.sessionTraces.get(sessionID)
+        if (trace) {
+          void trace.endTrace().catch(() => {})
+          this.sessionTraces.delete(sessionID)
+          this.sessionUserMsgIds.delete(sessionID)
+        }
+      }, this.finalizeGraceMs),
+    )
+  }
+
   /** Feed one bus event into the per-session traces. Never throws. */
   handleEvent(event: unknown) {
     try {
       const e = event as BusEventLike
+      // Any activity for a session that is waiting out the finalize grace
+      // window pushes the finalization back — trailing events (e.g. the
+      // user message re-published with its generated summary) are absorbed
+      // into the live trace instead of re-creating an empty one.
+      {
+        const props = e.properties as Record<string, any> | undefined
+        const sid = props?.sessionID ?? props?.info?.sessionID ?? props?.part?.sessionID ?? props?.info?.id
+        if (typeof sid === "string" && this.pendingEnd.has(sid)) this.scheduleEnd(sid)
+      }
       if (e.type === "message.updated") {
         const info = e.properties?.info as Record<string, any> | undefined
         // Resolve sessionID: use info.sessionID directly, or fall back to
@@ -184,18 +242,14 @@ export class TraceConsumer {
           if (trace) trace.setTitle(String(info.title))
         }
       }
-      // Finalize trace when session reaches idle (completed)
+      // Finalize trace when session reaches idle (completed) — after the
+      // grace window, so post-idle stragglers don't clobber the trace file.
       if (e.type === "session.status") {
         const props = e.properties as Record<string, any> | undefined
         const sid = props?.sessionID
         const status = props?.status?.type
-        if (status === "idle" && sid) {
-          const trace = this.sessionTraces.get(sid)
-          if (trace) {
-            void trace.endTrace().catch(() => {})
-            this.sessionTraces.delete(sid)
-            this.sessionUserMsgIds.delete(sid)
-          }
+        if (status === "idle" && sid && this.sessionTraces.has(sid)) {
+          this.scheduleEnd(sid)
         }
       }
     } catch {
@@ -209,6 +263,8 @@ export class TraceConsumer {
    * doesn't leak across stream instances.
    */
   reset() {
+    for (const [, timer] of this.pendingEnd) clearTimeout(timer)
+    this.pendingEnd.clear()
     for (const [, trace] of this.sessionTraces) {
       void trace.endTrace().catch(() => {})
     }
@@ -218,6 +274,8 @@ export class TraceConsumer {
 
   /** End all in-flight traces and wait for them. Used on shutdown. */
   async flush() {
+    for (const [, timer] of this.pendingEnd) clearTimeout(timer)
+    this.pendingEnd.clear()
     for (const [, trace] of this.sessionTraces) {
       await trace.endTrace().catch(() => {})
     }
