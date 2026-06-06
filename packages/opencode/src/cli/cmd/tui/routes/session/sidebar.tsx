@@ -1,10 +1,10 @@
 import { useSync } from "@tui/context/sync"
-import { createMemo, For, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, Switch, Match } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useTheme } from "../../context/theme"
 import { Locale } from "@/util/locale"
 import path from "path"
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, ToolPart } from "@opencode-ai/sdk/v2"
 import { Global } from "@/global"
 import { Installation } from "@/installation"
 import { useKeybind } from "../../context/keybind"
@@ -62,6 +62,39 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     }
   })
 
+  // altimate_change start - total tool time
+  // Flatten every tool part in this session so we can sum execution time across
+  // completed/error tools and live-tick any tool that's still running.
+  const toolParts = createMemo<ToolPart[]>(() => {
+    const out: ToolPart[] = []
+    for (const message of messages()) {
+      const parts = sync.data.part[message.id]
+      if (!parts) continue
+      for (const part of parts) {
+        if (part.type === "tool") out.push(part as ToolPart)
+      }
+    }
+    return out
+  })
+  const hasRunningTool = createMemo(() => toolParts().some((p) => p.state.status === "running"))
+  const [nowToolTime, setNowToolTime] = createSignal(Date.now())
+  createEffect(() => {
+    if (!hasRunningTool()) return
+    const id = setInterval(() => setNowToolTime(Date.now()), 1000)
+    onCleanup(() => clearInterval(id))
+  })
+  const toolTime = createMemo(() => {
+    let ms = 0
+    const tick = nowToolTime()
+    for (const part of toolParts()) {
+      const s = part.state
+      if (s.status === "running") ms += tick - s.time.start
+      else if (s.status === "completed" || s.status === "error") ms += s.time.end - s.time.start
+    }
+    return ms
+  })
+  // altimate_change end
+
   const directory = useDirectory()
   const kv = useKV()
 
@@ -107,6 +140,13 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>{context()?.tokens ?? 0} tokens</text>
               <text fg={theme.textMuted}>{context()?.percentage ?? 0}% used</text>
               <text fg={theme.textMuted}>{cost()} spent</text>
+              {/* altimate_change start - total tool time */}
+              <Show when={toolTime() > 0}>
+                <text fg={theme.textMuted}>
+                  {Locale.duration(toolTime())} in tools{hasRunningTool() ? " (running)" : ""}
+                </text>
+              </Show>
+              {/* altimate_change end */}
             </box>
             {/* altimate_change start - trace section */}
             <box>
