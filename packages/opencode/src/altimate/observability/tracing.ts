@@ -47,6 +47,14 @@ export interface TraceSpan {
   endTime?: number
   status: "ok" | "error"
   statusMessage?: string
+  /**
+   * True when this span was force-closed by trace reconstruction (worker
+   * restart / cache eviction) rather than by a real error. The span keeps
+   * `status: "error"` so its boundary stays visible, but consumers (the viewer,
+   * error aggregations) should treat it as "incomplete (reconstructed)" — not a
+   * genuine agent/tool failure.
+   */
+  interrupted?: boolean
 
   // --- LLM / generation fields (populated for kind=generation) ---
   model?: {
@@ -349,6 +357,53 @@ function formatDurationShort(ms: number): string {
 // Exported so the viewer's chat-tab dedupe can compare against the same boundary
 // (otherwise it'd silently drift if either side changes the magic number).
 export const USER_MESSAGE_INPUT_MAX_CHARS = 4000
+
+/**
+ * Upper bound on the number of spans serialized into a single `ses_<id>.json`.
+ * `snapshot()` rewrites the entire spans array on every event, so an unbounded
+ * long-lived session would grow the file without limit and pay O(n) per write
+ * (O(n²) over the session). When a trace exceeds this, serialization keeps the
+ * head (early context: prompt + first tools) and the tail (most recent
+ * activity) and elides the middle with a single marker span — bounding both
+ * file size and per-event write cost. In-memory spans are untouched; only the
+ * on-disk projection is capped. Override with `ALTIMATE_TRACE_MAX_SPANS`.
+ */
+export const MAX_SERIALIZED_SPANS = (() => {
+  const raw = parseInt(process.env["ALTIMATE_TRACE_MAX_SPANS"] ?? "", 10)
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000
+})()
+
+/**
+ * Bound the spans written to disk to `cap` while preserving the most useful
+ * context: keep the head (root span, prompt, first tool calls) and the tail
+ * (most recent activity), and replace the elided middle with one marker span.
+ * Returns the input unchanged when it's already within the cap.
+ */
+export function capSpansForSerialization(spans: TraceSpan[], cap: number = MAX_SERIALIZED_SPANS): TraceSpan[] {
+  if (cap <= 0 || spans.length <= cap) return spans
+  const headCount = Math.max(1, Math.floor(cap * 0.3))
+  const tailCount = Math.max(1, cap - headCount - 1) // reserve one slot for the marker
+  // Only elide if the result is actually smaller than the input (+1 for the
+  // marker we'd add) — otherwise there's nothing to gain.
+  if (headCount + tailCount + 1 >= spans.length) return spans
+  const head = spans.slice(0, headCount)
+  const tail = spans.slice(spans.length - tailCount)
+  const elided = spans.length - head.length - tail.length
+  const rootId = spans.find((s) => s.parentSpanId === null)?.spanId ?? null
+  const anchor = head[head.length - 1]
+  const anchorTime = anchor?.endTime ?? anchor?.startTime ?? 0
+  const marker: TraceSpan = {
+    spanId: `elided-${head.length}-${tail.length}-of-${spans.length}`,
+    parentSpanId: rootId,
+    name: `… ${elided} spans elided (trace exceeded ${cap} spans) …`,
+    kind: "span",
+    startTime: anchorTime,
+    endTime: anchorTime,
+    status: "ok",
+    attributes: { elided, totalSpans: spans.length },
+  }
+  return [...head, marker, ...tail]
+}
 // altimate_change end
 
 export class Trace {
@@ -592,6 +647,9 @@ export class Trace {
         s.endTime = now
         s.status = "error"
         s.statusMessage = "interrupted — altimate-code restarted before this step finished recording; not an agent failure"
+        // Distinguish a recorder restart from a real failure so the viewer and
+        // error aggregations don't paint this red or count it as an incident.
+        s.interrupted = true
       }
     }
     this.endTraceStarted = false
@@ -926,6 +984,8 @@ export class Trace {
       snapshotSpans = this.spans
       snapshotMetadata = this.metadata
     }
+
+    snapshotSpans = capSpansForSerialization(snapshotSpans)
 
     return {
       version: 2,

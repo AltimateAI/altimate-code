@@ -196,6 +196,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .wf-preview .pv-tag.model { background: rgba(77,142,255,0.12); color: var(--secondary); }
 .wf-preview .pv-tag.tok { background: rgba(74,222,128,0.12); color: var(--green); }
 .wf-preview .pv-tag.err { background: rgba(248,113,113,0.12); color: var(--red); }
+.wf-preview .pv-tag.warn { background: rgba(251,191,36,0.12); color: var(--orange); }
 .wf-bar-c { flex: 1; height: 18px; position: relative; overflow: hidden; }
 .wf-bar { position: absolute; height: 100%; border-radius: 3px; min-width: 3px; opacity: 0.85; display: flex; align-items: center; padding-left: 4px; }
 .wf-bar.generation { background: var(--secondary); }
@@ -222,6 +223,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .tree-preview .pv-tag.model { background: rgba(77,142,255,0.12); color: var(--secondary); }
 .tree-preview .pv-tag.tok { background: rgba(74,222,128,0.12); color: var(--green); }
 .tree-preview .pv-tag.err { background: rgba(248,113,113,0.12); color: var(--red); }
+.tree-preview .pv-tag.warn { background: rgba(251,191,36,0.12); color: var(--orange); }
 .tree-detail { margin-top: 8px; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; display: none; }
 .tree-detail.open { display: block; }
 
@@ -443,7 +445,9 @@ var icons = { session: '\\u25A0', generation: '\\u2B50', tool: '\\u2692', text: 
 function getPreview(span) {
   var parts = [];
   if (span.status === 'error' && span.statusMessage) {
-    return '<span class="pv-tag err">\\u2718</span>' + e((span.statusMessage || '').slice(0, 120));
+    // Interrupted = recorder restart, not a real failure: amber warn, not red.
+    var tag = span.interrupted ? '<span class="pv-tag warn">\\u26A0</span>' : '<span class="pv-tag err">\\u2718</span>';
+    return tag + e((span.statusMessage || '').slice(0, 120));
   }
   if (span.kind === 'tool') {
     var inp = span.input;
@@ -467,7 +471,7 @@ function getPreview(span) {
         }
       }
     }
-    if (span.status === 'error') parts.unshift('<span class="pv-tag err">\\u2718</span>');
+    if (span.status === 'error') parts.unshift(span.interrupted ? '<span class="pv-tag warn">\\u26A0</span>' : '<span class="pv-tag err">\\u2718</span>');
   } else if (span.kind === 'generation') {
     if (span.model && span.model.modelId) parts.push('<span class="pv-tag model">' + e(span.model.modelId) + '</span>');
     if (span.tokens && span.tokens.total) parts.push('<span class="pv-tag tok">' + Number(span.tokens.total).toLocaleString() + ' tok</span>');
@@ -487,8 +491,9 @@ function showDetail(span) {
   var dur = (span.endTime || Date.now()) - (span.startTime || 0);
   var h = '<div class="detail-panel"><h3>' + e(span.name) + '</h3><dl class="dg">';
   h += '<dt>Kind</dt><dd>' + e(span.kind||'') + '</dd>';
-  h += '<dt>Status</dt><dd' + (span.status==='error'?' style="color:var(--red)"':'') + '>' + e(span.status||'') + '</dd>';
-  if (span.statusMessage) h += '<dt>Error</dt><dd style="color:var(--red)">' + e(span.statusMessage) + '</dd>';
+  var statusColor = span.interrupted ? 'var(--orange)' : (span.status==='error' ? 'var(--red)' : '');
+  h += '<dt>Status</dt><dd' + (statusColor?' style="color:'+statusColor+'"':'') + '>' + e(span.interrupted ? 'interrupted' : (span.status||'')) + '</dd>';
+  if (span.statusMessage) h += '<dt>' + (span.interrupted ? 'Interrupted' : 'Error') + '</dt><dd style="color:' + (span.interrupted ? 'var(--orange)' : 'var(--red)') + '">' + e(span.statusMessage) + '</dd>';
   h += '<dt>Duration</dt><dd>' + fd(dur) + '</dd>';
   if (span.model) {
     if (span.model.modelId) h += '<dt>Model</dt><dd>' + e(span.model.modelId) + '</dd>';
@@ -565,7 +570,10 @@ function showDetail(span) {
   // --- Classify all tool spans upfront ---
   var toolSpans = nonSession.filter(function(sp) { return sp.kind === 'tool'; });
   var genSpans = nonSession.filter(function(sp) { return sp.kind === 'generation'; });
-  var errSpans = nonSession.filter(function(sp) { return sp.status === 'error'; });
+  // Reconstructed (interrupted) spans keep status:'error' for boundary
+  // visibility, but they reflect a recorder restart — exclude them from the
+  // session error count so a clean session isn't reported as failed.
+  var errSpans = nonSession.filter(function(sp) { return sp.status === 'error' && !sp.interrupted; });
 
   // Categorize files: changed (edit/write) vs read
   var changedFiles = {};

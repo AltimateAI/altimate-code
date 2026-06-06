@@ -83,6 +83,11 @@ async function loadTracingConfig() {
 async function getOrCreateTrace(sessionID: string): Promise<Trace | null> {
   if (!sessionID || !tracingEnabled) return null
   if (sessionTraces.has(sessionID)) return sessionTraces.get(sessionID)!
+  // altimate_change start — capture the stream that owns this call so we can
+  // detect a concurrent startEventStream() (e.g. setWorkspace) that aborted us
+  // and cleared the cache while we were suspended at the rehydrate await below.
+  const streamAtEntry = eventStream.abort
+  // altimate_change end
   try {
     if (sessionTraces.size >= MAX_TRACES) {
       const oldest = sessionTraces.keys().next().value
@@ -104,6 +109,16 @@ async function getOrCreateTrace(sessionID: string): Promise<Trace | null> {
     // Async to keep the event-stream loop unblocked on large existing traces.
     if (!(await trace.rehydrateFromFile(sessionID))) {
       trace.startTrace(sessionID, {})
+    }
+    // altimate_change end
+    // altimate_change start — if a new stream replaced ours while we were
+    // awaiting rehydrate, this Trace belongs to a stream that's already been
+    // aborted and its cache cleared. Inserting it now would resurrect an orphan
+    // writer into the freshly-cleared map. Discard it and defer to whatever the
+    // live stream has for this session.
+    if (eventStream.abort !== streamAtEntry) {
+      void trace.endTrace().catch(() => {})
+      return sessionTraces.get(sessionID) ?? null
     }
     // altimate_change end
     Trace.setActive(trace)
