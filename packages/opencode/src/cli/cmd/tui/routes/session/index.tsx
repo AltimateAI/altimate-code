@@ -34,6 +34,7 @@ import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type { AssistantMessage, Part, ToolPart, UserMessage, TextPart, ReasoningPart } from "@opencode-ai/sdk/v2"
 import { useLocal } from "@tui/context/local"
 import { Locale } from "@/util/locale"
+import { SLOW_TOOL_MS, formatElapsed, type Elapsed } from "./timing"
 import type { Tool } from "@/tool/tool"
 import type { ReadTool } from "@/tool/read"
 import type { WriteTool } from "@/tool/write"
@@ -1693,7 +1694,6 @@ function ToolTitle(props: { fallback: string; when: any; icon: string; children:
 
 // Elapsed time (ms) for a tool part. Returns undefined for "pending" (no start yet),
 // ticks at 1Hz while "running", freezes to end-start on "completed"/"error".
-const SLOW_TOOL_MS = 30_000
 function useElapsed(part: () => ToolPart | undefined) {
   const [now, setNow] = createSignal(Date.now())
   createEffect(() => {
@@ -1701,7 +1701,7 @@ function useElapsed(part: () => ToolPart | undefined) {
     const id = setInterval(() => setNow(Date.now()), 1000)
     onCleanup(() => clearInterval(id))
   })
-  return createMemo<{ start: number; ms: number; running: boolean } | undefined>(() => {
+  return createMemo<Elapsed | undefined>(() => {
     const p = part()
     if (!p) return undefined
     const s = p.state
@@ -1803,8 +1803,7 @@ function InlineTool(props: {
             <Show when={timingVisible()}>
               <span style={{ fg: timingColor() }}>
                 {" · "}
-                {Locale.clockTime(elapsed()!.start)} · {elapsed()!.running ? "running " : ""}
-                {Locale.duration(elapsed()!.ms)}
+                {formatElapsed(elapsed()!)}
               </span>
             </Show>
           </text>
@@ -1862,18 +1861,14 @@ function BlockTool(props: {
             <Show when={timingVisible()}>
               <span style={{ fg: timingColor() }}>
                 {"  "}
-                {Locale.clockTime(elapsed()!.start)} · {elapsed()!.running ? "running " : ""}
-                {Locale.duration(elapsed()!.ms)}
+                {formatElapsed(elapsed()!)}
               </span>
             </Show>
           </text>
         }
       >
         <Spinner color={theme.textMuted}>
-          {props.title.replace(/^# /, "") +
-            (timingVisible()
-              ? `  ${Locale.clockTime(elapsed()!.start)} · ${elapsed()!.running ? "running " : ""}${Locale.duration(elapsed()!.ms)}`
-              : "")}
+          {props.title.replace(/^# /, "") + (timingVisible() ? `  ${formatElapsed(elapsed()!)}` : "")}
         </Spinner>
       </Show>
       {props.children}

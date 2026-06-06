@@ -71,7 +71,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
       const parts = sync.data.part[message.id]
       if (!parts) continue
       for (const part of parts) {
-        if (part.type === "tool") out.push(part as ToolPart)
+        if (part.type === "tool") out.push(part)
       }
     }
     return out
