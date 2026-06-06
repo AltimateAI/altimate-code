@@ -56,7 +56,12 @@ It's **off by default**. Set a threshold under the top-level `governance` config
 
 When a query is over budget, `sql_execute` prompts via the `sql_execute_cost` permission with the estimate and a hint to run `sql_optimize` first. The standalone `sql_cost_estimate` tool also reports an estimate on demand without running anything.
 
-Estimates require a warehouse that supports cheap pre-flight estimation. BigQuery is supported today via a dry-run (exact bytes processed, no execution and no charge); warehouses without estimation support skip the guard, so the firewall never blocks legitimate work it can't price.
+Estimates require a warehouse that supports cheap pre-flight estimation:
+
+- **BigQuery** — via a dry-run (exact bytes processed, no execution and no charge).
+- **Snowflake** — via `EXPLAIN`, which compiles the query and returns the planner's estimated bytes to scan without resuming a warehouse. Note that Snowflake bills by warehouse **credits** (compute time), not bytes, so the dollar figure is an approximate proxy — prefer `max_bytes_scanned` as the meaningful threshold for Snowflake.
+
+Warehouses without estimation support skip the guard, so the firewall never blocks legitimate work it can't price.
 
 ---
 

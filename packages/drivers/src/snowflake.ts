@@ -3,7 +3,7 @@
  */
 
 import * as fs from "fs"
-import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import type { ConnectionConfig, Connector, ConnectorResult, CostEstimate, ExecuteOptions, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let snowflake: any
@@ -255,6 +255,38 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         rows,
         row_count: rows.length,
         truncated,
+      }
+    },
+
+    // Estimate scan cost via `EXPLAIN USING JSON`, which compiles the query
+    // and returns the planner's estimated bytes/partitions to scan WITHOUT
+    // executing it or resuming a warehouse (compilation is metadata-only).
+    //
+    // Caveat surfaced in `note`: Snowflake bills by warehouse *credits*
+    // (compute time), not bytes scanned, so the bytes figure is an accurate
+    // expense proxy but the derived USD is approximate. The `max_bytes_scanned`
+    // guard is the meaningful threshold for Snowflake.
+    async estimateCost(sql: string): Promise<CostEstimate> {
+      const query = sql.replace(/;\s*$/, "")
+      const explain = await executeQuery(`EXPLAIN USING JSON ${query}`)
+      const raw = explain.rows?.[0]?.[0]
+      if (raw == null) {
+        return { note: "Snowflake EXPLAIN returned no plan; bytes estimate unavailable" }
+      }
+      // EXPLAIN USING JSON yields one VARIANT cell — a JSON string via the
+      // Node SDK, or an already-parsed object depending on the driver version.
+      let plan: any
+      try {
+        plan = typeof raw === "string" ? JSON.parse(raw) : raw
+      } catch {
+        return { note: "Snowflake EXPLAIN plan was not parseable JSON" }
+      }
+      const globalStats = plan?.GlobalStats ?? {}
+      const assigned = globalStats.bytesAssigned
+      const bytesScanned = assigned != null ? Number(assigned) : undefined
+      return {
+        bytesScanned: Number.isFinite(bytesScanned) ? bytesScanned : undefined,
+        note: "Snowflake EXPLAIN estimate — bytes scanned (Snowflake bills by warehouse credits, so USD is a rough proxy)",
       }
     },
 
