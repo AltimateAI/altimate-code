@@ -386,10 +386,19 @@ export function capSpansForSerialization(spans: TraceSpan[], cap: number = MAX_S
   // Only elide if the result is actually smaller than the input (+1 for the
   // marker we'd add) — otherwise there's nothing to gain.
   if (headCount + tailCount + 1 >= spans.length) return spans
-  const head = spans.slice(0, headCount)
+  let head = spans.slice(0, headCount)
   const tail = spans.slice(spans.length - tailCount)
+  // Guarantee the structural root (session) span survives the cut even if it
+  // isn't in the head slice — rehydrate and the viewer's tree both require it,
+  // and the elision marker is parented to it. In practice the root is index 0
+  // (pushed first), so this is defensive, but it makes the invariant explicit
+  // instead of silently depending on span ordering.
+  const rootSpan = spans.find((s) => s.parentSpanId === null) ?? null
+  if (rootSpan && !head.some((s) => s.spanId === rootSpan.spanId) && !tail.some((s) => s.spanId === rootSpan.spanId)) {
+    head = [rootSpan, ...head.slice(0, headCount - 1)]
+  }
   const elided = spans.length - head.length - tail.length
-  const rootId = spans.find((s) => s.parentSpanId === null)?.spanId ?? null
+  const rootId = rootSpan?.spanId ?? null
   const anchor = head[head.length - 1]
   const anchorTime = anchor?.endTime ?? anchor?.startTime ?? 0
   const marker: TraceSpan = {

@@ -83,6 +83,11 @@ describe("#901 — interrupted spans are marked and not counted as errors", () =
     expect(html).toContain("!sp.interrupted")
     // the interrupted span's flag survives into the embedded data
     expect(html).toContain('"interrupted":true')
+    // the secondary surfaces (waterfall row class, tree meta, log row) all
+    // gate the red/error treatment on !span.interrupted so reconstructed spans
+    // render amber, not red, everywhere — not just in the preview/detail.
+    expect(html).toContain("span.status === 'error' && !span.interrupted")
+    expect(html).toContain("color:var(--orange)\">interrupted</span>")
   })
 })
 
@@ -137,29 +142,89 @@ describe("#902 — getOrCreateTrace guards against resurrecting a Trace into a c
   // import), so it can't be unit-tested in-process. Lock the guard's shape with
   // a scope-bounded source contract, the same approach as
   // worker-trace-clearing.test.ts.
-  test("captures the active stream before the rehydrate await and re-checks it after", async () => {
+  test("captures the stream generation before the rehydrate await and re-checks it after", async () => {
     const workerSrc = await fs.readFile(
       path.join(__dirname, "../../src/cli/cmd/tui/worker.ts"),
       "utf-8",
     )
 
-    // The owning stream is captured at entry, before any await.
-    expect(workerSrc).toMatch(/const streamAtEntry = eventStream\.abort/)
+    // Ownership is keyed on a monotonic counter, not AbortController identity.
+    expect(workerSrc).toMatch(/let streamGeneration = 0/)
+    // The owning generation is captured at entry, before any await.
+    expect(workerSrc).toMatch(/const generationAtEntry = streamGeneration/)
+    // A new stream bumps the counter, invalidating in-flight calls.
+    expect(workerSrc).toMatch(/streamGeneration\+\+/)
 
     // After awaiting rehydrate, if a new stream replaced ours, the freshly built
     // Trace is discarded (ended) instead of being inserted into the cleared map.
     const guard = workerSrc.match(
-      /if \(eventStream\.abort !== streamAtEntry\)[\s\S]*?trace\.endTrace\(\)[\s\S]*?return sessionTraces\.get\(sessionID\) \?\? null/,
+      /if \(streamGeneration !== generationAtEntry\)[\s\S]*?trace\.endTrace\(\)[\s\S]*?return sessionTraces\.get\(sessionID\) \?\? null/,
     )
     expect(guard).not.toBeNull()
 
     // The guard must sit AFTER the rehydrate await and BEFORE the cache insert,
     // otherwise it can't prevent the orphan write.
     const awaitIdx = workerSrc.indexOf("await trace.rehydrateFromFile(sessionID)")
-    const guardIdx = workerSrc.indexOf("if (eventStream.abort !== streamAtEntry)")
+    const guardIdx = workerSrc.indexOf("if (streamGeneration !== generationAtEntry)")
     const setIdx = workerSrc.indexOf("sessionTraces.set(sessionID, trace)")
     expect(awaitIdx).toBeGreaterThan(-1)
     expect(guardIdx).toBeGreaterThan(awaitIdx)
     expect(setIdx).toBeGreaterThan(guardIdx)
+
+    // The bump happens inside startEventStream so a workspace switch invalidates
+    // any suspended getOrCreateTrace.
+    const startIdx = workerSrc.indexOf("const startEventStream =")
+    const bumpIdx = workerSrc.indexOf("streamGeneration++")
+    expect(bumpIdx).toBeGreaterThan(startIdx)
+  })
+})
+
+describe("#903 — capSpansForSerialization structural guarantees (review hardening)", () => {
+  test("always retains the root span even when it is NOT at index 0", () => {
+    // Root deliberately placed in the middle so the naive head-slice would drop it.
+    const spans: TraceSpan[] = []
+    for (let i = 0; i < 40; i++) spans.push(span(i))
+    const root: TraceSpan = { spanId: "ROOT", parentSpanId: null, name: "root", kind: "session", startTime: 20, status: "ok" }
+    spans.splice(20, 0, root) // root now at index 20, not in the head slice
+    const out = capSpansForSerialization(spans, 10)
+    expect(out.some((s) => s.spanId === "ROOT")).toBe(true)
+    // the elision marker is parented to the real root
+    const marker = out.find((s) => s.name.includes("elided"))
+    expect(marker?.parentSpanId).toBe("ROOT")
+    expect(out.length).toBeLessThanOrEqual(10)
+  })
+
+  test.each([1, 2, 3, 4, 5])("tiny cap=%i never throws and never references a missing parent", (cap) => {
+    const spans: TraceSpan[] = [{ spanId: "root", parentSpanId: null, name: "root", kind: "session", startTime: 0, status: "ok" }]
+    for (let i = 1; i < 30; i++) spans.push(span(i))
+    const out = capSpansForSerialization(spans, cap)
+    // every non-root span's parent (if it's a kept span's parent) must resolve,
+    // OR be the root, OR be absent (orphan attaches to root in the viewer).
+    const ids = new Set(out.map((s) => s.spanId))
+    const marker = out.find((s) => s.name.includes("elided"))
+    if (marker) {
+      expect(marker.parentSpanId === null || ids.has(marker.parentSpanId as string)).toBe(true)
+    }
+    // a root span is always present in the output
+    expect(out.some((s) => s.parentSpanId === null)).toBe(true)
+  })
+
+  test("exact boundary head+tail+1 === length returns the original (no pointless marker)", () => {
+    // cap=10 → head 3, tail 6, +1 marker = 10. length 10 → 10 >= 10 → pass-through.
+    const spans: TraceSpan[] = [{ spanId: "root", parentSpanId: null, name: "root", kind: "session", startTime: 0, status: "ok" }]
+    for (let i = 1; i < 10; i++) spans.push(span(i))
+    expect(spans.length).toBe(10)
+    expect(capSpansForSerialization(spans, 10)).toBe(spans)
+  })
+
+  test("elision marker reports an accurate elided count", () => {
+    const spans: TraceSpan[] = [{ spanId: "root", parentSpanId: null, name: "root", kind: "session", startTime: 0, status: "ok" }]
+    for (let i = 1; i < 1000; i++) spans.push(span(i))
+    const cap = 100
+    const out = capSpansForSerialization(spans, cap)
+    const marker = out.find((s) => s.name.includes("elided"))!
+    const keptReal = out.length - 1 // minus the marker
+    expect((marker.attributes as any).elided).toBe(spans.length - keptReal)
+    expect((marker.attributes as any).totalSpans).toBe(1000)
   })
 })

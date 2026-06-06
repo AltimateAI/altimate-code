@@ -47,6 +47,14 @@ const eventStream = {
   abort: undefined as AbortController | undefined,
 }
 
+// altimate_change start — trace: monotonic stream generation. Bumped on every
+// startEventStream() so an in-flight getOrCreateTrace() can detect that its
+// owning stream was torn down while it was suspended at an await. Keyed on a
+// counter rather than the AbortController's object identity so the guard does
+// not silently depend on startEventStream always allocating a fresh controller.
+let streamGeneration = 0
+// altimate_change end
+
 // altimate_change start — trace: per-session traces
 const sessionTraces = new Map<string, Trace>()
 const sessionUserMsgIds = new Map<string, Set<string>>() // Per-session user message IDs (cleaned up on session end)
@@ -83,10 +91,12 @@ async function loadTracingConfig() {
 async function getOrCreateTrace(sessionID: string): Promise<Trace | null> {
   if (!sessionID || !tracingEnabled) return null
   if (sessionTraces.has(sessionID)) return sessionTraces.get(sessionID)!
-  // altimate_change start — capture the stream that owns this call so we can
-  // detect a concurrent startEventStream() (e.g. setWorkspace) that aborted us
-  // and cleared the cache while we were suspended at the rehydrate await below.
-  const streamAtEntry = eventStream.abort
+  // altimate_change start — capture the stream generation that owns this call so
+  // we can detect a concurrent startEventStream() (e.g. setWorkspace) that
+  // aborted us and cleared the cache while we were suspended at the rehydrate
+  // await below. A counter (not AbortController identity) so we don't depend on
+  // startEventStream's allocation strategy.
+  const generationAtEntry = streamGeneration
   // altimate_change end
   try {
     if (sessionTraces.size >= MAX_TRACES) {
@@ -115,15 +125,17 @@ async function getOrCreateTrace(sessionID: string): Promise<Trace | null> {
     // awaiting rehydrate, this Trace belongs to a stream that's already been
     // aborted and its cache cleared. Inserting it now would resurrect an orphan
     // writer into the freshly-cleared map. Discard it and defer to whatever the
-    // live stream has for this session.
-    if (eventStream.abort !== streamAtEntry) {
+    // live stream has. The check and the set below run in the same synchronous
+    // turn (no await between them), so the insert can't race a later
+    // startEventStream — this closes the suspend-at-await hole specifically.
+    if (streamGeneration !== generationAtEntry) {
       void trace.endTrace().catch(() => {})
       return sessionTraces.get(sessionID) ?? null
     }
-    // altimate_change end
     Trace.setActive(trace)
     sessionTraces.set(sessionID, trace)
     return trace
+    // altimate_change end
   } catch {
     return null
   }
@@ -132,6 +144,10 @@ async function getOrCreateTrace(sessionID: string): Promise<Trace | null> {
 
 const startEventStream = (input: { directory: string; workspaceID?: string }) => {
   if (eventStream.abort) eventStream.abort.abort()
+  // altimate_change start — new stream generation; invalidates any in-flight
+  // getOrCreateTrace() suspended at its rehydrate await (see generationAtEntry).
+  streamGeneration++
+  // altimate_change end
   // Clear stale per-stream trace state before starting a new stream instance
   for (const [, trace] of sessionTraces) {
     void trace.endTrace().catch(() => {})

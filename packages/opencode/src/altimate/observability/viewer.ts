@@ -1247,12 +1247,12 @@ function showDetail(span) {
     var dur = (span.endTime || Date.now()) - (span.startTime||0);
     var left = (st / tTotal * 100).toFixed(2);
     var width = Math.max(0.5, dur / tTotal * 100).toFixed(2);
-    var cls = span.status === 'error' ? 'error' : e(span.kind);
+    var cls = (span.status === 'error' && !span.interrupted) ? 'error' : e(span.kind);
     var row = document.createElement('div');
     row.className = 'wf-row';
     row.setAttribute('data-idx', String(idx));
     if (span.spanId) row.setAttribute('data-span-id', span.spanId);
-    var iconCls = span.status === 'error' ? 'error' : e(span.kind);
+    var iconCls = (span.status === 'error' && !span.interrupted) ? 'error' : e(span.kind);
     var pv = getPreview(span);
     row.innerHTML = '<div class="wf-icon ' + iconCls + '">' + (icons[span.kind]||'\\u2022') + '</div>' +
       '<div class="wf-info"><div class="wf-name">' + e(span.name) + '</div>' + (pv ? '<div class="wf-preview">' + pv + '</div>' : '') + '</div>' +
@@ -1286,7 +1286,8 @@ function showDetail(span) {
       meta.push(fd(dur));
       if (span.tokens) meta.push(Number(span.tokens.total||0) + ' tok');
       if (span.cost) meta.push(fc(span.cost));
-      if (span.status === 'error') meta.push('<span style="color:var(--red)">error</span>');
+      if (span.interrupted) meta.push('<span style="color:var(--orange)">interrupted</span>');
+      else if (span.status === 'error') meta.push('<span style="color:var(--red)">error</span>');
       html += '<div class="tree-node"><div class="tree-item" data-idx="' + idx + '">';
       html += '<div class="tree-head">';
       html += '<span class="tree-type ' + e(span.kind) + '">' + e(span.kind) + '</span>';
@@ -1398,7 +1399,7 @@ function showDetail(span) {
     if (span.kind === 'session') return;
     var idx = spans.indexOf(span);
     var ts = span.startTime ? new Date(span.startTime).toISOString().slice(11,23) : '';
-    var kindCls = span.status === 'error' ? 'error' : e(span.kind);
+    var kindCls = (span.status === 'error' && !span.interrupted) ? 'error' : e(span.kind);
     html += '<div class="log-entry" data-idx="' + idx + '">';
     html += '<span class="log-ts">' + ts + '</span>';
     var logIcon = span.kind === 'generation' ? '\\u2B50' : span.kind === 'tool' ? '\\u2692' : '\\u25A0';
@@ -1408,7 +1409,8 @@ function showDetail(span) {
     if (span.tokens) html += ' <span style="color:var(--dim);font-size:11px">' + Number(span.tokens.total||0) + ' tok</span>';
     if (span.cost) html += ' <span style="color:var(--orange);font-size:11px">' + fc(span.cost) + '</span>';
     if (span.tool && span.tool.durationMs != null) html += ' <span style="color:var(--dim);font-size:11px">' + fd(span.tool.durationMs) + '</span>';
-    if (span.status === 'error') html += ' <span style="color:var(--red);font-size:11px">\\u2718 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
+    if (span.interrupted) html += ' <span style="color:var(--orange);font-size:11px">\\u26A0 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
+    else if (span.status === 'error') html += ' <span style="color:var(--red);font-size:11px">\\u2718 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
     if (span.kind === 'tool' && span.input) {
       var logPv = getPreview(span);
       if (logPv) html += '<div class="log-data" style="color:var(--cyan);opacity:0.7;max-height:none">' + logPv + '</div>';
