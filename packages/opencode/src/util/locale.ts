@@ -8,6 +8,11 @@ export namespace Locale {
     return date.toLocaleTimeString(undefined, { timeStyle: "short" })
   }
 
+  export function clockTime(input: number): string {
+    const date = new Date(input)
+    return date.toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  }
+
   export function datetime(input: number): string {
     const date = new Date(input)
     const localTime = time(input)

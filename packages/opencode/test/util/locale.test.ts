@@ -51,6 +51,21 @@ describe("Locale.duration", () => {
   })
 })
 
+describe("Locale.clockTime", () => {
+  test("renders HH:MM:SS in 24-hour form", () => {
+    // 2024-01-15T03:04:05 in the host's local time, since the helper formats local time.
+    const d = new Date(2024, 0, 15, 3, 4, 5).getTime()
+    const out = Locale.clockTime(d)
+    expect(out).toMatch(/^\d{2}:\d{2}:\d{2}$/)
+    expect(out).toBe("03:04:05")
+  })
+
+  test("zero-pads single digit components", () => {
+    const d = new Date(2024, 0, 15, 9, 0, 7).getTime()
+    expect(Locale.clockTime(d)).toBe("09:00:07")
+  })
+})
+
 describe("Locale.truncateMiddle", () => {
   test("returns original if short enough", () => {
     expect(Locale.truncateMiddle("hello", 35)).toBe("hello")
