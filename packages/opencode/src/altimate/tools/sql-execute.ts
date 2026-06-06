@@ -13,6 +13,10 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { getCache } from "../native/schema/cache"
 import * as Registry from "../native/connections/registry"
 // altimate_change end
+// altimate_change start — cost firewall: pre-execution query cost guardrail
+import { Config } from "@/config/config"
+import { formatBytes, formatCost } from "./sql-cost-estimate"
+// altimate_change end
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -36,6 +40,13 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         metadata: { queryType },
       })
     }
+    // altimate_change end
+
+    // altimate_change start — cost firewall: estimate scan cost and ask for
+    // confirmation before running queries that exceed configured budgets.
+    // Outside try/catch so a denial propagates to the framework. No-op unless
+    // a threshold is configured AND the warehouse supports estimation.
+    await enforceCostFirewall(args.query, args.warehouse, ctx)
     // altimate_change end
 
     // altimate_change start — shadow-mode pre-execution SQL validation
@@ -102,6 +113,58 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     }
   },
 })
+
+// altimate_change start — cost firewall: pre-execution query cost guardrail
+/**
+ * Estimate a query's scan cost and prompt for confirmation if it exceeds the
+ * budgets in `config.governance`. Throws (via ctx.ask denial) to abort an
+ * over-budget query. No-op when no threshold is configured, the warehouse
+ * can't estimate, or estimation fails — the query then runs normally so this
+ * never blocks legitimate work due to estimator gaps.
+ */
+async function enforceCostFirewall(query: string, warehouse: string | undefined, ctx: Tool.Context): Promise<void> {
+  const cfg = await Config.get().catch(() => undefined)
+  const governance = cfg?.governance
+  const maxCost = governance?.max_query_cost_usd
+  const maxBytes = governance?.max_bytes_scanned
+  // Disabled unless at least one threshold is set.
+  if (maxCost == null && maxBytes == null) return
+
+  let estimate
+  try {
+    estimate = await Dispatcher.call("sql.estimate_cost", {
+      sql: query,
+      warehouse,
+      cost_per_tib_usd: governance?.cost_per_tib_usd,
+    })
+  } catch {
+    // Estimation failed — fail open (run the query) rather than blocking work.
+    return
+  }
+  if (!estimate.supported) return
+
+  const overCost = maxCost != null && estimate.estimated_cost_usd != null && estimate.estimated_cost_usd > maxCost
+  const overBytes = maxBytes != null && estimate.bytes_scanned != null && estimate.bytes_scanned > maxBytes
+  if (!overCost && !overBytes) return
+
+  const reasons: string[] = []
+  if (overCost) reasons.push(`estimated cost ${formatCost(estimate.estimated_cost_usd!)} exceeds budget ${formatCost(maxCost!)}`)
+  if (overBytes) reasons.push(`estimated scan ${formatBytes(estimate.bytes_scanned!)} exceeds limit ${formatBytes(maxBytes!)}`)
+
+  // Denial throws and aborts execution; approval lets the query proceed.
+  await ctx.ask({
+    permission: "sql_execute_cost",
+    patterns: [query.slice(0, 200)],
+    always: ["*"],
+    metadata: {
+      reason: reasons.join("; "),
+      bytes_scanned: estimate.bytes_scanned,
+      estimated_cost_usd: estimate.estimated_cost_usd,
+      hint: "Consider sql_optimize to reduce scan cost before running.",
+    },
+  })
+}
+// altimate_change end
 
 // altimate_change start — pre-execution SQL validation via cached schema
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours

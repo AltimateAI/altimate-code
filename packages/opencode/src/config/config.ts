@@ -1297,6 +1297,32 @@ export namespace Config {
         })
         .optional(),
       // altimate_change end
+      // altimate_change start — cost firewall: pre-execution query cost guardrails
+      governance: z
+        .object({
+          max_query_cost_usd: z
+            .number()
+            .nonnegative()
+            .optional()
+            .describe(
+              "Cost firewall: ask for confirmation before running a query whose estimated cost (USD) exceeds this value. Requires a warehouse that supports cost estimation (e.g. BigQuery). Unset = disabled.",
+            ),
+          max_bytes_scanned: z
+            .number()
+            .nonnegative()
+            .optional()
+            .describe(
+              "Cost firewall: ask for confirmation before running a query estimated to scan more than this many bytes. Unset = disabled.",
+            ),
+          cost_per_tib_usd: z
+            .number()
+            .positive()
+            .optional()
+            .describe("USD price per TiB scanned, used to convert estimated bytes to cost (default: 6.25)."),
+        })
+        .optional()
+        .describe("Data governance guardrails applied before queries run."),
+      // altimate_change end
       experimental: z
         .object({
           disable_paste_summary: z.boolean().optional(),

@@ -19,6 +19,27 @@ export interface SqlExecuteResult {
   error?: string
 }
 
+// --- SQL Cost Estimate (cost firewall) ---
+
+export interface SqlEstimateCostParams {
+  sql: string
+  warehouse?: string
+  /** USD price per TiB scanned, used to convert bytes → cost. */
+  cost_per_tib_usd?: number
+}
+
+export interface SqlEstimateCostResult {
+  /** True when the resolved warehouse can estimate cost without executing. */
+  supported: boolean
+  warehouse_type: string
+  bytes_scanned?: number
+  estimated_cost_usd?: number
+  cost_per_tib_usd?: number
+  /** Estimation method or caveat (e.g. "BigQuery dry-run"). */
+  note?: string
+  error?: string
+}
+
 // --- SQL Analyze ---
 
 export interface SqlAnalyzeParams {
@@ -1165,6 +1186,7 @@ export interface DataDiffResult {
 
 export const BridgeMethods = {
   "sql.execute": {} as { params: SqlExecuteParams; result: SqlExecuteResult },
+  "sql.estimate_cost": {} as { params: SqlEstimateCostParams; result: SqlEstimateCostResult },
   "sql.analyze": {} as { params: SqlAnalyzeParams; result: SqlAnalyzeResult },
   "sql.optimize": {} as { params: SqlOptimizeParams; result: SqlOptimizeResult },
   "sql.translate": {} as { params: SqlTranslateParams; result: SqlTranslateResult },

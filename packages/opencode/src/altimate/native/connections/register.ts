@@ -14,6 +14,8 @@ import { runDataDiff } from "./data-diff"
 import type {
   SqlExecuteParams,
   SqlExecuteResult,
+  SqlEstimateCostParams,
+  SqlEstimateCostResult,
   SqlExplainParams,
   SqlExplainResult,
   SqlAutocompleteParams,
@@ -435,6 +437,54 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       })
     } catch {}
     return { columns: [], rows: [], row_count: 0, truncated: false, error: errorMsg } as SqlExecuteResult & { error: string }
+  }
+})
+
+// --- sql.estimate_cost (cost firewall) ---
+// Bytes in one TiB (2^40). Cost = bytes / TIB_BYTES * cost_per_tib_usd.
+const TIB_BYTES = 1_099_511_627_776
+// On-demand scan pricing defaults to BigQuery's published $6.25/TiB. Callers
+// can override per warehouse via cost_per_tib_usd.
+const DEFAULT_COST_PER_TIB_USD = 6.25
+
+register("sql.estimate_cost", async (params: SqlEstimateCostParams): Promise<SqlEstimateCostResult> => {
+  const warehouseType = getWarehouseType(params.warehouse)
+  try {
+    // Resolve the connector the same way sql.execute does (named warehouse, else first).
+    let connector
+    if (params.warehouse) {
+      connector = await Registry.get(params.warehouse)
+    } else {
+      const warehouses = Registry.list().warehouses
+      if (warehouses.length === 0) {
+        return { supported: false, warehouse_type: warehouseType, error: "No warehouse configured." }
+      }
+      connector = await Registry.get(warehouses[0].name)
+    }
+
+    if (typeof connector.estimateCost !== "function") {
+      return {
+        supported: false,
+        warehouse_type: warehouseType,
+        note: `Cost estimation is not supported for warehouse type ${JSON.stringify(warehouseType)}.`,
+      }
+    }
+
+    const estimate = await connector.estimateCost(params.sql)
+    const costPerTib = params.cost_per_tib_usd ?? DEFAULT_COST_PER_TIB_USD
+    const estimatedCost =
+      estimate.bytesScanned != null ? (estimate.bytesScanned / TIB_BYTES) * costPerTib : undefined
+
+    return {
+      supported: true,
+      warehouse_type: warehouseType,
+      bytes_scanned: estimate.bytesScanned,
+      estimated_cost_usd: estimatedCost,
+      cost_per_tib_usd: costPerTib,
+      note: estimate.note,
+    }
+  } catch (e) {
+    return { supported: false, warehouse_type: warehouseType, error: String(e) }
   }
 })
 

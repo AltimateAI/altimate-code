@@ -2,7 +2,7 @@
  * BigQuery driver using the `@google-cloud/bigquery` package.
  */
 
-import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import type { ConnectionConfig, Connector, ConnectorResult, CostEstimate, ExecuteOptions, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let BigQueryModule: any
@@ -68,6 +68,31 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         ),
         row_count: limitedRows.length,
         truncated,
+      }
+    },
+
+    // Estimate scan cost via a BigQuery dry-run. The dry-run validates and
+    // plans the query server-side and returns the exact bytes it would
+    // process, without running it or incurring charges. This is the most
+    // accurate pre-flight estimate available for any warehouse.
+    async estimateCost(sql: string): Promise<CostEstimate> {
+      const query = sql.replace(/;\s*$/, "")
+      const options: Record<string, unknown> = { query, dryRun: true }
+      if (config.dataset) {
+        options.defaultDataset = {
+          datasetId: config.dataset,
+          projectId: config.project,
+        }
+      }
+      const [job] = await client.createQueryJob(options)
+      const stats = job.metadata?.statistics ?? {}
+      // BigQuery reports total bytes processed at the statistics root and,
+      // redundantly, under statistics.query — prefer whichever is present.
+      const raw = stats.totalBytesProcessed ?? stats.query?.totalBytesProcessed
+      const bytesScanned = raw != null ? Number(raw) : undefined
+      return {
+        bytesScanned: Number.isFinite(bytesScanned) ? bytesScanned : undefined,
+        note: "BigQuery dry-run (exact bytes processed)",
       }
     },
 

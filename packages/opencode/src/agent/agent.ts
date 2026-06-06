@@ -153,6 +153,11 @@ export namespace Agent {
             question: "allow",
             plan_enter: "allow",
             sql_execute_write: "ask",
+            // altimate_change start — cost firewall: must be "ask" so the guard
+            // prompts; the inherited `"*": "allow"` default would otherwise
+            // silently approve over-budget queries.
+            sql_execute_cost: "ask",
+            // altimate_change end
           }),
           userWithSafety,
         ),
@@ -170,6 +175,7 @@ export namespace Agent {
             "*": "deny",
             // SQL read tools
             sql_execute: "allow",
+            sql_cost_estimate: "allow",
             altimate_core_validate: "allow",
             sql_analyze: "allow",
             sql_translate: "allow",
@@ -182,6 +188,10 @@ export namespace Agent {
             sql_diff: "allow",
             // SQL writes denied
             sql_execute_write: "deny",
+            // altimate_change start — cost firewall: prompt (not hard-deny) when a
+            // query exceeds the configured cost budget, so the analyst can approve.
+            sql_execute_cost: "ask",
+            // altimate_change end
             // Warehouse/schema/finops
             warehouse_list: "allow",
             warehouse_test: "allow",
