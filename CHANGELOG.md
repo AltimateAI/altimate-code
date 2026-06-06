@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Cost firewall — estimate a query's scan cost before it runs and confirm before going over budget.** A new opt-in `governance` config (`max_query_cost_usd`, `max_bytes_scanned`, `cost_per_tib_usd`) makes `sql_execute` consult a pre-execution estimate and prompt via the `sql_execute_cost` permission when a query would exceed the configured budget, with a hint to run `sql_optimize` first. Estimation uses a new optional `Connector.estimateCost()` capability — implemented for BigQuery via a dry-run (exact bytes processed, no execution and no charge) — surfaced through the `sql.estimate_cost` dispatcher method and a standalone `sql_cost_estimate` tool. Disabled by default; warehouses without estimation support skip the guard, so it never blocks work it can't price. (#906)
+
 ## [0.8.4] - 2026-06-05
 
 A trace-durability patch. Open `/traces` mid-session and you'd see a rich waterfall — then the moment the agent finished its turn the view collapsed to a single "system-prompt" span, the Summary tab's *"What was asked"* showed *"No prompt recorded"*, and the Chat tab dropped every user turn but the last. The data was genuinely gone from disk, not just hidden in the viewer. This release stops the on-disk trace from being overwritten after each turn and makes the file authoritative across worker restarts. A five-persona pre-release review drove a follow-up wording fix so a reconstructed trace isn't misread as a failed run.

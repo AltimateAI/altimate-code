@@ -8,7 +8,7 @@ Task-scoped permissions aren't just about safety — they're about **focus**. Wh
 
 There's an audit angle too. In regulated industries, prescribed tooling eliminates unnecessary audit cycles. When your tools generate SQL the same way every time, auditors can verify consistency. Change the SQL — even if the results are conceptually identical — and you trigger an investigation to prove equivalence. Deterministic tooling removes that overhead entirely.
 
-Altimate Code enforces governance at the **harness level**, not via prompt instructions the model can ignore. Four mechanisms work together:
+Altimate Code enforces governance at the **harness level**, not via prompt instructions the model can ignore. Five mechanisms work together:
 
 ## Rules
 
@@ -34,6 +34,30 @@ Every file edit is auto-formatted before it's written. This isn't optional consi
 
 [:octicons-arrow-right-24: Formatters reference](formatters.md)
 
+## Cost Firewall
+
+An agent can write a `SELECT` that scans terabytes and runs up a real warehouse bill before anyone notices. The cost firewall estimates a query's scan cost **before** it runs and asks for confirmation when it exceeds a budget you set — turning a surprise bill into an approve-or-optimize decision.
+
+It's **off by default**. Set a threshold under the top-level `governance` config to enable it:
+
+```json
+{
+  "governance": {
+    "max_query_cost_usd": 1.0,
+    "max_bytes_scanned": 53687091200,
+    "cost_per_tib_usd": 6.25
+  }
+}
+```
+
+- `max_query_cost_usd` — prompt before running a query whose estimated cost exceeds this many USD.
+- `max_bytes_scanned` — prompt before running a query estimated to scan more than this many bytes.
+- `cost_per_tib_usd` — price per TiB scanned, used to convert estimated bytes to cost (default `6.25`).
+
+When a query is over budget, `sql_execute` prompts via the `sql_execute_cost` permission with the estimate and a hint to run `sql_optimize` first. The standalone `sql_cost_estimate` tool also reports an estimate on demand without running anything.
+
+Estimates require a warehouse that supports cheap pre-flight estimation. BigQuery is supported today via a dry-run (exact bytes processed, no execution and no charge); warehouses without estimation support skip the guard, so the firewall never blocks legitimate work it can't price.
+
 ---
 
-Together, these four mechanisms mean governance is not an afterthought — it's built into every agent interaction. The harness enforces the rules so your team doesn't have to police the output.
+Together, these five mechanisms mean governance is not an afterthought — it's built into every agent interaction. The harness enforces the rules so your team doesn't have to police the output.
