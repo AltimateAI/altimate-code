@@ -7,12 +7,39 @@ import { For, Match, Switch, Show, createMemo } from "solid-js"
 
 export type DialogStatusProps = {}
 
+// altimate_change start — cost firewall: human-readable byte budget for the status panel
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "unknown"
+  if (bytes === 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 2)} ${units[i]}`
+}
+// altimate_change end
+
 export function DialogStatus() {
   const sync = useSync()
   const { theme } = useTheme()
   const dialog = useDialog()
 
   const enabledFormatters = createMemo(() => sync.data.formatter.filter((f) => f.enabled))
+
+  // altimate_change start — cost firewall budget. The SDK Config type is
+  // regenerated from the server schema at build time; read governance through
+  // a local shape so this compiles before that regen lands.
+  const governance = createMemo(
+    () =>
+      (
+        sync.data.config as {
+          governance?: { max_query_cost_usd?: number; max_bytes_scanned?: number; cost_per_tib_usd?: number }
+        }
+      ).governance,
+  )
+  const firewallEnabled = createMemo(() => {
+    const g = governance()
+    return !!g && (g.max_query_cost_usd != null || g.max_bytes_scanned != null)
+  })
+  // altimate_change end
 
   const plugins = createMemo(() => {
     const list = sync.data.config.plugin ?? []
@@ -165,6 +192,35 @@ export function DialogStatus() {
           </For>
         </box>
       </Show>
+      {/* altimate_change start — cost firewall budget */}
+      <Show when={firewallEnabled()} fallback={<text fg={theme.text}>Cost Firewall: off</text>}>
+        <box>
+          <text fg={theme.text}>Cost Firewall: on</text>
+          <Show when={governance()?.max_query_cost_usd != null}>
+            <box flexDirection="row" gap={1}>
+              <text flexShrink={0} style={{ fg: theme.success }}>
+                •
+              </text>
+              <text fg={theme.text}>
+                <b>Max cost</b>{" "}
+                <span style={{ fg: theme.textMuted }}>${governance()!.max_query_cost_usd!.toFixed(2)}/query</span>
+              </text>
+            </box>
+          </Show>
+          <Show when={governance()?.max_bytes_scanned != null}>
+            <box flexDirection="row" gap={1}>
+              <text flexShrink={0} style={{ fg: theme.success }}>
+                •
+              </text>
+              <text fg={theme.text}>
+                <b>Max scan</b>{" "}
+                <span style={{ fg: theme.textMuted }}>{formatBytes(governance()!.max_bytes_scanned!)}/query</span>
+              </text>
+            </box>
+          </Show>
+        </box>
+      </Show>
+      {/* altimate_change end */}
     </box>
   )
 }
