@@ -1,4 +1,5 @@
 import { Dispatcher } from "../native"
+import { parseManifest } from "../native/dbt/manifest"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
 
@@ -116,7 +117,10 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
     if (!manifestPromise) {
       manifestPromise = (async () => {
         try {
-          const res = await Dispatcher.call("dbt.manifest", { path: opts.manifestPath })
+          // Manifest parsing is pure TypeScript. Keep it independent from the
+          // native dispatcher registration path so a core-loading failure
+          // cannot incorrectly downgrade a valid dbt run to lint-only.
+          const res = await parseManifest({ path: opts.manifestPath })
           const models = new Map<string, ManifestModel>()
           const byName = new Map<string, ManifestModel>()
           const children = new Map<string, string[]>()
@@ -239,6 +243,10 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
   }
 
   return {
+    async manifestAvailable(): Promise<boolean> {
+      return (await loadManifest()).ok
+    },
+
     async impact(model: string): Promise<ImpactResult> {
       const mf = await loadManifest()
       if (!mf.ok) {

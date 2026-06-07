@@ -57,13 +57,38 @@ runs:
     - name: Get altimate-code version
       id: version
       shell: bash
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        # Authenticated API calls lift the unauthenticated 60 req/hr IP limit to
+        # 1,000 req/hr, so a busy org's runners don't get rate-limited into the
+        # "latest" fallback below.
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
-        VERSION=$(curl -sf https://api.github.com/repos/AltimateAI/altimate-code/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-        VERSION="${VERSION#v}" # the installer's --version expects no leading 'v'
+        set -euo pipefail
+        if [[ "${ACTION_REF:-}" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          VERSION="${BASH_REMATCH[1]}"
+        else
+          # Only attach the auth header when a token is present; the
+          # ${AUTH[@]+"${AUTH[@]}"} idiom expands to nothing on an empty array
+          # even under `set -u` (portable back to bash 3.2).
+          AUTH=()
+          [[ -n "${GITHUB_TOKEN:-}" ]] && AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+          VERSION=$(
+            curl -sf --connect-timeout 5 --max-time 15 ${AUTH[@]+"${AUTH[@]}"} \
+              https://api.github.com/repos/AltimateAI/altimate-code/releases/latest \
+              | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4 || true
+          )
+          VERSION="${VERSION#v}" # the installer's --version expects no leading 'v'
+        fi
         echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
 
     - name: Cache altimate-code
       id: cache
+      # Never cache against the floating "latest" key: a single rate-limited or
+      # offline lookup would otherwise pin whatever binary it grabbed and reuse
+      # it forever, silently ignoring later releases. A resolved semver caches
+      # normally; "latest" falls through to a fresh install each run.
+      if: steps.version.outputs.version != 'latest'
       uses: actions/cache@v4
       with:
         path: ~/.altimate/bin
@@ -107,12 +132,15 @@ runs:
             echo "::error::altimate_api_key is set but altimate_instance is empty — provide the tenant/instance name."
             exit 1
           fi
+          umask 077
           mkdir -p "$HOME/.altimate"
+          # Read the API key from the environment inside the jq program rather
+          # than passing it via --arg: argv is visible to other processes and
+          # is printed verbatim if a user enables ACTIONS_STEP_DEBUG (set -x).
           jq -nc \
             --arg url "${IN_ALT_URL:-https://api.myaltimate.com}" \
             --arg inst "$IN_ALT_INSTANCE" \
-            --arg key "$IN_ALT_KEY" \
-            '{altimateUrl:$url, altimateInstanceName:$inst, altimateApiKey:$key}' \
+            '{altimateUrl:$url, altimateInstanceName:$inst, altimateApiKey:$ENV.IN_ALT_KEY}' \
             > "$HOME/.altimate/altimate.json"
           echo "Advisory lane: hosted altimate model (tenant: $IN_ALT_INSTANCE)."
         elif [[ -n "${IN_MODEL:-}" ]]; then

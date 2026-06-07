@@ -1,5 +1,14 @@
 # dbt PR Review
 
+[**See live review PRs**](https://github.com/AltimateAI/dbt-pr-review-demo/pulls)
+·
+[**Install the GitHub App**](https://github.com/apps/altimate-code-agent/installations/new)
+
+The public demo is a zero-secret DuckDB project with open PRs for broken joins,
+removed tests, PII exposure, `SELECT *`, unsafe incremental models, and a safe
+refactor. The GitHub App handles interactive repository tasks; the automatic
+review on every pull request is installed with the Action below.
+
 AI code review specialized for dbt/SQL. `dbt-pr-review` produces a single,
 **signed** verdict on a pull request — `APPROVE`, `COMMENT`, or `REQUEST_CHANGES`
 — where every **blocking** finding is backed by a deterministic engine call, not
@@ -172,7 +181,7 @@ jobs:
         with: { fetch-depth: 0 }
       # Produce target/manifest.json for the full verdict (adapter-specific).
       - run: pip install dbt-core dbt-bigquery && dbt deps && dbt compile
-      - uses: AltimateAI/altimate-code/github/review@v1
+      - uses: AltimateAI/altimate-code/github/review@v0.8.5
         with:
           mode: comment                       # `gate` to block merges
           manifest_path: target/manifest.json
@@ -270,7 +279,7 @@ In GitHub Actions, supply the connection from a secret — both sides of the dif
 run against the **same** warehouse (base-compiled vs head-compiled SQL):
 
 ```yaml
-      - uses: AltimateAI/altimate-code/github/review@v1
+      - uses: AltimateAI/altimate-code/github/review@v0.8.5
         with:
           mode: comment
           manifest_path: target/manifest.json

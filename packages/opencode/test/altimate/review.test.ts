@@ -1079,7 +1079,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
       async equivalence() {
         return { decided: true, equivalent: false, differences: ["filter changed"], confidence: "high" }
@@ -1227,6 +1227,50 @@ describe("orchestrate", () => {
     })
     expect(env.summary.degraded).toBe(true)
     expect(["APPROVE", "COMMENT"]).toContain(env.verdict)
+  })
+
+  test("loaded manifest is not marked lint-only when a changed model is absent from it", async () => {
+    const files: ChangedFile[] = [{ path: "models/staging/new_model.sql", status: "added", diff: "+select 1\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async manifestAvailable() {
+        return true
+      },
+      async impact() {
+        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: content("select 1 as value"),
+    })
+    expect(env.summary.degraded).toBe(false)
+  })
+
+  test("manifest availability errors degrade safely instead of aborting the review", async () => {
+    const files: ChangedFile[] = [{ path: "models/staging/stg_x.sql", status: "modified", diff: "+select 1\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async manifestAvailable() {
+        throw new Error("manifest unreadable")
+      },
+      async impact() {
+        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: content("select 1 as value"),
+    })
+    expect(env.summary.degraded).toBe(true)
   })
 
   test("renderSummary + inlineComments produce marker + structured output", async () => {

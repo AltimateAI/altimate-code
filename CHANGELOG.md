@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-06-06
+
+### Fixed
+
+- **The `github/review` composite action can be downloaded by GitHub Actions again.** The release tree contained three VS Code image symlinks whose removed targets caused GitHub's action downloader to reject the entire archive before the review step started. The images are now self-contained files and a release-critical test prevents dangling links from returning.
+- **A valid dbt manifest is no longer mislabeled as a lint-only run.** Manifest availability is now checked independently from changed-model lookup, so new models and other valid manifests receive the correct full-run status.
+- **The release-version lookup is rate-limit resilient and never caches a floating `latest`.** The composite action now authenticates its GitHub release-API call with the workflow token (lifting the 60→1,000 req/hr unauthenticated limit) and skips the binary cache entirely when the version resolves to `latest`, so a single rate-limited or offline lookup can no longer pin a stale binary across all subsequent runs.
+- **Session traces survive worker restarts, concurrency, and long sessions without corruption or false alarms.** Three reliability follow-ups to the v0.8.4 trace-durability fix: reconstructed in-flight spans are marked `interrupted` and render with an amber "⚠" instead of red (and are excluded from the session error count) so a restart isn't misread as a failure (#901); `getOrCreateTrace` no longer resurrects a `Trace` into a cache that a concurrent stream switch already cleared, preventing an orphan writer under a dead stream (#902); and the on-disk `ses_<id>.json` projection is bounded to `MAX_SERIALIZED_SPANS` (default 5000, override via `ALTIMATE_TRACE_MAX_SPANS`), keeping head + tail and eliding the middle so long sessions no longer grow the file without bound or pay O(n²) write cost (#903).
+
+### Added
+
+- **Direct GitHub onboarding and a live dbt review demo.** The GitHub App installer now opens GitHub's repository-selection screen directly, and the README/docs link to the public `dbt-pr-review-demo` pull requests.
+
+### Security
+
+- **The hosted Altimate API key is no longer placed on the `jq` process arg list.** The credential write reads the key from the environment inside the `jq` program, keeping it out of `argv` (which is visible to other processes and printed verbatim when `ACTIONS_STEP_DEBUG` enables `set -x`).
+
 ## [0.8.4] - 2026-06-05
 
 A trace-durability patch. Open `/traces` mid-session and you'd see a rich waterfall — then the moment the agent finished its turn the view collapsed to a single "system-prompt" span, the Summary tab's *"What was asked"* showed *"No prompt recorded"*, and the Chat tab dropped every user turn but the last. The data was genuinely gone from disk, not just hidden in the viewer. This release stops the on-disk trace from being overwritten after each turn and makes the file authoritative across worker restarts. A five-persona pre-release review drove a follow-up wording fix so a reconstructed trace isn't misread as a failed run.
