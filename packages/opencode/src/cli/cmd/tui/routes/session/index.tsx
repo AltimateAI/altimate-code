@@ -7,6 +7,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -33,6 +34,7 @@ import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type { AssistantMessage, Part, ToolPart, UserMessage, TextPart, ReasoningPart } from "@opencode-ai/sdk/v2"
 import { useLocal } from "@tui/context/local"
 import { Locale } from "@/util/locale"
+import { SLOW_TOOL_MS, formatElapsed, type Elapsed } from "./timing"
 import type { Tool } from "@/tool/tool"
 import type { ReadTool } from "@/tool/read"
 import type { WriteTool } from "@/tool/write"
@@ -152,7 +154,7 @@ export function Session() {
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
   const [showThinking, setShowThinking] = kv.signal("thinking_visibility", true)
-  const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
+  const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "show")
   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
   const [showAssistantMetadata, setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
   const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", true)
@@ -615,12 +617,12 @@ export function Session() {
       },
     },
     {
-      title: showTimestamps() ? "Hide timestamps" : "Show timestamps",
+      title: showTimestamps() ? "Hide tool timing" : "Show tool timing",
       value: "session.toggle.timestamps",
       category: "Session",
       slash: {
         name: "timestamps",
-        aliases: ["toggle-timestamps"],
+        aliases: ["toggle-timestamps", "timing", "toggle-timing"],
       },
       onSelect: (dialog) => {
         setTimestamps((prev) => (prev === "show" ? "hide" : "show"))
@@ -1690,6 +1692,25 @@ function ToolTitle(props: { fallback: string; when: any; icon: string; children:
   )
 }
 
+// Elapsed time (ms) for a tool part. Returns undefined for "pending" (no start yet),
+// ticks at 1Hz while "running", freezes to end-start on "completed"/"error".
+function useElapsed(part: () => ToolPart | undefined) {
+  const [now, setNow] = createSignal(Date.now())
+  createEffect(() => {
+    if (part()?.state.status !== "running") return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    onCleanup(() => clearInterval(id))
+  })
+  return createMemo<Elapsed | undefined>(() => {
+    const p = part()
+    if (!p) return undefined
+    const s = p.state
+    if (s.status === "pending") return undefined
+    if (s.status === "running") return { start: s.time.start, ms: now() - s.time.start, running: true }
+    return { start: s.time.start, ms: s.time.end - s.time.start, running: false }
+  })
+}
+
 function InlineTool(props: {
   icon: string
   iconColor?: RGBA
@@ -1728,6 +1749,14 @@ function InlineTool(props: {
       error()?.includes("specified a rule") ||
       error()?.includes("user dismissed"),
   )
+
+  const elapsed = useElapsed(() => props.part)
+  const timingVisible = createMemo(() => ctx.showTimestamps() && !!elapsed())
+  const timingColor = createMemo(() => {
+    const e = elapsed()
+    if (e?.running && e.ms >= SLOW_TOOL_MS) return theme.warning
+    return theme.textMuted
+  })
 
   return (
     <box
@@ -1771,6 +1800,12 @@ function InlineTool(props: {
             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
               <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
             </Show>
+            <Show when={timingVisible()}>
+              <span style={{ fg: timingColor() }}>
+                {" · "}
+                {formatElapsed(elapsed()!)}
+              </span>
+            </Show>
           </text>
         </Match>
       </Switch>
@@ -1788,10 +1823,18 @@ function BlockTool(props: {
   part?: ToolPart
   spinner?: boolean
 }) {
+  const ctx = use()
   const { theme } = useTheme()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
+  const elapsed = useElapsed(() => props.part)
+  const timingVisible = createMemo(() => ctx.showTimestamps() && !!elapsed())
+  const timingColor = createMemo(() => {
+    const e = elapsed()
+    if (e?.running && e.ms >= SLOW_TOOL_MS) return theme.warning
+    return theme.textMuted
+  })
   return (
     <box
       border={["left"]}
@@ -1814,11 +1857,19 @@ function BlockTool(props: {
         when={props.spinner}
         fallback={
           <text paddingLeft={3} fg={theme.textMuted}>
-            {props.title}
+            <span>{props.title}</span>
+            <Show when={timingVisible()}>
+              <span style={{ fg: timingColor() }}>
+                {"  "}
+                {formatElapsed(elapsed()!)}
+              </span>
+            </Show>
           </text>
         }
       >
-        <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
+        <Spinner color={theme.textMuted}>
+          {props.title.replace(/^# /, "") + (timingVisible() ? `  ${formatElapsed(elapsed()!)}` : "")}
+        </Spinner>
       </Show>
       {props.children}
       <Show when={error()}>
