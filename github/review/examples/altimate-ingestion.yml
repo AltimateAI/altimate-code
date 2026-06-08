@@ -64,7 +64,7 @@ jobs:
       - name: altimate dbt PR review
         # Pin to the altimate-code release that ships `altimate review`
         # (the first release cut after the dbt-pr-review feature merges).
-        uses: AltimateAI/altimate-code/github/review@v0.8.0
+        uses: AltimateAI/altimate-code/github/review@v0.8.5
         with:
           mode: comment # start non-blocking; switch to `gate` once trusted
           manifest_path: target/manifest.json

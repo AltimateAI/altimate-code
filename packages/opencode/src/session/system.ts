@@ -10,6 +10,9 @@ import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_ANTHROPIC_WITHOUT_TODO from "./prompt/qwen.txt"
 import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
+// altimate_change start — shared family→vendor classifier (see #888 J1)
+import { familyVendor } from "../provider/family"
+// altimate_change end
 
 import PROMPT_CODEX from "./prompt/codex_header.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
@@ -29,6 +32,29 @@ export namespace SystemPrompt {
   }
 
   export function provider(model: Provider.Model) {
+    // altimate_change start — route altimate-backend gateway models by `family`
+    // before the api.id string-match fallthrough. The gateway's model.api.id is
+    // the opaque alias `altimate-default` (kept stable for backward compat —
+    // users persist it in model.json), which matches none of the patterns below.
+    // Use the shared `familyVendor` classifier so specific family values
+    // (`claude-sonnet`, `gemini-pro`, `gpt-codex`, …) map to the right vendor.
+    // An exact `family === "anthropic"` check would silently fall through to
+    // PROMPT_CODEX on any altimate-backend gateway path that exposes a Claude
+    // model with the specific family — recreating the #887 misrouting class
+    // this PR is meant to fix (see #888 J1).
+    // Unknown vendors default to PROMPT_CODEX because the gateway is registered
+    // as `@ai-sdk/openai-compatible`.
+    if (model.providerID === "altimate-backend") {
+      switch (familyVendor(model.family)) {
+        case "anthropic":
+          return [PROMPT_ANTHROPIC]
+        case "gemini":
+          return [PROMPT_GEMINI]
+        default:
+          return [PROMPT_CODEX]
+      }
+    }
+    // altimate_change end
     if (model.api.id.includes("gpt-5")) return [PROMPT_CODEX]
     if (model.api.id.includes("gpt-") || model.api.id.includes("o1") || model.api.id.includes("o3"))
       return [PROMPT_BEAST]

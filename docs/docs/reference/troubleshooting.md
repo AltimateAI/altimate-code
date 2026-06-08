@@ -125,6 +125,15 @@ As of v0.7.1, altimate-code surfaces the **inner provider message** instead of d
    ```
 3. No Python installation is required. All tools run natively in TypeScript.
 
+### Plan mode refuses a benign request, or stops without exploring
+
+**Symptoms:** In plan mode (`--agent plan`), the agent replies *"I'm sorry, but I cannot assist with that request"* to an ordinary planning ask, or you see the warning *"the `plan` agent … stopped without calling any tools."* Most common on the hosted `altimate-default` model (and other non-Anthropic models).
+
+**Solutions:**
+
+1. **Upgrade to v0.8.3 or later.** This was a known bug: altimate-code's internal plan instructions were delivered in a way that non-Anthropic models (GPT-5.x, Gemini, …) could mistake for a prompt-injection attempt and refuse. v0.8.3 delivers them as proper system-role messages, eliminating the refusal.
+2. If you still see the agent stop without exploring, follow the in-product warning's recoveries: reply asking it to investigate first (`read`/`grep`/`glob`/`explore`), rephrase the request more concretely, or — if it keeps refusing — `/model` to a tier more eager to explore (e.g. Claude Sonnet/Opus).
+
 ### Warehouse Connection Failed
 
 **Symptoms:** "Connection refused", authentication errors, or "No warehouse configured".

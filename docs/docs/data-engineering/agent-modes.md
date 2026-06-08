@@ -142,6 +142,8 @@ altimate --agent plan
 
 Plan mode restricts the agent to reading files and editing plan files only. No SQL, no bash, no file modifications. Use this to outline an approach before switching to builder to execute it.
 
+The plan agent investigates the repo before drafting: it makes at least one read-only call (`read`/`grep`/`glob`/`explore`) to ground the plan in your actual code, rather than guessing from the prompt alone. For a genuinely trivial, fully-specified change it will say so and skip straight to the plan.
+
 ### Two-step workflow
 
 Plan mode uses a two-step approach to keep you in control:

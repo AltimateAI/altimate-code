@@ -48,12 +48,18 @@ const eventStream = {
 }
 
 // altimate_change start — trace: per-session traces (shared consumer)
+// All per-session trace state + event handling lives in TraceConsumer so the
+// headless `serve` entrypoint (VS Code chat panel) gets identical behaviour.
+// reset() bumps the consumer's stream generation (the equivalent of the old
+// inline cache-clear) to invalidate any in-flight rehydrate.
 const traceConsumer = new TraceConsumer()
 // altimate_change end
 
 const startEventStream = (input: { directory: string; workspaceID?: string }) => {
   if (eventStream.abort) eventStream.abort.abort()
-  // Clear stale per-stream trace state before starting a new stream instance
+  // Clear stale per-stream trace state before starting a new stream instance.
+  // reset() also bumps the consumer's stream generation, invalidating any
+  // in-flight getOrCreateTrace() suspended at its rehydrate await.
   traceConsumer.reset()
 
   const abort = new AbortController()
@@ -95,7 +101,7 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
 
       for await (const event of events.stream) {
         // altimate_change start — trace: feed events to per-session trace
-        traceConsumer.handleEvent(event)
+        await traceConsumer.handleEvent(event)
         // altimate_change end
 
         Rpc.emit("event", event as Event)
@@ -111,6 +117,16 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
     })
   })
 }
+
+// altimate_change start — track the last workspaceID used to start the event stream
+// so `setWorkspace` becomes idempotent on unchanged values. SolidJS effects in the
+// session route can fire on every `session()` signal change (including agent-finish);
+// without this guard, every fire propagates to `startEventStream` which clears
+// `sessionTraces`, which causes the next snapshot from a freshly-created Trace to
+// overwrite the rich on-disk trace with a near-empty one. Symptom: waterfall view
+// collapses to the system-prompt span after every turn.
+let currentWorkspaceID: string | undefined
+// altimate_change end
 
 startEventStream({ directory: process.cwd() })
 
@@ -157,6 +173,10 @@ export const rpc = {
     await Instance.disposeAll()
   },
   async setWorkspace(input: { workspaceID?: string }) {
+    // altimate_change start — idempotency guard; see currentWorkspaceID comment above
+    if (input.workspaceID === currentWorkspaceID) return
+    currentWorkspaceID = input.workspaceID
+    // altimate_change end
     startEventStream({ directory: process.cwd(), workspaceID: input.workspaceID })
   },
   async shutdown() {

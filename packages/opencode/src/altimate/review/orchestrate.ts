@@ -112,6 +112,8 @@ export interface CheckResult {
 
 /** High-level engine surface the orchestrator depends on. */
 export interface ReviewRunner {
+  /** True when the configured dbt manifest loaded, independent of model lookup. */
+  manifestAvailable?(): Promise<boolean>
   impact(model: string): Promise<ImpactResult>
   grade(sql: string, dialect: string): Promise<GradeResult>
   check(sql: string, dialect: string, baseSql?: string): Promise<CheckResult>
@@ -1002,6 +1004,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const modelFiles = reviewable.filter((f) => f.kind === "model_sql" || f.kind === "python_model")
   const ctxByPath = new Map<string, ModelContext>()
   let anyManifest = false
+  if (input.runner.manifestAvailable) {
+    anyManifest = await input.runner.manifestAvailable().catch(() => false)
+  }
   await Promise.all(
     modelFiles.map(async (file) => {
       const model = modelNameFromPath(file.path)

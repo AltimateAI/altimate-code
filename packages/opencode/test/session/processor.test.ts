@@ -474,11 +474,19 @@ describe("plan-agent no-tool-generation detection", () => {
     modelID: string
     providerID: string
     tokensOutput: number
+    /**
+     * Whether the conversation history (streamInput.messages) contains any prior
+     * assistant tool-call content. Mirrors the source check at processor.ts that
+     * compensates for `sessionToolCallsMade` being per-step (SessionProcessor.create
+     * is called per-step by loop()).
+     */
+    priorToolCallsInHistory?: boolean
   }): { event: Telemetry.Event | null; warningEmitted: boolean } {
+    const sessionHasPriorToolCalls = opts.sessionToolCallsMade > 0 || opts.priorToolCallsInHistory === true
     if (
       opts.agent === "plan" &&
       opts.finishReason === "stop" &&
-      opts.sessionToolCallsMade === 0 &&
+      !sessionHasPriorToolCalls &&
       !opts.planNoToolWarningEmitted
     ) {
       return {
@@ -529,6 +537,24 @@ describe("plan-agent no-tool-generation detection", () => {
       agent: "plan",
       finishReason: "stop",
       sessionToolCallsMade: 3,
+      planNoToolWarningEmitted: false,
+    })
+    expect(result.event).toBeNull()
+    expect(result.warningEmitted).toBe(false)
+  })
+
+  // Regression guard: SessionProcessor.create() is called per-step by loop(),
+  // so sessionToolCallsMade is per-step in practice. A multi-step plan-mode
+  // session that runs many tools and then produces a final text-only step
+  // would false-positive without also consulting the conversation history.
+  // See processor.ts comment block.
+  test("does not fire on final text-only step when prior steps used tools", () => {
+    const result = simulateFinishStep({
+      ...baseOpts,
+      agent: "plan",
+      finishReason: "stop",
+      sessionToolCallsMade: 0, // resets each step — final text-only step is 0
+      priorToolCallsInHistory: true, // earlier steps populated tool-call parts
       planNoToolWarningEmitted: false,
     })
     expect(result.event).toBeNull()

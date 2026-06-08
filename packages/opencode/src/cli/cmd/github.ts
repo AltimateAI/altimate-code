@@ -141,6 +141,7 @@ type IssueQueryResponse = {
 const AGENT_USERNAME = "altimate-code-agent[bot]"
 const AGENT_REACTION = "eyes"
 const WORKFLOW_FILE = ".github/workflows/altimate-code.yml"
+export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/altimate-code-agent/installations/new"
 // altimate_change end
 
 // Event categories for routing
@@ -333,7 +334,7 @@ export const GithubInstallCommand = cmd({
 
             // Open browser
             // altimate_change start — upstream_fix: GitHub App slug is altimate-code-agent
-            const url = "https://github.com/apps/altimate-code-agent"
+            const url = GITHUB_APP_INSTALL_URL
             // altimate_change end
             const command =
               process.platform === "darwin"

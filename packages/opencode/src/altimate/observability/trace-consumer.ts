@@ -1,15 +1,26 @@
 /**
  * Shared event-stream → trace consumer.
  *
- * Feeds bus events (message.updated, message.part.updated, session.updated,
- * session.status) into per-session Trace instances so every front-end that
- * observes the event stream writes the same trace files to
- * ~/.local/share/altimate-code/traces/.
+ * Feeds bus events (message.updated, message.part.updated, session.updated)
+ * into per-session Trace instances so every front-end that observes the event
+ * stream writes the same trace files to ~/.local/share/altimate-code/traces/.
  *
  * Extracted from cli/cmd/tui/worker.ts so the headless server
  * (`altimate serve`, used by the VS Code "Altimate Code" chat panel) produces
  * traces too — previously only the terminal entrypoints (TUI and `run`)
  * instantiated a tracer, and chat sessions were never traced.
+ *
+ * The per-event logic here is a 1:1 port of the worker's inline handling so
+ * both front-ends behave identically:
+ *   - traces are NOT finalized on `session.status: idle` — idle fires after
+ *     every turn, not at session end; finalization happens on flush()
+ *     (shutdown) and on MAX_TRACES eviction. Long-lived sessions keep their
+ *     Trace in cache across turns.
+ *   - cache-miss re-creation rehydrates the rich on-disk trace
+ *     (`rehydrateFromFile`) instead of starting fresh and clobbering it.
+ *   - a monotonic stream generation guards getOrCreateTrace against a
+ *     concurrent reset() (the consumer's equivalent of the worker's
+ *     startEventStream cache-clear) tearing the cache out mid-await.
  *
  * Consumers:
  *   - cli/cmd/tui/worker.ts — feeds events from its own SDK event loop
@@ -25,19 +36,6 @@ import { Trace, FileExporter, HttpExporter, type TraceExporter } from "./tracing
 
 const MAX_TRACES = 100
 
-/**
- * How long to wait after `session.status: idle` before finalizing a trace.
- *
- * Sessions emit trailing events after going idle — e.g. the user message is
- * re-published with its generated `summary` once title generation completes.
- * Finalizing immediately on idle would delete the trace from the map, and
- * the straggler would then lazily re-create an EMPTY trace for the same
- * sessionID whose finalization overwrites the rich `<sessionId>.json` file.
- * Any event arriving during the grace window is absorbed into the live
- * trace and pushes the finalization back.
- */
-const FINALIZE_GRACE_MS = 2_000
-
 /** Minimal structural view of a bus event — narrowed at each read site. */
 interface BusEventLike {
   type?: string
@@ -48,33 +46,28 @@ export class TraceConsumer {
   private sessionTraces = new Map<string, Trace>()
   // Per-session user message IDs (cleaned up on session end)
   private sessionUserMsgIds = new Map<string, Set<string>>()
-  // Sessions that went idle and are waiting out the finalize grace window
-  private pendingEnd = new Map<string, ReturnType<typeof setTimeout>>()
+  // Monotonic stream generation. Bumped on every reset() so an in-flight
+  // getOrCreateTrace() can detect that its owning stream was torn down while
+  // it was suspended at the rehydrate await. Keyed on a counter rather than
+  // any object identity so the guard doesn't depend on caller behaviour.
+  private streamGeneration = 0
 
   // Cached tracing config — loaded once at first use
   private configLoaded = false
   private enabled = true
   private exporters: TraceExporter[] | undefined
   private maxFiles: number | undefined
-  private finalizeGraceMs = FINALIZE_GRACE_MS
 
   /**
    * Optional overrides bypass config loading entirely — used by tests to
-   * inject a FileExporter pointed at a temp directory and shrink the
-   * finalize grace window.
+   * inject a FileExporter pointed at a temp directory.
    */
-  constructor(overrides?: {
-    exporters?: TraceExporter[]
-    maxFiles?: number
-    enabled?: boolean
-    finalizeGraceMs?: number
-  }) {
+  constructor(overrides?: { exporters?: TraceExporter[]; maxFiles?: number; enabled?: boolean }) {
     if (overrides) {
       this.configLoaded = true
       this.enabled = overrides.enabled ?? true
       this.exporters = overrides.exporters
       this.maxFiles = overrides.maxFiles
-      if (overrides.finalizeGraceMs !== undefined) this.finalizeGraceMs = overrides.finalizeGraceMs
     }
   }
 
@@ -102,9 +95,13 @@ export class TraceConsumer {
     }
   }
 
-  private getOrCreateTrace(sessionID: string): Trace | null {
+  private async getOrCreateTrace(sessionID: string): Promise<Trace | null> {
     if (!sessionID || !this.enabled) return null
     if (this.sessionTraces.has(sessionID)) return this.sessionTraces.get(sessionID)!
+    // Capture the stream generation that owns this call so we can detect a
+    // concurrent reset() that cleared the cache while we were suspended at the
+    // rehydrate await below.
+    const generationAtEntry = this.streamGeneration
     try {
       if (this.sessionTraces.size >= MAX_TRACES) {
         const oldest = this.sessionTraces.keys().next().value
@@ -116,17 +113,28 @@ export class TraceConsumer {
             .catch(() => {})
           this.sessionTraces.delete(oldest)
           this.sessionUserMsgIds.delete(oldest)
-          const pendingTimer = this.pendingEnd.get(oldest)
-          if (pendingTimer) {
-            clearTimeout(pendingTimer)
-            this.pendingEnd.delete(oldest)
-          }
         }
       }
       const trace = this.exporters
         ? Trace.withExporters([...this.exporters], { maxFiles: this.maxFiles })
         : Trace.create()
-      trace.startTrace(sessionID, {})
+      // Prefer disk-rehydration on cache miss for an existing session (worker
+      // restart, MAX_TRACES eviction, post-turn re-creation). startTrace would
+      // push a fresh root span into empty `this.spans` and the immediate
+      // snapshot would clobber the rich on-disk file.
+      if (!(await trace.rehydrateFromFile(sessionID))) {
+        trace.startTrace(sessionID, {})
+      }
+      // If a reset() replaced our stream while we were awaiting rehydrate, this
+      // Trace belongs to a stream that's already torn down and its cache
+      // cleared. Inserting it now would resurrect an orphan writer into the
+      // freshly-cleared map. Discard it and defer to the live stream. The check
+      // and the set below run in the same synchronous turn (no await between),
+      // so the insert can't race a later reset().
+      if (this.streamGeneration !== generationAtEntry) {
+        void trace.endTrace().catch(() => {})
+        return this.sessionTraces.get(sessionID) ?? null
+      }
       Trace.setActive(trace)
       this.sessionTraces.set(sessionID, trace)
       return trace
@@ -135,40 +143,10 @@ export class TraceConsumer {
     }
   }
 
-  /**
-   * Schedule (or push back) finalization of a session's trace. Fires after
-   * the grace window unless another event for the session arrives first.
-   */
-  private scheduleEnd(sessionID: string) {
-    const existing = this.pendingEnd.get(sessionID)
-    if (existing) clearTimeout(existing)
-    this.pendingEnd.set(
-      sessionID,
-      setTimeout(() => {
-        this.pendingEnd.delete(sessionID)
-        const trace = this.sessionTraces.get(sessionID)
-        if (trace) {
-          void trace.endTrace().catch(() => {})
-          this.sessionTraces.delete(sessionID)
-          this.sessionUserMsgIds.delete(sessionID)
-        }
-      }, this.finalizeGraceMs),
-    )
-  }
-
   /** Feed one bus event into the per-session traces. Never throws. */
-  handleEvent(event: unknown) {
+  async handleEvent(event: unknown): Promise<void> {
     try {
       const e = event as BusEventLike
-      // Any activity for a session that is waiting out the finalize grace
-      // window pushes the finalization back — trailing events (e.g. the
-      // user message re-published with its generated summary) are absorbed
-      // into the live trace instead of re-creating an empty one.
-      {
-        const props = e.properties as Record<string, any> | undefined
-        const sid = props?.sessionID ?? props?.info?.sessionID ?? props?.part?.sessionID ?? props?.info?.id
-        if (typeof sid === "string" && this.pendingEnd.has(sid)) this.scheduleEnd(sid)
-      }
       if (e.type === "message.updated") {
         const info = e.properties?.info as Record<string, any> | undefined
         // Resolve sessionID: use info.sessionID directly, or fall back to
@@ -187,7 +165,7 @@ export class TraceConsumer {
           // Create trace eagerly on user message (arrives before part events)
           const trace =
             this.sessionTraces.get(resolvedSessionID) ??
-            (info.role === "user" ? this.getOrCreateTrace(resolvedSessionID) : null)
+            (info.role === "user" ? await this.getOrCreateTrace(resolvedSessionID) : null)
           if (info.role === "user") {
             if (info.id) {
               if (!this.sessionUserMsgIds.has(resolvedSessionID))
@@ -200,7 +178,7 @@ export class TraceConsumer {
             }
           }
           if (info.role === "assistant") {
-            const r = trace ?? this.getOrCreateTrace(resolvedSessionID)
+            const r = trace ?? (await this.getOrCreateTrace(resolvedSessionID))
             r?.enrichFromAssistant({
               modelID: info.modelID,
               providerID: info.providerID,
@@ -214,20 +192,50 @@ export class TraceConsumer {
         const part = e.properties?.part as Record<string, any> | undefined
         if (part) {
           // Create trace on first event for this session (lazy creation)
-          const trace = this.sessionTraces.get(part.sessionID) ?? this.getOrCreateTrace(part.sessionID)
+          const trace = this.sessionTraces.get(part.sessionID) ?? (await this.getOrCreateTrace(part.sessionID))
           if (trace) {
             if (part.type === "step-start") trace.logStepStart(part as Parameters<Trace["logStepStart"]>[0])
             if (part.type === "step-finish") trace.logStepFinish(part as Parameters<Trace["logStepFinish"]>[0])
-            if (part.type === "text" && part.time?.end) {
-              if (part.messageID && this.sessionUserMsgIds.get(part.sessionID)?.has(part.messageID)) {
-                // This is user prompt text — capture as title/prompt
+            // altimate_change start — split the user-vs-assistant text routes.
+            // User text parts arrive without `time.end` set (it's a meaningful
+            // concept only for processing-end of assistant chunks), so the old
+            // `&& part.time?.end` gate dropped the prompt entirely. We trust
+            // `sessionUserMsgIds.has(messageID)` as the user-text signal and
+            // call `setPrompt(text)` only — never `setTitle` — to avoid racing
+            // the auto-generated title from `session.updated` (Path C).
+            if (part.type === "text") {
+              // altimate_change start — skip synthetic / ignored text parts.
+              // `Session.createUserMessage` (prompt.ts) attaches many `synthetic: true`
+              // text parts to the user message — MCP resource banners, decoded file
+              // contents, retry/reminder text, plan-mode reminders, agent-handoff
+              // tags. They all share the user's `messageID` so they would otherwise
+              // pass the `sessionUserMsgIds` check below and override `metadata.prompt`
+              // with the LAST synthetic blob (typically file content) and render one
+              // fake "▶ You" bubble per synthetic part in the chat tab. The synthetic
+              // and ignored flags exist precisely to mark non-authored content; this
+              // is exactly the place to consult them. We skip silently rather than
+              // `continue`-ing the event-loop iteration because the outer loop still
+              // needs to forward the event downstream via `Rpc.emit`.
+              const isAuthoredText = !part.synthetic && !part.ignored
+              // altimate_change end
+              if (isAuthoredText && part.messageID && this.sessionUserMsgIds.get(part.sessionID)?.has(part.messageID)) {
                 const text = String(part.text || "")
-                if (text) trace.setTitle(text.slice(0, 80), text)
-              } else {
-                // This is assistant response text
+                if (text) {
+                  trace.setPrompt(text)
+                  // altimate_change start — record each user message as a span
+                  // so the chat tab can render multi-turn conversations.
+                  // Without a span, the viewer can only display `metadata.prompt`
+                  // (singular) and every subsequent user message is silently
+                  // dropped from the conversation rendering.
+                  trace.logUserMessage(text)
+                  // altimate_change end
+                }
+              } else if (isAuthoredText && part.time?.end) {
+                // Assistant response text (only counts when processing-end fires)
                 trace.logText(part as Parameters<Trace["logText"]>[0])
               }
             }
+            // altimate_change end
             if (part.type === "tool" && (part.state?.status === "completed" || part.state?.status === "error")) {
               trace.logToolCall(part as Parameters<Trace["logToolCall"]>[0])
             }
@@ -242,29 +250,26 @@ export class TraceConsumer {
           if (trace) trace.setTitle(String(info.title))
         }
       }
-      // Finalize trace when session reaches idle (completed) — after the
-      // grace window, so post-idle stragglers don't clobber the trace file.
-      if (e.type === "session.status") {
-        const props = e.properties as Record<string, any> | undefined
-        const sid = props?.sessionID
-        const status = props?.status?.type
-        if (status === "idle" && sid && this.sessionTraces.has(sid)) {
-          this.scheduleEnd(sid)
-        }
-      }
+      // DO NOT finalize the trace on session.status=idle. `idle` fires after
+      // every turn (busy → idle), not at session end. Finalizing per-turn would
+      // treat each turn as session end and the next turn's events would hit a
+      // cache miss; getOrCreateTrace rehydrates from disk as defense in depth,
+      // but the correct behaviour is to keep the Trace live across turns and
+      // finalize only on flush() (shutdown) and MAX_TRACES eviction.
     } catch {
       // Trace must never interrupt event forwarding
     }
   }
 
   /**
-   * End all in-flight traces fire-and-forget and clear state.
-   * Used before (re)starting an event stream so stale per-stream state
-   * doesn't leak across stream instances.
+   * Bump the stream generation and end all in-flight traces fire-and-forget,
+   * then clear state. The worker calls this at the top of every
+   * startEventStream so stale per-stream state doesn't leak across stream
+   * instances; the generation bump invalidates any getOrCreateTrace suspended
+   * at its rehydrate await.
    */
   reset() {
-    for (const [, timer] of this.pendingEnd) clearTimeout(timer)
-    this.pendingEnd.clear()
+    this.streamGeneration++
     for (const [, trace] of this.sessionTraces) {
       void trace.endTrace().catch(() => {})
     }
@@ -274,8 +279,6 @@ export class TraceConsumer {
 
   /** End all in-flight traces and wait for them. Used on shutdown. */
   async flush() {
-    for (const [, timer] of this.pendingEnd) clearTimeout(timer)
-    this.pendingEnd.clear()
     for (const [, trace] of this.sessionTraces) {
       await trace.endTrace().catch(() => {})
     }
@@ -328,7 +331,7 @@ export function subscribeTraceConsumer(input: { directory: string }): { stop: ()
       }
 
       for await (const event of events.stream) {
-        consumer.handleEvent(event)
+        await consumer.handleEvent(event)
       }
 
       if (!signal.aborted) {

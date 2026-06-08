@@ -733,7 +733,45 @@ function isUpstreamShared(file: string, config: MergeConfig): boolean {
 }
 
 // altimate_change start — exported for unit testing
-export function parseDiffForMarkerWarnings(file: string, diffOutput: string): MarkerWarning[] {
+/**
+ * Compute the set of 1-based line numbers in `content` that are covered by an
+ * `altimate_change start … altimate_change end` block (the marker lines
+ * themselves are covered too). A depth counter handles nested blocks, so an
+ * inner start/end pair inside an outer one is tracked correctly.
+ *
+ * This is derived from the FULL file, independent of any diff context window —
+ * which is the whole point. The diff-based tracker in
+ * `parseDiffForMarkerWarnings` only sees ±N context lines around a change, so a
+ * line modified deep inside a large pre-existing marked block (its `start`
+ * marker outside the hunk) looks unmarked and false-positives. Passing the
+ * full-file coverage in lets the parser suppress those false positives.
+ */
+export function computeMarkedLines(content: string): Set<number> {
+  const marked = new Set<number>()
+  const lines = content.split("\n")
+  let depth = 0
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.includes("altimate_change start")) {
+      depth++
+      marked.add(i + 1)
+      continue
+    }
+    if (line.includes("altimate_change end")) {
+      marked.add(i + 1)
+      depth = Math.max(0, depth - 1)
+      continue
+    }
+    if (depth > 0) marked.add(i + 1)
+  }
+  return marked
+}
+
+export function parseDiffForMarkerWarnings(
+  file: string,
+  diffOutput: string,
+  markedLines?: Set<number>,
+): MarkerWarning[] {
   const warnings: MarkerWarning[] = []
   if (!diffOutput.trim()) return warnings
 
@@ -790,7 +828,12 @@ export function parseDiffForMarkerWarnings(file: string, diffOutput: string): Ma
       if (content.startsWith("import ")) continue
       if (content.startsWith("export ")) continue
 
-      if (!inMarkerBlock) {
+      // A line is covered if either the in-hunk tracker saw its enclosing
+      // `start` marker, OR the full-file coverage map (when provided) says this
+      // line sits inside a marked block. The full-file map is what rescues
+      // changes whose `start` marker lives outside the diff's context window.
+      const coveredByFullFile = markedLines?.has(currentLine) ?? false
+      if (!inMarkerBlock && !coveredByFullFile) {
         if (!hasNewCode) {
           hasNewCode = true
           newCodeStart = currentLine
@@ -827,7 +870,22 @@ function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
     return []
   }
 
-  return parseDiffForMarkerWarnings(file, diffOutput)
+  // Coverage from the FULL post-change file, so a change deep inside a
+  // pre-existing marked block isn't false-flagged just because its `start`
+  // marker fell outside the diff's ±5-line context window. The "new" side is
+  // HEAD when diffing against a base, or the working tree otherwise — matching
+  // the side the `+`/context line numbers in the diff refer to.
+  let markedLines: Set<number> | undefined
+  try {
+    const newContent = base
+      ? execSync(`git show HEAD:"${file}"`, { cwd: root, encoding: "utf-8" })
+      : require("fs").readFileSync(require("path").join(root, file), "utf-8")
+    markedLines = computeMarkedLines(newContent)
+  } catch {
+    markedLines = undefined
+  }
+
+  return parseDiffForMarkerWarnings(file, diffOutput, markedLines)
 }
 
 function runMarkerCheck(config: MergeConfig, base?: string, strict?: boolean): number {

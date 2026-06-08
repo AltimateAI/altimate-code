@@ -165,7 +165,7 @@ describe("invariant: event-type literals match between producer and consumers", 
     // (also used by `serve`) — the literals live there now.
     {
       file: "altimate/observability/trace-consumer.ts",
-      types: ["message.updated", "message.part.updated", "session.updated", "session.status"],
+      types: ["message.updated", "message.part.updated", "session.updated"],
     },
     { file: "cli/cmd/run.ts", types: ["message.updated", "message.part.updated"] },
     { file: "acp/agent.ts", types: ["message.part.updated"] },
