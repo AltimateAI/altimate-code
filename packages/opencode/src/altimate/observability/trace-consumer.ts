@@ -91,9 +91,12 @@ export class TraceConsumer {
       this.exporters = exporters
       this.maxFiles = tc?.maxFiles
     } catch (error) {
-      // Config failure should not prevent the host (TUI/serve) from working
-      this.enabled = false
-      Log.Default.debug("[tracing] failed to load config, disabling", {
+      // Config failure must not prevent the host (TUI/serve) from tracing:
+      // leave `enabled` true and `exporters` undefined so getOrCreateTrace
+      // falls back to Trace.create()'s default FileExporter. Warn so the
+      // fallback isn't silent (the original concern was the lack of any signal,
+      // not the fallback itself).
+      Log.Default.warn("[tracing] failed to load config, using default tracer", {
         error: error instanceof Error ? error.message : String(error),
       })
     }
@@ -139,7 +142,11 @@ export class TraceConsumer {
         void trace.endTrace().catch(() => {})
         return this.sessionTraces.get(sessionID) ?? null
       }
-      Trace.setActive(trace)
+      // Intentionally NOT calling Trace.setActive() here: it sets a single
+      // process-global active trace, which is meaningless (and a footgun) for a
+      // multi-session consumer where serve runs many sessions concurrently —
+      // whichever session's event arrived last would win. Per-session routing
+      // is via the sessionTraces map; nothing reads Trace.active on this path.
       this.sessionTraces.set(sessionID, trace)
       return trace
     } catch (error) {

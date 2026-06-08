@@ -37,16 +37,19 @@ export const ServeCommand = cmd({
     // left un-finalized (status never "completed", no summary/narrative).
     // Mirrors the SIGINT/SIGTERM/beforeExit pattern in cli/cmd/run.ts.
     let isShuttingDown = false
-    const shutdown = async () => {
+    const shutdown = async (code: number) => {
       if (isShuttingDown) return
       isShuttingDown = true
       await traceSub.stop()
       await server.stop()
-      process.exit(0)
+      process.exit(code)
     }
-    process.once("SIGINT", () => void shutdown())
-    process.once("SIGTERM", () => void shutdown())
-    process.once("beforeExit", () => void shutdown())
+    // Exit with signal-conventional codes (128 + signal number) so a
+    // SIGINT/SIGTERM isn't masked as a successful (0) run. beforeExit is a
+    // normal drain, so it exits 0. Matches cli/cmd/run.ts.
+    process.once("SIGINT", () => void shutdown(130))
+    process.once("SIGTERM", () => void shutdown(143))
+    process.once("beforeExit", () => void shutdown(0))
     // altimate_change end
 
     await new Promise(() => {})
