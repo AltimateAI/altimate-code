@@ -57,10 +57,12 @@ const traceConsumer = new TraceConsumer()
 
 const startEventStream = (input: { directory: string; workspaceID?: string }) => {
   if (eventStream.abort) eventStream.abort.abort()
-  // Clear stale per-stream trace state before starting a new stream instance.
-  // reset() also bumps the consumer's stream generation, invalidating any
-  // in-flight getOrCreateTrace() suspended at its rehydrate await.
+  // altimate_change start — trace: clear stale per-stream trace state before
+  // starting a new stream instance. reset() also bumps the consumer's stream
+  // generation, invalidating any in-flight getOrCreateTrace() suspended at its
+  // rehydrate await.
   traceConsumer.reset()
+  // altimate_change end
 
   const abort = new AbortController()
   eventStream.abort = abort
