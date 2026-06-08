@@ -90,8 +90,12 @@ export class TraceConsumer {
       }
       this.exporters = exporters
       this.maxFiles = tc?.maxFiles
-    } catch {
+    } catch (error) {
       // Config failure should not prevent the host (TUI/serve) from working
+      this.enabled = false
+      Log.Default.debug("[tracing] failed to load config, disabling", {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 
@@ -138,7 +142,10 @@ export class TraceConsumer {
       Trace.setActive(trace)
       this.sessionTraces.set(sessionID, trace)
       return trace
-    } catch {
+    } catch (error) {
+      Log.Default.debug("[tracing] getOrCreateTrace failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
       return null
     }
   }
@@ -250,14 +257,32 @@ export class TraceConsumer {
           if (trace) trace.setTitle(String(info.title))
         }
       }
+      // Finalize and evict on a real session-end signal. `session.deleted` is a
+      // true end-of-session event (unlike `idle`, which fires every turn), so
+      // it is the correct place to flush the trace and release per-session
+      // state. Without this, in a long-lived `serve` process the trace and its
+      // sessionUserMsgIds set live until MAX_TRACES eviction (or never, for
+      // <100 sessions), since reset()/flush() don't fire during normal serve.
+      if (e.type === "session.deleted") {
+        const info = e.properties?.info as Record<string, any> | undefined
+        if (info?.id) {
+          const trace = this.sessionTraces.get(info.id)
+          if (trace) void trace.endTrace().catch(() => {})
+          this.sessionTraces.delete(info.id)
+          this.sessionUserMsgIds.delete(info.id)
+        }
+      }
       // DO NOT finalize the trace on session.status=idle. `idle` fires after
       // every turn (busy → idle), not at session end. Finalizing per-turn would
       // treat each turn as session end and the next turn's events would hit a
       // cache miss; getOrCreateTrace rehydrates from disk as defense in depth,
       // but the correct behaviour is to keep the Trace live across turns and
       // finalize only on flush() (shutdown) and MAX_TRACES eviction.
-    } catch {
-      // Trace must never interrupt event forwarding
+    } catch (error) {
+      // Trace must never interrupt event forwarding — log at debug only.
+      Log.Default.debug("[tracing] handleEvent error", {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 
@@ -295,50 +320,103 @@ export class TraceConsumer {
  *
  * Trace failures must never affect the server, so every step is best-effort.
  */
-export function subscribeTraceConsumer(input: { directory: string }): { stop: () => Promise<void> } {
-  const consumer = new TraceConsumer()
+/** One subscription's event stream. */
+export interface TraceEventSource {
+  stream: AsyncIterable<unknown>
+}
+
+export interface TraceSubscribeOptions {
+  /** Test seam: inject the consumer (e.g. with a temp-dir FileExporter). */
+  consumer?: TraceConsumer
+  /**
+   * Test seam: provide the event source. Resolves to a stream of bus events,
+   * or `undefined` to trigger a backoff+retry. Defaults to the in-process SDK
+   * subscription. Called once per (re)connect with the shutdown signal.
+   */
+  subscribe?: (signal: AbortSignal) => Promise<TraceEventSource | undefined>
+}
+
+export function subscribeTraceConsumer(
+  input: { directory: string },
+  options?: TraceSubscribeOptions,
+): { stop: () => Promise<void> } {
+  const consumer = options?.consumer ?? new TraceConsumer()
   const abort = new AbortController()
   const signal = abort.signal
 
-  // In-process fetch against the default app — same pattern as the TUI
-  // worker. The Bus is process-wide, so events published by sessions served
-  // by the TCP listener arrive on this subscription too.
-  const fetchFn = (async (fetchInput: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(fetchInput, init)
-    const password = Flag.OPENCODE_SERVER_PASSWORD
-    if (password) {
-      const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
-      request.headers.set("Authorization", `Basic ${btoa(`${username}:${password}`)}`)
-    }
-    return Server.Default().fetch(request)
-  }) as typeof globalThis.fetch
+  // Default event source: the in-process SDK subscription — same pattern as the
+  // TUI worker. The Bus is process-wide, so events published by sessions served
+  // by the TCP listener arrive on this subscription too. The SDK client is
+  // built once; `subscribe` is invoked per (re)connect.
+  const subscribe =
+    options?.subscribe ??
+    (() => {
+      const fetchFn = (async (fetchInput: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(fetchInput, init)
+        const password = Flag.OPENCODE_SERVER_PASSWORD
+        if (password) {
+          const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
+          request.headers.set("Authorization", `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`)
+        }
+        return Server.Default().fetch(request)
+      }) as typeof globalThis.fetch
 
-  const sdk = createOpencodeClient({
-    baseUrl: "http://altimate-code.internal",
-    directory: input.directory,
-    fetch: fetchFn,
-    signal,
-  })
+      const sdk = createOpencodeClient({
+        baseUrl: "http://altimate-code.internal",
+        directory: input.directory,
+        fetch: fetchFn,
+        signal,
+      })
 
-  ;(async () => {
+      return (sig: AbortSignal): Promise<TraceEventSource | undefined> =>
+        Promise.resolve(sdk.event.subscribe({}, { signal: sig }))
+          .then((r) => r as unknown as TraceEventSource)
+          .catch(() => undefined)
+    })()
+
+  // Abortable sleep so a pending reconnect-backoff doesn't delay shutdown.
+  const BASE_BACKOFF_MS = 250
+  const MAX_BACKOFF_MS = 30_000
+  const backoffSleep = (ms: number) => sleep(ms, undefined, { signal }).catch(() => {})
+
+  const loopPromise = (async () => {
     await consumer.loadConfig()
+    // Exponential backoff on repeated failure so a durably-down stream doesn't
+    // hot-loop; reset to the base delay after a successful subscription.
+    let backoff = BASE_BACKOFF_MS
     while (!signal.aborted) {
-      const events = await Promise.resolve(sdk.event.subscribe({}, { signal })).catch(() => undefined)
+      const events = await subscribe(signal).catch(() => undefined)
 
       if (!events) {
-        await sleep(250)
+        await backoffSleep(backoff)
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS)
         continue
       }
+      backoff = BASE_BACKOFF_MS
 
-      for await (const event of events.stream) {
-        await consumer.handleEvent(event)
+      // The try/catch MUST sit inside the while loop: a mid-stream throw
+      // (network disconnect, server hiccup) would otherwise escape to the
+      // outer .catch and kill the loop permanently for the server's lifetime.
+      try {
+        for await (const event of events.stream) {
+          await consumer.handleEvent(event)
+        }
+      } catch (err) {
+        if (!signal.aborted) {
+          Log.Default.warn("[tracing] trace event stream disconnected, reconnecting", {
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
 
       if (!signal.aborted) {
-        await sleep(250)
+        await backoffSleep(backoff)
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS)
       }
     }
-  })().catch((error) => {
+  })()
+
+  loopPromise.catch((error: unknown) => {
     Log.Default.error("trace event stream error", {
       error: error instanceof Error ? error.message : error,
     })
@@ -346,7 +424,12 @@ export function subscribeTraceConsumer(input: { directory: string }): { stop: ()
 
   return {
     stop: async () => {
+      // Stop accepting new work, then DRAIN the loop before flushing so we
+      // don't finalize traces while a handleEvent() is still mid-event.
+      // Bounded by a timeout so an unresponsive stream can't hang shutdown —
+      // flush() finalizes whatever is in the cache either way.
       abort.abort()
+      await Promise.race([loopPromise.catch(() => {}), sleep(1000)])
       await consumer.flush()
     },
   }

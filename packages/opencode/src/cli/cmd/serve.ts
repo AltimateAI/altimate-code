@@ -29,10 +29,26 @@ export const ServeCommand = cmd({
     // serve mode. Subscribe the shared trace consumer to the in-process
     // event stream so serve sessions produce the same trace files as the
     // terminal entrypoints.
-    subscribeTraceConsumer({ directory: process.cwd() })
+    const traceSub = subscribeTraceConsumer({ directory: process.cwd() })
+
+    // Finalize traces on shutdown. `serve` blocks forever on the promise below
+    // and otherwise dies abruptly on signal, so without these handlers the
+    // consumer's stop()/flush()/endTrace() never runs and serve traces are
+    // left un-finalized (status never "completed", no summary/narrative).
+    // Mirrors the SIGINT/SIGTERM/beforeExit pattern in cli/cmd/run.ts.
+    let isShuttingDown = false
+    const shutdown = async () => {
+      if (isShuttingDown) return
+      isShuttingDown = true
+      await traceSub.stop()
+      await server.stop()
+      process.exit(0)
+    }
+    process.once("SIGINT", () => void shutdown())
+    process.once("SIGTERM", () => void shutdown())
+    process.once("beforeExit", () => void shutdown())
     // altimate_change end
 
     await new Promise(() => {})
-    await server.stop()
   },
 })

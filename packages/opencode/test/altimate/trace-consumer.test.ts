@@ -18,7 +18,11 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import os from "os"
-import { TraceConsumer } from "../../src/altimate/observability/trace-consumer"
+import {
+  TraceConsumer,
+  subscribeTraceConsumer,
+  type TraceEventSource,
+} from "../../src/altimate/observability/trace-consumer"
 import { FileExporter, type TraceFile } from "../../src/altimate/observability/tracing"
 
 let tmpDir: string
@@ -45,6 +49,51 @@ async function feed(consumer: TraceConsumer, events: unknown[]) {
   for (const event of events) {
     await consumer.handleEvent(event)
   }
+}
+
+/**
+ * Poll until `predicate` holds, instead of a fixed sleep — snapshot/endTrace
+ * writes are async + debounced, so a fixed delay is flaky under CI load.
+ */
+async function waitFor<T>(read: () => Promise<T>, predicate: (v: T) => boolean, timeoutMs = 5000): Promise<T> {
+  const start = Date.now()
+  for (;;) {
+    try {
+      const v = await read()
+      if (predicate(v)) return v
+    } catch {
+      // not ready yet (e.g. file not written) — keep polling
+    }
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor: condition not met within timeout")
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+/**
+ * Build a single-use event source for the `subscribeTraceConsumer` test seam.
+ * Optionally throws mid-stream (to exercise reconnect) or holds the stream open
+ * until the shutdown signal fires (to exercise stop()/drain).
+ */
+function eventSource(
+  events: unknown[],
+  opts?: { throwAfter?: number; holdUntilAbort?: AbortSignal },
+): TraceEventSource {
+  async function* gen() {
+    let i = 0
+    for (const e of events) {
+      yield e
+      i++
+      if (opts?.throwAfter !== undefined && i >= opts.throwAfter) throw new Error("simulated stream disconnect")
+    }
+    const sig = opts?.holdUntilAbort
+    if (sig) {
+      await new Promise<void>((resolve) => {
+        if (sig.aborted) return resolve()
+        sig.addEventListener("abort", () => resolve(), { once: true })
+      })
+    }
+  }
+  return { stream: gen() }
 }
 
 /** Event sequence mirroring what a real session emits over the bus. */
@@ -260,10 +309,95 @@ describe("TraceConsumer", () => {
     const consumer = makeConsumer()
     await feed(consumer, sessionEvents("ses_consumer_reset"))
     consumer.reset()
-    // reset finalizes fire-and-forget; give the async endTrace a tick.
-    await new Promise((r) => setTimeout(r, 100))
-
-    const trace = await readTraceFile("ses_consumer_reset")
+    // reset finalizes fire-and-forget; poll for the write instead of a fixed
+    // sleep so the test isn't flaky under CI load.
+    const trace = await waitFor(
+      () => readTraceFile("ses_consumer_reset"),
+      (t) => t.spans.some((s) => s.kind === "tool"),
+    )
     expect(trace.spans.some((s) => s.kind === "tool")).toBe(true)
+  })
+
+  test("incremental snapshots land on disk BEFORE any flush (the serve path)", async () => {
+    // serve never calls flush() during normal operation — it relies entirely
+    // on the incremental snapshots written as events arrive. This is the path
+    // every other test skips by flushing first.
+    const consumer = makeConsumer()
+    await feed(consumer, sessionEvents("ses_consumer_noflush"))
+    const trace = await waitFor(
+      () => readTraceFile("ses_consumer_noflush"),
+      (t) => t.spans.some((s) => s.kind === "tool"),
+    )
+    expect(trace.summary.totalToolCalls).toBe(1)
+    expect(trace.metadata.prompt).toBe("list my files")
+  })
+
+  test("session.deleted finalizes the trace and releases per-session state", async () => {
+    const consumer = makeConsumer()
+    await feed(consumer, sessionEvents("ses_consumer_del"))
+    await consumer.handleEvent({ type: "session.deleted", properties: { info: { id: "ses_consumer_del" } } })
+    // endTrace is fire-and-forget on session.deleted; poll for finalization.
+    const trace = await waitFor(
+      () => readTraceFile("ses_consumer_del"),
+      (t) => t.summary.status === "completed",
+    )
+    expect(trace.summary.status).toBe("completed")
+    // State is already released, so a later flush must be a harmless no-op.
+    await consumer.flush()
+  })
+})
+
+describe("subscribeTraceConsumer (serve integration)", () => {
+  test("stop() drains the loop and flushes — serve traces are finalized", async () => {
+    const consumer = makeConsumer()
+    let calls = 0
+    const sub = subscribeTraceConsumer(
+      { directory: tmpDir },
+      {
+        consumer,
+        subscribe: async (signal) => {
+          calls++
+          // Deliver a full session on the first connect, then hold the stream
+          // open until shutdown so stop() exercises the drain path.
+          return eventSource(calls === 1 ? sessionEvents("ses_sub_stop") : [], { holdUntilAbort: signal })
+        },
+      },
+    )
+    // Wait until the session's events have been consumed (snapshot on disk).
+    await waitFor(
+      () => readTraceFile("ses_sub_stop"),
+      (t) => t.spans.some((s) => s.kind === "tool"),
+    )
+    // Pre-stop the trace is not yet finalized; stop() must flush → "completed".
+    await sub.stop()
+    const trace = await readTraceFile("ses_sub_stop")
+    expect(trace.summary.status).toBe("completed")
+    expect(trace.summary.totalToolCalls).toBe(1)
+  })
+
+  test("a mid-stream throw does not kill the loop — it reconnects", async () => {
+    const consumer = makeConsumer()
+    let calls = 0
+    const sub = subscribeTraceConsumer(
+      { directory: tmpDir },
+      {
+        consumer,
+        subscribe: async (signal) => {
+          calls++
+          // 1st connect throws mid-stream; 2nd connect delivers a different
+          // session in full. If the throw killed the loop, session B's file
+          // would never appear and the wait below would time out.
+          if (calls === 1) return eventSource(sessionEvents("ses_sub_A"), { throwAfter: 2 })
+          return eventSource(sessionEvents("ses_sub_B"), { holdUntilAbort: signal })
+        },
+      },
+    )
+    const trace = await waitFor(
+      () => readTraceFile("ses_sub_B"),
+      (t) => t.summary.totalToolCalls >= 1,
+    )
+    expect(trace.summary.totalToolCalls).toBe(1)
+    expect(calls).toBeGreaterThanOrEqual(2)
+    await sub.stop()
   })
 })
