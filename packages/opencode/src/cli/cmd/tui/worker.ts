@@ -84,8 +84,9 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
   })
 
   ;(async () => {
-    // Load tracing config once before processing events
+    // altimate_change start — trace: load tracing config once before processing events
     await traceConsumer.loadConfig()
+    // altimate_change end
     while (!signal.aborted) {
       const events = await Promise.resolve(
         sdk.event.subscribe(
