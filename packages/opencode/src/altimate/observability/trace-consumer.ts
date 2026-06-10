@@ -58,6 +58,12 @@ export class TraceConsumer {
   private exporters: TraceExporter[] | undefined
   private maxFiles: number | undefined
 
+  getTraceDirectory(): string | undefined {
+    const fileExporter = this.exporters?.find((exp) => exp instanceof FileExporter)
+
+    return fileExporter instanceof FileExporter ? fileExporter.getDir() : undefined
+  }
+
   /**
    * Optional overrides bypass config loading entirely — used by tests to
    * inject a FileExporter pointed at a temp directory.
@@ -394,6 +400,15 @@ export function subscribeTraceConsumer(
 
   const loopPromise = (async () => {
     await consumer.loadConfig()
+
+    const traceDir = consumer.getTraceDirectory()
+
+    if (traceDir) {
+      Log.Default.info("[tracing] session traces", {
+        directory: traceDir,
+      })
+    }
+
     // Exponential backoff on repeated failure so a durably-down stream doesn't
     // hot-loop; reset to the base delay after a successful subscription.
     let backoff = BASE_BACKOFF_MS
