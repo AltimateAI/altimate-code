@@ -222,11 +222,16 @@ export async function execDbtShow(sql: string, limit?: number) {
   if (limit !== undefined) args.push("--limit", String(limit))
 
   let lines: Record<string, unknown>[]
+  // AI-7082: capture the run() error so we can bubble the real dbt failure
+  // up if all parse tiers fail; the generic "Could not parse" alone misleads
+  // callers into treating structural project errors as transient.
+  let primaryRunError: ExecFileError | undefined
   try {
     const { stdout } = await run(args)
     lines = parseJsonLines(stdout)
-  } catch {
-    lines = []
+  } catch (e) {
+    primaryRunError = e as ExecFileError
+    lines = parseJsonLines(primaryRunError.stdout ?? "")
   }
 
   // --- Tier 1: known field paths ---
@@ -281,6 +286,7 @@ export async function execDbtShow(sql: string, limit?: number) {
   }
 
   // --- Tier 3: plain text fallback (ASCII table) ---
+  let plainRunError: ExecFileError | undefined
   try {
     const plainArgs = ["show", "--inline", sql]
     if (limit !== undefined) plainArgs.push("--limit", String(limit))
@@ -295,13 +301,64 @@ export async function execDbtShow(sql: string, limit?: number) {
         compiledSql: sql,
       }
     }
-  } catch {
-    // Plain text dbt show also failed — fall through to error below
+  } catch (e) {
+    plainRunError = e as ExecFileError
+  }
+
+  // AI-7082: if either run() rejected, dbt actually crashed — surface the real
+  // error instead of the generic "Could not parse" message.
+  const realError = extractDbtError(lines, primaryRunError, plainRunError)
+  if (realError) {
+    throw new Error(`dbt show failed: ${realError}`)
   }
 
   throw new Error(
     "Could not parse dbt show output in any format (JSON, heuristic, or plain text). " +
       `Got ${lines.length} JSON lines.`,
+  )
+}
+
+/** AI-7082: shape of an execFile rejection — carries stdout/stderr alongside message. */
+interface ExecFileError extends Error {
+  stdout?: string
+  stderr?: string
+  code?: number | string
+}
+
+/**
+ * AI-7082: pick the best human-readable error from a failed `dbt show` invocation.
+ *
+ * Preference order:
+ *   1. A structured `level: "error"` event in the JSON log (dbt's own error msg).
+ *   2. Stderr from the JSON-mode run.
+ *   3. Stderr from the plain-text-mode run.
+ *   4. The exception message itself.
+ *
+ * Returns undefined if neither run rejected — caller falls back to the generic
+ * "Could not parse" message, which is correct when dbt exited 0 but emitted
+ * something we can't decode.
+ */
+function extractDbtError(
+  lines: Record<string, unknown>[],
+  primary?: ExecFileError,
+  plain?: ExecFileError,
+): string | undefined {
+  if (!primary && !plain) return undefined
+
+  const errorEvent = lines.find(
+    (l: any) => l.info?.level === "error" || l.level === "error",
+  ) as any
+  const structuredMsg = errorEvent?.info?.msg ?? errorEvent?.msg
+
+  const primaryStderr = primary?.stderr?.toString().trim()
+  const plainStderr = plain?.stderr?.toString().trim()
+
+  return (
+    (typeof structuredMsg === "string" && structuredMsg.length > 0 ? structuredMsg : undefined) ??
+    (primaryStderr && primaryStderr.length > 0 ? primaryStderr : undefined) ??
+    (plainStderr && plainStderr.length > 0 ? plainStderr : undefined) ??
+    primary?.message ??
+    plain?.message
   )
 }
 
