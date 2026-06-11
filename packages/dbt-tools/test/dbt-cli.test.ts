@@ -150,9 +150,9 @@ describe("execDbtShow", () => {
     await expect(execDbtShow("SELECT 1")).rejects.toThrow("Could not parse dbt show output in any format")
   })
 
-  // --- AI-7082: bubble real dbt error instead of generic "Could not parse" ---
+  // --- Bubble real dbt error instead of generic "Could not parse" ---
 
-  test("AI-7082: surfaces real dbt stderr when run fails", async () => {
+  test("surfaces real dbt stderr when run fails", async () => {
     mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
       const err: any = new Error("Command failed: dbt show --inline ...")
       err.code = 1
@@ -166,7 +166,7 @@ describe("execDbtShow", () => {
     await expect(execDbtShow("SELECT 1")).rejects.toThrow(/dbt show failed/)
   })
 
-  test("AI-7082: prefers structured error event in JSON log over raw stderr", async () => {
+  test("prefers structured error event in JSON log over raw stderr", async () => {
     const errorLog = JSON.stringify({
       info: {
         level: "error",
@@ -184,7 +184,7 @@ describe("execDbtShow", () => {
     await expect(execDbtShow("SELECT 1")).rejects.toThrow(/Compilation Error.*Model 'foo'/)
   })
 
-  test("AI-7082: does not surface generic 'Could not parse' when dbt actually crashed", async () => {
+  test("does not surface generic 'Could not parse' when dbt actually crashed", async () => {
     mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
       const err: any = new Error("Command failed")
       err.code = 2
@@ -196,7 +196,7 @@ describe("execDbtShow", () => {
     await expect(execDbtShow("SELECT 1")).rejects.not.toThrow(/Could not parse dbt show output/)
   })
 
-  test("AI-7082: preserves generic 'Could not parse' when dbt exited 0 but output unparseable", async () => {
+  test("preserves generic 'Could not parse' when dbt exited 0 but output unparseable", async () => {
     // Existing behavior — dbt didn't crash, we just couldn't decode its output.
     mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
       cb(null, "some unparseable output", "")
@@ -205,7 +205,7 @@ describe("execDbtShow", () => {
     await expect(execDbtShow("SELECT 1")).rejects.toThrow("Could not parse dbt show output in any format")
   })
 
-  test("AI-7082: falls back to error message when stderr is empty", async () => {
+  test("falls back to error message when stderr is empty", async () => {
     mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
       const err: any = new Error("spawn ENOENT")
       err.code = "ENOENT"

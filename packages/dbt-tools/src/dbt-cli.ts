@@ -222,9 +222,9 @@ export async function execDbtShow(sql: string, limit?: number) {
   if (limit !== undefined) args.push("--limit", String(limit))
 
   let lines: Record<string, unknown>[]
-  // AI-7082: capture the run() error so we can bubble the real dbt failure
-  // up if all parse tiers fail; the generic "Could not parse" alone misleads
-  // callers into treating structural project errors as transient.
+  // Capture the run() error so we can bubble the real dbt failure up if all
+  // parse tiers fail; the generic "Could not parse" alone misleads callers
+  // into treating structural project errors as transient.
   let primaryRunError: ExecFileError | undefined
   try {
     const { stdout } = await run(args)
@@ -305,8 +305,8 @@ export async function execDbtShow(sql: string, limit?: number) {
     plainRunError = e as ExecFileError
   }
 
-  // AI-7082: if either run() rejected, dbt actually crashed — surface the real
-  // error instead of the generic "Could not parse" message.
+  // If either run() rejected, dbt actually crashed — surface the real error
+  // instead of the generic "Could not parse" message.
   const realError = extractDbtError(lines, primaryRunError, plainRunError)
   if (realError) {
     throw new Error(`dbt show failed: ${realError}`)
@@ -318,7 +318,7 @@ export async function execDbtShow(sql: string, limit?: number) {
   )
 }
 
-/** AI-7082: shape of an execFile rejection — carries stdout/stderr alongside message. */
+/** Shape of an execFile rejection — carries stdout/stderr alongside message. */
 interface ExecFileError extends Error {
   stdout?: string
   stderr?: string
@@ -326,7 +326,7 @@ interface ExecFileError extends Error {
 }
 
 /**
- * AI-7082: pick the best human-readable error from a failed `dbt show` invocation.
+ * Pick the best human-readable error from a failed `dbt show` invocation.
  *
  * Preference order:
  *   1. A structured `level: "error"` event in the JSON log (dbt's own error msg).
