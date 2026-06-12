@@ -22,6 +22,9 @@ import path from "path"
 import { Global } from "../../global"
 import { randomUUIDv7 } from "bun"
 import { Log } from "../../util/log"
+// altimate_change start — trace augmentation: procedural classifier
+import { annotateToolSpan, annotateSession } from "./annotator"
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Trace data types — v2 schema
@@ -841,12 +844,14 @@ export class Trace {
           status: "completed"
           input: Record<string, unknown>
           output: string
+          metadata?: Record<string, unknown>
           time: { start: number; end: number }
         }
       | {
           status: "error"
           input: Record<string, unknown>
           error: string
+          metadata?: Record<string, unknown>
           time: { start: number; end: number }
         }
   }) {
@@ -874,6 +879,71 @@ export class Trace {
         safeInput = { _serialization_error: "Input contained circular references or non-serializable data" }
       }
 
+      // altimate_change start — trace augmentation: lift structured tool metadata
+      // (carried via ToolStateCompleted/Error.metadata in message-v2) onto the
+      // span. Only keys matching the `de.` semantic-convention prefix are
+      // promoted — other metadata stays internal to the tool framework
+      // (e.g., `truncated`, `outputPath`, `findings`, `success`).
+      //
+      // This is the "metadata channel": tools surface structured fields by
+      // setting `de.*` keys on their returned metadata object, without ever
+      // importing the observability layer.
+      //
+      // Values must be JSON-compatible (Date / BigInt / class instances are
+      // silently dropped or stringified, matching the trace file's serialization
+      // contract). Per-value and total byte caps below prevent runaway payloads
+      // from ballooning snapshots and HTTP exports — both truncation layers
+      // upstream (`tool.ts` output truncation, `tracing.ts` 10 KB output slice)
+      // operate on `output: string`, not on `metadata`.
+      const ATTR_VALUE_MAX_BYTES = 10_000
+      const ATTR_TOTAL_MAX_BYTES = 32_000
+      const spanAttributes: Record<string, unknown> = {}
+      let totalBytes = 0
+
+      // Layer 1: tool-provided structured metadata (high fidelity — driver
+      // values, parser output). Filtered to the de.* prefix.
+      const rawMetadata = state.metadata
+      if (rawMetadata && typeof rawMetadata === "object") {
+        for (const [k, v] of Object.entries(rawMetadata)) {
+          if (typeof k !== "string" || !k.startsWith("de.") || v === undefined) continue
+          try {
+            const serialized = JSON.stringify(v)
+            if (serialized === undefined) continue
+            if (serialized.length > ATTR_VALUE_MAX_BYTES) continue
+            if (totalBytes + serialized.length > ATTR_TOTAL_MAX_BYTES) continue
+            // Store original value (matches setSpanAttributes() at line ~1135 for
+            // consistent overwrite semantics if both paths target the same key).
+            spanAttributes[k] = v
+            totalBytes += serialized.length
+          } catch {
+            // Bad metadata value must never break the tracer
+          }
+        }
+      }
+
+      // Layer 2: derived classification from (name, input, output). Best-effort
+      // procedural — taxonomy lookup, bash intent, dbt layer from path, etc.
+      // Tool-provided metadata (Layer 1) wins on conflicts.
+      try {
+        const derived = annotateToolSpan(toolName, safeInput, isError ? errorStr : outputStr)
+        for (const [k, v] of Object.entries(derived)) {
+          if (v === undefined || k in spanAttributes) continue
+          try {
+            const serialized = JSON.stringify(v)
+            if (serialized === undefined) continue
+            if (serialized.length > ATTR_VALUE_MAX_BYTES) continue
+            if (totalBytes + serialized.length > ATTR_TOTAL_MAX_BYTES) continue
+            spanAttributes[k] = v
+            totalBytes += serialized.length
+          } catch {
+            // best-effort
+          }
+        }
+      } catch {
+        // Annotator must never break the tracer
+      }
+      // altimate_change end
+
       this.spans.push({
         spanId: randomUUIDv7(),
         parentSpanId: this.currentGenerationSpanId ?? this.rootSpanId,
@@ -889,6 +959,7 @@ export class Trace {
         },
         input: safeInput,
         output: isError ? { error: errorStr } : outputStr.slice(0, 10000),
+        ...(Object.keys(spanAttributes).length > 0 && { attributes: spanAttributes }),
       })
       this.toolCallCount++
 
@@ -1233,6 +1304,34 @@ export class Trace {
 
     const trace = this.buildTraceFile(error)
 
+    // altimate_change start — trace augmentation: session-level rollup.
+    // Pure-function classifier attaches workflow / outcome / artifacts / env
+    // attributes to the root (session) span. Runs over the snapshotted trace
+    // (post buildTraceFile) so it sees the final state. Best-effort.
+    //
+    // Merge semantics: derived attributes fill only ABSENT keys. Anything an
+    // upstream caller set explicitly via setSpanAttributes(..., "session")
+    // wins — Layer 1 (caller-provided) > Layer 2 (derived), same rule as
+    // logToolCall.
+    try {
+      const sessionAttrs = annotateSession(trace)
+      if (Object.keys(sessionAttrs).length > 0) {
+        const rootSnapshotSpan = trace.spans.find((s) => s.spanId === this.rootSpanId)
+        if (rootSnapshotSpan) {
+          rootSnapshotSpan.attributes = { ...sessionAttrs, ...(rootSnapshotSpan.attributes ?? {}) }
+        }
+        // Also mirror onto the live root span so a subsequent snapshot()
+        // (e.g., via flushSync) sees the same attributes.
+        const liveRoot = this.spans.find((s) => s.spanId === this.rootSpanId)
+        if (liveRoot) {
+          liveRoot.attributes = { ...sessionAttrs, ...(liveRoot.attributes ?? {}) }
+        }
+      }
+    } catch {
+      // Session annotation must never break the trace
+    }
+    // altimate_change end
+
     // altimate_change start — trace: post-session summary (narrative, loops, topTools)
     try {
       // Top tools by call count
@@ -1346,6 +1445,24 @@ export class Trace {
       }
       const trace = this.buildTraceFile(error || "Process exited before trace completed")
       trace.summary.status = "crashed"
+
+      // altimate_change start — trace augmentation: session-level rollup on crash.
+      // Without this, crashed/interrupted sessions get per-tool attributes but
+      // no root rollup (workflow/outcome/artifacts/env). Pure-function call,
+      // best-effort, must never throw.
+      try {
+        const sessionAttrs = annotateSession(trace)
+        if (Object.keys(sessionAttrs).length > 0) {
+          const rootSnapshotSpan = trace.spans.find((s) => s.spanId === this.rootSpanId)
+          if (rootSnapshotSpan) {
+            rootSnapshotSpan.attributes = { ...sessionAttrs, ...(rootSnapshotSpan.attributes ?? {}) }
+          }
+        }
+      } catch {
+        // best-effort
+      }
+      // altimate_change end
+
       const safeId = (this.sessionId || "unknown").replace(/[/\\.:]/g, "_") || "unknown"
       const filePath = path.join(this.snapshotDir, `${safeId}.json`)
       // Must be synchronous — async writes won't complete before signal handler exits

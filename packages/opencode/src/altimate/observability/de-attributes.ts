@@ -56,6 +56,8 @@ export const DE_WAREHOUSE = {
   ROWS_RETURNED: "de.warehouse.rows_returned",
   /** Rows affected (INSERT/UPDATE/DELETE) */
   ROWS_AFFECTED: "de.warehouse.rows_affected",
+  /** Total rows in a table (from schema_inspect, not query result) */
+  ROWS_TOTAL: "de.warehouse.rows_total",
   /** Query ID from the warehouse (for linking to warehouse query history) */
   QUERY_ID: "de.warehouse.query_id",
   /** Whether the query hit a warehouse cache (Snowflake result cache, BQ cache) */
@@ -102,6 +104,8 @@ export const DE_SQL = {
 export const DE_DBT = {
   /** dbt command: run, test, build, compile, seed, snapshot */
   COMMAND: "de.dbt.command",
+  /** dbt project layer derived from model path: staging, intermediate, dim, fact, agg, mart, source, seed, macro, test */
+  LAYER: "de.dbt.layer",
   /** Model unique_id (e.g., model.my_project.stg_orders) */
   MODEL_UNIQUE_ID: "de.dbt.model.unique_id",
   /** Model short name */
@@ -207,6 +211,79 @@ export const DE_COST = {
 } as const
 
 // ---------------------------------------------------------------------------
+// Workflow & session classification (Layer 6) — populated by derived annotator
+// ---------------------------------------------------------------------------
+
+export const DE_WORKFLOW = {
+  /** Session workflow type: dbt_develop, dbt_troubleshoot, dbt_test, dbt_docs, sql_analysis, warehouse_exploration, project_scan, generic_file_edit */
+  TYPE: "de.workflow.type",
+  /** Session intent verb-phrase: "create model", "fix error", "add tests", "refactor model", "inspect schema", "run query" */
+  INTENT: "de.workflow.intent",
+  /** Confidence of the classifier (0.0-1.0) */
+  TYPE_CONFIDENCE: "de.workflow.type_confidence",
+} as const
+
+// ---------------------------------------------------------------------------
+// Session outcome (Layer 7) — populated by derived annotator
+// ---------------------------------------------------------------------------
+
+export const DE_OUTCOME = {
+  /** success, failure, interrupted, provider_routing_failure, validation_failure, no_op, partial_fix */
+  CLASS: "de.outcome.class",
+  /** Whether a build/test/run was actually executed */
+  EXECUTED: "de.outcome.executed",
+  /** Whether a fix or change was applied */
+  CHANGE_APPLIED: "de.outcome.change_applied",
+} as const
+
+// ---------------------------------------------------------------------------
+// Touched artifacts (Layer 8) — populated by derived annotator
+// ---------------------------------------------------------------------------
+
+export const DE_ARTIFACTS = {
+  /** File paths read (JSON array) */
+  FILES_READ: "de.artifacts.files_read",
+  /** File paths written or edited (JSON array) */
+  FILES_EDITED: "de.artifacts.files_edited",
+  /** dbt model names mentioned in the user prompt (JSON array) */
+  MODELS_MENTIONED: "de.artifacts.models_mentioned",
+  /** Fully-qualified tables referenced by executed SQL (JSON array) */
+  TABLES_REFERENCED: "de.artifacts.tables_referenced",
+} as const
+
+// ---------------------------------------------------------------------------
+// Environment capabilities (Layer 9) — populated by derived annotator
+// ---------------------------------------------------------------------------
+
+export const DE_ENV = {
+  /** Whether dbt is present in the working directory */
+  DBT_PRESENT: "de.env.dbt_present",
+  /** Whether dbt manifest.json exists */
+  DBT_MANIFEST_PRESENT: "de.env.dbt_manifest_present",
+  /** Warehouse adapter detected: snowflake, bigquery, postgres, duckdb, databricks, redshift */
+  WAREHOUSE_TYPE: "de.env.warehouse_type",
+  /** Orchestrators / data-quality / lint tools detected (JSON array): airflow, dagster, prefect, soda, sqlmesh, great_expectations, sqlfluff */
+  TOOLS_DETECTED: "de.env.tools_detected",
+} as const
+
+// ---------------------------------------------------------------------------
+// Generic tool classification (Layer 10) — populated by derived annotator
+// ---------------------------------------------------------------------------
+
+export const DE_TOOL = {
+  /** Tool category: warehouse, sql, dbt, schema, lineage, quality, finops, fs, exec, planning, generic */
+  CATEGORY: "de.tool.category",
+  /** Finer-grained subcategory (e.g., "sql.execute", "dbt.build", "fs.read") */
+  SUBCATEGORY: "de.tool.subcategory",
+  /** Vendor or framework the tool wraps: snowflake, bigquery, duckdb, dbt, altimate-core, etc. */
+  VENDOR: "de.tool.vendor",
+  /** bash-command intent when kind=tool name=bash: dbt, altimate_dbt, python_sql, sql, fs, vcs, install, other */
+  BASH_INTENT: "de.tool.bash_intent",
+  /** Concrete CLI invoked in a bash command: dbt, altimate-dbt, python3, psql, sqlfluff, etc. */
+  BASH_INVOKED: "de.tool.bash_invoked",
+} as const
+
+// ---------------------------------------------------------------------------
 // Convenience namespace
 // ---------------------------------------------------------------------------
 
@@ -217,4 +294,9 @@ export const DE = {
   DBT: DE_DBT,
   QUALITY: DE_QUALITY,
   COST: DE_COST,
+  WORKFLOW: DE_WORKFLOW,
+  OUTCOME: DE_OUTCOME,
+  ARTIFACTS: DE_ARTIFACTS,
+  ENV: DE_ENV,
+  TOOL: DE_TOOL,
 } as const

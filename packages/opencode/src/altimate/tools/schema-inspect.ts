@@ -45,9 +45,26 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
         })
       }
       // altimate_change end
+      // altimate_change start — trace augmentation: surface row/column counts
+      // on the de.* metadata channel.
+      const qualifiedTable = schemaResult.schema_name
+        ? `${schemaResult.schema_name}.${schemaResult.table ?? args.table}`
+        : (schemaResult.table ?? args.table)
+      const deAttrs: Record<string, unknown> = {
+        ...(schemaResult.row_count !== undefined && schemaResult.row_count !== null && {
+          "de.warehouse.rows_total": schemaResult.row_count,
+        }),
+        ...(qualifiedTable && { "de.sql.lineage.output_table": qualifiedTable }),
+      }
+      // altimate_change end
       return {
         title: `Schema: ${schemaResult.table ?? args.table}`,
-        metadata: { success: true, columnCount: (schemaResult.columns ?? []).length, rowCount: schemaResult.row_count },
+        metadata: {
+          success: true,
+          columnCount: (schemaResult.columns ?? []).length,
+          rowCount: schemaResult.row_count,
+          ...deAttrs,
+        },
         output,
       }
     } catch (e) {

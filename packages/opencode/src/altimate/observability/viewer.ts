@@ -516,7 +516,7 @@ function showDetail(span) {
   }
   // DE attributes grouped
   var a = span.attributes || {};
-  var groups = [['de.warehouse.','Warehouse','cyan'],['de.sql.','SQL','secondary'],['de.dbt.','dbt','orange'],['de.quality.','Quality','green'],['de.cost.','Cost','orange']];
+  var groups = [['de.warehouse.','Warehouse','cyan'],['de.sql.','SQL','secondary'],['de.dbt.','dbt','orange'],['de.quality.','Quality','green'],['de.cost.','Cost','orange'],['de.workflow.','Workflow','accent'],['de.outcome.','Outcome','green'],['de.artifacts.','Artifacts','secondary'],['de.env.','Environment','cyan'],['de.tool.','Tool','accent']];
   var used = {};
   groups.forEach(function(g) {
     var entries = Object.keys(a).filter(function(k){return k.indexOf(g[0])===0;});

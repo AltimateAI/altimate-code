@@ -30,9 +30,78 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
       const error = normalizeError(result.error) ?? normalizeError(data.error)
       const failureMessage = error?.trim() || "Column lineage failed."
       const isFailure = error !== undefined || result.success === false || data.success === false
+
+      // altimate_change start — trace augmentation: emit structured lineage on
+      // the de.* metadata channel. Higher fidelity than the annotator's regex
+      // extraction since it comes from altimate-core's real parser.
+      //
+      // Prefer structured `source_table`/`source_column` / `target_table`/
+      // `target_column` fields when altimate-core supplies them — that
+      // preserves quoted/case-sensitive identifiers. Fall back to splitting
+      // a dotted endpoint string only when the structured fields are absent.
+      const lineageAttrs: Record<string, unknown> = {}
+      if (!isFailure) {
+        const inputTables = new Set<string>()
+        const outputs = new Set<string>()
+        const colsRead = new Set<string>()
+        const colsWritten = new Set<string>()
+
+        const extractTable = (edge: Record<string, any>, side: "source" | "target"): string | undefined => {
+          const direct = edge[`${side}_table`] ?? edge[`${side}Table`]
+          if (typeof direct === "string" && direct) return direct
+          if (typeof direct === "object" && direct !== null) {
+            const obj = direct as Record<string, unknown>
+            const t = obj.table ?? obj.name
+            if (typeof t === "string" && t) return t
+          }
+          const endpoint = edge[side]
+          if (typeof endpoint === "string" && endpoint.includes(".")) {
+            // Strip the trailing column segment; preserve original case
+            return endpoint.split(".").slice(0, -1).join(".") || undefined
+          }
+          return undefined
+        }
+        const extractColumn = (edge: Record<string, any>, side: "source" | "target"): string | undefined => {
+          const direct = edge[`${side}_column`] ?? edge[`${side}Column`]
+          if (typeof direct === "string" && direct) return direct
+          const endpoint = edge[side]
+          if (typeof endpoint === "string") return endpoint
+          if (typeof endpoint === "object" && endpoint !== null) {
+            const obj = endpoint as Record<string, unknown>
+            const c = obj.column ?? obj.name
+            if (typeof c === "string" && c) return c
+          }
+          return undefined
+        }
+
+        for (const edge of (data.column_lineage ?? []) as Record<string, any>[]) {
+          const srcTable = extractTable(edge, "source")
+          const tgtTable = extractTable(edge, "target")
+          const srcCol = extractColumn(edge, "source")
+          const tgtCol = extractColumn(edge, "target")
+          if (srcTable) inputTables.add(srcTable)
+          if (tgtTable) outputs.add(tgtTable)
+          if (srcCol) colsRead.add(srcCol)
+          if (tgtCol) colsWritten.add(tgtCol)
+        }
+        if (inputTables.size > 0) lineageAttrs["de.sql.lineage.input_tables"] = [...inputTables].slice(0, 50)
+        // Keep output_table scalar — Codex chunk-3 review #5: don't switch attribute
+        // type to array when there are multiple outputs. Omit the attribute instead.
+        if (outputs.size === 1) lineageAttrs["de.sql.lineage.output_table"] = [...outputs][0]
+        if (colsRead.size > 0) lineageAttrs["de.sql.lineage.columns_read"] = [...colsRead].slice(0, 100)
+        if (colsWritten.size > 0) lineageAttrs["de.sql.lineage.columns_written"] = [...colsWritten].slice(0, 100)
+        if (args.dialect) lineageAttrs["de.sql.dialect"] = args.dialect
+      }
+      // altimate_change end
+
       return {
         title: isFailure ? "Column Lineage: ERROR" : `Column Lineage: ${edgeCount} edge(s)`,
-        metadata: { success: !isFailure, edge_count: edgeCount, ...(isFailure && { error: failureMessage }) },
+        metadata: {
+          success: !isFailure,
+          edge_count: edgeCount,
+          ...(isFailure && { error: failureMessage }),
+          ...lineageAttrs,
+        },
         output: isFailure ? `Failed: ${failureMessage}` : formatColumnLineage(data),
       }
     } catch (e) {

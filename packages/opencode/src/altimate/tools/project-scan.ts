@@ -929,6 +929,24 @@ export const ProjectScanTool = Tool.define("project_scan", {
 
     const degradedSuffix = degradedList.length > 0 ? ` (${degradedList.length} degraded)` : ""
 
+    // altimate_change start — trace augmentation: lift environment signals onto
+    // the de.* metadata channel so the session-level rollup gets authoritative
+    // values instead of regex-parsing output text.
+    const deWhTypes = [
+      ...new Set(
+        (schemaCache?.warehouses ?? [])
+          .map((w: any) => (typeof w?.type === "string" ? w.type.toLowerCase() : ""))
+          .filter(Boolean),
+      ),
+    ]
+    const deAttrs: Record<string, unknown> = {
+      "de.env.dbt_present": dbtProject.found,
+      "de.env.dbt_manifest_present": dbtManifest !== undefined && dbtManifest !== null,
+      ...(toolsFound.length > 0 && { "de.env.tools_detected": toolsFound }),
+      ...(deWhTypes.length === 1 && { "de.env.warehouse_type": deWhTypes[0] }),
+    }
+    // altimate_change end
+
     return {
       title: `Scan: ${totalConnections} connection(s), ${dbtProject.found ? "dbt found" : "no dbt"}${degradedSuffix}`,
       metadata: {
@@ -962,6 +980,7 @@ export const ProjectScanTool = Tool.define("project_scan", {
         // so dashboard queries don't need null coalescing. Empty array means
         // "no degradation" cleanly.
         degraded: degradedList,
+        ...deAttrs,
       },
       output: lines.join("\n"),
     }

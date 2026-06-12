@@ -87,9 +87,30 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         })
       }
       // altimate_change end
+      // altimate_change start — trace augmentation: surface driver-reported
+      // values via the de.* metadata channel. Tools never import observability;
+      // they just set keys on the returned metadata object and the tracer's
+      // logToolCall hook lifts `de.*` keys onto the tool span's attributes.
+      const warehouseEntry = (() => {
+        try {
+          const registered = Registry.list().warehouses
+          return registered.find((w) => w.name === (args.warehouse ?? registered[0]?.name))
+        } catch {
+          return undefined
+        }
+      })()
+      // altimate_change end
       return {
         title: `SQL: ${args.query.slice(0, 60)}${args.query.length > 60 ? "..." : ""}`,
-        metadata: { rowCount: result.row_count, truncated: result.truncated },
+        metadata: {
+          rowCount: result.row_count,
+          truncated: result.truncated,
+          // altimate_change start — de.* attributes lifted onto span by tracer
+          "de.warehouse.rows_returned": result.row_count,
+          ...(warehouseEntry?.type && { "de.warehouse.system": warehouseEntry.type }),
+          ...(warehouseEntry?.type && { "de.sql.dialect": warehouseEntry.type }),
+          // altimate_change end
+        },
         output,
       }
     } catch (e) {
