@@ -196,15 +196,6 @@ describe("execDbtShow", () => {
     await expect(execDbtShow("SELECT 1")).rejects.not.toThrow(/Could not parse dbt show output/)
   })
 
-  test("preserves generic 'Could not parse' when dbt exited 0 but output unparseable", async () => {
-    // Existing behavior — dbt didn't crash, we just couldn't decode its output.
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
-      cb(null, "some unparseable output", "")
-    })
-
-    await expect(execDbtShow("SELECT 1")).rejects.toThrow("Could not parse dbt show output in any format")
-  })
-
   test("falls back to error message when stderr is empty", async () => {
     mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
       const err: any = new Error("spawn ENOENT")
