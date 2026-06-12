@@ -127,7 +127,7 @@ describe("tool.question non-interactive auto-answer", () => {
     askSpy.mockRestore()
   })
 
-  test("picks safe-keyword option when present and does not invoke Question.ask", async () => {
+  test("default returns Unanswered for every question and does not invoke Question.ask", async () => {
     const tool = await QuestionTool.init()
     const questions = [
       {
@@ -142,29 +142,39 @@ describe("tool.question non-interactive auto-answer", () => {
 
     const result = await tool.execute({ questions }, ctx)
     expect(askSpy).not.toHaveBeenCalled()
-    expect(result.output).toContain("Profile only")
+    expect(result.output).toContain('"May I run row-level hashdiff comparisons?"="Unanswered"')
+    // The non-interactive prefix tells the agent to pick a safe path from context
+    // AND tells the agent about the escape hatch so it can surface it to the user
+    // when reporting that input is required.
     expect(result.output).toContain("non-interactive mode")
+    expect(result.output).toContain("safe path")
+    expect(result.output).toContain("ALTIMATE_AUTO_ANSWER")
   })
 
-  test("falls back to last option when no safe keyword matches", async () => {
+  test("does not invent answers based on label text (no label-text heuristic)", async () => {
+    // Regression: a prior implementation scanned labels for substrings like
+    // "skip" / "cancel" / "no". That false-positived on labels like
+    // "Snowflake" (contains "no") and quietly picked the wrong option. The
+    // default now returns Unanswered — the agent decides.
     const tool = await QuestionTool.init()
     const questions = [
       {
-        question: "Pick a color",
-        header: "Color",
+        question: "Pick a warehouse",
+        header: "Warehouse",
         options: [
-          { label: "Red", description: "The color of passion" },
-          { label: "Blue", description: "The color of sky" },
+          { label: "Snowflake", description: "Continue with Snowflake" },
+          { label: "Cancel", description: "Stop here" },
         ],
       },
     ]
 
     const result = await tool.execute({ questions }, ctx)
-    expect(askSpy).not.toHaveBeenCalled()
-    expect(result.output).toContain("Blue")
+    expect(result.output).toContain('"Pick a warehouse"="Unanswered"')
+    expect(result.output).not.toContain('"Snowflake"')
+    expect(result.output).not.toContain('"Cancel"')
   })
 
-  test("ALTIMATE_AUTO_ANSWER=first picks first option", async () => {
+  test("ALTIMATE_AUTO_ANSWER=first picks first option (explicit opt-in)", async () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "first"
     const tool = await QuestionTool.init()
     const questions = [
@@ -179,22 +189,25 @@ describe("tool.question non-interactive auto-answer", () => {
     ]
 
     const result = await tool.execute({ questions }, ctx)
-    expect(result.output).toContain("Red")
+    expect(result.output).toContain('"Pick a color"="Red"')
   })
 
-  test("ALTIMATE_AUTO_ANSWER=skip returns Unanswered for each question", async () => {
-    process.env["ALTIMATE_AUTO_ANSWER"] = "skip"
+  test("ALTIMATE_AUTO_ANSWER=last picks last option (explicit opt-in)", async () => {
+    process.env["ALTIMATE_AUTO_ANSWER"] = "last"
     const tool = await QuestionTool.init()
     const questions = [
       {
         question: "Pick a color",
         header: "Color",
-        options: [{ label: "Red", description: "" }],
+        options: [
+          { label: "Red", description: "" },
+          { label: "Blue", description: "" },
+        ],
       },
     ]
 
     const result = await tool.execute({ questions }, ctx)
-    expect(result.output).toContain("Unanswered")
+    expect(result.output).toContain('"Pick a color"="Blue"')
   })
 
   test("ALTIMATE_AUTO_ANSWER=<exact label> picks matching option", async () => {
@@ -212,7 +225,25 @@ describe("tool.question non-interactive auto-answer", () => {
     ]
 
     const result = await tool.execute({ questions }, ctx)
-    expect(result.output).toContain("Blue")
+    expect(result.output).toContain('"Pick a color"="Blue"')
+  })
+
+  test("ALTIMATE_AUTO_ANSWER=<unknown label> falls through to Unanswered", async () => {
+    process.env["ALTIMATE_AUTO_ANSWER"] = "green"
+    const tool = await QuestionTool.init()
+    const questions = [
+      {
+        question: "Pick a color",
+        header: "Color",
+        options: [
+          { label: "Red", description: "" },
+          { label: "Blue", description: "" },
+        ],
+      },
+    ]
+
+    const result = await tool.execute({ questions }, ctx)
+    expect(result.output).toContain('"Pick a color"="Unanswered"')
   })
 
   test("non-interactive prefix is set when Question.ask is bypassed", async () => {

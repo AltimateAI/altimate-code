@@ -3,32 +3,30 @@ import { Tool } from "./tool"
 import { Question } from "../question"
 import DESCRIPTION from "./question.txt"
 
-// altimate_change start — non-interactive auto-answer support.
-// When running under `claude --print`, CI, or any other context without a TTY,
-// there is nobody to click an option in the TUI. The default Question.ask()
-// behaviour is to await a Deferred indefinitely, which causes the parent
-// process to TaskStop the subprocess after a long wait — looking exactly like
-// a hang. See deliverable 02 (Run F first sub-session) for the trace.
+// altimate_change start — non-interactive handling for the question tool.
 //
-// Resolution policy: in non-interactive mode, pick the option whose label
-// contains a "safe" keyword (skip / cancel / profile only / no / abort).
-// If no such option exists, pick the LAST option (UX convention: safer/cancel
-// usually sits at the end). The agent then sees a concrete answer in the
-// tool result and can continue without blocking. Override via env var:
-//   ALTIMATE_AUTO_ANSWER=first    — always pick first option
-//   ALTIMATE_AUTO_ANSWER=last     — always pick last option (default)
-//   ALTIMATE_AUTO_ANSWER=skip     — return Unanswered for all questions
-const SAFE_KEYWORDS = [
-  "skip",
-  "cancel",
-  "no",
-  "abort",
-  "profile only",
-  "profile-only",
-  "decline",
-  "deny",
-  "stop",
-]
+// When running under `claude --print`, CI, or any other context without a TTY,
+// there is nobody to click an option in the TUI. The upstream Question.ask()
+// awaits a Deferred indefinitely, which looks exactly like a hang to a parent
+// supervisor.
+//
+// Policy: when non-interactive, return Unanswered for every question and let
+// the calling agent decide what to do. The agent knows what it was about to
+// do and why it asked; it can pick a safe path from context or report that
+// user input is required. We deliberately do NOT guess based on label text
+// — every heuristic we tried (safe-keyword scan, last-option fallback)
+// either invented decisions the user didn't make or false-positive'd on
+// labels like "Snowflake" that happened to contain "no".
+//
+// Explicit overrides (for users who genuinely want a default and accept the
+// responsibility):
+//   ALTIMATE_AUTO_ANSWER=first         — always pick the first option
+//   ALTIMATE_AUTO_ANSWER=last          — always pick the last option
+//   ALTIMATE_AUTO_ANSWER="<label>"     — pick the option whose label matches
+//
+// TTY-detection overrides (for harnesses that lie about being a TTY):
+//   ALTIMATE_FORCE_INTERACTIVE=1       — treat as interactive even without TTY
+//   ALTIMATE_NON_INTERACTIVE=1         — treat as non-interactive even with TTY
 
 function isNonInteractive(): boolean {
   if (process.env["ALTIMATE_FORCE_INTERACTIVE"] === "1") return false
@@ -37,20 +35,14 @@ function isNonInteractive(): boolean {
 }
 
 function autoAnswer(questions: Question.Info[]): Question.Answer[] {
-  const mode = (process.env["ALTIMATE_AUTO_ANSWER"] ?? "last").toLowerCase()
+  const mode = process.env["ALTIMATE_AUTO_ANSWER"]?.toLowerCase()
   return questions.map((q) => {
-    if (mode === "skip") return []
+    if (!mode) return [] // default — Unanswered, agent decides
     if (mode === "first") return q.options[0] ? [q.options[0].label] : []
     if (mode === "last") {
-      const safe = q.options.find((o) => {
-        const text = `${o.label} ${o.description}`.toLowerCase()
-        return SAFE_KEYWORDS.some((k) => text.includes(k))
-      })
-      if (safe) return [safe.label]
       const last = q.options[q.options.length - 1]
       return last ? [last.label] : []
     }
-    // exact label match for explicit answers, e.g. ALTIMATE_AUTO_ANSWER="Profile only"
     const match = q.options.find((o) => o.label.toLowerCase() === mode)
     return match ? [match.label] : []
   })
@@ -64,8 +56,12 @@ export const QuestionTool = Tool.define("question", {
   }),
   async execute(params, ctx) {
     // altimate_change start — short-circuit when no human is listening.
+    // Cache the mode once: env vars can change across the `await` below, and
+    // we want the result prefix to describe the path the answer actually
+    // came from, not whatever state we observe later.
+    const nonInteractive = isNonInteractive()
     let answers: Question.Answer[]
-    if (isNonInteractive()) {
+    if (nonInteractive) {
       answers = autoAnswer(params.questions)
     } else {
       answers = await Question.ask({
@@ -83,11 +79,10 @@ export const QuestionTool = Tool.define("question", {
 
     const formatted = params.questions.map((q, i) => `"${q.question}"="${format(answers[i])}"`).join(", ")
 
-    // altimate_change start — flag auto-answers explicitly so the agent
-    // knows the user didn't actually answer and can decide whether to
-    // proceed with that choice or fail back gracefully.
-    const prefix = isNonInteractive()
-      ? `Running in non-interactive mode (no TTY). Auto-answered with safe defaults: `
+    // altimate_change start — make the non-interactive case unambiguous to
+    // the agent so it doesn't treat "Unanswered" as a real user choice.
+    const prefix = nonInteractive
+      ? `Running in non-interactive mode (no TTY). No user was available to answer. Either pick a safe path from the context of the action you were about to take, or report that user input is required to proceed — the user can set ALTIMATE_AUTO_ANSWER=first|last|<exact option label> to pre-answer questions in this mode. Result: `
       : `User has answered your questions: `
     // altimate_change end
 
