@@ -32,6 +32,17 @@ describe("install.ps1 — Bun exe, not npm", () => {
   test("rejects win32-arm64 (no NAPI prebuild)", () => {
     expect(PS1).toContain("Unsupported OS/Arch")
   })
+
+  test("resolves arch via PROCESSOR_ARCHITEW6432 (WOW64-safe)", () => {
+    // A 32-bit PowerShell host on 64-bit Windows reports PROCESSOR_ARCHITECTURE=x86;
+    // the real arch is in PROCESSOR_ARCHITEW6432. Must prefer the latter.
+    expect(PS1).toContain("PROCESSOR_ARCHITEW6432")
+  })
+
+  test("exposes a -Help/usage block", () => {
+    expect(PS1).toContain("[switch]$Help")
+    expect(PS1).toContain("Altimate Code Installer")
+  })
 })
 
 describe("install.ps1 — baseline (non-AVX2) parity", () => {

@@ -20,7 +20,9 @@ param(
   [switch]$NoPathUpdate = $false,
   # Force the baseline (non-AVX2) build even if AVX2 is detected. Also used by
   # the illegal-instruction retry below when AVX2 detection is wrong.
-  [switch]$ForceBaseline = $false
+  [switch]$ForceBaseline = $false,
+  # Show usage and exit (mirrors -h/--help in the bash installer).
+  [switch]$Help = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,17 +35,60 @@ $InstallDir = Join-Path $env:USERPROFILE ".altimate\bin"
 $BinaryName = "$App.exe"
 $InstalledBinary = Join-Path $InstallDir $BinaryName
 
+# All user-facing errors go through Write-Err with a uniform "error: " prefix so
+# logs are greppable; informational/secondary lines use the muted Write-Muted.
 function Write-Muted($msg) { Write-Host $msg -ForegroundColor DarkGray }
-function Write-Err($msg) { Write-Host $msg -ForegroundColor Red }
+function Write-Err($msg) { Write-Host "error: $msg" -ForegroundColor Red }
+
+function Show-Usage {
+  Write-Host @"
+Altimate Code Installer (Windows)
+
+Usage: irm https://www.altimate.sh/install.ps1 | iex
+   or: install.ps1 [options]
+
+Options:
+    -Help                  Display this help message
+    -Version <version>     Install a specific version (e.g. 1.0.180)
+    -NoPathUpdate          Don't modify the user PATH
+    -ForceBaseline         Install the non-AVX2 (baseline) build
+
+Examples:
+    powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
+    &([scriptblock]::Create((irm https://www.altimate.sh/install.ps1))) -Version 1.0.180
+"@
+}
+
+if ($Help) {
+  Show-Usage
+  exit 0
+}
+
+# A single P/Invoke type carries both native calls we need — the AVX2 CPU probe
+# (kernel32) and the PATH-change broadcast (user32) — so we Add-Type once instead
+# of compiling a throwaway type per call site.
+function Initialize-Native {
+  if (-not ("Win32.AltimateNative" -as [type])) {
+    Add-Type -Namespace Win32 -Name AltimateNative -MemberDefinition @"
+[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+"@
+  }
+}
 
 # ---------------------------------------------------------------------------
 # Architecture / baseline detection
 # ---------------------------------------------------------------------------
 # Only win32-x64 is built. @altimateai/altimate-core has no NAPI prebuild for
 # win32-arm64, so ARM64 has no standalone archive (see packages/opencode/script/build.ts).
-$procArch = $env:PROCESSOR_ARCHITECTURE
-if ($procArch -ne "AMD64") {
-  Write-Err "Unsupported OS/Arch: windows/$procArch"
+#
+# Under WOW64 (a 32-bit PowerShell host on 64-bit Windows) PROCESSOR_ARCHITECTURE
+# reports "x86"; the true machine arch lives in PROCESSOR_ARCHITEW6432. Prefer the
+# latter so a real AMD64 box isn't misdetected as unsupported x86.
+$rawArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if ($rawArch -ne "AMD64") {
+  Write-Err "Unsupported OS/Arch: windows/$rawArch"
   Write-Muted "The standalone Windows build is x64 (AMD64) only. On Windows-on-ARM, use WSL or npm install -g altimate-code."
   exit 1
 }
@@ -53,9 +98,8 @@ $arch = "x64"
 # IsProcessorFeaturePresent(40) == PF_AVX2_INSTRUCTIONS_AVAILABLE.
 function Test-Avx2 {
   try {
-    $sig = '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);'
-    $k32 = Add-Type -MemberDefinition $sig -Name "AltimateKernel32" -Namespace "Win32" -PassThru
-    return [bool]$k32::IsProcessorFeaturePresent(40)
+    Initialize-Native
+    return [bool][Win32.AltimateNative]::IsProcessorFeaturePresent(40)
   } catch {
     # If detection fails, assume no AVX2 and fall back to the baseline build —
     # the baseline binary runs everywhere, an AVX2 binary on a non-AVX2 CPU crashes.
@@ -89,7 +133,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
   try {
     Invoke-WebRequest -Uri "https://github.com/AltimateAI/altimate-code/releases/tag/v$Version" -Method Head -UseBasicParsing | Out-Null
   } catch {
-    Write-Err "Error: Release v$Version not found"
+    Write-Err "Release v$Version not found"
     Write-Muted "Available releases: https://github.com/AltimateAI/altimate-code/releases"
     exit 1
   }
@@ -140,6 +184,12 @@ function Install-Target {
   $zipPath = Join-Path $tmpDir $filename
 
   try {
+    # NOTE: integrity verification (SHA256/signature) of the archive is
+    # intentionally deferred to match the bash installer's posture — both rely
+    # on HTTPS from github.com release assets. Releases do not currently publish
+    # a checksums file; adding one + verifying it in both installers is tracked
+    # as a follow-up. See PR #930 discussion.
+    #
     # Prefer curl.exe (ships with Windows 10 1803+) for a fast download with
     # --fail so HTTP errors don't write an error page to disk; fall back to
     # Invoke-WebRequest where curl.exe is unavailable.
@@ -198,16 +248,11 @@ if (-not $needsBaseline) {
 # Write the user PATH through the registry (not setx, which truncates at 1024
 # chars) and broadcast WM_SETTINGCHANGE so already-open shells pick it up.
 function Publish-EnvChange {
-  if (-not ("Win32.NativeMethods" -as [type])) {
-    Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
-[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-"@
-  }
+  Initialize-Native
   $HWND_BROADCAST = [IntPtr]0xffff
   $WM_SETTINGCHANGE = 0x1a
   $result = [UIntPtr]::Zero
-  [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+  [Win32.AltimateNative]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
 }
 
 if (-not $NoPathUpdate) {
