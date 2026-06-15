@@ -77,6 +77,36 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   }
 }
 
+# Verify a downloaded archive against the release's checksums.txt.
+# Hard-fails (throws) on a real mismatch. Soft-skips when checksums.txt can't be
+# fetched (older release, network blip) or has no entry for this file, so pinned
+# installs of pre-checksums releases keep working.
+function Test-Checksum {
+  param([string]$Path, [string]$Name, [string]$ChecksumsUrl)
+
+  $sums = $null
+  try {
+    $sums = (Invoke-WebRequest -Uri $ChecksumsUrl -UseBasicParsing).Content
+  } catch {
+    Write-Muted "Skipping integrity check — checksums.txt not published for this release"
+    return
+  }
+
+  # checksums.txt is sha256sum format: "<hash>  <filename>" (one entry per line).
+  $line = ($sums -split "`n") | Where-Object { $_ -match "\s\*?$([regex]::Escape($Name))\s*$" } | Select-Object -First 1
+  if (-not $line) {
+    Write-Muted "Skipping integrity check — no checksum entry for $Name"
+    return
+  }
+
+  $expected = (($line -split '\s+')[0]).ToLower()
+  $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLower()
+  if ($actual -ne $expected) {
+    throw "Checksum mismatch for $Name (expected $expected, got $actual)"
+  }
+  Write-Muted "Verified $Name (sha256)"
+}
+
 # ---------------------------------------------------------------------------
 # Architecture / baseline detection
 # ---------------------------------------------------------------------------
@@ -171,10 +201,12 @@ function Install-Target {
   $filename = "$App-$target.zip"
 
   if ($useLatest) {
-    $url = "https://github.com/AltimateAI/altimate-code/releases/latest/download/$filename"
+    $base = "https://github.com/AltimateAI/altimate-code/releases/latest/download"
   } else {
-    $url = "https://github.com/AltimateAI/altimate-code/releases/download/v$specificVersion/$filename"
+    $base = "https://github.com/AltimateAI/altimate-code/releases/download/v$specificVersion"
   }
+  $url = "$base/$filename"
+  $checksumsUrl = "$base/checksums.txt"
 
   Write-Host ""
   Write-Host "Installing $App version: $specificVersion"
@@ -184,12 +216,6 @@ function Install-Target {
   $zipPath = Join-Path $tmpDir $filename
 
   try {
-    # NOTE: integrity verification (SHA256/signature) of the archive is
-    # intentionally deferred to match the bash installer's posture — both rely
-    # on HTTPS from github.com release assets. Releases do not currently publish
-    # a checksums file; adding one + verifying it in both installers is tracked
-    # as a follow-up. See PR #930 discussion.
-    #
     # Prefer curl.exe (ships with Windows 10 1803+) for a fast download with
     # --fail so HTTP errors don't write an error page to disk; fall back to
     # Invoke-WebRequest where curl.exe is unavailable.
@@ -200,6 +226,10 @@ function Install-Target {
     } else {
       Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
     }
+
+    # Integrity check: hard-fail on mismatch; skip (with notice) when the release
+    # predates checksums.txt or the fetch fails, so older pinned installs still work.
+    Test-Checksum -Path $zipPath -Name $filename -ChecksumsUrl $checksumsUrl
 
     Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
     $extracted = Join-Path $tmpDir $BinaryName

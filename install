@@ -356,6 +356,51 @@ download_with_progress() {
     return $ret
 }
 
+# Verify the downloaded archive against the release's checksums.txt.
+# Hard-fails on a real mismatch; soft-skips when checksums.txt can't be fetched
+# (older release, network blip) or has no entry, so pinned installs of
+# pre-checksums releases keep working.
+verify_checksum() {
+    local file="$1"
+    local name="$2"
+    # $url ends in /$filename — strip it to get the release base, append checksums.txt.
+    local checksums_url="${url%/*}/checksums.txt"
+
+    local sums
+    if ! sums=$(curl --fail -sL "$checksums_url" 2>/dev/null); then
+        print_message info "${MUTED}Skipping integrity check — checksums.txt not published for this release${NC}"
+        return 0
+    fi
+
+    # checksums.txt is sha256sum format: "<hash>  <filename>" (sha256sum may
+    # prefix the name with '*' in binary mode — tolerate it).
+    local expected
+    expected=$(printf '%s\n' "$sums" | awk -v f="$name" '{ n=$2; sub(/^\*/,"",n); if (n==f) { print $1; exit } }')
+    if [ -z "$expected" ]; then
+        print_message info "${MUTED}Skipping integrity check — no checksum entry for $name${NC}"
+        return 0
+    fi
+
+    local actual
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$file" | cut -d' ' -f1)
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
+    else
+        print_message info "${MUTED}Skipping integrity check — no sha256 tool available${NC}"
+        return 0
+    fi
+
+    if [ "$actual" != "$expected" ]; then
+        print_message error "Checksum mismatch for $name"
+        print_message error "  expected: $expected"
+        print_message error "  actual:   $actual"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+    print_message info "${MUTED}Verified ${NC}$name${MUTED} (sha256)${NC}"
+}
+
 download_and_install() {
     print_message info "\n${MUTED}Installing ${NC}altimate ${MUTED}version: ${NC}$specific_version"
     local tmp_dir="${TMPDIR:-/tmp}/altimate_install_$$"
@@ -366,6 +411,8 @@ download_and_install() {
         # --fail so 404s exit non-zero instead of writing the error page to $tmp_dir/$filename.
         curl --fail -# -L -o "$tmp_dir/$filename" "$url"
     fi
+
+    verify_checksum "$tmp_dir/$filename" "$filename"
 
     # Extract only the expected binary member rather than the whole archive.
     # The current build only puts a single file in each archive, but listing

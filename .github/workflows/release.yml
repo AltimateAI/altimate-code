@@ -357,6 +357,13 @@ jobs:
           path: packages/opencode/dist/
           merge-multiple: true
 
+      - name: Generate checksums
+        # Single checksums.txt (sha256sum format: "<hash>  <bare-filename>") shipped
+        # as a release asset. The curl and PowerShell installers fetch it and verify
+        # the downloaded archive before extracting.
+        working-directory: packages/opencode/dist
+        run: sha256sum *.tar.gz *.zip > checksums.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
@@ -366,5 +373,6 @@ jobs:
           files: |
             packages/opencode/dist/*.tar.gz
             packages/opencode/dist/*.zip
+            packages/opencode/dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
