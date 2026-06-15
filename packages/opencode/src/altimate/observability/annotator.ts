@@ -170,11 +170,19 @@ type BashClassification = {
 
 // Hoisted to module scope so the RegExp is compiled once at startup, not on
 // every classifyBash call. (Gemini PR-938 review.)
+//
+// All `dbt` / `altimate-dbt` patterns are anchored to a command-boundary
+// position — start-of-string or a shell separator (`;` `|` `&`). Plain word
+// boundaries (`\b`) would substring-match `dbt` inside string literals,
+// arguments to other commands, etc. — `echo "dbt run"`,
+// `python -c "import dbt"`, `grep dbt file` would all misclassify as
+// intent="dbt" without this guard (GPT PR-938 consensus review M1).
 const DBT_VERBS = "build|run|test|seed|snapshot|compile|deps|run-operation|debug|parse|docs|clean|list|ls|source|init|show|retry|freshness"
-const DBT_VERB_RE = new RegExp(`\\bdbt\\s+(${DBT_VERBS})\\b`, "i")
-const ALTIMATE_DBT_RE = /\baltimate-dbt\b/i
-const ALTIMATE_DBT_VERB_RE = /\baltimate-dbt\s+([a-z][a-z0-9-]*)\b/i
-const DBT_BARE_RE = /\bdbt\b/
+const CMD_BOUNDARY = "(?:^|[;|&])\\s*"
+const DBT_VERB_RE = new RegExp(`${CMD_BOUNDARY}dbt\\s+(${DBT_VERBS})\\b`, "i")
+const ALTIMATE_DBT_RE = new RegExp(`${CMD_BOUNDARY}altimate-dbt(?:\\s|$)`, "i")
+const ALTIMATE_DBT_VERB_RE = new RegExp(`${CMD_BOUNDARY}altimate-dbt\\s+([a-z][a-z0-9-]*)\\b`, "i")
+const DBT_BARE_RE = new RegExp(`${CMD_BOUNDARY}dbt(?:\\s|$)`, "i")
 const CD_PREFIX_RE = /^\s*cd\s+\S+\s*&&\s*/
 
 function classifyBash(command: string | undefined): BashClassification | undefined {
