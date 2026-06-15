@@ -4,6 +4,7 @@ import { discoverExternalMcp } from "../../mcp/discover"
 import { resolveConfigPath, addMcpToConfig, findAllConfigPaths, listMcpInConfig } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
+import { MCP } from "../../mcp"
 
 /**
  * Check which MCP server names are permanently configured on disk
@@ -131,7 +132,10 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       //  as a security default (no auto-connect until user approves).
       // When the user explicitly adds a server via this tool, it should be enabled.
       const { enabled: _discardEnabled, ...cfgToWrite } = stripSessionEnv(discovered[name]) as any
-      await addMcpToConfig(name, { ...cfgToWrite, enabled: true } as import('../../config/config').Config.Mcp, configPath)
+      await addMcpToConfig(name, { ...cfgToWrite, enabled: true, updatedAt: new Date().toISOString() } as import('../../config/config').Config.Mcp, configPath)
+      // Connect immediately so /mcps reflects the server status in the current session
+      // without requiring a restart.
+      await MCP.connect(name)
       // altimate_change end
     }
 
