@@ -242,6 +242,36 @@ function classifyBash(command: string | undefined): BashClassification | undefin
 // SQL fragment extraction from input/output text
 // ---------------------------------------------------------------------------
 
+// Tools that accept a single SQL query in a `query` or `sql` parameter — the
+// annotator lifts that into `de.sql.query_text` + extracts input tables.
+// sql_autocomplete (takes a `prefix`, not full SQL) and sql_diff (takes
+// `original`+`modified`) are handled separately.
+const SQL_QUERY_TOOLS = new Set<string>([
+  "sql_execute",
+  "sql_analyze",
+  "sql_optimize",
+  "sql_fix",
+  "sql_explain",
+  "sql_translate",
+  "sql_rewrite",
+  "sql_format",
+  // altimate_core_* wrappers that consume SQL via a `sql` parameter.
+  // altimate_core_column_lineage has its own Layer-1 opt-in and is excluded.
+  "altimate_core_rewrite",
+  "altimate_core_validate",
+  "altimate_core_check",
+  "altimate_core_grade",
+  "altimate_core_compare",
+  "altimate_core_complete",
+  "altimate_core_correct",
+  "altimate_core_fix",
+  "altimate_core_semantics",
+  "altimate_core_extract_metadata",
+  "altimate_core_query_pii",
+  "altimate_core_prune_schema",
+  "altimate_core_policy",
+])
+
 const SQL_TABLE_PATTERN = /\b(?:FROM|JOIN)\s+([A-Za-z_"`][A-Za-z0-9_."`\-]*)/gi
 
 function extractInputTables(sql: string): string[] | undefined {
@@ -297,7 +327,7 @@ export function annotateToolSpan(
     } else if (toolName === "read" || toolName === "write" || toolName === "edit") {
       const layer = dbtLayerFromPath(typeof inp.filePath === "string" ? inp.filePath : undefined)
       if (layer) out[DE.DBT.LAYER] = layer
-    } else if (toolName === "sql_execute" || toolName === "sql_analyze" || toolName === "sql_optimize" || toolName === "sql_fix" || toolName === "sql_explain" || toolName === "sql_translate" || toolName === "sql_rewrite" || toolName === "sql_format") {
+    } else if (SQL_QUERY_TOOLS.has(toolName)) {
       const q = typeof inp.query === "string" ? inp.query : (typeof inp.sql === "string" ? inp.sql : undefined)
       if (q) {
         // Don't pre-truncate. The tracer enforces a 10 KB UTF-8 byte cap per
@@ -306,6 +336,17 @@ export function annotateToolSpan(
         // Let the tracer be the single authority on byte limits.
         out[DE.SQL.QUERY_TEXT] = q
         const tables = extractInputTables(q)
+        if (tables) out[DE.SQL.LINEAGE_INPUT_TABLES] = tables
+      }
+    } else if (toolName === "sql_diff") {
+      // sql_diff takes `original` and `modified` instead of a single query.
+      // Lift input_tables from both — there's no single canonical `query_text`
+      // to store, so we skip that key.
+      const both = [inp.original, inp.modified]
+        .filter((v): v is string => typeof v === "string" && v.length > 0)
+        .join("\n")
+      if (both) {
+        const tables = extractInputTables(both)
         if (tables) out[DE.SQL.LINEAGE_INPUT_TABLES] = tables
       }
     } else if (toolName === "skill") {
