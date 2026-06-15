@@ -421,6 +421,33 @@ describe("execDbtShow", () => {
 
     await expect(execDbtShow("SELECT 1")).rejects.toThrow(/Database Error: connection refused/)
   })
+
+  test("does NOT return malformed data when data.preview is a truthy non-array", async () => {
+    // Regression for #944: the previewLine match only checks truthiness, so a
+    // future dbt version emitting `data.preview = {}` would flow into `rows`
+    // and the downstream `data: rows` field would crash callers that do
+    // `.map` / `.length`. Treat unexpected shapes as empty rows instead.
+    const jsonLines = [JSON.stringify({ data: { preview: {} } })].join("\n")
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      cb(null, jsonLines, "")
+    })
+
+    const result = await execDbtShow("SELECT 1")
+    expect(Array.isArray(result.data)).toBe(true)
+    expect(result.data).toEqual([])
+    expect(result.columnNames).toEqual([])
+  })
+
+  test("also treats numeric data.preview as empty (defence-in-depth)", async () => {
+    const jsonLines = [JSON.stringify({ data: { preview: 42 } })].join("\n")
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      cb(null, jsonLines, "")
+    })
+
+    const result = await execDbtShow("SELECT 1")
+    expect(Array.isArray(result.data)).toBe(true)
+    expect(result.data).toEqual([])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -513,6 +540,45 @@ describe("execDbtCompile", () => {
     const result = await execDbtCompile("my_model")
     expect(result.sql).toBe("SELECT * FROM final_model")
   })
+
+  // --- Real dbt error bubbling (#943) ---
+
+  test("surfaces real dbt stderr when compile fails", async () => {
+    // Pre-fix: catch { lines = [] } swallowed the real error and the final
+    // throw embedded Node's generic "Command failed: ..." message.
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      const err: any = new Error("Command failed: dbt compile --select foo ...")
+      err.code = 1
+      cb(err, "", "Compilation Error: Model 'foo' depends on a node named 'bar' which was not found")
+    })
+
+    await expect(execDbtCompile("foo")).rejects.toThrow(/Compilation Error.*Model 'foo'.*depends on a node named 'bar'/)
+  })
+
+  test("prefers structured JSON error event over raw stderr", async () => {
+    const errorLog = JSON.stringify({
+      info: { level: "error", msg: "Database Error: relation does not exist" },
+    })
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      const err: any = new Error("Command failed")
+      err.code = 1
+      cb(err, errorLog, "exit status 1")
+    })
+
+    await expect(execDbtCompile("foo")).rejects.toThrow(/Database Error: relation does not exist/)
+  })
+
+  test("does not double the 'dbt compile failed:' prefix on dbt category errors", async () => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      const err: any = new Error("Command failed")
+      err.code = 1
+      cb(err, "", "Compilation Error: model not found")
+    })
+
+    const caught = (await execDbtCompile("foo").catch((e) => e)) as Error
+    expect(caught.message).toBe("Compilation Error: model not found")
+    expect(caught.message).not.toMatch(/dbt compile failed: Compilation Error/)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -532,6 +598,53 @@ describe("execDbtCompileInline", () => {
 
     const result = await execDbtCompileInline("SELECT * FROM {{ ref('customers') }}")
     expect(result.sql).toBe("SELECT id, name FROM raw.customers")
+  })
+
+  // --- Real dbt error bubbling (#943) + SQL redaction (#945) ---
+
+  test("surfaces real dbt error when inline compile fails", async () => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      const err: any = new Error("Command failed: dbt compile --inline 'SELECT 1' ...")
+      err.code = 1
+      cb(err, "", "Compilation Error: Undefined macro 'unknown_macro'")
+    })
+
+    await expect(execDbtCompileInline("SELECT 1")).rejects.toThrow(/Compilation Error.*Undefined macro/)
+  })
+
+  test("does NOT embed inline SQL into the surfaced error (no Command-failed leak)", async () => {
+    // Regression for #945: pre-fix the throw used `e.message` directly,
+    // which is Node's "Command failed: <dbt-path> compile --inline '<entire
+    // SQL>' …" format — leaking the user's full query into logs and UI.
+    const sensitiveSql = "SELECT 'PII_TOKEN_compile_xyz' AS secret FROM users WHERE ssn = '111-22-3333'"
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      const err: any = new Error(
+        `Command failed: /usr/local/bin/dbt compile --inline ${sensitiveSql} --output json --log-format json`,
+      )
+      err.code = 2
+      cb(err, "", "")
+    })
+
+    const caught = (await execDbtCompileInline(sensitiveSql).catch((e) => e)) as Error
+    expect(caught.message).not.toContain("PII_TOKEN_compile_xyz")
+    expect(caught.message).not.toContain("111-22-3333")
+    expect(caught.message).toMatch(/dbt compile inline failed: dbt exited with status 2/)
+  })
+
+  test("does NOT leak SQL when inline compile is killed by signal / timeout", async () => {
+    const sensitiveSql = "SELECT 'compile_leak_canary' FROM secrets"
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: any, cb: Function) => {
+      const err: any = new Error(
+        `Command failed: /usr/local/bin/dbt compile --inline ${sensitiveSql} --output json --log-format json`,
+      )
+      err.killed = true
+      err.signal = "SIGTERM"
+      cb(err, "", "")
+    })
+
+    const caught = (await execDbtCompileInline(sensitiveSql).catch((e) => e)) as Error
+    expect(caught.message).not.toContain("compile_leak_canary")
+    expect(caught.message).toMatch(/dbt compile inline failed: dbt killed by signal SIGTERM/)
   })
 })
 

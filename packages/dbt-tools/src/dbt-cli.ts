@@ -285,17 +285,20 @@ export async function execDbtShow(sql: string, limit?: number) {
         (previewLine as any).result?.preview ??
         (previewLine as any).result?.rows
 
-      // Guard JSON.parse — fall through to Tier 2 on malformed strings
+      // The previewLine match upstream only checked for truthiness, so a
+      // future dbt version emitting `data.preview = {}` or `= 42` would
+      // flow into `rows` unchecked and the downstream `data: rows` field
+      // would crash callers that do `.map` / `.length`. Guard explicitly
+      // for the three shapes we accept (parsed JSON array, native array,
+      // malformed) and emit an empty result for anything else.
       let rows: Record<string, unknown>[]
       if (typeof preview === "string") {
         const parsed = safeJsonParse(preview)
-        if (Array.isArray(parsed)) {
-          rows = parsed
-        } else {
-          rows = [] // Malformed — will fall through below
-        }
-      } else {
+        rows = Array.isArray(parsed) ? parsed : []
+      } else if (Array.isArray(preview)) {
         rows = preview
+      } else {
+        rows = []
       }
 
       // Return the result — even if empty. An empty preview means the query returned
@@ -465,51 +468,87 @@ function fallbackExitMessage(primary?: ExecFileError, plain?: ExecFileError): st
 }
 
 /**
+ * Build a user-facing error message from a failed `dbt <cmd>` invocation.
+ *
+ * Used by every execDbt* function so all three share the same error UX:
+ *   - structured `level: "error"` event from JSON logs > primary stderr >
+ *     plain-text stderr > redacted exit-status fallback
+ *   - ANSI escapes stripped
+ *   - inline SQL / command-line redacted from any err.message-derived path
+ *   - no doubled prefix when dbt's own category prefix is already present
+ */
+function bubbleDbtError(label: string, primary?: ExecFileError, plain?: ExecFileError): string {
+  const errorLogLines = primary?.stdout ? parseJsonLines(primary.stdout.toString()) : []
+  const real = extractDbtError(errorLogLines, primary, plain)
+  if (real) {
+    const hasDbtCategoryPrefix = /^(Compilation|Database|Runtime|Parsing|Validation|Dependency)\s+Error\b/.test(
+      real,
+    )
+    return hasDbtCategoryPrefix ? real : `${label}: ${real}`
+  }
+  return `${label}: ${fallbackExitMessage(primary, plain) ?? "unknown error"}`
+}
+
+/**
  * Compile a model via `dbt compile --select <model>` and return compiled SQL.
  */
 export async function execDbtCompile(model: string): Promise<{ sql: string }> {
   const args = ["compile", "--select", model, "--output", "json", "--log-format", "json"]
 
-  let lines: Record<string, unknown>[]
+  let lines: Record<string, unknown>[] = []
+  let primaryRunError: ExecFileError | undefined
   try {
     const { stdout } = await run(args)
     lines = parseJsonLines(stdout)
-  } catch {
-    lines = []
+  } catch (e) {
+    primaryRunError = toExecFileError(e)
   }
 
-  // --- Tier 1: known field paths ---
-  const sql = findCompiledSql(lines)
-  if (sql) return { sql }
+  // Skip success-only tiers when the primary run failed (same anti-spurious-
+  // data reasoning as execDbtShow).
+  if (!primaryRunError) {
+    // --- Tier 1: known field paths ---
+    const sql = findCompiledSql(lines)
+    if (sql) return { sql }
 
-  // --- Tier 2: heuristic deep scan ---
-  for (const line of lines) {
-    const found = deepFind(line, (val) => looksLikeSql(val))
-    if (found) return { sql: found as string }
+    // --- Tier 2: heuristic deep scan ---
+    for (const line of lines) {
+      const found = deepFind(line, (val) => looksLikeSql(val))
+      if (found) return { sql: found as string }
+    }
   }
 
-  // --- Tier 3: read compiled SQL from manifest.json (more reliable than stdout) ---
-  // dbt compile writes compiled_code to target/manifest.json even when stdout is logs.
-  // We run compile without JSON flags so it writes to manifest, then read the artifact.
+  // --- Manifest fallback ---
+  // dbt compile writes compiled_code to target/manifest.json even when stdout
+  // is just logs. Re-run plain (no JSON flags) so the artifact is fresh, then
+  // read it back. We tolerate a failure here (a prior successful compile may
+  // have left a usable manifest) but capture the error for later bubbling.
+  let manifestRunError: ExecFileError | undefined
   try {
     await run(["compile", "--select", model])
-  } catch {
-    // Compile may fail (e.g., dbt not found, project errors) — continue to manifest check
-    // since a prior successful compile may have left a usable manifest
+  } catch (e) {
+    manifestRunError = toExecFileError(e)
   }
   const fromManifest = readCompiledFromManifest(model)
   if (fromManifest) return { sql: fromManifest }
 
-  // Last resort: return stdout (may contain logs mixed with SQL)
+  // --- Last resort: plain compile, return raw stdout ---
+  let plainRunError: ExecFileError | undefined
   try {
     const { stdout: plainOut } = await run(["compile", "--select", model])
     return { sql: plainOut.trim() }
   } catch (e) {
-    throw new Error(
-      `Could not compile model '${model}' in any format (JSON, heuristic, or manifest). ` +
-        `Last error: ${e instanceof Error ? e.message : String(e)}`,
-    )
+    plainRunError = toExecFileError(e)
   }
+
+  // If dbt actually failed at any tier, surface the real dbt error via the
+  // shared helper so the message is SQL-safe, ANSI-stripped, and consistent
+  // with execDbtShow's error UX.
+  if (primaryRunError || plainRunError || manifestRunError) {
+    throw new Error(bubbleDbtError("dbt compile failed", primaryRunError, plainRunError ?? manifestRunError))
+  }
+
+  throw new Error(`Could not compile model '${model}' in any format (JSON, heuristic, or manifest).`)
 }
 
 /**
@@ -521,34 +560,45 @@ export async function execDbtCompileInline(
 ): Promise<{ sql: string }> {
   const args = ["compile", "--inline", sql, "--output", "json", "--log-format", "json"]
 
-  let lines: Record<string, unknown>[]
+  let lines: Record<string, unknown>[] = []
+  let primaryRunError: ExecFileError | undefined
   try {
     const { stdout } = await run(args)
     lines = parseJsonLines(stdout)
-  } catch {
-    lines = []
+  } catch (e) {
+    primaryRunError = toExecFileError(e)
   }
 
-  // --- Tier 1: known field paths ---
-  const compiled = findCompiledSql(lines)
-  if (compiled) return { sql: compiled }
+  // Skip success-only tiers when the primary run failed.
+  if (!primaryRunError) {
+    // --- Tier 1: known field paths ---
+    const compiled = findCompiledSql(lines)
+    if (compiled) return { sql: compiled }
 
-  // --- Tier 2: heuristic deep scan ---
-  for (const line of lines) {
-    const found = deepFind(line, (val) => looksLikeSql(val))
-    if (found) return { sql: found as string }
+    // --- Tier 2: heuristic deep scan ---
+    for (const line of lines) {
+      const found = deepFind(line, (val) => looksLikeSql(val))
+      if (found) return { sql: found as string }
+    }
   }
 
   // --- Tier 3: plain text fallback ---
+  let plainRunError: ExecFileError | undefined
   try {
     const { stdout: plainOut } = await run(["compile", "--inline", sql])
     return { sql: plainOut.trim() }
   } catch (e) {
-    throw new Error(
-      `Could not compile inline SQL in any format (JSON, heuristic, or plain text). ` +
-        `Last error: ${e instanceof Error ? e.message : String(e)}`,
-    )
+    plainRunError = toExecFileError(e)
   }
+
+  // bubbleDbtError redacts inline SQL from any err.message fallback — critical
+  // here because we're spawning `dbt compile --inline <user SQL>` and Node's
+  // rejection message embeds the full command line (with the SQL) verbatim.
+  if (primaryRunError || plainRunError) {
+    throw new Error(bubbleDbtError("dbt compile inline failed", primaryRunError, plainRunError))
+  }
+
+  throw new Error("Could not compile inline SQL in any format (JSON, heuristic, or plain text).")
 }
 
 /** Shared: extract compiled SQL from known dbt JSON output formats. */
