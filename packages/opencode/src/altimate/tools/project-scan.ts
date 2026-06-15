@@ -7,6 +7,9 @@ import { Telemetry } from "@/telemetry"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { Skill } from "../../skill"
+// altimate_change start — trace augmentation: use vocab constants for de.* keys
+import { DE_ENV } from "../observability/de-attributes"
+// altimate_change end
 
 // --- Types ---
 
@@ -944,10 +947,10 @@ export const ProjectScanTool = Tool.define("project_scan", {
     // `dbt.manifest` failure would otherwise emit `false` even when the
     // file is there, breaking the attribute's semantic contract.
     const deAttrs: Record<string, unknown> = {
-      "de.env.dbt_present": dbtProject.found,
-      "de.env.dbt_manifest_present": typeof dbtProject.manifestPath === "string" && dbtProject.manifestPath.length > 0,
-      ...(toolsFound.length > 0 && { "de.env.tools_detected": toolsFound }),
-      ...(deWhTypes.length === 1 && { "de.env.warehouse_type": deWhTypes[0] }),
+      [DE_ENV.DBT_PRESENT]: dbtProject.found,
+      [DE_ENV.DBT_MANIFEST_PRESENT]: typeof dbtProject.manifestPath === "string" && dbtProject.manifestPath.length > 0,
+      ...(toolsFound.length > 0 && { [DE_ENV.TOOLS_DETECTED]: toolsFound }),
+      ...(deWhTypes.length === 1 && { [DE_ENV.WAREHOUSE_TYPE]: deWhTypes[0] }),
     }
     // altimate_change end
 

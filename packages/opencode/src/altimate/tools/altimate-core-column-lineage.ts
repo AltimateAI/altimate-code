@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import { isRecord, normalizeError } from "./response-normalization"
+import { DE_SQL } from "../observability/de-attributes"
 
 export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_lineage", {
   description:
@@ -91,13 +92,13 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
           if (srcCol) colsRead.add(srcCol)
           if (tgtCol) colsWritten.add(tgtCol)
         }
-        if (inputTables.size > 0) lineageAttrs["de.sql.lineage.input_tables"] = [...inputTables].slice(0, 50)
+        if (inputTables.size > 0) lineageAttrs[DE_SQL.LINEAGE_INPUT_TABLES] = [...inputTables].slice(0, 50)
         // Keep output_table scalar — Codex chunk-3 review #5: don't switch attribute
         // type to array when there are multiple outputs. Omit the attribute instead.
-        if (outputs.size === 1) lineageAttrs["de.sql.lineage.output_table"] = [...outputs][0]
-        if (colsRead.size > 0) lineageAttrs["de.sql.lineage.columns_read"] = [...colsRead].slice(0, 100)
-        if (colsWritten.size > 0) lineageAttrs["de.sql.lineage.columns_written"] = [...colsWritten].slice(0, 100)
-        if (args.dialect) lineageAttrs["de.sql.dialect"] = args.dialect
+        if (outputs.size === 1) lineageAttrs[DE_SQL.LINEAGE_OUTPUT_TABLE] = [...outputs][0]
+        if (colsRead.size > 0) lineageAttrs[DE_SQL.LINEAGE_COLUMNS_READ] = [...colsRead].slice(0, 100)
+        if (colsWritten.size > 0) lineageAttrs[DE_SQL.LINEAGE_COLUMNS_WRITTEN] = [...colsWritten].slice(0, 100)
+        if (args.dialect) lineageAttrs[DE_SQL.DIALECT] = args.dialect
       }
       // altimate_change end
 

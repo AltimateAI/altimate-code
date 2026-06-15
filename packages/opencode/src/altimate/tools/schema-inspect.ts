@@ -6,6 +6,9 @@ import type { SchemaInspectResult } from "../native/types"
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
 import { isRecord, normalizeError } from "./response-normalization"
+// altimate_change start — trace augmentation: use vocab constants for de.* keys
+import { DE_WAREHOUSE, DE_SQL } from "../observability/de-attributes"
+// altimate_change end
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
   description: "Inspect database schema — list columns, types, and constraints for a table.",
@@ -52,9 +55,9 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
         : (schemaResult.table ?? args.table)
       const deAttrs: Record<string, unknown> = {
         ...(schemaResult.row_count !== undefined && schemaResult.row_count !== null && {
-          "de.warehouse.rows_total": schemaResult.row_count,
+          [DE_WAREHOUSE.ROWS_TOTAL]: schemaResult.row_count,
         }),
-        ...(qualifiedTable && { "de.sql.lineage.output_table": qualifiedTable }),
+        ...(qualifiedTable && { [DE_SQL.LINEAGE_OUTPUT_TABLE]: qualifiedTable }),
       }
       // altimate_change end
       return {

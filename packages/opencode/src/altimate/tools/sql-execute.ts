@@ -13,6 +13,9 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { getCache } from "../native/schema/cache"
 import * as Registry from "../native/connections/registry"
 // altimate_change end
+// altimate_change start — trace augmentation: use vocab constants for de.* keys
+import { DE_WAREHOUSE, DE_SQL } from "../observability/de-attributes"
+// altimate_change end
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -106,9 +109,9 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
           rowCount: result.row_count,
           truncated: result.truncated,
           // altimate_change start — de.* attributes lifted onto span by tracer
-          "de.warehouse.rows_returned": result.row_count,
-          ...(warehouseEntry?.type && { "de.warehouse.system": warehouseEntry.type }),
-          ...(warehouseEntry?.type && { "de.sql.dialect": warehouseEntry.type }),
+          [DE_WAREHOUSE.ROWS_RETURNED]: result.row_count,
+          ...(warehouseEntry?.type && { [DE_WAREHOUSE.SYSTEM]: warehouseEntry.type }),
+          ...(warehouseEntry?.type && { [DE_SQL.DIALECT]: warehouseEntry.type }),
           // altimate_change end
         },
         output,
