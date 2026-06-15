@@ -65,6 +65,15 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
         const extractColumn = (edge: Record<string, any>, side: "source" | "target"): string | undefined => {
           const direct = edge[`${side}_column`] ?? edge[`${side}Column`]
           if (typeof direct === "string" && direct) return direct
+          // Mirror extractTable's object-form branch — altimate-core may emit
+          // a structured `{ column?, name? }` object instead of a bare string.
+          // Without this, the column was silently dropped while extractTable
+          // still captured its half of the edge.
+          if (typeof direct === "object" && direct !== null) {
+            const obj = direct as Record<string, unknown>
+            const c = obj.column ?? obj.name
+            if (typeof c === "string" && c) return c
+          }
           const endpoint = edge[side]
           if (typeof endpoint === "string") {
             // Strip the table prefix when falling back to a dotted endpoint
