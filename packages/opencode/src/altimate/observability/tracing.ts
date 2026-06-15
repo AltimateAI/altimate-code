@@ -895,6 +895,11 @@ export class Trace {
       // from ballooning snapshots and HTTP exports — both truncation layers
       // upstream (`tool.ts` output truncation, `tracing.ts` 10 KB output slice)
       // operate on `output: string`, not on `metadata`.
+      //
+      // Byte size is computed as UTF-8 byte length, not JS string length
+      // (which counts UTF-16 code units): non-ASCII payloads (e.g.,
+      // CJK identifiers, emoji in error messages) would otherwise bypass
+      // the cap and balloon trace exports.
       const ATTR_VALUE_MAX_BYTES = 10_000
       const ATTR_TOTAL_MAX_BYTES = 32_000
       const spanAttributes: Record<string, unknown> = {}
@@ -909,12 +914,13 @@ export class Trace {
           try {
             const serialized = JSON.stringify(v)
             if (serialized === undefined) continue
-            if (serialized.length > ATTR_VALUE_MAX_BYTES) continue
-            if (totalBytes + serialized.length > ATTR_TOTAL_MAX_BYTES) continue
+            const valueBytes = Buffer.byteLength(serialized, "utf8")
+            if (valueBytes > ATTR_VALUE_MAX_BYTES) continue
+            if (totalBytes + valueBytes > ATTR_TOTAL_MAX_BYTES) continue
             // Store original value (matches setSpanAttributes() at line ~1135 for
             // consistent overwrite semantics if both paths target the same key).
             spanAttributes[k] = v
-            totalBytes += serialized.length
+            totalBytes += valueBytes
           } catch {
             // Bad metadata value must never break the tracer
           }
@@ -931,10 +937,11 @@ export class Trace {
           try {
             const serialized = JSON.stringify(v)
             if (serialized === undefined) continue
-            if (serialized.length > ATTR_VALUE_MAX_BYTES) continue
-            if (totalBytes + serialized.length > ATTR_TOTAL_MAX_BYTES) continue
+            const valueBytes = Buffer.byteLength(serialized, "utf8")
+            if (valueBytes > ATTR_VALUE_MAX_BYTES) continue
+            if (totalBytes + valueBytes > ATTR_TOTAL_MAX_BYTES) continue
             spanAttributes[k] = v
-            totalBytes += serialized.length
+            totalBytes += valueBytes
           } catch {
             // best-effort
           }
