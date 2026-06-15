@@ -939,9 +939,13 @@ export const ProjectScanTool = Tool.define("project_scan", {
           .filter(Boolean),
       ),
     ]
+    // `manifest_present` reflects on-disk file existence (set at line 218 via
+    // existsSync(target/manifest.json)), not RPC success. A transient
+    // `dbt.manifest` failure would otherwise emit `false` even when the
+    // file is there, breaking the attribute's semantic contract.
     const deAttrs: Record<string, unknown> = {
       "de.env.dbt_present": dbtProject.found,
-      "de.env.dbt_manifest_present": dbtManifest !== undefined && dbtManifest !== null,
+      "de.env.dbt_manifest_present": typeof dbtProject.manifestPath === "string" && dbtProject.manifestPath.length > 0,
       ...(toolsFound.length > 0 && { "de.env.tools_detected": toolsFound }),
       ...(deWhTypes.length === 1 && { "de.env.warehouse_type": deWhTypes[0] }),
     }
