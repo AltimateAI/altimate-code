@@ -168,29 +168,37 @@ type BashClassification = {
   dbtCommand?: string
 }
 
+// Hoisted to module scope so the RegExp is compiled once at startup, not on
+// every classifyBash call. (Gemini PR-938 review.)
+const DBT_VERBS = "build|run|test|seed|snapshot|compile|deps|run-operation|debug|parse|docs|clean|list|ls|source|init|show|retry|freshness"
+const DBT_VERB_RE = new RegExp(`\\bdbt\\s+(${DBT_VERBS})\\b`, "i")
+const ALTIMATE_DBT_RE = /\baltimate-dbt\b/i
+const ALTIMATE_DBT_VERB_RE = /\baltimate-dbt\s+([a-z][a-z0-9-]*)\b/i
+const DBT_BARE_RE = /\bdbt\b/
+const CD_PREFIX_RE = /^\s*cd\s+\S+\s*&&\s*/
+
 function classifyBash(command: string | undefined): BashClassification | undefined {
   if (typeof command !== "string" || !command) return undefined
 
   // Strip leading "cd <dir> &&" so we classify the actual work.
-  const stripped = command.replace(/^\s*cd\s+\S+\s*&&\s*/, "").trim()
+  const stripped = command.replace(CD_PREFIX_RE, "").trim()
   if (!stripped) return undefined
 
   // altimate-dbt CLI — MUST be checked before dbt below: `\b` is a word
   // boundary so `-` is non-word and `altimate-dbt build` would otherwise
   // match the dbt-verb regex and get misclassified as intent="dbt".
-  if (/\baltimate-dbt\b/i.test(stripped)) {
-    const verb = stripped.match(/\baltimate-dbt\s+([a-z][a-z0-9-]*)\b/i)
+  if (ALTIMATE_DBT_RE.test(stripped)) {
+    const verb = stripped.match(ALTIMATE_DBT_VERB_RE)
     return { intent: "altimate_dbt", invoked: "altimate-dbt", ...(verb && { dbtCommand: verb[1].toLowerCase() }) }
   }
 
   // dbt CLI: detect verb after `dbt`. Broad list of subcommands.
-  const dbtVerbs = "build|run|test|seed|snapshot|compile|deps|run-operation|debug|parse|docs|clean|list|ls|source|init|show|retry|freshness"
-  const dbtMatch = stripped.match(new RegExp(`\\bdbt\\s+(${dbtVerbs})\\b`, "i"))
+  const dbtMatch = stripped.match(DBT_VERB_RE)
   if (dbtMatch) {
     return { intent: "dbt", invoked: "dbt", dbtCommand: dbtMatch[1].toLowerCase() }
   }
   // dbt invoked but without a recognized verb (e.g. `dbt --version`, `dbt --help`)
-  if (/\bdbt\b/.test(stripped)) {
+  if (DBT_BARE_RE.test(stripped)) {
     return { intent: "dbt", invoked: "dbt" }
   }
 
