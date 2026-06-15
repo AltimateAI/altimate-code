@@ -19,10 +19,10 @@ describe("tool.question", () => {
   let askSpy: any
 
   beforeEach(() => {
-    // Force the original interactive path for the legacy tests below — the
-    // test environment is non-TTY (bun:test runs without a terminal), so
-    // without this override the non-interactive auto-answer branch would
-    // short-circuit `Question.ask` and the existing spies would never fire.
+    // Defensive: detection is opt-in via ALTIMATE_NON_INTERACTIVE, so the
+    // default in `bun:test` is already interactive. Setting
+    // ALTIMATE_FORCE_INTERACTIVE=1 protects against env pollution if a
+    // parent shell or earlier test leaked ALTIMATE_NON_INTERACTIVE=1.
     process.env["ALTIMATE_FORCE_INTERACTIVE"] = "1"
     askSpy = spyOn(QuestionModule.Question, "ask").mockImplementation(async () => {
       return []
@@ -258,5 +258,108 @@ describe("tool.question non-interactive auto-answer", () => {
 
     const result = await tool.execute({ questions }, ctx)
     expect(result.output.startsWith("Running in non-interactive mode")).toBe(true)
+  })
+
+  test("non-interactive output does not contradict itself", async () => {
+    // Regression: the trailing literal "continue with the user's answers in
+    // mind" used to be appended unconditionally, contradicting the
+    // non-interactive prefix that says no user answered. See PR #937 review.
+    const tool = await QuestionTool.init()
+    const questions = [
+      {
+        question: "OK to proceed?",
+        header: "Proceed",
+        options: [{ label: "Cancel", description: "Stop" }],
+      },
+    ]
+
+    const result = await tool.execute({ questions }, ctx)
+    expect(result.output).not.toContain("continue with the user's answers in mind")
+  })
+})
+
+describe("tool.question default detection (no env vars)", () => {
+  let askSpy: any
+
+  beforeEach(() => {
+    // Default detection must NOT short-circuit when no env vars are set.
+    // Regression: an earlier revision used !process.stdin.isTTY, which
+    // misclassified `serve`/`web`/`acp`/`workspace-serve` (all non-TTY but
+    // with HTTP /question/:requestID/reply) as non-interactive and silently
+    // disabled the IDE reply path. See PR #937 review (suryaiyer95).
+    delete process.env["ALTIMATE_FORCE_INTERACTIVE"]
+    delete process.env["ALTIMATE_NON_INTERACTIVE"]
+    delete process.env["ALTIMATE_AUTO_ANSWER"]
+    askSpy = spyOn(QuestionModule.Question, "ask").mockImplementation(async () => [["Red"]])
+  })
+
+  afterEach(() => {
+    askSpy.mockRestore()
+  })
+
+  test("calls Question.ask by default — does not short-circuit on missing TTY", async () => {
+    const tool = await QuestionTool.init()
+    const questions = [
+      {
+        question: "Pick a color",
+        header: "Color",
+        options: [
+          { label: "Red", description: "" },
+          { label: "Blue", description: "" },
+        ],
+      },
+    ]
+
+    const result = await tool.execute({ questions }, ctx)
+    expect(askSpy).toHaveBeenCalledTimes(1)
+    expect(result.output.startsWith("User has answered your questions")).toBe(true)
+  })
+
+  test("ALTIMATE_NON_INTERACTIVE=0 honored as explicit opt-out", async () => {
+    // run.ts auto-sets this env var only when undefined, so a user-set "0"
+    // is preserved. isNonInteractive() matches strict "=== '1'", so "0"
+    // falls through to the interactive path. PR #937 comment promises this
+    // works; lock the contract.
+    process.env["ALTIMATE_NON_INTERACTIVE"] = "0"
+
+    const tool = await QuestionTool.init()
+    const questions = [
+      {
+        question: "Pick a color",
+        header: "Color",
+        options: [
+          { label: "Red", description: "" },
+          { label: "Blue", description: "" },
+        ],
+      },
+    ]
+
+    const result = await tool.execute({ questions }, ctx)
+    expect(askSpy).toHaveBeenCalledTimes(1)
+    expect(result.output.startsWith("User has answered your questions")).toBe(true)
+  })
+
+  test("ALTIMATE_FORCE_INTERACTIVE=1 overrides ALTIMATE_NON_INTERACTIVE=1", async () => {
+    // FORCE_INTERACTIVE is checked first in isNonInteractive() so it wins
+    // even when NON_INTERACTIVE is also set. Used by tests to keep the
+    // interactive path live regardless of parent-shell env pollution.
+    process.env["ALTIMATE_NON_INTERACTIVE"] = "1"
+    process.env["ALTIMATE_FORCE_INTERACTIVE"] = "1"
+
+    const tool = await QuestionTool.init()
+    const questions = [
+      {
+        question: "Pick a color",
+        header: "Color",
+        options: [
+          { label: "Red", description: "" },
+          { label: "Blue", description: "" },
+        ],
+      },
+    ]
+
+    const result = await tool.execute({ questions }, ctx)
+    expect(askSpy).toHaveBeenCalledTimes(1)
+    expect(result.output.startsWith("User has answered your questions")).toBe(true)
   })
 })

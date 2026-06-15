@@ -368,6 +368,30 @@ export const RunCommand = cmd({
     // altimate_change end
   },
   handler: async (args) => {
+    // altimate_change start — `run` is the only entrypoint without an answer
+    // channel for the question tool: no TUI is mounted and the in-process
+    // Server.Default() shim below does not bind a port, so a connected IDE
+    // or web client cannot POST /question/:requestID/reply. Without this
+    // flag, Question.ask() awaits a Deferred forever and the parent
+    // supervisor TaskStops the subprocess — looking exactly like a hang.
+    // Server commands (serve/web/acp/workspace-serve) intentionally leave
+    // this unset so their HTTP reply path stays live.
+    //
+    // Skipped when --attach is set: the agent runs on the remote server, so
+    // the local env var would be a no-op and would only pollute the local
+    // process env for other tools that may consult it.
+    //
+    // Child processes spawned by the bash tool would inherit this flag and
+    // misbehave if they themselves are server-mode entrypoints; bash.ts
+    // strips ALTIMATE_NON_INTERACTIVE from mergedEnv to prevent that leak.
+    //
+    // Users can opt out by exporting ALTIMATE_NON_INTERACTIVE=0 before
+    // launching `run`.
+    if (!args.attach && process.env["ALTIMATE_NON_INTERACTIVE"] === undefined) {
+      process.env["ALTIMATE_NON_INTERACTIVE"] = "1"
+    }
+    // altimate_change end
+
     let message = [...args.message, ...(args["--"] || [])]
       .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
       .join(" ")
@@ -430,7 +454,10 @@ export const RunCommand = cmd({
       message = [extractedParts.join("\n\n"), message].filter(Boolean).join("\n\n")
     }
 
-    if (!process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+    // altimate_change start — null-safe stdin access. process.stdin can be
+    // undefined in embedded/child runtimes (see dev-punia review on PR #937).
+    if (!process.stdin?.isTTY) message += "\n" + (await Bun.stdin.text())
+    // altimate_change end
 
     if (message.trim().length === 0 && !args.command) {
       UI.error("You must provide a message or a command")
