@@ -29,6 +29,7 @@ import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
 import { Config } from "../../config/config"
+import { readStdinIfAvailable, assembleStdinMessage } from "../../util/stdin"
 
 type ToolProps<T extends Tool.Info> = {
   input: Tool.InferParameters<T>
@@ -430,16 +431,9 @@ export const RunCommand = cmd({
       message = [extractedParts.join("\n\n"), message].filter(Boolean).join("\n\n")
     }
 
-    // Only read stdin when no positional message was provided. The original
-    // unconditional `!isTTY` guard matched a non-TTY parent process even when
-    // it inherited (but never closed) stdin — `Bun.stdin.text()` would then
-    // wait forever for an EOF that never arrives, producing a silent 0% CPU
-    // hang for any subprocess / CI / agent caller that passed a positional
-    // message. Positional-overrides-stdin matches conventional CLI semantics;
-    // pipe-only invocations without a positional arg still work as before.
-    if (!process.stdin.isTTY && message.trim().length === 0) {
-      message += "\n" + (await Bun.stdin.text())
-    }
+    // Read piped/redirected stdin without wedging on inherited-but-idle fds.
+    // See `src/util/stdin.ts` for the failure mode and the first-byte-race fix.
+    message = assembleStdinMessage(message, await readStdinIfAvailable())
 
     if (message.trim().length === 0 && !args.command) {
       UI.error("You must provide a message or a command")
