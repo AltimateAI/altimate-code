@@ -44,18 +44,20 @@ const defaultDeps: StartupUpgradeDeps = {
 }
 
 /**
- * Runs a single best-effort upgrade check. Resolves, never rejects: `run()`
- * (upgrade) swallows its own errors via the inner catch; the outer guard only
- * fires for an `Instance.provide` failure. A flaky network/registry therefore
- * can't take the server down.
+ * Runs a single best-effort upgrade check. Resolves, never rejects, via two
+ * layers: the inner `.catch` swallows any error from `run()` (`upgrade()` can
+ * throw, e.g. from `Config.global()` / `Installation.method()`), and the outer
+ * try/catch guards an `Instance.provide` (bootstrap) failure. A flaky
+ * network/registry therefore can't take the server down. Errors are passed as
+ * `Error` objects so `Log` formats the message + `cause` chain.
  */
 export async function runStartupUpgradeCheck(deps: StartupUpgradeDeps = defaultDeps): Promise<void> {
   try {
     await deps.provide(process.cwd(), () =>
-      deps.run().catch((err) => log.error("startup upgrade check failed", { error: String(err) })),
+      deps.run().catch((err) => log.error("startup upgrade check failed", { error: err })),
     )
   } catch (err) {
-    log.error("startup upgrade instance failed", { error: String(err) })
+    log.error("startup upgrade instance failed", { error: err })
   }
 }
 
