@@ -29,6 +29,7 @@ import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
 import { Config } from "../../config/config"
+import { readStdinIfAvailable, assembleStdinMessage } from "../../util/stdin"
 
 type ToolProps<T extends Tool.Info> = {
   input: Tool.InferParameters<T>
@@ -454,14 +455,11 @@ export const RunCommand = cmd({
       message = [extractedParts.join("\n\n"), message].filter(Boolean).join("\n\n")
     }
 
-    // altimate_change start — null-safe stdin read. process.stdin can be
-    // undefined in embedded/child runtimes (dev-punia review, PR #937).
-    // Earlier revision used `!process.stdin?.isTTY`, which turned the crash
-    // into a stall: undefined stdin satisfied the guard and we then awaited
-    // Bun.stdin.text() on a stream that would never EOF. Skip the read
-    // entirely when there is no stdin to read from.
-    if (process.stdin && !process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
-    // altimate_change end
+    // Read piped/redirected stdin without wedging on inherited-but-idle fds.
+    // See `src/util/stdin.ts` for the failure mode and the first-byte-race fix.
+    // The helper also handles `process.stdin === undefined` (embedded/child
+    // runtimes — dev-punia review on PR #937) by returning "".
+    message = assembleStdinMessage(message, await readStdinIfAvailable())
 
     if (message.trim().length === 0 && !args.command) {
       UI.error("You must provide a message or a command")
