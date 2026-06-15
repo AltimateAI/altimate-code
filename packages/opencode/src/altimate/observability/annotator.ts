@@ -388,7 +388,10 @@ function classifyWorkflow(
   }
 
   // Prompt-driven fallbacks
-  if (/\b(fix|debug|troubleshoot|broken|failing|error)\b/.test(p) && (toolNames.includes("read") || toolNames.includes("edit"))) {
+  if (
+    /\b(fix|debug|troubleshoot|broken|failing|error)\b/.test(p) &&
+    (toolNames.includes("read") || toolNames.includes("edit") || toolNames.includes("write"))
+  ) {
     return { type: "dbt_troubleshoot", confidence: 0.5 }
   }
   if (/\b(create|add|build|model|refactor)\b/.test(p) && (toolNames.includes("write") || toolNames.includes("edit"))) {
