@@ -51,6 +51,20 @@ function getDbt(): ResolvedDbt {
   return resolvedDbt
 }
 
+/** Shape of an execFile rejection — carries stdout/stderr alongside message. */
+interface ExecFileError extends Error {
+  stdout?: string | Buffer
+  stderr?: string | Buffer
+  code?: number | string
+  signal?: string
+}
+
+/** Coerce an unknown rejection into something the catch blocks can read safely. */
+function toExecFileError(e: unknown): ExecFileError {
+  if (e instanceof Error) return e as ExecFileError
+  return new Error(String(e)) as ExecFileError
+}
+
 function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
   const dbt = getDbt()
   const env = buildDbtEnv(dbt)
@@ -58,8 +72,18 @@ function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
 
   return new Promise((resolve, reject) => {
     execFile(dbt.path, args, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024, env, cwd }, (err, stdout, stderr) => {
-      if (err) reject(err)
-      else resolve({ stdout, stderr })
+      if (err) {
+        // Node's execFile passes stdout/stderr as separate callback arguments,
+        // not as properties on the error. Attach them here so callers can
+        // surface the real dbt failure text instead of Node's generic
+        // "Command failed: ..." message.
+        const execErr = err as ExecFileError
+        execErr.stdout = stdout
+        execErr.stderr = stderr
+        reject(execErr)
+      } else {
+        resolve({ stdout, stderr })
+      }
     })
   })
 }
@@ -221,71 +245,82 @@ export async function execDbtShow(sql: string, limit?: number) {
   const args = ["show", "--inline", sql, "--output", "json", "--log-format", "json"]
   if (limit !== undefined) args.push("--limit", String(limit))
 
-  let lines: Record<string, unknown>[]
-  // Capture the run() error so we can bubble the real dbt failure up if all
+  // Capture the run() errors so we can bubble the real dbt failure up if all
   // parse tiers fail; the generic "Could not parse" alone misleads callers
   // into treating structural project errors as transient.
   let primaryRunError: ExecFileError | undefined
+  let lines: Record<string, unknown>[] = []
   try {
     const { stdout } = await run(args)
     lines = parseJsonLines(stdout)
   } catch (e) {
-    primaryRunError = e as ExecFileError
-    lines = parseJsonLines(primaryRunError.stdout ?? "")
+    primaryRunError = toExecFileError(e)
+    // Deliberately do NOT feed crashed-run stdout into `lines` for the
+    // heuristic tiers below. Crash logs can contain incidental arrays that
+    // `looksLikeRowData` would happily return as "rows" (silent wrong data).
+    // The crashed stdout is still consulted by extractDbtError below for the
+    // structured `level: "error"` event.
   }
 
-  // --- Tier 1: known field paths ---
-  const previewLine =
-    lines.find((l: any) => l.data?.preview) ??
-    lines.find((l: any) => l.data?.rows) ??
-    lines.find((l: any) => l.result?.preview) ??
-    lines.find((l: any) => l.result?.rows)
+  // Skip the success-only tiers when the primary run failed — see comment
+  // above. We still try Tier 3 (a separate plain-text run) because that can
+  // recover from JSON-mode-specific failures.
+  if (!primaryRunError) {
+    // --- Tier 1: known field paths ---
+    const previewLine =
+      lines.find((l: any) => l.data?.preview) ??
+      lines.find((l: any) => l.data?.rows) ??
+      lines.find((l: any) => l.result?.preview) ??
+      lines.find((l: any) => l.result?.rows)
 
-  const sqlLine =
-    lines.find((l: any) => l.data?.sql) ??
-    lines.find((l: any) => l.data?.compiled_sql) ??
-    lines.find((l: any) => l.result?.sql)
+    const sqlLine =
+      lines.find((l: any) => l.data?.sql) ??
+      lines.find((l: any) => l.data?.compiled_sql) ??
+      lines.find((l: any) => l.result?.sql)
 
-  if (previewLine) {
-    const preview =
-      (previewLine as any).data?.preview ??
-      (previewLine as any).data?.rows ??
-      (previewLine as any).result?.preview ??
-      (previewLine as any).result?.rows
+    if (previewLine) {
+      const preview =
+        (previewLine as any).data?.preview ??
+        (previewLine as any).data?.rows ??
+        (previewLine as any).result?.preview ??
+        (previewLine as any).result?.rows
 
-    // Guard JSON.parse — fall through to Tier 2 on malformed strings
-    let rows: Record<string, unknown>[]
-    if (typeof preview === "string") {
-      const parsed = safeJsonParse(preview)
-      if (Array.isArray(parsed)) {
-        rows = parsed
+      // Guard JSON.parse — fall through to Tier 2 on malformed strings
+      let rows: Record<string, unknown>[]
+      if (typeof preview === "string") {
+        const parsed = safeJsonParse(preview)
+        if (Array.isArray(parsed)) {
+          rows = parsed
+        } else {
+          rows = [] // Malformed — will fall through below
+        }
       } else {
-        rows = [] // Malformed — will fall through below
+        rows = preview
       }
-    } else {
-      rows = preview
+
+      // Return the result — even if empty. An empty preview means the query returned
+      // zero rows, which is a valid result. Do NOT fall through to Tier 2, which could
+      // match spurious log metadata as row data.
+      const columnNames = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : []
+      const compiledSql = (sqlLine as any)?.data?.sql ?? (sqlLine as any)?.data?.compiled_sql ?? (sqlLine as any)?.result?.sql ?? sql
+      return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
     }
 
-    // Return the result — even if empty. An empty preview means the query returned
-    // zero rows, which is a valid result. Do NOT fall through to Tier 2, which could
-    // match spurious log metadata as row data.
-    const columnNames = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : []
-    const compiledSql = (sqlLine as any)?.data?.sql ?? (sqlLine as any)?.data?.compiled_sql ?? (sqlLine as any)?.result?.sql ?? sql
-    return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
-  }
-
-  // --- Tier 2: heuristic deep scan ---
-  for (const line of lines) {
-    const found = deepFind(line, (val) => looksLikeRowData(val))
-    if (found) {
-      const rows: Record<string, unknown>[] = typeof found === "string" ? JSON.parse(found as string) : (found as Record<string, unknown>[])
-      const columnNames = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : []
-      const compiledSql = (deepFind(line, (val) => looksLikeSql(val)) as string) ?? sql
-      return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
+    // --- Tier 2: heuristic deep scan ---
+    for (const line of lines) {
+      const found = deepFind(line, (val) => looksLikeRowData(val))
+      if (found) {
+        const rows: Record<string, unknown>[] = typeof found === "string" ? JSON.parse(found as string) : (found as Record<string, unknown>[])
+        const columnNames = rows.length > 0 && rows[0] ? Object.keys(rows[0]) : []
+        const compiledSql = (deepFind(line, (val) => looksLikeSql(val)) as string) ?? sql
+        return { columnNames, columnTypes: columnNames.map(() => "string"), data: rows, rawSql: sql, compiledSql }
+      }
     }
   }
 
   // --- Tier 3: plain text fallback (ASCII table) ---
+  // Tried unconditionally — even if JSON-mode crashed, the plain-text mode
+  // sometimes succeeds and gives us a usable table.
   let plainRunError: ExecFileError | undefined
   try {
     const plainArgs = ["show", "--inline", sql]
@@ -302,14 +337,43 @@ export async function execDbtShow(sql: string, limit?: number) {
       }
     }
   } catch (e) {
-    plainRunError = e as ExecFileError
+    plainRunError = toExecFileError(e)
   }
 
-  // If either run() rejected, dbt actually crashed — surface the real error
-  // instead of the generic "Could not parse" message.
-  const realError = extractDbtError(lines, primaryRunError, plainRunError)
-  if (realError) {
-    throw new Error(`dbt show failed: ${realError}`)
+  // Two distinct failure modes; don't conflate them:
+  //
+  // (a) JSON-mode `dbt show` actually crashed → surface the real dbt error.
+  //     This is the original motivation for the PR.
+  //
+  // (b) JSON-mode succeeded (exit 0) but emitted output we can't decode,
+  //     AND the plain-text retry then failed for some other reason. The
+  //     `dbt show` command itself didn't fail; our parser did. Throwing
+  //     "dbt show failed: <plain-mode error>" here would misattribute a
+  //     parser regression as a dbt execution failure.
+  if (primaryRunError) {
+    const errorLogLines = parseJsonLines(primaryRunError.stdout?.toString() ?? "")
+    const realError = extractDbtError(errorLogLines, primaryRunError, plainRunError)
+    if (realError) {
+      // Avoid doubling the "failed:" prefix when dbt's own category prefix
+      // is already in the message (e.g. "Database Error: ...",
+      // "Compilation Error: ...").
+      const hasDbtCategoryPrefix = /^(Compilation|Database|Runtime|Parsing|Validation|Dependency)\s+Error\b/.test(
+        realError,
+      )
+      throw new Error(hasDbtCategoryPrefix ? realError : `dbt show failed: ${realError}`)
+    }
+  }
+
+  if (plainRunError) {
+    // Both branches stay SQL-safe: extractDbtError already strips ANSI and
+    // redacts via fallbackExitMessage; the fallback here uses the same helper
+    // explicitly so this code path can't regress to a raw err.message even if
+    // extractDbtError is refactored.
+    const fallback =
+      extractDbtError([], undefined, plainRunError) ??
+      fallbackExitMessage(undefined, plainRunError) ??
+      "unknown error"
+    throw new Error(`Could not parse dbt show JSON output, and plain-text fallback failed: ${fallback}`)
   }
 
   throw new Error(
@@ -318,26 +382,33 @@ export async function execDbtShow(sql: string, limit?: number) {
   )
 }
 
-/** Shape of an execFile rejection — carries stdout/stderr alongside message. */
-interface ExecFileError extends Error {
-  stdout?: string
-  stderr?: string
-  code?: number | string
-}
-
 /**
  * Pick the best human-readable error from a failed `dbt show` invocation.
  *
  * Preference order:
- *   1. A structured `level: "error"` event in the JSON log (dbt's own error msg).
+ *   1. The LAST structured `level: "error"` event in the JSON log. dbt often
+ *      emits a generic header (e.g. "Encountered an error:") before the
+ *      actionable message; we want the actionable one.
  *   2. Stderr from the JSON-mode run.
  *   3. Stderr from the plain-text-mode run.
- *   4. The exception message itself.
+ *   4. A concise "dbt exited with status N" fallback. We deliberately do NOT
+ *      surface `err.message` directly when it's an execFile rejection — Node
+ *      embeds the full command line (including the inline SQL) in that
+ *      message, which would leak the user's query into logs and UI.
  *
  * Returns undefined if neither run rejected — caller falls back to the generic
  * "Could not parse" message, which is correct when dbt exited 0 but emitted
  * something we can't decode.
+ *
+ * ANSI escape codes are stripped from the returned message so logs and UI
+ * bubbles stay clean (dbt may colour-code stderr and structured events).
  */
+interface DbtLogLine {
+  info?: { level?: string; msg?: string }
+  level?: string
+  msg?: string
+}
+
 function extractDbtError(
   lines: Record<string, unknown>[],
   primary?: ExecFileError,
@@ -345,21 +416,52 @@ function extractDbtError(
 ): string | undefined {
   if (!primary && !plain) return undefined
 
-  const errorEvent = lines.find(
-    (l: any) => l.info?.level === "error" || l.level === "error",
-  ) as any
-  const structuredMsg = errorEvent?.info?.msg ?? errorEvent?.msg
+  const errorMessages = lines
+    .map((l) => {
+      const line = l as DbtLogLine
+      const isError = line.info?.level === "error" || line.level === "error"
+      if (!isError) return undefined
+      return line.info?.msg ?? line.msg
+    })
+    .filter((m): m is string => typeof m === "string" && m.trim().length > 0)
+  const structuredMsg = errorMessages.at(-1)
 
   const primaryStderr = primary?.stderr?.toString().trim()
   const plainStderr = plain?.stderr?.toString().trim()
 
-  return (
-    (typeof structuredMsg === "string" && structuredMsg.length > 0 ? structuredMsg : undefined) ??
+  const chosen =
+    (structuredMsg && structuredMsg.length > 0 ? structuredMsg : undefined) ??
     (primaryStderr && primaryStderr.length > 0 ? primaryStderr : undefined) ??
     (plainStderr && plainStderr.length > 0 ? plainStderr : undefined) ??
-    primary?.message ??
-    plain?.message
-  )
+    fallbackExitMessage(primary, plain)
+
+  return chosen ? stripAnsi(chosen) : undefined
+}
+
+/**
+ * Build a concise exit-status message that does NOT leak the dbt command line.
+ *
+ * Node's `execFile` rejection has `err.message` = `"Command failed: <dbt-path>
+ * show --inline '<entire SQL>' ..."` whenever the spawned process actually
+ * ran — exit-non-zero AND timeout/signal kills both produce this message,
+ * embedding the user's full query (potentially with secrets, PII, multi-KB
+ * literals) into any log/UI surface that displays the error.
+ *
+ * Spawn-time failures (ENOENT etc.) have a different message shape that does
+ * NOT embed args, so they're safe to surface directly.
+ */
+function fallbackExitMessage(primary?: ExecFileError, plain?: ExecFileError): string | undefined {
+  const err = primary ?? plain
+  if (!err) return undefined
+
+  const looksLikeCommandFailed = typeof err.message === "string" && err.message.startsWith("Command failed:")
+  if (!looksLikeCommandFailed) return err.message
+
+  // The process ran; redact the embedded command line.
+  if (typeof err.code === "number") return `dbt exited with status ${err.code}`
+  if (err.signal) return `dbt killed by signal ${err.signal}`
+  if (typeof err.code === "string") return `dbt failed: ${err.code}`
+  return "dbt failed (no exit code reported)"
 }
 
 /**
