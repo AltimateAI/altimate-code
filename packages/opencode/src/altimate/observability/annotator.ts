@@ -501,14 +501,49 @@ export function annotateSession(trace: TraceFile): Record<string, unknown> {
     if (filesRead.size > 0) out[DE.ARTIFACTS.FILES_READ] = [...filesRead].slice(0, 100)
     if (filesEdited.size > 0) out[DE.ARTIFACTS.FILES_EDITED] = [...filesEdited].slice(0, 100)
 
-    // Environment capabilities (deterministic if project_scan ran — parse its output text)
-    const projectScanSpan = toolSpans.find((s) => s.name === "project_scan")
-    if (projectScanSpan) {
-      const env = detectEnvFromProjectScan(projectScanSpan)
-      if (env.dbtPresent != null) out[DE.ENV.DBT_PRESENT] = env.dbtPresent
-      if (env.manifestPresent != null) out[DE.ENV.DBT_MANIFEST_PRESENT] = env.manifestPresent
-      if (env.warehouseType) out[DE.ENV.WAREHOUSE_TYPE] = env.warehouseType
-      if (env.toolsDetected.length > 0) out[DE.ENV.TOOLS_DETECTED] = env.toolsDetected
+    // Environment capabilities. Prefer the project_scan tool's Layer-1
+    // `de.env.*` attributes (authoritative, set in project-scan.ts:935) over
+    // re-parsing its output text. Falls back to text parsing only when the
+    // Layer-1 attribute is absent.
+    //
+    // Picks the LATEST project_scan span (last one in the array — spans are
+    // pushed in insertion order in logToolCall) so that a session running
+    // project_scan twice (e.g., after adding a warehouse) reflects the
+    // current state, not the initial one. (GPT PR-938 consensus review M2.)
+    const projectScanSpans = toolSpans.filter((s) => s.name === "project_scan")
+    const latestScan = projectScanSpans[projectScanSpans.length - 1]
+    if (latestScan) {
+      const attrs = latestScan.attributes ?? {}
+      // Text-parse fallback computed lazily — only used per key when Layer-1
+      // is absent, so we still skip the regex work when all 4 keys hit Layer 1.
+      let fallback: ScanEnv | undefined
+      const parsed = (): ScanEnv => {
+        if (!fallback) fallback = detectEnvFromProjectScan(latestScan)
+        return fallback
+      }
+      const pickBool = (key: string, fb: () => boolean | undefined): boolean | undefined => {
+        const v = attrs[key]
+        if (typeof v === "boolean") return v
+        return fb()
+      }
+      const pickString = (key: string, fb: () => string | undefined): string | undefined => {
+        const v = attrs[key]
+        if (typeof v === "string" && v) return v
+        return fb()
+      }
+      const pickStringArray = (key: string, fb: () => string[]): string[] => {
+        const v = attrs[key]
+        if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v as string[]
+        return fb()
+      }
+      const dbtPresent = pickBool(DE.ENV.DBT_PRESENT, () => parsed().dbtPresent)
+      const manifestPresent = pickBool(DE.ENV.DBT_MANIFEST_PRESENT, () => parsed().manifestPresent)
+      const warehouseType = pickString(DE.ENV.WAREHOUSE_TYPE, () => parsed().warehouseType)
+      const toolsDetected = pickStringArray(DE.ENV.TOOLS_DETECTED, () => parsed().toolsDetected)
+      if (dbtPresent !== undefined) out[DE.ENV.DBT_PRESENT] = dbtPresent
+      if (manifestPresent !== undefined) out[DE.ENV.DBT_MANIFEST_PRESENT] = manifestPresent
+      if (warehouseType) out[DE.ENV.WAREHOUSE_TYPE] = warehouseType
+      if (toolsDetected.length > 0) out[DE.ENV.TOOLS_DETECTED] = toolsDetected
     }
 
     // Outcome.executed: was a dbt-family DML command (build/run/test/seed/
