@@ -309,9 +309,13 @@ export function annotateToolSpan(
       // Find a sql_execute-shaped SELECT/INSERT/CTE inside the bash command
       const sqlMatch = cmd.match(/(?:^|[\s'"`(])((?:WITH\s+\w[\s\S]{0,200}?AS\s*\(|SELECT|INSERT\s+INTO|UPDATE\s|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE)[\s\S]+)/i)
       if (sqlMatch) {
-        const sql = sqlMatch[1].slice(0, 8000)
-        out[DE.SQL.QUERY_TEXT] = sql
-        const tables = extractInputTables(sql)
+        // Cap stored query text at 8 KB for span size, but pass the FULL
+        // extracted SQL to extractInputTables so tail table refs aren't lost.
+        // Matches the sql_execute path (line ~287) and addresses Gemini
+        // review on PR #938 — earlier this scanned the truncated text.
+        const fullSql = sqlMatch[1]
+        out[DE.SQL.QUERY_TEXT] = fullSql.slice(0, 8000)
+        const tables = extractInputTables(fullSql)
         if (tables) out[DE.SQL.LINEAGE_INPUT_TABLES] = tables
       }
     }
