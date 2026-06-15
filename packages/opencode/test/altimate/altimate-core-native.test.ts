@@ -816,3 +816,101 @@ describe("Real-world equivalence regressions", () => {
     expect(await structRules("select distinct a from t group by a", "select distinct a from t group by a")).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------------------
+// altimate-core@0.5.1: dialect forwarding + authoritative `decidable` field
+// ---------------------------------------------------------------------------
+//
+// 0.5.1 added an optional `dialect` arg to checkEquivalence and a `decidable`
+// flag on the result. The native equivalence handler now forwards `params.dialect`
+// to the engine so dialect-specific compiled warehouse SQL parses instead of
+// abstaining on a syntax error. These tests exercise the REAL engine through the
+// Dispatcher (no mocks) to prove the arg is wired end-to-end.
+describe("core 0.5.1 dialect forwarding + decidable", () => {
+  beforeAll(async () => {
+    registerAll()
+    // sql.diff lives in the sql/* handler set, registered separately.
+    const { registerAllSql } = await import("../../src/altimate/native/sql/register")
+    registerAllSql()
+  })
+
+  const variantSchema = {
+    tables: { t: { columns: [
+      { name: "x", type: "INT" }, { name: "payload", type: "VARIANT" },
+    ] } },
+  }
+  // Snowflake semi-structured access `payload:f` is a hard PARSE error in the
+  // default dialect (the ':' is rejected) but parses under the snowflake dialect.
+  // The validation-error TEXT therefore differs by dialect — a syntax error only
+  // when the hint is dropped. Pre-fix (dialect not forwarded) BOTH would be syntax
+  // errors; this asserts they diverge, proving the arg reaches the parser.
+  const colonSql = "select payload:f::int as v from t"
+  const equivCall = (dialect?: string) =>
+    Dispatcher.call("altimate_core.equivalence", { sql1: colonSql, sql2: colonSql, schema_context: variantSchema, dialect })
+  const hasSyntaxError = (data: any) =>
+    (data.validation_errors ?? []).some((e: string) => /Syntax error|Expected end of statement/i.test(String(e)))
+
+  test("dialect hint is forwarded to the engine (changes parse outcome)", async () => {
+    const noDialect = await equivCall(undefined)
+    const snowflake = await equivCall("snowflake")
+    expect(noDialect.success).toBe(true)
+    expect(snowflake.success).toBe(true)
+    // Without a dialect the colon is a syntax error; snowflake accepts it.
+    expect(hasSyntaxError(noDialect.data)).toBe(true)
+    expect(hasSyntaxError(snowflake.data)).toBe(false)
+  })
+
+  test("decidable=false is surfaced when the engine cannot parse/plan", async () => {
+    const noDialect = await equivCall(undefined)
+    expect((noDialect.data as any).decidable).toBe(false)
+  })
+
+  test("decidable=true is surfaced for a cleanly decided pair", async () => {
+    const r = await Dispatcher.call("altimate_core.equivalence", {
+      sql1: "select count(*) from t",
+      sql2: "select count(1) from t",
+      schema_context: variantSchema,
+    })
+    expect(r.success).toBe(true)
+    const d = r.data as any
+    expect(d.decidable).toBe(true)
+    expect(d.equivalent).toBe(true)
+  })
+
+  test("empty-string dialect is coerced to no-hint (does NOT throw)", async () => {
+    // ReviewConfig.dialect defaults to "" (auto-detect). The engine throws on an
+    // unknown dialect "", so the handler must coerce "" → undefined (`|| undefined`,
+    // not `??`). Regression guard: before the coercion this returned success=false
+    // and silently disabled equivalence checking on the default config.
+    const r = await Dispatcher.call("altimate_core.equivalence", {
+      sql1: "select count(*) from t",
+      sql2: "select count(1) from t",
+      schema_context: variantSchema,
+      dialect: "",
+    })
+    expect(r.success).toBe(true)
+    const d = r.data as any
+    expect(d.decidable).toBe(true)
+    expect(d.equivalent).toBe(true)
+  })
+
+  test("sql.diff accepts and forwards the dialect hint without throwing", async () => {
+    // sql.diff's runtime shape (success/diff/equivalent) predates its declared
+    // SqlDiffResult type, so read through `any`. The assertion that matters: the
+    // dialect param is plumbed into the handler's checkEquivalence call (Edit in
+    // sql/register.ts) and the snowflake path is reachable end-to-end.
+    const call = (dialect?: string) =>
+      Dispatcher.call("sql.diff", {
+        original: colonSql,
+        modified: colonSql,
+        schema_context: variantSchema,
+        dialect,
+      } as any) as Promise<any>
+    const noDialect = await call(undefined)
+    const snowflake = await call("snowflake")
+    expect(noDialect.success).toBe(true)
+    expect(snowflake.success).toBe(true)
+    expect(typeof noDialect.diff).toBe("string")
+    expect(typeof snowflake.diff).toBe("string")
+  })
+})

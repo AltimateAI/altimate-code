@@ -58,7 +58,11 @@ export const ReviewCommand = cmd({
         manifestPath: args.manifest as string | undefined,
         mode: args.mode as ReviewMode | undefined,
         severityThreshold: args.severity as Severity | undefined,
-        noAi: args.ai === false,
+        // The flag is registered as `--no-ai`, so yargs sets `args.noAi`. No `ai`
+        // option is declared, so `--ai=false` is NOT a supported CLI flag; the
+        // `args.ai === false` check only covers programmatic callers that pass
+        // `ai: false` directly.
+        noAi: args.noAi === true || args.ai === false,
       })
 
       if (args.output) await fs.writeFile(args.output as string, JSON.stringify(env, null, 2))

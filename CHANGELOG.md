@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] - 2026-06-10
+
+### Added
+
+- **Verified query optimization — `altimate_core_rewrite` now proves a rewrite is safe before suggesting it.** A new `verify_equivalence` mode composes the rewrite engine with the equivalence checker: a candidate rewrite is labeled **VERIFIED** only when the engine affirmatively returns `equivalent === true`; everything else (including the no-schema case) is still returned but labeled "review before applying." This is the gated core for one-click verified query optimization, so an optimization that silently changes results is never presented as safe. (#918)
+- **Per-turn tool retrieval trims the tool-definition context flood.** Three flag-gated, default-off agent-loop reliability features: a per-turn tool subset (always-on core tools + lexical top-k, never dropping a tool referenced mid-trajectory) that cuts the ~78-tool definition payload sent each turn; grammar/JSON-Schema constrained decoding for local models (vLLM/LM Studio/llama.cpp); and a pluggable pre-execution critic gate for side-effecting tools. All default off, so the existing agent path is unchanged unless explicitly enabled. (#858)
+
+### Changed
+
+- **Upgraded the SQL engine `@altimateai/altimate-core` `0.4.0` → `0.5.1` and wired its new equivalence capabilities into the dbt PR reviewer.** The reviewer now forwards the project's SQL **dialect** hint to the equivalence engine, so dialect-specific compiled warehouse SQL (e.g. Snowflake semi-structured `col:field`) parses and the comparison is decided instead of abstaining on a syntax error, and it honors the engine's new authoritative **`decidable`** flag — abstaining when the engine itself says it could not decide, rather than guessing. An empty/auto-detect dialect is coerced to "no hint" so the engine is never handed an unknown dialect. (#925, #928)
+
+### Fixed
+
+- **The dbt PR reviewer is more reliable and less noisy.** Demo-parity hardening: tighter PII-review precision, reduced safe-refactor review noise, schema YAML catalog rules now run in review, and added DuckDB data-diff end-to-end coverage. (#919)
+- **dbt review no longer misclassifies YAML files.** Schema/property YAML files are classified correctly so the right rules apply to them. (#920)
+- **The `release-v0.8.5` adversarial test gate is pinned to a constant version** so it stops breaking on every subsequent release. (#923)
+
+### Internal
+
+- **Centralized code-review dispatch on PR ready.** A gated loop dispatches a centralized OCR/Gemini review when a pull request is marked ready for review. (#914)
+
 ## [0.8.6] - 2026-06-08
 
 ### Added

@@ -52,3 +52,21 @@ When [LSP servers](../lsp.md) are configured, the `lsp` tool provides:
 - Go-to-definition
 - Hover information
 - Completions
+
+### Tool Retrieval
+
+With the full data-engineering toolset (~78 tools), sending every tool definition on every turn floods the context window and adds distractors that hurt the model's tool selection. **Tool retrieval** trims the exposed set per turn to a relevant subset, cutting input tokens substantially at the same task quality.
+
+It is **off by default** and enabled with an environment variable:
+
+```bash
+ALTIMATE_TOOL_RETRIEVAL=1 altimate-code run "..."
+```
+
+When enabled, each turn exposes:
+
+- an always-on **core** set of essentials that are never trimmed (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `list`, `task`, `todowrite`, `skill`),
+- any tool already **referenced by an in-flight tool call** (so a mid-trajectory tool is never dropped), and
+- the highest-scoring remaining tools by a deterministic lexical match against the turn's request, up to a fixed budget.
+
+Selection is deterministic and dependency-free; small tool sets are left untouched (nothing to gain). In internal benchmarks this cut input tokens by ~50% at an identical task-resolution rate.

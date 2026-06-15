@@ -228,10 +228,15 @@ describe("v0.8.5 adversarial - composite action", () => {
   })
 
   test("docs point at the action patch, not the already-published broken tag", async () => {
+    // This is the 0.8.5 release gate: it asserts the 0.8.5 docs reference the
+    // patched action tag (@v0.8.5) and NOT the already-published broken @v0.8.4.
+    // It must stay pinned to the constant "0.8.5" — earlier this derived `version`
+    // from the changelog's TOP entry, which later releases (0.8.6+) move, breaking
+    // the gate on every subsequent release. Assert the 0.8.5 entry EXISTS in the
+    // changelog rather than that it is the latest.
+    const version = "0.8.5"
     const changelog = await fs.readFile(path.join(repoRoot, "CHANGELOG.md"), "utf8")
-    // Match whether the entry is still "Unreleased" or has been date-stamped at release.
-    const version = changelog.match(/^## \[(\d+\.\d+\.\d+)\] - (?:Unreleased|\d{4}-\d{2}-\d{2})$/m)?.[1]
-    expect(version).toBe("0.8.5")
+    expect(changelog).toContain(`## [${version}]`)
 
     for (const relative of ["docs/docs/usage/dbt-pr-review.md", "github/review/examples/altimate-ingestion.yml"]) {
       const content = await fs.readFile(path.join(repoRoot, relative), "utf8")

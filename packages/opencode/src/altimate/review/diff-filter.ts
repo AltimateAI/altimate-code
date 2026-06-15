@@ -58,6 +58,7 @@ export type DbtFileKind =
 /** Classify a changed file by its role in a dbt project. */
 export function classifyDbtFile(path: string): DbtFileKind {
   const p = path.replace(/\\/g, "/").toLowerCase()
+  const isYaml = p.endsWith(".yml") || p.endsWith(".yaml")
   if (/(^|\/)(dbt_project|profiles|packages|dependencies)\.ya?ml$/.test(p)) return "project_config"
   if (/(^|\/)macros\//.test(p)) return "macro"
   if (/(^|\/)snapshots\//.test(p)) return "snapshot"
@@ -66,7 +67,8 @@ export function classifyDbtFile(path: string): DbtFileKind {
   if (/(^|\/)analyses\//.test(p)) return "analysis"
   if (/(^|\/)models\//.test(p) && p.endsWith(".py")) return "python_model"
   if (/(^|\/)models\//.test(p) && p.endsWith(".sql")) return "model_sql"
-  if (p.endsWith(".yml") || p.endsWith(".yaml")) return "schema_yml"
+  if (isYaml && /(^|\/)(models|snapshots|seeds|tests)\//.test(p)) return "schema_yml"
+  if (isYaml && /(^|\/)(_?schema|_?models|_?sources|sources|properties)\.ya?ml$/.test(p)) return "schema_yml"
   return "other"
 }
 

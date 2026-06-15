@@ -320,7 +320,13 @@ export function registerAll(): void {
   register("altimate_core.equivalence", async (params) => {
     try {
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema)
+      // Pass the optional dialect hint so dialect-specific compiled warehouse SQL
+      // (e.g. Snowflake semi-structured `col:field`) parses and the pair is
+      // decidable instead of abstaining on a syntax error. Supported since
+      // altimate-core@0.5.1. Use `|| undefined` (not `??`) so the default empty
+      // string from ReviewConfig.dialect coerces to "no hint": the engine throws
+      // on an unknown dialect "", and "" must mean auto-detect, not a real dialect.
+      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema, params.dialect || undefined)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -332,7 +338,7 @@ export function registerAll(): void {
   register("altimate_core.migration", async (params) => {
     try {
       // Build schema from old_ddl, analyze new_ddl against it
-      const schema = core.Schema.fromDdl(params.old_ddl, params.dialect || undefined)
+      const schema = core.Schema.fromDdl(params.old_ddl, params.dialect ?? undefined)
       const raw = core.analyzeMigration(params.new_ddl, schema)
       const data = toData(raw)
       return ok(true, data)
@@ -426,7 +432,7 @@ export function registerAll(): void {
   register("altimate_core.column_lineage", async (params) => {
     try {
       const schema = resolveSchema(params.schema_path, params.schema_context)
-      const raw = core.columnLineage(params.sql, params.dialect || undefined, schema ?? undefined)
+      const raw = core.columnLineage(params.sql, params.dialect ?? undefined, schema ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -447,7 +453,7 @@ export function registerAll(): void {
   // 22. altimate_core.format
   register("altimate_core.format", async (params) => {
     try {
-      const raw = core.formatSql(params.sql, params.dialect || undefined)
+      const raw = core.formatSql(params.sql, params.dialect ?? undefined)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -458,7 +464,7 @@ export function registerAll(): void {
   // 23. altimate_core.metadata
   register("altimate_core.metadata", async (params) => {
     try {
-      const raw = core.extractMetadata(params.sql, params.dialect || undefined)
+      const raw = core.extractMetadata(params.sql, params.dialect ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -468,7 +474,7 @@ export function registerAll(): void {
   // 24. altimate_core.compare
   register("altimate_core.compare", async (params) => {
     try {
-      const raw = core.compareQueries(params.left_sql, params.right_sql, params.dialect || undefined)
+      const raw = core.compareQueries(params.left_sql, params.right_sql, params.dialect ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -522,7 +528,7 @@ export function registerAll(): void {
   // 29. altimate_core.import_ddl — returns Schema, must serialize
   register("altimate_core.import_ddl", async (params) => {
     try {
-      const schema = core.importDdl(params.ddl, params.dialect || undefined)
+      const schema = core.importDdl(params.ddl, params.dialect ?? undefined)
       const jsonObj = schema.toJson()
       return ok(true, { success: true, schema: toData(jsonObj) })
     } catch (e) {

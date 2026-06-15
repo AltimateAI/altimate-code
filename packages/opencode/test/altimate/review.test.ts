@@ -569,6 +569,130 @@ describe("orchestrate", () => {
     ).toBe(true)
   })
 
+  test("core SC010 join-key regression maps to critical join_risk and blocks", async () => {
+    const oldSql = `
+      select *
+      from orders
+      left join customers
+        on orders.customer_id = customers.customer_id
+    `
+    const newSql = `
+      select *
+      from orders
+      left join customers
+        on orders.order_id = customers.customer_id
+    `
+    let sawBase = ""
+    let sawHead = ""
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async structuralDiff(baseSql, headSql) {
+        sawBase = baseSql
+        sawHead = headSql
+        return [
+          {
+            code: "SC010",
+            rule: "join_key_regression",
+            severity: "error",
+            message:
+              "A join key changed from matching the same identifier stem to `orders.order_id = customers.customer_id`.",
+          },
+        ]
+      },
+    }
+    const env = await runReview({
+      changedFiles: [
+        {
+          path: "models/marts/fct_customer_orders.sql",
+          status: "modified",
+          diff: "+on orders.order_id = customers.customer_id\n-on orders.customer_id = customers.customer_id\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: async (_f, side) => (side === "new" ? newSql : oldSql),
+      getCompiled: async (_f, side) => (side === "new" ? newSql : oldSql),
+      generatedAt: "2026-06-08T00:00:00Z",
+    })
+    expect(sawBase).toBe(oldSql)
+    expect(sawHead).toBe(newSql)
+    const f = env.findings.find(
+      (x) => x.evidence?.tool === "altimate_core.structural_diff" && (x.evidence?.result as any)?.code === "SC010",
+    )
+    expect(f).toBeDefined()
+    expect(f!.severity).toBe("critical")
+    expect(f!.category).toBe("join_risk")
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("core structural diff quiet on CTE rename and bridge join countercases", async () => {
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async structuralDiff() {
+        return []
+      },
+    }
+    const safeEnv = await runReview({
+      changedFiles: [
+        {
+          path: "models/marts/fct_customer_orders.sql",
+          status: "modified",
+          diff:
+            "+on order_records.customer_id = customer_records.customer_id\n" +
+            "-on orders.customer_id = customers.customer_id\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: async (_f, side) =>
+        side === "new"
+          ? "select * from order_records left join customer_records on order_records.customer_id = customer_records.customer_id"
+          : "select * from orders left join customers on orders.customer_id = customers.customer_id",
+      getCompiled: async (_f, side) =>
+        side === "new"
+          ? "select * from order_records left join customer_records on order_records.customer_id = customer_records.customer_id"
+          : "select * from orders left join customers on orders.customer_id = customers.customer_id",
+      generatedAt: "2026-06-08T00:00:00Z",
+    })
+    expect(
+      safeEnv.findings.some(
+        (x) => x.evidence?.tool === "altimate_core.structural_diff" && (x.evidence?.result as any)?.code === "SC010",
+      ),
+    ).toBe(false)
+
+    const bridgeEnv = await runReview({
+      changedFiles: [
+        {
+          path: "models/marts/fct_order_items.sql",
+          status: "modified",
+          diff: "+on orders.order_id = order_items.order_id\n-on orders.customer_id = customers.customer_id\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: async (_f, side) =>
+        side === "new"
+          ? "select * from orders left join order_items on orders.order_id = order_items.order_id"
+          : "select * from orders left join customers on orders.customer_id = customers.customer_id",
+      getCompiled: async (_f, side) =>
+        side === "new"
+          ? "select * from orders left join order_items on orders.order_id = order_items.order_id"
+          : "select * from orders left join customers on orders.customer_id = customers.customer_id",
+      generatedAt: "2026-06-08T00:00:00Z",
+    })
+    expect(
+      bridgeEnv.findings.some(
+        (x) => x.evidence?.tool === "altimate_core.structural_diff" && (x.evidence?.result as any)?.code === "SC010",
+      ),
+    ).toBe(false)
+  })
+
   test("core L033 portability → regex portability twin suppressed, idempotency concern survives", async () => {
     const sql = "select getdate() as loaded_at from {{ ref('a') }}"
     const files: ChangedFile[] = [{ path: "models/marts/m.sql", status: "modified", diff: "+    , getdate() as loaded_at\n" }]
@@ -1207,6 +1331,433 @@ describe("orchestrate", () => {
     expect(pii).toBeDefined()
     expect(pii!.severity).toBe("critical")
     expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("diff-scoped core PII is the single blocker for newly introduced mart email", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["email"] }
+      },
+      async columnLineage(sql) {
+        return sql.includes("email")
+          ? [
+              { source: "customers.customer_name", target: "customer_name" },
+              { source: "customers.email", target: "email" },
+            ]
+          : [{ source: "customers.customer_name", target: "customer_name" }]
+      },
+      async classifyPii(columns) {
+        return columns.map((column) => ({
+          column,
+          classification: "Email",
+          confidence: 0.95,
+          masking: "'***MASKED***'",
+        }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_name, email from customers", "select customer_name from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii).toHaveLength(1)
+    expect(pii[0].severity).toBe("critical")
+    expect(pii[0].evidence?.tool).toBe("altimate_core.classify_pii")
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("broad PII detector remains fallback for existing output columns", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    lower(email) as email\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["email"] }
+      },
+      async columnLineage(sql) {
+        return sql.includes("email")
+          ? [
+              { source: "customers.customer_id", target: "customer_id" },
+              { source: "customers.email", target: "email" },
+            ]
+          : [{ source: "customers.customer_id", target: "customer_id" }]
+      },
+      async classifyPii(columns) {
+        return columns.map((column) => ({
+          column,
+          classification: "Email",
+          confidence: 0.95,
+          masking: "'***MASKED***'",
+        }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, lower(email) as email from customers", "select customer_id, email from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii).toHaveLength(1)
+    expect(pii[0].evidence?.tool).toBe("schema.detect_pii")
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("PII fallback survives core lineage failure instead of aborting review", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["email"] }
+      },
+      async columnLineage() {
+        throw new Error("lineage parser crashed")
+      },
+      async classifyPii(columns) {
+        return columns.map((column) => ({
+          column,
+          classification: "Email",
+          confidence: 0.95,
+        }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, email from customers", "select customer_id from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii).toHaveLength(1)
+    expect(pii[0].evidence?.tool).toBe("schema.detect_pii")
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("PII fallback survives core classification failure instead of hiding risk", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["email"] }
+      },
+      async columnLineage(sql) {
+        return sql.includes("email")
+          ? [
+              { source: "customers.customer_id", target: "customer_id" },
+              { source: "customers.email", target: "email" },
+            ]
+          : [{ source: "customers.customer_id", target: "customer_id" }]
+      },
+      async classifyPii() {
+        throw new Error("classifier unavailable")
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, email from customers", "select customer_id from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii).toHaveLength(1)
+    expect(pii[0].evidence?.tool).toBe("schema.detect_pii")
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("case-variant PII detector output does not duplicate core diff-scoped finding", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    Email as EMAIL\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["EMAIL", "email"] }
+      },
+      async columnLineage(sql) {
+        return sql.toLowerCase().includes("email")
+          ? [
+              { source: "customers.customer_id", target: "customer_id" },
+              { source: "customers.email", target: "EMAIL" },
+            ]
+          : [{ source: "customers.customer_id", target: "customer_id" }]
+      },
+      async classifyPii(columns) {
+        return columns.map((column) => ({
+          column,
+          classification: "Email",
+          confidence: 0.95,
+        }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, Email as EMAIL from customers", "select customer_id from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii).toHaveLength(1)
+    expect(pii[0].evidence?.tool).toBe("altimate_core.classify_pii")
+  })
+
+  test("low-confidence name PII does not surface or fall back to regex PII comments", async () => {
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    first_name\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["first_name"] }
+      },
+      async columnLineage(sql) {
+        return sql.includes("first_name")
+          ? [
+              { source: "customers.customer_id", target: "customer_id" },
+              { source: "customers.first_name", target: "first_name" },
+            ]
+          : [{ source: "customers.customer_id", target: "customer_id" }]
+      },
+      async classifyPii(columns) {
+        return columns.map((column) => ({
+          column,
+          classification: "Name",
+          confidence: 0.85,
+        }))
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, first_name from customers", "select customer_id from customers"),
+    })
+    expect(env.findings.some((f) => f.category === "pii_exposure")).toBe(false)
+  })
+
+  test("diff-scoped PII recall: a column core's classifier MISSED still surfaces via the broad fallback", async () => {
+    // Regression guard: when core `classify_pii` returns NOTHING for an introduced
+    // column (it missed it), that column must remain eligible for the broad
+    // `schema.detect_pii` detector — it must not be silently dropped just because
+    // the diff-scoped lane ran for the file.
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["ssn"] }
+      },
+      async columnLineage(sql) {
+        return sql.includes("ssn")
+          ? [
+              { source: "customers.customer_id", target: "customer_id" },
+              { source: "customers.ssn", target: "ssn" },
+            ]
+          : [{ source: "customers.customer_id", target: "customer_id" }]
+      },
+      async classifyPii() {
+        return []
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["pii_exposure"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, ssn from customers", "select customer_id from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(pii).toHaveLength(1)
+    expect(pii[0].evidence?.tool).toBe("schema.detect_pii")
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("core-missed high-risk PII still caught by the regex twin when the broad PII lane is off", async () => {
+    // Lower tiers (trivial/lite) run `dbt_patterns` but not `pii_exposure`. If core
+    // classification ran but missed a high-risk column, the regex twin is the only
+    // safety net — it must NOT be suppressed for a column core never classified.
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["ssn"] }
+      },
+      async columnLineage(sql) {
+        return sql.includes("ssn")
+          ? [
+              { source: "customers.customer_id", target: "customer_id" },
+              { source: "customers.ssn", target: "ssn" },
+            ]
+          : [{ source: "customers.customer_id", target: "customer_id" }]
+      },
+      async classifyPii() {
+        return []
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, ssn from customers", "select customer_id from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(
+      pii.some((f) => f.evidence?.tool === "dbt-patterns" && (f.evidence?.result as any)?.rule === "pii_into_mart"),
+    ).toBe(true)
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("zero-target lineage does not mark the file PII-complete, so the regex twin survives", async () => {
+    // Regression guard: when `columnLineage` RESOLVES but yields no output targets
+    // (the parser couldn't derive columns — uncertainty, not "no new PII"), the
+    // diff-scoped lane must not flag the file as completed. Otherwise the file
+    // enters the PII-completed/classified sets and a deterministic regex twin could
+    // be suppressed for a column core never actually classified.
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["ssn"] }
+      },
+      async columnLineage() {
+        // Lineage resolves but derives zero output columns for every input.
+        return []
+      },
+      async classifyPii() {
+        return []
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, ssn from customers", "select customer_id from customers"),
+    })
+    const pii = env.findings.filter((f) => f.category === "pii_exposure")
+    expect(
+      pii.some((f) => f.evidence?.tool === "dbt-patterns" && (f.evidence?.result as any)?.rule === "pii_into_mart"),
+    ).toBe(true)
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+  })
+
+  test("core considered the matched column (muted as low-confidence) → the regex twin is suppressed", async () => {
+    // Inverse of the recall guards above: suppression must be COLUMN-aware, not
+    // merely "the classifier ran". Here core's `classify_pii` DID consider `ssn`
+    // but muted it (confidence below threshold → no diff-scoped finding). Because
+    // the column was considered, the coarse `pii_into_mart` regex twin for the
+    // same column is redundant and must be suppressed — otherwise the same column
+    // is double-reported. This exercises the token-gated suppression branch
+    // (`classifiedPiiColumnsByFile.has(token)`), distinct from the "never
+    // classified → twin survives" path.
+    const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async detectPii() {
+        return { columns: ["ssn"] }
+      },
+      async columnLineage(sql) {
+        return sql.includes("ssn")
+          ? [
+              { source: "customers.customer_id", target: "customer_id" },
+              { source: "customers.ssn", target: "ssn" },
+            ]
+          : [{ source: "customers.customer_id", target: "customer_id" }]
+      },
+      async classifyPii() {
+        // Considered `ssn` but is not confident → muted, no diff-scoped finding,
+        // yet `ssn` still lands in the classified-columns set.
+        return [{ column: "ssn", classification: "SSN", confidence: 0.1 }]
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: content("select customer_id, ssn from customers", "select customer_id from customers"),
+    })
+    const piiIntoMart = env.findings.filter(
+      (f) => f.evidence?.tool === "dbt-patterns" && (f.evidence?.result as any)?.rule === "pii_into_mart",
+    )
+    expect(piiIntoMart).toHaveLength(0)
+  })
+
+  test("structural error severity blocks only for join_risk; other rules stay advisory", async () => {
+    // SC003 group_by_change is `semantic_change`, not `join_risk`. Even at core
+    // `severity: "error"` it must NOT be escalated to critical — only join-key
+    // regressions are allowed to hard-block.
+    const oldSql = "select g, sum(x) as x from t group by g"
+    const newSql = "select g, h, sum(x) as x from t group by g, h"
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async structuralDiff() {
+        return [{ code: "SC003", rule: "group_by_change", severity: "error", message: "grain changed" }]
+      },
+    }
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/fct_orders.sql", status: "modified", diff: "+group by g, h\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: async (_f, side) => (side === "new" ? newSql : oldSql),
+      getCompiled: async (_f, side) => (side === "new" ? newSql : oldSql),
+      generatedAt: "2026-06-08T00:00:00Z",
+    })
+    const f = env.findings.find(
+      (x) => x.evidence?.tool === "altimate_core.structural_diff" && (x.evidence?.result as any)?.code === "SC003",
+    )
+    expect(f).toBeDefined()
+    expect(f!.severity).toBe("warning")
+    expect(f!.category).toBe("semantic_change")
+  })
+
+  test("join_key_regression below error severity stays advisory (warning, not critical)", async () => {
+    const oldSql = "select * from orders left join customers on orders.customer_id = customers.customer_id"
+    const newSql = "select * from orders left join customers on orders.order_id = customers.customer_id"
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async structuralDiff() {
+        return [{ code: "SC010", rule: "join_key_regression", severity: "warning", message: "join key changed" }]
+      },
+    }
+    const env = await runReview({
+      changedFiles: [
+        {
+          path: "models/marts/fct_customer_orders.sql",
+          status: "modified",
+          diff: "+on orders.order_id = customers.customer_id\n",
+        },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["semantic_change"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "gate",
+      runner,
+      getContent: async (_f, side) => (side === "new" ? newSql : oldSql),
+      getCompiled: async (_f, side) => (side === "new" ? newSql : oldSql),
+      generatedAt: "2026-06-08T00:00:00Z",
+    })
+    const f = env.findings.find(
+      (x) => x.evidence?.tool === "altimate_core.structural_diff" && (x.evidence?.result as any)?.code === "SC010",
+    )
+    expect(f).toBeDefined()
+    expect(f!.severity).toBe("warning")
+    expect(f!.category).toBe("join_risk")
   })
 
   test("clean change with no manifest → degraded, APPROVE/COMMENT, lint-only labeled", async () => {

@@ -56,33 +56,57 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         new Promise<any>((resolve, reject) => {
           let resolved = false
           let timeout: ReturnType<typeof setTimeout> | undefined
+          let instance: any
+          // Sentinel for an open callback that fired synchronously (before
+          // `instance` was assigned): `undefined` = not yet fired, `null` =
+          // fired with success, `Error` = fired with failure. Replayed once
+          // `instance` exists.
+          let pendingOpen: Error | null | undefined
           const opts = accessMode ? { access_mode: accessMode } : undefined
-          const instance = new duckdb.Database(
-            dbPath,
-            opts,
-            (err: Error | null) => {
-              if (resolved) { if (instance && typeof instance.close === "function") instance.close(); return }
-              resolved = true
-              if (timeout) clearTimeout(timeout)
-              if (err) {
-                const msg = err.message || String(err)
-                if (msg.toLowerCase().includes("locked") || msg.includes("SQLITE_BUSY") || msg.includes("DUCKDB_LOCKED")) {
-                  reject(new Error("DUCKDB_LOCKED"))
-                } else {
-                  reject(err)
-                }
+          const closeQuietly = () => {
+            try {
+              if (instance && typeof instance.close === "function") instance.close()
+            } catch {
+              // best-effort cleanup of a half-open handle
+            }
+          }
+          const onOpen = (err: Error | null) => {
+            if (!instance) {
+              pendingOpen = err
+              return
+            }
+            if (resolved) {
+              closeQuietly()
+              return
+            }
+            resolved = true
+            if (timeout) clearTimeout(timeout)
+            if (err) {
+              // Open failed — release the half-open handle so it doesn't leak.
+              closeQuietly()
+              const msg = err.message || String(err)
+              if (msg.toLowerCase().includes("locked") || msg.includes("SQLITE_BUSY") || msg.includes("DUCKDB_LOCKED")) {
+                reject(new Error("DUCKDB_LOCKED"))
               } else {
-                resolve(instance)
+                reject(err)
               }
-            },
-          )
-          // Bun: native callback may not fire; fall back after 2s
+            } else {
+              resolve(instance)
+            }
+          }
+          instance = opts
+            ? new duckdb.Database(dbPath, opts, onOpen)
+            : new duckdb.Database(dbPath, onOpen)
+          // Bun: native callback may not fire; fall back after 2s. Arm the timer
+          // BEFORE replaying a synchronous callback so a sync resolve/reject can
+          // actually clear it (otherwise it lingers ~2s and delays process exit).
           timeout = setTimeout(() => {
             if (!resolved) {
               resolved = true
               reject(new Error(`Timed out opening DuckDB database "${dbPath}"`))
             }
           }, 2000)
+          if (pendingOpen !== undefined) onOpen(pendingOpen)
         })
 
       try {

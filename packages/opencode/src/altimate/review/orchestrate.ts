@@ -117,7 +117,7 @@ export interface ReviewRunner {
   impact(model: string): Promise<ImpactResult>
   grade(sql: string, dialect: string): Promise<GradeResult>
   check(sql: string, dialect: string, baseSql?: string): Promise<CheckResult>
-  equivalence(oldSql: string, newSql: string, dialect: string): Promise<EquivalenceResult>
+  equivalence(oldSql: string, newSql: string, dialect?: string): Promise<EquivalenceResult>
   detectPii(sql: string, dialect: string): Promise<{ columns: string[] }>
   /**
    * Lexical scan (reserved-word aliases + dialect operators) — the curated lists
@@ -813,7 +813,22 @@ const STRUCTURAL_CATEGORY: Record<string, ReviewCategory> = {
   coalesce_removed: "semantic_change",
   removed_predicate: "semantic_change",
   type_narrowing: "contract_violation",
+  join_key_regression: "join_risk",
 }
+
+// PII classification thresholds for the diff-scoped lane. Names/addresses are
+// common, lower-sensitivity PII that the broad name-pattern detector over-flags,
+// so the precise lane requires higher confidence before surfacing them. Kept a
+// named constant (not a magic number) and deliberately narrow: broadening the
+// low-risk set to variants would suppress MORE real columns, hurting recall.
+const PII_LOW_RISK_CLASS = /^(name|address)$/i
+const PII_LOW_RISK_MIN_CONFIDENCE = 0.9
+const PII_DEFAULT_MIN_CONFIDENCE = 0.7
+// Column-name tokens the regex PII twins (`pii_into_mart`) key off — used to
+// recover which column a coarse regex finding flagged so suppression can be
+// column-aware (suppress only when core actually classified THAT column).
+const PII_TOKEN_RE =
+  /\b(email|ssn|social_security|phone_number|first_name|last_name|full_name|street_address|date_of_birth|dob|passport|credit_card)\b/i
 
 async function structuralChangeLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
   if (!runner.structuralDiff) return []
@@ -828,7 +843,11 @@ async function structuralChangeLane(ctx: ModelContext, runner: ReviewRunner): Pr
   const out: Finding[] = []
   for (const f of raw) {
     const cat: ReviewCategory = STRUCTURAL_CATEGORY[f.rule] ?? "semantic_change"
-    const sev = clampSeverity(cat, "warning", "high")
+    // Only `join_risk` (SC010 join-key regression) is allowed to block: a changed
+    // join key silently corrupts row sets. Other structural rules core marks
+    // `error` stay advisory (warning) so this lane never over-blocks on a rule
+    // it wasn't designed to gate.
+    const sev = clampSeverity(cat, cat === "join_risk" && f.severity === "error" ? "critical" : "warning", "high")
     out.push(
       makeFinding({
         severity: sev,
@@ -915,29 +934,65 @@ async function siblingConsistencyLane(ctxs: ModelContext[], runner: ReviewRunner
  * only NEW PII (a column whose name appears in the added diff), so it never nags
  * about pre-existing PII columns the PR didn't touch.
  */
-async function piiClassifyLane(ctx: ModelContext, runner: ReviewRunner, dialect: string): Promise<Finding[]> {
-  if (!runner.classifyPii) return []
+async function piiClassifyLane(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+): Promise<{ findings: Finding[]; classifiedColumns: Set<string>; completed: boolean }> {
+  const empty = { findings: [], classifiedColumns: new Set<string>(), completed: false }
+  if (!runner.classifyPii) return empty
   const { file, engineNewSql } = ctx
-  if (!engineNewSql || file.status === "deleted") return []
+  if (!engineNewSql || file.status === "deleted") return empty
   const model = modelNameFromPath(file.path)
-  if (!runner.columnLineage) return []
+  if (!runner.columnLineage) return empty
   // Output columns the change INTRODUCED = head targets − base targets (precise;
   // a pre-existing column merely mentioned in the diff is NOT counted).
-  const headCols = [...new Set((await runner.columnLineage(engineNewSql, dialect)).map((e) => e.target).filter(Boolean))]
-  if (!headCols.length) return []
-  const baseCols = ctx.engineOldSql
-    ? new Set((await runner.columnLineage(ctx.engineOldSql, dialect)).map((e) => e.target.toLowerCase()))
-    : undefined
-  const newCols = baseCols ? headCols.filter((c) => !baseCols.has(c.toLowerCase())) : headCols
-  if (!newCols.length) return []
-  const pii = await runner.classifyPii(newCols)
+  let newCols: string[]
+  try {
+    const headCols = [...new Set((await runner.columnLineage(engineNewSql, dialect)).map((e) => e.target).filter(Boolean))]
+    // Zero head targets means lineage could NOT resolve this model's output
+    // columns — the classifier considered nothing, so this is uncertainty, not a
+    // confident "no new PII". Returning `completed: false` keeps the deterministic
+    // regex fallback alive (vs. the `!newCols.length` case below, where lineage
+    // DID resolve columns but none are newly introduced — that is genuinely done).
+    if (!headCols.length) return empty
+    const baseCols = ctx.engineOldSql
+      ? new Set((await runner.columnLineage(ctx.engineOldSql, dialect)).map((e) => e.target.toLowerCase()))
+      : undefined
+    newCols = baseCols ? headCols.filter((c) => !baseCols.has(c.toLowerCase())) : headCols
+  } catch {
+    return empty
+  }
+  if (!newCols.length) return { findings: [], classifiedColumns: new Set<string>(), completed: true }
+  let pii
+  try {
+    pii = await runner.classifyPii(newCols)
+  } catch {
+    return empty
+  }
+  // Columns core's classifier actually CONSIDERED (returned a verdict for), even
+  // if below threshold. The broad fallback and the regex twins dedup against THIS
+  // set — not all introduced columns — so a column core simply MISSED (never
+  // classified) stays eligible for the broad name-pattern detector instead of
+  // being silently dropped.
+  const classifiedColumns = new Set(pii.map((p) => String(p.column ?? "").toLowerCase()).filter(Boolean))
   const out: Finding[] = []
+  // "Exposure" severity only escalates for published/broadly-read layers
+  // (marts/reporting). This is intentionally narrower than where grain tests
+  // apply (`missingGrainTestLane` also includes `intermediate`): an internal
+  // intermediate model surfacing PII is a warning, not a hard block.
+  const highExposureLayer = /(^|\/)(marts|reporting)\//.test(file.path)
   for (const p of pii) {
-    if (p.confidence < 0.7 || !p.column) continue
+    const classification = String(p.classification ?? "")
+    const lowRiskClass = PII_LOW_RISK_CLASS.test(classification)
+    const minConfidence = lowRiskClass ? PII_LOW_RISK_MIN_CONFIDENCE : PII_DEFAULT_MIN_CONFIDENCE
+    if (p.confidence < minConfidence || !p.column) continue
     const col = p.column.toLowerCase()
+    const highConfidence = p.confidence >= 0.9
+    const severity: Severity = highExposureLayer && highConfidence && !lowRiskClass ? "critical" : "warning"
     out.push(
       makeFinding({
-        severity: "warning",
+        severity: clampSeverity("pii_exposure", severity, highConfidence ? "high" : "medium"),
         category: "pii_exposure",
         title: `${model}: exposes ${p.classification} column \`${p.column}\``,
         body:
@@ -946,13 +1001,13 @@ async function piiClassifyLane(ctx: ModelContext, runner: ReviewRunner, dialect:
           (p.masking ? `; suggested masking: \`${p.masking}\`.` : "."),
         file: file.path,
         model,
-        confidence: p.confidence >= 0.9 ? "high" : "medium",
+        confidence: highConfidence ? "high" : "medium",
         evidence: { tool: "altimate_core.classify_pii", result: p },
         ruleKey: `pii_exposure:${col}`,
       }),
     )
   }
-  return out
+  return { findings: out, classifiedColumns, completed: true }
 }
 
 function piiLane(file: ChangedFile & { kind: string }, columns: string[]): Finding[] {
@@ -1045,6 +1100,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
 
   const all: Finding[][] = []
+  // Files where the diff-scoped PII classifier completed (looked at the change),
+  // those where it actually emitted a finding, and — per file — the lowercased
+  // columns it classified. These drive column-aware dedup of the coarse regex
+  // PII twins in the merge step below.
+  const diffScopedPiiCompletedFiles = new Set<string>()
+  const diffScopedPiiFindingFiles = new Set<string>()
+  const classifiedPiiColumnsByFile = new Map<string, Set<string>>()
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
@@ -1070,11 +1132,35 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
     }
     if (lanes.has("test_coverage")) tasks.push(missingGrainTestLane(ctx, input.runner))
-    if (lanes.has("pii_exposure")) all.push(piiLane(ctx.file, ctx.pii))
     // PII classification always runs (cheap name-pattern check, diff-scoped to
     // newly-introduced columns) — exposing PII is a hard-floor concern that
-    // shouldn't depend on the cost tier enabling the pii_exposure lane.
-    tasks.push(piiClassifyLane(ctx, input.runner, dialect))
+    // shouldn't depend on the cost tier enabling the pii_exposure lane. If core
+    // lineage/classification fails, keep the broad deterministic fallback.
+    // Run it as a concurrent task (not an inline await) so the heavy native
+    // lineage/classify calls overlap the other engine lanes for this file.
+    const currentCtx = ctx
+    tasks.push(
+      (async () => {
+        const diffScopedPii = await piiClassifyLane(currentCtx, input.runner, dialect)
+        if (diffScopedPii.completed) {
+          diffScopedPiiCompletedFiles.add(currentCtx.file.path)
+          classifiedPiiColumnsByFile.set(currentCtx.file.path, diffScopedPii.classifiedColumns)
+        }
+        if (diffScopedPii.findings.length) diffScopedPiiFindingFiles.add(currentCtx.file.path)
+        const findings = [...diffScopedPii.findings]
+        if (lanes.has("pii_exposure")) {
+          // The broad fallback covers output PII columns the precise lane did NOT
+          // classify (pre-existing columns, or ones core's classifier missed) —
+          // dedup against the columns core actually CONSIDERED, never all
+          // introduced columns, so a missed column still surfaces here.
+          const fallbackPii = diffScopedPii.completed
+            ? currentCtx.pii.filter((col) => !diffScopedPii.classifiedColumns.has(col.toLowerCase()))
+            : currentCtx.pii
+          findings.push(...piiLane(currentCtx.file, fallbackPii))
+        }
+        return findings
+      })(),
+    )
     // Deterministic dbt anti-pattern detectors run on RAW SQL + diff (need Jinja).
     if (lanes.has("dbt_patterns")) {
       all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric))
@@ -1138,6 +1224,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // regex still covers functions core didn't flag (dialect-suppressed / not in
   // core's set) plus reserved words / types / operators that L033 doesn't do.
   const flat = all.flat()
+  const schemaPiiFiles = new Set(
+    flat.filter((f) => f.category === "pii_exposure" && f.evidence?.tool === "schema.detect_pii").map((f) => f.file),
+  )
   // Per file, the concatenated rule names core's AST lint actually emitted —
   // so we suppress a regex twin only when core genuinely covered that concern.
   const coreRulesByFile = new Map<string, string>()
@@ -1160,13 +1249,43 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
   }
   const merged = flat.filter((f) => {
-    if (!coreRanFiles.has(f.file)) return true
     const tool = f.evidence?.tool
+    const fallbackRule = String((f.evidence?.result as any)?.rule ?? "").replace(/_/g, "-")
+    // Dedup the coarse regex PII twins against the precise deterministic PII
+    // detectors — but only when a better detector genuinely COVERS the same
+    // column. Suppressing whenever the classifier merely "ran" hid real PII
+    // (a high-risk column core's classifier missed but the regex would catch,
+    // especially on tiers without the broad `pii_exposure` lane).
+    if (
+      (tool === "dbt-patterns" || tool === "rule-catalog") &&
+      f.category === "pii_exposure" &&
+      (fallbackRule === "pii-into-mart" || fallbackRule === "select-pii-columns")
+    ) {
+      // The broad `schema.detect_pii` lane already flagged this file → redundant.
+      if (schemaPiiFiles.has(f.file)) return false
+      if (fallbackRule === "pii-into-mart") {
+        // `pii_into_mart` carries the matched column in `result.line`: suppress
+        // only when core's classifier actually CONSIDERED that column (flagged or
+        // deliberately muted). A column core never classified falls through.
+        const token = PII_TOKEN_RE.exec(String((f.evidence?.result as any)?.line ?? ""))?.[1]?.toLowerCase()
+        if (token && classifiedPiiColumnsByFile.get(f.file)?.has(token)) return false
+        // No recoverable column: defer to the prior file-level behavior so the
+        // twin isn't double-reported when core ran for the file.
+        if (!token && diffScopedPiiCompletedFiles.has(f.file)) return false
+        return true
+      }
+      // `select-pii-columns` doesn't preserve its column. Suppress only when a
+      // precise detector actually EMITTED a PII finding for the file (so the
+      // exposure is reported by the better source, not silently dropped).
+      if (diffScopedPiiFindingFiles.has(f.file)) return false
+      return true
+    }
+    if (!coreRanFiles.has(f.file)) return true
     if (tool !== "dbt-patterns" && tool !== "rule-catalog") return true
     // Structural twins: the check code survives on evidence.result.rule (ruleKey
     // is stripped by the zod schema). Suppress ONLY if core actually emitted the
     // equivalent rule for this file (else the issue would fall through).
-    const code = String((f.evidence?.result as any)?.rule ?? "").replace(/_/g, "-")
+    const code = fallbackRule
     const coreMatcher = CORE_AST_COVERED[code]
     if (coreMatcher && coreMatcher.test(coreRulesByFile.get(f.file) ?? "")) return false
     // Portability twins: drop a regex finding ONLY IF it is itself a portability

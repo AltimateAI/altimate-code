@@ -13,6 +13,9 @@ import {
 } from "ai"
 import { mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
+// altimate_change start — tool retrieval
+import { Retrieval } from "@/tool/retrieval"
+// altimate_change end
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
 import type { Agent } from "@/agent/agent"
@@ -175,6 +178,29 @@ export namespace LLM {
             metadata: {},
           }),
         })
+      }
+    }
+    // altimate_change end
+
+    // altimate_change start — tool retrieval
+    // Expose only the relevant top-k tools this turn (flag-gated). Keeps the
+    // always-on core + any in-flight (referenced) tools; no-op for small sets.
+    if (Retrieval.enabled()) {
+      const lastUser = [...input.messages].reverse().find((m) => m.role === "user")
+      const c = lastUser?.content as any
+      const query =
+        typeof c === "string"
+          ? c
+          : Array.isArray(c)
+            ? c.map((p: any) => (typeof p === "string" ? p : (p?.text ?? ""))).join(" ")
+            : ""
+      const list = Object.entries(tools).map(([name, t]) => ({ name, description: (t as any)?.description }))
+      const keep = Retrieval.select(query, list, { keep: referencedTools })
+      for (const name of Object.keys(tools)) {
+        // Never delete "invalid": it's the AI-SDK fallback tool the runtime relies
+        // on for malformed tool calls, not a user-facing tool, so it's exempt from
+        // retrieval rather than being listed in Retrieval.CORE.
+        if (name !== "invalid" && !keep.has(name)) delete tools[name]
       }
     }
     // altimate_change end
