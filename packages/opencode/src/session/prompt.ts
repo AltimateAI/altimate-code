@@ -2589,18 +2589,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   export async function command(input: CommandInput) {
     log.info("command", input)
-    const command = await Command.get(input.command)
-    if (!command) {
-      const all = await Command.list()
-      const names = all
-        .map((c: any) => c.name)
-        .filter(Boolean)
-        .sort()
-      throw new NamedError.Unknown({
-        message: `Command not found: "${input.command}". Available: ${names.join(", ") || "(none)"}`,
-      })
-    }
-    const agentName = command.agent ?? input.agent ?? (await Agent.defaultAgent())
 
     // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
     if (input.command === "mcps") {
@@ -2703,6 +2691,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }
     // altimate_change end
 
+    const command = await Command.get(input.command)
+    if (!command) {
+      const all = await Command.list()
+      const names = all
+        .map((c: any) => c.name)
+        .filter(Boolean)
+        .sort()
+      throw new NamedError.Unknown({
+        message: `Command not found: "${input.command}". Available: ${names.join(", ") || "(none)"}`,
+      })
+    }
+    const agentName = command.agent ?? input.agent ?? (await Agent.defaultAgent())
 
     const raw = input.arguments.match(argsRegex) ?? []
     const args = raw.map((arg) => arg.replace(quoteTrimRegex, ""))
