@@ -66,7 +66,15 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
           const direct = edge[`${side}_column`] ?? edge[`${side}Column`]
           if (typeof direct === "string" && direct) return direct
           const endpoint = edge[side]
-          if (typeof endpoint === "string") return endpoint
+          if (typeof endpoint === "string") {
+            // Strip the table prefix when falling back to a dotted endpoint
+            // string so this returns only the column — matching the structured
+            // path above. Without this, `columns_read` would mix bare
+            // column names (from `source_column`) with fully-qualified
+            // strings (from `source` as fallback), breaking deduplication.
+            const lastDot = endpoint.lastIndexOf(".")
+            return lastDot >= 0 ? endpoint.slice(lastDot + 1) : endpoint
+          }
           if (typeof endpoint === "object" && endpoint !== null) {
             const obj = endpoint as Record<string, unknown>
             const c = obj.column ?? obj.name
