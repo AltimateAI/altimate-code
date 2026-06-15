@@ -131,7 +131,7 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       //  as a security default (no auto-connect until user approves).
       // When the user explicitly adds a server via this tool, it should be enabled.
       const { enabled: _discardEnabled, ...cfgToWrite } = stripSessionEnv(discovered[name]) as any
-      await addMcpToConfig(name, cfgToWrite as import('../../config/config').Config.Mcp, configPath)
+      await addMcpToConfig(name, { ...cfgToWrite, enabled: true } as import('../../config/config').Config.Mcp, configPath)
       // altimate_change end
     }
 
