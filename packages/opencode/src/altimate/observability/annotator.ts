@@ -300,9 +300,11 @@ export function annotateToolSpan(
     } else if (toolName === "sql_execute" || toolName === "sql_analyze" || toolName === "sql_optimize" || toolName === "sql_fix" || toolName === "sql_explain" || toolName === "sql_translate" || toolName === "sql_rewrite" || toolName === "sql_format") {
       const q = typeof inp.query === "string" ? inp.query : (typeof inp.sql === "string" ? inp.sql : undefined)
       if (q) {
-        // Cap the stored query text to keep span size bounded, but still extract
-        // lineage from the full query so we don't lose table refs at the tail.
-        out[DE.SQL.QUERY_TEXT] = q.slice(0, 8000)
+        // Don't pre-truncate. The tracer enforces a 10 KB UTF-8 byte cap per
+        // value in `logToolCall`; a char-based slice here was inconsistent
+        // (8000 CJK chars = ~24 KB and gets silently dropped by the byte cap).
+        // Let the tracer be the single authority on byte limits.
+        out[DE.SQL.QUERY_TEXT] = q
         const tables = extractInputTables(q)
         if (tables) out[DE.SQL.LINEAGE_INPUT_TABLES] = tables
       }
@@ -317,12 +319,10 @@ export function annotateToolSpan(
       // Find a sql_execute-shaped SELECT/INSERT/CTE inside the bash command
       const sqlMatch = cmd.match(/(?:^|[\s'"`(])((?:WITH\s+\w[\s\S]{0,200}?AS\s*\(|SELECT|INSERT\s+INTO|UPDATE\s|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE)[\s\S]+)/i)
       if (sqlMatch) {
-        // Cap stored query text at 8 KB for span size, but pass the FULL
-        // extracted SQL to extractInputTables so tail table refs aren't lost.
-        // Matches the sql_execute path (line ~287) and addresses Gemini
-        // review on PR #938 — earlier this scanned the truncated text.
+        // No pre-truncation here either — tracer's 10 KB UTF-8 byte cap is
+        // the single source of truth for span-attribute size limits.
         const fullSql = sqlMatch[1]
-        out[DE.SQL.QUERY_TEXT] = fullSql.slice(0, 8000)
+        out[DE.SQL.QUERY_TEXT] = fullSql
         const tables = extractInputTables(fullSql)
         if (tables) out[DE.SQL.LINEAGE_INPUT_TABLES] = tables
       }
