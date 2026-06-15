@@ -511,12 +511,18 @@ export function annotateSession(trace: TraceFile): Record<string, unknown> {
       if (env.toolsDetected.length > 0) out[DE.ENV.TOOLS_DETECTED] = env.toolsDetected
     }
 
-    // Outcome.executed: was a dbt build/run/test actually performed?
+    // Outcome.executed: was a dbt-family DML command (build/run/test/seed/
+    // snapshot) actually performed? Reads the cached `de.tool.bash_intent`
+    // and `de.dbt.command` attributes set by classifyBash at logToolCall
+    // time — single source of truth, no regex duplication, no verb-list drift.
+    // (Claude PR-938 consensus review M4.)
+    const DBT_EXECUTED_VERBS = new Set(["build", "run", "test", "seed", "snapshot"])
     const ranDbt = toolSpans.some((s) => {
       if (s.name !== "bash") return false
-      const inp = s.input as Record<string, unknown> | undefined
-      const cmd = typeof inp?.command === "string" ? inp.command : ""
-      return /\b(?:dbt|altimate-dbt)\s+(?:build|run|test|seed|snapshot)\b/i.test(cmd)
+      const intent = s.attributes?.[DE.TOOL.BASH_INTENT]
+      if (intent !== "dbt" && intent !== "altimate_dbt") return false
+      const cmd = s.attributes?.[DE.DBT.COMMAND]
+      return typeof cmd === "string" && DBT_EXECUTED_VERBS.has(cmd)
     })
     if (ranDbt) out[DE.OUTCOME.EXECUTED] = true
 
