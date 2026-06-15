@@ -2079,6 +2079,16 @@ export namespace SessionPrompt {
     }
   }
 
+  //
+  // NOTE: `family` is a free-form, config-settable string on the model schema —
+  // a connection that declares `family: "claude-*"` on a non-Anthropic gateway
+  // will classify as Anthropic-like and SKIP the hoist, which reintroduces the
+  // #887 refusal on that backend. This is a routing-trust input, not an
+  // escalation vector (whoever sets the model config already controls the
+  // prompt), but operators adding gateway models should set `family` correctly.
+  //
+  // Exported for testing — the hoist/classification contract is exercised
+  // behaviorally in test/session/plan-layer-e2e.test.ts.
   // altimate_change start — model-family helper used by the trust-aware hoist below.
   // Uses `familyVendor` so specific family values (`claude-sonnet`, `claude-haiku`,
   // `gemini-pro`, etc.) classify correctly — an exact `family === "anthropic"`
@@ -2096,16 +2106,6 @@ export namespace SessionPrompt {
     if (/^anthropic[-_/]/.test(apiId)) return true
     return false
   }
-  //
-  // NOTE: `family` is a free-form, config-settable string on the model schema —
-  // a connection that declares `family: "claude-*"` on a non-Anthropic gateway
-  // will classify as Anthropic-like and SKIP the hoist, which reintroduces the
-  // #887 refusal on that backend. This is a routing-trust input, not an
-  // escalation vector (whoever sets the model config already controls the
-  // prompt), but operators adding gateway models should set `family` correctly.
-  //
-  // Exported for testing — the hoist/classification contract is exercised
-  // behaviorally in test/session/plan-layer-e2e.test.ts.
   // altimate_change end
 
   // altimate_change start — return the trusted reminder parts insertReminders just appended
