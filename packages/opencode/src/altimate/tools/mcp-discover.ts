@@ -36,7 +36,6 @@ function safeDetail(server: { type: string } & Record<string, any>): string {
   return `(${server.type})`
 }
 
-// altimate_change start — strip session-specific env vars before persisting
 // discovered servers. ALTIMATE_EXTENSION_RPC is a Unix socket path that is
 // unique to the current VS Code extension host process. Writing it to disk
 // causes altimate-code on a future session (or a different VS Code window) to
@@ -50,7 +49,6 @@ function stripSessionEnv(cfg: import("../../config/config").Config.Mcp): import(
   const { ALTIMATE_EXTENSION_RPC: _rpc, ...rest } = cfg.environment
   return { ...cfg, environment: Object.keys(rest).length > 0 ? rest : undefined }
 }
-// altimate_change end
 
 export const McpDiscoverTool = Tool.define("mcp_discover", {
   description:
@@ -127,7 +125,6 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
     )
 
     for (const name of toAdd) {
-      // altimate_change start — strip session-specific ALTIMATE_EXTENSION_RPC and
       // strip the discovery-time  flag. Project-scoped discovery sets
       //  as a security default (no auto-connect until user approves).
       // When the user explicitly adds a server via this tool, it should be enabled.
@@ -136,7 +133,6 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       // Connect immediately so /mcps reflects the server status in the current session
       // without requiring a restart.
       await MCP.connect(name)
-      // altimate_change end
     }
 
     lines.push(`\nAdded ${toAdd.length} server(s) to ${configPath}: ${toAdd.join(", ")}`)

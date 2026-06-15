@@ -9,9 +9,7 @@ import type { Config } from "../config/config"
 
 const log = Log.create({ service: "datamate-transport" })
 
-// altimate_change start — shared constant used in datamate.ts, serve.ts, and server.ts
 export const DATAMATE_KEY = "datamate"
-// altimate_change end
 
 /**
  * Top-level keys that MCP config files use to map server name → entry.
