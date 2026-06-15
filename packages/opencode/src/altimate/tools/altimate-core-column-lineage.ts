@@ -74,7 +74,14 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
           return undefined
         }
 
-        for (const edge of (data.column_lineage ?? []) as Record<string, any>[]) {
+        // Guard with Array.isArray — the `?? []` fallback only handles
+        // null/undefined. If the dispatcher returns a non-array shape we
+        // skip lineage extraction rather than throwing in the for-of.
+        // Use unknown[] at the array boundary and narrow per element with
+        // isRecord — Array.isArray only proves array, not array-of-records.
+        const edges: unknown[] = Array.isArray(data.column_lineage) ? data.column_lineage : []
+        for (const edge of edges) {
+          if (!isRecord(edge)) continue
           const srcTable = extractTable(edge, "source")
           const tgtTable = extractTable(edge, "target")
           const srcCol = extractColumn(edge, "source")
