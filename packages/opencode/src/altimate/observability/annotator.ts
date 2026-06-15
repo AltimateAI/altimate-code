@@ -471,8 +471,10 @@ export function annotateSession(trace: TraceFile): Record<string, unknown> {
     })
     if (ranDbt) out[DE.OUTCOME.EXECUTED] = true
 
-    // Outcome.change_applied: any write/edit spans?
-    const changed = toolSpans.some((s) => s.name === "write" || s.name === "edit")
+    // Outcome.change_applied: any SUCCESSFUL write/edit spans? The attribute
+    // name says "applied," not "attempted" — a failed write that didn't touch
+    // the file should not flip this to true.
+    const changed = toolSpans.some((s) => (s.name === "write" || s.name === "edit") && s.status === "ok")
     if (changed) out[DE.OUTCOME.CHANGE_APPLIED] = true
   } catch {
     // best-effort
