@@ -117,11 +117,15 @@ describe("tool.question non-interactive auto-answer", () => {
   let askSpy: any
 
   beforeEach(() => {
+    // Defensive: clear FORCE_INTERACTIVE so a parent-shell export can't
+    // silently flip this suite to the interactive path and lose coverage.
+    delete process.env["ALTIMATE_FORCE_INTERACTIVE"]
     process.env["ALTIMATE_NON_INTERACTIVE"] = "1"
     askSpy = spyOn(QuestionModule.Question, "ask").mockImplementation(async () => [])
   })
 
   afterEach(() => {
+    delete process.env["ALTIMATE_FORCE_INTERACTIVE"]
     delete process.env["ALTIMATE_NON_INTERACTIVE"]
     delete process.env["ALTIMATE_AUTO_ANSWER"]
     askSpy.mockRestore()

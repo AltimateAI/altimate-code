@@ -454,9 +454,13 @@ export const RunCommand = cmd({
       message = [extractedParts.join("\n\n"), message].filter(Boolean).join("\n\n")
     }
 
-    // altimate_change start — null-safe stdin access. process.stdin can be
-    // undefined in embedded/child runtimes (see dev-punia review on PR #937).
-    if (!process.stdin?.isTTY) message += "\n" + (await Bun.stdin.text())
+    // altimate_change start — null-safe stdin read. process.stdin can be
+    // undefined in embedded/child runtimes (dev-punia review, PR #937).
+    // Earlier revision used `!process.stdin?.isTTY`, which turned the crash
+    // into a stall: undefined stdin satisfied the guard and we then awaited
+    // Bun.stdin.text() on a stream that would never EOF. Skip the read
+    // entirely when there is no stdin to read from.
+    if (process.stdin && !process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
     // altimate_change end
 
     if (message.trim().length === 0 && !args.command) {
