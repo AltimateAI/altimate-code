@@ -131,6 +131,40 @@ describe("Installation Script", () => {
 })
 
 // ---------------------------------------------------------------------------
+// 4b. Windows Installation Script (install.ps1)
+// ---------------------------------------------------------------------------
+describe("Windows Installation Script", () => {
+  const ps1Content = readText(join(repoRoot, "install.ps1"))
+
+  test("installs the Bun standalone exe, not the npm package", () => {
+    // The whole point of install.ps1 is parity with the bash installer: pull
+    // the Bun-compiled altimate.exe from GitHub releases and extract it — not
+    // shell out to a package manager. (npm is only mentioned as an ARM64 hint.)
+    expect(ps1Content).toContain("github.com/AltimateAI/altimate-code/releases")
+    expect(ps1Content).toContain("Expand-Archive")
+    expect(ps1Content).toContain('"$App.exe"')
+    expect(ps1Content).not.toContain("npm install -g @altimateai")
+  })
+
+  test("install dir is .altimate\\bin", () => {
+    expect(ps1Content).toContain(".altimate\\bin")
+    expect(ps1Content).not.toContain(".altimate-code\\bin")
+  })
+
+  test("downloads the windows-x64 archive with a baseline fallback", () => {
+    expect(ps1Content).toContain("windows-$arch")
+    expect(ps1Content).toContain("-baseline")
+    // AVX2 detection mirrors the bash installer's IsProcessorFeaturePresent(40).
+    expect(ps1Content).toContain("IsProcessorFeaturePresent(40)")
+  })
+
+  test("no upstream/foreign brand leaks", () => {
+    expect(ps1Content).not.toContain("opencode.ai")
+    expect(ps1Content).not.toContain("anomalyco")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 5. GitHub Action
 // ---------------------------------------------------------------------------
 describe("GitHub Action", () => {

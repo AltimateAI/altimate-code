@@ -30,13 +30,19 @@ into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 npm install -g altimate-code
 ```
 
-Or via curl (installs the `altimate` binary to `~/.altimate/bin`):
+Or via curl on macOS/Linux (installs the `altimate` binary to `~/.altimate/bin`):
 
 ```bash
 curl -fsSL https://www.altimate.sh/install | bash
 ```
 
-The curl install drops a single self-contained binary named `altimate`. The npm install exposes both `altimate` and `altimate-code` on PATH; the curl install only exposes `altimate`. Alpine Linux (musl) and Windows on ARM64 are not currently supported by the standalone binary — use `apk add gcompat` on Alpine, or use WSL on Windows-on-ARM.
+On Windows, install the same self-contained binary (to `%USERPROFILE%\.altimate\bin`) from PowerShell — no Node required:
+
+```powershell
+powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
+```
+
+The standalone install drops a single self-contained binary named `altimate`. The npm install exposes both `altimate` and `altimate-code` on PATH; the standalone install only exposes `altimate`. Alpine Linux (musl) and Windows on ARM64 are not currently supported by the standalone binary — use `apk add gcompat` on Alpine, or use WSL on Windows-on-ARM.
 
 For GitHub, [install the Altimate Code App](https://github.com/apps/altimate-code-agent/installations/new)
 to select repositories for interactive agent tasks. Automatic dbt pull-request

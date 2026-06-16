@@ -52,6 +52,24 @@ Or use a glibc-based base image (`debian`, `ubuntu`, `node:slim`).
 
 Run the x64 build under Windows-on-ARM's x64 emulation layer, or use WSL.
 
+### `altimate` not found after the Windows standalone install
+
+**Symptoms:** `altimate` is unrecognized after running the PowerShell installer.
+
+The installer adds `%USERPROFILE%\.altimate\bin` to your **user** PATH — open a
+new terminal so it takes effect. To (re)install or pin a version:
+
+```powershell
+# Latest
+powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
+
+# Specific version
+&([scriptblock]::Create((irm https://www.altimate.sh/install.ps1))) -Version 1.0.180
+```
+
+If the binary crashes immediately on an older CPU, the installer normally retries
+the baseline (non-AVX2) build automatically; force it with `-ForceBaseline`.
+
 ## Log Files
 
 Logs are stored at:
