@@ -2588,8 +2588,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       // Helper: build and persist an assistant reply for a command shortcut.
       async function respond(
-        parentID: string,
+        parentID: MessageID,
         responseText: string,
+        model: { modelID: ModelID; providerID: ProviderID },
       ): Promise<MessageV2.WithParts> {
         const now = Date.now()
         const assistantMsg: MessageV2.Assistant = {
@@ -2637,7 +2638,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows
           : "No MCP servers configured."
 
-        return respond(userMsg.info.id, responseText)
+        return respond(userMsg.info.id, responseText, model)
       }
 
       const subMatch = trimmed.match(/^(enable|disable)\s+(\S+)/)
@@ -2669,7 +2670,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           responseText = `MCP server **${name}** disabled.`
         }
 
-        return respond(userMsg.info.id, responseText)
+        return respond(userMsg.info.id, responseText, model)
       }
     }
     // altimate_change end
