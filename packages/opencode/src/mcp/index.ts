@@ -16,7 +16,7 @@ import z from "zod/v4"
 import { Instance } from "../project/instance"
 import { Installation } from "../installation"
 // altimate_change start — persist enabled flag
-import { findAllConfigPaths, listMcpInConfig, addMcpToConfig } from "./config"
+import { findAllConfigPaths, listMcpInConfig, addMcpToConfig, readMcpEntryFromDisk } from "./config"
 import { Global } from "../global"
 // altimate_change end
 import { withTimeout } from "@/util/timeout"
@@ -706,8 +706,7 @@ export namespace MCP {
       for (const p of paths) {
         const names = await listMcpInConfig(p)
         if (names.includes(name)) {
-          const cfg = await Config.get()
-          const entry = cfg.mcp?.[name]
+          const entry = await readMcpEntryFromDisk(name, p)
           if (entry)
             await addMcpToConfig(
               name,

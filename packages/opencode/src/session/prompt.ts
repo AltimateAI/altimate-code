@@ -423,22 +423,15 @@ export namespace SessionPrompt {
     // so the next resolveTools() call (once per LLM turn) naturally picks up fresh
     // tools without any extra work here. This subscription makes the session layer
     // explicitly aware of the reconnect and logs it so it is traceable in prod.
-    let toolsNeedRefresh = false
     const unsubscribeToolsChanged = Bus.subscribe(MCP.ToolsChanged, (event) => {
       log.info("MCP.ToolsChanged received — tools will refresh on next turn", {
         server: event.properties.server,
         sessionID,
       })
-      toolsNeedRefresh = true
     })
     using _unsubToolsChanged = defer(unsubscribeToolsChanged)
     // altimate_change end
     while (true) {
-      // altimate_change start — log when a ToolsChanged event was received since last turn
-      if (toolsNeedRefresh) {
-        log.info("refreshing MCP tools after ToolsChanged event", { sessionID })
-        toolsNeedRefresh = false
-      }
       // altimate_change end
       // altimate_change start — SessionStatus.set became async in v1.4.0; await so busy state flushes before LLM call
       await SessionStatus.set(sessionID, { type: "busy" })
@@ -2592,35 +2585,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
     if (input.command === "mcps") {
-      const trimmed = input.arguments.trim()
 
-      if (!trimmed) {
-        // /mcps (no args): return actual runtime status directly
-        const userMsg = await createUserMessage({
-          sessionID: input.sessionID,
-          messageID: input.messageID,
-          parts: [{ type: "text", text: "/mcps" }],
-        })
-        const model = await lastModel(input.sessionID)
-        const statusMap = await MCP.status()
-        const rows = Object.entries(statusMap)
-          .map(([srv, s]) => {
-            const icon = s.status === "connected" ? "\u2713" : "\u25cb"
-            const label =
-              s.status === "failed"
-                ? icon + " " + s.status + " (" + (s as any).error + ")"
-                : icon + " " + s.status
-            return "| `" + srv + "` | " + label + " |"
-          })
-          .join("\n")
-        const responseText = rows
-          ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows
-          : "No MCP servers configured."
-
+      // Helper: build and persist an assistant reply for a command shortcut.
+      async function respond(
+        parentID: string,
+        responseText: string,
+      ): Promise<MessageV2.WithParts> {
         const now = Date.now()
         const assistantMsg: MessageV2.Assistant = {
           id: MessageID.ascending(), role: "assistant", sessionID: input.sessionID,
-          parentID: userMsg.info.id, modelID: model.modelID, providerID: model.providerID,
+          parentID, modelID: model.modelID, providerID: model.providerID,
           mode: "builder", agent: "builder",
           path: { cwd: Instance.directory, root: Instance.worktree },
           cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -2637,6 +2611,33 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           arguments: input.arguments, messageID: assistantMsg.id,
         })
         return { info: assistantMsg, parts: [textPart] } as MessageV2.WithParts
+      }
+      const trimmed = input.arguments.trim()
+
+      if (!trimmed) {
+        // /mcps (no args): return actual runtime status directly
+        const userMsg = await createUserMessage({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          parts: [{ type: "text", text: "/mcps" }],
+        })
+        const model = await lastModel(input.sessionID)
+        const statusMap = await MCP.status()
+        const rows = Object.entries(statusMap)
+          .map(([srv, s]) => {
+            const icon = s.status === "connected" ? "\u2713" : "\u25cb"
+            const label =
+              s.status === "failed"
+                ? icon + " " + s.status + " (" + s.error + ")"
+                : icon + " " + s.status
+            return "| `" + srv + "` | " + label + " |"
+          })
+          .join("\n")
+        const responseText = rows
+          ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows
+          : "No MCP servers configured."
+
+        return respond(userMsg.info.id, responseText)
       }
 
       const subMatch = trimmed.match(/^(enable|disable)\s+(\S+)/)
@@ -2660,33 +2661,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           if (entry?.status === "connected") {
             responseText = `MCP server **${name}** enabled. Status: connected.`
           } else {
-            responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${(entry as any)?.error ? " — " + (entry as any).error : "."}.`
+            const errSuffix = entry?.status === "failed" ? " — " + entry.error : ""
+          responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
           }
         } else {
           await MCP.disconnect(name)
           responseText = `MCP server **${name}** disabled.`
         }
 
-        const now = Date.now()
-        const assistantMsg: MessageV2.Assistant = {
-          id: MessageID.ascending(), role: "assistant", sessionID: input.sessionID,
-          parentID: userMsg.info.id, modelID: model.modelID, providerID: model.providerID,
-          mode: "builder", agent: "builder",
-          path: { cwd: Instance.directory, root: Instance.worktree },
-          cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          finish: "stop", time: { created: now, completed: now },
-        }
-        await Session.updateMessage(assistantMsg)
-        const textPart: MessageV2.TextPart = {
-          id: PartID.ascending(), sessionID: input.sessionID, messageID: assistantMsg.id,
-          type: "text", text: responseText, time: { start: now, end: now },
-        }
-        await Session.updatePart(textPart)
-        Bus.publish(Command.Event.Executed, {
-          name: input.command, sessionID: input.sessionID,
-          arguments: input.arguments, messageID: assistantMsg.id,
-        })
-        return { info: assistantMsg, parts: [textPart] } as MessageV2.WithParts
+        return respond(userMsg.info.id, responseText)
       }
     }
     // altimate_change end

@@ -4,10 +4,6 @@ import { withNetworkOptions, resolveNetworkOptions } from "../network"
 import { Flag } from "../../flag/flag"
 // altimate_change start — trace: session tracing in headless serve
 import { subscribeTraceConsumer } from "../../altimate/observability/trace-consumer"
-// datamate IDE-sync helpers extracted to shared module
-// Logic lives in altimate/datamate-transport.ts so serve.ts, server.ts, and
-// datamate.ts all import from one place (no duplication, shared DATAMATE_KEY constant).
-export { syncDatamateUrlFromVscodeMcp } from "../../altimate/datamate-transport"
 // altimate_change start — self-update on headless serve startup
 import { scheduleStartupUpgradeCheck } from "./serve-upgrade-check"
 // altimate_change end

@@ -1,7 +1,7 @@
 import { readFile } from "fs/promises"
 import path from "path"
 import { parseTree, findNodeAtLocation } from "jsonc-parser"
-import { resolveConfigPath, addMcpToConfig } from "../mcp/config"
+import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk } from "../mcp/config"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
 import { Log } from "../util/log"
@@ -18,8 +18,6 @@ export const DATAMATE_KEY = "datamate"
  */
 const MCP_SERVERS_KEYS = ["servers", "mcpServers"] as const
 
-/** Glob patterns to exclude from mcp.json scans (large, irrelevant trees). */
-const MCP_SCAN_EXCLUDE = ["/node_modules/", "/.git/", "/dist/", "/build/", "/.pnpm/"]
 
 export type DatamateTransport =
   | { type: "remote"; url: string }
@@ -51,10 +49,9 @@ async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
       cwd: projectRootDir,
       absolute: true,
       dot: true,
+      ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.pnpm/**"],
     })
-    return paths
-      .filter((p) => !MCP_SCAN_EXCLUDE.some((ex) => p.includes(ex)))
-      .sort()
+    return paths.sort()
   } catch {
     log.warn("findAllMcpJsonFiles: glob scan failed", { cwd: projectRootDir })
     return []
@@ -193,7 +190,7 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
             // IDE config uses "stdio"/"http"/"streamable-http"/"sse";
             // altimate-code.json uses "local"/"remote".
             let newEntry: Record<string, unknown>
-            if (datamateVscode["type"] === "stdio") {
+            if ("command" in datamateVscode) {
               const env = datamateVscode["env"] as Record<string, string> | undefined
               const { ALTIMATE_EXTENSION_RPC: _rpc, ...restEnv } = env ?? {}
               const cmd =
@@ -300,30 +297,3 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
   return updated
 }
 
-/**
- * Read a single MCP entry directly from disk (bypasses the in-memory Config
- * singleton) so callers can get the freshly-written config without busting the
- * whole cache. Returns undefined if the entry is not found in any config file.
- */
-export async function readMcpEntryFromDisk(
-  name: string,
-  configPath: string,
-): Promise<Config.Mcp | undefined> {
-  if (!(await Filesystem.exists(configPath))) return undefined
-
-  const text = await Filesystem.readText(configPath)
-  const tree = parseTree(text)
-  if (!tree) return undefined
-
-  const node = findNodeAtLocation(tree, ["mcp", name])
-  if (!node || node.type !== "object" || !node.children) return undefined
-
-  const entry: Record<string, unknown> = {}
-  for (const prop of node.children) {
-    if (prop.type === "property" && prop.children) {
-      entry[prop.children[0]!.value as string] = prop.children[1]!.value
-    }
-  }
-
-  return entry as Config.Mcp
-}

@@ -101,3 +101,31 @@ export async function findAllConfigPaths(projectDir: string, globalDir: string):
   }
   return paths
 }
+
+/**
+ * Read a single MCP entry directly from a config file, bypassing the Config
+ * singleton so callers can get the freshly-written config without busting the
+ * whole cache. Returns undefined if the entry is not found in the file.
+ */
+export async function readMcpEntryFromDisk(
+  name: string,
+  configPath: string,
+): Promise<Config.Mcp | undefined> {
+  if (!(await Filesystem.exists(configPath))) return undefined
+
+  const text = await Filesystem.readText(configPath)
+  const tree = parseTree(text)
+  if (!tree) return undefined
+
+  const node = findNodeAtLocation(tree, ["mcp", name])
+  if (!node || node.type !== "object" || !node.children) return undefined
+
+  const entry: Record<string, unknown> = {}
+  for (const prop of node.children) {
+    if (prop.type === "property" && prop.children) {
+      entry[prop.children[0]!.value as string] = prop.children[1]!.value
+    }
+  }
+
+  return entry as Config.Mcp
+}

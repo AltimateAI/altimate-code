@@ -33,7 +33,8 @@ import { McpRoutes } from "./routes/mcp"
 import { MCP } from "../mcp"
 // Import sync + fresh-read helpers directly from the shared transport module.
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
-import { syncDatamateUrlFromVscodeMcp, readMcpEntryFromDisk } from "../altimate/datamate-transport"
+import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
+import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
