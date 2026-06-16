@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { formatTranscript } from "../../cli/cmd/tui/util/transcript"
+import { formatTranscript } from "@/cli/cmd/tui/util/transcript"
 import { stream } from "hono/streaming"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import { SessionID, MessageID, PartID } from "@/session/schema"
@@ -491,9 +491,9 @@ export const SessionRoutes = lazy(() =>
       validator(
         "query",
         z.object({
-          thinking: z.coerce.boolean().optional().default(false).meta({ description: "Include reasoning/thinking parts" }),
-          toolDetails: z.coerce.boolean().optional().default(false).meta({ description: "Include tool input/output details" }),
-          assistantMetadata: z.coerce.boolean().optional().default(false).meta({ description: "Include assistant model/timing metadata" }),
+          thinking: z.preprocess(v => v === "false" ? false : v, z.coerce.boolean()).optional().default(false).meta({ description: "Include reasoning/thinking parts" }),
+          toolDetails: z.preprocess(v => v === "false" ? false : v, z.coerce.boolean()).optional().default(false).meta({ description: "Include tool input/output details" }),
+          assistantMetadata: z.preprocess(v => v === "false" ? false : v, z.coerce.boolean()).optional().default(false).meta({ description: "Include assistant model/timing metadata" }),
         }),
       ),
       async (c) => {

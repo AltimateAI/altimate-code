@@ -47,6 +47,33 @@ async function addUserMessage(sessionID: SessionID, text: string) {
   return id
 }
 
+async function addAssistantMessageWithReasoning(sessionID: SessionID, parentID: MessageID, reasoningText: string) {
+  const id = MessageID.ascending()
+  await Session.updateMessage({
+    id,
+    sessionID,
+    role: "assistant",
+    agent: "build",
+    modelID: "claude-sonnet",
+    providerID: "anthropic",
+    mode: "",
+    parentID,
+    path: { cwd: "/test", root: "/test" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: Date.now() },
+  } as unknown as MessageV2.Info)
+  await Session.updatePart({
+    id: PartID.ascending(),
+    sessionID,
+    messageID: id,
+    type: "reasoning",
+    text: reasoningText,
+    time: { start: Date.now() },
+  } as unknown as Parameters<typeof Session.updatePart>[0])
+  return id
+}
+
 describe("session transcript endpoint", () => {
   test("returns 200 with text/plain markdown for a session", async () => {
     await using tmp = await tmpdir({ git: true })
@@ -109,22 +136,36 @@ describe("session transcript endpoint", () => {
     )
   })
 
-  test("accepts thinking, toolDetails, and assistantMetadata query params", async () => {
+  test("thinking=true includes reasoning, thinking=false and default exclude it", async () => {
     await using tmp = await tmpdir({ git: true })
     await withoutWatcher(() =>
       Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const session = await Session.create({ title: "Options Session" })
-          await addUserMessage(session.id, "test message")
+          const session = await Session.create({ title: "Reasoning Session" })
+          const userMsgId = await addUserMessage(session.id, "think about this")
+          await addAssistantMessageWithReasoning(session.id, userMsgId, "inner thoughts here")
           const app = Server.Default()
 
-          const res = await app.request(
-            `/session/${session.id}/transcript?thinking=true&toolDetails=true&assistantMetadata=true`,
-          )
-          expect(res.status).toBe(200)
-          const body = await res.text()
-          expect(body).toStartWith("# ")
+          // ?thinking=true must include the reasoning block
+          const withThinking = await app.request(`/session/${session.id}/transcript?thinking=true`)
+          expect(withThinking.status).toBe(200)
+          const bodyWithThinking = await withThinking.text()
+          expect(bodyWithThinking).toContain("_Thinking:_")
+          expect(bodyWithThinking).toContain("inner thoughts here")
+
+          // ?thinking=false must NOT include it (validates the z.preprocess fix:
+          // old z.coerce.boolean() coerced "false" string → Boolean("false") = true)
+          const withFalse = await app.request(`/session/${session.id}/transcript?thinking=false`)
+          expect(withFalse.status).toBe(200)
+          const bodyWithFalse = await withFalse.text()
+          expect(bodyWithFalse).not.toContain("_Thinking:_")
+
+          // default (no param) also excludes reasoning
+          const withDefault = await app.request(`/session/${session.id}/transcript`)
+          expect(withDefault.status).toBe(200)
+          const bodyWithDefault = await withDefault.text()
+          expect(bodyWithDefault).not.toContain("_Thinking:_")
 
           await Session.remove(session.id)
         },
