@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setSystemTime, test } from "bun:test"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { Instance } from "../../src/project/instance"
@@ -162,17 +162,25 @@ description: ${description}
   })
 
   test("environment() keeps the volatile date out of the cached system prefix", async () => {
-    await using tmp = await tmpdir({ git: true })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const today = new Date().toDateString()
-        const [env] = await SystemPrompt.environment(makeModel({ apiId: "claude-3-7-sonnet" }))
-        expect(env).toMatch(/<env>/)
-        expect(env).not.toMatch(/Today's date/)
-        expect(env).not.toContain(today)
-        expect(SystemPrompt.currentDate()).toContain(today)
-      },
-    })
+    // Freeze the clock so the captured `today` and the `new Date()` inside
+    // currentDate() read the same instant — otherwise the assertion can race
+    // across midnight.
+    setSystemTime(new Date("2026-06-17T12:00:00.000Z"))
+    try {
+      await using tmp = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const today = new Date().toDateString()
+          const [env] = await SystemPrompt.environment(makeModel({ apiId: "claude-3-7-sonnet" }))
+          expect(env).toMatch(/<env>/)
+          expect(env).not.toMatch(/Today's date/)
+          expect(env).not.toContain(today)
+          expect(SystemPrompt.currentDate()).toContain(today)
+        },
+      })
+    } finally {
+      setSystemTime()
+    }
   })
 })
