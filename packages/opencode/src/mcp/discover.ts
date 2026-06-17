@@ -260,24 +260,51 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   // Recursively scan every mcp.json under the project root — covers
   // .vscode/mcp.json (VS Code), .cursor/mcp.json (Cursor),
   // .github/copilot/mcp.json (Copilot), and any other tool's mcp.json.
-  // Sorted for deterministic first-source-wins ordering.
+  // Ordered by IDE precedence first, then alphabetically, so first-source-wins
+  // dedup is deterministic and keeps the historical .vscode > .cursor > copilot order
+  // (a plain alphabetical sort would let .cursor override .vscode).
+  const IDE_PRECEDENCE = [".vscode/mcp.json", ".cursor/mcp.json", ".github/copilot/mcp.json"]
+  const toRel = (abs: string) => path.relative(projectDir, abs).split(path.sep).join("/")
   let mcpJsonFiles: string[] = []
   try {
-    mcpJsonFiles = (
-      await Glob.scan("**/mcp.json", {
-        cwd: projectDir,
-        absolute: true,
-        dot: true,
-        ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.pnpm/**"],
-      })
-    ).sort()
+    const scanned = await Glob.scan("**/mcp.json", {
+      cwd: projectDir,
+      absolute: true,
+      dot: true,
+      ignore: [
+        "**/node_modules/**",
+        "**/.git/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.pnpm/**",
+        "**/target/**",
+        "**/.next/**",
+        "**/out/**",
+        "**/vendor/**",
+        "**/coverage/**",
+        "**/.venv/**",
+        "**/.turbo/**",
+      ],
+    })
+    const rank = (abs: string) => {
+      const i = IDE_PRECEDENCE.indexOf(toRel(abs))
+      return i === -1 ? IDE_PRECEDENCE.length : i
+    }
+    mcpJsonFiles = scanned.sort((a, b) => {
+      const ra = rank(a)
+      const rb = rank(b)
+      if (ra !== rb) return ra - rb
+      const relA = toRel(a)
+      const relB = toRel(b)
+      return relA < relB ? -1 : relA > relB ? 1 : 0
+    })
   } catch {
     log.warn("mcp.json glob scan failed", { cwd: projectDir })
   }
   for (const file of mcpJsonFiles) {
     const parsed = await readJsonSafe(file)
     if (!parsed || typeof parsed !== "object") continue
-    const label = path.relative(projectDir, file) || path.basename(file)
+    const label = toRel(file) || path.basename(file)
     addServersFromFile(mergeServerKeys(parsed), label, result, contributingSources, true)
   }
 
