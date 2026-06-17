@@ -432,7 +432,6 @@ export namespace SessionPrompt {
     using _unsubToolsChanged = defer(unsubscribeToolsChanged)
     // altimate_change end
     while (true) {
-      // altimate_change end
       // altimate_change start — SessionStatus.set became async in v1.4.0; await so busy state flushes before LLM call
       await SessionStatus.set(sessionID, { type: "busy" })
       // altimate_change end

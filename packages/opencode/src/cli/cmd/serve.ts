@@ -4,6 +4,7 @@ import { withNetworkOptions, resolveNetworkOptions } from "../network"
 import { Flag } from "../../flag/flag"
 // altimate_change start — trace: session tracing in headless serve
 import { subscribeTraceConsumer } from "../../altimate/observability/trace-consumer"
+// altimate_change end
 // altimate_change start — self-update on headless serve startup
 import { scheduleStartupUpgradeCheck } from "./serve-upgrade-check"
 // altimate_change end
@@ -27,6 +28,7 @@ export const ServeCommand = cmd({
     // altimate_change end
     const server = await Server.listen(opts)
     console.log(`altimate-code server listening on http://${server.hostname}:${server.port}`)
+    // altimate_change end
 
     // altimate_change start — trace: session tracing in headless serve
     // Sessions driven over HTTP (e.g. the VS Code chat panel) have no TUI
