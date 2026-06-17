@@ -969,6 +969,24 @@ export namespace SessionPrompt {
 
       await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+      // altimate_change start — upstream_fix: carry the date in the trailing user message
+      // so it stays out of the cache-controlled system prefix (see session/system.ts).
+      const lastUserForDate = msgs.findLast((m) => m.info.role === "user")
+      if (lastUserForDate) {
+        lastUserForDate.parts = [
+          ...lastUserForDate.parts,
+          {
+            type: "text" as const,
+            id: PartID.ascending(),
+            sessionID,
+            messageID: lastUserForDate.info.id,
+            text: `\n\n${SystemPrompt.currentDate()}`,
+            synthetic: true,
+          },
+        ]
+      }
+      // altimate_change end
+
       // Build system prompt, adding structured output instruction if needed
       const skills = await SystemPrompt.skills(agent)
       // altimate_change start - unified context-aware injection for memory + training

@@ -75,7 +75,12 @@ export namespace SystemPrompt {
         `  Workspace root folder: ${Instance.worktree}`,
         `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
         `  Platform: ${process.platform}`,
-        `  Today's date: ${new Date().toDateString()}`,
+        // altimate_change start — upstream_fix: move volatile date out of cached system prefix
+        // The date changes daily but environment() is the first entry in the system[]
+        // array, which applyCaching() marks with cacheControl. A session crossing midnight
+        // within the cache TTL would otherwise invalidate the whole system prefix. The date
+        // is appended to the trailing user message instead (see session/prompt.ts).
+        // altimate_change end
         `</env>`,
         `<directories>`,
         `  ${
@@ -90,6 +95,12 @@ export namespace SystemPrompt {
       ].join("\n"),
     ]
   }
+
+  // altimate_change start — upstream_fix: date carried outside the cached system prefix
+  export function currentDate() {
+    return `Today's date is ${new Date().toDateString()}.`
+  }
+  // altimate_change end
 
   export async function skills(agent: Agent.Info) {
     if (PermissionNext.disabled(["skill"], agent.permission).has("skill")) return

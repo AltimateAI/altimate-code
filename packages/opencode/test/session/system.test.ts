@@ -160,4 +160,18 @@ description: ${description}
       process.env.OPENCODE_TEST_HOME = home
     }
   })
+
+  test("environment() keeps the volatile date out of the cached system prefix", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const [env] = await SystemPrompt.environment(makeModel({ apiId: "claude-3-7-sonnet" }))
+        expect(env).toMatch(/<env>/)
+        expect(env).not.toMatch(/Today's date/)
+        expect(env).not.toContain(new Date().toDateString())
+        expect(SystemPrompt.currentDate()).toContain(new Date().toDateString())
+      },
+    })
+  })
 })
