@@ -166,11 +166,12 @@ description: ${description}
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
+        const today = new Date().toDateString()
         const [env] = await SystemPrompt.environment(makeModel({ apiId: "claude-3-7-sonnet" }))
         expect(env).toMatch(/<env>/)
         expect(env).not.toMatch(/Today's date/)
-        expect(env).not.toContain(new Date().toDateString())
-        expect(SystemPrompt.currentDate()).toContain(new Date().toDateString())
+        expect(env).not.toContain(today)
+        expect(SystemPrompt.currentDate()).toContain(today)
       },
     })
   })
