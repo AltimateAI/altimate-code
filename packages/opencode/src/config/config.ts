@@ -269,7 +269,7 @@ export namespace Config {
     // altimate_change start — auto-discover MCP servers from external AI tool configs
     if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && result.experimental?.auto_mcp_discovery !== false) {
       const { discoverExternalMcp, setDiscoveryResult } = await import("../mcp/discover")
-      const { servers: externalMcp, sources } = await discoverExternalMcp(Instance.worktree)
+      const { servers: externalMcp, sources } = await discoverExternalMcp(Instance.directory)
       if (Object.keys(externalMcp).length > 0) {
         result.mcp ??= {}
         const added: string[] = []

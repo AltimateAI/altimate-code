@@ -11,7 +11,7 @@ import { MCP } from "../../mcp"
  * (as opposed to ephemeral auto-discovered servers in memory).
  */
 async function getPersistedMcpNames(): Promise<Set<string>> {
-  const configPaths = await findAllConfigPaths(Instance.worktree, Global.Path.config)
+  const configPaths = await findAllConfigPaths(Instance.directory, Global.Path.config)
   const names = new Set<string>()
   for (const p of configPaths) {
     for (const name of await listMcpInConfig(p)) {
@@ -68,7 +68,7 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       .describe('Server names to add. If omitted with action "add", adds all new servers.'),
   }),
   async execute(args, ctx) {
-    const { servers: discovered } = await discoverExternalMcp(Instance.worktree)
+    const { servers: discovered } = await discoverExternalMcp(Instance.directory)
     const discoveredNames = Object.keys(discovered)
 
     if (discoveredNames.length === 0) {
@@ -120,7 +120,7 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
 
     const useGlobal = args.scope === "global"
     const configPath = await resolveConfigPath(
-      useGlobal ? Global.Path.config : Instance.worktree,
+      useGlobal ? Global.Path.config : Instance.directory,
       useGlobal,
     )
 
