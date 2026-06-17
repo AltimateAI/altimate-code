@@ -619,7 +619,7 @@ export namespace Server {
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("reload-datamate: failed", { error })
-          return c.json({ ok: false, error })
+          return c.json({ ok: false, error }, 500)
         }
       })
       // altimate_change end

@@ -699,7 +699,16 @@ export namespace MCP {
   }
 
   // altimate_change start — persist enabled/disabled to disk so it survives session restarts
-  async function persistMcpEnabled(name: string, enabled: boolean): Promise<void> {
+  // Serialize all writes: persistMcpEnabled is read-modify-write on a shared config
+  // file, so concurrent callers (e.g. rapid /mcps enable then disable) could otherwise
+  // interleave and clobber each other's changes.
+  let persistChain: Promise<void> = Promise.resolve()
+  function persistMcpEnabled(name: string, enabled: boolean): Promise<void> {
+    const run = persistChain.then(() => persistMcpEnabledUnlocked(name, enabled))
+    persistChain = run.catch(() => {})
+    return run
+  }
+  async function persistMcpEnabledUnlocked(name: string, enabled: boolean): Promise<void> {
     try {
       const paths = await findAllConfigPaths(Instance.directory, Global.Path.config)
       let found = false

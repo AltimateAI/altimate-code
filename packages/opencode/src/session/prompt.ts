@@ -2653,6 +2653,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
 
         const model = await lastModel(input.sessionID)
+        // MCP.connect/disconnect on an unknown name logs and returns silently, so
+        // validate against config first and give the user a clear signal on a typo.
+        const cfg = await Config.get()
+        if (!cfg.mcp?.[name]) {
+          const known = Object.keys(cfg.mcp ?? {})
+          const suffix = known.length ? ` Known servers: ${known.join(", ")}.` : ""
+          return respond(
+            userMsg.info.id,
+            `MCP server **${name}** not found in config.${suffix}`,
+            model,
+          )
+        }
+
         let responseText: string
 
         if (isEnable) {

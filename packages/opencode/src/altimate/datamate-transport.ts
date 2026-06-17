@@ -1,6 +1,6 @@
 import { readFile } from "fs/promises"
 import path from "path"
-import { parseTree, findNodeAtLocation } from "jsonc-parser"
+import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk } from "../mcp/config"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
@@ -49,7 +49,23 @@ async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
       cwd: projectRootDir,
       absolute: true,
       dot: true,
-      ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.pnpm/**"],
+      // Exclude build/dependency/output trees. command + args from a discovered
+      // mcp.json are passed to StdioClientTransport, so keep the scan to source the
+      // user actually authors and out of vendored/generated directories.
+      ignore: [
+        "**/node_modules/**",
+        "**/.git/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.pnpm/**",
+        "**/target/**",
+        "**/.next/**",
+        "**/out/**",
+        "**/vendor/**",
+        "**/coverage/**",
+        "**/.venv/**",
+        "**/.turbo/**",
+      ],
     })
     return paths.sort()
   } catch {
@@ -170,25 +186,38 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
           : undefined
 
         if (existingNode) {
-          let existingUpdatedAt: string | undefined
-          let existingEnabled: boolean | undefined
-          if (existingNode.type === "object" && existingNode.children) {
-            for (const prop of existingNode.children) {
-              if (prop.type !== "property" || !prop.children) continue
-              const k = prop.children[0]!.value as string
-              if (k === "updatedAt") existingUpdatedAt = prop.children[1]!.value as string
-              if (k === "enabled") existingEnabled = prop.children[1]!.value as boolean
-            }
-          }
+          // getNodeValue reconstructs the full entry (a manual children walk reading
+          // `prop.children[1].value` drops array/object fields — jsonc-parser only
+          // populates `Node.value` for primitives).
+          const existingEntry =
+            existingNode.type === "object"
+              ? (getNodeValue(existingNode) as Record<string, unknown>)
+              : {}
+          const existingUpdatedAt =
+            typeof existingEntry["updatedAt"] === "string" ? existingEntry["updatedAt"] : undefined
 
           if (vscodeUpdatedAt === existingUpdatedAt) {
             log.info("syncDatamateUrlFromVscodeMcp: datamate entry already up to date", {
               updatedAt: vscodeUpdatedAt,
             })
           } else {
-            // Build the new config entry in altimate-code.json format.
-            // IDE config uses "stdio"/"http"/"streamable-http"/"sse";
+            // Preserve fields the IDE doesn't manage (enabled, timeout, oauth, …) by
+            // carrying forward everything except the transport-identity fields, which
+            // we re-derive below. IDE config uses "stdio"/"http"/"streamable-http"/"sse";
             // altimate-code.json uses "local"/"remote".
+            const TRANSPORT_FIELDS = new Set([
+              "type",
+              "command",
+              "args",
+              "environment",
+              "url",
+              "updatedAt",
+            ])
+            const preserved: Record<string, unknown> = {}
+            for (const [k, v] of Object.entries(existingEntry)) {
+              if (!TRANSPORT_FIELDS.has(k)) preserved[k] = v
+            }
+
             let newEntry: Record<string, unknown>
             if ("command" in datamateVscode) {
               const env = datamateVscode["env"] as Record<string, string> | undefined
@@ -198,6 +227,7 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
                   ? (datamateVscode["command"] as string)
                   : DATAMATE_KEY
               newEntry = {
+                ...preserved,
                 type: "local",
                 command: [cmd, ...((datamateVscode["args"] as string[]) ?? [])],
                 ...(Object.keys(restEnv).length > 0 ? { environment: restEnv } : {}),
@@ -206,12 +236,12 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
             } else {
               // http / streamable-http / sse → remote
               newEntry = {
+                ...preserved,
                 type: "remote",
                 url: datamateVscode["url"] as string,
                 updatedAt: vscodeUpdatedAt,
               }
             }
-            if (typeof existingEnabled === "boolean") newEntry["enabled"] = existingEnabled
 
             await addMcpToConfig(
               DATAMATE_KEY,
@@ -262,13 +292,10 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
             const match = httpEntries.find((e) => e.key === remote.name)
             if (match && match.url !== remote.url) {
               const entryNode = findNodeAtLocation(tree, ["mcp", remote.name])
-              if (!entryNode || entryNode.type !== "object" || !entryNode.children) continue
-              const entry: Record<string, unknown> = {}
-              for (const prop of entryNode.children) {
-                if (prop.type === "property" && prop.children) {
-                  entry[prop.children[0]!.value as string] = prop.children[1]!.value
-                }
-              }
+              if (!entryNode || entryNode.type !== "object") continue
+              // getNodeValue preserves headers/oauth/timeout; a children walk reading
+              // `prop.children[1].value` would strip them (object/array nodes).
+              const entry = getNodeValue(entryNode) as Record<string, unknown>
               entry["url"] = match.url
               entry["updatedAt"] = new Date().toISOString()
               await addMcpToConfig(

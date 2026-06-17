@@ -1,5 +1,5 @@
 import path from "path"
-import { modify, applyEdits, parseTree, findNodeAtLocation } from "jsonc-parser"
+import { modify, applyEdits, parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { Filesystem } from "../util/filesystem"
 import type { Config } from "../config/config"
 
@@ -118,14 +118,11 @@ export async function readMcpEntryFromDisk(
   if (!tree) return undefined
 
   const node = findNodeAtLocation(tree, ["mcp", name])
-  if (!node || node.type !== "object" || !node.children) return undefined
+  if (!node || node.type !== "object") return undefined
 
-  const entry: Record<string, unknown> = {}
-  for (const prop of node.children) {
-    if (prop.type === "property" && prop.children) {
-      entry[prop.children[0]!.value as string] = prop.children[1]!.value
-    }
-  }
-
-  return entry as Config.Mcp
+  // getNodeValue reconstructs the full value tree. A manual children walk reading
+  // `prop.children[1].value` would silently drop array/object fields (command,
+  // environment, headers, oauth) — jsonc-parser only populates `Node.value` for
+  // primitives — corrupting the entry on the next disk write.
+  return getNodeValue(node) as Config.Mcp
 }
