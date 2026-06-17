@@ -1,3 +1,4 @@
+import os from "os"
 import path from "path"
 import { defineConfig } from "drizzle-kit"
 
