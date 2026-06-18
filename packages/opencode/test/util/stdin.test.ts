@@ -173,7 +173,6 @@ describe("readStdinIfAvailable", () => {
     expect(out).toBe("")
     expect(seen).toHaveLength(1)
     expect(seen[0]).toContain("stdin produced no data")
-    expect(seen[0]).toContain("ALTIMATE_STDIN_TIMEOUT_MS")
   })
 
   test("does NOT warn when isTTY (no pipe to drop in the first place)", async () => {

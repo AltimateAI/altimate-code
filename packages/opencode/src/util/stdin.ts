@@ -99,13 +99,12 @@ export async function readStdinIfAvailable(deps: ReadStdinDeps = {}): Promise<st
 
   if (result === "") {
     // An empty result can come from the timer firing (slow producer), a
-    // clean `end` with zero bytes (intentionally empty pipe), or an error
-    // event. Wording is cause-neutral; the env-var tip is still useful for
-    // the slow-producer case and harmless otherwise.
-    warn(
-      `altimate-code: stdin produced no data; proceeding without it. ` +
-        `Tip: set ${STDIN_TIMEOUT_ENV}=N (ms) higher if upstream is a slow producer.`,
-    )
+    // clean `end` with zero bytes (intentionally empty pipe), or a stream
+    // error. The previous version included a `set ${STDIN_TIMEOUT_ENV}=N`
+    // tip; cubic-dev-ai flagged it as misleading for the error and the
+    // dominant inherited-idle subprocess cases. The env var stays
+    // documented in code/docs for the rare slow-producer scenario.
+    warn(`altimate-code: stdin produced no data; proceeding without it.`)
   }
 
   return result
