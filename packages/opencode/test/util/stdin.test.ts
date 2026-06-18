@@ -138,6 +138,28 @@ describe("readStdinIfAvailable", () => {
     }
   })
 
+  // cubic P2 on commit 7fceb85a1: a caller that passes `deps.isTTY` bypasses
+  // the outer `process.stdin?.isTTY` guard. If `process.stdin` is undefined,
+  // the default reader path used to crash on `stdin.on(...)`. The defensive
+  // check inside `defaultReadStdin` covers this.
+  test("default reader returns empty when process.stdin is undefined even when deps.isTTY is passed", async () => {
+    const original = process.stdin
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(process as any).stdin = undefined
+    try {
+      const out = await readStdinIfAvailable({
+        isTTY: false,
+        fstat: () => fifo,
+        // no readStdin → exercises defaultReadStdin
+        warn: () => {},
+      })
+      expect(out).toBe("")
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(process as any).stdin = original
+    }
+  })
+
   // Sury PR #935 review #2: silent drop is bad UX. When fd 0 looked like
   // real input but no first byte arrived, warn so the user knows.
   test("warns when stdin looked like input but readStdin returned empty (silent-drop fix)", async () => {
@@ -150,7 +172,7 @@ describe("readStdinIfAvailable", () => {
     })
     expect(out).toBe("")
     expect(seen).toHaveLength(1)
-    expect(seen[0]).toContain("stdin appears piped")
+    expect(seen[0]).toContain("stdin produced no data")
     expect(seen[0]).toContain("ALTIMATE_STDIN_TIMEOUT_MS")
   })
 

@@ -98,9 +98,13 @@ export async function readStdinIfAvailable(deps: ReadStdinDeps = {}): Promise<st
   const result = await readStdin(timeoutMs)
 
   if (result === "") {
+    // An empty result can come from the timer firing (slow producer), a
+    // clean `end` with zero bytes (intentionally empty pipe), or an error
+    // event. Wording is cause-neutral; the env-var tip is still useful for
+    // the slow-producer case and harmless otherwise.
     warn(
-      `altimate-code: stdin appears piped but no data received within ${timeoutMs}ms; ` +
-        `proceeding without it. Set ${STDIN_TIMEOUT_ENV}=N (ms) to wait longer.`,
+      `altimate-code: stdin produced no data; proceeding without it. ` +
+        `Tip: set ${STDIN_TIMEOUT_ENV}=N (ms) higher if upstream is a slow producer.`,
     )
   }
 
@@ -132,6 +136,11 @@ export function assembleStdinMessage(positional: string, stdinInput: string): st
 function defaultReadStdin(timeoutMs: number): Promise<string> {
   return new Promise<string>((resolve) => {
     const stdin = process.stdin
+    // Defensive: a caller can reach this path with `deps.isTTY` set but
+    // `process.stdin` undefined (embedded/child runtime). The outer
+    // `process.stdin?.isTTY` guard short-circuits the default case but not
+    // this one. Treat absence as "no data" to match the function's contract.
+    if (!stdin) return resolve("")
     const chunks: Buffer[] = []
     let firstByteReceived = false
     let firstByteTimer: ReturnType<typeof setTimeout> | undefined
