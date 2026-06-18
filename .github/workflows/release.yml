@@ -127,6 +127,11 @@ jobs:
           name: dist-${{ matrix.name }}
           path: packages/opencode/dist/
           compression-level: 1
+          # These are intra-run couriers: the publish + gh-release jobs download
+          # them within the same run, then the binaries live permanently as npm
+          # packages + GitHub Release assets. Keep them only long enough to span
+          # the run so they don't accumulate against the org artifact-storage quota.
+          retention-days: 2
 
   # ---------------------------------------------------------------------------
   # Verdaccio sanity suite — tests the real `npm install -g` flow BEFORE
