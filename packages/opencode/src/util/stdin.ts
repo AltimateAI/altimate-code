@@ -77,10 +77,10 @@ function defaultWarn(msg: string): void {
 //      slow-producer case.
 export async function readStdinIfAvailable(deps: ReadStdinDeps = {}): Promise<string> {
   // `process.stdin` can be undefined in embedded / child runtimes (flagged
-  // by dev-punia on PR #937). Treat absence as "no stdin to read."
-  if (deps.isTTY === undefined && !process.stdin) return ""
-
-  const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY)
+  // by dev-punia on PR #937, suryaiyer95 review on PR #935 #3). Optional
+  // chaining keeps the access safe; the fstat catch below covers the case
+  // where fd 0 itself isn't open.
+  const isTTY = deps.isTTY ?? Boolean(process.stdin?.isTTY)
   const fstat = deps.fstat ?? (() => fs.fstatSync(0) as Stat)
   const readStdin = deps.readStdin ?? defaultReadStdin
   const timeoutMs = deps.timeoutMs ?? resolveTimeoutMs()
