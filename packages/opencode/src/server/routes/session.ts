@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { formatTranscript } from "@/cli/cmd/tui/util/transcript"
 import { stream } from "hono/streaming"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import { SessionID, MessageID, PartID } from "@/session/schema"
@@ -460,6 +461,53 @@ export const SessionRoutes = lazy(() =>
           messageID: query.messageID,
         })
         return c.json(result)
+      },
+    )
+    .get(
+      "/:sessionID/transcript",
+      describeRoute({
+        summary: "Get session transcript",
+        description: "Retrieve the full conversation transcript for a session as formatted markdown.",
+        tags: ["Session"],
+        operationId: "session.transcript",
+        responses: {
+          200: {
+            description: "Markdown transcript of the session",
+            content: {
+              "text/plain": {
+                schema: resolver(z.string()),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: SessionID.zod,
+        }),
+      ),
+      validator(
+        "query",
+        z.object({
+          thinking: z.preprocess(v => v === "false" ? false : v, z.coerce.boolean()).optional().default(false).meta({ description: "Include reasoning/thinking parts" }),
+          toolDetails: z.preprocess(v => v === "false" ? false : v, z.coerce.boolean()).optional().default(false).meta({ description: "Include tool input/output details" }),
+          assistantMetadata: z.preprocess(v => v === "false" ? false : v, z.coerce.boolean()).optional().default(false).meta({ description: "Include assistant model/timing metadata" }),
+        }),
+      ),
+      async (c) => {
+        const sessionID = c.req.valid("param").sessionID
+        const query = c.req.valid("query")
+        const session = await Session.get(sessionID)
+        const messages = await Session.messages({ sessionID })
+        const transcript = formatTranscript(session, messages, {
+          thinking: query.thinking,
+          toolDetails: query.toolDetails,
+          assistantMetadata: query.assistantMetadata,
+        })
+        c.header("Content-Type", "text/plain; charset=utf-8")
+        return c.text(transcript)
       },
     )
     .delete(

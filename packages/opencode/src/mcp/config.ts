@@ -1,5 +1,5 @@
 import path from "path"
-import { modify, applyEdits, parseTree, findNodeAtLocation } from "jsonc-parser"
+import { modify, applyEdits, parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { Filesystem } from "../util/filesystem"
 import type { Config } from "../config/config"
 
@@ -100,4 +100,29 @@ export async function findAllConfigPaths(projectDir: string, globalDir: string):
     }
   }
   return paths
+}
+
+/**
+ * Read a single MCP entry directly from a config file, bypassing the Config
+ * singleton so callers can get the freshly-written config without busting the
+ * whole cache. Returns undefined if the entry is not found in the file.
+ */
+export async function readMcpEntryFromDisk(
+  name: string,
+  configPath: string,
+): Promise<Config.Mcp | undefined> {
+  if (!(await Filesystem.exists(configPath))) return undefined
+
+  const text = await Filesystem.readText(configPath)
+  const tree = parseTree(text)
+  if (!tree) return undefined
+
+  const node = findNodeAtLocation(tree, ["mcp", name])
+  if (!node || node.type !== "object") return undefined
+
+  // getNodeValue reconstructs the full value tree. A manual children walk reading
+  // `prop.children[1].value` would silently drop array/object fields (command,
+  // environment, headers, oauth) — jsonc-parser only populates `Node.value` for
+  // primitives — corrupting the entry on the next disk write.
+  return getNodeValue(node) as Config.Mcp
 }

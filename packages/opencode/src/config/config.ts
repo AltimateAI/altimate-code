@@ -269,7 +269,7 @@ export namespace Config {
     // altimate_change start — auto-discover MCP servers from external AI tool configs
     if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && result.experimental?.auto_mcp_discovery !== false) {
       const { discoverExternalMcp, setDiscoveryResult } = await import("../mcp/discover")
-      const { servers: externalMcp, sources } = await discoverExternalMcp(Instance.worktree)
+      const { servers: externalMcp, sources } = await discoverExternalMcp(Instance.directory)
       if (Object.keys(externalMcp).length > 0) {
         result.mcp ??= {}
         const added: string[] = []
@@ -622,6 +622,9 @@ export namespace Config {
         .positive()
         .optional()
         .describe("Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified."),
+      // altimate_change start — sync timestamp written by syncDatamateUrlFromVscodeMcp
+      updatedAt: z.string().optional().describe("ISO timestamp of last URL sync; used to detect reconnect need."),
+      // altimate_change end
     })
     .strict()
     .meta({
@@ -661,6 +664,9 @@ export namespace Config {
         .positive()
         .optional()
         .describe("Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified."),
+      // altimate_change start — sync timestamp written by syncDatamateUrlFromVscodeMcp
+      updatedAt: z.string().optional().describe("ISO timestamp of last URL sync; used to detect reconnect need."),
+      // altimate_change end
     })
     .strict()
     .meta({

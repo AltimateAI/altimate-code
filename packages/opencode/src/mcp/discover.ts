@@ -3,6 +3,7 @@ import path from "path"
 import { parse as parseJsonc } from "jsonc-parser"
 import { Log } from "../util/log"
 import { Filesystem } from "../util/filesystem"
+import { Glob } from "../util/glob"
 import { ConfigPaths } from "../config/paths"
 import type { Config } from "../config/config"
 
@@ -47,13 +48,14 @@ interface ExternalMcpSource {
   scope: "project" | "home" | "both"
 }
 
-/** Standard sources checked relative to project root and/or home directory */
+/**
+ * Config files whose basename is NOT "mcp.json" — the `**​/mcp.json` glob scan
+ * in `discoverExternalMcp` does not match these, so they are still checked by
+ * exact relative path. (`.vscode/mcp.json`, `.cursor/mcp.json`,
+ * `.github/copilot/mcp.json` and any other tool's `mcp.json` are covered by the
+ * glob scan and intentionally omitted here.)
+ */
 const SOURCES: ExternalMcpSource[] = [
-  // Project-only sources
-  { file: ".vscode/mcp.json", key: "servers", scope: "project" },
-  { file: ".cursor/mcp.json", key: "mcpServers", scope: "project" },
-  { file: ".github/copilot/mcp.json", key: "mcpServers", scope: "project" },
-
   // Both project and home
   { file: ".mcp.json", key: "mcpServers", scope: "both" },
   { file: ".gemini/settings.json", key: "mcpServers", scope: "both" },
@@ -212,19 +214,41 @@ async function discoverClaudeCode(
 }
 
 /**
+ * Merge the server maps from every recognized top-level key in a parsed config.
+ * VS Code 1.99+ uses "servers"; older VS Code, Cursor, and Copilot use
+ * "mcpServers". A single file normally uses one or the other, but we merge both
+ * so the scan is IDE-agnostic regardless of which key the writer chose.
+ */
+function mergeServerKeys(parsed: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {}
+  for (const key of ["servers", "mcpServers"]) {
+    const candidate = parsed[key]
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      Object.assign(out, candidate)
+    }
+  }
+  return out
+}
+
+/**
  * Discover MCP servers configured in external AI tool configs
- * (VS Code, GitHub Copilot, Claude Code, Gemini CLI).
+ * (VS Code, Cursor, GitHub Copilot, Claude Code, Gemini CLI).
  *
  * Security model: Project-scoped servers (.vscode/mcp.json, .mcp.json, etc.) are
  * discovered with enabled=false so they don't auto-connect. Users must explicitly
  * approve them via /discover-and-add-mcps. Home-directory configs (~/.claude.json,
  * ~/.gemini/settings.json) are auto-enabled since they're user-owned.
  *
- * Searches both the project directory and the home directory.
+ * `projectDir` is the project root (the opened workspace folder) — NOT the git
+ * worktree, which resolves to "/" for non-git projects and would scan the whole
+ * filesystem / miss the project's configs entirely.
+ *
+ * Recursively scans every `mcp.json` under `projectDir` (IDE-agnostic) plus the
+ * non-"mcp.json" config files in the project and home directories.
  * Returns servers and contributing source labels.
  * First-discovered-wins per server name across sources.
  */
-export async function discoverExternalMcp(worktree: string): Promise<{
+export async function discoverExternalMcp(projectDir: string): Promise<{
   servers: Record<string, Config.Mcp>
   sources: string[]
 }> {
@@ -233,13 +257,64 @@ export async function discoverExternalMcp(worktree: string): Promise<{
   const contributingSources: string[] = []
   const homedir = os.homedir()
 
-  // Scan standard sources in project and/or home directories
+  // Recursively scan every mcp.json under the project root — covers
+  // .vscode/mcp.json (VS Code), .cursor/mcp.json (Cursor),
+  // .github/copilot/mcp.json (Copilot), and any other tool's mcp.json.
+  // Ordered by IDE precedence first, then alphabetically, so first-source-wins
+  // dedup is deterministic and keeps the historical .vscode > .cursor > copilot order
+  // (a plain alphabetical sort would let .cursor override .vscode).
+  const IDE_PRECEDENCE = [".vscode/mcp.json", ".cursor/mcp.json", ".github/copilot/mcp.json"]
+  const toRel = (abs: string) => path.relative(projectDir, abs).split(path.sep).join("/")
+  let mcpJsonFiles: string[] = []
+  try {
+    const scanned = await Glob.scan("**/mcp.json", {
+      cwd: projectDir,
+      absolute: true,
+      dot: true,
+      ignore: [
+        "**/node_modules/**",
+        "**/.git/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.pnpm/**",
+        "**/target/**",
+        "**/.next/**",
+        "**/out/**",
+        "**/vendor/**",
+        "**/coverage/**",
+        "**/.venv/**",
+        "**/.turbo/**",
+      ],
+    })
+    const rank = (abs: string) => {
+      const i = IDE_PRECEDENCE.indexOf(toRel(abs))
+      return i === -1 ? IDE_PRECEDENCE.length : i
+    }
+    mcpJsonFiles = scanned.sort((a, b) => {
+      const ra = rank(a)
+      const rb = rank(b)
+      if (ra !== rb) return ra - rb
+      const relA = toRel(a)
+      const relB = toRel(b)
+      return relA < relB ? -1 : relA > relB ? 1 : 0
+    })
+  } catch {
+    log.warn("mcp.json glob scan failed", { cwd: projectDir })
+  }
+  for (const file of mcpJsonFiles) {
+    const parsed = await readJsonSafe(file)
+    if (!parsed || typeof parsed !== "object") continue
+    const label = toRel(file) || path.basename(file)
+    addServersFromFile(mergeServerKeys(parsed), label, result, contributingSources, true)
+  }
+
+  // Non-"mcp.json" config files (not matched by the glob above), in project and/or home.
   for (const source of SOURCES) {
     const dirs: Array<{ dir: string; label: string }> = []
     if (source.scope === "project" || source.scope === "both") {
-      dirs.push({ dir: worktree, label: source.file })
+      dirs.push({ dir: projectDir, label: source.file })
     }
-    if ((source.scope === "home" || source.scope === "both") && worktree !== homedir) {
+    if ((source.scope === "home" || source.scope === "both") && projectDir !== homedir) {
       dirs.push({ dir: homedir, label: `~/${source.file}` })
     }
 
@@ -248,14 +323,14 @@ export async function discoverExternalMcp(worktree: string): Promise<{
       const parsed = await readJsonSafe(filePath)
       if (!parsed || typeof parsed !== "object") continue
 
-      const isProjectScoped = dir === worktree
+      const isProjectScoped = dir === projectDir
       const servers = parsed[source.key]
       addServersFromFile(servers, label, result, contributingSources, isProjectScoped)
     }
   }
 
   // Claude Code has a unique config structure — handle separately
-  await discoverClaudeCode(worktree, result, contributingSources)
+  await discoverClaudeCode(projectDir, result, contributingSources)
 
   const serverNames = Object.keys(result)
   if (serverNames.length > 0) {

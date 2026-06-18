@@ -39,6 +39,10 @@ export namespace Installation {
   // Amplify Next.js app — tracked separately; revisit when apex DNS is fixed).
   // Bounded timeout so a stalled CDN/origin can't hang `altimate upgrade` forever.
   const UPGRADE_INSTALL_URL = "https://www.altimate.sh/install"
+  // Native Windows has no `bash`, so the curl-installed binary self-updates via
+  // the PowerShell installer instead (downloads the same Bun exe from GitHub
+  // releases). Same host as the bash script; both 302 to raw GitHub.
+  const UPGRADE_INSTALL_PS_URL = "https://www.altimate.sh/install.ps1"
   const UPGRADE_FETCH_TIMEOUT_MS = 15_000
   // altimate_change end
 
@@ -79,6 +83,42 @@ export namespace Installation {
       stderr,
     }
   }
+
+  // altimate_change start — Windows curl-install upgrade via PowerShell
+  // The curl/standalone install on native Windows lives in %USERPROFILE%\.altimate\bin
+  // (detected as method "curl") but there is no `bash` to pipe the install
+  // script into. Run the PowerShell installer instead; it downloads the same
+  // Bun exe from GitHub releases and reads $env:VERSION to pin the target.
+  async function upgradePowershell(target: string) {
+    // Probe-only fetch to surface a friendly error before we hand the URL to
+    // PowerShell (which would otherwise fail opaquely inside `irm | iex`).
+    try {
+      await fetch(UPGRADE_INSTALL_PS_URL, {
+        method: "HEAD",
+        signal: AbortSignal.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+      }).then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+      })
+    } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${cause}. ` +
+          `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
+          `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
+      )
+    }
+    return Process.run(
+      ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `irm ${UPGRADE_INSTALL_PS_URL} | iex`],
+      {
+        env: {
+          ...process.env,
+          VERSION: target,
+        },
+        nothrow: true,
+      },
+    )
+  }
+  // altimate_change end
 
   export type Method = Awaited<ReturnType<typeof method>>
 
@@ -209,7 +249,9 @@ export namespace Installation {
     let result: Awaited<ReturnType<typeof upgradeCurl>> | undefined
     switch (method) {
       case "curl":
-        result = await upgradeCurl(target)
+        // altimate_change start — native Windows has no bash; use the PS installer
+        result = process.platform === "win32" ? await upgradePowershell(target) : await upgradeCurl(target)
+        // altimate_change end
         break
       case "npm":
         result = await Process.run(["npm", "install", "-g", `@altimateai/altimate-code@${target}`], { nothrow: true })

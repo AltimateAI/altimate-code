@@ -23,6 +23,7 @@ jobs:
       typescript: ${{ steps.filter.outputs.typescript }}
       drivers: ${{ steps.filter.outputs.drivers }}
       dbt-tools: ${{ steps.filter.outputs.dbt-tools }}
+      installer: ${{ steps.filter.outputs.installer }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -50,6 +51,9 @@ jobs:
               - 'packages/opencode/test/altimate/connections.test.ts'
             dbt-tools:
               - 'packages/dbt-tools/**'
+            installer:
+              - 'install.ps1'
+              - 'test/windows/**'
 
   # ---------------------------------------------------------------------------
   # Main TypeScript tests — excludes driver E2E tests (separate job) and
@@ -308,6 +312,34 @@ jobs:
       - name: Run dbt-tools unit tests
         run: bun run test
         working-directory: packages/dbt-tools
+
+  # ---------------------------------------------------------------------------
+  # Windows installer (install.ps1) — Pester behavioral tests on real Windows.
+  # Runs the script as a subprocess (stopping early via -Help / unknown version
+  # so nothing is downloaded) to cover arg parsing, the WOW64 arch fix, and
+  # unknown-version rejection. Only when install.ps1 / its tests change.
+  # ---------------------------------------------------------------------------
+  windows-installer:
+    name: Windows Installer (Pester)
+    needs: changes
+    if: needs.changes.outputs.installer == 'true' || github.event_name == 'push'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -MinimumVersion 5.0.0 -Force -Scope CurrentUser -SkipPublisherCheck
+
+      - name: Run installer Pester tests
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = "./test/windows/install.Tests.ps1"
+          $config.Run.Throw = $true
+          $config.Output.Verbosity = "Detailed"
+          Invoke-Pester -Configuration $config
 
   # ---------------------------------------------------------------------------
   # dbt-tools E2E — slow (~3 min), only on push to main.

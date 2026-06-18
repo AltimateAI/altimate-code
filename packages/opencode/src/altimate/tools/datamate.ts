@@ -11,6 +11,10 @@ import {
 } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
+import { Log } from "../../util/log"
+import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
+
+const log = Log.create({ service: "datamate" })
 
 /** Project root for config resolution — falls back to cwd when no git repo is detected. */
 function projectRoot() {
@@ -24,6 +28,11 @@ export function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
 }
+
+// Scans .vscode/mcp.json, .cursor/mcp.json, .github/copilot/mcp.json in projectRootDir
+// so this works in Cursor, Copilot, and other IDEs that write their own MCP config file.
+// Returns the exact command from the IDE config so altimate-code reuses the same process
+// the extension already manages rather than spawning a second one.
 
 export const DatamateManagerTool = Tool.define("datamate_manager", {
   description:
@@ -39,7 +48,9 @@ export const DatamateManagerTool = Tool.define("datamate_manager", {
     "'list-config' shows all datamate entries saved in config files (project and global). " +
     "Config files: project config is at <project-root>/altimate-code.json, " +
     "global config is at ~/.config/altimate-code/altimate-code.json. " +
-    "Datamate server names are prefixed with 'datamate-'. " +
+    "When a VS Code extension datamate entry exists (.vscode/mcp.json has 'datamate' key), " +
+    "'add' always uses the server name 'datamate' — tools are then prefixed 'datamate_'. " +
+    "In standalone mode, server names follow 'datamate-<name>' pattern. " +
     "Do NOT use glob/grep/read to find config files — use 'list-config' instead.",
   parameters: z.object({
     operation: z.enum(["list", "list-integrations", "add", "create", "edit", "delete", "status", "remove", "list-config"]),
@@ -154,6 +165,8 @@ async function handleListIntegrations() {
   }
 }
 
+// DATAMATE_KEY is imported from altimate/datamate-transport.ts (shared constant).
+
 async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "project" | "global" }) {
   if (!args.datamate_id) {
     return {
@@ -163,17 +176,105 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
     }
   }
   try {
-    const creds = await AltimateApi.getCredentials()
     const datamate = await AltimateApi.getDatamate(args.datamate_id)
-    const serverName = args.name ?? `datamate-${slugify(datamate.name)}`
-    const mcpConfig = AltimateApi.buildMcpConfig(creds, args.datamate_id)
+    // readDatamateTransportFromIde returns the exact command from the IDE config so we
+    // reuse the same process the extension already manages, not a second one.
+    const transport = await readDatamateTransportFromIde(projectRoot())
 
-    // Always save to config first so it persists for future sessions
+    if (transport !== null) {
+      log.info("handleAdd: IDE transport detected, entering single-gateway mode", {
+        serverName: DATAMATE_KEY,
+        transportType: transport.type,
+      })
+    } else {
+      log.info("handleAdd: no IDE transport found, using standalone cloud config")
+    }
+
+    // If an IDE MCP config has a "datamate" entry (written by VS Code, Cursor, etc.),
+    // always use DATAMATE_KEY ("datamate") as the server name regardless
+    // of which specific datamate the user selected. This prevents duplicate tool sets
+    // — the extension's gateway already serves all datamate tools through a single
+    // MCP connection.
+    // In standalone/CLI mode (no IDE datamate entry), fall back to per-datamate naming
+    // with cloud URL.
+    const serverName = transport !== null
+      ? DATAMATE_KEY
+      : (args.name ?? `datamate-${slugify(datamate.name)}`)
+
+    const creds = transport ? undefined : await AltimateApi.getCredentials()
+    const mcpConfig =
+      transport?.type === "remote"
+        ? { type: "remote" as const, url: transport.url }
+        : transport?.type === "local"
+          // Use the exact command from the IDE config so we reuse the process the
+          // extension manages rather than spawning a second one. The extension and
+          // altimate-code would otherwise maintain two separate stdio child processes
+          // connected to the same datamate binary, wasting resources.
+          ? { type: "local" as const, command: transport.command }
+          : AltimateApi.buildMcpConfig(creds!, args.datamate_id)
+
     const isGlobal = args.scope === "global"
     const configPath = await resolveConfigPath(isGlobal ? Global.Path.config : projectRoot(), isGlobal)
-    await addMcpToConfig(serverName, mcpConfig, configPath)
 
-    await MCP.add(serverName, mcpConfig)
+    if (transport !== null) {
+      // IDE/extension mode: check if DATAMATE_KEY is already wired up
+      const existingNames = await listMcpInConfig(configPath)
+      const staleEntries = existingNames.filter(
+        (n) => n !== DATAMATE_KEY && n.startsWith("datamate-"),
+      )
+      if (staleEntries.length > 0) {
+        log.info("handleAdd: stale per-datamate entries detected alongside extension gateway", {
+          staleEntries,
+        })
+      }
+
+      if (existingNames.includes(DATAMATE_KEY)) {
+        // Already in config — just ensure it is connected in this session
+        const allStatus = await MCP.status()
+        if (allStatus[DATAMATE_KEY]?.status === "connected") {
+          log.info("handleAdd: already connected, skipping add", {
+            serverName: DATAMATE_KEY,
+          })
+          const mcpTools = await MCP.tools()
+          const toolCount = Object.keys(mcpTools).filter((k) =>
+            k.startsWith(DATAMATE_KEY + "_"),
+          ).length
+          const staleNote =
+            staleEntries.length > 0
+              ? `\n\nNote: stale per-datamate entries found in config: ${staleEntries.join(", ")} — use operation 'remove' to clean them up.`
+              : ""
+          return {
+            title: `Datamate '${datamate.name}': already connected via '${DATAMATE_KEY}'`,
+            metadata: { serverName: DATAMATE_KEY, datamateId: args.datamate_id, toolCount },
+            output: `Datamate tools are already available via the '${DATAMATE_KEY}' MCP server (${toolCount} tools active).${staleNote}`,
+          }
+        }
+        // In config but not connected — reconnect via MCP.connect() so persistMcpEnabled
+        // is called and the enabled:true state survives the next session restart.
+        // Bug-fix: was previously MCP.add() which skips persistMcpEnabled, so a session
+        // that had the server disabled would not re-enable it on the next restart.
+        log.info("handleAdd: reconnecting existing datamate entry", {
+          serverName: DATAMATE_KEY,
+        })
+        await MCP.connect(DATAMATE_KEY)
+      } else {
+        // Not in config yet — write to disk then connect
+        log.info("handleAdd: adding new datamate entry", {
+          serverName: DATAMATE_KEY,
+          type: mcpConfig.type,
+        })
+        await addMcpToConfig(DATAMATE_KEY, { ...mcpConfig, enabled: true }, configPath)
+        await MCP.add(DATAMATE_KEY, mcpConfig)
+      }
+    } else {
+      // Standalone/CLI mode — original behaviour: per-datamate name + cloud URL
+      log.info("handleAdd: standalone mode, adding per-datamate entry", {
+        serverName,
+        type: mcpConfig.type,
+      })
+      await addMcpToConfig(serverName, { ...mcpConfig, enabled: true }, configPath)
+      await MCP.add(serverName, mcpConfig)
+    }
 
     // Check connection status
     const allStatus = await MCP.status()
@@ -197,7 +298,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
     return {
       title: `Datamate '${datamate.name}': connected as '${serverName}'`,
       metadata: { serverName, datamateId: args.datamate_id, toolCount, configPath },
-      output: `Connected datamate '${datamate.name}' (ID: ${args.datamate_id}) as MCP server '${serverName}'.\n\n${toolCount} tools are now available from this datamate. They will be usable in the next message.\n\nConfiguration saved to ${configPath} for future sessions.`,
+      output: `Connected datamate '${datamate.name}' (ID: ${args.datamate_id}) as MCP server '${serverName}'.\n\n${toolCount} tools are now available. They will be usable in the next message.\n\nConfiguration saved to ${configPath} for future sessions.`,
     }
   } catch (e) {
     return {

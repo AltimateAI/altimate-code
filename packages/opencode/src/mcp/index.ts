@@ -15,6 +15,10 @@ import { NamedError } from "@opencode-ai/util/error"
 import z from "zod/v4"
 import { Instance } from "../project/instance"
 import { Installation } from "../installation"
+// altimate_change start — persist enabled flag
+import { findAllConfigPaths, listMcpInConfig, addMcpToConfig, readMcpEntryFromDisk } from "./config"
+import { Global } from "../global"
+// altimate_change end
 import { withTimeout } from "@/util/timeout"
 import { McpOAuthProvider } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
@@ -694,6 +698,48 @@ export namespace MCP {
     return state().then((state) => state.clients)
   }
 
+  // altimate_change start — persist enabled/disabled to disk so it survives session restarts
+  // Serialize all writes: persistMcpEnabled is read-modify-write on a shared config
+  // file, so concurrent callers (e.g. rapid /mcps enable then disable) could otherwise
+  // interleave and clobber each other's changes.
+  let persistChain: Promise<void> = Promise.resolve()
+  function persistMcpEnabled(name: string, enabled: boolean): Promise<void> {
+    const run = persistChain.then(() => persistMcpEnabledUnlocked(name, enabled))
+    persistChain = run.catch(() => {})
+    return run
+  }
+  async function persistMcpEnabledUnlocked(name: string, enabled: boolean): Promise<void> {
+    try {
+      const paths = await findAllConfigPaths(Instance.directory, Global.Path.config)
+      let found = false
+      for (const p of paths) {
+        const names = await listMcpInConfig(p)
+        if (names.includes(name)) {
+          const entry = await readMcpEntryFromDisk(name, p)
+          if (entry)
+            await addMcpToConfig(
+              name,
+              { ...entry, enabled } as Parameters<typeof addMcpToConfig>[1],
+              p,
+            )
+          log.info("persistMcpEnabled", { name, enabled, path: p })
+          found = true
+          break
+        }
+      }
+      if (!found) {
+        log.warn("persistMcpEnabled: entry not found in any config file — enabled flag not persisted", {
+          name,
+          enabled,
+          searchedPaths: paths,
+        })
+      }
+    } catch (err) {
+      log.error("Failed to persist MCP enabled flag", { name, enabled, error: err })
+    }
+  }
+  // altimate_change end
+
   export async function connect(name: string) {
     const cfg = await Config.get()
     const config = cfg.mcp ?? {}
@@ -732,6 +778,9 @@ export namespace MCP {
       s.clients[name] = result.mcpClient
       if (result.transport) s.transports[name] = result.transport
     }
+    // altimate_change start — persist enabled:true so it survives session restarts
+    await persistMcpEnabled(name, true)
+    // altimate_change end
   }
 
   export async function disconnect(name: string) {
@@ -754,6 +803,9 @@ export namespace MCP {
     })
     delete s.transports[name]
     s.status[name] = { status: "disabled" }
+    // altimate_change start — persist enabled:false so disable survives session restarts
+    await persistMcpEnabled(name, false)
+    // altimate_change end
   }
 
   /** Fully remove a dynamically-added MCP server — disconnects, and purges from runtime state. */

@@ -168,6 +168,15 @@ export const BashTool = Tool.define("bash", async () => {
 
       // altimate_change start — prepend bundled tools dir (ALTIMATE_BIN_DIR) and user tools dirs to PATH
       const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }
+      // altimate_change start — strip ALTIMATE_NON_INTERACTIVE from child env.
+      // `run` sets this flag on its own process so the question tool short-
+      // circuits, but child processes spawned by the bash tool may themselves
+      // be server-mode entrypoints (e.g. `altimate-code serve`) that need
+      // their HTTP question-reply path live. Without this delete, the parent
+      // process.env spread above would silently disable that path in every
+      // nested server invocation. See PR #937 review (Issue #3).
+      delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]
+      // altimate_change end
       const sep = process.platform === "win32" ? ";" : ":"
       const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""
       const pathEntries = new Set(basePath.split(sep).filter(Boolean))
