@@ -395,7 +395,10 @@ verify_checksum() {
         print_message error "Checksum mismatch for $name"
         print_message error "  expected: $expected"
         print_message error "  actual:   $actual"
-        rm -rf "$tmp_dir"
+        # Clean up via the file's own directory rather than the caller's $tmp_dir,
+        # so this stays self-contained and doesn't depend on a dynamically-scoped
+        # local from download_and_install.
+        rm -rf "$(dirname "$file")"
         exit 1
     fi
     print_message info "${MUTED}Verified ${NC}$name${MUTED} (sha256)${NC}"

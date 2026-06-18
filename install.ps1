@@ -86,7 +86,17 @@ function Test-Checksum {
 
   $sums = $null
   try {
-    $sums = (Invoke-WebRequest -Uri $ChecksumsUrl -UseBasicParsing).Content
+    $resp = Invoke-WebRequest -Uri $ChecksumsUrl -UseBasicParsing
+    # On Windows PowerShell 5.1, .Content is a Byte[] (not a String) whenever the
+    # response isn't a text-recognized content-type — and GitHub serves release
+    # assets as application/octet-stream. A raw Byte[] coerces to a "49 50 51 …"
+    # decimal string when split, so verification would silently soft-skip on the
+    # default Windows shell. Decode the bytes explicitly to recover real text.
+    if ($resp.Content -is [byte[]]) {
+      $sums = [System.Text.Encoding]::UTF8.GetString($resp.Content)
+    } else {
+      $sums = $resp.Content
+    }
   } catch {
     Write-Muted "Skipping integrity check — checksums.txt not published for this release"
     return
@@ -200,7 +210,13 @@ function Install-Target {
   if ($Baseline) { $target = "$target-baseline" }
   $filename = "$App-$target.zip"
 
-  if ($useLatest) {
+  # Pin BOTH the archive and checksums.txt to the same resolved release. The
+  # mutable releases/latest/download URL would fetch the two assets in separate
+  # requests, so a release published mid-install could hand back an archive from
+  # one release and checksums from another → a spurious hard-fail. We resolve
+  # the concrete tag up front ($specificVersion), so pin to it. Only fall back
+  # to the mutable latest/ URL when the version genuinely couldn't be resolved.
+  if ($useLatest -and -not $specificVersion) {
     $base = "https://github.com/AltimateAI/altimate-code/releases/latest/download"
   } else {
     $base = "https://github.com/AltimateAI/altimate-code/releases/download/v$specificVersion"

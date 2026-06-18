@@ -46,4 +46,30 @@ describe("PowerShell installer verifies checksums", () => {
     // Expand-Archive mention in the top-of-file ProgressPreference comment).
     expect(PS1.indexOf("Test-Checksum -Path")).toBeLessThan(PS1.indexOf("Expand-Archive -Path"))
   })
+
+  test("decodes a Byte[] checksums.txt body (Windows PowerShell 5.1)", () => {
+    // GitHub serves release assets as octet-stream, so PS 5.1 returns .Content
+    // as Byte[]; without an explicit decode it coerces to decimal text and the
+    // check silently soft-skips. See test/windows/install.Tests.ps1 for the
+    // behavioral guard.
+    expect(PS1).toContain("-is [byte[]]")
+    expect(PS1).toContain("[System.Text.Encoding]::UTF8.GetString")
+  })
+})
+
+describe("archive and checksums come from the same release (no latest/ race)", () => {
+  test("bash derives the checksums URL from the same base as the archive", () => {
+    // verify_checksum builds checksums_url from the archive's own URL (${url%/*}),
+    // so the two are always fetched from the same release path.
+    expect(BASH_INSTALL).toContain('checksums_url="${url%/*}/checksums.txt"')
+  })
+
+  test("PowerShell pins both URLs to the resolved release tag (cubic P2)", () => {
+    // The archive and checksums.txt share one $base; that base is the resolved
+    // tag, so a release published mid-install can't hand back mismatched assets.
+    // Falls back to latest/ only when the version couldn't be resolved.
+    expect(PS1).toContain('$url = "$base/$filename"')
+    expect(PS1).toContain('$checksumsUrl = "$base/checksums.txt"')
+    expect(PS1).toContain('$base = "https://github.com/AltimateAI/altimate-code/releases/download/v$specificVersion"')
+  })
 })
