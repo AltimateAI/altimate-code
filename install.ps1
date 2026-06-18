@@ -3,7 +3,7 @@
 #
 # Mirrors ./install (the bash installer for macOS/Linux): it downloads the
 # Bun-compiled standalone executable (altimate.exe) from GitHub releases and
-# drops it in %USERPROFILE%\.altimate\bin — it does NOT depend on npm/Node.
+# drops it in %USERPROFILE%\.altimate\bin - it does NOT depend on npm/Node.
 #
 # Usage:
 #   powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
@@ -64,8 +64,8 @@ if ($Help) {
   exit 0
 }
 
-# A single P/Invoke type carries both native calls we need — the AVX2 CPU probe
-# (kernel32) and the PATH-change broadcast (user32) — so we Add-Type once instead
+# A single P/Invoke type carries both native calls we need - the AVX2 CPU probe
+# (kernel32) and the PATH-change broadcast (user32) - so we Add-Type once instead
 # of compiling a throwaway type per call site.
 function Initialize-Native {
   if (-not ("Win32.AltimateNative" -as [type])) {
@@ -101,21 +101,21 @@ function Test-Avx2 {
     Initialize-Native
     return [bool][Win32.AltimateNative]::IsProcessorFeaturePresent(40)
   } catch {
-    # If detection fails, assume no AVX2 and fall back to the baseline build —
+    # If detection fails, assume no AVX2 and fall back to the baseline build -
     # the baseline binary runs everywhere, an AVX2 binary on a non-AVX2 CPU crashes.
     return $false
   }
 }
 
 # ---------------------------------------------------------------------------
-# Resolve version (once) — latest tag or a pinned release
+# Resolve version (once) - latest tag or a pinned release
 # ---------------------------------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($Version)) {
   $useLatest = $true
   # The download below resolves "latest" server-side (releases/latest/download),
   # so this API call only feeds the version-string display and the
   # already-installed short-circuit. A transient api.github.com blip or the
-  # unauthenticated rate limit (60/hr/IP) must NOT abort the install — retry a
+  # unauthenticated rate limit (60/hr/IP) must NOT abort the install - retry a
   # few times, then proceed without the version string.
   $specificVersion = ""
   for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -130,7 +130,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
     if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
   }
   if ([string]::IsNullOrWhiteSpace($specificVersion)) {
-    Write-Muted "Could not resolve the latest version from GitHub (API unavailable) — installing the latest release anyway."
+    Write-Muted "Could not resolve the latest version from GitHub (API unavailable) - installing the latest release anyway."
     # Reset to $null (not ""): the already-installed short-circuit below compares
     # $installedVersion -eq $specificVersion. If the version probe of a missing or
     # corrupt binary also yields "", an "" -eq "" match would falsely report
@@ -200,12 +200,6 @@ function Install-Target {
   $zipPath = Join-Path $tmpDir $filename
 
   try {
-    # NOTE: integrity verification (SHA256/signature) of the archive is
-    # intentionally deferred to match the bash installer's posture — both rely
-    # on HTTPS from github.com release assets. Releases do not currently publish
-    # a checksums file; adding one + verifying it in both installers is tracked
-    # as a follow-up. See PR #930 discussion.
-    #
     # Prefer curl.exe (ships with Windows 10 1803+) for a fast download with
     # --fail so HTTP errors don't write an error page to disk; fall back to
     # Invoke-WebRequest where curl.exe is unavailable.
@@ -226,7 +220,7 @@ function Install-Target {
 
     # Windows locks a running .exe, so `altimate upgrade` (which re-runs this
     # installer) can't overwrite the binary that is currently executing. Windows
-    # *does* allow renaming a running exe — move the old one aside first, then
+    # *does* allow renaming a running exe - move the old one aside first, then
     # drop the new one in. Best-effort cleanup of the stale copy afterward.
     if (Test-Path $InstalledBinary) {
       $stale = "$InstalledBinary.old"
@@ -253,7 +247,7 @@ if (-not $needsBaseline) {
   & $InstalledBinary --version *> $null
   $code = $LASTEXITCODE
   if ($code -eq 3221225501 -or $code -eq 1073741795 -or $code -eq -1073741795) {
-    Write-Muted "CPU lacks AVX2 — reinstalling the baseline build"
+    Write-Muted "CPU lacks AVX2 - reinstalling the baseline build"
     Install-Target -Baseline:$true
   }
 }
