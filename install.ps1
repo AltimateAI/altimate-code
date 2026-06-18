@@ -3,7 +3,7 @@
 #
 # Mirrors ./install (the bash installer for macOS/Linux): it downloads the
 # Bun-compiled standalone executable (altimate.exe) from GitHub releases and
-# drops it in %USERPROFILE%\.altimate\bin — it does NOT depend on npm/Node.
+# drops it in %USERPROFILE%\.altimate\bin - it does NOT depend on npm/Node.
 #
 # Usage:
 #   powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
@@ -64,8 +64,8 @@ if ($Help) {
   exit 0
 }
 
-# A single P/Invoke type carries both native calls we need — the AVX2 CPU probe
-# (kernel32) and the PATH-change broadcast (user32) — so we Add-Type once instead
+# A single P/Invoke type carries both native calls we need - the AVX2 CPU probe
+# (kernel32) and the PATH-change broadcast (user32) - so we Add-Type once instead
 # of compiling a throwaway type per call site.
 function Initialize-Native {
   if (-not ("Win32.AltimateNative" -as [type])) {
@@ -88,8 +88,8 @@ function Test-Checksum {
   try {
     $resp = Invoke-WebRequest -Uri $ChecksumsUrl -UseBasicParsing
     # On Windows PowerShell 5.1, .Content is a Byte[] (not a String) whenever the
-    # response isn't a text-recognized content-type — and GitHub serves release
-    # assets as application/octet-stream. A raw Byte[] coerces to a "49 50 51 …"
+    # response isn't a text-recognized content-type - and GitHub serves release
+    # assets as application/octet-stream. A raw Byte[] coerces to a "49 50 51 ..."
     # decimal string when split, so verification would silently soft-skip on the
     # default Windows shell. Decode the bytes explicitly to recover real text.
     if ($resp.Content -is [byte[]]) {
@@ -98,14 +98,14 @@ function Test-Checksum {
       $sums = $resp.Content
     }
   } catch {
-    Write-Muted "Skipping integrity check — checksums.txt not published for this release"
+    Write-Muted "Skipping integrity check - checksums.txt not published for this release"
     return
   }
 
   # checksums.txt is sha256sum format: "<hash>  <filename>" (one entry per line).
   $line = ($sums -split "`n") | Where-Object { $_ -match "\s\*?$([regex]::Escape($Name))\s*$" } | Select-Object -First 1
   if (-not $line) {
-    Write-Muted "Skipping integrity check — no checksum entry for $Name"
+    Write-Muted "Skipping integrity check - no checksum entry for $Name"
     return
   }
 
@@ -141,14 +141,14 @@ function Test-Avx2 {
     Initialize-Native
     return [bool][Win32.AltimateNative]::IsProcessorFeaturePresent(40)
   } catch {
-    # If detection fails, assume no AVX2 and fall back to the baseline build —
+    # If detection fails, assume no AVX2 and fall back to the baseline build -
     # the baseline binary runs everywhere, an AVX2 binary on a non-AVX2 CPU crashes.
     return $false
   }
 }
 
 # ---------------------------------------------------------------------------
-# Resolve version (once) — latest tag or a pinned release
+# Resolve version (once) - latest tag or a pinned release
 # ---------------------------------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($Version)) {
   $useLatest = $true
@@ -213,7 +213,7 @@ function Install-Target {
   # Pin BOTH the archive and checksums.txt to the same resolved release. The
   # mutable releases/latest/download URL would fetch the two assets in separate
   # requests, so a release published mid-install could hand back an archive from
-  # one release and checksums from another → a spurious hard-fail. We resolve
+  # one release and checksums from another -> a spurious hard-fail. We resolve
   # the concrete tag up front ($specificVersion), so pin to it. Only fall back
   # to the mutable latest/ URL when the version genuinely couldn't be resolved.
   if ($useLatest -and -not $specificVersion) {
@@ -256,7 +256,7 @@ function Install-Target {
 
     # Windows locks a running .exe, so `altimate upgrade` (which re-runs this
     # installer) can't overwrite the binary that is currently executing. Windows
-    # *does* allow renaming a running exe — move the old one aside first, then
+    # *does* allow renaming a running exe - move the old one aside first, then
     # drop the new one in. Best-effort cleanup of the stale copy afterward.
     if (Test-Path $InstalledBinary) {
       $stale = "$InstalledBinary.old"
@@ -283,7 +283,7 @@ if (-not $needsBaseline) {
   & $InstalledBinary --version *> $null
   $code = $LASTEXITCODE
   if ($code -eq 3221225501 -or $code -eq 1073741795 -or $code -eq -1073741795) {
-    Write-Muted "CPU lacks AVX2 — reinstalling the baseline build"
+    Write-Muted "CPU lacks AVX2 - reinstalling the baseline build"
     Install-Target -Baseline:$true
   }
 }

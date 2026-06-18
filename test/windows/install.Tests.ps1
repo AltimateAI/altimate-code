@@ -1,7 +1,7 @@
 # Pester behavioral tests for install.ps1 (the Windows standalone installer).
 #
 # These run the real script as a subprocess on Windows PowerShell so they
-# exercise actual behavior — not just substring matching. They deliberately
+# exercise actual behavior - not just substring matching. They deliberately
 # stop the script early (via -Help or an unknown -Version) so no 268 MB binary
 # is ever downloaded, while still covering the risky branches: argument
 # parsing, the WOW64 architecture fix, and unknown-version rejection.
@@ -56,7 +56,7 @@ Describe "install.ps1 -Help" {
 
 Describe "install.ps1 architecture detection" {
   It "detects AMD64 under WOW64 (32-bit PowerShell on 64-bit Windows)" {
-    # PROCESSOR_ARCHITECTURE=x86 but PROCESSOR_ARCHITEW6432=AMD64 → real 64-bit box.
+    # PROCESSOR_ARCHITECTURE=x86 but PROCESSOR_ARCHITEW6432=AMD64 -> real 64-bit box.
     # Using an unknown version makes the script stop at the release 404 check,
     # which it can only reach if the WOW64 arch check let it past.
     $r = Invoke-Installer -ScriptArgs @("-Version", "0.0.0-nonexistent") -Env @{
@@ -146,7 +146,7 @@ Describe "install.ps1 Test-Checksum" {
   It "verifies a matching archive when checksums.txt is served as Byte[] (Windows PowerShell 5.1)" {
     # The regression guard: GitHub serves release assets as octet-stream, so on
     # PS 5.1 .Content is a Byte[]. Without the explicit UTF8 decode it coerces to
-    # a "49 50 51 …" decimal string, no entry matches, and the check soft-skips.
+    # a "49 50 51 ..." decimal string, no entry matches, and the check soft-skips.
     $tmp = New-FixtureArchive
     $name = Split-Path $tmp -Leaf
     $hash = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash.ToLower()
