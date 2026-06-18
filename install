@@ -211,9 +211,15 @@ else
         # (60/hr/IP) must NOT abort the install — retry a few times with --fail
         # (so a 504 retries instead of parsing an error body), then proceed
         # without the version string.
+        #
+        # --max-time 10 bounds a dead-air socket (curl's default has no transfer
+        # cap), and the trailing `|| true` is load-bearing: under `set -euo
+        # pipefail`, a failing `curl --fail` propagates through the pipeline and
+        # the assignment, so `set -e` would abort the script before the loop can
+        # retry or degrade. `|| true` lets the failure resolve to an empty string.
         specific_version=""
         for attempt in 1 2 3; do
-            specific_version=$(curl -fsSL https://api.github.com/repos/AltimateAI/altimate-code/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+            specific_version=$(curl -fsSL --max-time 10 https://api.github.com/repos/AltimateAI/altimate-code/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' || true)
             [ -n "$specific_version" ] && break
             [ "$attempt" -lt 3 ] && sleep "$attempt"
         done

@@ -19,7 +19,18 @@ describe("bash installer — latest-version fetch is non-fatal", () => {
   test("retries the releases/latest API call", () => {
     expect(BASH).toContain("for attempt in 1 2 3")
     // --fail so a 504 errors out (and retries) instead of parsing an error body.
-    expect(BASH).toContain("curl -fsSL https://api.github.com")
+    expect(BASH).toContain("curl -fsSL --max-time 10 https://api.github.com")
+  })
+
+  test("the retry assignment absorbs curl failure so set -e can't abort it", () => {
+    // Under `set -euo pipefail`, a failing `curl --fail` propagates through the
+    // pipeline + assignment and aborts the script before the loop can retry or
+    // degrade. The trailing `|| true` keeps the retry loop alive.
+    expect(BASH).toMatch(/curl -fsSL --max-time 10 https:\/\/api\.github\.com[^\n]*\|\| true/)
+  })
+
+  test("bounds the API call with a transfer timeout", () => {
+    expect(BASH).toContain("--max-time 10")
   })
 
   test("degrades gracefully instead of exiting on API failure", () => {
@@ -38,9 +49,19 @@ describe("PowerShell installer — latest-version fetch is non-fatal", () => {
     expect(PS1).toContain("for ($attempt = 1; $attempt -le 3; $attempt++)")
   })
 
+  test("bounds the API call with a request timeout", () => {
+    expect(PS1).toContain("-TimeoutSec 10")
+  })
+
   test("degrades gracefully instead of exiting on API failure", () => {
     expect(PS1).toContain("installing the latest release anyway")
     // The old fatal hard-fail must be gone.
     expect(PS1).not.toContain("Failed to fetch version information")
+  })
+
+  test("resets the unresolved version to $null so empty==empty can't false-match", () => {
+    // $installedVersion -eq $specificVersion with both "" would falsely report
+    // "already installed" for a missing/corrupt binary; $null -eq "" is $false.
+    expect(PS1).toContain("$specificVersion = $null")
   })
 })

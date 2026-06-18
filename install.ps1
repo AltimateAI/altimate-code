@@ -120,7 +120,10 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
   $specificVersion = ""
   for ($attempt = 1; $attempt -le 3; $attempt++) {
     try {
-      $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/AltimateAI/altimate-code/releases/latest" -Headers @{ "User-Agent" = "altimate-install" }
+      # -TimeoutSec 10 bounds a stuck socket: Invoke-RestMethod defaults to 100s
+      # on PS 5.1 and is effectively unbounded on PS 7+, so without it three
+      # back-to-back retries on dead air could freeze for minutes.
+      $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/AltimateAI/altimate-code/releases/latest" -Headers @{ "User-Agent" = "altimate-install" } -TimeoutSec 10
       $specificVersion = ($rel.tag_name -replace '^v', '')
       if (-not [string]::IsNullOrWhiteSpace($specificVersion)) { break }
     } catch {}
@@ -128,6 +131,13 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
   }
   if ([string]::IsNullOrWhiteSpace($specificVersion)) {
     Write-Muted "Could not resolve the latest version from GitHub (API unavailable) — installing the latest release anyway."
+    # Reset to $null (not ""): the already-installed short-circuit below compares
+    # $installedVersion -eq $specificVersion. If the version probe of a missing or
+    # corrupt binary also yields "", an "" -eq "" match would falsely report
+    # "already installed" and skip the reinstall. $null -eq "" is $false, so the
+    # comparison correctly falls through; the banner still shows "latest" because
+    # if ($specificVersion) treats $null as falsy.
+    $specificVersion = $null
   }
 } else {
   $useLatest = $false
