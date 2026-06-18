@@ -24,8 +24,12 @@ function upgradePowershellBlock() {
 
 describe("PR #930 install.ps1 release URL construction", () => {
   test("uses only HTTPS GitHub release URLs for Windows zip assets", () => {
-    expect(INSTALL_PS1).toContain('"https://github.com/AltimateAI/altimate-code/releases/latest/download/$filename"')
-    expect(INSTALL_PS1).toContain('"https://github.com/AltimateAI/altimate-code/releases/download/v$specificVersion/$filename"')
+    // The archive and checksums.txt share one $base so they always resolve to the
+    // same release (see verify_checksum / Test-Checksum). $base is the latest
+    // download path or the pinned release tag; $url and $checksumsUrl derive from it.
+    expect(INSTALL_PS1).toContain('$base = "https://github.com/AltimateAI/altimate-code/releases/latest/download"')
+    expect(INSTALL_PS1).toContain('$base = "https://github.com/AltimateAI/altimate-code/releases/download/v$specificVersion"')
+    expect(INSTALL_PS1).toContain('$url = "$base/$filename"')
     expect(INSTALL_PS1).toContain('"https://api.github.com/repos/AltimateAI/altimate-code/releases/latest"')
     expect(INSTALL_PS1).not.toMatch(/http:\/\/(?:github\.com|api\.github\.com|www\.altimate\.sh)/)
   })
@@ -62,9 +66,13 @@ describe("PR #930 install.ps1 release URL construction", () => {
 })
 
 describe("PR #930 install.ps1 download and archive safety", () => {
-  // BUG: install.ps1 currently documents that SHA256/signature verification is deferred
-  // and relies only on HTTPS. Release assets should be verified before extraction.
-  test.todo("verifies downloaded archive integrity with SHA256 or a signature before extraction", () => {})
+  test("verifies downloaded archive integrity with SHA256 before extraction", () => {
+    // Closed by the checksum-verification work: Test-Checksum fetches checksums.txt
+    // and compares SHA256, and the verify call precedes the actual extraction.
+    expect(INSTALL_PS1).toContain("Test-Checksum -Path $zipPath")
+    expect(INSTALL_PS1).toContain("Get-FileHash -Path $Path -Algorithm SHA256")
+    expect(INSTALL_PS1.indexOf("Test-Checksum -Path")).toBeLessThan(INSTALL_PS1.indexOf("Expand-Archive -Path"))
+  })
 
   test("fails curl.exe downloads on HTTP errors and checks curl exit status", () => {
     const installTarget = scriptBlock("function Install-Target", "$needsBaseline")
