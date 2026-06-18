@@ -397,8 +397,13 @@ verify_checksum() {
         print_message error "  actual:   $actual"
         # Clean up via the file's own directory rather than the caller's $tmp_dir,
         # so this stays self-contained and doesn't depend on a dynamically-scoped
-        # local from download_and_install.
-        rm -rf "$(dirname "$file")"
+        # local from download_and_install. Guard against a pathological $file
+        # (empty or root-level) that would make dirname resolve to "." or "/".
+        local cleanup_dir
+        cleanup_dir=$(dirname "$file")
+        if [ -n "$cleanup_dir" ] && [ "$cleanup_dir" != "." ] && [ "$cleanup_dir" != "/" ]; then
+            rm -rf "$cleanup_dir"
+        fi
         exit 1
     fi
     print_message info "${MUTED}Verified ${NC}$name${MUTED} (sha256)${NC}"
