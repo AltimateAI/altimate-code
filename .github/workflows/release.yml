@@ -130,8 +130,9 @@ jobs:
           # These are intra-run couriers: the publish + gh-release jobs download
           # them within the same run, then the binaries live permanently as npm
           # packages + GitHub Release assets. Keep them only long enough to span
-          # the run so they don't accumulate against the org artifact-storage quota.
-          retention-days: 2
+          # the run (worst run ~62 min) plus margin for a next-day partial re-run,
+          # so they don't accumulate against the org artifact-storage quota.
+          retention-days: 5
 
   # ---------------------------------------------------------------------------
   # Verdaccio sanity suite — tests the real `npm install -g` flow BEFORE
