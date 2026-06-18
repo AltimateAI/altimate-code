@@ -50,22 +50,24 @@ describe("readStdinIfAvailable (spawned subprocess)", () => {
     "exits promptly with empty result when stdin is an inherited-but-idle pipe",
     async () => {
       const { code, result, elapsed } = await runFixture({
-        // Don't write — leave the pipe open and silent. Close after 1s so
+        // Don't write — leave the pipe open and silent. Close after 3s so
         // the parent's writer isn't garbage-collected; by then the child
-        // should have already exited via the first-byte timeout.
+        // should have already exited via the 500ms first-byte timeout.
         writeStdin: async (sink) => {
-          await new Promise((r) => setTimeout(r, 1000))
+          await new Promise((r) => setTimeout(r, 3000))
           try {
             await sink.end()
           } catch {}
         },
-        killAfterMs: 5000,
+        killAfterMs: 8000,
       })
       expect(code).toBe(0)
       expect(result).toBe("")
-      expect(elapsed).toBeLessThan(500)
+      // 1500 = timeout (500ms) × 3 for CI scheduler headroom. Well under
+      // "infinite hang" — the assertion guards the wedge fix, not perf.
+      expect(elapsed).toBeLessThan(1500)
     },
-    10000,
+    15000,
   )
 
   // MAJOR-regression from PR #935: `echo ctx | run "prompt"` must still
@@ -85,18 +87,16 @@ describe("readStdinIfAvailable (spawned subprocess)", () => {
     10000,
   )
 
-  // M2-regression: a producer that takes >100ms to flush first byte was
-  // truncated by the old Promise.race timeout. The first-byte gate must
-  // accept the byte once it arrives and then drain the rest without a
-  // deadline.
+  // Sury PR #935 review #2: 500ms must cover realistic slow-first-byte
+  // producers (DB queries that need to plan, decompression, network calls
+  // with DNS+TLS handshake). 300ms is comfortably under the 500ms budget;
+  // the previous 100ms config would have truncated this.
   test(
-    "preserves data from slow producer (first byte arrives just before timeout)",
+    "preserves data from slow producer (first byte arrives ~300ms after spawn)",
     async () => {
       const { code, result } = await runFixture({
         writeStdin: async (sink) => {
-          // Sleep close to but under the 100ms first-byte budget, then
-          // flush. The whole-stream-race fix would have returned "".
-          await new Promise((r) => setTimeout(r, 60))
+          await new Promise((r) => setTimeout(r, 300))
           sink.write("slow ctx")
           await sink.end()
         },
@@ -109,12 +109,13 @@ describe("readStdinIfAvailable (spawned subprocess)", () => {
 
   // Negative control: a producer slow enough to miss the first-byte window
   // should yield "" (intentional cutoff, no truncation of in-flight data).
+  // 1200ms > 500ms timeout with margin for CI scheduler latency.
   test(
     "returns empty when first byte arrives after the first-byte timeout",
     async () => {
       const { code, result } = await runFixture({
         writeStdin: async (sink) => {
-          await new Promise((r) => setTimeout(r, 400))
+          await new Promise((r) => setTimeout(r, 1200))
           try {
             sink.write("too late")
             await sink.end()
@@ -124,6 +125,6 @@ describe("readStdinIfAvailable (spawned subprocess)", () => {
       expect(code).toBe(0)
       expect(result).toBe("")
     },
-    10000,
+    15000,
   )
 })

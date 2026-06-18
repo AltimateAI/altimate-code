@@ -84,6 +84,7 @@ describe("readStdinIfAvailable", () => {
       isTTY: false,
       fstat: () => fifo,
       readStdin: async () => "", // simulates first-byte timeout
+      warn: () => {}, // silence the stderr note in test output
     })
     expect(out).toBe("")
   })
@@ -107,6 +108,7 @@ describe("readStdinIfAvailable", () => {
       isTTY: false,
       fstat: () => fifo,
       readStdin: async () => "",
+      warn: () => {},
     })
     expect(out).toBe("")
   })
@@ -118,6 +120,116 @@ describe("readStdinIfAvailable", () => {
       readStdin: async () => "   \n\t  ",
     })
     expect(out).toBe("   \n\t  ")
+  })
+
+  // PR #937 / dev-punia review: `process.stdin` can be undefined in
+  // embedded/child runtimes. The helper must not throw when accessing
+  // `process.stdin.isTTY` in that case.
+  test("returns empty when process.stdin is undefined (embedded/child runtime)", async () => {
+    const original = process.stdin
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(process as any).stdin = undefined
+    try {
+      const out = await readStdinIfAvailable()
+      expect(out).toBe("")
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(process as any).stdin = original
+    }
+  })
+
+  // Sury PR #935 review #2: silent drop is bad UX. When fd 0 looked like
+  // real input but no first byte arrived, warn so the user knows.
+  test("warns when stdin looked like input but readStdin returned empty (silent-drop fix)", async () => {
+    const seen: string[] = []
+    const out = await readStdinIfAvailable({
+      isTTY: false,
+      fstat: () => fifo,
+      readStdin: async () => "",
+      warn: (msg) => seen.push(msg),
+    })
+    expect(out).toBe("")
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toContain("stdin appears piped")
+    expect(seen[0]).toContain("ALTIMATE_STDIN_TIMEOUT_MS")
+  })
+
+  test("does NOT warn when isTTY (no pipe to drop in the first place)", async () => {
+    const seen: string[] = []
+    const out = await readStdinIfAvailable({
+      isTTY: true,
+      readStdin: async () => "",
+      warn: (msg) => seen.push(msg),
+    })
+    expect(out).toBe("")
+    expect(seen).toHaveLength(0)
+  })
+
+  test("does NOT warn when fstat says char device (/dev/null) — intentional skip", async () => {
+    const seen: string[] = []
+    const out = await readStdinIfAvailable({
+      isTTY: false,
+      fstat: () => charDev,
+      readStdin: async () => "",
+      warn: (msg) => seen.push(msg),
+    })
+    expect(out).toBe("")
+    expect(seen).toHaveLength(0)
+  })
+
+  test("does NOT warn when stdin delivered data (no drop happened)", async () => {
+    const seen: string[] = []
+    const out = await readStdinIfAvailable({
+      isTTY: false,
+      fstat: () => fifo,
+      readStdin: async () => "ctx",
+      warn: (msg) => seen.push(msg),
+    })
+    expect(out).toBe("ctx")
+    expect(seen).toHaveLength(0)
+  })
+
+  // Sury PR #935 review #2: env override for slow-pipeline users.
+  test("ALTIMATE_STDIN_TIMEOUT_MS env override is forwarded to readStdin", async () => {
+    const original = process.env["ALTIMATE_STDIN_TIMEOUT_MS"]
+    process.env["ALTIMATE_STDIN_TIMEOUT_MS"] = "2500"
+    let observed: number | undefined
+    try {
+      await readStdinIfAvailable({
+        isTTY: false,
+        fstat: () => fifo,
+        readStdin: async (ms) => {
+          observed = ms
+          return "data"
+        },
+        warn: () => {},
+      })
+    } finally {
+      if (original === undefined) delete process.env["ALTIMATE_STDIN_TIMEOUT_MS"]
+      else process.env["ALTIMATE_STDIN_TIMEOUT_MS"] = original
+    }
+    expect(observed).toBe(2500)
+  })
+
+  test("ALTIMATE_STDIN_TIMEOUT_MS falls back to default when unparseable", async () => {
+    const original = process.env["ALTIMATE_STDIN_TIMEOUT_MS"]
+    process.env["ALTIMATE_STDIN_TIMEOUT_MS"] = "not-a-number"
+    let observed: number | undefined
+    try {
+      await readStdinIfAvailable({
+        isTTY: false,
+        fstat: () => fifo,
+        readStdin: async (ms) => {
+          observed = ms
+          return "data"
+        },
+        warn: () => {},
+      })
+    } finally {
+      if (original === undefined) delete process.env["ALTIMATE_STDIN_TIMEOUT_MS"]
+      else process.env["ALTIMATE_STDIN_TIMEOUT_MS"] = original
+    }
+    expect(observed).toBe(500)
   })
 })
 

@@ -1,7 +1,8 @@
 import fs from "fs"
 import type { Stats } from "fs"
 
-const FIRST_BYTE_TIMEOUT_MS = 100
+const STDIN_TIMEOUT_ENV = "ALTIMATE_STDIN_TIMEOUT_MS"
+const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 500
 
 type Stat = Pick<Stats, "isFIFO" | "isFile" | "isSocket">
 
@@ -15,6 +16,25 @@ export interface ReadStdinDeps {
   // implementation in tests.
   readStdin?: (timeoutMs: number) => Promise<string>
   timeoutMs?: number
+  // Called once with a human-readable note when fd 0 looked like a real
+  // input source (FIFO / file / socket) but no first byte arrived within
+  // the timeout — so a user whose pipe was silently dropped finds out.
+  // Default writes to stderr; tests inject a no-op to silence.
+  warn?: (msg: string) => void
+}
+
+function resolveTimeoutMs(): number {
+  const raw = process.env[STDIN_TIMEOUT_ENV]
+  if (raw === undefined) return DEFAULT_FIRST_BYTE_TIMEOUT_MS
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_FIRST_BYTE_TIMEOUT_MS
+  return parsed
+}
+
+function defaultWarn(msg: string): void {
+  try {
+    process.stderr?.write(msg + "\n")
+  } catch {}
 }
 
 // Read piped/redirected stdin without wedging on an inherited-but-idle fd.
@@ -35,16 +55,36 @@ export interface ReadStdinDeps {
 //      wait up to `timeoutMs` for the first readable byte. If no byte
 //      arrives in that window, we treat stdin as inherited-idle and skip.
 //      If a byte arrives, we drain to EOF without further deadline — so a
-//      slow producer that takes >100ms total but flushes its first chunk
-//      within the window is not truncated. This avoids the two pitfalls of
-//      a whole-stream race: (a) the orphaned `Bun.stdin.text()` continuing
-//      to hold fd 0 open after the loser is abandoned, and (b) silent
-//      mid-stream truncation of legitimate slow / large producers.
+//      slow producer that takes >500ms total but flushes its first chunk
+//      within the window is not truncated. The 500ms default is chosen to
+//      cover realistic slow-to-first-byte producers (DB queries that need
+//      to plan, decompression headers, network calls with DNS+TLS handshake)
+//      while still failing fast enough to keep the inherited-idle wedge fix
+//      effective. Users can override via `ALTIMATE_STDIN_TIMEOUT_MS=N` (ms)
+//      for environments with even slower producers. This avoids the two
+//      pitfalls of a whole-stream race: (a) the orphaned `Bun.stdin.text()`
+//      continuing to hold fd 0 open after the loser is abandoned, and
+//      (b) silent mid-stream truncation of legitimate slow / large producers.
+//
+//   3. Stderr note on silent drop: if we got past the fstat gate (fd 0
+//      looked like real input) but the read came back empty, we write one
+//      line to stderr so a user whose pipe was dropped finds out instead
+//      of silently getting no input. The note also tells them how to bump
+//      the timeout. This fires on the dominant inherited-idle path too —
+//      that's intentional, since stderr is captured but not surfaced for
+//      most subprocess callers (Claude Code's Bash tool, CI) and a single
+//      line of noise per call is worth the explicitness for the
+//      slow-producer case.
 export async function readStdinIfAvailable(deps: ReadStdinDeps = {}): Promise<string> {
+  // `process.stdin` can be undefined in embedded / child runtimes (flagged
+  // by dev-punia on PR #937). Treat absence as "no stdin to read."
+  if (deps.isTTY === undefined && !process.stdin) return ""
+
   const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY)
   const fstat = deps.fstat ?? (() => fs.fstatSync(0) as Stat)
   const readStdin = deps.readStdin ?? defaultReadStdin
-  const timeoutMs = deps.timeoutMs ?? FIRST_BYTE_TIMEOUT_MS
+  const timeoutMs = deps.timeoutMs ?? resolveTimeoutMs()
+  const warn = deps.warn ?? defaultWarn
 
   if (isTTY) return ""
 
@@ -55,7 +95,16 @@ export async function readStdinIfAvailable(deps: ReadStdinDeps = {}): Promise<st
     return ""
   }
 
-  return readStdin(timeoutMs)
+  const result = await readStdin(timeoutMs)
+
+  if (result === "") {
+    warn(
+      `altimate-code: stdin appears piped but no data received within ${timeoutMs}ms; ` +
+        `proceeding without it. Set ${STDIN_TIMEOUT_ENV}=N (ms) to wait longer.`,
+    )
+  }
+
+  return result
 }
 
 // Compose the final prompt from a positional message and stdin input.
