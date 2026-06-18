@@ -51,13 +51,17 @@ describe("PR #930 install.ps1 release URL construction", () => {
     expect(versionBlock).toContain("exit 1")
   })
 
-  test("latest-version resolution requires a nonblank GitHub release tag", () => {
+  test("latest-version resolution retries then degrades instead of hard-failing", () => {
     const versionBlock = scriptBlock("# Resolve version (once)", "# Skip if the requested version")
     expect(versionBlock).toContain("[string]::IsNullOrWhiteSpace($Version)")
     expect(versionBlock).toContain('"User-Agent" = "altimate-install"')
     expect(versionBlock).toContain("$specificVersion = ($rel.tag_name -replace '^v', '')")
     expect(versionBlock).toContain("[string]::IsNullOrWhiteSpace($specificVersion)")
-    expect(versionBlock.match(/Failed to fetch version information/g)?.length).toBeGreaterThanOrEqual(2)
+    // A transient releases/latest API blip must not abort the install: retry a few
+    // times, then degrade gracefully (the download resolves "latest" server-side).
+    expect(versionBlock).toContain("for ($attempt = 1; $attempt -le 3; $attempt++)")
+    expect(versionBlock).toContain("installing the latest release anyway")
+    expect(versionBlock).not.toContain("Failed to fetch version information")
   })
 })
 
@@ -102,7 +106,10 @@ describe("PR #930 install.ps1 error handling and idempotency", () => {
     expect(INSTALL_PS1).toContain('$ErrorActionPreference = "Stop"')
     expect(INSTALL_PS1.match(/\btry\s*\{/g)?.length).toBeGreaterThanOrEqual(4)
     expect(INSTALL_PS1.match(/\bcatch\s*\{/g)?.length).toBeGreaterThanOrEqual(4)
-    expect(INSTALL_PS1.match(/exit 1/g)?.length).toBeGreaterThanOrEqual(3)
+    // The unsupported-arch and pinned-version-not-found paths still hard-fail
+    // (exit 1). The latest-version path no longer does: it degrades gracefully on
+    // a transient API blip rather than aborting the install.
+    expect(INSTALL_PS1.match(/exit 1/g)?.length).toBeGreaterThanOrEqual(2)
   })
 
   test("skips reinstall when altimate or altimate-code already reports the target version", () => {
