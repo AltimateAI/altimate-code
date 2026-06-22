@@ -15,24 +15,43 @@ BeforeAll {
   # Invoke install.ps1 in a child pwsh with a controlled environment and return
   # @{ Code = <exit code>; Output = <combined stdout+stderr> }. PROCESSOR_* env
   # vars are passed per-call so we can simulate WOW64 / ARM64 hosts.
+  #
+  # The requested env vars are applied INSIDE the child session (via a -Command
+  # preamble), not by mutating this host's Process-scope environment and relying
+  # on inheritance. PROCESSOR_ARCHITECTURE is a loader-managed variable: the
+  # windows-latest runner re-initializes it for a spawned process, so a
+  # Process-scope override here does not reliably reach `pwsh -File` (the child
+  # saw it blank). Setting it in the child's own session, after the loader has
+  # run, is deterministic. An empty value removes the var so detection of a
+  # "missing" PROCESSOR_ARCHITEW6432 falls through correctly.
   function Invoke-Installer {
     param(
       [string[]]$ScriptArgs = @(),
       [hashtable]$Env = @{}
     )
-    $saved = @{}
+    # Single-quote PowerShell literals by doubling embedded single quotes.
+    $sq = "'"; $escSq = "''"
+    $preamble = ""
     foreach ($k in $Env.Keys) {
-      $saved[$k] = [Environment]::GetEnvironmentVariable($k)
-      [Environment]::SetEnvironmentVariable($k, $Env[$k])
-    }
-    try {
-      $output = & pwsh -NoProfile -File $script:InstallScript @ScriptArgs 2>&1 | Out-String
-      return @{ Code = $LASTEXITCODE; Output = $output }
-    } finally {
-      foreach ($k in $Env.Keys) {
-        [Environment]::SetEnvironmentVariable($k, $saved[$k])
+      $v = $Env[$k]
+      if ([string]::IsNullOrEmpty($v)) {
+        $preamble += "Remove-Item -Path Env:$k -ErrorAction SilentlyContinue; "
+      } else {
+        $vEsc = $v.Replace($sq, $escSq)
+        $preamble += "`$env:$k = '$vEsc'; "
       }
     }
+    # Pass the script args as bareword command-line tokens (e.g. `-Version
+    # 0.0.0-nonexistent`) so parameter NAMES bind as names - matching the
+    # original `pwsh -File <script> @ScriptArgs` semantics. Quoting them as
+    # literals (or array-splatting) binds positionally instead, so $Version
+    # would receive the literal string "-Version". The harness only ever passes
+    # shell-safe tokens (-Help, -Version, version strings; no spaces/quotes).
+    $argTokens = $ScriptArgs -join " "
+    $scriptEsc = $script:InstallScript.Replace($sq, $escSq)
+    $command = "$preamble & '$scriptEsc' $argTokens"
+    $output = & pwsh -NoProfile -Command $command 2>&1 | Out-String
+    return @{ Code = $LASTEXITCODE; Output = $output }
   }
 }
 
