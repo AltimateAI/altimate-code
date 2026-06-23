@@ -436,6 +436,9 @@ export const defaultConfig: MergeConfig = {
     // Desktop CLI: install dir/binary + WSL installer point at OUR altimate paths
     // (functional divergence, not just branding) — must keep altimate_change markers.
     "packages/desktop/src-tauri/src/cli.rs",
+    // Desktop shell waits for OUR branded sqlite path (~/.local/share/altimate-code/
+    // altimate-code.db), not upstream's opencode path — else the window hangs.
+    "packages/desktop/src-tauri/src/lib.rs",
   ],
 
   skipFiles: [
