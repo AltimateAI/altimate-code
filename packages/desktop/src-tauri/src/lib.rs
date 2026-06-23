@@ -697,11 +697,12 @@ fn opencode_db_path() -> Result<PathBuf, &'static str> {
         }
     };
 
-    // altimate_change — our fork's data dir + DB are branded "altimate-code"
+    // altimate_change start — our fork's data dir + DB are branded "altimate-code"
     // (see packages/opencode/src/global/index.ts `app = "altimate-code"` and
     // index.ts `altimate-code.db`). The shell must wait for THIS path, not the
     // upstream `opencode/opencode.db`, or the window hangs on "Just a moment…".
     Ok(data_home.join("altimate-code").join("altimate-code.db"))
+    // altimate_change end
 }
 
 // Creates a `once` listener for the specified event and returns a future that resolves
