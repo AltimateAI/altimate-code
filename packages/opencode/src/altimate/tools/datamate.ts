@@ -403,7 +403,7 @@ async function handleDelete(args: { datamate_id?: string }) {
     const disconnected: string[] = []
     if (serverName in allStatus) {
       try {
-        await MCP.remove(serverName)
+        await MCP.disconnect(serverName)
         disconnected.push(serverName)
       } catch {
         // Log but don't fail the delete operation
@@ -484,7 +484,7 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
   }
   try {
     // Fully remove from runtime state (disconnect + purge from MCP list)
-    await MCP.remove(args.server_name).catch(() => {})
+    await MCP.disconnect(args.server_name).catch(() => {})
 
     // Remove from config files — when no scope specified, try both to avoid orphaned entries
     const removed: string[] = []

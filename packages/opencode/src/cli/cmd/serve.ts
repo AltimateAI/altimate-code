@@ -1,7 +1,7 @@
-import { Server } from "../../server/server"
-import { cmd } from "./cmd"
+import { Effect } from "effect"
+import { effectCmd } from "../effect-cmd"
 import { withNetworkOptions, resolveNetworkOptions } from "../network"
-import { Flag } from "../../flag/flag"
+import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change start — trace: session tracing in headless serve
 import { subscribeTraceConsumer } from "../../altimate/observability/trace-consumer"
 // altimate_change end
@@ -9,24 +9,30 @@ import { subscribeTraceConsumer } from "../../altimate/observability/trace-consu
 import { scheduleStartupUpgradeCheck } from "./serve-upgrade-check"
 // altimate_change end
 
-export const ServeCommand = cmd({
+export const ServeCommand = effectCmd({
   command: "serve",
   builder: (yargs) => withNetworkOptions(yargs),
-  // altimate_change start — upstream_fix: branding regression in describe + log line
+  // altimate_change start — upstream_fix: branding regression in describe
   describe: "starts a headless altimate-code server",
-  handler: async (args) => {
+  // altimate_change end
+  // Server loads instances per-request via x-opencode-directory header — no
+  // need for an ambient project InstanceContext at startup.
+  instance: false,
+  handler: Effect.fn("Cli.serve")(function* (args) {
+    const { Server } = yield* Effect.promise(() => import("../../server/server"))
     if (!Flag.OPENCODE_SERVER_PASSWORD) {
       console.log("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
     }
-    const opts = await resolveNetworkOptions(args)
+    const opts = yield* resolveNetworkOptions(args)
     // altimate_change start — sync datamate URL from IDE MCP config on serve startup.
     // When a VS Code/Cursor window restarts, the extension picks a new local port and
     // rewrites its MCP config. Re-reading it here keeps altimate-code.json in sync
     // without requiring any user action.
-    const { syncDatamateUrlFromVscodeMcp } = await import("../../altimate/datamate-transport")
-    await syncDatamateUrlFromVscodeMcp(process.cwd())
+    const { syncDatamateUrlFromVscodeMcp } = yield* Effect.promise(() => import("../../altimate/datamate-transport"))
+    yield* Effect.promise(() => syncDatamateUrlFromVscodeMcp(process.cwd()))
     // altimate_change end
-    const server = await Server.listen(opts)
+    const server = yield* Effect.promise(() => Server.listen(opts))
+    // altimate_change start — upstream_fix: branding regression in log line
     console.log(`altimate-code server listening on http://${server.hostname}:${server.port}`)
     // altimate_change end
 
@@ -46,18 +52,20 @@ export const ServeCommand = cmd({
     // A headless `serve` is how the VS Code / Cursor extension runs
     // altimate-code, and it is the ONLY long-running entrypoint that never
     // checked for updates: auto-update was wired solely into the TUI bootstrap
-    // (cli/cmd/tui/thread.ts → worker.checkUpgrade → upgrade()). As a result the
+    // (cli/cmd/tui → worker.checkUpgrade → upgrade()). As a result the
     // extension fleet froze at whatever version was installed at onboarding.
     // Fire the missing trigger here; see serve-upgrade-check.ts for why it runs
     // in (but never disposes) the process.cwd() instance.
     scheduleStartupUpgradeCheck()
     // altimate_change end
 
-    // Finalize traces on shutdown. `serve` blocks forever on the promise below
-    // and otherwise dies abruptly on signal, so without these handlers the
-    // consumer's stop()/flush()/endTrace() never runs and serve traces are
+    // Finalize traces on shutdown. `serve` blocks forever on `Effect.never`
+    // below and otherwise dies abruptly on signal, so without these handlers
+    // the consumer's stop()/flush()/endTrace() never runs and serve traces are
     // left un-finalized (status never "completed", no summary/narrative).
-    // Mirrors the SIGINT/SIGTERM/beforeExit pattern in cli/cmd/run.ts.
+    // Mirrors the SIGINT/SIGTERM/beforeExit pattern in cli/cmd/run.ts. The
+    // signal callbacks fire outside the Effect runtime, so they drain the
+    // Promise-returning cleanup directly.
     let isShuttingDown = false
     const shutdown = async (code: number) => {
       if (isShuttingDown) return
@@ -74,6 +82,6 @@ export const ServeCommand = cmd({
     process.once("beforeExit", () => void shutdown(0))
     // altimate_change end
 
-    await new Promise(() => {})
-  },
+    yield* Effect.never
+  }),
 })

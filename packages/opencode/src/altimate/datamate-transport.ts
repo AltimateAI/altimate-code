@@ -3,7 +3,7 @@ import path from "path"
 import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk } from "../mcp/config"
 import { Filesystem } from "../util/filesystem"
-import { Glob } from "../util/glob"
+import { Glob } from "@opencode-ai/core/util/glob"
 import { Log } from "@/altimate/util/log"
 import type { Config } from "../config/config"
 
@@ -49,25 +49,26 @@ async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
       cwd: projectRootDir,
       absolute: true,
       dot: true,
-      // Exclude build/dependency/output trees. command + args from a discovered
-      // mcp.json are passed to StdioClientTransport, so keep the scan to source the
-      // user actually authors and out of vendored/generated directories.
-      ignore: [
-        "**/node_modules/**",
-        "**/.git/**",
-        "**/dist/**",
-        "**/build/**",
-        "**/.pnpm/**",
-        "**/target/**",
-        "**/.next/**",
-        "**/out/**",
-        "**/vendor/**",
-        "**/coverage/**",
-        "**/.venv/**",
-        "**/.turbo/**",
-      ],
     })
-    return paths.sort()
+    // Exclude build/dependency/output trees. command + args from a discovered
+    // mcp.json are passed to StdioClientTransport, so keep the scan to source the
+    // user actually authors and out of vendored/generated directories. The new core
+    // Glob.Options dropped the `ignore` field, so filter the results instead.
+    const ignoredDirs = [
+      "node_modules",
+      ".git",
+      "dist",
+      "build",
+      ".pnpm",
+      "target",
+      ".next",
+      "out",
+      "vendor",
+      "coverage",
+      ".venv",
+      ".turbo",
+    ]
+    return paths.filter((p) => !ignoredDirs.some((dir) => p.includes(`/${dir}/`))).sort()
   } catch {
     log.warn("findAllMcpJsonFiles: glob scan failed", { cwd: projectRootDir })
     return []

@@ -1,21 +1,34 @@
-wip: bridge upstream v1.17.9 overlay + install/structure reconciliation (checkpoint)
+wip: v1.17.9 reconciliation — Effect-API compat wrappers + config-schema re-apply (checkpoint 3)
 
-Bridge overlay of upstream OpenCode v1.4.0 -> v1.17.9 (3254 commits, no common
-ancestor). This is a WIP checkpoint on the merge branch; NOT ready to merge.
+Resolves the §2 Effect-only API migration for the altimate consumer surface by
+restoring thin Promise wrappers (backed by the instance-bound `makeRuntime`
+bridge, so reads stay per-workspace) instead of churning 100+ call sites:
 
-Done:
-- Overlaid 1850 upstream files via bridge-merge.ts; reapplied PR #18186 anthropic.
-- Restored altimate bits in packages/opencode/package.json (name, bin altimate/
-  altimate-code, deps @altimateai/altimate-core, @altimateai/drivers,
-  @opencode-ai/util, yaml; test script without --only-failures).
-- Pruned root workspaces (drop console/slack/stats), fixed repository URL.
-- Dropped packages/stats (hosted dashboard) + added to skipFiles.
-- Vendored 5 TUI attention mp3s into packages/tui; repointed @opencode-ai/ui audio.
-- Deleted 246 confirmed-stale upstream files (present in v1.4.0, removed by v1.17.9,
-  unmarked) via in-v1.4.0 discriminator; kept 174 fork-origin files.
-- bun install GREEN; packages/core + packages/tui typecheck GREEN.
+- `Config`: restore get/getGlobal/getConsoleState/update/invalidate/directories
+  Promise wrappers (40+ `await Config.get()` callers, upstream-shared + altimate).
+- `MCP`: restore status/tools/add/connect/disconnect wrappers; repoint datamate's
+  `MCP.remove` -> `MCP.disconnect` (session-runtime removal; config purge is separate).
+- `Skill`: restore `all()` wrapper for project-scan's environment census.
 
-Remaining (tracked): re-derive ~72 kept marker/requireMarkers files onto v1.17.9 +
-re-apply altimate_change blocks; migrate server/tui/util-extracted customizations;
-effect beta.43->beta.74 API drift; update fork test suite to v1.17.9 APIs; apply
-branding transforms to overlaid files; re-evaluate 62 upstream_fix markers.
+Mechanical §2 repoints (all fork-original altimate files):
+- `Installation.VERSION` -> `InstallationVersion` (@opencode-ai/core/installation/version).
+- glob -> `@opencode-ai/core/util/glob`; post-filter ignore dirs (core Glob.Options
+  dropped the `ignore` field).
+- `Config.Mcp` -> `ConfigMCPV1.Info` (@opencode-ai/core/v1/config/mcp).
+- project-scan: removed Flag experimental keys -> direct process.env census reads.
+
+Config-schema fidelity (core v1/config/config.ts, re-applied from main):
+- top-level `tracing` block (enabled/dir/maxFiles/exporters), zod -> Effect Schema.
+- experimental toggles dropped by the overlay: auto_enhance_prompt,
+  env_fingerprint_skill_selection, auto_mcp_discovery.
+
+Also lands the prior-session Tool-API adapter shim (altimate/tool-zod-compat.ts)
+referenced by tool/tool.ts — the recipe to bridge the 77 old-shape zod/Promise
+tools onto the new Effect Tool API without rewriting each.
+
+altimate/ typecheck surface: 37 -> 3 errors (the 3 remaining are the §2.12 Tool-API
+rewrites in altimate-core-rewrite.ts + tool-lookup.ts). Package total 3181 -> 3040;
+the remainder is the stale-file delete (§3.4) + TUI/server re-home (§4) phases.
+
+Marker guard --strict still fails on pre-existing broad-overlay debt (125 unmarked
+sites across sdk/turbo/etc untouched here); my additions are balanced and marked.

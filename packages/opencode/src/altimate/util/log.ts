@@ -46,6 +46,12 @@ export namespace Log {
 
   function render(value: any): string {
     if (typeof value === "string") return value
+    // Errors don't JSON.stringify usefully (message/stack are non-enumerable) —
+    // surface them like the upstream util/log.ts did.
+    if (value instanceof Error) {
+      const cause = (value as { cause?: unknown }).cause
+      return value.stack || `${value.name}: ${value.message}` + (cause ? ` (cause: ${render(cause)})` : "")
+    }
     try {
       return JSON.stringify(value)
     } catch {

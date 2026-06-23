@@ -163,6 +163,36 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  // altimate_change start - tracing config (re-applied from main during the v1.17.9 reconciliation)
+  tracing: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Enable session tracing (default: true). Traces are saved locally and can be viewed with `altimate-code trace`.",
+      }),
+      dir: Schema.optional(Schema.String).annotate({
+        description: "Custom directory for trace files (default: ~/.local/share/altimate-code/traces/)",
+      }),
+      maxFiles: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Maximum number of trace files to keep. 0 for unlimited. Oldest files are removed when exceeded (default: 100).",
+      }),
+      exporters: Schema.optional(
+        Schema.mutable(
+          Schema.Array(
+            Schema.Struct({
+              name: Schema.String.annotate({ description: "Exporter identifier" }),
+              endpoint: Schema.String.annotate({ description: "HTTP endpoint to POST trace data to" }),
+              headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+                description: "Custom headers (e.g., Authorization)",
+              }),
+            }),
+          ),
+        ),
+      ).annotate({ description: "Additional trace exporters. Each receives the full trace JSON via HTTP POST." }),
+    }),
+  ),
+  // altimate_change end
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),
@@ -182,6 +212,20 @@ export const Info = Schema.Struct({
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
       }),
+      // altimate_change start - fork experimental toggles re-applied during the v1.17.9 reconciliation
+      auto_enhance_prompt: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Automatically enhance prompts with AI before sending (default: false). Uses a small model to rewrite rough prompts into clearer versions.",
+      }),
+      env_fingerprint_skill_selection: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Use environment fingerprint to select relevant skills once per session (default: false). Set to true to enable LLM-based skill filtering.",
+      }),
+      auto_mcp_discovery: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup (default: true). Set to false to disable.",
+      }),
+      // altimate_change end
     }),
   ),
 }).annotate({ identifier: "Config" })

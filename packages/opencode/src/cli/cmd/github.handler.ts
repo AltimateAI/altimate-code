@@ -138,9 +138,14 @@ type IssueQueryResponse = {
   }
 }
 
-const AGENT_USERNAME = "opencode-agent[bot]"
+// altimate_change start — upstream_fix: bridge merge reverted these constants from
+// our altimate-code branding back to upstream. They affect the GitHub App identity,
+// the workflow filename committed to user repos, and the agent username we react as.
+const AGENT_USERNAME = "altimate-code-agent[bot]"
 const AGENT_REACTION = "eyes"
-const WORKFLOW_FILE = ".github/workflows/opencode.yml"
+const WORKFLOW_FILE = ".github/workflows/altimate-code.yml"
+export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/altimate-code-agent/installations/new"
+// altimate_change end
 
 // Event categories for routing
 // USER_EVENTS: triggered by user actions, have actor/issueId, support reactions/comments
@@ -200,7 +205,7 @@ export const githubInstall = Effect.fn("Cli.github.install")(function* () {
             "",
             "    3. Go to a GitHub issue and comment `/oc summarize` to see the agent in action",
             "",
-            "   Learn more about the GitHub agent - https://opencode.ai/docs/github/#usage-examples",
+            "   Learn more about the GitHub agent - https://altimate.ai/docs/github/#usage-examples",
           ].join("\n"),
         )
       }
@@ -226,7 +231,9 @@ export const githubInstall = Effect.fn("Cli.github.install")(function* () {
 
       async function promptProvider() {
         const priority: Record<string, number> = {
-          opencode: 0,
+          // altimate_change start — upstream_fix: provider priority key was "altimate-code"
+          "altimate-code": 0,
+          // altimate_change end
           anthropic: 1,
           openai: 2,
           google: 3,
@@ -284,7 +291,9 @@ export const githubInstall = Effect.fn("Cli.github.install")(function* () {
         if (installation) return s.stop("GitHub app already installed")
 
         // Open browser
-        const url = "https://github.com/apps/opencode-agent"
+        // altimate_change start — upstream_fix: GitHub App slug is altimate-code-agent
+        const url = GITHUB_APP_INSTALL_URL
+        // altimate_change end
         const command =
           process.platform === "darwin"
             ? `open "${url}"`
@@ -320,7 +329,9 @@ export const githubInstall = Effect.fn("Cli.github.install")(function* () {
         s.stop("Installed GitHub app")
 
         async function getInstallation() {
-          return await fetch(`https://api.opencode.ai/get_github_app_installation?owner=${app.owner}&repo=${app.repo}`)
+          // altimate_change start — upstream_fix: installation lookup hits altimate API
+          return await fetch(`https://api.altimate.ai/get_github_app_installation?owner=${app.owner}&repo=${app.repo}`)
+            // altimate_change end
             .then((res) => res.json())
             .then((data) => data.installation)
         }
@@ -334,7 +345,9 @@ export const githubInstall = Effect.fn("Cli.github.install")(function* () {
 
         await Filesystem.write(
           path.join(app.root, WORKFLOW_FILE),
-          `name: opencode
+          // altimate_change start — upstream_fix: workflow yaml name + job +
+          // mention triggers should be altimate-code branded
+          `name: altimate-code
 
 on:
   issue_comment:
@@ -343,12 +356,12 @@ on:
     types: [created]
 
 jobs:
-  opencode:
+  altimate-code:
     if: |
       contains(github.event.comment.body, ' /oc') ||
       startsWith(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, ' /opencode') ||
-      startsWith(github.event.comment.body, '/opencode')
+      contains(github.event.comment.body, ' /altimate-code') ||
+      startsWith(github.event.comment.body, '/altimate-code')
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -361,10 +374,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run opencode
-        uses: anomalyco/opencode/github@latest${envStr}
+      - name: Run altimate-code
+        uses: AltimateAI/altimate-code/github@latest${envStr}
         with:
           model: ${provider}/${model}`,
+          // altimate_change end
         )
 
         prompts.log.success(`Added workflow file: "${WORKFLOW_FILE}"`)
@@ -426,7 +440,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
         ? (payload as IssueCommentEvent | IssuesEvent).issue.number
         : (payload as PullRequestEvent | PullRequestReviewCommentEvent).pull_request.number
     const runUrl = `/${owner}/${repo}/actions/runs/${runId}`
-    const shareBaseUrl = isMock ? "https://dev.opencode.ai" : "https://opencode.ai"
+    // altimate_change start — upstream_fix: share links point to altimate.ai
+    const shareBaseUrl = isMock ? "https://dev.altimate.ai" : "https://altimate.ai"
+    // altimate_change end
 
     let appToken: string
     let octoRest: Octokit
@@ -494,7 +510,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
         await addReaction(commentType)
       }
 
-      // Setup opencode session
+      // altimate_change start — branding: session setup comment
+      // Setup altimate-code session
+      // altimate_change end
       const repoData = await fetchRepo()
       session = await runLocalEffect(
         sessionSvc.create({
@@ -514,7 +532,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
         await runLocalEffect(sessionShare.share(session.id))
         return session.id.slice(-8)
       })()
-      console.log("opencode session", session.id)
+      // altimate_change start — branding: session log label
+      console.log("altimate-code session", session.id)
+      // altimate_change end
 
       // Handle event types:
       // REPO_EVENTS (schedule, workflow_dispatch): no issue/PR context, output to logs/PR only
@@ -687,7 +707,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
 
     function normalizeOidcBaseUrl(): string {
       const value = process.env["OIDC_BASE_URL"]
-      if (!value) return "https://api.opencode.ai"
+      // altimate_change start — upstream_fix: default OIDC base URL is altimate API
+      if (!value) return "https://api.altimate.ai"
+      // altimate_change end
       return value.replace(/\/+$/, "")
     }
 
@@ -736,7 +758,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
       }
 
       const reviewContext = getReviewCommentContext()
-      const mentions = (process.env["MENTIONS"] || "/opencode,/oc")
+      // altimate_change start — upstream_fix: default mention triggers are /altimate-code,/oc
+      const mentions = (process.env["MENTIONS"] || "/altimate-code,/oc")
+        // altimate_change end
         .split(",")
         .map((m) => m.trim().toLowerCase())
         .filter(Boolean)
@@ -887,7 +911,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
     }
 
     async function chat(message: string, files: PromptFiles = []) {
-      console.log("Sending message to opencode...")
+      // altimate_change start — branding: chat log label
+      console.log("Sending message to altimate-code...")
+      // altimate_change end
 
       return runLocalEffect(
         Effect.gen(function* () {
@@ -975,7 +1001,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
 
     async function getOidcToken() {
       try {
-        return await core.getIDToken("opencode-github-action")
+        // altimate_change start — upstream_fix: OIDC audience is altimate-code-github-action
+        return await core.getIDToken("altimate-code-github-action")
+        // altimate_change end
       } catch (error) {
         console.error("Failed to get OIDC token:", error instanceof Error ? error.message : error)
         throw new Error(
@@ -1074,11 +1102,13 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
         .replace(/\.\d{3}Z/, "")
         .split("T")
         .join("")
+      // altimate_change start — upstream_fix: agent branches use altimate-code/ prefix
       if (type === "schedule" || type === "dispatch") {
         const hex = crypto.randomUUID().slice(0, 6)
-        return `opencode/${type}-${hex}-${timestamp}`
+        return `altimate-code/${type}-${hex}-${timestamp}`
       }
-      return `opencode/${type}${issueId}-${timestamp}`
+      return `altimate-code/${type}${issueId}-${timestamp}`
+      // altimate_change end
     }
 
     async function pushToNewBranch(summary: string, branch: string, commit: boolean, isSchedule: boolean) {
@@ -1350,9 +1380,13 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
         const titleAlt = encodeURIComponent(session.title.substring(0, 50))
         const title64 = Buffer.from(session.title.substring(0, 700), "utf8").toString("base64")
 
-        return `<a href="${shareBaseUrl}/s/${shareId}"><img width="200" alt="${titleAlt}" src="https://social-cards.sst.dev/opencode-share/${title64}.png?model=${providerID}/${modelID}&version=${session.version}&id=${shareId}" /></a>\n`
+        // altimate_change start — branding: social card path is altimate-code-share
+        return `<a href="${shareBaseUrl}/s/${shareId}"><img width="200" alt="${titleAlt}" src="https://social-cards.sst.dev/altimate-code-share/${title64}.png?model=${providerID}/${modelID}&version=${session.version}&id=${shareId}" /></a>\n`
+        // altimate_change end
       })()
-      const shareUrl = shareId ? `[opencode session](${shareBaseUrl}/s/${shareId})&nbsp;&nbsp;|&nbsp;&nbsp;` : ""
+      // altimate_change start — branding: share link label
+      const shareUrl = shareId ? `[altimate-code session](${shareBaseUrl}/s/${shareId})&nbsp;&nbsp;|&nbsp;&nbsp;` : ""
+      // altimate_change end
       return `\n\n${image}${shareUrl}[github run](${runUrl})`
     }
 
@@ -1413,7 +1447,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
       return [
         "<github_action_context>",
         "You are running as a GitHub Action. Important:",
-        "- Git push and PR creation are handled AUTOMATICALLY by the opencode infrastructure after your response",
+        // altimate_change start — branding: github_action_context references altimate-code infrastructure
+        "- Git push and PR creation are handled AUTOMATICALLY by the altimate-code infrastructure after your response",
+        // altimate_change end
         "- Do NOT include warnings or disclaimers about GitHub tokens, workflow permissions, or PR creation capabilities",
         "- Do NOT suggest manual steps for creating PRs or pushing code - this happens automatically",
         "- Focus only on the code changes and your analysis/response",
@@ -1551,7 +1587,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
       return [
         "<github_action_context>",
         "You are running as a GitHub Action. Important:",
-        "- Git push and PR creation are handled AUTOMATICALLY by the opencode infrastructure after your response",
+        // altimate_change start — branding: github_action_context references altimate-code infrastructure
+        "- Git push and PR creation are handled AUTOMATICALLY by the altimate-code infrastructure after your response",
+        // altimate_change end
         "- Do NOT include warnings or disclaimers about GitHub tokens, workflow permissions, or PR creation capabilities",
         "- Do NOT suggest manual steps for creating PRs or pushing code - this happens automatically",
         "- Focus only on the code changes and your analysis/response",

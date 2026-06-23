@@ -4,7 +4,7 @@ import Bun from "bun"
 import os from "os"
 import path from "path"
 import { Tool } from "../../tool/tool"
-import { Installation } from "@/installation"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 const CATEGORY_LABELS = {
   bug: "bug",
@@ -78,7 +78,7 @@ export const FeedbackSubmitTool = Tool.define("feedback_submit", {
     }
 
     // Collect metadata
-    const version = Installation.VERSION
+    const version = InstallationVersion
     const platform = process.platform
     const arch = process.arch
     const osRelease = os.release()

@@ -1,4 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change start — makeRuntime for the restored Promise wrapper (see bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import path from "path"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema } from "effect"
@@ -362,5 +365,13 @@ export const node = LayerNode.make(layer, [
   Global.node,
   RuntimeFlags.node,
 ])
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed. project-scan's
+// environment census calls `await Skill.all()` from plain async code; bind it through makeRuntime.
+const { runPromise: runSkill } = makeRuntime(Service, defaultLayer)
+export async function all() {
+  return runSkill((svc) => svc.all())
+}
+// altimate_change end
 
 export * as Skill from "."
