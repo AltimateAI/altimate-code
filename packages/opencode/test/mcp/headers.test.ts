@@ -143,7 +143,7 @@ test("OAuth is auto-disabled when Authorization is supplied via headersCommand",
         headersCommand: {
           Authorization: ["printf", "Bearer dynamic-token"],
         },
-      } as any).catch(() => {})
+      }).catch(() => {})
 
       expect(transportCalls.length).toBeGreaterThanOrEqual(1)
       for (const call of transportCalls) {

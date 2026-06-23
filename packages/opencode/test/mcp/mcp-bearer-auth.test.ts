@@ -1,41 +1,12 @@
 import { describe, test, expect } from "bun:test"
-import z from "zod/v4"
 import { Config } from "../../src/config/config"
 
-// We replicate the lenient ListTools schema used in mcp/index.ts here so the
-// test does not depend on the MCP module's heavy import surface (Instance,
-// Telemetry, Bus, Plugin, etc.). The schema is byte-for-byte identical to
-// the one in mcp/index.ts; if it drifts, the integration test in mcp.test.ts
-// will catch it.
-const LenientToolAnnotationsSchema = z
-  .object({
-    title: z.string().optional(),
-    readOnlyHint: z.boolean().nullable().optional(),
-    destructiveHint: z.boolean().nullable().optional(),
-    idempotentHint: z.boolean().nullable().optional(),
-    openWorldHint: z.boolean().nullable().optional(),
-  })
-  .loose()
-
-const LenientToolSchema = z
-  .object({
-    name: z.string(),
-    title: z.string().optional(),
-    description: z.string().optional(),
-    inputSchema: z.any(),
-    outputSchema: z.any().optional(),
-    annotations: LenientToolAnnotationsSchema.optional(),
-    _meta: z.record(z.string(), z.unknown()).optional(),
-  })
-  .loose()
-
-const LenientListToolsResultSchema = z
-  .object({
-    tools: z.array(LenientToolSchema),
-    nextCursor: z.string().optional(),
-    _meta: z.record(z.string(), z.unknown()).optional(),
-  })
-  .loose()
+// Assert against the *production* lenient schema directly (exported via
+// MCP._testing) so this test can never pass against a stale duplicate. The MCP
+// module is already imported dynamically by the resolveHeadersCommand tests
+// below, so pulling it in here adds no new import surface.
+const { MCP } = await import("../../src/mcp")
+const { LenientListToolsResultSchema } = MCP._testing
 
 // ---------------------------------------------------------------------------
 // 1. Lenient tools/list schema accepts what real-world servers emit.
@@ -109,6 +80,67 @@ describe("lenient tools/list schema", () => {
 })
 
 // ---------------------------------------------------------------------------
+// 1b. End-to-end listToolsLenient retry (#792). Locks in the load-bearing
+// contract: when the SDK's strict listTools() rejects a Fabric-style payload,
+// the rejected error is named `$ZodError` (zod v4-mini), isSchemaError catches
+// it, and the lenient client.request() retry returns the tools. A future
+// re-narrowing of isSchemaError would break this without tripping the
+// schema-only tests above.
+// ---------------------------------------------------------------------------
+describe("listToolsLenient retry against SDK $ZodError (#792)", () => {
+  test("retries with lenient schema when strict listTools() rejects Fabric-style nulls", async () => {
+    const { ListToolsResultSchema } = await import("@modelcontextprotocol/sdk/types.js")
+    const { safeParse } = await import("@modelcontextprotocol/sdk/server/zod-compat.js")
+    // Real payload shape from Microsoft Fabric Core MCP: null annotation hints.
+    const fabricPayload = {
+      tools: [
+        {
+          name: "list_workspaces",
+          inputSchema: { type: "object", properties: {} },
+          annotations: { readOnlyHint: true, destructiveHint: null, idempotentHint: null, openWorldHint: null },
+        },
+      ],
+    }
+    // Produce the exact error the SDK would reject with (a `$ZodError`).
+    const strict: any = safeParse(ListToolsResultSchema as any, fabricPayload)
+    expect(strict.success).toBe(false)
+    expect(strict.error?.name).toBe("$ZodError")
+
+    let requestCalled = false
+    const fakeClient = {
+      listTools: async () => {
+        throw strict.error
+      },
+      request: async () => {
+        requestCalled = true
+        return fabricPayload
+      },
+    }
+
+    const result = await MCP._testing.listToolsLenient(fakeClient)
+    expect(requestCalled).toBe(true)
+    expect(result.tools).toHaveLength(1)
+    expect(result.tools[0].name).toBe("list_workspaces")
+  })
+
+  test("does NOT retry (rethrows) when the error is not a schema error", async () => {
+    const transportError = new Error("ECONNREFUSED")
+    let requestCalled = false
+    const fakeClient = {
+      listTools: async () => {
+        throw transportError
+      },
+      request: async () => {
+        requestCalled = true
+        return { tools: [] }
+      },
+    }
+    await expect(MCP._testing.listToolsLenient(fakeClient)).rejects.toThrow(/ECONNREFUSED/)
+    expect(requestCalled).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 2. McpRemote schema accepts new headersCommand field (issue #791).
 // ---------------------------------------------------------------------------
 describe("McpRemote.headersCommand schema (#791)", () => {
@@ -131,6 +163,16 @@ describe("McpRemote.headersCommand schema (#791)", () => {
       headersCommand: { Authorization: [] },
     })
     expect(result.success).toBe(false)
+  })
+
+  test("rejects array-shaped headers/headersCommand with an actionable invalid_type error", () => {
+    // normalizeMcpConfig passes these malformed shapes through unchanged so the
+    // schema rejects them loudly instead of the normalizer silently dropping
+    // them (which would connect a header-less server with no feedback).
+    const headersArr = Config.McpRemote.safeParse({ type: "remote", url: "https://x/mcp", headers: ["a", "b"] })
+    expect(headersArr.success).toBe(false)
+    const cmdArr = Config.McpRemote.safeParse({ type: "remote", url: "https://x/mcp", headersCommand: [["x"]] })
+    expect(cmdArr.success).toBe(false)
   })
 
   test("allows static headers and headersCommand to coexist", () => {
@@ -182,11 +224,13 @@ describe("resolveHeadersCommand helper", () => {
     )
   })
 
-  test("throws when command does not exist", async () => {
+  test("throws when command does not exist, naming the failing header", async () => {
     const { MCP } = await import("../../src/mcp")
+    // The error must name the specific header so `mcp list` points to the
+    // exact failing command rather than a bare ENOENT.
     await expect(
       MCP._testing.resolveHeadersCommand({ Authorization: ["this-binary-does-not-exist-xyz"] }),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/headersCommand\[Authorization\] failed:/)
   })
 
   test("does not invoke a shell (argv is passed directly to execFile)", async () => {

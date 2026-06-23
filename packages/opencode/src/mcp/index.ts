@@ -133,41 +133,42 @@ export namespace MCP {
   // Zod, blocking listTools() entirely. We accept `null` as "hint absent" by
   // calling `client.request()` with a permissive schema in place of the SDK's
   // strict one. See https://github.com/AltimateAI/altimate-code/issues/792.
-  const LenientToolAnnotationsSchema = z
-    .object({
-      title: z.string().optional(),
-      readOnlyHint: z.boolean().nullable().optional(),
-      destructiveHint: z.boolean().nullable().optional(),
-      idempotentHint: z.boolean().nullable().optional(),
-      openWorldHint: z.boolean().nullable().optional(),
-    })
-    .loose()
+  const LenientToolAnnotationsSchema = z.looseObject({
+    title: z.string().optional(),
+    readOnlyHint: z.boolean().nullable().optional(),
+    destructiveHint: z.boolean().nullable().optional(),
+    idempotentHint: z.boolean().nullable().optional(),
+    openWorldHint: z.boolean().nullable().optional(),
+  })
 
-  const LenientToolSchema = z
-    .object({
-      name: z.string(),
-      title: z.string().optional(),
-      description: z.string().optional(),
-      inputSchema: z.any(),
-      outputSchema: z.any().optional(),
-      annotations: LenientToolAnnotationsSchema.optional(),
-      _meta: z.record(z.string(), z.unknown()).optional(),
-    })
-    .loose()
+  const LenientToolSchema = z.looseObject({
+    name: z.string(),
+    title: z.string().optional(),
+    description: z.string().optional(),
+    inputSchema: z.any(),
+    outputSchema: z.any().optional(),
+    annotations: LenientToolAnnotationsSchema.optional(),
+    _meta: z.record(z.string(), z.unknown()).optional(),
+  })
 
-  const LenientListToolsResultSchema = z
-    .object({
-      tools: z.array(LenientToolSchema),
-      nextCursor: z.string().optional(),
-      _meta: z.record(z.string(), z.unknown()).optional(),
-    })
-    .loose()
+  const LenientListToolsResultSchema = z.looseObject({
+    tools: z.array(LenientToolSchema),
+    nextCursor: z.string().optional(),
+    _meta: z.record(z.string(), z.unknown()).optional(),
+  })
 
   function isSchemaError(err: unknown): boolean {
-    if (!err) return false
-    if (err instanceof Error && (err.name === "ZodError" || err.constructor?.name === "$ZodError")) return true
-    if (typeof err === "object" && err !== null && "issues" in err) return true
-    return false
+    // Narrowly match Zod validation errors only. We key off the error *name*
+    // (not `instanceof z.ZodError`) because the MCP SDK may throw a ZodError
+    // from a different zod copy (it depends on `zod@^3.25 || ^4.0`), which
+    // would fail a cross-realm `instanceof`. In practice the SDK's z4-mini path
+    // names the error `$ZodError` (the primary case); the public ZodError
+    // subclass names it `ZodError`. We require an `issues` *array* (rather than
+    // `"issues" in err`) to avoid a throwing getter and to reject unrelated
+    // errors that merely carry an `issues` property of some other type.
+    if (typeof err !== "object" || err === null) return false
+    const name = (err as { name?: string }).name ?? (err as { constructor?: { name?: string } }).constructor?.name
+    return (name === "ZodError" || name === "$ZodError") && Array.isArray((err as { issues?: unknown }).issues)
   }
 
   /**
@@ -197,16 +198,20 @@ export namespace MCP {
   export const _testing = {
     LenientListToolsResultSchema,
     isSchemaError,
+    listToolsLenient: (client: {
+      listTools: () => Promise<{ tools: MCPToolDef[] }>
+      request: (...args: any[]) => Promise<unknown>
+    }) => listToolsLenient(client as unknown as MCPClient),
     resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") =>
       resolveHeadersCommand(spec, key),
     hasAuthorizationHeader,
   }
   // altimate_change end
 
-  // altimate_change start — resolve dynamic header values produced by shell
-  // commands (e.g. `az account get-access-token`). Runs via execFile (not a
-  // shell) so values aren't subject to shell injection. Re-runs on every
-  // connect so expiring bearer tokens refresh without manual config edits.
+  // altimate_change start — resolve dynamic header values from argv commands
+  // (e.g. `az account get-access-token`). Each value is an argv array run via
+  // execFile (no shell) so values aren't subject to shell injection. Re-runs on
+  // every connect so expiring bearer tokens refresh without manual config edits.
   // See https://github.com/AltimateAI/altimate-code/issues/791.
   async function resolveHeadersCommand(
     spec: Record<string, string[]> | undefined,
@@ -219,11 +224,26 @@ export namespace MCP {
         throw new Error(`headersCommand[${name}] must be a non-empty argv array`)
       }
       const [cmd, ...args] = argv
-      const { stdout } = await execFileAsync(cmd, args, {
-        encoding: "utf-8",
-        maxBuffer: 1024 * 1024,
-        timeout: 30_000,
-      })
+      let stdout = ""
+      try {
+        stdout = (
+          await execFileAsync(cmd, args, {
+            encoding: "utf-8",
+            maxBuffer: 1024 * 1024,
+            timeout: 30_000,
+          })
+        ).stdout
+      } catch (err) {
+        // Wrap with the header key so `mcp list` points to the exact failing
+        // command (ENOENT, timeout, non-zero exit) rather than a bare error.
+        // On a non-zero exit the actionable reason lives on `err.stderr` (e.g.
+        // `az`'s "run 'az login'"), which `err.message` omits — append it.
+        const e = err as { message?: string; stderr?: string }
+        const stderr = typeof e.stderr === "string" ? e.stderr.trim().slice(0, 500) : ""
+        const base = err instanceof Error ? err.message : String(err)
+        const message = stderr ? `${base}: ${stderr}` : base
+        throw new Error(`headersCommand[${name}] failed: ${message}`)
+      }
       const value = stdout.trim()
       if (!value) {
         throw new Error(`headersCommand[${name}] produced empty output`)
@@ -484,9 +504,9 @@ export namespace MCP {
     if (mcp.type === "remote") {
       // altimate_change start — resolve dynamic headers (e.g. bearer tokens
       // produced by `az account get-access-token`) before constructing
-      // transports. Failure to resolve aborts the connect attempt with a
-      // clear error so the user sees `failed: headersCommand[...] failed`
-      // in `mcp list` rather than a generic transport error.
+      // transports. Failure to resolve aborts the connect attempt. The thrown
+      // message already names the failing header (`headersCommand[<name>] failed:
+      // ...`), so the user sees exactly which command broke in `mcp list`.
       let dynamicHeaders: Record<string, string> = {}
       try {
         dynamicHeaders = await resolveHeadersCommand(mcp.headersCommand, key)
@@ -495,7 +515,7 @@ export namespace MCP {
         log.error("headersCommand resolution failed", { key, error: message })
         return {
           mcpClient: undefined,
-          status: { status: "failed" as const, error: `headersCommand failed: ${message}` },
+          status: { status: "failed" as const, error: message },
         }
       }
       const mergedHeaders: Record<string, string> = { ...(mcp.headers ?? {}), ...dynamicHeaders }
