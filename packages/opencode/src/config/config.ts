@@ -652,9 +652,11 @@ export namespace Config {
       url: z.string().describe("URL of the remote MCP server"),
       enabled: z.boolean().optional().describe("Enable or disable the MCP server on startup"),
       headers: z.record(z.string(), z.string()).optional().describe("Headers to send with the request"),
-      // altimate_change start — dynamic header values produced by a shell command,
-      // resolved on each (re)connect so callers can refresh expiring bearer tokens
-      // without restarting the session (e.g. `az account get-access-token`).
+      // altimate_change start — dynamic header values produced by an argv command
+      // (run via execFile, not a shell — no shell interpolation unless the user
+      // explicitly invokes one like `sh -c`), resolved on each (re)connect so
+      // callers can refresh expiring bearer tokens without restarting the session
+      // (e.g. `az account get-access-token`).
       headersCommand: z
         .record(z.string(), z.array(z.string()).nonempty())
         .optional()
@@ -1466,6 +1468,12 @@ export namespace Config {
           servers[name] = transformed
         } else if (entry.url && typeof entry.url === "string") {
           const transformed: Record<string, any> = { type: "remote", url: entry.url }
+          // Copy `headers` / `headersCommand` through as-is — including malformed
+          // array shapes. The downstream `Info.safeParse` validates `mcp` against
+          // the McpRemote schema, and `z.record(...)` rejects an array with an
+          // actionable `invalid_type` error. Stripping arrays here would instead
+          // drop the field silently and connect a header-less server with no
+          // feedback to the user. See #791 / #792.
           if (entry.headers && typeof entry.headers === "object") transformed.headers = entry.headers
           // altimate_change start — preserve fields that the original normalizer dropped
           // silently. Without these passes, a user-supplied `oauth: false` or
