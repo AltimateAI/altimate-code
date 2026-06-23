@@ -724,20 +724,20 @@ describe("E2E: README mandated branding audit (script/upstream)", () => {
 // ---------------------------------------------------------------------------
 
 describe("E2E: skipFiles compliance (upstream-only packages absent)", () => {
-  for (const dir of [
-    "packages/app",
-    "packages/console",
-    "packages/desktop",
-    "packages/desktop-electron",
-    "packages/enterprise",
-    "packages/storybook",
-    "packages/ui",
-    "packages/web",
-    "infra",
-    "nix",
-  ]) {
+  // packages/{app,ui,desktop,desktop-electron} were ADOPTED for the desktop app
+  // (see the "adopted desktop packages present" block below) — they are no longer
+  // in skipFiles and intentionally exist.
+  for (const dir of ["packages/console", "packages/enterprise", "packages/storybook", "packages/web", "infra", "nix"]) {
     test(`${dir}/ does not exist`, () => {
       expect(existsSync(path.join(repoRoot, dir))).toBe(false)
+    })
+  }
+})
+
+describe("E2E: adopted desktop packages present", () => {
+  for (const dir of ["packages/app", "packages/ui", "packages/desktop", "packages/desktop-electron"]) {
+    test(`${dir}/ exists`, () => {
+      expect(existsSync(path.join(repoRoot, dir))).toBe(true)
     })
   }
 })
