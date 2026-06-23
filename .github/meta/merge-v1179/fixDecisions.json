@@ -1,0 +1,180 @@
+[
+ {
+  "file": "packages/opencode/src/skill/followups.ts:156-162",
+  "recommendation": "keep",
+  "reason": "This entire file is altimate-authored (wrapped top-to-bottom in altimate_change markers as `SkillFollowups`, with dbt-specific skills like dbt-develop/dbt-analyze/lineage-diff). It does NOT exist in v1.4.0 OR v1.17.9 (git show v1.17.9:packages/opencode/src/skill/followups.ts -> 'exists on disk, but not in v1.17.9'). The inner upstream_fix marker on get() (Object.hasOwn guard + Object.freeze of suggestions, guarding prototype pollution and freezing returned objects) is real defensive code, but the upstream_fix tag is a misnomer: there is no upstream code to compare to or accept. Keep our code; nothing to drop. Recommend retagging the inner block as a regular altimate_change (it is not an upstream bug fix).",
+  "upstreamHasFix": false,
+  "isBrandingNotBug": false
+ },
+ {
+  "file": "packages/opencode/src/util/locale.ts:57-60",
+  "recommendation": "keep",
+  "reason": "Genuine bug still unfixed upstream. v1.17.9 moved the duration() implementation: packages/opencode/src/util/locale.ts is now just `export * from \"@opencode-ai/tui/util/locale\"`, and the real code lives in packages/tui/src/util/locale.ts. That upstream copy STILL has the swapped/broken days-hours math: `const hours = Math.floor(input / 3600000)` (total hours, not remainder) and `const days = Math.floor((input % 3600000) / 86400000)` (always 0 because input%3600000 < 3600000 << 86400000). Our fix is correct: days = floor(input/86400000), hours = floor((input%86400000)/3600000). MERGE NOTE: keep the fix, but re-apply it at the new location packages/tui/src/util/locale.ts since the opencode-package copy collapses to a re-export upstream.",
+  "upstreamHasFix": false,
+  "isBrandingNotBug": false
+ },
+ {
+  "file": "packages/opencode/src/util/filesystem.ts:72-74",
+  "recommendation": "keep",
+  "reason": "Genuine bug still unfixed upstream. In v1.17.9 the write() function (same path packages/opencode/src/util/filesystem.ts) still uses only `await writeFile(p, content, { mode })` with NO follow-up `await chmod(p, mode)` in the primary branch. The umask-affects-writeFile-mode bug our fix addresses persists upstream (upstream only chmods inside the separate writeStream() function). chmod is already imported upstream, so re-applying is trivial. MERGE NOTE: v1.17.9 dropped the `Filesystem` namespace wrapper (now top-level exports), so the surrounding structure changed but the bug and the needed chmod-after-writeFile remain.",
+  "upstreamHasFix": false,
+  "isBrandingNotBug": false
+ },
+ {
+  "file": "packages/opencode/src/util/filesystem.ts:83-85",
+  "recommendation": "keep",
+  "reason": "Same genuine bug as the 72-74 entry, but in the ENOENT/mkdir retry branch of write(). v1.17.9's write() retry branch also does only `await writeFile(p, content, { mode })` with no explicit chmod afterward. Still unfixed upstream; keep our explicit `await chmod(p, mode)`.",
+  "upstreamHasFix": false,
+  "isBrandingNotBug": false
+ },
+ {
+  "file": "packages/opencode/src/plugin/install.ts:337-351",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix — mislabeled upstream_fix. This is a brand directory change in patchDir(). Upstream v1.17.9 patchDir() returns `path.join(root, \".opencode\")`; our fork returns `.altimate-code` with a backward-compat fallback to an existing `.opencode/` dir. Same control-flow/logic as upstream, only the brand directory name differs (opencode -> altimate-code). Keep permanently as branding; do not accept upstream.",
+  "upstreamHasFix": false,
+  "isBrandingNotBug": true
+ },
+ {
+  "file": "packages/opencode/src/plugin/install.ts:355-360",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix — mislabeled upstream_fix. Brand config-file name change in patchName(). Upstream v1.17.9 patchName() returns `\"opencode\"` for kind===\"server\"; our fork returns `\"altimate-code\"` so new server config lands as altimate-code.json (existing opencode.json still discovered via dep.files()). Pure branding (opencode.json -> altimate-code.json). Keep permanently; do not accept upstream.",
+  "upstreamHasFix": false,
+  "isBrandingNotBug": true
+ },
+ {
+  "file": "packages/opencode/src/plugin/install.ts:337-351",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. The altimate_change block swaps the plugin install/config DIRECTORY from upstream's `.opencode/` to `.altimate-code/` (with a fallback that keeps `.opencode/` if it already exists so prior installs aren't orphaned). Upstream v1.17.9 patchDir() still returns `path.join(root, \".opencode\")` (verified). This is a permanent brand-path customization; upstream will never ship `.altimate-code/` because it IS opencode. Keep permanently.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Plugin install dir: .opencode/ -> .altimate-code/ with fallback"
+ },
+ {
+  "file": "packages/opencode/src/plugin/install.ts:355-360",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. patchName() returns `\"altimate-code\"` for server-config files instead of upstream's `\"opencode\"`, so new server config lands as `altimate-code.json`. Upstream v1.17.9 patchName() still `return \"opencode\"` for kind===server (verified). Pure brand-filename customization; keep permanently. Note: patchName's TS return type was widened to include \"altimate-code\" — preserve that union when re-applying over upstream.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Server config filename: opencode.json -> altimate-code.json"
+ },
+ {
+  "file": "packages/opencode/src/plugin/github-copilot/copilot.ts:54-56",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. User-Agent brand string `altimate-code/${Installation.VERSION}` replacing upstream `opencode/...`. Upstream v1.17.9 still sends `opencode/${InstallationVersion}` here (verified, 4 occurrences match our 4). Keep permanently. MERGE HAZARD: upstream renamed the version symbol from `Installation.VERSION` (import { Installation } from \"@/installation\") to `InstallationVersion` (import from \"@opencode-ai/core/installation/version\"); when accepting upstream's refactored file, the brand line must use the new InstallationVersion symbol or it won't compile.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Copilot models-fetch User-Agent brand string"
+ },
+ {
+  "file": "packages/opencode/src/plugin/github-copilot/copilot.ts:137-139",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. User-Agent brand string `altimate-code/${Installation.VERSION}` in the chat-request headers. Upstream v1.17.9 still uses `opencode/${InstallationVersion}` at the equivalent spot (verified). Keep permanently. Same version-symbol rename hazard as the :54-56 entry — re-apply the brand over upstream using InstallationVersion.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Copilot chat-request User-Agent brand string"
+ },
+ {
+  "file": "packages/opencode/src/plugin/github-copilot/copilot.ts:215-217",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. User-Agent brand string `altimate-code/${Installation.VERSION}` in the device-code OAuth POST headers. Upstream v1.17.9 still uses `opencode/${InstallationVersion}` (verified). Keep permanently. Same version-symbol rename hazard on re-apply.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Copilot device-code request User-Agent brand string"
+ },
+ {
+  "file": "packages/opencode/src/plugin/github-copilot/copilot.ts:247-249",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. User-Agent brand string `altimate-code/${Installation.VERSION}` in the access-token poll request headers. Upstream v1.17.9 still uses `opencode/${InstallationVersion}` (verified). Keep permanently. Same version-symbol rename hazard on re-apply.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Copilot access-token poll User-Agent brand string"
+ },
+ {
+  "file": "packages/opencode/src/plugin/copilot.ts:125-127",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. User-Agent brand string `altimate-code/${Installation.VERSION}` in chat-request headers. STRUCTURAL FLAG: this file `packages/opencode/src/plugin/copilot.ts` does NOT exist in upstream v1.4.0 OR v1.17.9 — only `github-copilot/copilot.ts` exists upstream. It is a fork-tracked duplicate (introduced via the v1.4.0 bridge merge #757) that coexists with the github-copilot/ copy. There is no upstream counterpart to drop to, so the only option is keep-branding. Worth a separate cleanup decision: this looks like a stale duplicate of github-copilot/copilot.ts and may be dead/unused.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Fork-local duplicate copilot.ts chat-request UA brand (no upstream counterpart)"
+ },
+ {
+  "file": "packages/opencode/src/plugin/copilot.ts:205-207",
+  "recommendation": "keep-branding",
+  "reason": "Not a bug fix. User-Agent brand string `altimate-code/${Installation.VERSION}` in device-code request headers. Same structural flag as :125-127 — this file has no upstream counterpart (fork-local duplicate of github-copilot/copilot.ts), so keep-branding is the only viable choice. Recommend verifying whether plugin/copilot.ts is actually imported anywhere; if it's a dead duplicate it should be removed wholesale rather than carried.",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "desc": "Fork-local duplicate copilot.ts device-code UA brand (no upstream counterpart)"
+ },
+ {
+  "file": "packages/opencode/src/plugin/copilot.ts:237-239",
+  "recommendation": "keep-branding",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "reason": "Pure User-Agent brand string: our block sets `\"User-Agent\": altimate-code/${Installation.VERSION}` on the Copilot device-auth ACCESS_TOKEN_URL fetch. In v1.17.9 the file moved to packages/opencode/src/plugin/github-copilot/copilot.ts and still uses `opencode/${InstallationVersion}` (lines 75/163/239/269). Not a bug; upstream will never converge on our brand. Re-apply over the moved upstream file.",
+  "desc": "UA brand"
+ },
+ {
+  "file": "packages/opencode/src/plugin/codex.ts:133-167",
+  "recommendation": "keep",
+  "isBrandingNotBug": false,
+  "upstreamHasFix": false,
+  "reason": "Our refreshAccessToken adds a 3-attempt loop with 4xx-vs-5xx awareness + backoff and a descriptive error pointing at `altimate-code auth login openai`. In v1.17.9 the file moved to packages/opencode/src/plugin/openai/codex.ts and refreshAccessToken (line 124) is still a single fetch that throws `Token refresh failed: ${status}` with NO retry loop. Upstream did add an `issuer` param + a refreshPromise de-dup (separate concern) but the transient-blip retry is still missing. Keep; re-apply over moved file (note new `issuer` param).",
+  "desc": "bridge merge dropped the 3-attempt retry"
+ },
+ {
+  "file": "packages/opencode/src/plugin/codex.ts:449-455",
+  "recommendation": "keep",
+  "isBrandingNotBug": false,
+  "upstreamHasFix": false,
+  "reason": "Our guard refreshes when `currentAuth.expires < Date.now() + 30_000` (30s skew buffer to avoid mid-flight 401s). In v1.17.9 (moved to plugin/openai/codex.ts, line 438) the check is still bare `currentAuth.expires < Date.now()` — no skew buffer. Upstream did NOT add this. Keep; re-apply over moved file.",
+  "desc": "bridge merge dropped the 30s skew"
+ },
+ {
+  "file": "packages/opencode/src/provider/provider.ts:589-591",
+  "recommendation": "keep-branding",
+  "isBrandingNotBug": true,
+  "upstreamHasFix": false,
+  "reason": "Pure User-Agent brand string in the GitLab AI gateway headers: our block sets `altimate-code/${Installation.VERSION} gitlab-ai-provider/...`. Same path in v1.17.9 (provider.ts line 608) still uses `opencode/${InstallationVersion} gitlab-ai-provider/...`. Not a bug. Re-apply.",
+  "desc": "UA brand"
+ },
+ {
+  "file": "packages/opencode/src/provider/models.ts:155-168",
+  "recommendation": "drop-accept-upstream",
+  "isBrandingNotBug": false,
+  "upstreamHasFix": true,
+  "reason": "Our setTimeout(...,0) wrapper deferred the import-time ModelsDev.refresh()+setInterval bootstrap past the current microtask to dodge a circular-dep crash where Installation.USER_AGENT wasn't yet initialized. In v1.17.9 packages/opencode/src/provider/models.ts no longer exists; the whole bootstrap was rearchitected into an Effect-TS service at packages/core/src/models-dev.ts: USER_AGENT is a plain eager top-level const (line 17) and the periodic refresh runs in a fiber via `Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced(\"60 minutes\")), Effect.ignore))` (line 239), wired through ModelsDev.defaultLayer/Service in effect/app-runtime.ts. The import-time-side-effect timing hazard our defer-hack worked around is gone by construction. The marker's host file disappears upstream; nothing to carry forward — accept the upstream service.",
+  "desc": "bridge merge removed the setTimeout(...,0)"
+ },
+ {
+  "file": "packages/opencode/src/provider/error.ts:31-45",
+  "recommendation": "keep",
+  "isBrandingNotBug": false,
+  "upstreamHasFix": false,
+  "reason": "Our isOpenAiErrorRetryable carves out `model_not_found` 404s (returns false so we don't retry-storm a never-recoverable error). In v1.17.9 (same path, error.ts lines 23-27) isOpenAiErrorRetryable still has NO model_not_found carve-out — it returns `status === 404 || e.isRetryable`, forcing all 404s retryable. Upstream did NOT add this. Keep.",
+  "desc": "don't retry-storm on model_not_found."
+ },
+ {
+  "file": "packages/opencode/src/provider/error.ts:79-101",
+  "recommendation": "keep",
+  "isBrandingNotBug": false,
+  "upstreamHasFix": false,
+  "reason": "Our message() extractor uses an explicit typeof-string ternary chain across 4 body shapes (error.message / message / errorMessage / error). In v1.17.9 (same path, error.ts line 51) the code is still the buggy `const errMsg = body.message || body.error || body.error?.message` — exactly the short-circuit-on-truthy-parent bug our fix removes. Upstream did NOT fix it. Keep.",
+  "desc": "extract provider error messages"
+ },
+ {
+  "file": "packages/opencode/src/provider/error.ts:188-212",
+  "recommendation": "keep",
+  "isBrandingNotBug": false,
+  "upstreamHasFix": false,
+  "reason": "Our parseStreamError adds a generic fallbackMsg typeof-string chain so non-OpenAI error shapes don't fall through to `Unknown: {...}` in the caller. In v1.17.9 (same path) parseStreamError (lines 102-147) only handles a fixed switch of OpenAI/Codex codes (it did add server_is_overloaded/server_error cases) and returns undefined for everything else — NO generic fallback extraction (grep for fallbackMsg = empty). Upstream did NOT add the generic path. Keep; re-apply, noting the two new upstream switch cases.",
+  "desc": "extend extraction to non-OpenAI error"
+ },
+ {
+  "file": "packages/opencode/src/server/routes/session.ts:18-22",
+  "recommendation": "drop-accept-upstream",
+  "isBrandingNotBug": false,
+  "upstreamHasFix": true,
+  "reason": "Edge-of-slice entry (description spills into next slice). Our fix imports PermissionNext so a deprecated reply route hits the same pending map after the bridge merge created a split-brain Permission vs PermissionNext. In v1.17.9 there is NO packages/opencode/src/permission/next.ts and ZERO PermissionNext references in opencode src; the permission system was unified into a single `Permission.Service` (@/permission, PermissionV1 schema from core). The reply route also moved out of the monolithic server/routes/session.ts into server/routes/instance/httpapi/handlers/permission.ts, which resolves replies via the one `Permission.Service.reply(...)`. The split our fix bridges no longer exists and the host file is gone — accept the unified upstream permission architecture.",
+  "desc": "bridge merge wired routes to Effect-TS Permission, but runtime asks come from PermissionNext"
+ }
+]

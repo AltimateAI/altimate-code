@@ -11,7 +11,7 @@ import {
 } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
 
 const log = Log.create({ service: "datamate" })

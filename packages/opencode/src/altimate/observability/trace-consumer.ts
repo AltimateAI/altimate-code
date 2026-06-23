@@ -29,9 +29,9 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { setTimeout as sleep } from "node:timers/promises"
 import { Config } from "@/config/config"
-import { Log } from "@/util/log"
+import { Log } from "@/altimate/util/log"
 import { Server } from "@/server/server"
-import { Flag } from "@/flag/flag"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Trace, FileExporter, HttpExporter, type TraceExporter } from "./tracing"
 
 const MAX_TRACES = 100

@@ -1,7 +1,7 @@
 // altimate_change - Training list tool for AI Teammate learned knowledge
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 import { TrainingStore, TrainingPrompt, TrainingInsights } from "../training"
 import { TrainingKind } from "../training/types"
 

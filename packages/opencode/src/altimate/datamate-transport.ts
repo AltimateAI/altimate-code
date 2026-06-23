@@ -4,7 +4,7 @@ import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk } from "../mcp/config"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
-import { Log } from "../util/log"
+import { Log } from "@/altimate/util/log"
 import type { Config } from "../config/config"
 
 const log = Log.create({ service: "datamate-transport" })

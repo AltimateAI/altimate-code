@@ -3,7 +3,7 @@ import { Provider } from "@/provider/provider"
 import { LLM } from "@/session/llm"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
-import { Log } from "@/util/log"
+import { Log } from "@/altimate/util/log"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, SessionID } from "@/session/schema"
 

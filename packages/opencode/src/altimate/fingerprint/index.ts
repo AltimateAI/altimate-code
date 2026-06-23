@@ -1,6 +1,6 @@
 import { Filesystem } from "../../util/filesystem"
 import { Glob } from "../../util/glob"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 import { Tracer } from "../observability/tracing"
 import path from "path"
 

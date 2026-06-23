@@ -4,7 +4,7 @@
 // glossaries, and standards from markdown documents into the training system.
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 import { TrainingStore, TrainingPrompt } from "../training"
 import { TrainingKind, TRAINING_MAX_PATTERNS_PER_KIND } from "../training/types"
 

@@ -1,7 +1,7 @@
 // altimate_change - Training save tool for AI Teammate learning
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 import { TrainingStore, TrainingPrompt } from "../training"
 import { TrainingKind, TRAINING_MAX_PATTERNS_PER_KIND, TRAINING_BUDGET } from "../training/types"
 import { CitationSchema } from "../../memory/types"

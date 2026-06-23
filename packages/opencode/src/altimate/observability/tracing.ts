@@ -21,7 +21,7 @@ import fsSync from "fs"
 import path from "path"
 import { Global } from "../../global"
 import { randomUUIDv7 } from "bun"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 
 // ---------------------------------------------------------------------------
 // Trace data types — v2 schema

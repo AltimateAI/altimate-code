@@ -1,7 +1,7 @@
 import { Account } from "@/account"
 import { Config } from "@/config/config"
 import { Installation } from "@/installation"
-import { Log } from "@/util/log"
+import { Log } from "@/altimate/util/log"
 import { createHash, randomUUID } from "crypto"
 import fs from "fs"
 import path from "path"

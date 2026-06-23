@@ -1,5 +1,5 @@
 // altimate_change - Unified context-aware injection for memory + training
-import { Log } from "@/util/log"
+import { Log } from "@/altimate/util/log"
 import { MemoryStore, isExpired } from "./store"
 import {
   MEMORY_DEFAULT_INJECTION_BUDGET,

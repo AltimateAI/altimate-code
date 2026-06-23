@@ -4,7 +4,7 @@ import { LLM } from "@/session/llm"
 import { Agent } from "@/agent/agent"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, SessionID } from "@/session/schema"
-import { Log } from "@/util/log"
+import { Log } from "@/altimate/util/log"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
 

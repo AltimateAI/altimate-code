@@ -1,0 +1,21 @@
+wip: bridge upstream v1.17.9 overlay + install/structure reconciliation (checkpoint)
+
+Bridge overlay of upstream OpenCode v1.4.0 -> v1.17.9 (3254 commits, no common
+ancestor). This is a WIP checkpoint on the merge branch; NOT ready to merge.
+
+Done:
+- Overlaid 1850 upstream files via bridge-merge.ts; reapplied PR #18186 anthropic.
+- Restored altimate bits in packages/opencode/package.json (name, bin altimate/
+  altimate-code, deps @altimateai/altimate-core, @altimateai/drivers,
+  @opencode-ai/util, yaml; test script without --only-failures).
+- Pruned root workspaces (drop console/slack/stats), fixed repository URL.
+- Dropped packages/stats (hosted dashboard) + added to skipFiles.
+- Vendored 5 TUI attention mp3s into packages/tui; repointed @opencode-ai/ui audio.
+- Deleted 246 confirmed-stale upstream files (present in v1.4.0, removed by v1.17.9,
+  unmarked) via in-v1.4.0 discriminator; kept 174 fork-origin files.
+- bun install GREEN; packages/core + packages/tui typecheck GREEN.
+
+Remaining (tracked): re-derive ~72 kept marker/requireMarkers files onto v1.17.9 +
+re-apply altimate_change blocks; migrate server/tui/util-extracted customizations;
+effect beta.43->beta.74 API drift; update fork test suite to v1.17.9 APIs; apply
+branding transforms to overlaid files; re-evaluate 62 upstream_fix markers.

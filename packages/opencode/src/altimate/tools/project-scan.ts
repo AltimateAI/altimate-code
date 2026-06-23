@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "fs"
 import path from "path"
 import { Telemetry } from "@/telemetry"
 import { Config } from "@/config/config"
-import { Flag } from "@/flag/flag"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Skill } from "../../skill"
 
 // --- Types ---
