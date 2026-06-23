@@ -303,7 +303,7 @@ export namespace SessionProcessor {
                   })
                   break
 
-                case "finish-step":
+                case "finish-step": {
                   const usage = Session.getUsage({
                     model: input.model,
                     usage: value.usage,
@@ -327,10 +327,15 @@ export namespace SessionProcessor {
                     duration_ms: Date.now() - stepStartTime,
                     tokens_input: usage.tokens.input,
                     tokens_output: usage.tokens.output,
-                    // altimate_change start — include total input tokens (with cache) when they differ from tokens_input
-                    ...(usage.tokens.inputTotal !== usage.tokens.input && {
-                      tokens_input_total: usage.tokens.inputTotal,
-                    }),
+                    // altimate_change start — always emit tokens_input_total so dashboard
+                    // queries can rely on it without null-handling. Pre-2026-05-22 this
+                    // was conditional on `inputTotal !== input` to save 12 bytes per event,
+                    // but the absent field looked like a bug in queries that didn't know
+                    // to coalesce — the false-positive "Anthropic tokens_input=0 broken"
+                    // finding in telemetry-2026-05-21 was driven by this. See the comment
+                    // block on the `generation` event type in telemetry/index.ts for the
+                    // canonical semantics. Cost: ~12 bytes × generations/day, negligible.
+                    tokens_input_total: usage.tokens.inputTotal,
                     // altimate_change end
                     ...(value.usage.reasoningTokens !== undefined && { tokens_reasoning: usage.tokens.reasoning }),
                     ...(value.usage.cachedInputTokens !== undefined && { tokens_cache_read: usage.tokens.cache.read }),
@@ -343,10 +348,27 @@ export namespace SessionProcessor {
                   // Users read the text, see no progress, and abandon. Surface a
                   // warning + telemetry so the pattern is measurable and the user
                   // knows to try a different model.
+                  //
+                  // sessionToolCallsMade tracks tool calls in the CURRENT step only
+                  // — SessionProcessor.create() is called per-step by loop() (see
+                  // prompt.ts), so the closure variable resets each step. A multi-
+                  // step plan-mode session (read → grep → read → … → final text)
+                  // would then false-positive on the final text-only step. Also
+                  // scan streamInput.messages for any prior assistant tool-call
+                  // content; if found, the session has used tools and the warning
+                  // should be suppressed.
+                  const sessionHasPriorToolCalls =
+                    sessionToolCallsMade > 0 ||
+                    streamInput.messages.some(
+                      (m) =>
+                        m.role === "assistant" &&
+                        Array.isArray(m.content) &&
+                        m.content.some((p) => p.type === "tool-call"),
+                    )
                   if (
                     input.assistantMessage.agent === "plan" &&
                     value.finishReason === "stop" &&
-                    sessionToolCallsMade === 0 &&
+                    !sessionHasPriorToolCalls &&
                     !planNoToolWarningEmitted
                   ) {
                     planNoToolWarningEmitted = true
@@ -376,9 +398,13 @@ export namespace SessionProcessor {
                       type: "text",
                       synthetic: true,
                       text:
-                        `⚠️ altimate-code: the \`plan\` agent is running on \`${input.model.providerID}/${input.model.id}\`, ` +
-                        `which returned text without calling any tools. If you expected the plan agent to explore the ` +
-                        `codebase, try switching to a model with stronger tool-use via \`/model\`.`,
+                        `⚠️ altimate-code: the \`plan\` agent on \`${input.model.providerID}/${input.model.id}\` ` +
+                        `stopped without calling any tools — it neither read, searched, nor explored the codebase. ` +
+                        `Common causes: (a) the model wrote a plan from prompt context alone, (b) the model declined ` +
+                        `to engage with the request (content-policy refusal), or (c) the request may need more detail. ` +
+                        `To recover, try one of: reply asking it to investigate first (\`read\`/\`grep\`/\`glob\`/\`explore\`); ` +
+                        `rephrase the request more concretely; or, if it keeps refusing, \`/model\` to a tier that's more ` +
+                        `eager to explore (e.g. Claude Sonnet/Opus).`,
                       time: { start: Date.now(), end: Date.now() },
                     })
                   }
@@ -419,6 +445,7 @@ export namespace SessionProcessor {
                     needsCompaction = true
                   }
                   break
+                }
 
                 case "text-start":
                   currentText = {
@@ -528,6 +555,18 @@ export namespace SessionProcessor {
                 sessionID: input.assistantMessage.sessionID,
                 error: input.assistantMessage.error,
               })
+              // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
+              // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),
+              // APIError (provider failures after retry exhaustion), AuthError, and any other streaming error.
+              Telemetry.track({
+                type: "error",
+                timestamp: Date.now(),
+                session_id: input.assistantMessage.sessionID,
+                error_name: error.name,
+                error_message: (error.data as any)?.message ?? String((e as any)?.message ?? ""),
+                context: "streaming",
+              })
+              // altimate_change end
               // altimate_change start — SessionStatus.set became async; await so idle state flushes before exit
               await SessionStatus.set(input.sessionID, { type: "idle" })
               // altimate_change end

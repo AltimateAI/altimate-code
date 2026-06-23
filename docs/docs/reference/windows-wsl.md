@@ -4,7 +4,35 @@ altimate runs on Windows both natively (via Node.js on Windows) and through WSL 
 
 ## Windows Native Install
 
-You can install and run altimate directly in PowerShell or Command Prompt without WSL:
+### Standalone install (no Node)
+
+The fastest path installs the self-contained binary — the same Bun-compiled
+`altimate.exe` we ship on macOS/Linux — straight from GitHub releases. It needs
+no Node.js or npm:
+
+```powershell
+powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
+```
+
+This downloads `altimate.exe` to `%USERPROFILE%\.altimate\bin` and adds that
+directory to your user PATH (open a new terminal afterwards). The installer
+auto-detects AVX2 support and falls back to the baseline build on older CPUs.
+
+Options (pass via a script block):
+
+```powershell
+# Pin a specific version
+&([scriptblock]::Create((irm https://www.altimate.sh/install.ps1))) -Version 1.0.180
+
+# Skip the PATH edit
+&([scriptblock]::Create((irm https://www.altimate.sh/install.ps1))) -NoPathUpdate
+```
+
+`altimate upgrade` self-updates a standalone install in place using the same script.
+
+### npm install
+
+Alternatively, install via npm with Node.js 18+ installed natively on Windows:
 
 ```powershell
 # PowerShell or CMD — install globally
@@ -14,7 +42,7 @@ npm install -g altimate-code
 altimate
 ```
 
-This works with Node.js 18+ installed natively on Windows. All core features work in native mode, including warehouse connections, agent modes, and the TUI.
+Both paths support all core features in native mode, including warehouse connections, agent modes, and the TUI.
 
 ## WSL Setup (Recommended)
 

@@ -323,3 +323,21 @@ FROM {{ ref('stg_orders') }}
 WHERE updated_at > (SELECT MAX(updated_at) FROM {{ this }})
 {% endif %}
 ```
+
+---
+
+## Completion-gate validators
+
+Beyond the agent-facing tools above, altimate-code ships **harness-side
+validators** that fire automatically after the agent declares done. They run
+`altimate-dbt test` and `altimate-dbt schema-verify` against every model
+modified during the session and block "done" if anything failed.
+
+This is **opt-in** today via either `ALTIMATE_VALIDATORS_ENABLED=1`
+(enforcement mode — failing validators block "done" with synthetic
+retries) or `ALTIMATE_VALIDATORS_SHADOW=1` (telemetry-only mode — runs
+without blocking, useful for measuring "would have caught" rates). When
+neither flag is set the dispatch path is completely skipped and there
+is zero overhead. See the [Validators page](../validators.md) for the
+full reference, env var catalogue, performance characteristics, and
+the phased rollout plan.

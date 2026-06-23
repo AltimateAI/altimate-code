@@ -1,5 +1,5 @@
 import path from "path"
-import { modify, applyEdits, parseTree, findNodeAtLocation } from "jsonc-parser"
+import { modify, applyEdits, parse, parseTree, findNodeAtLocation, getNodeValue, type ParseError } from "jsonc-parser"
 import { Filesystem } from "../util/filesystem"
 import type { Config } from "../config/config"
 
@@ -36,6 +36,19 @@ export async function addMcpToConfig(name: string, mcpConfig: Config.Mcp, config
   let text = "{}"
   if (await Filesystem.exists(configPath)) {
     text = await Filesystem.readText(configPath)
+  }
+
+  // Guard: refuse to overwrite a config whose JSON/JSONC we cannot parse.
+  // jsonc-parser's modify() (and parseTree()) are error-tolerant and would
+  // best-effort clobber a recoverable file, so use parse() with an error sink —
+  // comments and trailing commas are allowed (it is JSONC), but a genuinely
+  // malformed/truncated file produces errors and we bail instead of overwriting.
+  if (text.trim()) {
+    const parseErrors: ParseError[] = []
+    parse(text, parseErrors, { allowTrailingComma: true })
+    if (parseErrors.length > 0) {
+      throw new Error(`Refusing to write MCP config: ${configPath} is not valid JSON/JSONC`)
+    }
   }
 
   const edits = modify(text, ["mcp", name], mcpConfig, {
@@ -100,4 +113,29 @@ export async function findAllConfigPaths(projectDir: string, globalDir: string):
     }
   }
   return paths
+}
+
+/**
+ * Read a single MCP entry directly from a config file, bypassing the Config
+ * singleton so callers can get the freshly-written config without busting the
+ * whole cache. Returns undefined if the entry is not found in the file.
+ */
+export async function readMcpEntryFromDisk(
+  name: string,
+  configPath: string,
+): Promise<Config.Mcp | undefined> {
+  if (!(await Filesystem.exists(configPath))) return undefined
+
+  const text = await Filesystem.readText(configPath)
+  const tree = parseTree(text)
+  if (!tree) return undefined
+
+  const node = findNodeAtLocation(tree, ["mcp", name])
+  if (!node || node.type !== "object") return undefined
+
+  // getNodeValue reconstructs the full value tree. A manual children walk reading
+  // `prop.children[1].value` would silently drop array/object fields (command,
+  // environment, headers, oauth) — jsonc-parser only populates `Node.value` for
+  // primitives — corrupting the entry on the next disk write.
+  return getNodeValue(node) as Config.Mcp
 }

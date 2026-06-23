@@ -1,0 +1,187 @@
+name: "altimate dbt PR review"
+description: "Layered AI code review for dbt/SQL pull requests — a signed verdict backed by lineage, query equivalence, PII, and grade, plus advisory LLM comments."
+branding:
+  icon: "git-pull-request"
+  color: "orange"
+
+inputs:
+  mode:
+    description: "comment (never blocks) | gate (blocks the merge on REQUEST_CHANGES)"
+    required: false
+    default: "comment"
+  manifest_path:
+    description: "Path to the compiled dbt manifest.json. Run `dbt compile` before this step for the full (non-degraded) verdict."
+    required: false
+    default: "target/manifest.json"
+  severity_threshold:
+    description: "Minimum severity to surface: critical | warning | suggestion"
+    required: false
+    default: "suggestion"
+  base:
+    description: "Base git ref to diff against. Defaults to the merge-base with origin/main."
+    required: false
+  head:
+    description: "Head git ref. Defaults to the checked-out PR head."
+    required: false
+  post:
+    description: "Post the verdict to the PR (summary comment + inline review)."
+    required: false
+    default: "true"
+  signing_key:
+    description: "Optional HMAC key to sign the verdict envelope (ALTIMATE_REVIEW_SIGNING_KEY)."
+    required: false
+  # ── Advisory LLM reviewer (layer 3) — OPTIONAL ──
+  # The deterministic engine (lineage / equivalence / PII / grade / lint) needs
+  # NO model or credentials. These inputs only enable the advisory LLM comments;
+  # omit them all and the review runs deterministic-only (the AI lane self-disables).
+  altimate_api_key:
+    description: "Altimate API key → uses the hosted altimate model for the advisory lane. Pair with `altimate_instance`. Use a repo secret. Takes precedence over `model`."
+    required: false
+  altimate_instance:
+    description: "Altimate tenant/instance name (required when `altimate_api_key` is set)."
+    required: false
+  altimate_url:
+    description: "Altimate API base URL."
+    required: false
+    default: "https://api.myaltimate.com"
+  model:
+    description: "Bring-your-own advisory model as 'provider/model' (e.g. anthropic/claude-sonnet-4-6). Used when `altimate_api_key` is not set."
+    required: false
+  model_api_key:
+    description: "API key for `model`'s provider (e.g. an Anthropic key for an anthropic/* model). Use a repo secret."
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Get altimate-code version
+      id: version
+      shell: bash
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        # Authenticated API calls lift the unauthenticated 60 req/hr IP limit to
+        # 1,000 req/hr, so a busy org's runners don't get rate-limited into the
+        # "latest" fallback below.
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if [[ "${ACTION_REF:-}" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          VERSION="${BASH_REMATCH[1]}"
+        else
+          # Only attach the auth header when a token is present; the
+          # ${AUTH[@]+"${AUTH[@]}"} idiom expands to nothing on an empty array
+          # even under `set -u` (portable back to bash 3.2).
+          AUTH=()
+          [[ -n "${GITHUB_TOKEN:-}" ]] && AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+          VERSION=$(
+            curl -sf --connect-timeout 5 --max-time 15 ${AUTH[@]+"${AUTH[@]}"} \
+              https://api.github.com/repos/AltimateAI/altimate-code/releases/latest \
+              | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4 || true
+          )
+          VERSION="${VERSION#v}" # the installer's --version expects no leading 'v'
+        fi
+        echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
+
+    - name: Cache altimate-code
+      id: cache
+      # Never cache against the floating "latest" key: a single rate-limited or
+      # offline lookup would otherwise pin whatever binary it grabbed and reuse
+      # it forever, silently ignoring later releases. A resolved semver caches
+      # normally; "latest" falls through to a fresh install each run.
+      if: steps.version.outputs.version != 'latest'
+      uses: actions/cache@v4
+      with:
+        path: ~/.altimate/bin
+        key: altimate-code-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
+
+    - name: Install altimate-code
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ALT_VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        # Pin the install to the SAME version the cache key resolved — otherwise
+        # the installer pulls a floating "latest" that can drift from the cache.
+        if [[ -n "$ALT_VERSION" && "$ALT_VERSION" != "latest" ]]; then
+          curl -fsSL https://www.altimate.sh/install | bash -s -- --version "$ALT_VERSION"
+        else
+          curl -fsSL https://www.altimate.sh/install | bash
+        fi
+
+    - name: Add altimate-code to PATH
+      shell: bash
+      run: echo "$HOME/.altimate/bin" >> $GITHUB_PATH
+
+    # Configure the OPTIONAL advisory LLM lane. Two mutually-exclusive routes:
+    #   A) altimate_api_key (+ altimate_instance) → hosted altimate model
+    #   B) model (+ model_api_key)               → bring-your-own provider
+    # Neither set → the LLM lane self-disables and the review is deterministic-only.
+    - name: Configure advisory reviewer model + credentials
+      shell: bash
+      env:
+        IN_ALT_KEY: ${{ inputs.altimate_api_key }}
+        IN_ALT_INSTANCE: ${{ inputs.altimate_instance }}
+        IN_ALT_URL: ${{ inputs.altimate_url }}
+        IN_MODEL: ${{ inputs.model }}
+        IN_MODEL_API_KEY: ${{ inputs.model_api_key }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${IN_ALT_KEY:-}" ]]; then
+          # Route A — hosted altimate model (altimate-backend).
+          if [[ -z "${IN_ALT_INSTANCE:-}" ]]; then
+            echo "::error::altimate_api_key is set but altimate_instance is empty — provide the tenant/instance name."
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$HOME/.altimate"
+          # Read the API key from the environment inside the jq program rather
+          # than passing it via --arg: argv is visible to other processes and
+          # is printed verbatim if a user enables ACTIONS_STEP_DEBUG (set -x).
+          jq -nc \
+            --arg url "${IN_ALT_URL:-https://api.myaltimate.com}" \
+            --arg inst "$IN_ALT_INSTANCE" \
+            '{altimateUrl:$url, altimateInstanceName:$inst, altimateApiKey:$ENV.IN_ALT_KEY}' \
+            > "$HOME/.altimate/altimate.json"
+          echo "Advisory lane: hosted altimate model (tenant: $IN_ALT_INSTANCE)."
+        elif [[ -n "${IN_MODEL:-}" ]]; then
+          # Route B — bring-your-own provider/model via inline opencode config.
+          PROVIDER="${IN_MODEL%%/*}"
+          if [[ -n "${IN_MODEL_API_KEY:-}" ]]; then
+            CONTENT=$(jq -nc --arg m "$IN_MODEL" --arg p "$PROVIDER" --arg k "$IN_MODEL_API_KEY" \
+              '{model:$m, provider: {($p): {options: {apiKey:$k}}}}')
+          else
+            CONTENT=$(jq -nc --arg m "$IN_MODEL" '{model:$m}')
+          fi
+          echo "OPENCODE_CONFIG_CONTENT=$CONTENT" >> "$GITHUB_ENV"
+          echo "Advisory lane: bring-your-own model ($IN_MODEL)."
+        elif [[ -n "${IN_MODEL_API_KEY:-}" ]]; then
+          # Guard a likely misconfiguration: a key with no model would be silently
+          # ignored and the lane would disable without explanation.
+          echo "::error::model_api_key is set but model is empty — set \`model\` (e.g. anthropic/claude-sonnet-4-6) or use altimate_api_key."
+          exit 1
+        else
+          echo "Advisory lane: no model/credentials provided — running deterministic-only."
+        fi
+
+    - name: Run dbt PR review
+      shell: bash
+      # Inputs are passed as ENV (data), never interpolated into the command —
+      # `base`/`head` are PR-controllable refs, so building the command string
+      # from `${{ }}` would be a shell-injection vector. Build an arg array instead.
+      env:
+        IN_MODE: ${{ inputs.mode }}
+        IN_MANIFEST: ${{ inputs.manifest_path }}
+        IN_SEVERITY: ${{ inputs.severity_threshold }}
+        IN_BASE: ${{ inputs.base }}
+        IN_HEAD: ${{ inputs.head }}
+        IN_POST: ${{ inputs.post }}
+        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_EVENT_PATH: ${{ github.event_path }}
+        ALTIMATE_REVIEW_SIGNING_KEY: ${{ inputs.signing_key }}
+      run: |
+        args=(--mode "$IN_MODE" --manifest "$IN_MANIFEST" --severity "$IN_SEVERITY")
+        [[ -n "$IN_BASE" ]] && args+=(--base "$IN_BASE")
+        [[ -n "$IN_HEAD" ]] && args+=(--head "$IN_HEAD")
+        [[ "$IN_POST" == "true" ]] && args+=(--post)
+        altimate review "${args[@]}"

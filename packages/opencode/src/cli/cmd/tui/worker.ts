@@ -12,7 +12,7 @@ import type { BunWebSocketData } from "hono/bun"
 import { Flag } from "@/flag/flag"
 import { setTimeout as sleep } from "node:timers/promises"
 // altimate_change start — trace: session tracing in TUI
-import { Trace, FileExporter, HttpExporter, type TraceExporter } from "@/altimate/observability/tracing"
+import { TraceConsumer } from "@/altimate/observability/trace-consumer"
 // altimate_change end
 
 await Log.init({
@@ -47,73 +47,22 @@ const eventStream = {
   abort: undefined as AbortController | undefined,
 }
 
-// altimate_change start — trace: per-session traces
-const sessionTraces = new Map<string, Trace>()
-const sessionUserMsgIds = new Map<string, Set<string>>() // Per-session user message IDs (cleaned up on session end)
-const MAX_TRACES = 100
-
-// Cached tracing config — loaded once at first use
-let tracingConfigLoaded = false
-let tracingEnabled = true
-let tracingExporters: TraceExporter[] | undefined
-let tracingMaxFiles: number | undefined
-
-async function loadTracingConfig() {
-  if (tracingConfigLoaded) return
-  tracingConfigLoaded = true
-  try {
-    const cfg = await Config.get()
-    const tc = cfg.tracing
-    if (tc?.enabled === false) { tracingEnabled = false; return }
-    const exporters: TraceExporter[] = [new FileExporter(tc?.dir)]
-    if (tc?.exporters) {
-      for (const exp of tc.exporters) {
-        exporters.push(new HttpExporter(exp.name, exp.endpoint, exp.headers))
-      }
-    }
-    tracingExporters = exporters
-    tracingMaxFiles = tc?.maxFiles
-  } catch {
-    // Config failure should not prevent TUI from working
-  }
-}
-// altimate_change end
-
-// altimate_change start — trace: get or create per-session trace
-function getOrCreateTrace(sessionID: string): Trace | null {
-  if (!sessionID || !tracingEnabled) return null
-  if (sessionTraces.has(sessionID)) return sessionTraces.get(sessionID)!
-  try {
-    if (sessionTraces.size >= MAX_TRACES) {
-      const oldest = sessionTraces.keys().next().value
-      if (oldest) {
-        Log.Default.warn(`[tracing] Evicting trace for session ${oldest} — ${MAX_TRACES} concurrent sessions reached`)
-        sessionTraces.get(oldest)?.endTrace().catch(() => {})
-        sessionTraces.delete(oldest)
-        sessionUserMsgIds.delete(oldest)
-      }
-    }
-    const trace = tracingExporters
-      ? Trace.withExporters([...tracingExporters], { maxFiles: tracingMaxFiles })
-      : Trace.create()
-    trace.startTrace(sessionID, {})
-    Trace.setActive(trace)
-    sessionTraces.set(sessionID, trace)
-    return trace
-  } catch {
-    return null
-  }
-}
+// altimate_change start — trace: per-session traces (shared consumer)
+// All per-session trace state + event handling lives in TraceConsumer so the
+// headless `serve` entrypoint (VS Code chat panel) gets identical behaviour.
+// reset() bumps the consumer's stream generation (the equivalent of the old
+// inline cache-clear) to invalidate any in-flight rehydrate.
+const traceConsumer = new TraceConsumer()
 // altimate_change end
 
 const startEventStream = (input: { directory: string; workspaceID?: string }) => {
   if (eventStream.abort) eventStream.abort.abort()
-  // Clear stale per-stream trace state before starting a new stream instance
-  for (const [, trace] of sessionTraces) {
-    void trace.endTrace().catch(() => {})
-  }
-  sessionTraces.clear()
-  sessionUserMsgIds.clear()
+  // altimate_change start — trace: clear stale per-stream trace state before
+  // starting a new stream instance. reset() also bumps the consumer's stream
+  // generation, invalidating any in-flight getOrCreateTrace() suspended at its
+  // rehydrate await.
+  traceConsumer.reset()
+  // altimate_change end
 
   const abort = new AbortController()
   eventStream.abort = abort
@@ -135,8 +84,9 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
   })
 
   ;(async () => {
-    // Load tracing config once before processing events
-    await loadTracingConfig()
+    // altimate_change start — trace: load tracing config once before processing events
+    await traceConsumer.loadConfig()
+    // altimate_change end
     while (!signal.aborted) {
       const events = await Promise.resolve(
         sdk.event.subscribe(
@@ -154,97 +104,7 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
 
       for await (const event of events.stream) {
         // altimate_change start — trace: feed events to per-session trace
-        try {
-          if (event.type === "message.updated") {
-            const info = (event as any).properties?.info
-            // Resolve sessionID: use info.sessionID directly, or fall back to
-            // finding the session via info.parentID (assistant messages may only
-            // carry the parent message ID, not the session ID).
-            let resolvedSessionID = info?.sessionID as string | undefined
-            if (!resolvedSessionID && info?.parentID) {
-              for (const [sid, msgIds] of sessionUserMsgIds) {
-                if (msgIds.has(info.parentID)) {
-                  resolvedSessionID = sid
-                  break
-                }
-              }
-            }
-            if (resolvedSessionID) {
-              // Create trace eagerly on user message (arrives before part events)
-              const trace = sessionTraces.get(resolvedSessionID) ?? (info.role === "user" ? getOrCreateTrace(resolvedSessionID) : null)
-              if (info.role === "user") {
-                if (info.id) {
-                  if (!sessionUserMsgIds.has(resolvedSessionID)) sessionUserMsgIds.set(resolvedSessionID, new Set())
-                  sessionUserMsgIds.get(resolvedSessionID)!.add(info.id)
-                }
-                if (trace) {
-                  const title = (info as any).summary?.title || (info as any).summary?.body
-                  if (title) trace.setTitle(String(title).slice(0, 80), String(title))
-                }
-              }
-              if (info.role === "assistant") {
-                const r = trace ?? getOrCreateTrace(resolvedSessionID)
-                r?.enrichFromAssistant({
-                  modelID: info.modelID,
-                  providerID: info.providerID,
-                  agent: info.agent,
-                  variant: info.variant,
-                })
-              }
-            }
-          }
-          // altimate_change end
-          // altimate_change start — trace: part events
-          if (event.type === "message.part.updated") {
-            const part = (event as any).properties?.part
-            if (part) {
-              // Create trace on first event for this session (lazy creation)
-              const trace = sessionTraces.get(part.sessionID) ?? getOrCreateTrace(part.sessionID)
-              if (trace) {
-                if (part.type === "step-start") trace.logStepStart(part)
-                if (part.type === "step-finish") trace.logStepFinish(part)
-                if (part.type === "text" && part.time?.end) {
-                  if (part.messageID && sessionUserMsgIds.get(part.sessionID)?.has(part.messageID)) {
-                    // This is user prompt text — capture as title/prompt
-                    const text = String(part.text || "")
-                    if (text) trace.setTitle(text.slice(0, 80), text)
-                  } else {
-                    // This is assistant response text
-                    trace.logText(part)
-                  }
-                }
-                if (part.type === "tool" && (part.state?.status === "completed" || part.state?.status === "error")) {
-                  trace.logToolCall(part)
-                }
-              }
-            }
-          }
-          // altimate_change end
-          // altimate_change start — trace: session title capture and finalization
-          // Capture session title from session.updated events
-          if (event.type === "session.updated") {
-            const info = (event as any).properties?.info
-            if (info?.id && info?.title) {
-              const trace = sessionTraces.get(info.id)
-              if (trace) trace.setTitle(String(info.title))
-            }
-          }
-          // Finalize trace when session reaches idle (completed)
-          if (event.type === "session.status") {
-            const sid = (event as any).properties?.sessionID
-            const status = (event as any).properties?.status?.type
-            if (status === "idle" && sid) {
-              const trace = sessionTraces.get(sid)
-              if (trace) {
-                void trace.endTrace().catch(() => {})
-                sessionTraces.delete(sid)
-                sessionUserMsgIds.delete(sid)
-              }
-            }
-          }
-        } catch {
-          // Trace must never interrupt event forwarding
-        }
+        await traceConsumer.handleEvent(event)
         // altimate_change end
 
         Rpc.emit("event", event as Event)
@@ -260,6 +120,16 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
     })
   })
 }
+
+// altimate_change start — track the last workspaceID used to start the event stream
+// so `setWorkspace` becomes idempotent on unchanged values. SolidJS effects in the
+// session route can fire on every `session()` signal change (including agent-finish);
+// without this guard, every fire propagates to `startEventStream` which clears
+// `sessionTraces`, which causes the next snapshot from a freshly-created Trace to
+// overwrite the rich on-disk trace with a near-empty one. Symptom: waterfall view
+// collapses to the system-prompt span after every turn.
+let currentWorkspaceID: string | undefined
+// altimate_change end
 
 startEventStream({ directory: process.cwd() })
 
@@ -306,17 +176,17 @@ export const rpc = {
     await Instance.disposeAll()
   },
   async setWorkspace(input: { workspaceID?: string }) {
+    // altimate_change start — idempotency guard; see currentWorkspaceID comment above
+    if (input.workspaceID === currentWorkspaceID) return
+    currentWorkspaceID = input.workspaceID
+    // altimate_change end
     startEventStream({ directory: process.cwd(), workspaceID: input.workspaceID })
   },
   async shutdown() {
     Log.Default.info("worker shutting down")
     if (eventStream.abort) eventStream.abort.abort()
     // altimate_change start — trace: flush all active traces on shutdown
-    for (const [sid, trace] of sessionTraces) {
-      await trace.endTrace().catch(() => {})
-    }
-    sessionTraces.clear()
-    sessionUserMsgIds.clear()
+    await traceConsumer.flush()
     // altimate_change end
     await Instance.disposeAll()
     if (server) server.stop(true)

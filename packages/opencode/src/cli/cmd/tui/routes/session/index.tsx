@@ -183,11 +183,24 @@ export function Session() {
     return new CustomSpeedScroll(3)
   })
 
-  createEffect(() => {
-    if (session()?.workspaceID) {
-      sdk.setWorkspace(session()?.workspaceID)
-    }
-  })
+  // altimate_change start — gate setWorkspace on actual workspaceID change.
+  // A plain inline `createEffect` callback that reads the session signal would
+  // re-fire whenever ANY field on the signal changes (message count, status,
+  // parts) — including the cascade of updates at agent-finish. Every spurious
+  // fire propagates into `worker.setWorkspace` → `startEventStream` →
+  // `sessionTraces.clear()` → next snapshot overwrites the rich on-disk trace
+  // with a near-empty one. The `on()` projector below restricts SolidJS dirty-
+  // tracking to the workspaceID value alone, so the effect only fires when
+  // that field actually changes.
+  createEffect(
+    on(
+      () => session()?.workspaceID,
+      (workspaceID) => {
+        if (workspaceID) sdk.setWorkspace(workspaceID)
+      },
+    ),
+  )
+  // altimate_change end
 
   createEffect(async () => {
     await sync.session
@@ -224,7 +237,13 @@ export function Session() {
     if (part.id === lastSwitch) return
 
     if (part.tool === "plan_exit") {
-      local.agent.set("build")
+      // altimate_change start — canonical "builder" agent name (renamed from "build")
+      // Previously wrote "build" here which then flowed into the next session.prompt
+      // request as `agent: "build"`, leaking the legacy name into telemetry. Even
+      // though prompt.ts now normalizes at the emit boundary, write the canonical
+      // value at the source so debugging dumps / inspection see consistent state.
+      local.agent.set("builder")
+      // altimate_change end
       lastSwitch = part.id
     } else if (part.tool === "plan_enter") {
       local.agent.set("plan")

@@ -17,6 +17,8 @@ into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Slack](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://altimate.studio/join-agentic-data-engineering-slack)
 [![Docs](https://img.shields.io/badge/docs-docs.altimate.sh-blue)](https://docs.altimate.sh)
+[![Install GitHub App](https://img.shields.io/badge/GitHub-Install%20App-24292f?logo=github)](https://github.com/apps/altimate-code-agent/installations/new)
+[![Live dbt review](https://img.shields.io/badge/dbt-Live%20PR%20Demo-ff694b?logo=dbt)](https://github.com/AltimateAI/dbt-pr-review-demo/pulls)
 
 </div>
 
@@ -27,6 +29,26 @@ into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 ```bash
 npm install -g altimate-code
 ```
+
+Or via curl on macOS/Linux (installs the `altimate` binary to `~/.altimate/bin`):
+
+```bash
+curl -fsSL https://www.altimate.sh/install | bash
+```
+
+On Windows, install the same self-contained binary (to `%USERPROFILE%\.altimate\bin`) from PowerShell — no Node required:
+
+```powershell
+powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
+```
+
+The standalone install drops a single self-contained binary named `altimate`. The npm install exposes both `altimate` and `altimate-code` on PATH; the standalone install only exposes `altimate`. Alpine Linux (musl) and Windows on ARM64 are not currently supported by the standalone binary — use `apk add gcompat` on Alpine, or use WSL on Windows-on-ARM.
+
+For GitHub, [install the Altimate Code App](https://github.com/apps/altimate-code-agent/installations/new)
+to select repositories for interactive agent tasks. Automatic dbt pull-request
+reviews use the deterministic GitHub Action documented below; see the
+[public demo PRs](https://github.com/AltimateAI/dbt-pr-review-demo/pulls) before
+installing it in your own repository.
 
 Then — in order:
 
@@ -167,7 +189,7 @@ Each mode has scoped permissions, tool access, and SQL write-access control.
 
 ## Supported Warehouses
 
-Snowflake · BigQuery · Databricks · PostgreSQL · Redshift · ClickHouse · DuckDB · MySQL · SQL Server (incl. Microsoft Fabric) · Oracle · SQLite · MongoDB
+Snowflake · BigQuery · Databricks · PostgreSQL · Redshift · Trino · ClickHouse · DuckDB · MySQL · SQL Server (incl. Microsoft Fabric) · Oracle · SQLite · MongoDB
 
 First-class support with schema indexing, query execution, and metadata introspection. SSH tunneling available for secure connections.
 

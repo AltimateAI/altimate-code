@@ -17,6 +17,8 @@ const USAGE = {
     execute: "Execute SQL --query <sql> [--model <name>] [--limit <n>]",
     columns: "Get columns of model --model <name>",
     "columns-source": "Get columns of source --source <name> --table <name>",
+    "schema-verify":
+      "Diff a model's actual columns against the schema.yml spec --model <name>. Returns columns_extra / columns_missing / columns_reordered / type_mismatches. verdict: match | mismatch | no-spec",
     "column-values": "Get column values --model <name> --column <col>",
     children: "Get downstream models --model <name>",
     parents: "Get upstream models --model <name>",
@@ -181,6 +183,9 @@ async function main() {
         break
       case "column-values":
         result = await (await import("./commands/columns")).values(adapter, rest)
+        break
+      case "schema-verify":
+        result = await (await import("./commands/schema-verify")).schemaVerify(adapter, rest)
         break
       case "children":
         result = await (await import("./commands/graph")).children(adapter, rest)

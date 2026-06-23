@@ -1,0 +1,85 @@
+# Example: drop-in dbt PR review for a dbt repo (e.g. altimate-ingestion).
+# Copy to the target repo as `.github/workflows/dbt-pr-review.yml` and adjust the
+# dbt adapter + profiles/secrets to match the warehouse.
+#
+# Flow: checkout (full history) → dbt deps/compile (+ docs generate) → altimate review.
+# The review step itself needs NO warehouse access — it runs the deterministic
+# engine over the compiled artifacts (target/manifest.json + target/catalog.json).
+name: dbt PR review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read # checkout + read the diff
+  pull-requests: write # post the verdict comment / review
+
+concurrency:
+  group: dbt-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # REQUIRED: the merge-base diff needs full history
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Install the dbt adapter for your warehouse (snowflake/bigquery/redshift/...).
+      - name: Install dbt
+        run: pip install "dbt-snowflake>=1.8,<2.0"
+
+      # Compile to produce target/manifest.json. `dbt docs generate` additionally
+      # produces target/catalog.json (real warehouse column types) — strongly
+      # recommended so column-lineage breakage and proven equivalence fire at full
+      # fidelity rather than degraded (manifest-only) mode.
+      #
+      # Warehouse creds are consumed HERE (by dbt), via env_var() in profiles.yml.
+      # They are NOT needed by the review step.
+      #
+      # SECURITY: `dbt compile` executes the PR's Jinja/macros against the
+      # warehouse (e.g. a malicious macro calling run_query()). Use a
+      # LEAST-PRIVILEGE, read-only warehouse role for these credentials so a
+      # hostile PR can't read or mutate production data at compile time.
+      - name: dbt deps + compile
+        env:
+          DBT_PROFILES_DIR: ${{ github.workspace }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+        run: |
+          dbt deps
+          dbt compile
+          dbt docs generate || echo "docs generate skipped — review runs in degraded (manifest-only) mode"
+
+      - name: altimate dbt PR review
+        # Pin to the altimate-code release that ships `altimate review`
+        # (the first release cut after the dbt-pr-review feature merges).
+        uses: AltimateAI/altimate-code/github/review@v0.8.5
+        with:
+          mode: comment # start non-blocking; switch to `gate` once trusted
+          manifest_path: target/manifest.json
+          severity_threshold: suggestion
+
+          # ── Advisory LLM reviewer (OPTIONAL) ──
+          # Route A — hosted altimate model (recommended for altimate repos):
+          altimate_api_key: ${{ secrets.ALTIMATE_API_KEY }}
+          altimate_instance: ${{ secrets.ALTIMATE_INSTANCE }} # tenant name
+          #
+          # Route B — bring-your-own provider (use instead of Route A):
+          # model: anthropic/claude-sonnet-4-6
+          # model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          #
+          # Omit both routes entirely to run a deterministic-only review (no AI comments).
+
+          # Optional: sign the verdict envelope (tamper-evident, reproducible).
+          signing_key: ${{ secrets.ALTIMATE_REVIEW_SIGNING_KEY }}

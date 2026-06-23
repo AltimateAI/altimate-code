@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
+import * as Registry from "../../src/altimate/native/connections/registry"
 
 // Disable telemetry via env var instead of mock.module
 beforeAll(() => { process.env.ALTIMATE_TELEMETRY_DISABLED = "true" })
@@ -645,6 +646,31 @@ describe("Local: type mapping", () => {
 })
 
 describe("FinOps: handler error paths (no warehouse configured)", () => {
+  // Reviewer (2026-05-22) flagged that the previous version of these tests
+  // depended on ambient registry state — if a developer / CI ran with no
+  // warehouses configured, the resolver would return "...none are set up..."
+  // (no "not configured" substring) and the assertions would silently fail.
+  // Pin a deterministic registry state for the whole block.
+  const PRIOR_CONFIGS = new Map<string, any>()
+  beforeAll(() => {
+    // Capture whatever was there so the suite is hermetic.
+    for (const w of Registry.list().warehouses) {
+      const cfg = Registry.getConfig(w.name)
+      if (cfg) PRIOR_CONFIGS.set(w.name, cfg)
+    }
+    Registry.setConfigs({
+      test_pg: { type: "postgres", host: "localhost" } as any,
+      test_sf: { type: "snowflake", account: "x", user: "u", password: "p" } as any,
+    })
+  })
+  afterAll(() => {
+    if (PRIOR_CONFIGS.size > 0) {
+      Registry.setConfigs(Object.fromEntries(PRIOR_CONFIGS))
+    } else {
+      Registry.reset()
+    }
+  })
+
   test("finops.query_history returns error when no warehouse type found", async () => {
     const result = await Dispatcher.call("finops.query_history", {
       warehouse: "nonexistent",
@@ -660,20 +686,24 @@ describe("FinOps: handler error paths (no warehouse configured)", () => {
     expect(result.success).toBe(false)
   })
 
-  test("finops.role_hierarchy returns error for non-snowflake", async () => {
+  test("finops.role_hierarchy returns error for unknown warehouse", async () => {
     const result = await Dispatcher.call("finops.role_hierarchy", {
       warehouse: "nonexistent",
     } as any)
     expect(result.success).toBe(false)
-    expect(result.error).toContain("not available")
+    // The resolver returns one of two messages depending on whether ANY
+    // warehouses are configured: "not configured. Available: ..." (some
+    // exist) or "...none are set up..." (registry empty). The beforeAll
+    // above pins the first branch.
+    expect(result.error).toContain("not configured")
   })
 
-  test("finops.user_roles returns error for non-snowflake", async () => {
+  test("finops.user_roles returns error for unknown warehouse", async () => {
     const result = await Dispatcher.call("finops.user_roles", {
       warehouse: "nonexistent",
     } as any)
     expect(result.success).toBe(false)
-    expect(result.error).toContain("not available")
+    expect(result.error).toContain("not configured")
   })
 })
 

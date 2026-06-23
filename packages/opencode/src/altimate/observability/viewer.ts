@@ -12,7 +12,7 @@
  * Branded with Altimate Trace colors. Includes share/export features for virality.
  */
 
-import type { TraceFile } from "./tracing"
+import { USER_MESSAGE_INPUT_MAX_CHARS, type TraceFile } from "./tracing"
 
 export function renderTraceViewer(trace: TraceFile, options?: { live?: boolean; apiPath?: string }): string {
   const traceJSON = JSON.stringify(trace).replace(/<\//g, "<\\/")
@@ -196,6 +196,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .wf-preview .pv-tag.model { background: rgba(77,142,255,0.12); color: var(--secondary); }
 .wf-preview .pv-tag.tok { background: rgba(74,222,128,0.12); color: var(--green); }
 .wf-preview .pv-tag.err { background: rgba(248,113,113,0.12); color: var(--red); }
+.wf-preview .pv-tag.warn { background: rgba(251,191,36,0.12); color: var(--orange); }
 .wf-bar-c { flex: 1; height: 18px; position: relative; overflow: hidden; }
 .wf-bar { position: absolute; height: 100%; border-radius: 3px; min-width: 3px; opacity: 0.85; display: flex; align-items: center; padding-left: 4px; }
 .wf-bar.generation { background: var(--secondary); }
@@ -222,6 +223,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .tree-preview .pv-tag.model { background: rgba(77,142,255,0.12); color: var(--secondary); }
 .tree-preview .pv-tag.tok { background: rgba(74,222,128,0.12); color: var(--green); }
 .tree-preview .pv-tag.err { background: rgba(248,113,113,0.12); color: var(--red); }
+.tree-preview .pv-tag.warn { background: rgba(251,191,36,0.12); color: var(--orange); }
 .tree-detail { margin-top: 8px; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; display: none; }
 .tree-detail.open { display: block; }
 
@@ -443,7 +445,9 @@ var icons = { session: '\\u25A0', generation: '\\u2B50', tool: '\\u2692', text: 
 function getPreview(span) {
   var parts = [];
   if (span.status === 'error' && span.statusMessage) {
-    return '<span class="pv-tag err">\\u2718</span>' + e((span.statusMessage || '').slice(0, 120));
+    // Interrupted = recorder restart, not a real failure: amber warn, not red.
+    var tag = span.interrupted ? '<span class="pv-tag warn">\\u26A0</span>' : '<span class="pv-tag err">\\u2718</span>';
+    return tag + e((span.statusMessage || '').slice(0, 120));
   }
   if (span.kind === 'tool') {
     var inp = span.input;
@@ -467,7 +471,7 @@ function getPreview(span) {
         }
       }
     }
-    if (span.status === 'error') parts.unshift('<span class="pv-tag err">\\u2718</span>');
+    if (span.status === 'error') parts.unshift(span.interrupted ? '<span class="pv-tag warn">\\u26A0</span>' : '<span class="pv-tag err">\\u2718</span>');
   } else if (span.kind === 'generation') {
     if (span.model && span.model.modelId) parts.push('<span class="pv-tag model">' + e(span.model.modelId) + '</span>');
     if (span.tokens && span.tokens.total) parts.push('<span class="pv-tag tok">' + Number(span.tokens.total).toLocaleString() + ' tok</span>');
@@ -487,8 +491,9 @@ function showDetail(span) {
   var dur = (span.endTime || Date.now()) - (span.startTime || 0);
   var h = '<div class="detail-panel"><h3>' + e(span.name) + '</h3><dl class="dg">';
   h += '<dt>Kind</dt><dd>' + e(span.kind||'') + '</dd>';
-  h += '<dt>Status</dt><dd' + (span.status==='error'?' style="color:var(--red)"':'') + '>' + e(span.status||'') + '</dd>';
-  if (span.statusMessage) h += '<dt>Error</dt><dd style="color:var(--red)">' + e(span.statusMessage) + '</dd>';
+  var statusColor = span.interrupted ? 'var(--orange)' : (span.status==='error' ? 'var(--red)' : '');
+  h += '<dt>Status</dt><dd' + (statusColor?' style="color:'+statusColor+'"':'') + '>' + e(span.interrupted ? 'interrupted' : (span.status||'')) + '</dd>';
+  if (span.statusMessage) h += '<dt>' + (span.interrupted ? 'Interrupted' : 'Error') + '</dt><dd style="color:' + (span.interrupted ? 'var(--orange)' : 'var(--red)') + '">' + e(span.statusMessage) + '</dd>';
   h += '<dt>Duration</dt><dd>' + fd(dur) + '</dd>';
   if (span.model) {
     if (span.model.modelId) h += '<dt>Model</dt><dd>' + e(span.model.modelId) + '</dd>';
@@ -565,7 +570,10 @@ function showDetail(span) {
   // --- Classify all tool spans upfront ---
   var toolSpans = nonSession.filter(function(sp) { return sp.kind === 'tool'; });
   var genSpans = nonSession.filter(function(sp) { return sp.kind === 'generation'; });
-  var errSpans = nonSession.filter(function(sp) { return sp.status === 'error'; });
+  // Reconstructed (interrupted) spans keep status:'error' for boundary
+  // visibility, but they reflect a recorder restart — exclude them from the
+  // session error count so a clean session isn't reported as failed.
+  var errSpans = nonSession.filter(function(sp) { return sp.status === 'error' && !sp.interrupted; });
 
   // Categorize files: changed (edit/write) vs read
   var changedFiles = {};
@@ -1239,12 +1247,12 @@ function showDetail(span) {
     var dur = (span.endTime || Date.now()) - (span.startTime||0);
     var left = (st / tTotal * 100).toFixed(2);
     var width = Math.max(0.5, dur / tTotal * 100).toFixed(2);
-    var cls = span.status === 'error' ? 'error' : e(span.kind);
+    var cls = (span.status === 'error' && !span.interrupted) ? 'error' : e(span.kind);
     var row = document.createElement('div');
     row.className = 'wf-row';
     row.setAttribute('data-idx', String(idx));
     if (span.spanId) row.setAttribute('data-span-id', span.spanId);
-    var iconCls = span.status === 'error' ? 'error' : e(span.kind);
+    var iconCls = (span.status === 'error' && !span.interrupted) ? 'error' : e(span.kind);
     var pv = getPreview(span);
     row.innerHTML = '<div class="wf-icon ' + iconCls + '">' + (icons[span.kind]||'\\u2022') + '</div>' +
       '<div class="wf-info"><div class="wf-name">' + e(span.name) + '</div>' + (pv ? '<div class="wf-preview">' + pv + '</div>' : '') + '</div>' +
@@ -1278,7 +1286,8 @@ function showDetail(span) {
       meta.push(fd(dur));
       if (span.tokens) meta.push(Number(span.tokens.total||0) + ' tok');
       if (span.cost) meta.push(fc(span.cost));
-      if (span.status === 'error') meta.push('<span style="color:var(--red)">error</span>');
+      if (span.interrupted) meta.push('<span style="color:var(--orange)">interrupted</span>');
+      else if (span.status === 'error') meta.push('<span style="color:var(--red)">error</span>');
       html += '<div class="tree-node"><div class="tree-item" data-idx="' + idx + '">';
       html += '<div class="tree-head">';
       html += '<span class="tree-type ' + e(span.kind) + '">' + e(span.kind) + '</span>';
@@ -1310,13 +1319,48 @@ function showDetail(span) {
 (function() {
   var el = document.getElementById('v-chat');
   var html = '';
-  if (t.metadata.prompt) {
-    html += '<div class="chat-msg user"><div class="chat-role">\\u25B6 You</div>';
-    html += '<div class="chat-bubble">' + e(t.metadata.prompt) + '</div></div>';
-  }
+  // Build a chronologically sorted list of conversation turns by interleaving
+  // user-message spans with generation spans. We render \`metadata.prompt\` at
+  // the top as a fallback whenever it carries a value not already represented
+  // by a user-message span — that covers three cases:
+  //   1. Pre-fix traces with no user-message spans (just the legacy prompt).
+  //   2. Mixed traces: an older session rehydrated with only metadata.prompt,
+  //      then continued under the new code which added user-message spans for
+  //      later turns. Without this, the legacy first turn would be dropped.
+  //   3. Brand-new traces where the first user-message span input equals
+  //      metadata.prompt — we skip the duplicate to avoid double-rendering.
+  var userMsgs = spans.filter(function(s){return s.kind==='user-message';});
   var gens = spans.filter(function(s){return s.kind==='generation';});
-  gens.forEach(function(gen) {
-    var tools = spans.filter(function(s){return s.parentSpanId===gen.spanId && s.kind==='tool';});
+  if (t.metadata.prompt) {
+    // \`logUserMessage\` truncates span input to USER_MESSAGE_INPUT_MAX_CHARS
+    // (see tracing.ts); \`metadata.prompt\` stores the full string. For prompts
+    // longer than the truncation length, strict equality would miss the dedupe
+    // and the same text would render twice. Match against the truncated form as
+    // well. The constant is interpolated at render time so the two sides can't
+    // drift.
+    var USER_MSG_TRUNCATE = ${USER_MESSAGE_INPUT_MAX_CHARS};
+    var promptStr = String(t.metadata.prompt);
+    var promptTruncated = promptStr.slice(0, USER_MSG_TRUNCATE);
+    var promptAlreadyInSpan = userMsgs.some(function(u){
+      return typeof u.input === 'string' && (u.input === promptStr || u.input === promptTruncated);
+    });
+    if (!promptAlreadyInSpan) {
+      html += '<div class="chat-msg user"><div class="chat-role">\\u25B6 You</div>';
+      html += '<div class="chat-bubble">' + e(promptStr) + '</div></div>';
+    }
+  }
+  var turns = userMsgs.concat(gens).sort(function(a, b) { return (a.startTime||0) - (b.startTime||0); });
+  turns.forEach(function(s) {
+    if (s.kind === 'user-message') {
+      var utxt = typeof s.input === 'string' ? s.input : (s.input != null ? JSON.stringify(s.input) : '');
+      if (!utxt) return;
+      html += '<div class="chat-msg user"><div class="chat-role">\\u25B6 You</div>';
+      html += '<div class="chat-bubble">' + e(utxt) + '</div></div>';
+      return;
+    }
+    // Generation: render its tool children first, then the agent response.
+    var gen = s;
+    var tools = spans.filter(function(c){return c.parentSpanId===gen.spanId && c.kind==='tool';});
     if (tools.length) {
       tools.forEach(function(tool) {
         html += '<div class="chat-tool' + (tool.status === 'error' ? ' err' : '') + '">';
@@ -1355,7 +1399,7 @@ function showDetail(span) {
     if (span.kind === 'session') return;
     var idx = spans.indexOf(span);
     var ts = span.startTime ? new Date(span.startTime).toISOString().slice(11,23) : '';
-    var kindCls = span.status === 'error' ? 'error' : e(span.kind);
+    var kindCls = (span.status === 'error' && !span.interrupted) ? 'error' : e(span.kind);
     html += '<div class="log-entry" data-idx="' + idx + '">';
     html += '<span class="log-ts">' + ts + '</span>';
     var logIcon = span.kind === 'generation' ? '\\u2B50' : span.kind === 'tool' ? '\\u2692' : '\\u25A0';
@@ -1365,7 +1409,8 @@ function showDetail(span) {
     if (span.tokens) html += ' <span style="color:var(--dim);font-size:11px">' + Number(span.tokens.total||0) + ' tok</span>';
     if (span.cost) html += ' <span style="color:var(--orange);font-size:11px">' + fc(span.cost) + '</span>';
     if (span.tool && span.tool.durationMs != null) html += ' <span style="color:var(--dim);font-size:11px">' + fd(span.tool.durationMs) + '</span>';
-    if (span.status === 'error') html += ' <span style="color:var(--red);font-size:11px">\\u2718 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
+    if (span.interrupted) html += ' <span style="color:var(--orange);font-size:11px">\\u26A0 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
+    else if (span.status === 'error') html += ' <span style="color:var(--red);font-size:11px">\\u2718 ' + e((span.statusMessage||'').slice(0,100)) + '</span>';
     if (span.kind === 'tool' && span.input) {
       var logPv = getPreview(span);
       if (logPv) html += '<div class="log-data" style="color:var(--cyan);opacity:0.7;max-height:none">' + logPv + '</div>';

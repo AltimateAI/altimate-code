@@ -32,6 +32,19 @@ description: Generate dbt unit tests automatically for any model. Analyzes SQL l
 3. **Use sql format for ephemeral models.** Dict format fails silently for ephemeral upstreams.
 4. **Never weaken a test to make it pass.** If the test fails, the model logic may be wrong. Investigate before changing expected values.
 5. **Compile before committing.** Always run `altimate-dbt test --model <name>` to verify tests compile and execute.
+6. **Mock data MUST exercise the failure modes of every SQL construct in the model.** A unit test that only covers the happy path validates that the model handles easy inputs — it does not validate correctness. Before writing `given:` rows, list every SQL construct in the model and the boundary case it can mishandle, then ensure at least one mock row triggers each. Universal cases to always cover when the construct appears:
+   - **`LEFT JOIN` / `LEFT OUTER JOIN`** → at least one parent row with **no matching child** (catches `COUNT(*)` phantom rows, `SUM` over `NULL`, fan-out / dropout)
+   - **`INNER JOIN`** → at least one parent row whose child is filtered out by the JOIN condition (catches missing rows)
+   - **`COUNT(*)` / `COUNT(<col>)`** → row where the counted column is `NULL` (catches `COUNT(*)` vs `COUNT(col)` divergence)
+   - **`NULLIF(x, y)`** → row where `x = y` (so the result is `NULL`, exercising downstream `NULL`-handling)
+   - **`/` division** → row where the denominator is `0` or `NULL`
+   - **`CASE WHEN`** → at least one row matching each branch, including the implicit `ELSE NULL` if no explicit `ELSE` is set
+   - **`COALESCE` / `IFNULL`** → row where every argument is `NULL`
+   - **Window functions (`OVER`)** → a partition of size 1 (single-row group exercises rank/first/last edge cases), a row at the partition boundary, and a tie-break row (two rows with the same ORDER BY key)
+   - **Date arithmetic / date spines** → a row at the start of range, end of range, and a gap day with no events
+   - **Aggregations with `GROUP BY`** → at least one group of size 1 (often masks fan-out bugs) and one group whose key is `NULL`
+   - **Incremental merge keys** → both an "insert" row and an "update" row matching an existing key
+   If you can't think of a failure mode for a construct, you don't yet understand it well enough to test it — read the SQL again before guessing inputs.
 
 ## Core Workflow: Analyze -> Generate -> Refine -> Validate -> Write
 

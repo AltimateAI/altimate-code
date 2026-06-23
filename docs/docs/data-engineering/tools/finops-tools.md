@@ -2,6 +2,9 @@
 
 Cost optimization and warehouse governance. These tools help you find where money is being wasted and fix it.
 
+!!! note "v0.7.3+ — warehouse parameter is now optional"
+    Every `finops_*` tool used to require an explicit `warehouse=<connection-name>` argument. As of v0.7.3, the parameter is optional — if omitted, the tool auto-picks the first configured warehouse whose driver type supports the operation. Pass `warehouse=` explicitly when you have multiple compatible connections and want a specific one. The bare form (`finops_query_history --days 7`) works.
+
 ## finops_query_history
 
 Fetch recent query execution history from your warehouse.
@@ -27,11 +30,11 @@ Summary:
 ```
 
 **Parameters:**
-- `warehouse` (required): Connection name
+- `warehouse` (optional, since v0.7.3): Connection name. If omitted, the first configured Snowflake / BigQuery / Databricks / PostgreSQL warehouse is auto-picked.
 - `days` (optional, default: 7): Lookback period
 - `limit` (optional, default: 100): Max queries returned
 - `user` (optional): Filter by username
-- `warehouse_filter` (optional): Filter by compute warehouse name
+- `warehouse_filter` (optional, Snowflake-only): Filter the result rows by the in-warehouse compute name (different from the `warehouse` connection parameter). Use `warehouse` to pick which connection to query; use `warehouse_filter` to narrow which Snowflake virtual warehouse's queries appear in the output.
 
 **Data sources by warehouse:**
 - Snowflake: `QUERY_HISTORY` function
@@ -46,7 +49,8 @@ Summary:
 Break down credit consumption by warehouse, time, and user.
 
 ```
-> finops_analyze_credits prod-snowflake --days 30
+> finops_analyze_credits --days 30
+# equivalent: finops_analyze_credits prod-snowflake --days 30
 
 Credit Analysis (last 30 days):
 

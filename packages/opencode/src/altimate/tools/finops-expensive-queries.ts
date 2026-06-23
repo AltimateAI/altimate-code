@@ -13,9 +13,14 @@ function formatExpensiveQueries(queries: unknown[]): string {
 
   for (let i = 0; i < arr.length; i++) {
     const q = arr[i] as Record<string, unknown>
-    const queryText = truncateQuery(String(q.query_text ?? q.query ?? ""), 100)
+    // Both `query_preview` (from credit-analyzer SQL templates) and `query_text`
+    // appear in real responses depending on warehouse type — accept either.
+    const queryText = truncateQuery(String(q.query_preview ?? q.query_text ?? q.query ?? ""), 100)
     const bytesScanned = q.bytes_scanned !== undefined ? formatBytes(Number(q.bytes_scanned)) : "-"
-    const execTime = q.execution_time !== undefined ? `${Number(q.execution_time).toFixed(2)}s` : "-"
+    const execTime =
+      q.execution_time_sec !== undefined
+        ? `${Number(q.execution_time_sec).toFixed(2)}s`
+        : "-"
     const user = q.user_name ?? q.user ?? "-"
 
     lines.push(`${i + 1}. ${queryText}`)
@@ -32,9 +37,14 @@ function formatExpensiveQueries(queries: unknown[]): string {
 
 export const FinopsExpensiveQueriesTool = Tool.define("finops_expensive_queries", {
   description:
-    "Find the most expensive queries by bytes scanned. Helps identify optimization targets for cost reduction. Snowflake only.",
+    "Find the most expensive queries by bytes scanned on Snowflake / BigQuery / Databricks. Helps identify optimization targets for cost reduction.",
   parameters: z.object({
-    warehouse: z.string().describe("Warehouse connection name"),
+    warehouse: z
+      .string()
+      .optional()
+      .describe(
+        "Warehouse connection name. Optional — if omitted, the first configured Snowflake/BigQuery/Databricks warehouse is used.",
+      ),
     days: z.number().optional().default(7).describe("Days of history to search"),
     limit: z.number().optional().default(20).describe("Max queries to return"),
   }),

@@ -222,6 +222,17 @@ describe("buildExplainPlan", () => {
     expect(buildExplainPlan("clickhouse", false).prefix).toBe("EXPLAIN")
   })
 
+  test("Trino: plain EXPLAIN or EXPLAIN ANALYZE", () => {
+    expect(buildExplainPlan("trino", false)).toEqual({
+      prefix: "EXPLAIN",
+      actuallyAnalyzed: false,
+    })
+    expect(buildExplainPlan("trino", true)).toEqual({
+      prefix: "EXPLAIN ANALYZE",
+      actuallyAnalyzed: true,
+    })
+  })
+
   test("BigQuery: not supported via statement prefix", () => {
     // BigQuery requires a dry-run API call — no statement EXPLAIN.
     expect(buildExplainPlan("bigquery", false).prefix).toBe("")

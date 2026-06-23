@@ -52,22 +52,22 @@ runs:
       id: cache
       uses: actions/cache@v4
       with:
-        path: ~/.altimate-code/bin
+        path: ~/.altimate/bin
         key: altimate-code-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
 
     - name: Install altimate-code
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
-      run: curl -fsSL https://altimate.ai/install | bash
+      run: curl -fsSL https://www.altimate.sh/install | bash
 
     - name: Add altimate-code to PATH
       shell: bash
-      run: echo "$HOME/.altimate-code/bin" >> $GITHUB_PATH
+      run: echo "$HOME/.altimate/bin" >> $GITHUB_PATH
 
     - name: Run altimate-code
       shell: bash
       id: run_altimate_code
-      run: altimate-code github run
+      run: altimate github run
       env:
         MODEL: ${{ inputs.model }}
         AGENT: ${{ inputs.agent }}

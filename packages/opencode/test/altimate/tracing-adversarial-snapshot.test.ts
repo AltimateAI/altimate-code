@@ -37,6 +37,26 @@ const ZERO_STEP = {
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
 }
 
+// Poll the on-disk snapshot until it reaches `expected` status, instead of a
+// single fixed sleep. Snapshot writes are debounced/async, so a hardcoded delay
+// is too short under heavy parallel CI load (the snapshot hasn't flushed yet) →
+// flaky reads of a stale status. Polling is robust regardless of machine load.
+async function pollStatus(tracer: { getTracePath(): string | undefined }, expected: string, timeoutMs = 4000) {
+  const start = Date.now()
+  let last = "<none>"
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const snap = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
+      last = snap.summary.status
+      if (last === expected) return snap
+    } catch {
+      /* file mid-write or not yet created — keep polling */
+    }
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for status '${expected}' (last seen '${last}')`)
+}
+
 // ---------------------------------------------------------------------------
 // 1. buildTraceFile — snapshot isolation from mutations
 // ---------------------------------------------------------------------------
@@ -110,8 +130,6 @@ describe("buildTraceFile — snapshot isolation", () => {
   test("buildTraceFile shows 'running' status during active generation", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-running", { prompt: "test" })
-    // Wait for initial snapshot to complete
-    await new Promise((r) => setTimeout(r, 50))
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -120,15 +138,13 @@ describe("buildTraceFile — snapshot isolation", () => {
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
 
-    // Wait for snapshot — should show "running" since generation is in progress
-    await new Promise((r) => setTimeout(r, 50))
-    const snap = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
+    // Snapshot should show "running" since generation is in progress.
+    const snap = await pollStatus(tracer, "running")
     expect(snap.summary.status).toBe("running")
 
-    // After finishing generation, should show "completed"
+    // After finishing generation, should show "completed".
     tracer.logStepFinish(ZERO_STEP)
-    await new Promise((r) => setTimeout(r, 50))
-    const snap2 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
+    const snap2 = await pollStatus(tracer, "completed")
     expect(snap2.summary.status).toBe("completed")
 
     await tracer.endTrace()

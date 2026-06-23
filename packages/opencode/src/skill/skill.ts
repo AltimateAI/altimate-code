@@ -36,6 +36,17 @@ export namespace Skill {
     description: z.string(),
     location: z.string(),
     content: z.string(),
+    // altimate_change start — auto-load support (mirrors Cursor's "Always Apply" /
+    // "Auto Attached" rule modes). Skill bodies that match are inlined into the
+    // system prompt at session start, removing the need for the agent to invoke
+    // the Skill tool. Frontmatter fields:
+    //   alwaysApply: true            — unconditional auto-load
+    //   applyPaths:  "dbt_project.yml" | ["pyproject.toml", "schema.yml"]
+    //                                — auto-load when at least one matching file
+    //                                  exists anywhere under the worktree.
+    alwaysApply: z.boolean().optional(),
+    applyPaths: z.union([z.string(), z.array(z.string())]).optional(),
+    // altimate_change end
   })
   export type Info = z.infer<typeof Info>
 
@@ -82,7 +93,14 @@ export namespace Skill {
 
       if (!md) return
 
-      const parsed = Info.pick({ name: true, description: true }).safeParse(md.data)
+      const parsed = Info.pick({
+        name: true,
+        description: true,
+        // altimate_change start — pluck auto-load frontmatter
+        alwaysApply: true,
+        applyPaths: true,
+        // altimate_change end
+      }).safeParse(md.data)
       if (!parsed.success) return
 
       // Warn on duplicate skill names
@@ -101,6 +119,10 @@ export namespace Skill {
         description: parsed.data.description,
         location: match,
         content: md.content,
+        // altimate_change start — propagate auto-load fields
+        alwaysApply: parsed.data.alwaysApply,
+        applyPaths: parsed.data.applyPaths,
+        // altimate_change end
       }
     }
 
@@ -145,13 +167,24 @@ export namespace Skill {
         for (const entry of OPENCODE_BUILTIN_SKILLS) {
           try {
             const md = matter(entry.content)
-            const meta = Info.pick({ name: true, description: true }).safeParse(md.data)
+            const meta = Info.pick({
+              name: true,
+              description: true,
+              // altimate_change start — pluck auto-load frontmatter
+              alwaysApply: true,
+              applyPaths: true,
+              // altimate_change end
+            }).safeParse(md.data)
             if (!meta.success) continue
             skills[meta.data.name] = {
               name: meta.data.name,
               description: meta.data.description,
               location: `builtin:${entry.name}/SKILL.md`,
               content: md.content,
+              // altimate_change start — propagate auto-load fields
+              alwaysApply: meta.data.alwaysApply,
+              applyPaths: meta.data.applyPaths,
+              // altimate_change end
             }
           } catch (err) {
             log.error("failed to parse embedded skill", { skill: entry.name, err })

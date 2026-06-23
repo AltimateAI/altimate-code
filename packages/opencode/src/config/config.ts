@@ -269,7 +269,7 @@ export namespace Config {
     // altimate_change start — auto-discover MCP servers from external AI tool configs
     if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && result.experimental?.auto_mcp_discovery !== false) {
       const { discoverExternalMcp, setDiscoveryResult } = await import("../mcp/discover")
-      const { servers: externalMcp, sources } = await discoverExternalMcp(Instance.worktree)
+      const { servers: externalMcp, sources } = await discoverExternalMcp(Instance.directory)
       if (Object.keys(externalMcp).length > 0) {
         result.mcp ??= {}
         const added: string[] = []
@@ -622,6 +622,9 @@ export namespace Config {
         .positive()
         .optional()
         .describe("Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified."),
+      // altimate_change start — sync timestamp written by syncDatamateUrlFromVscodeMcp
+      updatedAt: z.string().optional().describe("ISO timestamp of last URL sync; used to detect reconnect need."),
+      // altimate_change end
     })
     .strict()
     .meta({
@@ -678,6 +681,9 @@ export namespace Config {
         .positive()
         .optional()
         .describe("Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified."),
+      // altimate_change start — sync timestamp written by syncDatamateUrlFromVscodeMcp
+      updatedAt: z.string().optional().describe("ISO timestamp of last URL sync; used to detect reconnect need."),
+      // altimate_change end
     })
     .strict()
     .meta({
@@ -1156,9 +1162,11 @@ export namespace Config {
       default_agent: z
         .string()
         .optional()
+        // altimate_change start — fallback name reflects the renamed "builder" agent
         .describe(
-          "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",
+          "Default agent to use when none is specified. Must be a primary agent. Falls back to 'builder' if not set or if the specified agent is invalid.",
         ),
+      // altimate_change end
       username: z
         .string()
         .optional()
@@ -1453,6 +1461,10 @@ export namespace Config {
           if (entry.environment && typeof entry.environment === "object") transformed.environment = entry.environment
           if (typeof entry.timeout === "number") transformed.timeout = entry.timeout
           if (typeof entry.enabled === "boolean") transformed.enabled = entry.enabled
+          // Preserve updatedAt — the datamate sync change-signal field; the
+          // McpLocal/McpRemote schemas accept it and dropping it on normalize
+          // would discard the reconnect timestamp on this load path.
+          if (typeof entry.updatedAt === "string") transformed.updatedAt = entry.updatedAt
           servers[name] = transformed
         } else if (entry.url && typeof entry.url === "string") {
           const transformed: Record<string, any> = { type: "remote", url: entry.url }
@@ -1474,6 +1486,7 @@ export namespace Config {
           // altimate_change end
           if (typeof entry.timeout === "number") transformed.timeout = entry.timeout
           if (typeof entry.enabled === "boolean") transformed.enabled = entry.enabled
+          if (typeof entry.updatedAt === "string") transformed.updatedAt = entry.updatedAt
           servers[name] = transformed
         }
       }

@@ -83,6 +83,7 @@
     "@tsconfig/bun": "catalog:",
     "@types/pg": "8.18.0",
     "@typescript/native-preview": "catalog:",
+    "duckdb": "1.4.4",
     "husky": "9.1.7",
     "playwright-core": "1.58.2",
     "prettier": "3.6.2",

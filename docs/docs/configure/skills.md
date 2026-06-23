@@ -28,7 +28,77 @@ Focus on the query: $ARGUMENTS
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | Yes | Skill name |
-| `description` | Yes | Short description |
+| `description` | Yes | Short description shown in the agent's `<available_skills>` listing |
+| `alwaysApply` | No | When `true`, the skill's full body is inlined into the system prompt at session start — the agent does not need to invoke the `Skill` tool to see it. See [Auto-loading skills](#auto-loading-skills). |
+| `applyPaths` | No | A glob (string) or list of globs. When at least one file under the worktree matches, the skill's full body is inlined into the system prompt at session start. Useful for project-aware skills (e.g. `dbt_project.yml` for dbt projects). |
+
+## Auto-loading skills
+
+By default, skills are **lazy-loaded**: only the `name` and `description` appear in
+the system prompt, and the full body is fetched only when the model invokes the
+`Skill` tool. This keeps the prompt small but relies on the model choosing to
+load the skill at the right moment.
+
+For skills that should always be in context for a given kind of project (e.g.
+"every dbt session should see the dbt-development pitfalls"), declare one of:
+
+```yaml
+---
+name: dbt-develop
+applyPaths:
+  - "dbt_project.yml"        # matches if any dbt_project.yml exists in the worktree
+  - "**/dbt_project.yml"
+description: ...
+---
+```
+
+or, for unconditional loading:
+
+```yaml
+---
+name: house-rules
+alwaysApply: true
+description: ...
+---
+```
+
+At session start, every matched skill body is prepended to the system prompt
+(BEFORE the standard `<available_skills>` listing — placement matters: putting
+the auto-loaded block first frames the bodies as binding "rules of the road"
+rather than background reference) under:
+
+```xml
+<auto_loaded_skill name="<skill-name>">
+... full skill body ...
+</auto_loaded_skill>
+```
+
+The agent is told it does not need to invoke the `Skill` tool again to access
+these — they are binding guidance for the session.
+
+### When to use
+
+| Pattern | Mode |
+|---|---|
+| Project-type-specific guidance (dbt project, Snowflake project, BigQuery project) | `applyPaths` with the project marker file |
+| Team conventions that apply to every session in a repo | `alwaysApply: true` in a project-level `.opencode/skills/<skill>/SKILL.md` |
+| Skill that's only relevant when the user asks for it explicitly (e.g. test generation, cost review) | Leave both fields unset — keep lazy loading |
+
+### Context-size implications
+
+When a skill auto-loads, its full body lands in the system prompt. A 250-line
+skill (~5K tokens) bumps the system prompt by roughly 25%. Two mitigators:
+
+1. **Prompt caching amortizes the cost** — the system prompt is the most-cached
+   part of the request. Across a long agent loop (~26 steps per task is typical)
+   the auto-loaded body is read from cache, not re-billed as fresh input.
+2. **Match the glob narrowly** — `applyPaths: "dbt_project.yml"` only fires
+   inside dbt projects; non-dbt sessions are unaffected. The mechanism is
+   opt-in per skill and per worktree.
+
+If you find auto-loaded bodies are crowding out task-specific context, prefer
+`applyPaths` over `alwaysApply` so the skill only loads when the project
+markers indicate it's relevant.
 
 ## Discovery Paths
 

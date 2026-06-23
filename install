@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-APP=altimate-code
+APP=altimate
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'
@@ -20,9 +20,9 @@ Options:
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
 
 Examples:
-    curl -fsSL https://altimate.ai/install | bash
-    curl -fsSL https://altimate.ai/install | bash -s -- --version 1.0.180
-    ./install --binary /path/to/altimate-code
+    curl -fsSL https://www.altimate.sh/install | bash
+    curl -fsSL https://www.altimate.sh/install | bash -s -- --version 1.0.180
+    ./install --binary /path/to/altimate
 EOF
 }
 
@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-INSTALL_DIR=$HOME/.altimate-code/bin
+INSTALL_DIR=$HOME/.altimate/bin
 mkdir -p "$INSTALL_DIR"
 
 # If --binary is provided, skip all download/detection logic
@@ -96,6 +96,7 @@ else
       rosetta_flag=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
       if [ "$rosetta_flag" = "1" ]; then
         arch="arm64"
+        echo -e "${MUTED}Rosetta detected — installing arm64 build${NC}"
       fi
     fi
 
@@ -121,10 +122,29 @@ else
       fi
 
       if command -v ldd >/dev/null 2>&1; then
-        if ldd --version 2>&1 | grep -qi musl; then
+        # ldd --version exits non-zero on musl by design. With `set -o pipefail`
+        # (line 2), a pipeline `ldd --version 2>&1 | grep -qi musl` would inherit
+        # ldd's failure and the if-block would never fire — defeating musl
+        # detection on every non-Alpine musl distro (Void, Adelie, custom builds).
+        # Capture output first, then grep.
+        ldd_out="$(ldd --version 2>&1 || true)"
+        if printf '%s' "$ldd_out" | grep -qi musl; then
           is_musl=true
         fi
       fi
+    fi
+
+    # @altimateai/altimate-core has no NAPI prebuild for musl. Without a
+    # musl-shaped archive, the install would 404 silently (without --fail
+    # curl writes the 404 HTML to disk, and tar then dies "not in gzip
+    # format"). Fail fast with an actionable message instead.
+    if [ "$is_musl" = "true" ]; then
+      echo -e "${RED}Alpine Linux (musl) is not currently supported by the standalone install.${NC}"
+      echo -e "${MUTED}altimate-core has no NAPI prebuild for musl yet. Workarounds:${NC}"
+      echo -e "  • apk add gcompat   ${MUTED}# run glibc binaries on Alpine${NC}"
+      echo -e "  • Use npm + gcompat: apk add gcompat && npm install -g altimate-code"
+      echo -e "    ${MUTED}(the npm postinstall also bails on raw musl; gcompat is required either way)${NC}"
+      exit 1
     fi
 
     needs_baseline=false
@@ -161,11 +181,14 @@ else
     if [ "$needs_baseline" = "true" ]; then
       target="$target-baseline"
     fi
-    if [ "$is_musl" = "true" ]; then
-      target="$target-musl"
-    fi
+    # is_musl=true would have exited above — no musl target suffix is constructed.
 
     filename="$APP-$target$archive_ext"
+    # Windows release archives ship altimate.exe, every other target ships altimate.
+    binary_name="$APP"
+    if [ "$os" = "windows" ]; then
+      binary_name="$APP.exe"
+    fi
 
 
     if [ "$os" = "linux" ]; then
@@ -182,11 +205,26 @@ else
 
     if [ -z "$requested_version" ]; then
         url="https://github.com/AltimateAI/altimate-code/releases/latest/download/$filename"
-        specific_version=$(curl -s https://api.github.com/repos/AltimateAI/altimate-code/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
-
-        if [[ $? -ne 0 || -z "$specific_version" ]]; then
-            echo -e "${RED}Failed to fetch version information${NC}"
-            exit 1
+        # The download above resolves "latest" server-side, so this API call only
+        # feeds the version display and the already-installed short-circuit. A
+        # transient api.github.com blip or the unauthenticated rate limit
+        # (60/hr/IP) must NOT abort the install — retry a few times with --fail
+        # (so a 504 retries instead of parsing an error body), then proceed
+        # without the version string.
+        #
+        # --max-time 10 bounds a dead-air socket (curl's default has no transfer
+        # cap), and the trailing `|| true` is load-bearing: under `set -euo
+        # pipefail`, a failing `curl --fail` propagates through the pipeline and
+        # the assignment, so `set -e` would abort the script before the loop can
+        # retry or degrade. `|| true` lets the failure resolve to an empty string.
+        specific_version=""
+        for attempt in 1 2 3; do
+            specific_version=$(curl -fsSL --max-time 10 https://api.github.com/repos/AltimateAI/altimate-code/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' || true)
+            [ -n "$specific_version" ] && break
+            [ "$attempt" -lt 3 ] && sleep "$attempt"
+        done
+        if [ -z "$specific_version" ]; then
+            echo -e "${MUTED}Could not resolve the latest version from GitHub (API unavailable) — installing the latest release anyway.${NC}"
         fi
     else
         # Strip leading 'v' if present
@@ -219,17 +257,27 @@ print_message() {
 }
 
 check_version() {
-    if command -v altimate-code >/dev/null 2>&1; then
-        altimate_code_path=$(which altimate-code)
+    # Probe both names: the curl-installed binary is `altimate` (v0.7.1+) but
+    # earlier curl installs and the npm alias still expose `altimate-code`.
+    # Without probing both, an upgrade from v0.7.0 would always re-download.
+    local probe=""
+    if command -v altimate >/dev/null 2>&1; then
+        probe="altimate"
+    elif command -v altimate-code >/dev/null 2>&1; then
+        probe="altimate-code"
+    fi
 
-        ## Check the installed version
-        installed_version=$(altimate-code --version 2>/dev/null || echo "")
+    if [ -n "$probe" ]; then
+        installed_version=$("$probe" --version 2>/dev/null || echo "")
 
-        if [[ "$installed_version" != "$specific_version" ]]; then
-            print_message info "${MUTED}Installed version: ${NC}$installed_version."
-        else
-            print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already installed"
+        # Only short-circuit on a real version match. When the latest version
+        # couldn't be resolved (API unavailable → specific_version empty), never
+        # treat an empty==empty as "already installed" — fall through and reinstall.
+        if [ -n "$specific_version" ] && [[ "$installed_version" == "$specific_version" ]]; then
+            print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already installed${NC}"
             exit 0
+        elif [ -n "$installed_version" ]; then
+            print_message info "${MUTED}Installed version: ${NC}$installed_version."
         fi
     fi
 }
@@ -275,7 +323,7 @@ download_with_progress() {
     fi
 
     local tmp_dir=${TMPDIR:-/tmp}
-    local basename="${tmp_dir}/altimate_code_install_$$"
+    local basename="${tmp_dir}/altimate_install_$$"
     local tracefile="${basename}.trace"
 
     rm -f "$tracefile"
@@ -287,7 +335,9 @@ download_with_progress() {
     trap "trap - RETURN; rm -f \"$tracefile\"; printf '\033[?25h' >&4; exec 4>&-" RETURN
 
     (
-        curl --trace-ascii "$tracefile" -s -L -o "$output" "$url"
+        # --fail so HTTP errors (e.g. 404 on an unknown target archive) become
+        # a non-zero exit instead of silently writing the error page to disk.
+        curl --fail --trace-ascii "$tracefile" -s -L -o "$output" "$url"
     ) &
     local curl_pid=$!
 
@@ -324,31 +374,117 @@ download_with_progress() {
     return $ret
 }
 
+# Verify the downloaded archive against the release's checksums.txt.
+# Hard-fails on a real mismatch; soft-skips when checksums.txt can't be fetched
+# (older release, network blip) or has no entry, so pinned installs of
+# pre-checksums releases keep working.
+verify_checksum() {
+    local file="$1"
+    local name="$2"
+    # $url ends in /$filename — strip it to get the release base, append checksums.txt.
+    local checksums_url="${url%/*}/checksums.txt"
+
+    local sums
+    if ! sums=$(curl --fail -sL "$checksums_url" 2>/dev/null); then
+        print_message info "${MUTED}Skipping integrity check — checksums.txt not published for this release${NC}"
+        return 0
+    fi
+
+    # checksums.txt is sha256sum format: "<hash>  <filename>" (sha256sum may
+    # prefix the name with '*' in binary mode — tolerate it).
+    local expected
+    expected=$(printf '%s\n' "$sums" | awk -v f="$name" '{ n=$2; sub(/^\*/,"",n); if (n==f) { print $1; exit } }')
+    if [ -z "$expected" ]; then
+        print_message info "${MUTED}Skipping integrity check — no checksum entry for $name${NC}"
+        return 0
+    fi
+
+    local actual
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$file" | cut -d' ' -f1)
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
+    else
+        print_message info "${MUTED}Skipping integrity check — no sha256 tool available${NC}"
+        return 0
+    fi
+
+    if [ "$actual" != "$expected" ]; then
+        print_message error "Checksum mismatch for $name"
+        print_message error "  expected: $expected"
+        print_message error "  actual:   $actual"
+        # Clean up via the file's own directory rather than the caller's $tmp_dir,
+        # so this stays self-contained and doesn't depend on a dynamically-scoped
+        # local from download_and_install. Guard against a pathological $file
+        # (empty or root-level) that would make dirname resolve to "." or "/".
+        local cleanup_dir
+        cleanup_dir=$(dirname "$file")
+        if [ -n "$cleanup_dir" ] && [ "$cleanup_dir" != "." ] && [ "$cleanup_dir" != "/" ]; then
+            rm -rf "$cleanup_dir"
+        fi
+        exit 1
+    fi
+    print_message info "${MUTED}Verified ${NC}$name${MUTED} (sha256)${NC}"
+}
+
 download_and_install() {
-    print_message info "\n${MUTED}Installing ${NC}altimate-code ${MUTED}version: ${NC}$specific_version"
-    local tmp_dir="${TMPDIR:-/tmp}/altimate_code_install_$$"
+    print_message info "\n${MUTED}Installing ${NC}altimate ${MUTED}version: ${NC}${specific_version:-latest}"
+    local tmp_dir="${TMPDIR:-/tmp}/altimate_install_$$"
     mkdir -p "$tmp_dir"
 
     if [[ "$os" == "windows" ]] || ! [ -t 2 ] || ! download_with_progress "$url" "$tmp_dir/$filename"; then
-        # Fallback to standard curl on Windows, non-TTY environments, or if custom progress fails
-        curl -# -L -o "$tmp_dir/$filename" "$url"
+        # Fallback to standard curl on Windows, non-TTY environments, or if custom progress fails.
+        # --fail so 404s exit non-zero instead of writing the error page to $tmp_dir/$filename.
+        curl --fail -# -L -o "$tmp_dir/$filename" "$url"
     fi
 
+    verify_checksum "$tmp_dir/$filename" "$filename"
+
+    # Extract only the expected binary member rather than the whole archive.
+    # The current build only puts a single file in each archive, but listing
+    # the member explicitly makes a future "tars a whole directory" mistake
+    # incapable of writing attacker-controlled paths to disk.
     if [ "$os" = "linux" ]; then
-        tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+        tar --no-same-owner -xzf "$tmp_dir/$filename" -C "$tmp_dir" "$binary_name"
     else
-        unzip -q "$tmp_dir/$filename" -d "$tmp_dir"
+        unzip -q "$tmp_dir/$filename" "$binary_name" -d "$tmp_dir"
     fi
 
-    mv "$tmp_dir/altimate-code" "$INSTALL_DIR"
-    chmod 755 "${INSTALL_DIR}/altimate-code"
+    mv "$tmp_dir/$binary_name" "${INSTALL_DIR}/$binary_name"
+    chmod 755 "${INSTALL_DIR}/$binary_name"
+
+    # If the previous install dropped `altimate-code` here (pre-v0.7.1 curl
+    # install), remove it so users don't end up running a stale binary by
+    # name. The npm/Homebrew/AUR paths still expose both names; only the
+    # standalone $INSTALL_DIR has the rename collapse.
+    if [ "$os" != "windows" ] && [ -f "${INSTALL_DIR}/altimate-code" ]; then
+        rm -f "${INSTALL_DIR}/altimate-code"
+        print_message info "${MUTED}Removed stale ${NC}altimate-code${MUTED} from ${NC}$INSTALL_DIR${MUTED} (renamed to altimate in v0.7.1)${NC}"
+    fi
+
     rm -rf "$tmp_dir"
 }
 
 install_from_binary() {
-    print_message info "\n${MUTED}Installing ${NC}altimate-code ${MUTED}from: ${NC}$binary_path"
-    cp "$binary_path" "${INSTALL_DIR}/altimate-code"
-    chmod 755 "${INSTALL_DIR}/altimate-code"
+    # --binary may point to either altimate or altimate.exe; preserve the
+    # caller's basename so the installed file matches what was supplied.
+    local dest_name
+    dest_name=$(basename "$binary_path")
+    local dest_path="${INSTALL_DIR}/$dest_name"
+
+    # Guard against cp-on-self: `--binary ~/.altimate/bin/altimate` would
+    # truncate the destination first and produce an empty file. Compare
+    # canonical paths (`-ef` checks inode equality; portable across coreutils
+    # and BusyBox).
+    if [ -f "$dest_path" ] && [ "$binary_path" -ef "$dest_path" ]; then
+        print_message info "${MUTED}Source and destination are the same file — nothing to do: ${NC}$dest_path"
+        chmod 755 "$dest_path"
+        return 0
+    fi
+
+    print_message info "\n${MUTED}Installing ${NC}$dest_name ${MUTED}from: ${NC}$binary_path"
+    cp "$binary_path" "$dest_path"
+    chmod 755 "$dest_path"
 }
 
 if [ -n "$binary_path" ]; then
@@ -366,9 +502,9 @@ add_to_path() {
     if grep -Fxq "$command" "$config_file"; then
         print_message info "Command already exists in $config_file, skipping write."
     elif [[ -w $config_file ]]; then
-        echo -e "\n# altimate-code" >> "$config_file"
+        echo -e "\n# altimate" >> "$config_file"
         echo "$command" >> "$config_file"
-        print_message info "${MUTED}Successfully added ${NC}altimate-code ${MUTED}to \$PATH in ${NC}$config_file"
+        print_message info "${MUTED}Successfully added ${NC}altimate ${MUTED}to \$PATH in ${NC}$config_file"
     else
         print_message warning "Manually add the directory to $config_file (or similar):"
         print_message info "  $command"
@@ -446,11 +582,12 @@ fi
 echo -e ""
 echo -e ""
 echo -e ""
-echo -e "${MUTED}To start:${NC}"
+echo -e "${MUTED}Get started:${NC}"
 echo -e ""
-echo -e "cd <project>       ${MUTED}# Open your project directory${NC}"
-echo -e "altimate-code      ${MUTED}# Launch the interactive TUI${NC}"
+echo -e "altimate                 ${MUTED}# Open the TUI${NC}"
+echo -e "altimate run \"hello\"     ${MUTED}# Run a quick task${NC}"
+echo -e "altimate --help          ${MUTED}# See all commands${NC}"
 echo -e ""
-echo -e "${MUTED}For more information visit ${NC}https://altimate.ai"
+echo -e "${MUTED}Docs: ${NC}https://altimate-code.dev"
 echo -e ""
 echo -e ""

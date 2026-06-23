@@ -60,9 +60,14 @@ function formatUnusedResources(
 
 export const FinopsUnusedResourcesTool = Tool.define("finops_unused_resources", {
   description:
-    "Find unused tables and idle warehouses to reduce costs. Identifies stale tables not accessed recently and warehouses with no query activity. Snowflake only.",
+    "Find unused tables and idle warehouses to reduce costs on Snowflake / BigQuery / Databricks. Identifies stale tables not accessed recently and warehouses with no query activity.",
   parameters: z.object({
-    warehouse: z.string().describe("Warehouse connection name"),
+    warehouse: z
+      .string()
+      .optional()
+      .describe(
+        "Warehouse connection name. Optional — if omitted, the first configured Snowflake/BigQuery/Databricks warehouse is used.",
+      ),
     days: z.number().optional().default(30).describe("Days of inactivity threshold"),
     limit: z.number().optional().default(50).describe("Max resources to return"),
   }),

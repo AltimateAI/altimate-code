@@ -283,7 +283,10 @@ export namespace ProviderTransform {
     msgs = normalizeMessages(msgs, model, options)
     if (
       (model.providerID === "anthropic" ||
+        // altimate_change start — altimate-specific Anthropic provider IDs
         model.providerID === "google-vertex-anthropic" ||
+        model.providerID === "altimate-backend" ||
+        // altimate_change end
         model.api.id.includes("anthropic") ||
         model.api.id.includes("claude") ||
         model.id.includes("anthropic") ||

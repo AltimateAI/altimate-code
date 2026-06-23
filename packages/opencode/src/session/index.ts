@@ -821,9 +821,19 @@ export namespace Session {
       // Anthropic does it differently though - inputTokens doesn't include cached tokens.
       // It looks like Altimate Code's cost calculation assumes all providers return inputTokens the same way Anthropic does (I'm guessing getUsage logic was originally implemented with anthropic), so it's causing incorrect cost calculation for OpenRouter and others.
       const excludesCachedTokens = !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
-      const adjustedInputTokens = safe(
-        excludesCachedTokens ? inputTokens : inputTokens - cacheReadInputTokens - cacheWriteInputTokens,
+      // altimate_change start — clamp at zero so inconsistent provider counts
+      // (inputTokens < cachedInputTokens) don't produce negative cost.
+      // Without the Math.max(0, ...), `tokens.input * costInfo.input` becomes
+      // negative and the per-message cost is then negative — leaks into the
+      // session total and Azure App Insights dashboards as a negative-cost
+      // outlier. Clamping at zero preserves the `input + cache.read +
+      // cache.write === inputTotal` invariant (just at the clamped value)
+      // and keeps cost monotonically non-negative.
+      const adjustedInputTokens = Math.max(
+        0,
+        safe(excludesCachedTokens ? inputTokens : inputTokens - cacheReadInputTokens - cacheWriteInputTokens),
       )
+      // altimate_change end
 
       const total = iife(() => {
         // Anthropic doesn't provide total_tokens, also ai sdk will vastly undercount if we

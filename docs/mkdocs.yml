@@ -97,6 +97,7 @@ nav:
           - Custom Tools: configure/tools/custom.md
       - Skills: configure/skills.md
       - Commands: configure/commands.md
+      - Validators: data-engineering/validators.md
       - Trace: configure/trace.md
       - Interfaces:
           - TUI: usage/tui.md
@@ -107,6 +108,8 @@ nav:
           - IDE: usage/ide.md
           - GitHub: usage/github.md
           - GitLab: usage/gitlab.md
+          - dbt PR Review: usage/dbt-pr-review.md
+          - dbt PR Review — Issue Corpus: usage/dbt-pr-review-corpus.md
       - Guides:
           - Cost Optimization: data-engineering/guides/cost-optimization.md
           - Migration: data-engineering/guides/migration.md

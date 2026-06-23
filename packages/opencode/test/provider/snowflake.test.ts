@@ -5,7 +5,19 @@ import { Instance } from "../../src/project/instance"
 import { Provider } from "../../src/provider/provider"
 import { Auth } from "../../src/auth"
 import { Env } from "../../src/env"
-import { parseSnowflakePAT, transformSnowflakeBody } from "../../src/altimate/plugin/snowflake"
+import { buildToolCapableSet, parseSnowflakePAT, transformSnowflakeBody } from "../../src/altimate/plugin/snowflake"
+
+// Fixture allowlist for transformSnowflakeBody unit tests. Reflects what
+// Snowflake Cortex actually accepts tools for today (Claude + OpenAI families).
+// Production code derives the equivalent set from `provider.models` at loader
+// time; this fixture exists so unit tests of the pure transform stay simple.
+const TOOLCAPABLE_FIXTURE: ReadonlySet<string> = new Set([
+  "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5",
+  "claude-opus-4-5", "claude-haiku-4-5", "claude-4-sonnet", "claude-3-7-sonnet",
+  "claude-3-5-sonnet",
+  "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5.1", "openai-gpt-5.2",
+  "openai-gpt-5-mini", "openai-gpt-5-nano", "openai-gpt-5-chat",
+])
 
 // ---------------------------------------------------------------------------
 // parseSnowflakePAT
@@ -78,7 +90,7 @@ describe("parseSnowflakePAT", () => {
 describe("transformSnowflakeBody", () => {
   test("rewrites max_tokens to max_completion_tokens", () => {
     const input = JSON.stringify({ model: "claude-sonnet-4-6", messages: [], max_tokens: 1000 })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.max_completion_tokens).toBe(1000)
     expect(parsed.max_tokens).toBeUndefined()
@@ -86,7 +98,7 @@ describe("transformSnowflakeBody", () => {
 
   test("leaves requests without max_tokens unchanged", () => {
     const input = JSON.stringify({ model: "claude-sonnet-4-6", messages: [], max_completion_tokens: 1000 })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.max_completion_tokens).toBe(1000)
     expect(parsed.max_tokens).toBeUndefined()
@@ -99,7 +111,7 @@ describe("transformSnowflakeBody", () => {
       tools: [{ type: "function", function: { name: "read_file" } }],
       tool_choice: "auto",
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tools).toBeUndefined()
     expect(parsed.tool_choice).toBeUndefined()
@@ -111,7 +123,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "hello" }],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tools).toBeUndefined()
   })
@@ -122,7 +134,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "hello" }],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tools).toBeUndefined()
   })
@@ -133,7 +145,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "hello" }],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tools).toBeDefined()
     expect(parsed.tools).toHaveLength(1)
@@ -145,7 +157,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "hello" }],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tools).toBeDefined()
     expect(parsed.tools).toHaveLength(1)
@@ -160,7 +172,7 @@ describe("transformSnowflakeBody", () => {
       ],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeDefined()
     expect(syntheticStop!.status).toBe(200)
     expect(syntheticStop!.headers.get("content-type")).toBe("text/event-stream")
@@ -175,7 +187,7 @@ describe("transformSnowflakeBody", () => {
       ],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeUndefined()
   })
 
@@ -185,7 +197,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "test" }],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeUndefined()
   })
 
@@ -198,7 +210,7 @@ describe("transformSnowflakeBody", () => {
         { role: "assistant", content: "I'm here!" },
       ],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeUndefined()
   })
 
@@ -211,7 +223,7 @@ describe("transformSnowflakeBody", () => {
         { role: "assistant", content: "I'm here!" },
       ],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeDefined()
   })
 
@@ -223,7 +235,7 @@ describe("transformSnowflakeBody", () => {
         { role: "assistant", content: "I'm here!" },
       ],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeDefined()
   })
 
@@ -235,7 +247,7 @@ describe("transformSnowflakeBody", () => {
         { role: "assistant", content: "done", tool_calls: [] },
       ],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeDefined()
   })
 
@@ -250,7 +262,7 @@ describe("transformSnowflakeBody", () => {
       ],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tools).toBeUndefined()
     // tool_calls should be removed from assistant messages
@@ -262,7 +274,7 @@ describe("transformSnowflakeBody", () => {
   })
 
   test("throws on invalid JSON input", () => {
-    expect(() => transformSnowflakeBody("not-json")).toThrow()
+    expect(() => transformSnowflakeBody("not-json", TOOLCAPABLE_FIXTURE)).toThrow()
   })
 
   test("synthetic stop SSE stream has correct format", async () => {
@@ -273,7 +285,7 @@ describe("transformSnowflakeBody", () => {
         { role: "assistant", content: "done" },
       ],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeDefined()
     const text = await syntheticStop!.text()
     // Should contain SSE data lines and [DONE]
@@ -286,13 +298,13 @@ describe("transformSnowflakeBody", () => {
 
   test("handles empty messages array without crashing", () => {
     const input = JSON.stringify({ model: "claude-sonnet-4-6", messages: [] })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeUndefined()
   })
 
   test("handles missing messages field", () => {
     const input = JSON.stringify({ model: "claude-sonnet-4-6" })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(JSON.parse(body).model).toBe("claude-sonnet-4-6")
   })
 
@@ -302,7 +314,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "test" }],
       max_completion_tokens: 500,
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.max_completion_tokens).toBe(500)
     expect(parsed.max_tokens).toBeUndefined()
@@ -315,7 +327,7 @@ describe("transformSnowflakeBody", () => {
       max_tokens: 100,
       max_completion_tokens: 500,
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.max_completion_tokens).toBe(100)
     expect(parsed.max_tokens).toBeUndefined()
@@ -327,7 +339,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "hello" }],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tools).toBeUndefined()
   })
@@ -338,7 +350,7 @@ describe("transformSnowflakeBody", () => {
       messages: [{ role: "user", content: "hello" }],
       tool_choice: "auto",
     })
-    const { body } = transformSnowflakeBody(input)
+    const { body } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     const parsed = JSON.parse(body)
     expect(parsed.tool_choice).toBeUndefined()
   })
@@ -362,7 +374,7 @@ describe("SnowflakeCortexAuthPlugin fetch interceptor", () => {
     })
 
     // Transform body (same logic as the fetch wrapper)
-    const result = transformSnowflakeBody(originalBody)
+    const result = transformSnowflakeBody(originalBody, TOOLCAPABLE_FIXTURE)
     const newBody = result.body
 
     // Body changed (max_tokens → max_completion_tokens), so lengths differ
@@ -382,7 +394,7 @@ describe("SnowflakeCortexAuthPlugin fetch interceptor", () => {
         { role: "assistant", content: "response" },
       ],
     })
-    const { syntheticStop } = transformSnowflakeBody(input)
+    const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE)
     expect(syntheticStop).toBeInstanceOf(Response)
     expect(syntheticStop!.status).toBe(200)
     expect(syntheticStop!.headers.get("content-type")).toBe("text/event-stream")
@@ -579,6 +591,258 @@ describe("snowflake-cortex provider", () => {
         fn: async () => {
           const providers = await Provider.list()
           expect(providers["snowflake-cortex"].env).toEqual([])
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
+  })
+
+  test("models added per Snowflake regional availability docs (issue #851)", async () => {
+    // Regression: PR for issue #851 added 8 models that Snowflake Cortex
+    // supports but were missing from the hardcoded list. Lock in identity,
+    // toolcall capability, AND limits (the limits were corrected in the
+    // consensus-review follow-up after an initial drift was caught).
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({ config: {} })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const models = providers["snowflake-cortex"].models
+
+          // Each entry: [id, expected toolcall, expected context, expected output]
+          // Values sourced from
+          // https://docs.snowflake.com/en/user-guide/snowflake-cortex/aisql-regional-availability
+          // (openai-gpt-5.2 is not in the restrictions table; using gpt-5 family defaults.)
+          const expectations: Array<[string, boolean, number, number]> = [
+            ["claude-opus-4-7", true, 1000000, 128000],
+            ["openai-gpt-5.1", true, 272000, 8192],
+            ["openai-gpt-5.2", true, 272000, 8192],
+            ["llama4-scout", false, 128000, 8192],
+            ["llama3.3-70b", false, 128000, 8192],
+            // Snowflake docs list output=8192 for this model, but its context
+            // is only 8000 — capped at 4096 (sibling default) so prompt+output
+            // always fit. See provider.ts comment for the rationale.
+            ["snowflake-llama-3.1-405b", false, 8000, 4096],
+            ["mixtral-8x7b", false, 32000, 8192],
+            ["gemini-3.1-pro", false, 1000000, 64000],
+          ]
+
+          for (const [id, toolcall, context, output] of expectations) {
+            expect(models[id], `model ${id} should be defined`).toBeDefined()
+            expect(models[id].capabilities.toolcall, `${id} toolcall`).toBe(toolcall)
+            expect(models[id].limit.context, `${id} context`).toBe(context)
+            expect(models[id].limit.output, `${id} output`).toBe(output)
+          }
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
+  })
+
+  test("buildToolCapableSet derives the allowlist from provider model capabilities", async () => {
+    // Source-of-truth test for the escape-hatch fix: the request transform
+    // gets its allowlist from `provider.models.capabilities.toolcall` rather
+    // than a separate hardcoded set in snowflake.ts. Models added via
+    // altimate-code.json with `tool_call: true` therefore retain tools at
+    // request time, and the picker capability cannot drift from the transform.
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({ config: {} })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const set = buildToolCapableSet(providers["snowflake-cortex"].models)
+          // Every model with capabilities.toolcall === true is in the set; the rest are not.
+          for (const [id, m] of Object.entries(providers["snowflake-cortex"].models)) {
+            expect(set.has(id), `${id} parity`).toBe(m.capabilities.toolcall)
+          }
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
+  })
+
+  test("escape-hatch model with tool_call: true retains tools through transformSnowflakeBody", async () => {
+    // The documented altimate-code.json escape hatch must work end-to-end:
+    // picker shows the model as tool-capable AND the request transform passes
+    // tools through. Without the loader-derived allowlist this test would fail
+    // because the static set never sees user-added entries.
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        config: {
+          provider: {
+            "snowflake-cortex": {
+              models: {
+                "user-tool-model": {
+                  name: "User Tool Model",
+                  limit: { context: 100000, output: 8192 },
+                  tool_call: true,
+                },
+              },
+            },
+          },
+        } as any,
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const toolCapable = buildToolCapableSet(providers["snowflake-cortex"].models)
+          const input = JSON.stringify({
+            model: "user-tool-model",
+            messages: [{ role: "user", content: "hi" }],
+            tools: [{ type: "function", function: { name: "read_file" } }],
+            tool_choice: "auto",
+          })
+          const { body } = transformSnowflakeBody(input, toolCapable)
+          const parsed = JSON.parse(body)
+          expect(parsed.tools).toBeDefined()
+          expect(parsed.tools).toHaveLength(1)
+          expect(parsed.tool_choice).toBe("auto")
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
+  })
+
+  test("escape-hatch model with tool_call: false has tools stripped through transformSnowflakeBody", async () => {
+    // Counterpart to the above: a user-registered non-tool model gets the
+    // tools stripped just like the built-in Llama/Mistral entries do.
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        config: {
+          provider: {
+            "snowflake-cortex": {
+              models: {
+                "user-notool-model": {
+                  name: "User No-Tool Model",
+                  limit: { context: 32000, output: 4096 },
+                  tool_call: false,
+                },
+              },
+            },
+          },
+        } as any,
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const toolCapable = buildToolCapableSet(providers["snowflake-cortex"].models)
+          const input = JSON.stringify({
+            model: "user-notool-model",
+            messages: [
+              { role: "user", content: "hi" },
+              { role: "tool", content: "x", tool_call_id: "t1" },
+            ],
+            tools: [{ type: "function", function: { name: "read_file" } }],
+            tool_choice: "auto",
+          })
+          const { body } = transformSnowflakeBody(input, toolCapable)
+          const parsed = JSON.parse(body)
+          expect(parsed.tools).toBeUndefined()
+          expect(parsed.tool_choice).toBeUndefined()
+          // Orphaned tool messages dropped too.
+          expect(parsed.messages.find((m: { role: string }) => m.role === "tool")).toBeUndefined()
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
+  })
+
+  test("aliased model (picker key != api.id) is matched by buildToolCapableSet on both ids", async () => {
+    // Regression: when a user registers an alias like
+    //   `"my-claude-alias": { "id": "claude-opus-4-7", "tool_call": true }`,
+    // the picker map is keyed by "my-claude-alias" but the request body sends
+    // `model: "claude-opus-4-7"`. The allowlist must include BOTH so tools
+    // aren't silently stripped on the way out.
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        config: {
+          provider: {
+            "snowflake-cortex": {
+              models: {
+                "my-claude-alias": {
+                  id: "claude-opus-4-7",
+                  name: "My Claude Alias",
+                  limit: { context: 1000000, output: 128000 },
+                  tool_call: true,
+                },
+              },
+            },
+          },
+        } as any,
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const toolCapable = buildToolCapableSet(providers["snowflake-cortex"].models)
+          // Both forms must be in the set.
+          expect(toolCapable.has("my-claude-alias")).toBe(true)
+          expect(toolCapable.has("claude-opus-4-7")).toBe(true)
+
+          // And the transform must keep tools when the request uses the api.id form.
+          const input = JSON.stringify({
+            model: "claude-opus-4-7",
+            messages: [{ role: "user", content: "hi" }],
+            tools: [{ type: "function", function: { name: "read_file" } }],
+            tool_choice: "auto",
+          })
+          const { body } = transformSnowflakeBody(input, toolCapable)
+          const parsed = JSON.parse(body)
+          expect(parsed.tools).toBeDefined()
+          expect(parsed.tool_choice).toBe("auto")
+        },
+      })
+    } finally {
+      await restoreAuth()
+    }
+  })
+
+  test("user can register a model not in the hardcoded list via altimate-code.json", async () => {
+    // Documents the option (2) escape hatch: when Snowflake adds a model
+    // before the CLI's hardcoded list catches up, users add it under
+    // provider['snowflake-cortex'].models and it merges into the picker.
+    await setupOAuth()
+    try {
+      await using tmp = await tmpdir({
+        config: {
+          provider: {
+            "snowflake-cortex": {
+              models: {
+                "future-model-x": {
+                  name: "Future Model X",
+                  limit: { context: 200000, output: 32000 },
+                  tool_call: true,
+                },
+              },
+            },
+          },
+        } as any,
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const providers = await Provider.list()
+          const m = providers["snowflake-cortex"].models["future-model-x"]
+          expect(m).toBeDefined()
+          expect(m.name).toBe("Future Model X")
+          expect(m.capabilities.toolcall).toBe(true)
+          expect(m.limit.context).toBe(200000)
+          // Built-in models still present alongside the config-added one.
+          expect(providers["snowflake-cortex"].models["claude-opus-4-7"]).toBeDefined()
         },
       })
     } finally {

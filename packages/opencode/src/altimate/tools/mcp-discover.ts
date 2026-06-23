@@ -4,13 +4,14 @@ import { discoverExternalMcp } from "../../mcp/discover"
 import { resolveConfigPath, addMcpToConfig, findAllConfigPaths, listMcpInConfig } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
+import { MCP } from "../../mcp"
 
 /**
  * Check which MCP server names are permanently configured on disk
  * (as opposed to ephemeral auto-discovered servers in memory).
  */
 async function getPersistedMcpNames(): Promise<Set<string>> {
-  const configPaths = await findAllConfigPaths(Instance.worktree, Global.Path.config)
+  const configPaths = await findAllConfigPaths(Instance.directory, Global.Path.config)
   const names = new Set<string>()
   for (const p of configPaths) {
     for (const name of await listMcpInConfig(p)) {
@@ -35,6 +36,20 @@ function safeDetail(server: { type: string } & Record<string, any>): string {
   return `(${server.type})`
 }
 
+// discovered servers. ALTIMATE_EXTENSION_RPC is a Unix socket path that is
+// unique to the current VS Code extension host process. Writing it to disk
+// causes altimate-code on a future session (or a different VS Code window) to
+// spawn datamate processes that connect to the wrong bridge or a dead socket.
+// Stripping it forces runtime discovery via ~/.altimate/extension-rpc/ sidecars,
+// which always resolves the correct live bridge by matching process.cwd() against
+// each bridge's recorded workspaceFolders.
+function stripSessionEnv(cfg: import("../../config/config").Config.Mcp): import("../../config/config").Config.Mcp {
+  if (cfg.type !== "local" || !cfg.environment) return cfg
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { ALTIMATE_EXTENSION_RPC: _rpc, ...rest } = cfg.environment
+  return { ...cfg, environment: Object.keys(rest).length > 0 ? rest : undefined }
+}
+
 export const McpDiscoverTool = Tool.define("mcp_discover", {
   description:
     "Discover MCP servers from external AI tool configs (VS Code, Cursor, Claude Code, Copilot, Gemini) and optionally add them to altimate-code config permanently.",
@@ -53,7 +68,7 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       .describe('Server names to add. If omitted with action "add", adds all new servers.'),
   }),
   async execute(args, ctx) {
-    const { servers: discovered } = await discoverExternalMcp(Instance.worktree)
+    const { servers: discovered } = await discoverExternalMcp(Instance.directory)
     const discoveredNames = Object.keys(discovered)
 
     if (discoveredNames.length === 0) {
@@ -105,12 +120,19 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
 
     const useGlobal = args.scope === "global"
     const configPath = await resolveConfigPath(
-      useGlobal ? Global.Path.config : Instance.worktree,
+      useGlobal ? Global.Path.config : Instance.directory,
       useGlobal,
     )
 
     for (const name of toAdd) {
-      await addMcpToConfig(name, discovered[name], configPath)
+      // strip the discovery-time  flag. Project-scoped discovery sets
+      //  as a security default (no auto-connect until user approves).
+      // When the user explicitly adds a server via this tool, it should be enabled.
+      const { enabled: _discardEnabled, ...cfgToWrite } = stripSessionEnv(discovered[name]) as any
+      await addMcpToConfig(name, { ...cfgToWrite, enabled: true, updatedAt: new Date().toISOString() } as import('../../config/config').Config.Mcp, configPath)
+      // Connect immediately so /mcps reflects the server status in the current session
+      // without requiring a restart.
+      await MCP.connect(name)
     }
 
     lines.push(`\nAdded ${toAdd.length} server(s) to ${configPath}: ${toAdd.join(", ")}`)

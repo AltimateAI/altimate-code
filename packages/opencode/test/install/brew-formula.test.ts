@@ -37,7 +37,7 @@ function generateBrewFormula(opts: {
     "",
     "  on_macos do",
     "    if Hardware::CPU.intel?",
-    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-code-darwin-x64.zip"`,
+    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-darwin-x64.zip"`,
     `      sha256 "${opts.macX64Sha}"`,
     "",
     "      def install",
@@ -46,7 +46,7 @@ function generateBrewFormula(opts: {
     "      end",
     "    end",
     "    if Hardware::CPU.arm?",
-    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-code-darwin-arm64.zip"`,
+    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-darwin-arm64.zip"`,
     `      sha256 "${opts.macArm64Sha}"`,
     "",
     "      def install",
@@ -58,7 +58,7 @@ function generateBrewFormula(opts: {
     "",
     "  on_linux do",
     "    if Hardware::CPU.intel? and Hardware::CPU.is_64_bit?",
-    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-code-linux-x64.tar.gz"`,
+    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-linux-x64.tar.gz"`,
     `      sha256 "${opts.x64Sha}"`,
     "      def install",
     '        bin.install "altimate"',
@@ -66,7 +66,7 @@ function generateBrewFormula(opts: {
     "      end",
     "    end",
     "    if Hardware::CPU.arm? and Hardware::CPU.is_64_bit?",
-    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-code-linux-arm64.tar.gz"`,
+    `      url "https://github.com/AltimateAI/altimate-code/releases/download/v${opts.version}/altimate-linux-arm64.tar.gz"`,
     `      sha256 "${opts.arm64Sha}"`,
     "      def install",
     '        bin.install "altimate"',
@@ -104,10 +104,10 @@ describe("brew formula template", () => {
   })
 
   test("all 4 platform variants are present", () => {
-    expect(formula).toContain("altimate-code-darwin-x64.zip")
-    expect(formula).toContain("altimate-code-darwin-arm64.zip")
-    expect(formula).toContain("altimate-code-linux-x64.tar.gz")
-    expect(formula).toContain("altimate-code-linux-arm64.tar.gz")
+    expect(formula).toContain("altimate-darwin-x64.zip")
+    expect(formula).toContain("altimate-darwin-arm64.zip")
+    expect(formula).toContain("altimate-linux-x64.tar.gz")
+    expect(formula).toContain("altimate-linux-arm64.tar.gz")
   })
 
   test("macOS uses .zip format", () => {
@@ -184,9 +184,9 @@ describe("publish.ts brew formula template matches test template", () => {
 
   test("publish.ts uses Script.version in URL construction", () => {
     // URLs must use v${Script.version} — not vv or raw tag
-    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-code-darwin-x64.zip")
-    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-code-darwin-arm64.zip")
-    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-code-linux-x64.tar.gz")
-    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-code-linux-arm64.tar.gz")
+    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-darwin-x64.zip")
+    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-darwin-arm64.zip")
+    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-linux-x64.tar.gz")
+    expect(PUBLISH_SCRIPT).toContain("v${Script.version}/altimate-linux-arm64.tar.gz")
   })
 })

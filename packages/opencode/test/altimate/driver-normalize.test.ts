@@ -311,6 +311,48 @@ describe("normalizeConfig — BigQuery", () => {
 })
 
 // ---------------------------------------------------------------------------
+// normalizeConfig — Trino aliases
+// ---------------------------------------------------------------------------
+
+describe("normalizeConfig — Trino", () => {
+  test("dbname → catalog for dbt-trino profiles", () => {
+    const result = normalizeConfig({
+      type: "trino",
+      dbname: "hive",
+    })
+    expect(result.catalog).toBe("hive")
+    expect(result.dbname).toBeUndefined()
+  })
+
+  test("database → catalog for compatibility with generic config", () => {
+    const result = normalizeConfig({
+      type: "trino",
+      database: "iceberg",
+    })
+    expect(result.catalog).toBe("iceberg")
+    expect(result.database).toBeUndefined()
+  })
+
+  test("token → access_token", () => {
+    const result = normalizeConfig({
+      type: "trino",
+      token: "jwt-token",
+    })
+    expect(result.access_token).toBe("jwt-token")
+    expect(result.token).toBeUndefined()
+  })
+
+  test("server → connection_string", () => {
+    const result = normalizeConfig({
+      type: "trino",
+      server: "https://trino.example.com:8443",
+    })
+    expect(result.connection_string).toBe("https://trino.example.com:8443")
+    expect(result.server).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // normalizeConfig — Databricks aliases
 // ---------------------------------------------------------------------------
 

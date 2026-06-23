@@ -1,6 +1,6 @@
 # Warehouses
 
-Altimate Code connects to 12 warehouse types. Configure them in `.altimate-code/connections.json` (project-local) or `~/.altimate-code/connections.json` (global).
+Altimate Code connects to 13 warehouse types. Configure them in `.altimate-code/connections.json` (project-local) or `~/.altimate-code/connections.json` (global).
 
 ## Configuration
 
@@ -117,6 +117,50 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 | `access_token` | Yes | Personal Access Token (PAT) |
 | `catalog` | No | Unity Catalog name |
 | `schema` | No | Schema/database name |
+
+## Trino
+
+```json
+{
+  "trino-prod": {
+    "type": "trino",
+    "host": "trino.example.com",
+    "port": 8443,
+    "protocol": "https",
+    "catalog": "iceberg",
+    "schema": "analytics",
+    "user": "analyst",
+    "password": "{env:TRINO_PASSWORD}"
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `connection_string` | No | Full server URL (alternative to host/port, e.g. `https://trino.example.com:8443`) |
+| `host` | No | Hostname (default: `localhost`) |
+| `port` | No | Port (default: `8080`, or `8443` when `protocol` is `https`) |
+| `protocol` | No | `http` or `https` (default: `http`) |
+| `catalog` | Recommended | Default catalog for query execution and required for schema/table introspection |
+| `schema` | No | Default schema |
+| `user` | No | Trino user (default sent by the client if omitted) |
+| `password` | Auth | Basic authentication password |
+| `access_token` | Auth | Bearer/JWT token |
+| `extra_headers` | No | Additional HTTP headers to send to Trino |
+
+### Using a bearer token
+
+```json
+{
+  "trino-prod": {
+    "type": "trino",
+    "connection_string": "https://trino.example.com:8443",
+    "catalog": "hive",
+    "schema": "default",
+    "access_token": "{env:TRINO_TOKEN}"
+  }
+}
+```
 
 ## PostgreSQL
 
@@ -471,7 +515,7 @@ The `/discover` command can automatically detect warehouse connections from:
 | Source | Detection |
 |--------|-----------|
 | dbt profiles | Searches for `profiles.yml` (see resolution order below) |
-| Docker containers | Finds running PostgreSQL, MySQL, SQL Server, and ClickHouse containers |
+| Docker containers | Finds running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, ClickHouse, and Trino containers |
 | Environment variables | Scans for `SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABRICKS_HOST`, etc. |
 
 ### dbt profiles.yml resolution order

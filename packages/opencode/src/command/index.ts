@@ -72,6 +72,7 @@ export namespace Command {
     CONFIGURE_CLAUDE: "configure-claude",
     CONFIGURE_CODEX: "configure-codex",
     DISCOVER_MCPS: "discover-and-add-mcps",
+    MCPS: "mcps",
     // altimate_change end
   } as const
 
@@ -143,6 +144,15 @@ export namespace Command {
           return PROMPT_DISCOVER_MCPS
         },
         hints: hints(PROMPT_DISCOVER_MCPS),
+      },
+      [Default.MCPS]: {
+        name: Default.MCPS,
+        description: "list added MCP servers and their connection status",
+        source: "command",
+        get template() {
+          return "List all configured MCP servers and their current connection status."
+        },
+        hints: [],
       },
       // altimate_change end
     }

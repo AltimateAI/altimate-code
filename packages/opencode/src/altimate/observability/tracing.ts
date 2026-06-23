@@ -42,11 +42,19 @@ export interface TraceSpan {
   spanId: string
   parentSpanId: string | null
   name: string
-  kind: "session" | "generation" | "tool" | "text" | "span"
+  kind: "session" | "generation" | "tool" | "text" | "span" | "user-message"
   startTime: number
   endTime?: number
   status: "ok" | "error"
   statusMessage?: string
+  /**
+   * True when this span was force-closed by trace reconstruction (worker
+   * restart / cache eviction) rather than by a real error. The span keeps
+   * `status: "error"` so its boundary stays visible, but consumers (the viewer,
+   * error aggregations) should treat it as "incomplete (reconstructed)" — not a
+   * genuine agent/tool failure.
+   */
+  interrupted?: boolean
 
   // --- LLM / generation fields (populated for kind=generation) ---
   model?: {
@@ -148,6 +156,15 @@ export interface TraceFile {
 export interface TraceExporter {
   readonly name: string
   export(trace: TraceFile): Promise<string | undefined>
+  // altimate_change start — M3 fix: optional crash-guard hook.
+  // If implemented, Trace.flushSync() calls this with the crashing session's
+  // id BEFORE writing the canonical crashed file. Exporters that write to a
+  // shared canonical location (e.g. FileExporter on the local filesystem)
+  // should use it to suppress in-flight or subsequent exports that would
+  // race the synchronous crash write. Exporters that POST to remote
+  // endpoints (e.g. HttpExporter) don't need to implement it.
+  markCrashed?(sessionId: string): void
+  // altimate_change end
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +182,30 @@ export class FileExporter implements TraceExporter {
   readonly name = "file"
   private dir: string
   private maxFiles: number
+  // altimate_change start — M3 fix: per-session crash-guard.
+  // We track which sessions have been crashed-out via flushSync rather than
+  // a single boolean, because the same FileExporter instance is shared
+  // across many Trace instances in the TUI worker (worker.ts caches a
+  // single exporter array at module init, then every session does
+  // `Trace.withExporters([...tracingExporters], ...)` which spreads the
+  // array but shares the inner objects). A single boolean would cause one
+  // crashed session to permanently suppress export() for all subsequent
+  // sessions in the same worker. Keying by sessionId scopes the guard to
+  // the actual crashing trace.
+  private crashedSessions = new Set<string>()
+  /** Mark a session's exports as superseded by a synchronous crash write.
+   *  Subsequent or in-flight export() calls for that session bail at the
+   *  next checkpoint (entry, pre-writeFile, or pre-rename). Idempotent.
+   *  The sessionId is normalized through the same sanitization that
+   *  buildTraceFile / export use for the on-disk file name, so callers
+   *  can pass the raw `this.sessionId` without worrying about whether
+   *  it contains path-unsafe characters. */
+  markCrashed(sessionId: string) {
+    if (!sessionId) return
+    const safeId = sessionId.replace(/[/\\.:]/g, "_") || "unknown"
+    this.crashedSessions.add(safeId)
+  }
+  // altimate_change end
 
   constructor(dir?: string, maxFiles?: number) {
     this.dir = dir ?? DEFAULT_TRACES_DIR
@@ -172,6 +213,10 @@ export class FileExporter implements TraceExporter {
   }
 
   async export(trace: TraceFile): Promise<string | undefined> {
+    // altimate_change start — M3 fix: bail at entry if this session has been
+    // marked crashed by a concurrent flushSync.
+    if (this.crashedSessions.has(trace.sessionId)) return undefined
+    // altimate_change end
     let tmpPath: string | undefined
     try {
       await fs.mkdir(this.dir, { recursive: true })
@@ -181,7 +226,20 @@ export class FileExporter implements TraceExporter {
       // Atomic write: write to temp file, then rename — prevents partial reads
       // when concurrent snapshots or exports target the same file
       tmpPath = filePath + `.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
+      // altimate_change start — M3 fix: re-check before the long writeFile.
+      // For large traces the writeFile takes 100+ms — a wide window for
+      // flushSync to interleave.
+      if (this.crashedSessions.has(trace.sessionId)) return undefined
+      // altimate_change end
       await fs.writeFile(tmpPath, JSON.stringify(trace, null, 2))
+      // altimate_change start — M3 fix: re-check before the rename. If
+      // flushSync ran during the writeFile, drop the tmp instead of
+      // overwriting flushSync's crashed canonical file.
+      if (this.crashedSessions.has(trace.sessionId)) {
+        await fs.unlink(tmpPath).catch(() => {})
+        return undefined
+      }
+      // altimate_change end
       await fs.rename(tmpPath, filePath)
 
       if (this.maxFiles > 0) {
@@ -295,6 +353,68 @@ function formatDurationShort(ms: number): string {
 }
 // altimate_change end
 
+// altimate_change start — shared truncation cap for `logUserMessage` span input.
+// Exported so the viewer's chat-tab dedupe can compare against the same boundary
+// (otherwise it'd silently drift if either side changes the magic number).
+export const USER_MESSAGE_INPUT_MAX_CHARS = 4000
+
+/**
+ * Upper bound on the number of spans serialized into a single `ses_<id>.json`.
+ * `snapshot()` rewrites the entire spans array on every event, so an unbounded
+ * long-lived session would grow the file without limit and pay O(n) per write
+ * (O(n²) over the session). When a trace exceeds this, serialization keeps the
+ * head (early context: prompt + first tools) and the tail (most recent
+ * activity) and elides the middle with a single marker span — bounding both
+ * file size and per-event write cost. In-memory spans are untouched; only the
+ * on-disk projection is capped. Override with `ALTIMATE_TRACE_MAX_SPANS`.
+ */
+export const MAX_SERIALIZED_SPANS = (() => {
+  const raw = parseInt(process.env["ALTIMATE_TRACE_MAX_SPANS"] ?? "", 10)
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000
+})()
+
+/**
+ * Bound the spans written to disk to `cap` while preserving the most useful
+ * context: keep the head (root span, prompt, first tool calls) and the tail
+ * (most recent activity), and replace the elided middle with one marker span.
+ * Returns the input unchanged when it's already within the cap.
+ */
+export function capSpansForSerialization(spans: TraceSpan[], cap: number = MAX_SERIALIZED_SPANS): TraceSpan[] {
+  if (cap <= 0 || spans.length <= cap) return spans
+  const headCount = Math.max(1, Math.floor(cap * 0.3))
+  const tailCount = Math.max(1, cap - headCount - 1) // reserve one slot for the marker
+  // Only elide if the result is actually smaller than the input (+1 for the
+  // marker we'd add) — otherwise there's nothing to gain.
+  if (headCount + tailCount + 1 >= spans.length) return spans
+  let head = spans.slice(0, headCount)
+  const tail = spans.slice(spans.length - tailCount)
+  // Guarantee the structural root (session) span survives the cut even if it
+  // isn't in the head slice — rehydrate and the viewer's tree both require it,
+  // and the elision marker is parented to it. In practice the root is index 0
+  // (pushed first), so this is defensive, but it makes the invariant explicit
+  // instead of silently depending on span ordering.
+  const rootSpan = spans.find((s) => s.parentSpanId === null) ?? null
+  if (rootSpan && !head.some((s) => s.spanId === rootSpan.spanId) && !tail.some((s) => s.spanId === rootSpan.spanId)) {
+    head = [rootSpan, ...head.slice(0, headCount - 1)]
+  }
+  const elided = spans.length - head.length - tail.length
+  const rootId = rootSpan?.spanId ?? null
+  const anchor = head[head.length - 1]
+  const anchorTime = anchor?.endTime ?? anchor?.startTime ?? 0
+  const marker: TraceSpan = {
+    spanId: `elided-${head.length}-${tail.length}-of-${spans.length}`,
+    parentSpanId: rootId,
+    name: `… ${elided} spans elided (trace exceeded ${cap} spans) …`,
+    kind: "span",
+    startTime: anchorTime,
+    endTime: anchorTime,
+    status: "ok",
+    attributes: { elided, totalSpans: spans.length },
+  }
+  return [...head, marker, ...tail]
+}
+// altimate_change end
+
 export class Trace {
   // Global active trace — set when a session starts, cleared on end.
   private static _active: Trace | null = null
@@ -337,6 +457,17 @@ export class Trace {
   private metadata: TraceFile["metadata"] = {}
   private snapshotDir: string | undefined
   private snapshotPending = false
+  // altimate_change start — M2 fix: if a snapshot was requested while another
+  // was in flight (and thus dropped by the snapshotPending debounce), we
+  // schedule exactly one follow-up snapshot when the in-flight one finishes.
+  // Without this, the on-disk file lags memory until a fresh event arrives
+  // — and if the process exits in that gap, the burst's tail is lost.
+  private snapshotRequestedDuringPending = false
+  // Once endTrace begins its canonical write, no more snapshots may run —
+  // they would race endTrace's mutation of the root span (endTime, status)
+  // and could clobber endTrace's content with stale pre-end state.
+  private endTraceStarted = false
+  // altimate_change end
   private snapshotPromise: Promise<void> | undefined
   // Set true when flushSync runs. Prevents in-flight async snapshot()
   // calls from racing with the synchronous crash write — without this,
@@ -429,6 +560,112 @@ export class Trace {
     this.snapshot()
   }
 
+  // altimate_change start — rehydrate a Trace from an existing on-disk file.
+  // Used by `getOrCreateTrace` on cache miss for a session whose trace file
+  // already exists (worker restart, MAX_TRACES eviction). Without this, the
+  // fresh Trace.create() + startTrace() path would push a single root span
+  // into an empty `this.spans` and the immediate snapshot would clobber the
+  // rich on-disk trace. Returns true if a usable trace was loaded; false
+  // otherwise (the caller should fall back to startTrace).
+  //
+  // Does NOT call snapshot — the file is already correct on disk; an
+  // unnecessary write here would compete with concurrent flushSync paths.
+  //
+  // Async: read the file off the event-loop hot path so a worker-restart
+  // cache miss with a large existing trace doesn't head-of-line-block all
+  // session events. The actual hot path was bounded (cache-miss only) but
+  // the sync `readFileSync` could still pause the worker noticeably for a
+  // multi-MB trace.
+  async rehydrateFromFile(sessionId: string): Promise<boolean> {
+    if (!this.snapshotDir) return false
+    const safeId = sessionId.replace(/[/\\.:]/g, "_") || "unknown"
+    const filePath = path.join(this.snapshotDir, `${safeId}.json`)
+    let raw: string
+    try {
+      raw = await fs.readFile(filePath, "utf-8")
+    } catch {
+      return false
+    }
+    let trace: TraceFile
+    try {
+      trace = JSON.parse(raw) as TraceFile
+    } catch {
+      return false
+    }
+    // `buildTraceFile` writes the sanitized form of `sessionId` (see ~line 808
+    // `.replace(/[/\\.:]/g, "_")`), so compare the same way — otherwise valid
+    // trace files with `/`, `\`, `.`, `:` in the session id would be rejected
+    // and the caller would fall back to `startTrace`, clobbering them.
+    const normalizedSessionId = sessionId.replace(/[/\\.:]/g, "_") || "unknown"
+    if (
+      !trace ||
+      trace.sessionId !== normalizedSessionId ||
+      !Array.isArray(trace.spans) ||
+      trace.spans.length === 0
+    ) {
+      return false
+    }
+    const root = trace.spans.find((s) => s.parentSpanId === null && s.kind === "session")
+    if (!root) return false
+
+    this.sessionId = sessionId
+    // Restore the original traceId so post-rehydrate snapshots/exports keep
+    // the same trace identity (downstream OTLP/Jaeger-style consumers and the
+    // trace viewer URL both depend on it being stable across rehydration).
+    if (typeof trace.traceId === "string" && trace.traceId.length > 0) {
+      this.traceId = trace.traceId
+    }
+    this.spans = trace.spans.map((s) => ({ ...s }))
+    this.rootSpanId = root.spanId
+    this.metadata = { ...(trace.metadata ?? {}) }
+    this.startTime = root.startTime
+    if (trace.summary) {
+      this.totalTokens = trace.summary.totalTokens ?? 0
+      this.totalCost = trace.summary.totalCost ?? 0
+      this.toolCallCount = trace.summary.totalToolCalls ?? 0
+      this.generationCount = trace.summary.totalGenerations ?? 0
+      if (trace.summary.tokens) {
+        this.tokensBreakdown = {
+          input: trace.summary.tokens.input ?? 0,
+          output: trace.summary.tokens.output ?? 0,
+          reasoning: trace.summary.tokens.reasoning ?? 0,
+          cacheRead: trace.summary.tokens.cacheRead ?? 0,
+          cacheWrite: trace.summary.tokens.cacheWrite ?? 0,
+        }
+      }
+    }
+    // Mid-session rehydration: the root span's endTime (if any) was set by a
+    // prior endTrace; clear it so the trace doesn't render as "completed."
+    const r = this.spans.find((s) => s.spanId === this.rootSpanId)
+    if (r) {
+      delete (r as { endTime?: number }).endTime
+      r.status = "ok"
+    }
+    // Close any in-flight generation spans as interrupted. The transient state
+    // these spans depended on (`this.currentGenerationSpanId`, `generationText`,
+    // `generationToolCalls`, `pendingToolResults`) lives only in memory and
+    // can't be reconstructed from the on-disk file. If we leave open spans
+    // open, the next `step-finish` event for that turn drops at the
+    // `if (!this.currentGenerationSpanId) return` guard in `logStepFinish`
+    // and any later `logToolCall` falls back to attaching tool spans to
+    // `rootSpanId`, silently degrading the trace shape. Marking them
+    // interrupted preserves the partial data and makes the boundary visible.
+    const now = Date.now()
+    for (const s of this.spans) {
+      if (s.kind === "generation" && s.endTime === undefined) {
+        s.endTime = now
+        s.status = "error"
+        s.statusMessage = "interrupted — altimate-code restarted before this step finished recording; not an agent failure"
+        // Distinguish a recorder restart from a real failure so the viewer and
+        // error aggregations don't paint this red or count it as an incident.
+        s.interrupted = true
+      }
+    }
+    this.endTraceStarted = false
+    return true
+  }
+  // altimate_change end
+
   /**
    * Enrich the trace with model/provider info from the first assistant message.
    * Called when the message.updated event fires with assistant role.
@@ -453,6 +690,46 @@ export class Trace {
     if (title) this.metadata.title = title
     if (prompt) this.metadata.prompt = prompt
   }
+
+  // altimate_change start — set only the user prompt without mutating title.
+  // The bus emits an auto-generated session title (Path C, `session.updated`)
+  // separately from the user's actual prompt text (Path B, `message.part.updated`).
+  // Capturing the prompt via `setTitle(text, text)` would race the title-agent:
+  // if the user text part arrived after `session.updated`, the nice generated
+  // title ("Greeting") would regress to the raw user input ("hi"). Use this
+  // method for prompt-only capture.
+  setPrompt(prompt: string) {
+    if (prompt) this.metadata.prompt = prompt
+  }
+  // altimate_change end
+
+  // altimate_change start — record an individual user message as a span so the
+  // chat tab can render multi-turn conversations. Without this, the viewer's
+  // chat tab can only display `metadata.prompt` at the top — a single string —
+  // and every later user message is silently dropped from the conversation
+  // rendering. Tracked as `kind: "user-message"` so the viewer can interleave
+  // these with `kind: "generation"` spans by startTime.
+  logUserMessage(text: string) {
+    if (!this.rootSpanId) return
+    if (!text) return
+    try {
+      const now = Date.now()
+      this.spans.push({
+        spanId: randomUUIDv7(),
+        parentSpanId: this.rootSpanId,
+        name: "user-message",
+        kind: "user-message",
+        startTime: now,
+        endTime: now,
+        status: "ok",
+        input: text.length > USER_MESSAGE_INPUT_MAX_CHARS ? text.slice(0, USER_MESSAGE_INPUT_MAX_CHARS) : text,
+      })
+      this.snapshot()
+    } catch {
+      // best-effort
+    }
+  }
+  // altimate_change end
 
   /**
    * Open a generation span from a step-start event.
@@ -717,6 +994,8 @@ export class Trace {
       snapshotMetadata = this.metadata
     }
 
+    snapshotSpans = capSpansForSerialization(snapshotSpans)
+
     return {
       version: 2,
       traceId: this.traceId,
@@ -750,9 +1029,25 @@ export class Trace {
    */
   private snapshot() {
     if (!this.snapshotDir || !this.sessionId) return
-    if (this.snapshotPending) return // Debounce — only one in flight at a time
+    // altimate_change start — M2 fix: when debounce drops this call, record
+    // that another snapshot is needed once the in-flight one settles.
+    // Without this, the disk file lags memory whenever events arrive faster
+    // than snapshots can complete (typical for bursty LLM turns).
+    if (this.snapshotPending) {
+      this.snapshotRequestedDuringPending = true
+      return
+    }
+    // No new snapshots once endTrace has begun: the canonical write is now
+    // endTrace's job, and a concurrent snapshot would capture state from
+    // BEFORE endTrace's root-span mutation and could lose to-end-only fields.
+    if (this.endTraceStarted) return
+    // altimate_change end
     if (this.crashed) return // flushSync wrote the canonical crashed file; do NOT race it
     this.snapshotPending = true
+    // altimate_change start — M2 fix: reset before kicking off, so any
+    // snapshot() calls during this write set the dirty flag for our .finally.
+    this.snapshotRequestedDuringPending = false
+    // altimate_change end
 
     const trace = this.buildTraceFile()
     const safeId = (this.sessionId || "unknown").replace(/[/\\.:]/g, "_") || "unknown"
@@ -779,6 +1074,17 @@ export class Trace {
       .finally(() => {
         this.snapshotPending = false
         this.snapshotPromise = undefined
+        // altimate_change start — M2 fix: if any span was added (or any
+        // snapshot was requested) while we were writing, schedule exactly
+        // one follow-up to flush those changes. Bounded: at most one extra
+        // write per "burst → quiet" cycle, regardless of burst size.
+        // Skip the follow-up if endTrace has taken over the canonical write,
+        // or if flushSync has marked the trace crashed.
+        if (this.snapshotRequestedDuringPending && !this.crashed && !this.endTraceStarted) {
+          this.snapshotRequestedDuringPending = false
+          queueMicrotask(() => this.snapshot())
+        }
+        // altimate_change end
       })
   }
 
@@ -793,13 +1099,26 @@ export class Trace {
   }
 
   /**
-   * Wait for any pending async snapshot to complete.
-   * Use from tests that need to read the trace file deterministically after
-   * a span completion (instead of `await sleep(50)` which races on slow CI runners).
-   * No-op if no snapshot is in flight.
+   * Wait for the on-disk snapshot to catch up with in-memory state.
+   *
+   * Drains both the current in-flight snapshot and any M2 follow-up snapshot
+   * scheduled by its `.finally`. Bounded by `MAX_DRAIN_ITER` to guard against
+   * pathological cases where events arrive faster than they can be drained.
    */
   async flush(): Promise<void> {
-    if (this.snapshotPromise) await this.snapshotPromise.catch(() => {})
+    // altimate_change start — M2 fix companion: drain follow-up snapshots so
+    // callers (and tests) see disk == memory after flush() returns. Without
+    // this drain loop, the M2 fix's queueMicrotask follow-up runs AFTER
+    // flush() resolves and the disk still trails by one snapshot.
+    const MAX_DRAIN_ITER = 16
+    for (let i = 0; i < MAX_DRAIN_ITER; i++) {
+      if (this.snapshotPromise) await this.snapshotPromise.catch(() => {})
+      if (!this.snapshotRequestedDuringPending && !this.snapshotPromise) return
+      // Yield so any queued microtask (the M2 follow-up) gets to run and
+      // populate snapshotPromise for the next iteration to await.
+      await new Promise<void>((r) => queueMicrotask(r))
+    }
+    // altimate_change end
   }
 
   /**
@@ -871,6 +1190,29 @@ export class Trace {
    * Returns the result from the first exporter that succeeds (typically the file path).
    */
   async endTrace(error?: string): Promise<string | undefined> {
+    // altimate_change start — M2 fix companion: claim the canonical write
+    // BEFORE awaiting the in-flight snapshot so any follow-up snapshot the
+    // in-flight one might schedule in its `.finally` is suppressed.
+    //
+    // Microtask-ordering invariant we rely on below: when an in-flight
+    // snapshot resolves, its `.finally` runs synchronously inside the
+    // promise chain — and only THEN does the `await this.snapshotPromise`
+    // (line below) hand control back to this function. By that point, if
+    // the .finally tried to schedule a follow-up snapshot via
+    // `queueMicrotask`, the follow-up is queued but hasn't run yet. We set
+    // `endTraceStarted=true` BEFORE the await, so whether the .finally
+    // already checked the flag (during the await) or the queued microtask
+    // runs after this point (calling `snapshot()` which re-checks at line
+    // ~803), both paths see the flag and bail.
+    this.endTraceStarted = true
+    // M3 fix: if flushSync already wrote the canonical crashed file, return
+    // the path to that file directly. Calling exporters would either bail
+    // (FileExporter, via the per-session crash guard) or POST stale
+    // "completed" data (HttpExporter). The crash signal is authoritative
+    // across exporters once flushSync has fired.
+    if (this.crashed) return this.getTracePath()
+    // altimate_change end
+
     // Wait for any in-flight snapshot to complete before final write
     if (this.snapshotPromise) await this.snapshotPromise.catch(() => {})
 
@@ -980,6 +1322,21 @@ export class Trace {
       // Set crashed BEFORE writing so any in-flight async snapshot() will
       // bail out at its rename step instead of clobbering our crashed file.
       this.crashed = true
+      // altimate_change start — M3 fix: notify every exporter that the current
+      // session is crashed BEFORE writing the canonical file synchronously
+      // below. Exporters that share a canonical write target (e.g. FileExporter)
+      // can suppress in-flight or future writes for this session. Polymorphic
+      // dispatch via the optional `markCrashed?` method — no instanceof check,
+      // so custom exporters with similar semantics participate automatically.
+      // Without this, an in-flight `await endTrace()` whose export() is
+      // mid-writeFile (a 100+ms window on multi-MB traces) lands its rename
+      // after this synchronous write and clobbers the crashed content.
+      if (this.sessionId) {
+        for (const exp of this.exporters) {
+          exp.markCrashed?.(this.sessionId)
+        }
+      }
+      // altimate_change end
       this.currentGenerationSpanId = undefined
       const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
       if (rootSpan) {

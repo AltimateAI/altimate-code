@@ -12,6 +12,11 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test"
 import { Dispatcher } from "../../src/altimate/native"
 import { Log } from "../../src/util/log"
+// Static import so resetShownSuggestions() targets the SAME module instance that
+// the tools (sql-analyze, schema-inspect) use. A dynamic `await import` here can
+// resolve to a different instance under parallel CI, leaving the real dedup Set
+// un-reset → flaky cross-test pollution of the progressive-suggestion state.
+import { PostConnectSuggestions } from "../../src/altimate/tools/post-connect-suggestions"
 
 Log.init({ print: false })
 
@@ -37,7 +42,6 @@ function makeCtx(agent = "builder") {
 // ---------------------------------------------------------------------------
 beforeEach(async () => {
   Dispatcher.reset()
-  const { PostConnectSuggestions } = await import("../../src/altimate/tools/post-connect-suggestions")
   PostConnectSuggestions.resetShownSuggestions()
 })
 
@@ -291,6 +295,7 @@ describe("REAL EXEC: sql_analyze tool", () => {
 
   test("S27: sql_analyze with parse error — no suggestion", async () => {
     Dispatcher.reset()
+    PostConnectSuggestions.resetShownSuggestions()
     Dispatcher.register("sql.analyze", async () => ({
       success: true, issues: [], issue_count: 0, confidence: "none",
       confidence_factors: [], error: "Parse error at line 1",
@@ -298,8 +303,10 @@ describe("REAL EXEC: sql_analyze tool", () => {
 
     const result = await execSqlAnalyze("SELCT * FORM users")
     expect(result.output).toContain("Parse error")
-    // Still gets suggestion on first call since it didn't throw
-    expect(result.output).toContain("schema_inspect")
+    // A `result.error` value flips `isRealFailure` to true in sql-analyze.ts,
+    // which suppresses the progressive-disclosure suggestion. So no
+    // `schema_inspect` follow-up should appear — matching the test name.
+    expect(result.output).not.toContain("schema_inspect")
   })
 
   test("S28: sql_analyze throws — returns error, no suggestion", async () => {

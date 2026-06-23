@@ -24,7 +24,7 @@ const ADAPTER_TYPE_MAP: Record<string, string> = {
   oracle: "oracle",
   sqlite: "sqlite",
   spark: "databricks",
-  trino: "postgres", // wire-compatible
+  trino: "trino",
   clickhouse: "clickhouse",
 }
 

@@ -5,6 +5,309 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.10] - 2026-06-22
+
+### Fixed
+
+- **The daily date no longer invalidates the cached system prompt across midnight.** The volatile "Today's date" line was the first entry in the cache-controlled system prefix, so a session left open across midnight within the cache TTL dropped its entire cached system prompt and paid to rebuild it. The date now rides the trailing user message — off the long-lived system-prefix cache and onto the rolling per-turn breakpoint that is rewritten every turn anyway — so the cached system bytes stay date-invariant and the agent still receives today's date each turn. (#950, fixes #949)
+
+### Internal
+
+- **The Windows installer Pester suite is deterministic on the updated `windows-latest` runner.** The harness now applies `PROCESSOR_*` overrides inside the child `pwsh` session instead of relying on Process-scope inheritance, which the new runner image re-initialized for the loader-managed `PROCESSOR_ARCHITECTURE` (it arrived blank → a spurious `Unsupported OS/Arch` failure). Test-only: the shipped `install.ps1` and the v0.8.9 binaries are unaffected — real users always have a populated `PROCESSOR_ARCHITECTURE`. (#959, fixes #958)
+- **Added a v0.8.10 adversarial + coverage suite** that closes the prior test gap on the date fix — it exercises the trailing-user-message path (date reaches the model, only the last user turn is tagged, no accumulation across turns, survives an all-ignored user turn) plus a static regression guard on the Windows installer harness. (#950, #959)
+
+## [0.8.9] - 2026-06-19
+
+### Fixed
+
+- **The non-interactive `run` guard no longer mis-handles a blank env var.** A blank/whitespace `ALTIMATE_NON_INTERACTIVE=` is now treated as unset, so it can't silently reintroduce the headless `run` hang that #937 fixed. (#937 follow-up)
+- **Session transcript boolean query flags accept the common falsey strings.** `thinking`, `toolDetails`, and `assistantMetadata` now treat `false`/`0`/`no`/`off` (case-insensitive) as false, not just the literal `"false"`. (#941 follow-up)
+- **Writing an MCP server entry refuses to clobber an unparseable config** (detected via `parse()` with an error sink, not the error-tolerant `parseTree()`), and `updatedAt` is preserved through config normalization so the datamate reconnect signal survives. (#893 follow-up)
+- **dbt error bubbling strips the full ANSI escape family** (cursor/erase sequences from progress spinners), not just SGR color codes. (#933 follow-up)
+
+### Changed
+
+- **The headless `serve` startup upgrade check is jittered** (base + random, ~1–6s) so a fleet restarting together doesn't stampede the unauthenticated GitHub releases API in the same instant. (#940 follow-up)
+
+### Internal
+
+- **Diverged upstream constants are wrapped in `altimate_change` markers** (`DEFAULT_CHUNK_TIMEOUT`, the question-tool `output` field) so they survive upstream merges. (#844, #937)
+- **Added a v0.8.9 adversarial test suite** covering the shipping code and the review fixes under hostile input (question-tool env matrix, MCP config parse-guard, startup-upgrade fail-safety + jitter).
+
+## [0.8.8] - 2026-06-19
+
+### Added
+
+- **Windows now has a one-line PowerShell installer.** `irm https://www.altimate.sh/install.ps1 | iex` downloads the standalone binary from GitHub releases (AVX2-aware, with a baseline fallback), adds it to your user `PATH`, and supports `-Version`, `-NoPathUpdate`, and `-ForceBaseline`. `altimate upgrade` uses the same path on Windows. (#930)
+- **IDE-aware datamate transport, MCP enabled-state persistence, and a `/mcps` command.** The active IDE's `mcp.json` datamate entry/URL is mirrored into `altimate-code.json` and reconnected when it changes; enabled/disabled state for MCP servers now persists to disk; `/mcps` lists and toggles servers; project `mcp.json` files are discovered recursively (project-scoped servers are discovered disabled, never auto-connected). (#893)
+- **Session transcript REST endpoint for the datamates extension.** `GET /session/:id/transcript` returns the full conversation as formatted Markdown, with `thinking`, `toolDetails`, and `assistantMetadata` query flags. (#941)
+
+### Changed
+
+- **Headless `serve` now checks for and applies updates on startup.** When `autoupdate` is unset (the default) and a supported install method is present, `serve` performs a one-shot, best-effort self-upgrade shortly after start. It never restarts the running process and can never crash `serve` (errors are swallowed). Opt out with `autoupdate: false` or `"notify"` in config, or `OPENCODE_DISABLE_AUTOUPDATE=1`. (#940)
+- **The per-chunk streaming watchdog timeout was raised from 2 minutes to 5 minutes** so slow warehouse/LLM streams are not aborted prematurely. (#844)
+
+### Fixed
+
+- **`dbt show`/`compile` failures now surface the real dbt error** instead of a generic "Could not parse", with inline SQL redacted from the message so secrets/PII don't leak into logs. (#933)
+- **The question tool no longer hangs in non-interactive contexts.** `altimate run` is detected as headless and returns "Unanswered" (letting the agent decide) rather than blocking forever; `ALTIMATE_AUTO_ANSWER=first|last|<label>` can pre-answer. (#937)
+- **Windows release archives are verified by checksum in both installers** before extraction, and latest-version resolution is more resilient to transient fetch failures. (#942, #946)
+
+### Internal
+
+- **`serve` logs the trace directory on startup** so operators can find session traces. (#929)
+- **Added a release-validation regression suite** covering the merged PRs. (#952)
+
+## [0.8.7] - 2026-06-10
+
+### Added
+
+- **Verified query optimization — `altimate_core_rewrite` now proves a rewrite is safe before suggesting it.** A new `verify_equivalence` mode composes the rewrite engine with the equivalence checker: a candidate rewrite is labeled **VERIFIED** only when the engine affirmatively returns `equivalent === true`; everything else (including the no-schema case) is still returned but labeled "review before applying." This is the gated core for one-click verified query optimization, so an optimization that silently changes results is never presented as safe. (#918)
+- **Per-turn tool retrieval trims the tool-definition context flood.** Three flag-gated, default-off agent-loop reliability features: a per-turn tool subset (always-on core tools + lexical top-k, never dropping a tool referenced mid-trajectory) that cuts the ~78-tool definition payload sent each turn; grammar/JSON-Schema constrained decoding for local models (vLLM/LM Studio/llama.cpp); and a pluggable pre-execution critic gate for side-effecting tools. All default off, so the existing agent path is unchanged unless explicitly enabled. (#858)
+
+### Changed
+
+- **Upgraded the SQL engine `@altimateai/altimate-core` `0.4.0` → `0.5.1` and wired its new equivalence capabilities into the dbt PR reviewer.** The reviewer now forwards the project's SQL **dialect** hint to the equivalence engine, so dialect-specific compiled warehouse SQL (e.g. Snowflake semi-structured `col:field`) parses and the comparison is decided instead of abstaining on a syntax error, and it honors the engine's new authoritative **`decidable`** flag — abstaining when the engine itself says it could not decide, rather than guessing. An empty/auto-detect dialect is coerced to "no hint" so the engine is never handed an unknown dialect. (#925, #928)
+
+### Fixed
+
+- **The dbt PR reviewer is more reliable and less noisy.** Demo-parity hardening: tighter PII-review precision, reduced safe-refactor review noise, schema YAML catalog rules now run in review, and added DuckDB data-diff end-to-end coverage. (#919)
+- **dbt review no longer misclassifies YAML files.** Schema/property YAML files are classified correctly so the right rules apply to them. (#920)
+- **The `release-v0.8.5` adversarial test gate is pinned to a constant version** so it stops breaking on every subsequent release. (#923)
+
+### Internal
+
+- **Centralized code-review dispatch on PR ready.** A gated loop dispatches a centralized OCR/Gemini review when a pull request is marked ready for review. (#914)
+
+## [0.8.6] - 2026-06-08
+
+### Added
+
+- **Session traces now work in headless `serve` mode — your VS Code "Altimate Code" chat sessions show up in `/traces` just like terminal sessions.** Sessions driven over `altimate serve` (the server behind the VS Code chat panel) had no TUI worker observing the event stream, so trace files were never written and `/traces` was always empty after a chat. The per-session tracing logic is now a shared `TraceConsumer` wired into both the TUI worker and `serve`, so IDE chat sessions produce the same incremental `ses_<id>.json` files — full multi-turn waterfall, recorded prompt, tool-call log, cost, and timing. `serve` now registers `SIGINT`/`SIGTERM`/`beforeExit` handlers that drain and finalize in-flight traces on shutdown (so a serve trace ends as `completed`, not `running`, and the process exits with signal-conventional codes), finalizes a session as soon as it is deleted, and finalizes all open sessions concurrently so a busy server isn't cut off mid-write by a container shutdown grace period. (#886)
+
+## [0.8.5] - 2026-06-06
+
+### Fixed
+
+- **The `github/review` composite action can be downloaded by GitHub Actions again.** The release tree contained three VS Code image symlinks whose removed targets caused GitHub's action downloader to reject the entire archive before the review step started. The images are now self-contained files and a release-critical test prevents dangling links from returning.
+- **A valid dbt manifest is no longer mislabeled as a lint-only run.** Manifest availability is now checked independently from changed-model lookup, so new models and other valid manifests receive the correct full-run status.
+- **The release-version lookup is rate-limit resilient and never caches a floating `latest`.** The composite action now authenticates its GitHub release-API call with the workflow token (lifting the 60→1,000 req/hr unauthenticated limit) and skips the binary cache entirely when the version resolves to `latest`, so a single rate-limited or offline lookup can no longer pin a stale binary across all subsequent runs.
+- **Session traces survive worker restarts, concurrency, and long sessions without corruption or false alarms.** Three reliability follow-ups to the v0.8.4 trace-durability fix: reconstructed in-flight spans are marked `interrupted` and render with an amber "⚠" instead of red (and are excluded from the session error count) so a restart isn't misread as a failure (#901); `getOrCreateTrace` no longer resurrects a `Trace` into a cache that a concurrent stream switch already cleared, preventing an orphan writer under a dead stream (#902); and the on-disk `ses_<id>.json` projection is bounded to `MAX_SERIALIZED_SPANS` (default 5000, override via `ALTIMATE_TRACE_MAX_SPANS`), keeping head + tail and eliding the middle so long sessions no longer grow the file without bound or pay O(n²) write cost (#903).
+
+### Added
+
+- **Direct GitHub onboarding and a live dbt review demo.** The GitHub App installer now opens GitHub's repository-selection screen directly, and the README/docs link to the public `dbt-pr-review-demo` pull requests.
+
+### Security
+
+- **The hosted Altimate API key is no longer placed on the `jq` process arg list.** The credential write reads the key from the environment inside the `jq` program, keeping it out of `argv` (which is visible to other processes and printed verbatim when `ACTIONS_STEP_DEBUG` enables `set -x`).
+
+## [0.8.4] - 2026-06-05
+
+A trace-durability patch. Open `/traces` mid-session and you'd see a rich waterfall — then the moment the agent finished its turn the view collapsed to a single "system-prompt" span, the Summary tab's *"What was asked"* showed *"No prompt recorded"*, and the Chat tab dropped every user turn but the last. The data was genuinely gone from disk, not just hidden in the viewer. This release stops the on-disk trace from being overwritten after each turn and makes the file authoritative across worker restarts. A five-persona pre-release review drove a follow-up wording fix so a reconstructed trace isn't misread as a failed run.
+
+### Fixed
+
+- **Session traces no longer lose their data after every agent turn — the waterfall, summary prompt, and chat tab all stay intact.** A `session.status === "idle"` handler in the shared TUI worker fired once *per turn* (not once per session), ending the `Trace` and evicting it from cache; the next event reconstructed a fresh `Trace` whose near-empty initial state overwrote the rich `ses_<id>.json` on disk with a one-span file. Symptoms: the **Waterfall** collapsed to a lone "system-prompt" span, the **Summary** tab's *"What was asked"* went to *"No prompt recorded"*, and the **Chat** tab kept only the last user turn. The destructive idle handler is removed (sessions are long-lived — finalization happens on shutdown and `MAX_TRACES` eviction only), trace reconstruction now **rehydrates from the on-disk file** before falling back to a fresh start, and each user prompt is recorded as its own `user-message` span so multi-turn sessions render every turn in order. Authored-text scoping keeps synthetic parts (MCP banners, decoded file contents, reminders) out of the prompt and chat surfaces. Distinct from the v0.8.1 trace-corruption fix (#865), which addressed intra-instance concurrency — this is the worker-level cache lifecycle. (#895)
+- **A trace reconstructed after a restart no longer reads as a failed run.** When the on-disk trace is rehydrated (worker restart or `MAX_TRACES` eviction), any generation span still in flight is closed and marked so its boundary stays visible in the waterfall. The status message now states plainly that altimate-code restarted before the step finished recording and that this is **not an agent failure** — so an on-call reader debugging from a trace isn't sent chasing a phantom incident. (#895)
+
+## [0.8.3] - 2026-06-04
+
+A plan-mode reliability patch for the hosted gateway and other non-Anthropic models. Ask the `plan` agent to plan something benign — *"plan a feature to add a verify-output button"* — on `altimate-backend/altimate-default` (GPT-5.x) and it could refuse outright with *"I'm sorry, but I cannot assist with that request."* This release fixes the refusal at its source, hardens the fix against prompt-injection, and rewrites a warning that was misdiagnosing the symptom.
+
+### Fixed
+
+- **Plan mode no longer refuses benign requests on `altimate-default` and other non-Anthropic models.** The root cause was *how* altimate-code delivers its own plan instructions: a `<system-reminder>`-wrapped block attached as user-role text. Claude is trained to read that tag as authoritative system guidance, but GPT-5.x, Gemini, and other non-Anthropic models pattern-matched the same block — carrying `STRICTLY FORBIDDEN` / `ZERO exceptions` / `MUST` language — as a **prompt-injection attempt** and declined, returning *"I'm sorry, but I cannot assist with that request."* for ordinary developer tasks. altimate-code now **hoists those self-injected reminders into proper `role:"system"` messages** for non-Anthropic models, so they arrive as instructions rather than suspect user input; Anthropic models are unchanged. The hoist is scoped by **provenance** to altimate-code's own reminder parts — user-supplied files, MCP-resource bodies, and `data:`-URL content can never gain system-role priority, even when they begin with `<system-reminder>`. Gateway models are routed by `model.family` (via a shared `familyVendor` classifier) so a Claude- or Gemini-backed gateway model lands on the right base prompt instead of an Anthropic-style fallback. (#887, #888)
+- **The "plan agent used no tools" warning is accurate — and no longer false-fires.** Previously the warning blamed the model's *tool-use capability* (misleading — these models are fully tool-capable) and could fire on the final text-only step of a **successful** multi-step plan session, making a working session look broken. The trip-wire now scans the conversation history for prior tool calls, so a session that already explored the codebase isn't flagged. When it does fire, the copy describes the observed symptom only ("stopped without calling any tools"), lists the likely causes, and offers concrete recoveries — ask it to investigate first, rephrase, or, if it keeps refusing, `/model` to a tier more eager to explore. The plan agent is also now instructed to **read or search the codebase before drafting** any plan, with an explicit escape hatch for trivial, fully-specified changes. See [Plan mode](https://docs.altimate.sh/data-engineering/agent-modes/#plan) and [Troubleshooting](https://docs.altimate.sh/reference/troubleshooting/). (#888)
+
+## [0.8.2] - 2026-06-03
+
+A small correctness patch. The dbt PR reviewer's deterministic engine never required an altimate API key — but two tool descriptions said it did, which could push the reviewer into lint-only mode and send users chasing a key they don't need. This release corrects that and documents what "lint-only" actually means.
+
+### Fixed
+
+- **`dbt_pr_review` no longer implies it needs an altimate API key.** The native `altimate-core` engine behind the reviewer (column-lineage blast radius, query equivalence, PII classification, A–F grade) runs **fully offline** via the bundled napi binary — there is no `altimate_core.init` and no API-key gate in that path. Two tool descriptions (`altimate_core_column_lineage`, `altimate_core_track_lineage`) still carried a stale Python-bridge-era line claiming *"Requires `altimate_core.init()` with API key"*, so a stuck **lint-only** run was mis-diagnosed as missing auth. The descriptions now state the tools run offline with no key. **Lint-only actually means the dbt `manifest.json` didn't resolve** (wrong path, stale manifest, or wrong working directory) — the [dbt PR Review docs](https://docs.altimate.sh/usage/dbt-pr-review/) now spell out how to fix it. The only thing that ever needs a key is the optional advisory LLM lane, which can never block a verdict. (#882)
+
+## [0.8.1] - 2026-06-02
+
+A reliability + correctness patch on top of 0.8.0. Highlights: **8 new Snowflake Cortex models** (with a config escape-hatch so you never wait for a release again), a **trace-corruption fix** for long-running sessions, and a **behavior change to the dbt PR reviewer** — it now always posts a GitHub *comment* and never a formal *approval*.
+
+### Added
+
+- **Snowflake Cortex — 8 new selectable models.** Closes the drift between altimate-code's hardcoded Cortex model list and Snowflake's current regional-availability matrix: adds `claude-opus-4-7`, `openai-gpt-5.1`, `openai-gpt-5.2`, `llama4-scout`, `llama3.3-70b`, `snowflake-llama-3.1-405b`, `mixtral-8x7b`, and `gemini-3.1-pro` (Claude + OpenAI tool-capable; the rest chat-only, the conservative default until tool calling is verified on Cortex). When Cortex adds a model before the next release, you can now add it yourself under `provider["snowflake-cortex"].models` in `altimate-code.json` and it merges into the picker — no fork, no waiting. See [Snowflake Cortex provider docs](https://docs.altimate.sh/configure/providers/). (#866)
+
+### Fixed
+
+- **dbt PR reviewer never posts a formal GitHub *Approve* — behavior change.** The reviewer's `APPROVE` verdict now posts a GitHub **COMMENT** review event (the "approved — no findings" outcome is in the comment body), never a formal *Approve*. A review bot must not be able to satisfy branch protection / required reviews and let a PR merge without human sign-off (observed on a real PR where the bot had auto-approved). The no-formal-approval invariant is now enforced at compile time. **Migration:** to block merges, gate on the verdict **check** (`--mode gate`), not on requiring this bot as a reviewer — if your branch protection previously *required the altimate bot's approval*, remove that requirement or those merges will stay blocked. (#870, #872)
+- **Trace corruption in long-running sessions.** Two concurrency bugs in the observability tracer are fixed: bursty turns (an LLM step firing many tool calls back-to-back) could drop the tail of a burst from the trace file when the process exited in the debounce gap (M2), and a crash during a large trace export could be overwritten by the in-flight export and show a stale terminal status instead of `crashed` (M3). Trace files now reliably reflect what actually happened, scoped per session in the shared TUI worker. (#865)
+
+Headlined by **dbt PR Review** — a Cloudflare-style, dbt/SQL-specialized code reviewer that emits a single **signed** verdict (`APPROVE` / `COMMENT` / `REQUEST_CHANGES`) where every *blocking* finding is backed by a deterministic `altimate-core` engine call over parsed SQL ASTs, not a model's opinion. An optional LLM lane adds advisory context but can never block. This release also adds a **native Trino driver**, the opt-in **completion-gate validators**, and reliability/cost fixes. A five-persona pre-release review drove a security hardening pass on the new `reviewer` agent (see Security).
+
+### Added
+
+- **dbt PR Review — signed, deterministic verdicts on dbt pull requests.** New `altimate review` CLI command and a composite GitHub Action (`github/review`). The deterministic engine (column-lineage / DAG blast radius, query equivalence on before/after model SQL, PII classification, A–F grade + anti-pattern lint) is the **only** layer that can block; an optional LLM reviewer is clamped to ≤ warning and excluded from the gate, so a `REQUEST_CHANGES` is always provable and replayable. Runs in CI with **zero warehouse access** (consumes `dbt compile` artifacts), and the verdict is HMAC-signable and tamper-evident. `comment` mode never blocks; `gate` mode fails the check on `REQUEST_CHANGES`. The advisory model/credentials are configured on the Action (hosted `altimate_api_key`, or bring-your-own `model` + `model_api_key`); omit them to run deterministic-only. See [dbt PR Review docs](https://docs.altimate.sh/usage/dbt-pr-review/) and the copy-paste workflow in `github/review/examples/`. Depends on `@altimateai/altimate-core` ≥ 0.4.0. (#856)
+- **Native Trino driver.** First-class Trino support over HTTP(S) with catalog/schema introspection and None / Basic / Bearer-token auth. **Migration note:** the dbt `trino` adapter previously mapped to the PostgreSQL driver; it now uses the native driver. Existing profiles are auto-aliased (`database` → `catalog`, `token` → `access_token`) and otherwise compatible. `trino-client` is an optional dependency — install it (`npm install trino-client`) to use Trino. (#795)
+- **Completion-gate validator framework.** A new opt-in harness-side check
+  that runs after the LLM declares `finish === "stop"`. Two built-in
+  validators for dbt projects: `dbt-tests-pass` (runs `altimate-dbt test`
+  against modified models) and `dbt-schema-verify` (runs `altimate-dbt
+  schema-verify` against modified models). On failure, the framework
+  injects a synthetic user turn so the agent gets one more chance to fix
+  the issue, bounded by a per-session retry budget. Two opt-in modes:
+  `ALTIMATE_VALIDATORS_ENABLED=1` (enforcement + retries) and
+  `ALTIMATE_VALIDATORS_SHADOW=1` (telemetry-only — measure "would have
+  caught" rates without blocking). Default is **off** with zero overhead.
+  Two new telemetry events (`validator_check`, `validator_retries_exhausted`).
+  Configuration via `ALTIMATE_VALIDATORS_{MAX_RETRIES,TIMEOUT_MS,CONCURRENCY,DEBUG}`.
+  See [Validators docs](https://docs.altimate.sh/data-engineering/validators/)
+  for the full reference, performance characteristics, and the phased
+  rollout plan. (#849)
+
+### Fixed
+
+- **`cancel()` race / idle-on-clean-exit.** A cancel arriving during normal loop teardown could leave a session without a `session.status:idle` event, leaving callers waiting on idle stuck. Idle is now emitted correctly on both the abort and clean-exit paths. (#845)
+- **Prompt caching on the `altimate-backend` provider.** Enabled the `cache_control` trigger for the hosted provider so the litellm Anthropic fallback caches repeated prompt prefixes — cheaper and faster repeat turns (no-op on providers that ignore the marker). (#850)
+
+### Security
+
+- **`reviewer` agent hardened to deny bash.** The v0.8.0 pre-release review found that the new `reviewer` agent — advertised as "read-only" — had a bash allowlist (`git log *`, `cat *`, `ls *`) that was bypassable: shell redirects rode *inside* a matched command (`git log -p > ~/.ssh/authorized_keys` was allowed) and `cat *` could read arbitrary files (e.g. `~/.altimate/altimate.json`) and exfiltrate them through the PR comment the agent posts. Bash is now **denied** for the reviewer (it uses the structured `read`/`grep`/`glob` tools + the verdict engine, which does its own diffing); the agent description was corrected; and the reviewer prompt now treats PR content as untrusted input. The CI Action path was never affected — its LLM lane runs with no tools. (#856)
+
+## [0.7.3] - 2026-05-24
+
+A telemetry-driven hardening release. Five P0 fixes merged from a `telemetry-analysis-2026-05-21` pass — every one tied to a measured failure number from the App Insights pipeline. The headline wins are user-visible: `finops_*` tools now work without an explicit `warehouse=` parameter (auto-pick the first compatible connection); `project_scan` no longer crashes on hosts where `git` isn't in PATH (the silent 437-user regression was masked by the PII filter collapsing the binary name to `?` in error messages); and `webfetch` caches 404/410/451 responses for up to 30 minutes so the agent stops re-asking dead URLs. Two telemetry-only fixes (build-agent name normalization, Anthropic token-count semantics) clean up dashboard mis-bucketing without changing user-visible behavior.
+
+A five-persona pre-release review drove a second hardening pass: HTTPS basic-auth credentials are now stripped from `git remote get-url origin` output before it reaches LLM-visible metadata or session transcripts; raw `git` stderr is routed through `Telemetry.maskString` to redact embedded emails and bearer tokens; `normalizeAgentName` gained C0 control-char stripping + NFKC normalization + a 64-char cap to neutralize log-injection and homoglyph-bucket attacks via custom agent configs; the webfetch failure cache now also drops auth-bearing query params (`token`, `api_key`, `signature`, `x-amz-signature`, etc.) from the cache key so presigned-URL secrets can't sit in an in-memory `Map` for 30 minutes; cache-hit error messages are prefixed with `(cached failure, Nm ago)` so an agent debugging a fast failure can tell cache vs. live network apart; and 34 adversarial tests pin every one of these regression classes plus the `warehouse_filter` / `warehouse` parameter disambiguation that caused LLM confusion.
+
+### Dashboard query change
+
+`tokens_input_total` is now **always** emitted on `generation` telemetry events (previously omitted when zero/null). Dashboards reading `tokens_input` to compute volume will under-report on Anthropic-cache-hit sessions — switch any "total input tokens consumed" queries to `tokens_input_total`. The old `tokens_input` field is preserved and reports uncached input tokens (clamped at zero so inconsistent provider counts can't produce negative cost). The two fields satisfy the invariant `tokens_input + tokens_cache_read + tokens_cache_write === tokens_input_total`.
+
+### Fixed
+
+- **`finops_*` tools auto-pick a warehouse when omitted.** All six finops tools (`finops_analyze_credits`, `finops_expensive_queries`, `finops_query_history`, `finops_role_*`, `finops_unused_resources`, `finops_warehouse_advice`) previously required an explicit `warehouse=<connection-name>` argument. Telemetry showed them at a 100% error rate because the LLM consistently guessed unconfigured warehouse names and got dead-end "Credit analysis is not available for unknown warehouses" errors with no enumeration of what *was* configured. The new `resolveFinopsWarehouse` helper centralizes resolution: if no warehouse is requested, it auto-picks the first configured connection whose driver type supports the operation (`snowflake` / `bigquery` / `databricks` for credit/sizing/usage tools; broader for query history; Snowflake-only for role-hierarchy). Errors now enumerate configured warehouse names and point at `warehouse_add` when nothing is configured. Trim is applied on the requested name (LLM whitespace edge cases) and type matching is case-insensitive (`"Snowflake"` / `"snowflake"` / `"SNOWFLAKE"` resolve identically). (#828, closes #827)
+- **`project_scan` no longer crashes when `git` is missing from PATH.** Telemetry showed a 32% failure rate across 437 users with the masked error `"Executable not found in $PATH: ?"` — the binary name was being collapsed to `?` by the PII filter, hiding the real cause for two months. `Bun.spawnSync` *throws* when a binary isn't found (not just non-zero exit), and `project_scan` was running the throw unguarded. The new `safeSpawnSync` wrapper catches it cleanly and returns `null`, and `detectGit` distinguishes three states via `GitInfo.gitAvailable` + `gitError`: `git missing` (binary not in PATH — surface install hint), `git present but degraded` (non-128 exit code — corrupted `.git`, permission denied; surfaces exit code + masked stderr), and `git present, not a repo` (clean exit 128 — render "Not a git repository"). The `metadata.degraded` array always emits even when empty, sorted and deduplicated, so dashboard queries never have to null-coalesce. (#831, closes #830)
+- **Build agent telemetry no longer reports 0% completion.** A rename from `"build"` → `"builder"` in the agent registry left three writer sites still emitting the legacy name: the TUI sent `agent: "build"` on session start, the plan-exit synthetic message wrote `lastUser.agent = "build"`, and the `agent_outcome` event read from that. The agent execution alias at `Agent.get()` masked the issue at runtime, but every dashboard saw a phantom `"build"` bucket with 0% completion alongside the real `"builder"` bucket. The new `normalizeAgentName` helper is the single source of truth — used by both `session_start` and `agent_outcome` emits so they can never drift, case-insensitive against the legacy name, plus C0-control-char strip + NFKC + 64-char cap so a malicious or hand-edited config can't inject newlines into App Insights or create a cardinality bomb. The TUI and plan tool now write `"builder"` directly. (#833, closes #832)
+- **Anthropic `tokens_input` is no longer always 0 in telemetry.** `Session.getUsage` previously assumed OpenAI-style accounting (where `inputTokens` is the inclusive total including cached) — but Anthropic returns `inputTokens` exclusive of cached, so the subtraction `inputTokens - cacheRead - cacheWrite` produced 0 (or negative) on every cache-hit session. The new branch tests `metadata.anthropic || metadata.bedrock` and skips the subtraction for those providers. `tokens_input_total` is now always emitted as the inclusive total (so dashboards have a clean denominator), and `tokens.input` is clamped at zero — inconsistent provider counts (e.g. `inputTokens=1000, cachedInputTokens=2000`) can no longer leak negative cost into App Insights or session totals. Venice metadata path (`metadata.venice.usage.cacheCreationInputTokens`) is now covered with the same treatment as Anthropic/Bedrock. (#837, closes #836)
+- **`webfetch` failure cache now persists known-bad URLs for 30 minutes (5 min for 451) and collapses LLM-generated URL variations.** Telemetry showed 486 residual webfetch 404 retries across the 14-day window (down from March's 2,222 but still meaningful) — the LLM kept fetching the same dead URL with different tracking parameters, fragments, and case variations and getting fresh 404s each time. The cache key is now the *normalized* URL: tracking params (`utm_*`, `fbclid`, `gclid`, `mc_*`, `_ga`, `_gl`, `igshid`, `mibextid`, HubSpot `_hsenc`/`_hsmi`, Marketo `mkt_tok`, Adobe `s_cid`/`s_kwcid`, Piwik/Matomo `pk_*`/`piwik_*`, `__cf_chl_*`) are stripped, query params are sorted by (key, value), the host is lowercased, the fragment is dropped, and HTTPS basic-auth userinfo (`user:pass@`) is removed. The functional `ref` param is deliberately *preserved* (GitHub raw URLs and git APIs use it to select branches/tags). Auth-bearing query params (`token`, `access_token`, `api_key`, `apikey`, `signature`, `sig`, `x-amz-signature`, `x-amz-credential`, `x-amz-security-token`, `x-goog-signature`, `x-goog-credential`) are dropped from the **cache key only** — the actual `fetch()` still uses the raw URL — so an S3 presigned URL that 404s doesn't leak its signature into the in-memory `Map` for 30 minutes. 451 uses a shorter 5-min TTL because it's observer-conditional (VPN swap unblocks). Cache-hit errors now prefix with `(cached failure, Nm ago)` so an agent debugging a fast failure can tell cache vs. live network apart. LRU re-touch on repeated failures via `delete-then-set` so a frequently-failing URL doesn't sit at the head of the FIFO and get evicted first under pressure (cache size cap is 500). (#839, closes #838)
+
+### Privacy & Security (pre-release hardening pass)
+
+- **`git remote get-url origin` output is now credential-stripped before it reaches LLM-visible metadata or session transcripts.** Pre-fix, `metadata.git.remoteUrl` shipped the URL verbatim — including embedded HTTPS basic-auth like `https://x-access-token:ghp_xxx@github.com/...` or `https://user:pass@gitlab.internal/...` — which then flowed to the LLM provider on every `project_scan` call and was preserved in the session transcript. The new `stripGitRemoteCredentials` helper sets `username` and `password` to empty on parseable URLs, preserves SSH-form remotes (`git@github.com:owner/repo.git` has no userinfo concept), and drops unparseable URLs entirely rather than risk leaking embedded creds. Flagged by the v0.7.3 compliance/chaos review.
+- **`gitError.stderr` is masked via `Telemetry.maskString` before persisting.** Git stderr on auth failures and bad-object errors contains embedded HTTPS remote URLs (with userinfo), commit emails, and `/Users/<realname>/` paths. The masker (already redacting `sk-`, `Bearer`, and `<email>` in error strings elsewhere) now runs before the stderr is sliced to 240 chars and assigned to `metadata.git.gitError.stderr`. Mask-before-slice order is pinned by adversarial test so a refactor can't reorder them and surface a half-redacted email.
+- **`normalizeAgentName` hardens against adversarial input.** Strips C0 control characters (`\x00-\x1f` + DEL) — a custom-agent config with `name: "x\nfake_event=hello"` would have split App Insights into two events; NFKC-normalizes so fullwidth/homoglyph agent names (`"ｂｕｉｌｄｅｒ"`) don't create separate telemetry buckets; caps length at 64 chars because agent names are slugs and anything larger is a cardinality bomb. Three new pinning tests guarantee each invariant.
+
+### Changed
+
+- **`warehouse_filter` parameter description disambiguated from `warehouse`.** With `warehouse` now optional, the previous description ("Filter to a specific Snowflake warehouse") was ambiguous next to the connection-name `warehouse` parameter. New description: "Filter result rows by an in-warehouse Snowflake compute name (NOT the connection name). Distinct from `warehouse`: `warehouse` picks which connection to query; `warehouse_filter` narrows which Snowflake virtual warehouse's queries are returned in the result set. Snowflake only." Applied to both `finops_analyze_credits` and `finops_query_history`. End-user persona flagged the LLM-confusion risk during pre-release review.
+- **`DEFAULT_FINOPS_TYPES` is the canonical "supported by any cloud warehouse" type list.** Pre-fix, three handlers (`credit-analyzer`, `unused-resources`, `warehouse-advisor`) each declared the same `["snowflake", "bigquery", "databricks"]` literal as a local `const`. Now exported from `warehouse-resolver.ts`; adding a fourth driver (e.g. Redshift `account_usage`) is one edit, not three.
+- **`docs/docs/data-engineering/tools/finops-tools.md` updated for the auto-pick behavior.** Pre-fix, the doc said `warehouse (required): Connection name` — directly contradicting the v0.7.3 code. Now lists `warehouse` as optional with the auto-pick semantics, includes a top-of-file `v0.7.3+` note about the change, and shows the bare (no-warehouse) invocation form in at least one example. PM persona flagged the doc/code drift as P0 pre-release.
+
+### Testing
+
+- **34 adversarial tests** in `release-v0.7.3-adversarial.test.ts` pin the regression classes:
+  - **finops auto-pick** — code/doc/tool-description alignment (no `warehouse (required)` left in docs; "Optional" appears in tool descriptions; `warehouse_filter` description disambiguates from `warehouse`; `DEFAULT_FINOPS_TYPES` is single source of truth; resolver trims whitespace; resolver auto-picks on empty/undefined/whitespace).
+  - **project_scan privacy** — `stripGitRemoteCredentials` present + sets `username`/`password` empty; `gitError.stderr` runs through `Telemetry.maskString`; mask-before-slice order; `safeSpawnSync` returns null on missing binary; `GitInfo.gitAvailable` + `gitError` distinguish three states; output line distinguishes "binary missing" from "not a repo".
+  - **normalizeAgentName** — single declaration site (single source of truth); case-folds before "build" compare; strips C0 control chars; NFKC-normalizes; length-caps at 64; both `session_start` and `agent_outcome` route through the helper.
+  - **webfetch cache key** — `AUTH_PARAMS_FOR_CACHE_KEY` enumerates `token`/`access_token`/`api_key`/`apikey`/`signature`/`sig`/`x-amz-signature`/`x-amz-credential`/`x-goog-signature`; presigned-S3 URLs with different signatures collapse; api_key/token variants all collapse; functional params (`page`, `q`) are NOT stripped; auth-param strip is case-insensitive; cache-hit error prefix wording is distinguishable; `isUrlCachedFailure` exposes `ageMs`; 451 has shorter TTL than 404/410.
+  - **URL normalization privacy invariants** — userinfo stripped from cache key; utm/fbclid/mc_ tracking collapses; normalization is idempotent; invalid URL passes through verbatim.
+  - **CHANGELOG presence** — release-skill backstop that catches a release commit without a 0.7.3 entry + all 5 merged PR numbers referenced.
+
+### Deferred to follow-up issues
+
+- [#840](https://github.com/AltimateAI/altimate-code/issues/840) Surface auto-picked warehouse name in `finops_*` tool output (currently `autoPicked: true` is computed but not rendered).
+- [#841](https://github.com/AltimateAI/altimate-code/issues/841) Audit: webfetch failure cache crosses logical sessions in `altimate serve` daemon mode.
+- [#842](https://github.com/AltimateAI/altimate-code/issues/842) Route the three compaction-summary `lastUser.agent` writes through `normalizeAgentName` (currently only the emit boundary is normalized; persisted state can still record legacy `"build"`).
+- [#843](https://github.com/AltimateAI/altimate-code/issues/843) Audit: cost telemetry retention + re-identification policy (`tokens_input_total` + `cost` are now always emitted per generation event; document TTL and TOS alignment).
+
+## [0.7.2] - 2026-05-21
+
+A focused hotfix for v0.7.1's broken install endpoint plus a defensive pass on the upgrade fetch surface. v0.7.1 documented and embedded `https://altimate.ai/install` in the curl install path and in `altimate upgrade`'s in-place upgrader — that host is the marketing-site SPA and returns an HTML 404 for `/install`, so every curl install and every curl-installed user's `altimate upgrade` silently failed end-to-end. v0.7.2 swaps the host to `https://www.altimate.sh/install` (apex `altimate.sh` is still not routed to the Amplify Next.js app — tracked separately, drop the `www.` once apex DNS is fixed), wraps the upgrader fetch with a 15s bounded timeout, replaces the raw `AbortError: The operation was aborted` with an actionable error that names the URL, prints the manual re-install one-liner, and points at the GitHub releases fallback. Realigns the published GitHub Action (`github/action.yml`) with the v0.7.1 binary rename (`altimate-code` → `altimate`) and new install directory (`~/.altimate/bin`) — pre-fix, every Action consumer hit the broken URL on cache miss and then a missing binary even if the URL had worked. 30 adversarial tests pin the regression classes (URL eradication, cross-file host consistency, named-constant invariants, error-surface invariants, action.yml alignment, marker integrity, migration recovery surface, CHANGELOG presence).
+
+**If you installed v0.7.1 via curl, your `altimate upgrade` will still fail until you re-install manually once:**
+
+```bash
+curl -fsSL https://www.altimate.sh/install | bash
+```
+
+After that, v0.7.2 and forward self-heal.
+
+### Fixed
+
+- **`Installation.upgradeCurl()` now fetches from `https://www.altimate.sh/install` instead of the unreachable `https://altimate.ai/install`.** v0.7.1 had pointed the in-place upgrader at the marketing site, which routes everything through a React Router SPA — `/install` rendered an HTML 404 page, the upgrader's `fetch` succeeded with a 200, the response body was the 404 HTML, and `bash` either executed the HTML and failed cryptically or hung mid-stream. The matching curl install one-liner in `install --help`, `README.md`, and `docs/docs/reference/troubleshooting.md` (three references) was broken the same way. www.altimate.sh now serves the install script via a Next.js route handler with `Content-Type: text/x-shellscript`. (#825, closes #309)
+- **Published GitHub Action (`github/action.yml`) realigned with the v0.7.1 binary rename.** v0.7.1 renamed the curl-installed binary `altimate-code` → `altimate` and moved the install directory `~/.altimate-code/bin` → `~/.altimate/bin`, but the Action's cache `path:`, `$GITHUB_PATH` addition, and final `run:` step still referenced the legacy `altimate-code` name and path. Combined with the broken install URL, every Action consumer hit a 404 on cache miss followed by an empty `$PATH` and a `altimate-code: command not found` even after the install "succeeded". All four references updated in lockstep.
+- **`altimate upgrade` (curl method) no longer hangs indefinitely on a stalled CDN/origin.** The fetch is bounded by `AbortSignal.timeout(UPGRADE_FETCH_TIMEOUT_MS)` (15s) so a TLS-rewriting corporate proxy, a hung CloudFront edge, or a slow-loris-style stall fails fast instead of blocking the user's terminal for minutes. Surfaced via CodeRabbit review on #825.
+
+### Changed
+
+- **Curl-upgrade fetch failures now surface an actionable error instead of `AbortError: The operation was aborted`.** Pre-fix, a timeout, a 404, a DNS failure, or a connection refused would propagate as `DOMException: The operation was aborted` (timeout) or `Error: Not Found` (HTTP non-2xx) — neither named the URL, the recovery path, or the fallback. The fetch is now wrapped in `try/catch` and the rethrown error reads: `"Could not download install script from https://www.altimate.sh/install: <cause>. Re-run the install manually: curl -fsSL https://www.altimate.sh/install | bash — or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest"`. HTTP non-2xx now also includes the numeric status (`HTTP 404 Not Found` instead of just `Not Found`).
+- **`UPGRADE_INSTALL_URL` and `UPGRADE_FETCH_TIMEOUT_MS` extracted as named constants** inside the `altimate_change` block in `packages/opencode/src/installation/index.ts`. Pre-fix, the URL and timeout were duplicated string + literal across the source and the test assertion. A future timeout tune (15s → 20s) would have required three coordinated edits; now it's one. The adversarial test asserts the existence of the named constant separately from the literal value so the regression guard isn't brittle to constant extraction itself.
+- **`altimate_change` marker block in `installation/index.ts` extended.** The v0.7.1 release did not mark the line where `upgradeCurl()` fetches the install script; v0.7.2 wraps the URL + timeout constants and the entire fetch+wrap block in a single marker pair so the next upstream bridge merge sees the intent and doesn't silently revert the URL or strip the timeout.
+
+### Testing
+
+- 30 adversarial tests in `release-v0.7.2-adversarial.test.ts` pinning the v0.7.2 surface:
+  - **URL eradication** — 5 surfaces (`installation/index.ts`, `install`, `README.md`, `troubleshooting.md`, `github/action.yml`) each negative-asserted to not contain `altimate.ai/install`. The intentional `altimate.ai/discord` link in `docs/mkdocs.yml` is positively asserted as still present (different path, marketing-site contact info, intentionally out of scope).
+  - **Cross-file host consistency** — the host used in the source `UPGRADE_INSTALL_URL` is automatically compared against every other reference in README, troubleshooting docs, install script, and action.yml. A future "drop the www." that updates the source but misses README will fail loudly.
+  - **`install --help` examples** — both examples in the `--help` block asserted (a previous half-fix had updated only the first); negative assertion against the legacy host on the help block specifically.
+  - **Bounded timeout** — `AbortSignal.timeout(` is wired, `UPGRADE_FETCH_TIMEOUT_MS = 15_000` is a named constant, the fetch references the constant by name, and a raw `AbortSignal.timeout(15_000)` literal is forbidden (would mean someone reverted the constant extraction).
+  - **Error surface** — the fetch lives inside a try/catch, the rethrown error message names the URL, includes the manual re-install one-liner with the URL templated through the constant, points at the GitHub releases fallback, and surfaces HTTP status codes (`HTTP ${res.status} ${res.statusText}`).
+  - **`github/action.yml` alignment** — install URL, cache path, `$GITHUB_PATH` addition, and final binary invocation all match the v0.7.1 rename; negative assertions against every legacy form. Action file existence asserted at `github/action.yml` (not `.github/action.yml`) since moving it would silently break every downstream consumer.
+  - **Marker integrity** — URL/timeout constants live inside an `altimate_change` block; try/catch wrapper lives inside an `altimate_change` block; balanced start/end count across the file.
+  - **Migration recovery surface** — troubleshooting doc still has the install-path section with the new URL; README curl one-liner matches the source's `UPGRADE_INSTALL_URL` host.
+  - **CHANGELOG presence** — release-skill backstop that catches a release commit without a 0.7.2 entry.
+
+## [0.7.1] - 2026-05-20
+
+A focused provider-error pass plus the standalone-binary fix: the curl-installed binary now starts (previously crashed with `Cannot find module '@altimateai/altimate-core'`), is renamed to match the npm primary `bin` (`altimate-code` → `altimate` for the curl path only), and Alpine + Windows-on-ARM hit a clear early-exit instead of a cryptic gzip failure. Two 5-persona pre-release reviews (provider-error pass, then binary-fix + rename pass) drove the surface — 86 adversarial tests total pin the regression classes.
+
+### Fixed
+
+- **Curl-installed standalone binary no longer crashes with `Cannot find module '@altimateai/altimate-core'` on first run.** The `script/build.ts` marked altimate-core as `external` (NAPI native modules can't live inside Bun's single-file bunfs), and the release archive shipped only the raw Bun binary — no companion `node_modules`, no NODE_PATH-aware wrapper. CI smoke tests hid the bug by pre-setting NODE_PATH against the developer checkout before invoking the binary. The fix stages a per-target copy of altimate-core whose loader is rewritten to a one-line shim `module.exports = require('./altimate-core.<platform>.node')`, drops the matching `.node` file next to it, and uses a `Bun.build` `onResolve` plugin to redirect every `@altimateai/altimate-core` import to that shim. Bun statically sees a single require and embeds that one `.node` into bunfs. Result: ~176 MB self-contained binary, no companion files, no NODE_PATH dance. CI smoke tests now run with `NODE_PATH` cleared from `$RUNNER_TEMP`, plus an independent `strings`-based content assertion that exactly one platform `.node` is embedded — the v0.5.10 / v0.7.0 class of regression is pinned by three independent guards. (#820)
+- **Alpine Linux (musl) and Windows on ARM64 install paths now fail fast with actionable messages instead of silent 404 → tar/unzip errors.** Pre-fix, `curl … | bash` on an unsupported target would write GitHub's 404 HTML to disk and die "not in gzip format". The curl `install` script, the npm bin wrapper (`packages/opencode/bin/altimate`), the npm `postinstall.mjs`, and `script/build.ts` all detect these platforms early and point to `apk add gcompat` (Alpine) or x64 emulation / WSL (Windows ARM). The musl-detection logic is also `pipefail`-safe (`ldd --version` exits non-zero on musl by design; the previous pipeline-form inherited that failure and silently missed every non-Alpine musl distro). (#820)
+- **Curl install `--fail` on both download paths.** A 404 / WAF block / TLS-rewriting corporate proxy no longer writes the error page to disk and gets unzipped as a binary; `curl --fail` exits non-zero and the install bails cleanly. (#820)
+- **`script/build.ts --target-index=N` for an out-of-range index exits non-zero.** Pre-fix, after the musl/win32-arm64 cull, an invalid index silently produced zero artifacts and CI "succeeded" with no binary. (#820)
+- **`script/build.ts --single` on a musl-linux host refuses to build the unrunnable glibc target.** Pre-fix the build would succeed but the resulting binary couldn't load on the host. (#820)
+- **`Installation.method()` recognises `~/.altimate/bin` as a curl install.** The same release that renames the curl-install dir would have broken `altimate upgrade` for curl-installed users without this; the `.opencode/bin` and `.local/bin` branches stay for back-compat. (#820)
+- **Provider 4xx errors now show the inner error message instead of a raw JSON dump.** When any provider returned the standard `{error: {message, type, code}}` shape (OpenAI, Azure OpenAI, OpenRouter, etc.), `parseAPICallError`'s extraction chain short-circuited on the truthy parent `error` object, the `typeof errMsg === "string"` guard rejected it, and the parser fell through to dumping the raw response body — which appeared as `APIError: Bad Request: {?:?}` after telemetry redaction collapsed string values to `?`. Telemetry caught users retrying broken model selections 3+ times in the same session because the surfaced error gave no clue about the cause. Users now see actionable text such as `APIError: Bad Request: The model 'gpt-5-codex' does not exist or you do not have access to it.` The OR-chain is replaced with explicit-typeof ternaries that mirror `parseStreamError`'s pattern, so a truthy non-string at any tier cannot block a valid string further down the chain. (#789, closes #788)
+- **Bedrock / AWS Lambda `errorMessage` shape is now extracted.** AWS APIs that return `{errorMessage: "...", errorType: "..."}` (Lambda style) previously fell through the OpenAI/Anthropic-shaped chain to a raw-body dump. Added `body.errorMessage` to the extraction ladder in both `parseAPICallError` and `parseStreamError`.
+- **Streaming error path no longer dumps `Unknown: {"type":"error",...}` for non-OpenAI codes.** `parseStreamError` previously handled only 4 OpenAI error codes (`context_length_exceeded`, `insufficient_quota`, `usage_not_included`, `invalid_prompt`); everything else fell through to `JSON.stringify(e)`. Added a default fallback that runs the same string-typeof chain as `parseAPICallError`, so any extractable provider message becomes a clean api_error.
+- **`model_not_found` no longer triggers a silent retry storm.** OpenAI 404s are forced retryable in general (some legitimate models 404 transiently), but `error.code === "model_not_found"` now short-circuits to `isRetryable: false` — the user sees the actionable error on attempt 1 instead of after 5 silent retries.
+
+### Added
+
+- **`altimate models` discoverability hint on model-not-found errors.** When `error.code === "model_not_found"`, the surfaced message now ends with `Run \`altimate models\` to see available models.` so the next step is one command away.
+- **Provider-API-Errors troubleshooting reference** at `docs/docs/reference/troubleshooting.md` covering model-not-found, unauthorized, rate-limited, context-overflow, and HTML-page error classes.
+- **Install-path troubleshooting section** at `docs/docs/reference/troubleshooting.md` covering "standalone binary not found after curl install" (the `altimate-code` → `altimate` rename), the legacy `Cannot find module '@altimateai/altimate-core'` crash with recovery instructions, Alpine/musl unsupported (with `apk add gcompat` workaround), and Windows-on-ARM unsupported (with WSL workaround). README also documents the curl-install option alongside the npm one.
+
+### Changed
+
+- **Curl-installed binary renamed `altimate-code` → `altimate`** to match the npm package's primary `bin` entry. The npm path continues to expose **both** `altimate` and `altimate-code`, so existing `npm install -g`/`pnpm i -g` users see no behavioural change. Homebrew installs are unchanged (the formula installs `altimate` and symlinks `altimate-code` for back-compat). Only the standalone (`curl … | bash`) channel is affected — it now ships a single self-contained `altimate` binary to `~/.altimate/bin/` (was `~/.altimate-code/bin/altimate-code`). CI users with scripts that called `altimate-code` after the curl install should switch to `altimate` or install via npm. The install script removes any stale `~/.altimate/bin/altimate-code` left over from a pre-v0.7.1 install. (#820)
+- **`check_version` probes both `altimate` and `altimate-code` on PATH** so an upgrade from v0.7.0 doesn't always re-download even when the version already matches. (#820)
+- **Curl install final banner mirrors the npm postinstall**: `altimate`, `altimate run "hello"`, `altimate --help`, and the same `https://altimate-code.dev` docs URL. Rosetta-detected x64 → arm64 swap now emits a one-line muted notice instead of being silent. (#820)
+- **`Installation.method()` upgrade detection recognises `~/.altimate/bin`** as a curl install (in addition to the legacy `~/.opencode/bin` and `~/.local/bin` paths). (#820)
+- **`_requiredExports` literal extracted from `@altimateai/altimate-core/index.js` is JSON.parsed and shape-checked** before being inlined into the per-target staged shim. Pre-fix, the regex match group was inlined verbatim — a malicious altimate-core that published an `index.js` whose `_requiredExports = ["x"]; <attacker JS>; const _foo = [` form would have embedded attacker JavaScript into every shipped binary. The validator now requires a pure JSON array of non-empty short string literals; anything else aborts the build. (#820)
+- **`build.ts` asserts the on-disk `@altimateai/altimate-core` version matches `package.json` declaration** after `bun install --os=* --cpu=*`. Catches the stale-hoist scenario where a previous version lingers in `node_modules/.bun/` and the new build silently embeds yesterday's `.node`. (#820)
+- **Per-target staging dir is wiped before each build** (pre-loop cleanup), not just after, so a previous build that crashed between staging and post-build cleanup can never leak a stale `.altimate-core-staged/` into the next build's resolution. (#820)
+- **Curl install extracts only the expected binary member** from tar/zip archives (`tar --no-same-owner -xzf … "$binary_name"` / `unzip … "$binary_name"`), so a future build mistake that tars a directory of attacker-controlled paths can't write them outside the explicit member. (#820)
+- **`install_from_binary` guards against cp-on-self**: `--binary ~/.altimate/bin/altimate` no longer truncates the destination to empty via POSIX `cp` semantics. (#820)
+- **Build matrix and standalone install matrix now align** — only platforms with a published `@altimateai/altimate-core` NAPI prebuild produce a release archive. (#820)
+
+### Removed
+
+- **`linux-arm64-musl`, `linux-x64-musl`, `linux-x64-baseline-musl`, and `win32-arm64` archives** from the release build matrix. `@altimateai/altimate-core` has no NAPI prebuild for these targets; archives for them were never going to work. The npm wrapper (`bin/altimate`) and npm `postinstall.mjs` hard-error on these platforms with the same `apk add gcompat` / WSL workarounds the curl-install script uses. Re-added when upstream prebuilds ship. (#820)
+
+### Privacy
+
+- **`Telemetry.maskString` now redacts email addresses and internal hostnames.** Pre-fix, the JSON-quote masking rule incidentally collapsed everything inside provider error JSON to `?`. The provider-error fix unwraps that JSON, which means provider-side identifiers (caller emails, internal `*.local` / `*.internal` / RFC1918 / IPv6 loopback / ULA / link-local / AWS IMDS endpoints) now flow as plain English. Added explicit redaction patterns so they're masked before reaching telemetry, the share backend, or local session storage. The masker is kept in sync with `parseAPICallError`'s `maskInternalHost` (same internal-endpoint coverage); query-string and fragment characters (`+`, `#`, `,`, `;`) are inside the trailing char class so secrets past the `<internal-host>` marker don't survive. `sk-…` and `Bearer …` token redaction is unchanged.
+- **`metadata.url` on `MessageV2.APIError` masks internal hosts and strips basic-auth userinfo.** When `error.url` points at `localhost`, `*.local`, `*.internal`, an RFC1918 IPv4, IPv6 loopback / ULA / link-local, or the AWS IMDS address (`169.254.169.254`), the host is rewritten to `internal-host.redacted` before the URL lands on the parsed error. Basic-auth userinfo (`user:pass@…`) is stripped on **every** URL — internal or public — since a credential in a public-host URL is at least as risky as one in an internal proxy. Public-host URLs are otherwise preserved verbatim for debugging.
+- **`responseBody` is capped at 4KB** at the `parseAPICallError` boundary. Without this, a hostile or verbose gateway could persist a 100KB+ body into local storage and (for shared sessions) the share backend.
+
+### Testing
+
+- 46 adversarial tests covering JSON-scalar bodies, prototype-pollution attempts, 100KB error messages, malformed JSON, every-tier null/numeric extraction, Bedrock `errorMessage` precedence, the `parseStreamError` fallback for unknown codes, the `model_not_found` retry-storm carve-out, the `altimate models` hint, the responseBody cap, the metadata.url internal-host masking (incl. IPv6 loopback/ULA/link-local, AWS IMDS, public-host basic-auth userinfo strip, RFC1918 boundary checks, lookalike-hostname guards), and the new email / internal-host `maskString` patterns (incl. IMDS, IPv6, and query-fragment leak guards).
+- 48 adversarial tests in `release-v0.7.1-binary-adversarial.test.ts` pinning the binary-fix + rename surface — install-method upgrade-path detection (`.altimate`/`.opencode`/`.local` triple-cover), curl-install hardening (Rosetta notice, cp-on-self guard, stale `altimate-code` cleanup, explicit tar/zip member extraction, dual `check_version` probe, musl + npm gcompat messaging, `--fail` on both curl paths, `pipefail`-safe ldd capture, no musl target-suffix construction), `_requiredExports` JSON.parse + shape-check rejection, altimate-core version pinning + actionable rebuild hint, staging-dir pre-loop wipe + post-build cleanup, empty-targets and musl-host build guards, build matrix excluding linux-musl + win32-arm64, smoke-test hermeticity (host-platform `findLocalBinary` filter + tmpdir cwd + content-level `strings` assertion), npm-wrapper + postinstall fail-fast parity for musl + win32-arm64, troubleshooting and README doc surface, archive-name + bin-rename cross-file invariants, and `release.yml` hermetic CI smoke tests + narrowed `publish-npm` permissions. Tests run together with the provider-error suite as the release-critical gate (`test/branding/ test/install/ test/skill/release-v0.7.1*`).
+- Smoke tests (`test/install/smoke-test-binary.test.ts`) gained: hermetic `NODE_PATH`-cleared invocation from a fresh tmpdir (so Bun's compiled binary cannot walk the worktree for `node_modules`), and a content-level `strings`-based assertion that exactly one platform `.node` is embedded in the compiled binary — independent of any runtime resolution path, so a silent `onResolve` regression that embeds 5 platforms' worth of `.node` files would fire here even if the runtime test passes by accident. (#820)
+
 ## [0.7.0] - 2026-05-03
 
 ### Changed

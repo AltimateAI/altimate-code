@@ -86,10 +86,31 @@ export namespace Telemetry {
         duration_ms: number
         // Flat token fields — only present when data is available from the provider.
         // No nested objects: Azure App Insights custom measures must be top-level numbers.
+        //
+        // SEMANTICS (read this before writing dashboard queries):
+        //   tokens_input        = UNCACHED input tokens. Equal to 0 on a full cache hit.
+        //                          Normalized across providers: Anthropic (and Bedrock
+        //                          Anthropic) return this directly; non-Anthropic
+        //                          providers return the inclusive total and Session.getUsage
+        //                          subtracts cache_read (and cache_write where present)
+        //                          to derive the uncached portion. cache_write in
+        //                          particular is only populated for Anthropic / Bedrock /
+        //                          Venice metadata paths — OpenAI / OpenRouter don't
+        //                          surface a "cache write" concept today, so the
+        //                          subtraction there is a no-op.
+        //   tokens_input_total  = INCLUSIVE input tokens (uncached + cache_read +
+        //                          cache_write). This is what most cost/volume queries
+        //                          actually want. Always present (since 2026-05-22).
+        //   tokens_cache_read   = subset of tokens_input_total served from prompt cache.
+        //   tokens_cache_write  = subset of tokens_input_total committed to prompt cache.
+        // Invariant: tokens_input + tokens_cache_read + tokens_cache_write == tokens_input_total.
         tokens_input: number
         tokens_output: number
-        // altimate_change start — total input tokens including cached (for providers like Anthropic that exclude cache from tokens_input)
-        tokens_input_total?: number
+        // altimate_change start — total input tokens including cached. Always emitted
+        // as of 2026-05-22 (previously conditional, which made dashboard queries that
+        // assumed presence return null for non-cache-using providers — including the
+        // false-positive "tokens_input=0 broken" finding in telemetry-2026-05-21).
+        tokens_input_total: number
         // altimate_change end
         tokens_reasoning?: number // only for reasoning models
         tokens_cache_read?: number // only when a cached prompt was reused
@@ -1060,6 +1081,26 @@ export namespace Telemetry {
     return s
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
+      // Email addresses — providers occasionally echo caller identity in error text.
+      .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")
+      // Internal hostnames in URLs — keeps parity with `parseAPICallError`'s
+      // `maskInternalHost` so an error message containing the same URL doesn't
+      // leak through telemetry while metadata.url is masked. Covers:
+      //   *.local / *.internal / *.localhost
+      //   RFC1918 IPv4: 10/8, 172.16/12, 192.168/16, plus 127/8 loopback
+      //   AWS IMDS / link-local IPv4: 169.254/16
+      //   IPv6 in brackets: [::1] loopback, [fc??::/[fd??:: ULA, [fe80:: link-local
+      // Char class includes `+`, `#`, `,`, `;` so secrets in query/fragment
+      // don't survive past the redaction marker. Over-masking is the correct
+      // failure mode here.
+      .replace(
+        // `(?:[^\/\s@]+@)?` allows optional basic-auth userinfo
+        // (`user:pass@`) before the host so URLs like
+        // `https://admin:hunter2@10.0.0.5/x` are still recognized as internal
+        // and redacted whole. The credential goes with the host into <internal-host>.
+        /\bhttps?:\/\/(?:[^\/\s@]+@)?(?:localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|0\.0\.0\.0|\[(?:::1|fc[0-9a-f]{2}:[^\]]*|fd[0-9a-f]{2}:[^\]]*|fe80:[^\]]*)\]|[A-Za-z0-9.-]+\.(?:local|internal|localhost))(?::\d+)?[\w/.?=&%+#,;~!*'()@:-]*/gi,
+        "<internal-host>",
+      )
       .replace(/'(?:[^'\\]|\\.)*'/g, "?")
       .replace(/"(?:[^"\\]|\\.)*"/g, "?")
       .replace(/\s+/g, " ")

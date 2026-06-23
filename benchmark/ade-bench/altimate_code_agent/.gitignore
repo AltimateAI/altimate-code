@@ -1,0 +1,3 @@
+# Build artifacts produced by build-local-tarball.sh
+altimate-code-local.tgz
+.stage/

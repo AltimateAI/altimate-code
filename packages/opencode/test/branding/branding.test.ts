@@ -91,16 +91,22 @@ describe("CLI Branding", () => {
 describe("Installation Script", () => {
   const installContent = readText(join(repoRoot, "install"))
 
-  test("APP variable is altimate-code", () => {
-    expect(installContent).toContain("APP=altimate-code")
+  test("APP variable is altimate", () => {
+    // APP is the standalone-archive prefix AND the installed binary name —
+    // matches the primary `altimate` npm bin, not the legacy `altimate-code`
+    // alias. The GitHub repo URL stays `AltimateAI/altimate-code` (covered by
+    // the next test) — only the binary name and archive prefix changed.
+    expect(installContent).toContain("APP=altimate")
+    expect(installContent).not.toContain("APP=altimate-code")
   })
 
   test("GitHub release URL references AltimateAI/altimate-code", () => {
     expect(installContent).toContain("github.com/AltimateAI/altimate-code/releases")
   })
 
-  test("install dir is .altimate-code", () => {
-    expect(installContent).toContain(".altimate-code/bin")
+  test("install dir is .altimate/bin", () => {
+    expect(installContent).toContain(".altimate/bin")
+    expect(installContent).not.toContain(".altimate-code/bin")
   })
 
   test("no references to opencode.ai domain", () => {
@@ -115,8 +121,46 @@ describe("Installation Script", () => {
     expect(installContent).not.toContain("anomalyco")
   })
 
-  test("references altimate.ai domain for user-facing URLs", () => {
-    expect(installContent).toContain("altimate.ai")
+  test("references altimate-owned domain for user-facing URLs", () => {
+    // The install URL moved from altimate.ai → altimate.sh in v0.7.1 because
+    // altimate.ai/install was an unreachable route on the marketing SPA
+    // (issue #309). altimate.sh is the canonical altimate-code site.
+    expect(installContent).toContain("altimate.sh/install")
+    expect(installContent).not.toContain("altimate.ai/install")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4b. Windows Installation Script (install.ps1)
+// ---------------------------------------------------------------------------
+describe("Windows Installation Script", () => {
+  const ps1Content = readText(join(repoRoot, "install.ps1"))
+
+  test("installs the Bun standalone exe, not the npm package", () => {
+    // The whole point of install.ps1 is parity with the bash installer: pull
+    // the Bun-compiled altimate.exe from GitHub releases and extract it — not
+    // shell out to a package manager. (npm is only mentioned as an ARM64 hint.)
+    expect(ps1Content).toContain("github.com/AltimateAI/altimate-code/releases")
+    expect(ps1Content).toContain("Expand-Archive")
+    expect(ps1Content).toContain('"$App.exe"')
+    expect(ps1Content).not.toContain("npm install -g @altimateai")
+  })
+
+  test("install dir is .altimate\\bin", () => {
+    expect(ps1Content).toContain(".altimate\\bin")
+    expect(ps1Content).not.toContain(".altimate-code\\bin")
+  })
+
+  test("downloads the windows-x64 archive with a baseline fallback", () => {
+    expect(ps1Content).toContain("windows-$arch")
+    expect(ps1Content).toContain("-baseline")
+    // AVX2 detection mirrors the bash installer's IsProcessorFeaturePresent(40).
+    expect(ps1Content).toContain("IsProcessorFeaturePresent(40)")
+  })
+
+  test("no upstream/foreign brand leaks", () => {
+    expect(ps1Content).not.toContain("opencode.ai")
+    expect(ps1Content).not.toContain("anomalyco")
   })
 })
 

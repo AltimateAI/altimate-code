@@ -6,6 +6,7 @@ import type { SqlAnalyzeResult } from "../native/types"
 // altimate_change start — progressive disclosure suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
+import { isRecord, normalizeError } from "./response-normalization"
 
 export const SqlAnalyzeTool = Tool.define("sql_analyze", {
   description:
@@ -26,17 +27,26 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
   async execute(args, ctx) {
     const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
-      const result = await Dispatcher.call("sql.analyze", {
+      const rawResult = (await Dispatcher.call("sql.analyze", {
         sql: args.sql,
         dialect: args.dialect,
         schema_path: args.schema_path,
         schema_context: args.schema_context,
-      })
+      })) as unknown
+
+      if (!isRecord(rawResult)) {
+        return analysisError(args, hasSchema, "Invalid analysis response from dispatcher.")
+      }
+
+      const envelopeError = normalizeError(rawResult.error)
+      const result = (isRecord(rawResult.data) ? rawResult.data : rawResult) as Partial<SqlAnalyzeResult>
 
       // The handler returns success=true when analysis completes (issues are
       // reported via issues/issue_count). Only treat it as a failure when
       // there's an actual error (e.g. parse failure).
-      const isRealFailure = !!result.error
+      const error = normalizeFailureMessage(result.error) ?? envelopeError
+      const isRealFailure = error !== undefined || rawResult.success === false || result.success === false
+      const failureMessage = error ?? "Analysis failed."
       // altimate_change start — sql quality findings for telemetry
       const findings: Telemetry.Finding[] = (result.issues ?? []).map((issue) => ({
         category: issue.rule ?? issue.type ?? "analysis_issue",
@@ -44,8 +54,8 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       // altimate_change end
 
       // altimate_change start — progressive disclosure suggestions
-      let output = formatAnalysis(result)
-      const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_analyze")
+      let output = isRealFailure ? formatFailure(failureMessage) : formatAnalysis(result)
+      const suggestion = !isRealFailure && PostConnectSuggestions.getProgressiveSuggestion("sql_analyze")
       if (suggestion) {
         output += "\n\n" + suggestion
         PostConnectSuggestions.trackSuggestions({
@@ -56,39 +66,54 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       }
       // altimate_change end
       return {
-        title: `Analyze: ${result.error ? "ERROR" : `${result.issue_count ?? 0} issue${(result.issue_count ?? 0) !== 1 ? "s" : ""}`} [${result.confidence ?? "unknown"}]`,
+        title: `Analyze: ${isRealFailure ? "ERROR" : `${result.issue_count ?? 0} issue${(result.issue_count ?? 0) !== 1 ? "s" : ""}`} [${result.confidence ?? "unknown"}]`,
         metadata: {
           success: !isRealFailure,
           issueCount: result.issue_count,
           confidence: result.confidence,
           dialect: args.dialect,
           has_schema: hasSchema,
-          ...(result.error && { error: result.error }),
+          ...(isRealFailure && { error: failureMessage }),
           ...(findings.length > 0 && { findings }),
         },
         output,
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
-        title: "Analyze: ERROR",
-        metadata: {
-          success: false,
-          issueCount: 0,
-          confidence: "unknown",
-          dialect: args.dialect,
-          has_schema: hasSchema,
-          error: msg,
-        },
-        output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
-      }
+      return analysisError(args, hasSchema, msg)
     }
   },
 })
 
-function formatAnalysis(result: SqlAnalyzeResult): string {
-  if (result.error) {
-    return `Analysis failed: ${result.error}`
+function analysisError(args: { dialect?: string }, hasSchema: boolean, msg: string) {
+  return {
+    title: "Analyze: ERROR",
+    metadata: {
+      success: false,
+      issueCount: 0,
+      confidence: "unknown",
+      dialect: args.dialect,
+      has_schema: hasSchema,
+      error: msg,
+    },
+    output: `Failed to analyze SQL: ${msg}\n\nCheck your connection configuration and try again.`,
+  }
+}
+
+function normalizeFailureMessage(value: unknown): string | undefined {
+  const message = normalizeError(value)
+  if (message === undefined) return undefined
+  return message.trim() || undefined
+}
+
+function formatFailure(message: string): string {
+  return message === "Analysis failed." ? message : `Analysis failed: ${message}`
+}
+
+function formatAnalysis(result: Partial<SqlAnalyzeResult>): string {
+  const error = normalizeFailureMessage(result.error)
+  if (error) {
+    return formatFailure(error)
   }
 
   const issues = result.issues ?? []

@@ -181,7 +181,10 @@ describe("Runner", () => {
       const s = yield* Scope.Scope
       const runner = Runner.make<string>(s)
       const fiber = yield* runner.ensureRunning(Effect.never.pipe(Effect.as("x"))).pipe(Effect.forkChild)
-      yield* Effect.sleep("10 millis")
+      // altimate_change start — replace fixed 10ms sleep with busy-poll to avoid
+      // race where cancel runs before state transitions to Running (CI flake).
+      yield* Effect.repeat(Effect.sleep("5 millis"), { until: () => runner.busy })
+      // altimate_change end
       yield* runner.cancel
       yield* Fiber.await(fiber)
 

@@ -5,8 +5,18 @@
  */
 
 import * as Registry from "../connections/registry"
-import { bqRegionFor, interpolateBqRegion, sanitizeBqRegion } from "./bq-utils"
+import { bqRegionFor, interpolateBqRegion } from "./bq-utils"
+import { resolveFinopsWarehouse } from "./warehouse-resolver"
 import type { QueryHistoryParams, QueryHistoryResult } from "../types"
+
+const QUERY_HISTORY_SUPPORTED_TYPES = [
+  "snowflake",
+  "postgres",
+  "postgresql",
+  "bigquery",
+  "databricks",
+  "clickhouse",
+] as const
 
 // ---------------------------------------------------------------------------
 // SQL templates
@@ -141,12 +151,6 @@ LIMIT __LIMIT__
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getWhType(warehouse: string): string {
-  const warehouses = Registry.list().warehouses
-  const wh = warehouses.find((w) => w.name === warehouse)
-  return wh?.type || "unknown"
-}
-
 function buildHistoryQuery(
   whType: string,
   days: number,
@@ -192,6 +196,9 @@ function buildHistoryQuery(
   if (whType === "duckdb") {
     return null // DuckDB has no native query history
   }
+  if (whType === "trino") {
+    return null // Trino exposes live runtime query state, not durable query history
+  }
   return null
 }
 
@@ -210,10 +217,25 @@ function rowsToRecords(result: { columns: string[]; rows: any[][] }): Record<str
 // ---------------------------------------------------------------------------
 
 export async function getQueryHistory(params: QueryHistoryParams): Promise<QueryHistoryResult> {
-  const whType = getWhType(params.warehouse)
   const days = params.days ?? 7
   const limit = params.limit ?? 100
-  const bqRegion = whType === "bigquery" ? bqRegionFor(params.warehouse) : undefined
+
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: QUERY_HISTORY_SUPPORTED_TYPES,
+    operationName: "Query history",
+  })
+  if (resolved.kind === "error") {
+    return {
+      success: false,
+      queries: [],
+      summary: {},
+      error: resolved.error,
+    }
+  }
+
+  const { warehouse: whName, type: whType } = resolved
+  const bqRegion = whType === "bigquery" ? bqRegionFor(whName) : undefined
 
   const built = buildHistoryQuery(whType, days, limit, params.user, params.warehouse_filter, bqRegion)
   if (!built) {
@@ -221,12 +243,12 @@ export async function getQueryHistory(params: QueryHistoryParams): Promise<Query
       success: false,
       queries: [],
       summary: {},
-      error: `Query history is not available for ${whType} warehouses.`,
+      error: `Internal error: query history SQL template missing for ${whType}.`,
     }
   }
 
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(whName)
     const result = await connector.execute(built.sql, limit, built.binds)
     const queries = rowsToRecords(result)
 
@@ -261,7 +283,7 @@ export async function getQueryHistory(params: QueryHistoryParams): Promise<Query
       success: false,
       queries: [],
       summary: {},
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }

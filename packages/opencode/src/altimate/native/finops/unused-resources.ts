@@ -6,10 +6,13 @@
 
 import * as Registry from "../connections/registry"
 import { bqRegionFor, interpolateBqRegion } from "./bq-utils"
+import { resolveFinopsWarehouse, DEFAULT_FINOPS_TYPES } from "./warehouse-resolver"
 import type {
   UnusedResourcesParams,
   UnusedResourcesResult,
 } from "../types"
+
+const UNUSED_RESOURCES_SUPPORTED_TYPES = DEFAULT_FINOPS_TYPES
 
 // ---------------------------------------------------------------------------
 // Snowflake SQL templates
@@ -121,12 +124,6 @@ LIMIT ?
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getWhType(warehouse: string): string {
-  const warehouses = Registry.list().warehouses
-  const wh = warehouses.find((w) => w.name === warehouse)
-  return wh?.type || "unknown"
-}
-
 function rowsToRecords(result: { columns: string[]; rows: any[][] }): Record<string, unknown>[] {
   return result.rows.map((row) => {
     const obj: Record<string, unknown> = {}
@@ -142,23 +139,29 @@ function rowsToRecords(result: { columns: string[]; rows: any[][] }): Record<str
 // ---------------------------------------------------------------------------
 
 export async function findUnusedResources(params: UnusedResourcesParams): Promise<UnusedResourcesResult> {
-  const whType = getWhType(params.warehouse)
   const days = params.days ?? 30
   const limit = params.limit ?? 50
 
-  if (!["snowflake", "bigquery", "databricks"].includes(whType)) {
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: UNUSED_RESOURCES_SUPPORTED_TYPES,
+    operationName: "Unused resource detection",
+  })
+  if (resolved.kind === "error") {
     return {
       success: false,
       unused_tables: [],
       idle_warehouses: [],
       summary: {},
       days_analyzed: days,
-      error: `Unused resource detection is not available for ${whType} warehouses.`,
+      error: resolved.error,
     }
   }
 
+  const { warehouse: whName, type: whType } = resolved
+
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(whName)
     let unusedTables: Record<string, unknown>[] = []
     let idleWarehouses: Record<string, unknown>[] = []
     const errors: string[] = []
@@ -187,7 +190,7 @@ export async function findUnusedResources(params: UnusedResourcesParams): Promis
       }
     } else if (whType === "bigquery") {
       try {
-        const sql = interpolateBqRegion(BIGQUERY_UNUSED_TABLES_SQL, bqRegionFor(params.warehouse))
+        const sql = interpolateBqRegion(BIGQUERY_UNUSED_TABLES_SQL, bqRegionFor(whName))
         const result = await connector.execute(sql, limit, [days, limit])
         unusedTables = rowsToRecords(result)
       } catch (e) {
@@ -228,7 +231,7 @@ export async function findUnusedResources(params: UnusedResourcesParams): Promis
       idle_warehouses: [],
       summary: {},
       days_analyzed: days,
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }

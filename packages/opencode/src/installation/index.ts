@@ -33,11 +33,38 @@ export namespace Installation {
     }).then((x) => x.text)
   }
 
+  // altimate_change start — curl-upgrade endpoint config
+  // Upstream uses opencode.ai/install. We fetch the altimate install script
+  // from www.altimate.sh/install (the apex altimate.sh isn't routed to the
+  // Amplify Next.js app — tracked separately; revisit when apex DNS is fixed).
+  // Bounded timeout so a stalled CDN/origin can't hang `altimate upgrade` forever.
+  const UPGRADE_INSTALL_URL = "https://www.altimate.sh/install"
+  // Native Windows has no `bash`, so the curl-installed binary self-updates via
+  // the PowerShell installer instead (downloads the same Bun exe from GitHub
+  // releases). Same host as the bash script; both 302 to raw GitHub.
+  const UPGRADE_INSTALL_PS_URL = "https://www.altimate.sh/install.ps1"
+  const UPGRADE_FETCH_TIMEOUT_MS = 15_000
+  // altimate_change end
+
   async function upgradeCurl(target: string) {
-    const body = await fetch("https://altimate.ai/install").then((res) => {
-      if (!res.ok) throw new Error(res.statusText)
-      return res.text()
-    })
+    // altimate_change start — friendly fetch error + manual-recovery hint
+    let body: string
+    try {
+      body = await fetch(UPGRADE_INSTALL_URL, {
+        signal: AbortSignal.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+      }).then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+        return res.text()
+      })
+    } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        `Could not download install script from ${UPGRADE_INSTALL_URL}: ${cause}. ` +
+          `Re-run the install manually: curl -fsSL ${UPGRADE_INSTALL_URL} | bash — ` +
+          `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
+      )
+    }
+    // altimate_change end
     const proc = Process.spawn(["bash"], {
       stdin: "pipe",
       stdout: "pipe",
@@ -56,6 +83,42 @@ export namespace Installation {
       stderr,
     }
   }
+
+  // altimate_change start — Windows curl-install upgrade via PowerShell
+  // The curl/standalone install on native Windows lives in %USERPROFILE%\.altimate\bin
+  // (detected as method "curl") but there is no `bash` to pipe the install
+  // script into. Run the PowerShell installer instead; it downloads the same
+  // Bun exe from GitHub releases and reads $env:VERSION to pin the target.
+  async function upgradePowershell(target: string) {
+    // Probe-only fetch to surface a friendly error before we hand the URL to
+    // PowerShell (which would otherwise fail opaquely inside `irm | iex`).
+    try {
+      await fetch(UPGRADE_INSTALL_PS_URL, {
+        method: "HEAD",
+        signal: AbortSignal.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+      }).then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+      })
+    } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${cause}. ` +
+          `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
+          `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
+      )
+    }
+    return Process.run(
+      ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `irm ${UPGRADE_INSTALL_PS_URL} | iex`],
+      {
+        env: {
+          ...process.env,
+          VERSION: target,
+        },
+        nothrow: true,
+      },
+    )
+  }
+  // altimate_change end
 
   export type Method = Awaited<ReturnType<typeof method>>
 
@@ -100,6 +163,12 @@ export namespace Installation {
   }
 
   export async function method() {
+    // altimate_change start — detect altimate-code curl install at ~/.altimate/bin
+    // (the standalone install dir was renamed in v0.7.1; `.opencode/bin` is kept
+    // for users still on a pre-rename layout, `.local/bin` for distros that
+    // resolve there).
+    if (process.execPath.includes(path.join(".altimate", "bin"))) return "curl"
+    // altimate_change end
     if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl"
     if (process.execPath.includes(path.join(".local", "bin"))) return "curl"
     const exec = process.execPath.toLowerCase()
@@ -180,7 +249,9 @@ export namespace Installation {
     let result: Awaited<ReturnType<typeof upgradeCurl>> | undefined
     switch (method) {
       case "curl":
-        result = await upgradeCurl(target)
+        // altimate_change start — native Windows has no bash; use the PS installer
+        result = process.platform === "win32" ? await upgradePowershell(target) : await upgradeCurl(target)
+        // altimate_change end
         break
       case "npm":
         result = await Process.run(["npm", "install", "-g", `@altimateai/altimate-code@${target}`], { nothrow: true })

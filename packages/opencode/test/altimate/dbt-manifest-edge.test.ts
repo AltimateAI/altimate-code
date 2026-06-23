@@ -82,6 +82,78 @@ describe("dbt manifest parser: edge cases", () => {
     expect(result.models).toEqual([])
   })
 
+  // Primary-key resolution for fan-out detection (L037).
+  test("resolves primary_key from a contract constraint", async () => {
+    const manifest = {
+      nodes: {
+        "model.p.dim": {
+          resource_type: "model",
+          name: "dim",
+          constraints: [{ type: "primary_key", columns: ["id"] }],
+          columns: { id: { name: "id" }, label: { name: "label" } },
+        },
+      },
+      sources: {},
+    }
+    const r = await parseManifest({ path: writeTmpManifest(JSON.stringify(manifest)) })
+    expect(r.models[0].primary_key).toEqual(["id"])
+  })
+
+  test("resolves primary_key from a column-level primary_key constraint", async () => {
+    const manifest = {
+      nodes: {
+        "model.p.events": {
+          resource_type: "model",
+          name: "events",
+          columns: {
+            event_id: { name: "event_id", constraints: [{ type: "primary_key" }] },
+            user_id: { name: "user_id" },
+          },
+        },
+      },
+      sources: {},
+    }
+    const r = await parseManifest({ path: writeTmpManifest(JSON.stringify(manifest)) })
+    expect(r.models[0].primary_key).toEqual(["event_id"])
+  })
+
+  test("resolves primary_key from an unambiguous unique_combination_of_columns test", async () => {
+    const manifest = {
+      nodes: {
+        "model.p.cols": { resource_type: "model", name: "cols", columns: {} },
+        "test.p.uc": {
+          resource_type: "test",
+          name: "unique_combination_cols",
+          attached_node: "model.p.cols",
+          depends_on: { nodes: ["model.p.cols"] },
+          test_metadata: { name: "unique_combination_of_columns", kwargs: { combination_of_columns: ["account", "full_column_name"] } },
+        },
+      },
+      sources: {},
+    }
+    const r = await parseManifest({ path: writeTmpManifest(JSON.stringify(manifest)) })
+    expect(r.models[0].primary_key).toEqual(["account", "full_column_name"])
+  })
+
+  test("does NOT set primary_key when multiple distinct unique tests are ambiguous", async () => {
+    const manifest = {
+      nodes: {
+        "model.p.m": { resource_type: "model", name: "m", columns: {} },
+        "test.p.u1": {
+          resource_type: "test", name: "u_a", depends_on: { nodes: ["model.p.m"] },
+          test_metadata: { name: "unique", kwargs: { column_name: "a" } },
+        },
+        "test.p.u2": {
+          resource_type: "test", name: "u_b", depends_on: { nodes: ["model.p.m"] },
+          test_metadata: { name: "unique", kwargs: { column_name: "b" } },
+        },
+      },
+      sources: {},
+    }
+    const r = await parseManifest({ path: writeTmpManifest(JSON.stringify(manifest)) })
+    expect(r.models[0].primary_key).toBeUndefined()
+  })
+
   test("extracts source columns with type fallback", async () => {
     const manifest = {
       nodes: {},

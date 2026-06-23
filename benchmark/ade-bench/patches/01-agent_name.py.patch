@@ -1,0 +1,12 @@
+diff --git a/ade_bench/agents/agent_name.py b/ade_bench/agents/agent_name.py
+index d6697f9..a4a741b 100644
+--- a/ade_bench/agents/agent_name.py
++++ b/ade_bench/agents/agent_name.py
+@@ -12,6 +12,7 @@ class AgentName(Enum):
+     OPENAI_CODEX = "codex"
+     GEMINI_CLI = "gemini"
+     MACRO = "macro"
++    ALTIMATE_CODE = "altimate"
+ 
+     def model_name_from_agent_name(model_name, agent_name):
+         if agent_name == AgentName.SAGE:

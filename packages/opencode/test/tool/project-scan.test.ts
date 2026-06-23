@@ -11,6 +11,7 @@ import {
   detectDataTools,
   detectConfigFiles,
   parseToolVersion,
+  safeSpawnSync,
   DATA_TOOL_NAMES,
   type GitInfo,
   type DbtProjectInfo,
@@ -114,6 +115,47 @@ describe("detectGit", () => {
       expect(result.isRepo).toBe(false)
       expect(result.branch).toBeUndefined()
       expect(result.remoteUrl).toBeUndefined()
+    } finally {
+      process.chdir(originalCwd)
+    }
+  })
+
+  test("safeSpawnSync returns null on missing binary (no process.env.PATH mutation needed)", () => {
+    // Telemetry-2026-05-21 showed `project_scan` failing 32% of the time with
+    // `Executable not found in $PATH: ?` — the binary was masked to `?` by the
+    // PII filter, but the underlying cause was Bun.spawnSync throwing on a
+    // missing git executable. Previously this test mutated process.env.PATH
+    // + process.chdir() to force the throw, which is risky under any future
+    // intra-file concurrency (and required handling the PATH=undefined
+    // restore case carefully). Use safeSpawnSync directly with an unknown
+    // binary instead — same code path, no global state mutation.
+    expect(safeSpawnSync(["this-binary-does-not-exist-xyz123"])).toBeNull()
+  })
+
+  test("detectGit distinguishes 'git missing' from 'not a repo'", () => {
+    // The gitAvailable field separates the two cases. We can't easily force
+    // git-missing in a unit test (would require mutating PATH globally),
+    // but we can verify the contract: the field exists and is true when
+    // git ran successfully (which it does in this repo).
+    expect(currentRepoResult.gitAvailable).toBe(true)
+    expect(currentRepoResult.isRepo).toBe(true)
+  })
+
+  test("detectGit on a clean non-repo dir has no gitError", async () => {
+    // Reviewer (coderabbit) flagged: any non-zero rev-parse exit was being
+    // bucketed as "not a repo", potentially masking corrupted-.git failures.
+    // Pin the contract that a clean non-repo (exit 128) leaves gitError
+    // undefined so callers can distinguish "clean non-repo" from "degraded
+    // git" by checking gitError presence.
+    const dir = nextTmpDir()
+    await fsp.mkdir(dir, { recursive: true })
+    const originalCwd = process.cwd()
+    process.chdir(dir)
+    try {
+      const result = await detectGit()
+      expect(result.isRepo).toBe(false)
+      expect(result.gitAvailable).toBe(true)
+      expect(result.gitError).toBeUndefined()
     } finally {
       process.chdir(originalCwd)
     }
@@ -314,6 +356,9 @@ describe("detectEnvVars", () => {
       "REDSHIFT_HOST", "REDSHIFT_PORT", "REDSHIFT_DATABASE", "REDSHIFT_USER", "REDSHIFT_PASSWORD",
       "CLICKHOUSE_HOST", "CLICKHOUSE_URL", "CLICKHOUSE_PORT", "CLICKHOUSE_DB",
       "CLICKHOUSE_DATABASE", "CLICKHOUSE_USER", "CLICKHOUSE_USERNAME", "CLICKHOUSE_PASSWORD",
+      "TRINO_HOST", "TRINO_SERVER", "TRINO_URL", "TRINO_PORT", "TRINO_CATALOG",
+      "TRINO_DATABASE", "TRINO_SCHEMA", "TRINO_USER", "TRINO_USERNAME", "TRINO_PASSWORD",
+      "TRINO_TOKEN", "TRINO_ACCESS_TOKEN",
     ]
     for (const v of vars) {
       delete process.env[v]
@@ -558,6 +603,43 @@ describe("detectEnvVars", () => {
       expect(ch!.signal).toBe("DATABASE_URL")
       expect(ch!.type).toBe("clickhouse")
       expect(ch!.config.connection_string).toBe("***")
+    }
+  })
+
+  test("detects Trino via TRINO_HOST", async () => {
+    clearWarehouseEnvVars()
+    process.env.TRINO_HOST = "trino.example.com"
+    process.env.TRINO_PORT = "8443"
+    process.env.TRINO_CATALOG = "iceberg"
+    process.env.TRINO_SCHEMA = "analytics"
+    process.env.TRINO_USER = "analyst"
+    process.env.TRINO_PASSWORD = "secret"
+
+    const result = await detectEnvVars()
+    const trino = result.find((r) => r.type === "trino")
+    expect(trino).toBeDefined()
+    expect(trino!.name).toBe("env_trino")
+    expect(trino!.source).toBe("env-var")
+    expect(trino!.signal).toBe("TRINO_HOST")
+    expect(trino!.config.host).toBe("trino.example.com")
+    expect(trino!.config.port).toBe("8443")
+    expect(trino!.config.catalog).toBe("iceberg")
+    expect(trino!.config.schema).toBe("analytics")
+    expect(trino!.config.user).toBe("analyst")
+    expect(trino!.config.password).toBe("***")
+  })
+
+  test("detects Trino via DATABASE_URL with trino schemes", async () => {
+    for (const scheme of ["trino", "trino+http", "trino+https", "presto"]) {
+      clearWarehouseEnvVars()
+      process.env.DATABASE_URL = `${scheme}://trino.example.com:8080`
+
+      const result = await detectEnvVars()
+      const trino = result.find((r) => r.type === "trino")
+      expect(trino).toBeDefined()
+      expect(trino!.signal).toBe("DATABASE_URL")
+      expect(trino!.type).toBe("trino")
+      expect(trino!.config.connection_string).toBe("***")
     }
   })
 
@@ -900,5 +982,43 @@ describe("return type contracts", () => {
     expect(typeof result.altimateConfig).toBe("boolean")
     expect(typeof result.sqlfluff).toBe("boolean")
     expect(typeof result.preCommit).toBe("boolean")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// safeSpawnSync — the new primitive both detectGit and detectDataTools route through
+// ---------------------------------------------------------------------------
+
+describe("safeSpawnSync", () => {
+  test("returns null when the binary is missing from PATH", () => {
+    const result = safeSpawnSync(["this-binary-does-not-exist-anywhere-on-the-system-xyz123"])
+    expect(result).toBeNull()
+  })
+
+  test("returns { exitCode, stdout } when the binary runs successfully", () => {
+    // Use `node --version` — present on any system that can run this test.
+    const result = safeSpawnSync(["node", "--version"])
+    expect(result).not.toBeNull()
+    if (result) {
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toMatch(/^v?\d+\.\d+/)
+    }
+  })
+
+  test("returns { exitCode: nonzero } when the binary exits non-zero", () => {
+    // `node -e 'process.exit(7)'` runs but exits 7.
+    const result = safeSpawnSync(["node", "-e", "process.exit(7)"])
+    expect(result).not.toBeNull()
+    if (result) {
+      expect(result.exitCode).toBe(7)
+    }
+  })
+
+  test("forwards the timeout option to Bun.spawnSync", () => {
+    // Just verify the helper doesn't crash when given timeout — actually
+    // exercising the timeout path requires a long-running command, which
+    // is flaky in CI. Smoke-check the wiring instead.
+    const result = safeSpawnSync(["node", "--version"], { timeout: 5000 })
+    expect(result).not.toBeNull()
   })
 })

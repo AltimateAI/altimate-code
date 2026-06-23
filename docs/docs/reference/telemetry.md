@@ -45,6 +45,8 @@ We collect the following categories of events:
 | `error_fingerprint` | Hashed error pattern for anonymous grouping — SHA-256 hash of masked error message, error class, tool name, and whether recovery succeeded. Raw error content is never sent. |
 | `sql_fingerprint` | SQL structural shape via AST parsing — statement types, table count, function count, subquery/aggregation/window function presence, and AST node count. No table names, column names, or SQL content. |
 | `schema_complexity` | Warehouse schema structural metrics from introspection — bucketed table, column, and schema counts plus average columns per table. No schema names or content. |
+| `validator_check` | A completion-gate validator ran on session end — validator name, `ok` boolean, step, retry count, `enforced` flag (false in shadow mode), and structured `details` (model counts, elapsed time, concurrency limit — no SQL or model content). Only emitted when `ALTIMATE_VALIDATORS_ENABLED=1` or `ALTIMATE_VALIDATORS_SHADOW=1`. See [Validators](../data-engineering/validators.md). |
+| `validator_retries_exhausted` | A session terminated with unresolved validator failures after exhausting the synthetic-retry budget — names of the failing validators (no failure body content). |
 
 Each event includes a timestamp, anonymous session ID, CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
 

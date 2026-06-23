@@ -280,14 +280,38 @@ Billing flows through your Snowflake credits — no per-token costs.
 
 | Model | Tool Calling |
 |-------|-------------|
-| `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-4-sonnet`, `claude-3-7-sonnet`, `claude-3-5-sonnet` | Yes |
-| `openai-gpt-4.1`, `openai-gpt-5`, `openai-gpt-5-mini`, `openai-gpt-5-nano`, `openai-gpt-5-chat` | Yes |
-| `llama4-maverick`, `snowflake-llama-3.3-70b`, `llama3.1-70b`, `llama3.1-405b`, `llama3.1-8b` | No |
-| `mistral-large`, `mistral-large2`, `mistral-7b` | No |
-| `deepseek-r1` | No |
+| `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-4-sonnet`, `claude-3-7-sonnet`, `claude-3-5-sonnet` | Yes |
+| `openai-gpt-4.1`, `openai-gpt-5`, `openai-gpt-5.1`, `openai-gpt-5.2`, `openai-gpt-5-mini`, `openai-gpt-5-nano`, `openai-gpt-5-chat` | Yes |
+| `llama4-maverick`, `llama4-scout`, `llama3.3-70b`, `snowflake-llama-3.3-70b`, `snowflake-llama-3.1-405b`, `llama3.1-70b`, `llama3.1-405b`, `llama3.1-8b` | No |
+| `mistral-large`, `mistral-large2`, `mistral-7b`, `mixtral-8x7b` | No |
+| `deepseek-r1`, `gemini-3.1-pro` | No |
 
 !!! note
     Model availability depends on your Snowflake region. Enable cross-region inference with `ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION'` for full model access.
+
+### Adding a model not in the list
+
+Snowflake Cortex adds models faster than this list can be updated. If a model is available on your Cortex account but not yet listed above, you can register it locally without forking the CLI — add it under `provider["snowflake-cortex"].models` in your `altimate-code.json` (or `.altimate-code/altimate-code.json`):
+
+```json
+{
+  "provider": {
+    "snowflake-cortex": {
+      "models": {
+        "your-new-model-id": {
+          "name": "Your New Model",
+          "limit": { "context": 200000, "output": 32000 },
+          "tool_call": true
+        }
+      }
+    }
+  }
+}
+```
+
+The entry merges with the built-in list, so the model appears in the picker and can be selected as `snowflake-cortex/your-new-model-id`. Set `"tool_call": false` for models that don't support tools on Cortex (Llama, Mistral, DeepSeek, Gemini today) — otherwise requests with tools will fail.
+
+The `tool_call` field uses snake_case (matching the rest of the `altimate-code.json` schema) and maps to the picker's `capabilities.toolcall`. The request transform reads the same value, so a user-added model marked `tool_call: true` keeps `tools` and `tool_choice` in outgoing requests — and one marked `tool_call: false` has them stripped, the same as the built-in non-tool entries.
 
 ## Databricks AI Gateway
 

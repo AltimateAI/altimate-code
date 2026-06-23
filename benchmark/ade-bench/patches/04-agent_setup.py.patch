@@ -1,0 +1,17 @@
+diff --git a/ade_bench/setup/agent_setup.py b/ade_bench/setup/agent_setup.py
+index b9a3480..fe1ebbe 100644
+--- a/ade_bench/setup/agent_setup.py
++++ b/ade_bench/setup/agent_setup.py
+@@ -42,3 +42,12 @@ def setup_agent_config(terminal, task_id: str, trial_handler, logger) -> None:
+         _copy_config_file(terminal, trial_handler, "AGENTS.md")
+     elif agent_name == AgentName.MACRO:
+         _copy_config_file(terminal, trial_handler, "MACRO.md")
++    elif agent_name == AgentName.ALTIMATE_CODE:
++        # altimate-code is OpenCode-based and auto-loads AGENTS.md via
++        # packages/opencode/src/session/instruction.ts. This routes the
++        # same baseline `shared/config/AGENTS.md` every other benchmarked
++        # agent (Codex) already receives, bringing altimate to parity. The
++        # content is identical across CLAUDE/AGENTS/GEMINI/MACRO files —
++        # generic "you are a data engineer, here's dbt context" — and
++        # ships with the published benchmark for reproducibility.
++        _copy_config_file(terminal, trial_handler, "AGENTS.md")

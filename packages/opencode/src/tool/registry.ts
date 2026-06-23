@@ -129,6 +129,9 @@ import { TrainingRemoveTool } from "../altimate/tools/training-remove"
 import { ImpactAnalysisTool } from "../altimate/tools/impact-analysis"
 import { TrainingImportTool } from "../altimate/tools/training-import"
 // altimate_change end
+// altimate_change start - import dbt PR review tool
+import { DbtPrReviewTool } from "../altimate/tools/dbt-pr-review"
+// altimate_change end
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
@@ -317,6 +320,9 @@ export namespace ToolRegistry {
       // altimate_change end
       // altimate_change start - register impact analysis tool
       ImpactAnalysisTool,
+      // altimate_change end
+      // altimate_change start - register dbt PR review tool
+      DbtPrReviewTool,
       // altimate_change end
       ...custom,
     ]

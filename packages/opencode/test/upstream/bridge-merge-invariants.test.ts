@@ -161,7 +161,12 @@ describe("invariant: event-type literals match between producer and consumers", 
       file: "cli/cmd/tui/context/sync.tsx",
       types: ["message.updated", "message.removed", "message.part.updated", "message.part.removed"],
     },
-    { file: "cli/cmd/tui/worker.ts", types: ["message.updated"] },
+    // worker.ts's inline event handling moved into the shared trace consumer
+    // (also used by `serve`) — the literals live there now.
+    {
+      file: "altimate/observability/trace-consumer.ts",
+      types: ["message.updated", "message.part.updated", "session.updated", "session.deleted"],
+    },
     { file: "cli/cmd/run.ts", types: ["message.updated", "message.part.updated"] },
     { file: "acp/agent.ts", types: ["message.part.updated"] },
   ]

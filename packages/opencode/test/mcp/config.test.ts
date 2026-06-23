@@ -8,6 +8,7 @@ import {
   removeMcpFromConfig,
   listMcpInConfig,
   findAllConfigPaths,
+  readMcpEntryFromDisk,
 } from "../../src/mcp/config"
 
 describe("MCP config: resolveConfigPath", () => {
@@ -96,6 +97,68 @@ describe("MCP config: addMcpToConfig + removeMcpFromConfig round-trip", () => {
     expect(removed).toBe(true)
     const after = await listMcpInConfig(configPath)
     expect(after).not.toContain("ephemeral")
+  })
+})
+
+describe("MCP config: readMcpEntryFromDisk round-trip", () => {
+  test("preserves command array and environment object for local entries", async () => {
+    await using tmp = await tmpdir()
+    const configPath = path.join(tmp.path, "opencode.json")
+    const local = {
+      type: "local",
+      command: ["node", "/path/to/datamate", "start-stdio"],
+      environment: { DATAMATE_KEY: "abc" },
+      enabled: false,
+    }
+    await addMcpToConfig("datamate", local as any, configPath)
+    const entry = await readMcpEntryFromDisk("datamate", configPath)
+    expect(entry).toEqual(local as any)
+  })
+
+  test("preserves headers object for remote entries", async () => {
+    await using tmp = await tmpdir()
+    const configPath = path.join(tmp.path, "opencode.json")
+    const remote = {
+      type: "remote",
+      url: "https://example.com/mcp",
+      headers: { Authorization: "Bearer xyz" },
+      enabled: true,
+    }
+    await addMcpToConfig("knowledge", remote as any, configPath)
+    const entry = await readMcpEntryFromDisk("knowledge", configPath)
+    expect(entry).toEqual(remote as any)
+  })
+
+  test("persist-enabled flow does not corrupt local command/environment", async () => {
+    // Mirrors persistMcpEnabled: read entry from disk, then write back {...entry, enabled}.
+    // A node-walker that drops array/object fields would strip command + environment here.
+    await using tmp = await tmpdir()
+    const configPath = path.join(tmp.path, "opencode.json")
+    await addMcpToConfig(
+      "datamate",
+      { type: "local", command: ["node", "/p"], environment: { K: "v" }, enabled: false } as any,
+      configPath,
+    )
+
+    const entry = await readMcpEntryFromDisk("datamate", configPath)
+    expect(entry).toBeDefined()
+    await addMcpToConfig("datamate", { ...(entry as any), enabled: true }, configPath)
+
+    const after = await readMcpEntryFromDisk("datamate", configPath)
+    expect(after).toEqual({
+      type: "local",
+      command: ["node", "/p"],
+      environment: { K: "v" },
+      enabled: true,
+    } as any)
+  })
+
+  test("returns undefined for missing file or unknown name", async () => {
+    await using tmp = await tmpdir()
+    const configPath = path.join(tmp.path, "opencode.json")
+    expect(await readMcpEntryFromDisk("x", path.join(tmp.path, "missing.json"))).toBeUndefined()
+    await writeFile(configPath, JSON.stringify({ mcp: { a: { type: "local", command: ["x"] } } }))
+    expect(await readMcpEntryFromDisk("nope", configPath)).toBeUndefined()
   })
 })
 

@@ -98,9 +98,15 @@ function formatUserRoles(assignments: unknown[]): string {
 }
 
 export const FinopsRoleGrantsTool = Tool.define("finops_role_grants", {
-  description: "Query RBAC grants — see what permissions are granted to roles and on which objects. Snowflake only.",
+  description:
+    "Query RBAC grants on Snowflake / BigQuery / Databricks — see what permissions are granted to roles and on which objects.",
   parameters: z.object({
-    warehouse: z.string().describe("Warehouse connection name"),
+    warehouse: z
+      .string()
+      .optional()
+      .describe(
+        "Warehouse connection name. Optional — if omitted, the first configured Snowflake/BigQuery/Databricks warehouse is used.",
+      ),
     role: z.string().optional().describe("Filter to grants for a specific role"),
     object_name: z.string().optional().describe("Filter to grants on a specific object"),
     limit: z.number().optional().default(100).describe("Max results"),
@@ -141,7 +147,12 @@ export const FinopsRoleGrantsTool = Tool.define("finops_role_grants", {
 export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
   description: "Show the role hierarchy — which roles inherit from which other roles. Snowflake only.",
   parameters: z.object({
-    warehouse: z.string().describe("Warehouse connection name"),
+    warehouse: z
+      .string()
+      .optional()
+      .describe(
+        "Warehouse connection name. Optional — if omitted, the first configured Snowflake warehouse is used.",
+      ),
   }),
   async execute(args, ctx) {
     try {
@@ -174,7 +185,12 @@ export const FinopsRoleHierarchyTool = Tool.define("finops_role_hierarchy", {
 export const FinopsUserRolesTool = Tool.define("finops_user_roles", {
   description: "Show which roles are assigned to users. Snowflake only.",
   parameters: z.object({
-    warehouse: z.string().describe("Warehouse connection name"),
+    warehouse: z
+      .string()
+      .optional()
+      .describe(
+        "Warehouse connection name. Optional — if omitted, the first configured Snowflake warehouse is used.",
+      ),
     user: z.string().optional().describe("Filter to a specific user"),
     limit: z.number().optional().default(100).describe("Max results"),
   }),

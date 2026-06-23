@@ -39,6 +39,7 @@ This opens the Altimate Code chat panel where you can interact with altimate age
 - **Tool call results inline** — SQL analysis, lineage, dbt operations, and more displayed in the chat
 - **Agent mode switching** — switch between Builder (full read/write), Analyst (read-only), and Plan (minimal access) modes from the command palette
 - **100+ data engineering tools** — SQL validation, query optimization, column lineage, dbt model generation, FinOps analysis, schema exploration, and more
+- **Session tracing** — every chat session is recorded as a trace file (the IDE panel runs `altimate-code serve` under the hood, which now writes traces just like the terminal). Inspect them with `altimate-code trace list` / `altimate-code trace view <id>`. See [Traces](../configure/trace.md).
 
 ## Configuration
 

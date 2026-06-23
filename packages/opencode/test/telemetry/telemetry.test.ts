@@ -636,6 +636,7 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
         agent: "builder",
         finish_reason: "end_turn",
         tokens_input: 100,
+        tokens_input_total: 115, // input + cache.read + cache.write
         tokens_output: 200,
         tokens_reasoning: 50,
         tokens_cache_read: 10,
@@ -649,6 +650,7 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
       const envelopes = JSON.parse(fetchCalls[0].body)
       const measurements = envelopes[0].data.baseData.measurements
       expect(measurements.tokens_input).toBe(100)
+      expect(measurements.tokens_input_total).toBe(115)
       expect(measurements.tokens_output).toBe(200)
       expect(measurements.tokens_reasoning).toBe(50)
       expect(measurements.tokens_cache_read).toBe(10)

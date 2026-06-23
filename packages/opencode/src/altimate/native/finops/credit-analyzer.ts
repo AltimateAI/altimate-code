@@ -6,12 +6,15 @@
 
 import * as Registry from "../connections/registry"
 import { bqRegionFor, interpolateBqRegion } from "./bq-utils"
+import { resolveFinopsWarehouse, DEFAULT_FINOPS_TYPES } from "./warehouse-resolver"
 import type {
   CreditAnalysisParams,
   CreditAnalysisResult,
   ExpensiveQueriesParams,
   ExpensiveQueriesResult,
 } from "../types"
+
+const CREDIT_SUPPORTED_TYPES = DEFAULT_FINOPS_TYPES
 
 // ---------------------------------------------------------------------------
 // Snowflake SQL templates
@@ -185,12 +188,6 @@ LIMIT ?
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getWhType(warehouse: string): string {
-  const warehouses = Registry.list().warehouses
-  const wh = warehouses.find((w) => w.name === warehouse)
-  return wh?.type || "unknown"
-}
-
 function buildCreditUsageSql(
   whType: string, days: number, limit: number, warehouseFilter?: string, bqRegion?: unknown,
 ): { sql: string; binds: any[] } | null {
@@ -302,14 +299,35 @@ function generateRecommendations(
 // ---------------------------------------------------------------------------
 
 export async function analyzeCredits(params: CreditAnalysisParams): Promise<CreditAnalysisResult> {
-  const whType = getWhType(params.warehouse)
   const days = params.days ?? 30
   const limit = params.limit ?? 50
-  const bqRegion = whType === "bigquery" ? bqRegionFor(params.warehouse) : undefined
+
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: CREDIT_SUPPORTED_TYPES,
+    operationName: "Credit analysis",
+  })
+  if (resolved.kind === "error") {
+    return {
+      success: false,
+      daily_usage: [],
+      warehouse_summary: [],
+      total_credits: 0,
+      days_analyzed: days,
+      recommendations: [],
+      error: resolved.error,
+    }
+  }
+
+  const { warehouse: whName, type: whType } = resolved
+  const bqRegion = whType === "bigquery" ? bqRegionFor(whName) : undefined
 
   const dailyBuilt = buildCreditUsageSql(whType, days, limit, params.warehouse_filter, bqRegion)
   const summaryBuilt = buildCreditSummarySql(whType, days, bqRegion)
 
+  // CREDIT_SUPPORTED_TYPES is the contract with the resolver — if we got past
+  // resolution, both builders are guaranteed to return non-null. Defensive null
+  // check here only to satisfy the type system; not a real runtime path.
   if (!dailyBuilt || !summaryBuilt) {
     return {
       success: false,
@@ -318,12 +336,12 @@ export async function analyzeCredits(params: CreditAnalysisParams): Promise<Cred
       total_credits: 0,
       days_analyzed: days,
       recommendations: [],
-      error: `Credit analysis is not available for ${whType} warehouses.`,
+      error: `Internal error: credit SQL templates missing for ${whType}.`,
     }
   }
 
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(whName)
     const dailyResult = await connector.execute(dailyBuilt.sql, limit, dailyBuilt.binds)
     const summaryResult = await connector.execute(summaryBuilt.sql, 1000, summaryBuilt.binds)
 
@@ -348,16 +366,32 @@ export async function analyzeCredits(params: CreditAnalysisParams): Promise<Cred
       total_credits: 0,
       days_analyzed: days,
       recommendations: [],
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }
 
 export async function getExpensiveQueries(params: ExpensiveQueriesParams): Promise<ExpensiveQueriesResult> {
-  const whType = getWhType(params.warehouse)
   const days = params.days ?? 7
   const limit = params.limit ?? 20
-  const bqRegion = whType === "bigquery" ? bqRegionFor(params.warehouse) : undefined
+
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: CREDIT_SUPPORTED_TYPES,
+    operationName: "Expensive query analysis",
+  })
+  if (resolved.kind === "error") {
+    return {
+      success: false,
+      queries: [],
+      query_count: 0,
+      days_analyzed: days,
+      error: resolved.error,
+    }
+  }
+
+  const { warehouse: whName, type: whType } = resolved
+  const bqRegion = whType === "bigquery" ? bqRegionFor(whName) : undefined
 
   const built = buildExpensiveSql(whType, days, limit, bqRegion)
   if (!built) {
@@ -366,12 +400,12 @@ export async function getExpensiveQueries(params: ExpensiveQueriesParams): Promi
       queries: [],
       query_count: 0,
       days_analyzed: days,
-      error: `Expensive query analysis is not available for ${whType} warehouses.`,
+      error: `Internal error: expensive-query SQL template missing for ${whType}.`,
     }
   }
 
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(whName)
     const result = await connector.execute(built.sql, limit, built.binds)
     const queries = rowsToRecords(result)
 
@@ -387,7 +421,7 @@ export async function getExpensiveQueries(params: ExpensiveQueriesParams): Promi
       queries: [],
       query_count: 0,
       days_analyzed: days,
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }

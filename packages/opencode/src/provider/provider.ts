@@ -54,7 +54,9 @@ import { VALID_ACCOUNT_RE } from "../altimate/plugin/snowflake"
 import { isValidDatabricksHost } from "../altimate/plugin/databricks"
 // altimate_change end
 
-const DEFAULT_CHUNK_TIMEOUT = 120_000
+// altimate_change start — raise SSE chunk-timeout watchdog 2min→5min (#844) for slow warehouse/LLM streams
+const DEFAULT_CHUNK_TIMEOUT = 300_000
+// altimate_change end
 
 export namespace Provider {
   const log = Log.create({ service: "provider" })
@@ -1015,6 +1017,14 @@ export namespace Provider {
       return m
     }
 
+    // Snowflake Cortex models are hardcoded rather than auto-discovered.
+    // Cortex's models endpoint (`GET /api/v2/cortex/v1/models`) has
+    // non-standard semantics — it requires a JSON body on GET, which breaks
+    // standard OpenAI-compatible clients. Until that gets a probe-able shim,
+    // the source of truth for "what's selectable" is this map. New models
+    // surfaced on Snowflake's regional availability docs should be added here
+    // (or registered via `altimate-code.json` per the
+    // `docs/docs/configure/providers.md` escape-hatch section).
     database["snowflake-cortex"] = {
       id: ProviderID.snowflakeCortex,
       source: "custom",
@@ -1023,6 +1033,7 @@ export namespace Provider {
       options: {},
       models: {
         // Claude models — tool calling supported
+        "claude-opus-4-7": makeSnowflakeModel("claude-opus-4-7", "Claude Opus 4.7", { context: 1000000, output: 128000 }),
         "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", {
           context: 200000,
           output: 64000,
@@ -1049,6 +1060,16 @@ export namespace Provider {
         }),
         // OpenAI models — tool calling supported
         "openai-gpt-4.1": makeSnowflakeModel("openai-gpt-4.1", "OpenAI GPT-4.1", { context: 1047576, output: 32768 }),
+        // openai-gpt-5.2: not in Snowflake's per-model restrictions table; using
+        // gpt-5 family defaults as best-effort until docs publish exact limits.
+        "openai-gpt-5.2": makeSnowflakeModel("openai-gpt-5.2", "OpenAI GPT-5.2", {
+          context: 272000,
+          output: 8192,
+        }),
+        "openai-gpt-5.1": makeSnowflakeModel("openai-gpt-5.1", "OpenAI GPT-5.1", {
+          context: 272000,
+          output: 8192,
+        }),
         "openai-gpt-5": makeSnowflakeModel("openai-gpt-5", "OpenAI GPT-5", { context: 1047576, output: 32768 }),
         "openai-gpt-5-mini": makeSnowflakeModel("openai-gpt-5-mini", "OpenAI GPT-5 Mini", {
           context: 1047576,
@@ -1070,10 +1091,35 @@ export namespace Provider {
           { context: 1048576, output: 4096 },
           { toolcall: false },
         ),
+        "llama4-scout": makeSnowflakeModel(
+          "llama4-scout",
+          "Llama 4 Scout",
+          { context: 128000, output: 8192 },
+          { toolcall: false },
+        ),
+        // llama3.3-70b: upstream Meta-hosted variant.
+        "llama3.3-70b": makeSnowflakeModel(
+          "llama3.3-70b",
+          "Llama 3.3 70B",
+          { context: 128000, output: 8192 },
+          { toolcall: false },
+        ),
+        // snowflake-llama-3.3-70b: Snowflake-hosted variant (different routing /
+        // region pinning vs the upstream `llama3.3-70b` above).
         "snowflake-llama-3.3-70b": makeSnowflakeModel(
           "snowflake-llama-3.3-70b",
           "Snowflake Llama 3.3 70B",
-          { context: 128000, output: 4096 },
+          { context: 128000, output: 8192 },
+          { toolcall: false },
+        ),
+        // snowflake-llama-3.1-405b: 8k context per Snowflake docs (much smaller
+        // than the upstream Meta model's window). Snowflake's table lists
+        // output=8192, but output cannot exceed the total token budget — cap
+        // at 4096 (the original sibling default) so prompt+output always fit.
+        "snowflake-llama-3.1-405b": makeSnowflakeModel(
+          "snowflake-llama-3.1-405b",
+          "Snowflake Llama 3.1 405B",
+          { context: 8000, output: 4096 },
           { toolcall: false },
         ),
         "llama3.1-70b": makeSnowflakeModel(
@@ -1113,12 +1159,25 @@ export namespace Provider {
           { context: 32000, output: 4096 },
           { toolcall: false },
         ),
+        "mixtral-8x7b": makeSnowflakeModel(
+          "mixtral-8x7b",
+          "Mixtral 8x7B",
+          { context: 32000, output: 8192 },
+          { toolcall: false },
+        ),
         // DeepSeek — no tool calling
         "deepseek-r1": makeSnowflakeModel(
           "deepseek-r1",
           "DeepSeek R1",
           { context: 64000, output: 32000 },
           { reasoning: true, toolcall: false },
+        ),
+        // Gemini — tool calling not verified on Cortex; default to off until confirmed
+        "gemini-3.1-pro": makeSnowflakeModel(
+          "gemini-3.1-pro",
+          "Gemini 3.1 Pro",
+          { context: 1000000, output: 64000 },
+          { toolcall: false },
         ),
       },
     }

@@ -1,0 +1,22 @@
+diff --git a/ade_bench/agents/agent_factory.py b/ade_bench/agents/agent_factory.py
+index bd0bb4b..4ad5aba 100644
+--- a/ade_bench/agents/agent_factory.py
++++ b/ade_bench/agents/agent_factory.py
+@@ -15,6 +15,9 @@ from ade_bench.agents.installed_agents.macro.macro_agent import (
+ from ade_bench.agents.installed_agents.openai_codex.openai_codex_agent import (
+     OpenAICodexAgent,
+ )
++from ade_bench.agents.installed_agents.altimate_code.altimate_code_agent import (
++    AltimateCodeAgent,
++)
+ from ade_bench.agents.none_agent import NoneAgent
+ from ade_bench.agents.sage_agent import SageAgent
+ 
+@@ -38,6 +41,7 @@ class NamedAgentFactory(AgentFactory):
+         OpenAICodexAgent.NAME: OpenAICodexAgent,
+         GeminiCLIAgent.NAME: GeminiCLIAgent,
+         MacroAgent.NAME: MacroAgent,
++        AltimateCodeAgent.NAME: AltimateCodeAgent,
+     }
+ 
+     def __init__(self, agent_name: AgentName):

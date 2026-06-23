@@ -4,7 +4,7 @@ import { Dispatcher } from "../native"
 
 export const AltimateCoreTrackLineageTool = Tool.define("altimate_core_track_lineage", {
   description:
-    "Track lineage across multiple SQL queries. Builds a combined lineage graph from a sequence of queries. Requires altimate_core.init() with API key. Provide schema_context or schema_path for accurate table/column resolution.",
+    "Track lineage across multiple SQL queries. Builds a combined lineage graph from a sequence of queries. Runs fully offline via the native engine — no API key or account required. Provide schema_context or schema_path for accurate table/column resolution.",
   parameters: z.object({
     queries: z.array(z.string()).describe("List of SQL queries to track lineage across"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),

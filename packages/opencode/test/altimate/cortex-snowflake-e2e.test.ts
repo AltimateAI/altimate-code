@@ -30,6 +30,13 @@ import {
   VALID_ACCOUNT_RE,
 } from "../../src/altimate/plugin/snowflake"
 
+// Production builds this set from `provider.models` at loader time; mirror
+// the same shape here for the transform-only e2e checks.
+const TOOLCAPABLE_E2E_FIXTURE: ReadonlySet<string> = new Set([
+  "claude-3-5-sonnet", "claude-sonnet-4-6", "claude-opus-4-7",
+  "openai-gpt-4.1", "openai-gpt-5",
+])
+
 // ---------------------------------------------------------------------------
 // Auth configuration
 // ---------------------------------------------------------------------------
@@ -375,7 +382,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
         max_tokens: 100,
         stream: true,
       })
-      const { body } = transformSnowflakeBody(input)
+      const { body } = transformSnowflakeBody(input, TOOLCAPABLE_E2E_FIXTURE)
       const parsed = JSON.parse(body)
       expect(parsed.max_completion_tokens).toBe(100)
       expect(parsed.max_tokens).toBeUndefined()
@@ -388,7 +395,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
         tools: [{ type: "function", function: { name: "read_file" } }],
         tool_choice: "auto",
       })
-      const { body } = transformSnowflakeBody(input)
+      const { body } = transformSnowflakeBody(input, TOOLCAPABLE_E2E_FIXTURE)
       const parsed = JSON.parse(body)
       expect(parsed.tools).toBeUndefined()
       expect(parsed.tool_choice).toBeUndefined()
@@ -403,7 +410,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
           { role: "assistant", content: "response" },
         ],
       })
-      const { syntheticStop } = transformSnowflakeBody(input)
+      const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_E2E_FIXTURE)
       expect(syntheticStop).toBeUndefined()
     })
 
@@ -416,7 +423,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
           { role: "assistant", content: "response" },
         ],
       })
-      const { syntheticStop } = transformSnowflakeBody(input)
+      const { syntheticStop } = transformSnowflakeBody(input, TOOLCAPABLE_E2E_FIXTURE)
       expect(syntheticStop).toBeDefined()
       expect(syntheticStop!.status).toBe(200)
     })

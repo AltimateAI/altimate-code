@@ -1,0 +1,58 @@
+name: Dispatch Code Review
+
+# Lightweight relay — on PR ready (not every push), dispatches the centralized
+# ocr/Gemini review in AltimateAI/altimate-qa (code-review.yml).
+#
+# Gated loop: review fires only when a PR is opened non-draft or marked Ready for
+# review. `synchronize` is intentionally omitted so pushes don't re-trigger.
+# altimate-qa flips the PR back to draft on CRITICAL findings, so re-review happens
+# on the next ready_for_review after the author addresses them.
+#
+# Token: reuses the org-level AUTOPILOT_DISPATCH_TOKEN (same one dbt-integration /
+# vscode-dbt-power-user use to dispatch to altimate-qa). If that org secret is not
+# visible to this repo, the step skips cleanly — ask an admin to extend its repo
+# visibility (no new token needs to be created).
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+    branches: [main]
+
+concurrency:
+  group: dispatch-code-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Notify altimate-qa
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch to centralized code review
+        env:
+          GH_TOKEN: ${{ secrets.AUTOPILOT_DISPATCH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "AUTOPILOT_DISPATCH_TOKEN not available to altimate-code — skipping centralized dispatch."
+            echo "Ask an org admin to extend that org secret's visibility to AltimateAI/altimate-code."
+            exit 0
+          fi
+          gh api repos/AltimateAI/altimate-qa/dispatches \
+            --method POST \
+            -f event_type=code-review \
+            -f "client_payload[repo]=AltimateAI/altimate-code" \
+            -f "client_payload[pr_number]=$PR_NUMBER" \
+            -f "client_payload[head_ref]=$PR_HEAD_REF" \
+            -f "client_payload[head_sha]=$PR_HEAD_SHA" \
+            -f "client_payload[author]=$PR_AUTHOR" \
+            -f "client_payload[title]=$PR_TITLE"
+          echo "Dispatched code review for PR #$PR_NUMBER"

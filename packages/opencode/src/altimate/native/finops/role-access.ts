@@ -6,6 +6,7 @@
 
 import * as Registry from "../connections/registry"
 import { bqRegionFor, interpolateBqRegion } from "./bq-utils"
+import { resolveFinopsWarehouse, DEFAULT_FINOPS_TYPES } from "./warehouse-resolver"
 import type {
   RoleGrantsParams,
   RoleGrantsResult,
@@ -107,11 +108,8 @@ LIMIT ?
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getWhType(warehouse: string): string {
-  const warehouses = Registry.list().warehouses
-  const wh = warehouses.find((w) => w.name === warehouse)
-  return wh?.type || "unknown"
-}
+const GRANTS_SUPPORTED_TYPES = DEFAULT_FINOPS_TYPES
+const SNOWFLAKE_ONLY_TYPES = ["snowflake"] as const
 
 function rowsToRecords(result: { columns: string[]; rows: any[][] }): Record<string, unknown>[] {
   return result.rows.map((row) => {
@@ -164,9 +162,25 @@ function buildGrantsSql(
 // ---------------------------------------------------------------------------
 
 export async function queryGrants(params: RoleGrantsParams): Promise<RoleGrantsResult> {
-  const whType = getWhType(params.warehouse)
   const limit = params.limit ?? 100
-  const bqRegion = whType === "bigquery" ? bqRegionFor(params.warehouse) : undefined
+
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: GRANTS_SUPPORTED_TYPES,
+    operationName: "Role/access queries",
+  })
+  if (resolved.kind === "error") {
+    return {
+      success: false,
+      grants: [],
+      grant_count: 0,
+      privilege_summary: {},
+      error: resolved.error,
+    }
+  }
+
+  const { warehouse: whName, type: whType } = resolved
+  const bqRegion = whType === "bigquery" ? bqRegionFor(whName) : undefined
 
   const built = buildGrantsSql(whType, params.role, params.object_name, limit, bqRegion)
   if (!built) {
@@ -175,12 +189,12 @@ export async function queryGrants(params: RoleGrantsParams): Promise<RoleGrantsR
       grants: [],
       grant_count: 0,
       privilege_summary: {},
-      error: `Role/access queries are not available for ${whType} warehouses.`,
+      error: `Internal error: grants SQL template missing for ${whType}.`,
     }
   }
 
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(whName)
     const result = await connector.execute(built.sql, limit, built.binds)
     const grants = rowsToRecords(result)
 
@@ -202,26 +216,28 @@ export async function queryGrants(params: RoleGrantsParams): Promise<RoleGrantsR
       grants: [],
       grant_count: 0,
       privilege_summary: {},
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }
 
 export async function queryRoleHierarchy(params: RoleHierarchyParams): Promise<RoleHierarchyResult> {
-  const whType = getWhType(params.warehouse)
-  if (whType !== "snowflake") {
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: SNOWFLAKE_ONLY_TYPES,
+    operationName: "Role hierarchy",
+  })
+  if (resolved.kind === "error") {
     return {
       success: false,
       hierarchy: [],
       role_count: 0,
-      error: `Role hierarchy is not available for ${whType}. ` +
-        `Use ${whType === "bigquery" ? "BigQuery IAM" : whType === "databricks" ? "Databricks Unity Catalog" : whType} ` +
-        `for access management.`,
+      error: resolved.error,
     }
   }
 
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(resolved.warehouse)
     const result = await connector.execute(SNOWFLAKE_ROLE_HIERARCHY_SQL, 10000)
     const hierarchy = rowsToRecords(result)
 
@@ -241,26 +257,28 @@ export async function queryRoleHierarchy(params: RoleHierarchyParams): Promise<R
       success: false,
       hierarchy: [],
       role_count: 0,
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }
 
 export async function queryUserRoles(params: UserRolesParams): Promise<UserRolesResult> {
-  const whType = getWhType(params.warehouse)
-  if (whType !== "snowflake") {
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: SNOWFLAKE_ONLY_TYPES,
+    operationName: "User role queries",
+  })
+  if (resolved.kind === "error") {
     return {
       success: false,
       assignments: [],
       assignment_count: 0,
-      error: `User role queries are not available for ${whType}. ` +
-        `Use ${whType === "bigquery" ? "BigQuery IAM" : whType === "databricks" ? "Databricks Unity Catalog" : whType} ` +
-        `for access management.`,
+      error: resolved.error,
     }
   }
 
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(resolved.warehouse)
     const limit = params.limit ?? 100
     const binds: any[] = []
     const userF = params.user ? (binds.push(params.user), "AND grantee_name = ?") : ""
@@ -280,7 +298,7 @@ export async function queryUserRoles(params: UserRolesParams): Promise<UserRoles
       success: false,
       assignments: [],
       assignment_count: 0,
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }

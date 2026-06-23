@@ -4,6 +4,7 @@ import { $ } from "bun"
 import fs from "fs"
 import path from "path"
 import { fileURLToPath } from "url"
+import { createRequire } from "node:module"
 import solidPlugin from "@opentui/solid/bun-plugin"
 
 const __filename = fileURLToPath(import.meta.url)
@@ -89,6 +90,17 @@ const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 
+// Build targets are limited to the platforms for which @altimateai/altimate-core
+// publishes a NAPI prebuild (see
+// https://www.npmjs.com/package/@altimateai/altimate-core?activeTab=dependencies).
+// Each per-target build embeds that prebuild's .node file directly into the Bun
+// single-file executable so the release archive ships a single self-contained
+// binary — no companion node_modules, no NODE_PATH wrapper.
+//
+// Combinations with no altimate-core prebuild are intentionally excluded:
+//   • linux-*-musl (no @altimateai/altimate-core-linux-*-musl)
+//   • win32-arm64  (no @altimateai/altimate-core-win32-arm64-msvc)
+// If/when altimate-core ships prebuilds for those, add them back here.
 const allTargets: {
   os: string
   arch: "arm64" | "x64"
@@ -109,22 +121,6 @@ const allTargets: {
     avx2: false,
   },
   {
-    os: "linux",
-    arch: "arm64",
-    abi: "musl",
-  },
-  {
-    os: "linux",
-    arch: "x64",
-    abi: "musl",
-  },
-  {
-    os: "linux",
-    arch: "x64",
-    abi: "musl",
-    avx2: false,
-  },
-  {
     os: "darwin",
     arch: "arm64",
   },
@@ -136,10 +132,6 @@ const allTargets: {
     os: "darwin",
     arch: "x64",
     avx2: false,
-  },
-  {
-    os: "win32",
-    arch: "arm64",
   },
   {
     os: "win32",
@@ -191,15 +183,59 @@ const targets = targetIndexFlag !== undefined
     ? allTargets.filter(t => targetsFlag.includes(t.os))
     : allTargets
 
+// Defense in depth: refuse to produce no artifacts at all, and refuse to build
+// the glibc target on a musl host where the binary would crash at startup.
+//
+// Why it matters:
+//   - `--target-index=N` for an index that no longer exists (after the
+//     musl/win32-arm64 cull) silently yields an empty `targets` array. Without
+//     this guard the build "succeeds" with zero output and CI proceeds.
+//   - `--single` only filters on os/arch, not libc. On Alpine that matches
+//     `linux-x64` (glibc), produces a glibc binary that the musl host can't
+//     load, and dies later with a cryptic linker error.
+if (targets.length === 0) {
+  const reason = targetIndexFlag !== undefined
+    ? `--target-index=${targetIndexFlag} is out of range (allTargets has ${allTargets.length} entries — musl/win32-arm64 were removed).`
+    : singleFlag
+      ? `--single found no entry in allTargets matching ${process.platform}/${process.arch} (host may be excluded — see allTargets at the top of build.ts).`
+      : targetsFlag
+        ? `--targets=${targetsFlag.join(",")} matched nothing in allTargets.`
+        : "allTargets is empty."
+  console.error(`error: no build targets selected. ${reason}`)
+  process.exit(1)
+}
+
+if (singleFlag && process.platform === "linux") {
+  const isMuslHost = (() => {
+    try {
+      if (fs.existsSync("/etc/alpine-release")) return true
+    } catch {}
+    try {
+      const { spawnSync } = require("node:child_process") as typeof import("node:child_process")
+      const r = spawnSync("ldd", ["--version"], { encoding: "utf8" })
+      const text = ((r.stdout ?? "") + (r.stderr ?? "")).toLowerCase()
+      if (text.includes("musl")) return true
+    } catch {}
+    return false
+  })()
+  if (isMuslHost) {
+    console.error("error: --single on a musl-linux host would build the glibc target and produce a binary the host cannot run.")
+    console.error("       altimate-core has no NAPI prebuild for musl yet. Build on a glibc host, or install via `apk add gcompat` + the npm wrapper.")
+    process.exit(1)
+  }
+}
+
 await $`rm -rf dist`
 
 // Packages excluded from the compiled binary — must be resolvable from
-// node_modules at runtime. Split into required (must ship with the wrapper
-// package) and optional (user installs on demand).
-const requiredExternals = [
-  // NAPI native module — cannot be embedded in Bun single-file executable.
-  "@altimateai/altimate-core",
-]
+// node_modules at runtime.
+//
+// NOTE: @altimateai/altimate-core is intentionally NOT external. We replace
+// its NAPI-RS loader with a one-line shim per target (see below) so Bun
+// statically sees a single `require('./altimate-core.<platform>.node')` and
+// embeds that one .node file into bunfs. This keeps the binary self-contained
+// without bloating it with 5 platforms' worth of native addons.
+const requiredExternals: string[] = []
 const optionalExternals = [
   // Database drivers — native addons, users install on demand per warehouse
   "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
@@ -212,6 +248,122 @@ const binaries: Record<string, string> = {}
 if (!skipInstall) {
   await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
   await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+  // Ensure every @altimateai/altimate-core platform prebuild is resolvable in
+  // node_modules. Each per-target build below picks one and embeds its .node
+  // file into the Bun binary.
+  await $`bun install --os="*" --cpu="*" @altimateai/altimate-core@${pkg.dependencies["@altimateai/altimate-core"]}`
+}
+
+// Map a build target to the altimate-core NAPI prebuild package name and the
+// matching `.node` file name. The mapping mirrors the lines in altimate-core's
+// NAPI-RS-generated loader (e.g. `require('./altimate-core.linux-x64-gnu.node')`).
+// Baseline variants share the same prebuild as their non-baseline counterpart —
+// "baseline" is a Bun-binary distinction, not a NAPI one.
+function altimateCorePlatformFor(item: { os: string; arch: "arm64" | "x64"; abi?: "musl" }): {
+  pkg: string
+  nodeFile: string
+  platformTag: string
+} {
+  if (item.abi === "musl") {
+    throw new Error(`No @altimateai/altimate-core prebuild for linux-${item.arch}-musl; this target should not be in allTargets.`)
+  }
+  if (item.os === "darwin") {
+    const tag = `darwin-${item.arch}`
+    return { pkg: `@altimateai/altimate-core-${tag}`, nodeFile: `altimate-core.${tag}.node`, platformTag: tag }
+  }
+  if (item.os === "linux") {
+    const tag = `linux-${item.arch}-gnu`
+    return { pkg: `@altimateai/altimate-core-${tag}`, nodeFile: `altimate-core.${tag}.node`, platformTag: tag }
+  }
+  if (item.os === "win32") {
+    if (item.arch === "x64") {
+      const tag = "win32-x64-msvc"
+      return { pkg: `@altimateai/altimate-core-${tag}`, nodeFile: `altimate-core.${tag}.node`, platformTag: tag }
+    }
+    throw new Error(`No @altimateai/altimate-core prebuild for win32-${item.arch}; this target should not be in allTargets.`)
+  }
+  throw new Error(`Unsupported build target: ${item.os}-${item.arch}`)
+}
+
+// Resolve the loader package once up-front. Real path (not the bun symlink in
+// node_modules/.bun) — we copy from this for each per-target staging dir.
+const altimateCoreLoaderPkgJson = fileURLToPath(import.meta.resolve("@altimateai/altimate-core/package.json"))
+const altimateCoreLoaderDir = fs.realpathSync(path.dirname(altimateCoreLoaderPkgJson))
+
+// Pin: the version actually on disk must match what package.json declares.
+// `bun install --os=* --cpu=*` hoists into `node_modules/.bun/` and re-links
+// the top-level entry, but a previous hoist for an older version can linger.
+// Asserting here catches the case where the build silently embeds yesterday's
+// .node into today's release archive.
+{
+  const expected = pkg.dependencies["@altimateai/altimate-core"]
+  const resolvedVersion = JSON.parse(
+    fs.readFileSync(path.join(altimateCoreLoaderDir, "package.json"), "utf8"),
+  ).version
+  if (resolvedVersion !== expected) {
+    throw new Error(
+      `build.ts: resolved @altimateai/altimate-core version ${resolvedVersion} ` +
+        `does not match package.json (${expected}). ` +
+        `Run 'rm -rf node_modules bun.lock && bun install' to refresh the hoist.`,
+    )
+  }
+}
+
+// A `require` rooted at the loader's index.js so we can resolve sibling
+// `@altimateai/altimate-core-<platform>` packages without hand-walking bun's
+// `.bun/` flat layout. Node's resolution walks parent node_modules from the
+// require base, which (in bun's hoisted layout used by this project) reaches
+// the top-level `node_modules/@altimateai/altimate-core-<platform>` symlinks.
+const altimateCoreLoaderRequire = createRequire(path.join(altimateCoreLoaderDir, "index.js"))
+
+// Extract the `_requiredExports` literal from the upstream NAPI-RS loader so
+// the generated single-platform shim can keep the same correctness check
+// (catches a stale or truncated .node file at startup with a clear error
+// instead of a confusing "method is not a function" later). Pin the exact
+// shape we expect — if the loader format changes, abort the build rather
+// than silently shipping a shim with no validation.
+const altimateCoreLoaderSource = fs.readFileSync(path.join(altimateCoreLoaderDir, "index.js"), "utf8")
+const requiredExportsMatch = altimateCoreLoaderSource.match(/const _requiredExports = (\[[\s\S]*?\])/)
+if (!requiredExportsMatch) {
+  throw new Error(
+    "build.ts: could not extract _requiredExports from @altimateai/altimate-core/index.js. " +
+      "The upstream NAPI-RS loader format changed — update the regex (see script/build.ts).",
+  )
+}
+// Parse and validate: the captured literal must be a pure JSON array of
+// non-empty string literals. The regex above would happily match
+// `["x"]; <attacker code>; const _foo = [` and the matched group would
+// then be inlined verbatim into the staged shim — embedding attacker JS
+// into our shipped binary. Strict parse + shape-check refuses any value
+// that isn't a string-array.
+let altimateCoreRequiredExportsLiteral: string
+try {
+  const parsed = JSON.parse(requiredExportsMatch[1])
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every((n) => typeof n === "string" && n.length > 0 && n.length < 200)
+  ) {
+    throw new Error("not an array of non-empty short string literals")
+  }
+  // Re-serialize so the shim is built from validated data, not the raw match.
+  altimateCoreRequiredExportsLiteral = JSON.stringify(parsed)
+} catch (err) {
+  throw new Error(
+    `build.ts: _requiredExports literal from @altimateai/altimate-core/index.js failed validation: ${
+      err instanceof Error ? err.message : String(err)
+    }. Refusing to inline into the staged shim.`,
+  )
+}
+
+// Locate the on-disk dir for an @altimateai/altimate-core-<platform> NAPI
+// prebuild. Use createRequire rooted at the loader's index.js — Node's
+// require.resolve walks parent node_modules from the require base, which
+// reaches both bun's hoisted top-level @altimateai/altimate-core-<platform>
+// symlinks and any nested layout.
+function locatePlatformPackageDir(pkgName: string): string {
+  const pkgJsonPath = altimateCoreLoaderRequire.resolve(`${pkgName}/package.json`)
+  return fs.realpathSync(path.dirname(pkgJsonPath))
 }
 for (const item of targets) {
   const name = [
@@ -235,10 +387,81 @@ for (const item of targets) {
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
   const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
 
+  // -------------------------------------------------------------------------
+  // Stage a per-target copy of @altimateai/altimate-core so we can embed the
+  // target's NAPI prebuild into the Bun single-file executable.
+  //
+  // The upstream NAPI-RS loader (index.js) dispatches at runtime across every
+  // supported platform — referencing each `./altimate-core.<platform>.node`
+  // and `@altimateai/altimate-core-<platform>` from `require()`. If we hand
+  // that loader to Bun.build as-is, Bun statically resolves every branch and
+  // either bloats the binary with 5 platforms' worth of .node files or fails
+  // when a non-target platform package isn't on disk.
+  //
+  // Instead we replace the loader with a one-line shim:
+  //
+  //     module.exports = require('./altimate-core.<platform>.node')
+  //
+  // and drop the matching .node file next to it. Bun sees a single static
+  // require() and embeds that one .node into bunfs. Result: self-contained
+  // ~80–100 MB binary, no companion files, no NODE_PATH.
+  // -------------------------------------------------------------------------
+  const platform = altimateCorePlatformFor(item)
+  const platformPkgDir = locatePlatformPackageDir(platform.pkg)
+  const platformNodeSrc = path.join(platformPkgDir, platform.nodeFile)
+  if (!fs.existsSync(platformNodeSrc)) {
+    throw new Error(`Expected NAPI prebuild not found: ${platformNodeSrc}. Did 'bun install --os=* --cpu=*' run?`)
+  }
+
+  const stagedAltimateCoreDir = path.join(dir, "dist", name, ".altimate-core-staged", "@altimateai", "altimate-core")
+  // Pre-loop cleanup: a previous build that crashed between staging and the
+  // post-build cleanup would leave a stale `.altimate-core-staged/` here.
+  // Without this, the next build could see the old shim and (if onResolve
+  // regresses) embed yesterday's .node. Wipe before staging fresh.
+  await $`rm -rf dist/${name}/.altimate-core-staged`
+  await $`mkdir -p ${stagedAltimateCoreDir}`
+  // Keep index.d.ts + package.json so typecheck and resolution stay happy.
+  fs.copyFileSync(path.join(altimateCoreLoaderDir, "package.json"), path.join(stagedAltimateCoreDir, "package.json"))
+  if (fs.existsSync(path.join(altimateCoreLoaderDir, "index.d.ts"))) {
+    fs.copyFileSync(path.join(altimateCoreLoaderDir, "index.d.ts"), path.join(stagedAltimateCoreDir, "index.d.ts"))
+  }
+  // The shim — single static require() of the target's .node file plus the
+  // same _requiredExports correctness check the upstream NAPI-RS loader does.
+  fs.writeFileSync(
+    path.join(stagedAltimateCoreDir, "index.js"),
+    `// Generated by packages/opencode/script/build.ts for ${name}.\n` +
+      `// Replaces the multi-platform NAPI-RS loader so Bun embeds exactly one .node.\n` +
+      `const nativeBinding = require('./${platform.nodeFile}')\n` +
+      `const _requiredExports = ${altimateCoreRequiredExportsLiteral}\n` +
+      `const _missing = _requiredExports.filter((n) => typeof nativeBinding[n] !== 'function')\n` +
+      `if (_missing.length > 0) {\n` +
+      `  throw new Error(\n` +
+      `    '@altimateai/altimate-core: embedded NAPI binary missing ' + _missing.length + ' export(s): ' +\n` +
+      `    _missing.slice(0, 5).join(', ') + (_missing.length > 5 ? '...' : '')\n` +
+      `  )\n` +
+      `}\n` +
+      `module.exports = nativeBinding\n`,
+  )
+  // The actual native binding, co-located so the shim's relative require() resolves.
+  fs.copyFileSync(platformNodeSrc, path.join(stagedAltimateCoreDir, platform.nodeFile))
+
+  // Bun.build plugin: rewrite @altimateai/altimate-core imports to the staged
+  // shim. Without this, Bun resolves the import via the workspace
+  // node_modules and we'd be back to the full multi-platform loader.
+  const stagedShimAbs = path.join(stagedAltimateCoreDir, "index.js")
+  const altimateCoreResolverPlugin = {
+    name: "altimate-core-staged-resolver",
+    setup(build: any) {
+      build.onResolve({ filter: /^@altimateai\/altimate-core$/ }, () => ({
+        path: stagedShimAbs,
+      }))
+    },
+  }
+
   await Bun.build({
     conditions: ["browser"],
     tsconfig: "./tsconfig.json",
-    plugins: [solidPlugin],
+    plugins: [solidPlugin, altimateCoreResolverPlugin],
     sourcemap: "external",
     // IMPORTANT: Without code splitting, Bun inlines dynamic import() targets
     // into the main chunk. Any external require() in those targets will fail
@@ -269,9 +492,15 @@ for (const item of targets) {
     },
   })
 
-  // Create backward-compatible altimate-code alias
-  // Use hard copy instead of symlink — npm publish and Docker COPY can strip symlinks,
-  // causing "Binary not found" in Verdaccio sanity tests.
+  // Staging dir is no longer needed once Bun has embedded the shim + .node.
+  await $`rm -rf dist/${name}/.altimate-core-staged`
+
+  // Create backward-compatible altimate-code alias inside the platform package.
+  // The npm wrapper (`packages/opencode/bin/altimate`) looks for `bin/altimate-code`
+  // (or .exe) when locating the platform binary, so this must exist for the
+  // `npm i -g` flow. The release archive below ships only `altimate`.
+  // Use a hard copy instead of a symlink — npm publish and Docker COPY can
+  // strip symlinks, causing "Binary not found" in Verdaccio sanity tests.
   if (item.os === "win32") {
     await $`cp dist/${name}/bin/altimate.exe dist/${name}/bin/altimate-code.exe`.nothrow()
   } else {
@@ -327,12 +556,20 @@ for (const item of targets) {
 
 if (Script.release) {
   for (const key of Object.keys(binaries)) {
-    const archiveName = key.replace(/^@altimateai\//, "")
+    // Archive name maps the platform package name (`@altimateai/altimate-code-<target>`)
+    // to a standalone-archive prefix (`altimate-<target>`). The curl-install
+    // script (`install` at repo root) expects this prefix and unpacks a single
+    // binary named `altimate` — matching the primary npm bin entry.
+    const archiveName = key.replace(/^@altimateai\/altimate-code-/, "altimate-")
     const archivePath = path.resolve("dist", archiveName)
+    // Name construction at line 283 substitutes `win32 → windows`, so the key
+    // contains "windows", not "win32". Matching the wrong substring here would
+    // archive a non-existent `altimate` file on Windows targets.
+    const binaryName = key.includes("windows") ? "altimate.exe" : "altimate"
     if (key.includes("linux")) {
-      await $`tar -czf ${archivePath}.tar.gz *`.cwd(`dist/${key}/bin`)
+      await $`tar -czf ${archivePath}.tar.gz ${binaryName}`.cwd(`dist/${key}/bin`)
     } else {
-      await $`zip -r ${archivePath}.zip *`.cwd(`dist/${key}/bin`)
+      await $`zip ${archivePath}.zip ${binaryName}`.cwd(`dist/${key}/bin`)
     }
   }
 }

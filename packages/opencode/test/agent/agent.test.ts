@@ -678,6 +678,7 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
       agent: {
         builder: { disable: true },
         analyst: { disable: true },
+        reviewer: { disable: true },
         plan: { disable: true },
       },
     },

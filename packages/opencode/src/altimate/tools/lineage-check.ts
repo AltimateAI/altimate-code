@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { LineageCheckResult } from "../native/types"
+import { isRecord, normalizeError } from "./response-normalization"
 
 export const LineageCheckTool = Tool.define("lineage_check", {
   description:
@@ -20,37 +21,47 @@ export const LineageCheckTool = Tool.define("lineage_check", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Dispatcher.call("lineage.check", {
+      const rawResult = (await Dispatcher.call("lineage.check", {
         sql: args.sql,
         dialect: args.dialect,
         schema_context: args.schema_context,
-      })
+      })) as unknown
 
-      const data = (result.data ?? {}) as Record<string, any>
-      if (result.error) {
-        return {
-          title: "Lineage: ERROR",
-          metadata: { success: false, error: result.error },
-          output: `Error: ${result.error}`,
-        }
+      if (!isRecord(rawResult)) {
+        return lineageError("Invalid lineage response from dispatcher.")
       }
 
-      const error = data.error
+      const result = rawResult as Partial<LineageCheckResult>
+
+      const data = isRecord(result.data) ? result.data : {}
+      const responseError = normalizeError(result.error)
+      if (responseError !== undefined) {
+        return lineageError(responseError.trim() || "Lineage check failed.")
+      }
+
+      const error = normalizeError(data.error)
+      // Treat the result as OK only when both the envelope and the inner payload
+      // report success, matching the two-layer check used by sql_analyze.
+      const success = result.success === true && data.success !== false
       return {
-        title: `Lineage: ${result.success ? "OK" : "PARTIAL"}`,
-        metadata: { success: result.success, ...(error && { error }) },
+        title: `Lineage: ${success ? "OK" : "PARTIAL"}`,
+        metadata: { success, ...(error && { error }) },
         output: formatLineage(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
-        title: "Lineage: ERROR",
-        metadata: { success: false, error: msg },
-        output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
-      }
+      return lineageError(msg)
     }
   },
 })
+
+function lineageError(msg: string) {
+  return {
+    title: "Lineage: ERROR",
+    metadata: { success: false, error: msg },
+    output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
+  }
+}
 
 function formatLineage(data: Record<string, any>): string {
   const lines: string[] = []

@@ -60,7 +60,7 @@ This will walk you through installing the GitHub app, creating the workflow, and
 
 ### Manual Setup
 
-1. Install the GitHub app https://github.com/apps/altimate-code-agent. Make sure it is installed on the target repository.
+1. [Install the GitHub app](https://github.com/apps/altimate-code-agent/installations/new) and select the target repository.
 2. Add the following workflow file to `.github/workflows/altimate-code.yml` in your repo. Set the appropriate `model` and required API keys in `env`.
 
    ```yml

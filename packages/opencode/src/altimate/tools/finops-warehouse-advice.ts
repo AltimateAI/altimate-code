@@ -18,33 +18,46 @@ function formatWarehouseAdvice(
     lines.push("".padEnd(50, "="))
 
     if (perf.length > 0) {
-      lines.push("Warehouse | Avg Exec Time | Avg Queue Time | Queries | Status")
-      lines.push("----------|---------------|----------------|---------|-------")
+      // Field names match what `warehouse-advisor.ts` actually returns from
+      // the SIZING SQL: warehouse_name, query_count, avg_time_sec,
+      // p95_time_sec, avg_bytes_scanned, total_credits. The previous version
+      // of this formatter read `avg_execution_time` / `avg_queue_time` /
+      // `status` / `health` — none of which exist in the result rows, so
+      // every value rendered as `-` regardless of input. (Same class of
+      // bug previously fixed for finops-query-history.ts and
+      // finops-expensive-queries.ts.)
+      lines.push("Warehouse | Queries | Avg Time | p95 Time | Credits")
+      lines.push("----------|---------|----------|----------|--------")
       for (const p of perf) {
         const r = p as Record<string, unknown>
         const name = String(r.warehouse_name ?? r.name ?? "unknown")
-        const avgExec = r.avg_execution_time !== undefined ? `${Number(r.avg_execution_time).toFixed(2)}s` : "-"
-        const avgQueue = r.avg_queue_time !== undefined ? `${Number(r.avg_queue_time).toFixed(2)}s` : "-"
-        const queries = r.query_count ?? r.total_queries ?? "-"
-        const statusVal = r.status ?? r.health ?? "-"
-        lines.push(`${name} | ${avgExec} | ${avgQueue} | ${queries} | ${statusVal}`)
+        const queries = r.query_count ?? "-"
+        const avgTime = r.avg_time_sec !== undefined ? `${Number(r.avg_time_sec).toFixed(2)}s` : "-"
+        const p95Time = r.p95_time_sec !== undefined ? `${Number(r.p95_time_sec).toFixed(2)}s` : "-"
+        const credits = r.total_credits !== undefined ? Number(r.total_credits).toFixed(2) : "-"
+        lines.push(`${name} | ${queries} | ${avgTime} | ${p95Time} | ${credits}`)
       }
       lines.push("")
     }
 
     if (load.length > 0) {
-      lines.push("Warehouse Load Metrics")
-      lines.push("".padEnd(50, "-"))
-      lines.push("Warehouse | Size | Avg Load | Peak Load | Utilization")
-      lines.push("----------|------|----------|-----------|------------")
+      // LOAD SQL returns: warehouse_name, avg_concurrency, avg_queue_load,
+      // peak_queue_load, sample_count. The previous version read
+      // `warehouse_size` / `avg_load` / `peak_load` / `utilization` — none of
+      // which are in the result rows. (Same bug pattern.) `warehouse_size` is
+      // populated separately in `recommendations[*].current_size` from the
+      // SHOW WAREHOUSES probe; surface that in the Recommendations section
+      // below, not here.
+      lines.push("Warehouse | Avg Concurrency | Avg Queue | Peak Queue | Samples")
+      lines.push("----------|-----------------|-----------|------------|--------")
       for (const l of load) {
         const r = l as Record<string, unknown>
         const name = String(r.warehouse_name ?? r.name ?? "unknown")
-        const size = String(r.warehouse_size ?? r.size ?? "-")
-        const avgLoad = r.avg_load !== undefined ? Number(r.avg_load).toFixed(1) : "-"
-        const peakLoad = r.peak_load !== undefined ? Number(r.peak_load).toFixed(1) : "-"
-        const util = r.utilization !== undefined ? `${Number(r.utilization).toFixed(1)}%` : "-"
-        lines.push(`${name} | ${size} | ${avgLoad} | ${peakLoad} | ${util}`)
+        const avgConc = r.avg_concurrency !== undefined ? Number(r.avg_concurrency).toFixed(2) : "-"
+        const avgQ = r.avg_queue_load !== undefined ? Number(r.avg_queue_load).toFixed(2) : "-"
+        const peakQ = r.peak_queue_load !== undefined ? Number(r.peak_queue_load).toFixed(2) : "-"
+        const samples = r.sample_count ?? "-"
+        lines.push(`${name} | ${avgConc} | ${avgQ} | ${peakQ} | ${samples}`)
       }
       lines.push("")
     }
@@ -70,9 +83,14 @@ function formatWarehouseAdvice(
 
 export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice", {
   description:
-    "Analyze warehouse load and performance to recommend sizing changes. Identifies underutilized, overloaded, and correctly-sized warehouses. Snowflake only.",
+    "Analyze warehouse load and performance on Snowflake / BigQuery / Databricks to recommend sizing changes. Identifies underutilized, overloaded, and correctly-sized warehouses.",
   parameters: z.object({
-    warehouse: z.string().describe("Warehouse connection name"),
+    warehouse: z
+      .string()
+      .optional()
+      .describe(
+        "Warehouse connection name. Optional — if omitted, the first configured Snowflake/BigQuery/Databricks warehouse is used.",
+      ),
     days: z.number().optional().default(14).describe("Days of history to analyze"),
   }),
   async execute(args, ctx) {
@@ -91,13 +109,18 @@ export const FinopsWarehouseAdviceTool = Tool.define("finops_warehouse_advice", 
         }
       }
 
+      // Defensive null-coalesce in case the handler ever returns a partial
+      // shape (transient dispatcher variance, future schema change). Without
+      // this, `.length` on an undefined would throw a TypeError and the user
+      // would see a JS stack instead of a structured tool error.
+      const recs = (result.recommendations as unknown[] | undefined) ?? []
       return {
-        title: `Warehouse Advice: ${result.recommendations.length} recommendation${result.recommendations.length !== 1 ? "s" : ""}`,
-        metadata: { success: true, recommendation_count: result.recommendations.length },
+        title: `Warehouse Advice: ${recs.length} recommendation${recs.length !== 1 ? "s" : ""}`,
+        metadata: { success: true, recommendation_count: recs.length },
         output: formatWarehouseAdvice(
-          result.recommendations as unknown[],
-          result.warehouse_load as unknown[],
-          result.warehouse_performance as unknown[],
+          recs,
+          (result.warehouse_load as unknown[] | undefined) ?? [],
+          (result.warehouse_performance as unknown[] | undefined) ?? [],
         ),
       }
     } catch (e) {

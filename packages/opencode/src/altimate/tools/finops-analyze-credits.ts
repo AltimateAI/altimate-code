@@ -63,12 +63,24 @@ function formatCreditsAnalysis(
 
 export const FinopsAnalyzeCreditsTool = Tool.define("finops_analyze_credits", {
   description:
-    "Analyze Snowflake credit consumption — daily breakdown by warehouse, total credits, and cost optimization recommendations. Requires ACCOUNT_USAGE access.",
+    "Analyze Snowflake/BigQuery/Databricks credit consumption — daily breakdown by warehouse, total credits, and cost optimization recommendations. Requires ACCOUNT_USAGE (Snowflake) / INFORMATION_SCHEMA.JOBS (BigQuery) / system.billing.usage (Databricks) access.",
   parameters: z.object({
-    warehouse: z.string().describe("Warehouse connection name"),
+    warehouse: z
+      .string()
+      .optional()
+      .describe(
+        "Warehouse connection name. Optional — if omitted, the first configured Snowflake/BigQuery/Databricks warehouse is used.",
+      ),
     days: z.number().optional().default(30).describe("Days of history to analyze"),
     limit: z.number().optional().default(50).describe("Max daily records"),
-    warehouse_filter: z.string().optional().describe("Filter to a specific Snowflake warehouse"),
+    warehouse_filter: z
+      .string()
+      .optional()
+      .describe(
+        "Filter result rows by an in-warehouse Snowflake compute name (NOT the connection name). " +
+          "Distinct from `warehouse`: `warehouse` picks which connection to query; `warehouse_filter` narrows " +
+          "which Snowflake virtual warehouse's queries are returned in the result set. Snowflake only.",
+      ),
   }),
   async execute(args, ctx) {
     try {

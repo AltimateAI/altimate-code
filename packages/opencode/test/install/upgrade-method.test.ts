@@ -85,8 +85,36 @@ describe("upgrade execution", () => {
     expect(INSTALLATION_SRC).toContain("HOMEBREW_NO_AUTO_UPDATE")
   })
 
-  test("curl upgrade uses altimate.ai/install endpoint", () => {
-    expect(INSTALLATION_SRC).toContain("https://altimate.ai/install")
+  test("curl upgrade uses altimate.sh/install endpoint", () => {
+    // Accept either apex (altimate.sh) or www. host. Apex routes to a non-
+    // Amplify origin today, so the source uses www.altimate.sh; once the
+    // apex is fixed (separate infra change), the source can drop www. and
+    // this assertion still passes.
+    expect(INSTALLATION_SRC).toMatch(/https:\/\/(www\.)?altimate\.sh\/install/)
+    // altimate.ai/install was the legacy URL (broken since 2026-05; tracked in
+    // #309). Keep the assertion so any future regression that reintroduces it
+    // fires immediately.
+    expect(INSTALLATION_SRC).not.toContain("https://altimate.ai/install")
+  })
+
+  test("curl upgrade fetch has a bounded timeout", () => {
+    // Without a timeout the install-script fetch can stall indefinitely on a
+    // hung CDN/origin, blocking `altimate upgrade` forever. Use AbortSignal.timeout
+    // so the request fails fast with a clear error instead.
+    // Assert on the named constant + 15s value separately so a future refactor
+    // that extracts the literal (e.g., `AbortSignal.timeout(UPGRADE_FETCH_TIMEOUT_MS)`)
+    // doesn't break this regression guard for cosmetic reasons.
+    expect(INSTALLATION_SRC).toMatch(/AbortSignal\.timeout\(/)
+    expect(INSTALLATION_SRC).toMatch(/UPGRADE_FETCH_TIMEOUT_MS\s*=\s*15_000/)
+  })
+
+  test("curl upgrade fetch failure surfaces an actionable error", () => {
+    // A raw `AbortError: The operation was aborted` is useless to a user on a
+    // flaky network — they should see the URL, the manual-recovery curl
+    // one-liner, and the GitHub releases fallback so they can self-recover.
+    expect(INSTALLATION_SRC).toContain("Could not download install script from")
+    expect(INSTALLATION_SRC).toContain("Re-run the install manually")
+    expect(INSTALLATION_SRC).toContain("github.com/AltimateAI/altimate-code/releases/latest")
   })
 
   test("VERSION normalization strips v prefix", () => {

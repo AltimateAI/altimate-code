@@ -359,7 +359,9 @@ export function registerAllSql(): void {
       const sqlA = params.original ?? params.sql_a
       const sqlB = params.modified ?? params.sql_b
 
-      const compareRaw = schema ? await core.checkEquivalence(sqlA, sqlB, schema) : null
+      // `|| undefined`: coerce a default empty-string dialect to "no hint" — the
+      // engine throws on an unknown dialect "".
+      const compareRaw = schema ? await core.checkEquivalence(sqlA, sqlB, schema, params.dialect || undefined) : null
       const compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
 
       // Simple line-based diff

@@ -76,11 +76,29 @@ describe("ProviderError.parseStreamError: SSE error classification", () => {
     expect(ProviderError.parseStreamError({ type: "content", text: "hello" })).toBeUndefined()
   })
 
-  test("returns undefined for unknown error codes", () => {
+  test("falls back to api_error with extracted message for unknown error codes (v0.7.1+)", () => {
+    // Behavior change in v0.7.1: previously returned undefined, which caused the
+    // caller to fall through to JSON.stringify(e). Now extracts the message via
+    // the same string-typeof chain used in parseAPICallError so users see a
+    // clean api_error instead of `Unknown: {"type":"error",...}`.
+    const result = ProviderError.parseStreamError({
+      type: "error",
+      error: { code: "unknown_code", message: "weird" },
+    })
+    expect(result?.type).toBe("api_error")
+    if (result && result.type === "api_error") {
+      expect(result.message).toBe("weird")
+      expect(result.isRetryable).toBe(false)
+    }
+  })
+
+  test("returns undefined when no extractable message exists for unknown code", () => {
+    // Last-resort behavior: extractor finds no string anywhere — caller falls
+    // back to JSON.stringify(e), which is at least visible if not friendly.
     expect(
       ProviderError.parseStreamError({
         type: "error",
-        error: { code: "unknown_code", message: "weird" },
+        error: { code: "unknown_code" },
       }),
     ).toBeUndefined()
   })

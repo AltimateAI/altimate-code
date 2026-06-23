@@ -1,5 +1,75 @@
 # Troubleshooting
 
+## Installation
+
+### Standalone binary not found after curl install
+
+**Symptoms:** `altimate-code: command not found` after running `curl -fsSL https://www.altimate.sh/install | bash`.
+
+As of v0.7.1 the curl-installed binary is named `altimate`, not `altimate-code`. The npm package continues to ship both names. If you scripted against the curl install:
+
+```bash
+# Before (v0.7.0 and earlier curl install):
+~/.altimate-code/bin/altimate-code run "..."
+
+# After (v0.7.1+ curl install):
+~/.altimate/bin/altimate run "..."
+```
+
+Or stay on the `altimate-code` name by installing via npm: `npm install -g altimate-code`.
+
+### `Cannot find module '@altimateai/altimate-code-core'`
+
+**Symptoms:** Binary crashes on first run with the above error (curl-installed v0.7.0 and earlier).
+
+The v0.7.0 curl install shipped without the NAPI native module. Fixed in v0.7.1 — the native module is now embedded directly into the binary. Re-install with:
+
+```bash
+curl -fsSL https://www.altimate.sh/install | bash
+```
+
+### Alpine Linux (musl) not supported
+
+**Symptoms:** `Alpine Linux (musl) is not currently supported by the standalone install` during curl install, or `altimate-code is not currently supported on Alpine Linux (musl)` during `npm install` postinstall.
+
+`@altimateai/altimate-core` has no NAPI prebuild for musl. Workarounds:
+
+```bash
+# Run the glibc binary under Alpine (recommended):
+apk add gcompat
+
+# Then either:
+curl -fsSL https://www.altimate.sh/install | bash   # standalone binary
+# or:
+apk add gcompat && npm install -g altimate-code  # npm install
+```
+
+Or use a glibc-based base image (`debian`, `ubuntu`, `node:slim`).
+
+### Windows on ARM64 not supported
+
+**Symptoms:** `altimate-code is not currently built for Windows on ARM64` during install.
+
+Run the x64 build under Windows-on-ARM's x64 emulation layer, or use WSL.
+
+### `altimate` not found after the Windows standalone install
+
+**Symptoms:** `altimate` is unrecognized after running the PowerShell installer.
+
+The installer adds `%USERPROFILE%\.altimate\bin` to your **user** PATH — open a
+new terminal so it takes effect. To (re)install or pin a version:
+
+```powershell
+# Latest
+powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
+
+# Specific version
+&([scriptblock]::Create((irm https://www.altimate.sh/install.ps1))) -Version 1.0.180
+```
+
+If the binary crashes immediately on an older CPU, the installer normally retries
+the baseline (non-AVX2) build automatically; force it with `-ForceBaseline`.
+
 ## Log Files
 
 Logs are stored at:
@@ -30,6 +100,30 @@ altimate --print-logs --log-level DEBUG
 3. If behind a proxy, set `HTTPS_PROXY` (see [Network](network.md))
 4. Try a different provider to isolate the issue
 
+### Provider API Errors
+
+**Symptoms:** `APIError: <status>: <message>` shown in chat output. Common forms:
+
+- `APIError: Bad Request: The model 'foo' does not exist or you do not have access to it.`
+- `APIError: Unauthorized: Invalid API key`
+- `APIError: Rate limit exceeded`
+
+As of v0.7.1, altimate-code surfaces the **inner provider message** instead of dumping the raw JSON body. The status prefix (`Bad Request:`, `Unauthorized:`, etc.) comes from the provider's HTTP status code; everything after the colon is the provider's text verbatim.
+
+**Solutions by error class:**
+
+1. **Model not found** (`APIError: Bad Request: The model '<name>' does not exist...`) — list the models your provider currently exposes and re-run with one of them:
+   ```bash
+   altimate models <provider>
+   ```
+   `model_not_found` errors no longer auto-retry; the message you see is the first attempt, not the fifth.
+2. **Unauthorized / 401** — re-run `altimate auth login <provider>` and re-issue the request.
+3. **Rate limited / 429** — altimate-code automatically retries on rate-limit responses (including plain-text 429s from Alibaba/DashScope). If you keep hitting rate limits, lower `parallel_tool_calls` or switch to a less-saturated model.
+4. **Context overflow** — switch to a larger-context model or trim earlier turns with `/compact`. Detection covers Anthropic, Bedrock, OpenAI, Gemini, xAI, Groq, OpenRouter, DeepSeek, Copilot, llama.cpp, LM Studio, MiniMax, Kimi, Moonshot, Azure OpenAI, and HTTP 413.
+5. **HTML page returned** — usually a gateway/proxy error. The CLI returns a friendly hint pointing at `altimate auth login` rather than dumping the raw HTML.
+
+**Privacy note:** error messages flow through the same redaction layer as everything else (`sk-…`, `Bearer …`, email addresses, and `*.local` / `*.internal` / RFC1918 / IPv6 loopback / ULA / link-local / AWS IMDS hostnames are masked before reaching telemetry). Internal-host URLs in `metadata.url` are also redacted before they reach local storage or shared sessions, and basic-auth userinfo (`user:pass@…`) is stripped from every URL regardless of whether the host is internal.
+
 ### Tool Execution Errors
 
 **Symptoms:** "No native handler" or tool execution failures for data engineering tools.
@@ -48,6 +142,15 @@ altimate --print-logs --log-level DEBUG
    bun add pg
    ```
 3. No Python installation is required. All tools run natively in TypeScript.
+
+### Plan mode refuses a benign request, or stops without exploring
+
+**Symptoms:** In plan mode (`--agent plan`), the agent replies *"I'm sorry, but I cannot assist with that request"* to an ordinary planning ask, or you see the warning *"the `plan` agent … stopped without calling any tools."* Most common on the hosted `altimate-default` model (and other non-Anthropic models).
+
+**Solutions:**
+
+1. **Upgrade to v0.8.3 or later.** This was a known bug: altimate-code's internal plan instructions were delivered in a way that non-Anthropic models (GPT-5.x, Gemini, …) could mistake for a prompt-injection attempt and refuse. v0.8.3 delivers them as proper system-role messages, eliminating the refusal.
+2. If you still see the agent stop without exploring, follow the in-product warning's recoveries: reply asking it to investigate first (`read`/`grep`/`glob`/`explore`), rephrase the request more concretely, or — if it keeps refusing — `/model` to a tier more eager to explore (e.g. Claude Sonnet/Opus).
 
 ### Warehouse Connection Failed
 

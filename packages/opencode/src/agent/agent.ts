@@ -17,6 +17,7 @@ import PROMPT_TITLE from "./prompt/title.txt"
 // altimate_change start - import custom agent mode prompts
 import PROMPT_BUILDER from "../altimate/prompts/builder.txt"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
+import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
 // altimate_change end
 import { PermissionNext } from "@/permission/next"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -235,6 +236,50 @@ export namespace Agent {
         mode: "primary",
         native: true,
       },
+      // altimate_change start — reviewer agent: dbt PR review verdict engine
+      reviewer: {
+        name: "reviewer",
+        description:
+          "dbt PR reviewer. Runs the dbt_pr_review verdict engine (lineage, equivalence, PII, grade) plus read-only analysis tools and posts findings. Edit/write tools are denied; bash is denied.",
+        prompt: PROMPT_REVIEWER,
+        options: {},
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+            // The verdict engine + the read-only analysis tools it composes.
+            dbt_pr_review: "allow",
+            impact_analysis: "allow",
+            altimate_core_check: "allow",
+            altimate_core_grade: "allow",
+            altimate_core_equivalence: "allow",
+            altimate_core_column_lineage: "allow",
+            altimate_core_compare: "allow",
+            lineage_check: "allow",
+            sql_analyze: "allow",
+            sql_diff: "allow",
+            schema_detect_pii: "allow",
+            // Writes denied — review never mutates the project.
+            sql_execute_write: "deny",
+            // Read-only file + repo access (structured tools, not bash).
+            read: "allow",
+            grep: "allow",
+            glob: "allow",
+            tool_lookup: "allow",
+            // Bash is DENIED. A string-prefix bash allowlist (e.g. `git log *`)
+            // cannot safely bound argv: shell redirects ride inside the matched
+            // command (`git log -p > ~/.ssh/authorized_keys`) and `cat *` reads
+            // any file — both bypass the "read-only" intent and enable
+            // write/exfil. The reviewer uses the structured read/grep/glob tools
+            // and the verdict engine (which does its own diffing) instead.
+            bash: "deny",
+          }),
+          userWithSafety,
+        ),
+        mode: "primary",
+        native: true,
+      },
+      // altimate_change end
       // altimate_change end
       plan: {
         name: "plan",

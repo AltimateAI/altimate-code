@@ -11,6 +11,9 @@ import { Session } from "."
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
+// altimate_change start — shared family→vendor classifier (#888 J1)
+import { familyVendor } from "../provider/family"
+// altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 import { Instance } from "../project/instance"
@@ -52,6 +55,14 @@ import { Truncate } from "@/tool/truncation"
 import { decodeDataUrl } from "@/util/data-url"
 // altimate_change start - import fingerprint for env-based skill selection
 import { Fingerprint } from "../altimate/fingerprint"
+// altimate_change end
+
+// altimate_change start - validator framework (see session/validators/types.ts header)
+import { ValidatorRegistry } from "./validators/registry"
+import { registerAltimateValidators } from "../altimate/validators"
+// Explicit registration call (not a side-effect import) so bun's --single
+// bundler cannot tree-shake the validator registrations.
+registerAltimateValidators()
 import { Config } from "../config/config"
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change end
@@ -72,6 +83,39 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
+
+  // altimate_change start — single source of truth for legacy agent-name normalization
+  //
+  // The "build" agent was renamed to "builder" but some persisted sessions and
+  // the plan-exit synthetic message historically wrote `agent: "build"`. Agent.get()
+  // applies an alias so execution still works, but every telemetry event with an
+  // `agent` field needs to project to the canonical name or dashboards see a
+  // phantom "build" bucket alongside "builder". This helper is the single place
+  // that normalization lives — used by both session_start and agent_outcome
+  // emits below so they can never drift. Future telemetry events with an `agent`
+  // field should route through this helper too.
+  function normalizeAgentName(name: string | undefined): string {
+    // Defence-in-depth before the legacy-name compare:
+    //   1. Strip C0 control characters (\x00-\x1f) — neutralizes log-injection
+    //      via embedded newlines/CRs that would split the telemetry field into
+    //      two fake events on App Insights.
+    //   2. Unicode-normalize (NFKC) — collapses visually-identical homoglyphs
+    //      so "ｂｕｉｌｄｅｒ" (fullwidth) doesn't create a separate bucket.
+    //   3. Cap at 64 chars — agent names should be slugs; anything larger is
+    //      a cardinality bomb or an injection vector. The agent registry's
+    //      longest legitimate name is well under this cap.
+    if (!name) return "builder"
+    const cleaned = name
+      .replace(/[\x00-\x1f\x7f]/g, "")
+      .normalize("NFKC")
+      .slice(0, 64)
+    // Case-insensitive legacy-name guard: a future config, custom prompt, or
+    // hand-edited persisted session could surface "Build"/"BUILD" and the
+    // phantom telemetry bucket would come back.
+    if (!cleaned || cleaned.toLowerCase() === "build") return "builder"
+    return cleaned
+  }
+  // altimate_change end
 
   const state = Instance.state(
     () => {
@@ -270,13 +314,15 @@ export namespace SessionPrompt {
     const s = state()
     const match = s[sessionID]
     if (!match) {
+      // Session already ended or was never started — set idle directly since no processor will do it
       await SessionStatus.set(sessionID, { type: "idle" })
       return
     }
     match.abort.abort()
     delete s[sessionID]
-    await SessionStatus.set(sessionID, { type: "idle" })
-    return
+    // Do NOT set idle status here — on abort the processor's catch block
+    // publishes session.error THEN sets idle, preserving correct event ordering.
+    // On normal completion, loop() sets idle after the while loop exits (see below).
   }
   // altimate_change end
 
@@ -322,6 +368,9 @@ export namespace SessionPrompt {
     let sessionTotalTokens = 0
     let toolCallCount = 0
     let compactionCount = 0
+    // altimate_change start — validator framework retry counter
+    let validatorRetryCount = 0
+    // altimate_change end
     let sessionAgentName = ""
     let sessionHadError = false
     // altimate_change start — plan refinement tracking
@@ -366,6 +415,21 @@ export namespace SessionPrompt {
     }
     process.once("beforeExit", emergencySessionEnd)
     process.once("exit", emergencySessionEnd)
+    // altimate_change end
+    // altimate_change start — refresh MCP tools on ToolsChanged event
+    // When a datamate MCP server reconnects (transport change, window restart),
+    // MCP.ToolsChanged is published. MCP.tools() already uses a per-client cache
+    // that is invalidated by the notification handler that publishes this event,
+    // so the next resolveTools() call (once per LLM turn) naturally picks up fresh
+    // tools without any extra work here. This subscription makes the session layer
+    // explicitly aware of the reconnect and logs it so it is traceable in prod.
+    const unsubscribeToolsChanged = Bus.subscribe(MCP.ToolsChanged, (event) => {
+      log.info("MCP.ToolsChanged received — tools will refresh on next turn", {
+        server: event.properties.server,
+        sessionID,
+      })
+    })
+    using _unsubToolsChanged = defer(unsubscribeToolsChanged)
     // altimate_change end
     while (true) {
       // altimate_change start — SessionStatus.set became async in v1.4.0; await so busy state flushes before LLM call
@@ -642,11 +706,24 @@ export namespace SessionPrompt {
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
       const isLastStep = step >= maxSteps
-      msgs = await insertReminders({
+      // altimate_change start — insertReminders returns the trusted reminder parts
+      // it appended. The function now also pre-applies `ignored: true` to those
+      // parts (and to the persisted rows under experimental plan mode) for
+      // non-Anthropic-like models, so `toModelMessages` skips them on every turn
+      // — not just this one (#888 J2). The returned-parts list is the trust
+      // boundary; we never infer trust from the `synthetic` flag (other code
+      // paths set it on user-derived file/resource expansions). See #887/#888.
+      const reminderResult = await insertReminders({
         messages: msgs,
         agent,
         session,
+        model,
       })
+      msgs = reminderResult.messages
+      const hoistedReminders = isAnthropicLikeModel(model)
+        ? []
+        : reminderResult.trustedReminderParts.map((p) => p.text)
+      // altimate_change end
 
       // altimate_change start — plan refinement detection and telemetry
       if (agent.name === "plan") {
@@ -830,13 +907,17 @@ export namespace SessionPrompt {
           messageID: lastUser.id,
         })
         // altimate_change start — session start telemetry
+        // Agent name routed through normalizeAgentName so session_start and the
+        // downstream agent_outcome event always agree on the canonical bucket
+        // (funnel analysis from start → outcome would otherwise drop legacy
+        // "build" sessions). See the helper at the top of this namespace.
         Telemetry.track({
           type: "session_start",
           timestamp: Date.now(),
           session_id: sessionID,
           model_id: model.id,
           provider_id: model.providerID,
-          agent: lastUser.agent,
+          agent: normalizeAgentName(lastUser.agent),
           project_id: Instance.project?.id ?? "",
           os: process.platform,
           arch: process.arch,
@@ -903,6 +984,27 @@ export namespace SessionPrompt {
 
       await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+      // altimate_change start — upstream_fix: carry the date in the trailing user message
+      // so it stays out of the long-lived, cache-controlled system prefix (see
+      // session/system.ts). It lands on the rolling last-user-turn cacheControl breakpoint,
+      // which applyCaching() rewrites every turn regardless — so steady-state cache cost is
+      // unchanged; we only stop midnight from busting the expensive system-prefix cache.
+      const lastUserForDate = msgs.findLast((m) => m.info.role === "user")
+      if (lastUserForDate) {
+        lastUserForDate.parts = [
+          ...lastUserForDate.parts,
+          {
+            type: "text" as const,
+            id: PartID.ascending(),
+            sessionID,
+            messageID: lastUserForDate.info.id,
+            text: `\n\n${SystemPrompt.currentDate()}`,
+            synthetic: true,
+          },
+        ]
+      }
+      // altimate_change end
+
       // Build system prompt, adding structured output instruction if needed
       const skills = await SystemPrompt.skills(agent)
       // altimate_change start - unified context-aware injection for memory + training
@@ -918,6 +1020,7 @@ export namespace SessionPrompt {
         ...(skills ? [skills] : []),
         ...(knowledgeInjection ? [knowledgeInjection] : []),
         ...(await InstructionPrompt.system()),
+        ...hoistedReminders,
       ]
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
@@ -1058,6 +1161,181 @@ export namespace SessionPrompt {
       }
       // altimate_change end
 
+      // altimate_change start — validator dispatch (harness-side completion gate)
+      // Fires when the model declares a clean stop on this step (finish === "stop"
+      // and no tool calls outstanding). Runs all registered validators that
+      // declare themselves applicable to this session. If any validator says
+      // the work is not done, the framework injects a synthetic user message
+      // describing the gap and continues the loop — the model gets one more
+      // turn to fix the issue. Bounded by a per-session retry budget; once
+      // exhausted the loop falls through to the natural break.
+      //
+      // Feature flag: ALTIMATE_VALIDATORS_ENABLED=1 opts in. Default OFF so
+      // existing sessions are unaffected until validators are vetted in
+      // production.
+      //
+      // ALTIMATE_VALIDATORS_SHADOW=1 runs validators WITHOUT enforcement so
+      // telemetry can measure "would have fired" rates against historical
+      // traffic, but no subprocess spawns or synthetic-message retries happen
+      // unless this is also set. By default, NEITHER flag is set so
+      // non-opting-in sessions skip the entire dispatch path (no fs scan,
+      // no subprocess spawn, no perf tax).
+      const validatorsEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
+      const validatorsShadow = process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
+      const validatorsActive = validatorsEnabled || validatorsShadow
+      const maxValidatorRetries = Number(process.env.ALTIMATE_VALIDATORS_MAX_RETRIES ?? "3")
+      const validatorsDebug = process.env.ALTIMATE_VALIDATORS_DEBUG === "1"
+      const validatorCount = ValidatorRegistry.list().length
+      // Always emit to opencode's file log. Mirror to stderr only when
+      // ALTIMATE_VALIDATORS_DEBUG=1 — needed during framework bring-up so
+      // benchmark harness logs capture the hook signal, but noisy enough
+      // that we keep it off by default for normal sessions.
+      const diag = {
+        kind: "validator_hook_reached",
+        sessionID,
+        step,
+        result,
+        finish: processor.message.finish,
+        hasError: Boolean(processor.message.error),
+        validatorsEnabled,
+        validatorCount,
+        validatorRetryCount,
+      }
+      log.info("validator_hook_reached", diag)
+      if (validatorsDebug) {
+        // eslint-disable-next-line no-console
+        console.error("[altimate-validators] " + JSON.stringify(diag))
+      }
+      if (
+        validatorsActive &&
+        result !== "stop" &&
+        result !== "compact" &&
+        processor.message.finish === "stop" &&
+        !processor.message.error &&
+        validatorCount > 0
+      ) {
+        try {
+          const vCtx = {
+            sessionID,
+            workingDirectory: Instance.directory,
+            sessionStartMs: sessionStartTime,
+            step,
+            retryCount: validatorRetryCount,
+          }
+          if (validatorsDebug) {
+            // eslint-disable-next-line no-console
+            console.error(
+              "[altimate-validators] " +
+                JSON.stringify({ kind: "dispatch_enter", sessionID, step, cwd: vCtx.workingDirectory, sessionStartMs: vCtx.sessionStartMs }),
+            )
+          }
+          const checks = await ValidatorRegistry.runAll(vCtx)
+          if (validatorsDebug) {
+            // eslint-disable-next-line no-console
+            console.error(
+              "[altimate-validators] " +
+                JSON.stringify({
+                  kind: "dispatch_result",
+                  sessionID,
+                  step,
+                  checks_count: checks.length,
+                  results: checks.map((c) => ({ name: c.validator.name, ok: c.result.ok, details: c.result.details })),
+                }),
+            )
+          }
+          const failures = checks.filter((c) => !c.result.ok)
+
+          // Telemetry: emit one event per validator that ran, plus a session
+          // rollup. Always emitted, even when the feature flag is off, so we
+          // can measure baseline fire rate vs prompt-only enforcement.
+          for (const { validator, result: vRes } of checks) {
+            Telemetry.track({
+              type: "validator_check",
+              timestamp: Date.now(),
+              session_id: sessionID,
+              validator_name: validator.name,
+              ok: vRes.ok,
+              step,
+              retry_count: validatorRetryCount,
+              enforced: validatorsEnabled,
+              ...(vRes.details && { details: vRes.details }),
+            } as any)
+          }
+
+          if (failures.length > 0 && validatorsEnabled && validatorRetryCount < maxValidatorRetries) {
+            // Build a single synthetic user-turn body that aggregates every
+            // failing validator's reason + fixHint. The agent sees this as
+            // the next user message and gets one more turn to address it.
+            const body = failures
+              .map(({ validator, result: vRes }) => {
+                const head = `[altimate-validator: ${validator.name}] ${vRes.reason ?? "validation failed"}`
+                const tail = vRes.fixHint ? `\n${vRes.fixHint}` : ""
+                return head + tail
+              })
+              .join("\n\n")
+
+            log.info("validator failures detected, injecting synthetic user turn", {
+              sessionID,
+              failures: failures.map((f) => f.validator.name),
+              retry: validatorRetryCount + 1,
+            })
+
+            const syntheticMessageID = MessageID.ascending()
+            await Session.updateMessage({
+              id: syntheticMessageID,
+              role: "user" as const,
+              sessionID,
+              time: { created: Date.now() },
+              agent: lastUser.agent,
+              model: lastUser.model,
+            } as MessageV2.Info)
+
+            // Append the validator body as a text part on the new user message.
+            await Session.updatePart({
+              id: PartID.ascending(),
+              messageID: syntheticMessageID,
+              sessionID,
+              type: "text",
+              text: body,
+              time: { start: Date.now(), end: Date.now() },
+            })
+
+            validatorRetryCount++
+            continue
+          } else if (failures.length > 0 && validatorsEnabled && validatorRetryCount >= maxValidatorRetries) {
+            // Retry budget exhausted with outstanding failures. Session will
+            // terminate on the natural break below. Emit an explicit signal so
+            // the operator dashboard can distinguish "completed cleanly" from
+            // "completed with unresolved validator failures".
+            log.warn("validator retries exhausted, session terminating with unresolved failures", {
+              sessionID,
+              failures: failures.map((f) => f.validator.name),
+            })
+            Telemetry.track({
+              type: "validator_retries_exhausted",
+              timestamp: Date.now(),
+              session_id: sessionID,
+              step,
+              validator_names: failures.map((f) => f.validator.name),
+            } as any)
+          }
+        } catch (e) {
+          // A bug in the validator framework should never block the agent loop.
+          log.warn("validator dispatch errored, skipping", {
+            sessionID,
+            error: e instanceof Error ? e.message : String(e),
+          })
+          if (validatorsDebug) {
+            // eslint-disable-next-line no-console
+            console.error(
+              "[altimate-validators] " +
+                JSON.stringify({ kind: "dispatch_error", sessionID, step, error: e instanceof Error ? e.message : String(e) }),
+            )
+          }
+        }
+      }
+      // altimate_change end
+
       if (result === "stop") break
       if (result === "compact") {
         // altimate_change start — track compaction count
@@ -1073,6 +1351,11 @@ export namespace SessionPrompt {
       }
       continue
     }
+    // altimate_change start — set idle on normal loop exit; abort path is handled by processor catch block
+    if (!abort.aborted) {
+      await SessionStatus.set(sessionID, { type: "idle" })
+    }
+    // altimate_change end
     SessionCompaction.prune({ sessionID })
     // altimate_change start — session end telemetry
     const outcome = abort.aborted
@@ -1150,7 +1433,11 @@ export namespace SessionPrompt {
       type: "agent_outcome",
       timestamp: Date.now(),
       session_id: sessionID,
-      agent: sessionAgentName,
+      // altimate_change start — route through normalizeAgentName (shared with
+      // session_start above) so the two events always agree on the bucket name.
+      // See the helper at the top of this namespace for the legacy-name policy.
+      agent: normalizeAgentName(sessionAgentName),
+      // altimate_change end
       tool_calls: toolCallCount,
       generations: step,
       duration_ms: Date.now() - sessionStartTime,
@@ -1805,34 +2092,97 @@ export namespace SessionPrompt {
     }
   }
 
-  async function insertReminders(input: { messages: MessageV2.WithParts[]; agent: Agent.Info; session: Session.Info }) {
+  //
+  // NOTE: `family` is a free-form, config-settable string on the model schema —
+  // a connection that declares `family: "claude-*"` on a non-Anthropic gateway
+  // will classify as Anthropic-like and SKIP the hoist, which reintroduces the
+  // #887 refusal on that backend. This is a routing-trust input, not an
+  // escalation vector (whoever sets the model config already controls the
+  // prompt), but operators adding gateway models should set `family` correctly.
+  //
+  // Exported for testing — the hoist/classification contract is exercised
+  // behaviorally in test/session/plan-layer-e2e.test.ts.
+  // altimate_change start — model-family helper used by the trust-aware hoist below.
+  // Uses `familyVendor` so specific family values (`claude-sonnet`, `claude-haiku`,
+  // `gemini-pro`, etc.) classify correctly — an exact `family === "anthropic"`
+  // check would miss the gateway-emitted specific names (#888 J1). The api.id
+  // checks are lowercased and tightened to a `claude-` / `anthropic-` /
+  // `anthropic/...` shape so a model named `foo-claude-bench` doesn't false-match.
+  export function isAnthropicLikeModel(model: Provider.Model): boolean {
+    if (model.providerID === "anthropic") return true
+    if (model.providerID === "google-vertex-anthropic") return true
+    if (familyVendor(model.family) === "anthropic") return true
+    if (model.api.npm === "@ai-sdk/anthropic") return true
+    const apiId = model.api.id.toLowerCase()
+    const lastSeg = apiId.split("/").pop() ?? apiId
+    if (/^claude[-_.]/.test(lastSeg)) return true
+    if (/^anthropic[-_/]/.test(apiId)) return true
+    return false
+  }
+  // altimate_change end
+
+  // altimate_change start — return the trusted reminder parts insertReminders just appended
+  // so the caller can hoist them into the system prompt on non-Anthropic models.
+  // The returned-parts contract is the trust boundary: only parts that *this function*
+  // creates are eligible for promotion. The schema-wide `synthetic` flag is set by other
+  // code paths too (file/resource expansions at lines ~1729/1751/1801 attach
+  // file content as synthetic text), so it is not safe to infer trust from `synthetic`
+  // alone. See #888 review feedback.
+  type InsertRemindersResult = { messages: MessageV2.WithParts[]; trustedReminderParts: MessageV2.TextPart[] }
+  // Exported for testing — the trust boundary (only self-injected reminders land
+  // in `trustedReminderParts`, never user/file/resource content) is verified
+  // behaviorally in test/session/plan-layer-e2e.test.ts.
+  export async function insertReminders(input: {
+    messages: MessageV2.WithParts[]
+    agent: Agent.Info
+    session: Session.Info
+    // altimate_change start — used to bake `ignored` into the persisted experimental
+    // plan-mode reminders so they don't replay as user-role `<system-reminder>` on
+    // turn 2+ on non-Anthropic models (#888 J2).
+    model: Provider.Model
+    // altimate_change end
+  }): Promise<InsertRemindersResult> {
+    const trustedReminderParts: MessageV2.TextPart[] = []
+    // altimate_change start — pre-compute the hoist decision once so it can be
+    // applied at insertion time (including to persisted rows). For non-Anthropic
+    // models, every trusted reminder is marked `ignored: true` immediately so
+    // `toModelMessages` will skip it (the caller no longer needs to mutate the
+    // flag, and DB-persisted rows survive the contract across turns).
+    const nonAnthropic = !isAnthropicLikeModel(input.model)
+    // altimate_change end
     const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
-    if (!userMessage) return input.messages
+    if (!userMessage) return { messages: input.messages, trustedReminderParts }
 
     // Original logic when experimental plan mode is disabled
     if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
       if (input.agent.name === "plan") {
-        userMessage.parts.push({
+        const part: MessageV2.TextPart = {
           id: PartID.ascending(),
           messageID: userMessage.info.id,
           sessionID: userMessage.info.sessionID,
           type: "text",
           text: PROMPT_PLAN,
           synthetic: true,
-        })
+          ...(nonAnthropic ? { ignored: true } : {}),
+        }
+        userMessage.parts.push(part)
+        trustedReminderParts.push(part)
       }
       const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
       if (wasPlan && input.agent.name === "builder") {
-        userMessage.parts.push({
+        const part: MessageV2.TextPart = {
           id: PartID.ascending(),
           messageID: userMessage.info.id,
           sessionID: userMessage.info.sessionID,
           type: "text",
           text: BUILD_SWITCH,
           synthetic: true,
-        })
+          ...(nonAnthropic ? { ignored: true } : {}),
+        }
+        userMessage.parts.push(part)
+        trustedReminderParts.push(part)
       }
-      return input.messages
+      return { messages: input.messages, trustedReminderParts }
     }
 
     // New plan mode logic when flag is enabled
@@ -1851,10 +2201,12 @@ export namespace SessionPrompt {
           text:
             BUILD_SWITCH + "\n\n" + `A plan file exists at ${plan}. You should execute on the plan defined within it`,
           synthetic: true,
+          ...(nonAnthropic ? { ignored: true } : {}),
         })
         userMessage.parts.push(part)
+        trustedReminderParts.push(part as MessageV2.TextPart)
       }
-      return input.messages
+      return { messages: input.messages, trustedReminderParts }
     }
 
     // Entering plan mode
@@ -1954,12 +2306,15 @@ This is critical - your turn should only end with either asking the user a quest
 NOTE: At any point in time through this workflow you should feel free to ask the user questions or clarifications. Don't make large assumptions about user intent. The goal is to present a well researched plan to the user, and tie any loose ends before implementation begins.
 </system-reminder>`,
         synthetic: true,
+        ...(nonAnthropic ? { ignored: true } : {}),
       })
       userMessage.parts.push(part)
-      return input.messages
+      trustedReminderParts.push(part as MessageV2.TextPart)
+      return { messages: input.messages, trustedReminderParts }
     }
-    return input.messages
+    return { messages: input.messages, trustedReminderParts }
   }
+  // altimate_change end
 
   export const ShellInput = z.object({
     sessionID: SessionID.zod,
@@ -2247,6 +2602,112 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   export async function command(input: CommandInput) {
     log.info("command", input)
+
+    // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
+    if (input.command === "mcps") {
+
+      // Helper: build and persist an assistant reply for a command shortcut.
+      async function respond(
+        parentID: MessageID,
+        responseText: string,
+        model: { modelID: ModelID; providerID: ProviderID },
+      ): Promise<MessageV2.WithParts> {
+        const now = Date.now()
+        const assistantMsg: MessageV2.Assistant = {
+          id: MessageID.ascending(), role: "assistant", sessionID: input.sessionID,
+          parentID, modelID: model.modelID, providerID: model.providerID,
+          mode: "builder", agent: "builder",
+          path: { cwd: Instance.directory, root: Instance.worktree },
+          cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          finish: "stop", time: { created: now, completed: now },
+        }
+        await Session.updateMessage(assistantMsg)
+        const textPart: MessageV2.TextPart = {
+          id: PartID.ascending(), sessionID: input.sessionID, messageID: assistantMsg.id,
+          type: "text", text: responseText, time: { start: now, end: now },
+        }
+        await Session.updatePart(textPart)
+        Bus.publish(Command.Event.Executed, {
+          name: input.command, sessionID: input.sessionID,
+          arguments: input.arguments, messageID: assistantMsg.id,
+        })
+        return { info: assistantMsg, parts: [textPart] } as MessageV2.WithParts
+      }
+      const trimmed = input.arguments.trim()
+
+      if (!trimmed) {
+        // /mcps (no args): return actual runtime status directly
+        const userMsg = await createUserMessage({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          parts: [{ type: "text", text: "/mcps" }],
+        })
+        const model = await lastModel(input.sessionID)
+        const statusMap = await MCP.status()
+        const rows = Object.entries(statusMap)
+          .map(([srv, s]) => {
+            const icon = s.status === "connected" ? "\u2713" : "\u25cb"
+            const label =
+              s.status === "failed"
+                ? icon + " " + s.status + " (" + s.error + ")"
+                : icon + " " + s.status
+            return "| `" + srv + "` | " + label + " |"
+          })
+          .join("\n")
+        const responseText = rows
+          ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows
+          : "No MCP servers configured."
+
+        return respond(userMsg.info.id, responseText, model)
+      }
+
+      const subMatch = trimmed.match(/^(enable|disable)\s+(\S+)/)
+      if (subMatch) {
+        const [, subCmd, name] = subMatch
+        const isEnable = subCmd === "enable"
+
+        const userMsg = await createUserMessage({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          parts: [{ type: "text", text: `/mcps ${subCmd} ${name}` }],
+        })
+
+        const model = await lastModel(input.sessionID)
+        // MCP.connect/disconnect on an unknown name logs and returns silently, so
+        // validate against config first and give the user a clear signal on a typo.
+        const cfg = await Config.get()
+        if (!cfg.mcp?.[name]) {
+          const known = Object.keys(cfg.mcp ?? {})
+          const suffix = known.length ? ` Known servers: ${known.join(", ")}.` : ""
+          return respond(
+            userMsg.info.id,
+            `MCP server **${name}** not found in config.${suffix}`,
+            model,
+          )
+        }
+
+        let responseText: string
+
+        if (isEnable) {
+          await MCP.connect(name)
+          const statusMap = await MCP.status()
+          const entry = statusMap[name]
+          if (entry?.status === "connected") {
+            responseText = `MCP server **${name}** enabled. Status: connected.`
+          } else {
+            const errSuffix = entry?.status === "failed" ? " — " + entry.error : ""
+          responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
+          }
+        } else {
+          await MCP.disconnect(name)
+          responseText = `MCP server **${name}** disabled.`
+        }
+
+        return respond(userMsg.info.id, responseText, model)
+      }
+    }
+    // altimate_change end
+
     const command = await Command.get(input.command)
     if (!command) {
       const all = await Command.list()

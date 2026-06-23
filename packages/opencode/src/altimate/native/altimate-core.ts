@@ -169,7 +169,17 @@ export function registerAll(): void {
     try {
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
       const validation = await core.validate(params.sql, schema)
-      const lintResult = core.lint(params.sql, schema)
+      // Diff-scoped lint: when a base SQL is supplied, core returns only the
+      // findings the change INTRODUCED (pre-existing issues in the file are
+      // dropped) — the structural comparison stays in the AST engine.
+      const lintResult =
+        params.base_sql && typeof core.lintDiff === "function"
+          ? core.lintDiff(
+              params.sql,
+              params.base_sql,
+              params.schema_context ? JSON.stringify(params.schema_context) : undefined,
+            )
+          : core.lint(params.sql, schema)
       const safety = core.scanSql(params.sql)
       const data: Record<string, unknown> = {
         validation: toData(validation),
@@ -181,6 +191,83 @@ export function registerAll(): void {
       return fail(e)
     }
   })
+
+  // altimate_change start — dbt-pr-review IP lives in the compiled core, not public TS
+  // The AI reviewer's system prompt and the response parse/clamp logic ship as a
+  // binary; the TS layer only transports the LLM call.
+  register("altimate_core.review_ai_prompt", async () => {
+    try {
+      return ok(true, { prompt: core.reviewAiSystemPrompt() })
+    } catch (e) {
+      return fail(e)
+    }
+  })
+  register("altimate_core.review_ai_parse", async (params) => {
+    try {
+      const json = core.reviewAiParse(params.text, params.valid_files ?? [])
+      return ok(true, { findings: JSON.parse(json) })
+    } catch (e) {
+      return fail(e)
+    }
+  })
+  // Lexical scan (reserved-word aliases + dialect operators) — curated lists +
+  // detection embedded in the binary; TS passes the raw added diff lines.
+  register("altimate_core.review_lexical_scan", async (params) => {
+    try {
+      const json = core.reviewLexicalScan(params.added_lines ?? [])
+      return ok(true, { findings: JSON.parse(json) })
+    } catch (e) {
+      return fail(e)
+    }
+  })
+
+  // Grain extraction (final-SELECT GROUP BY + dedup PARTITION BY) for grain-vs-PK
+  // mismatch detection in PR review. Parsing lives in core; the comparison to the
+  // declared key is plumbing done in the orchestrator.
+  register("altimate_core.grain", async (params) => {
+    try {
+      const json = core.extractGrain(params.sql)
+      return ok(true, JSON.parse(json))
+    } catch (e) {
+      return fail(e)
+    }
+  })
+
+  // Per-upstream WHERE-filter columns, for cross-model sibling filter-consistency.
+  register("altimate_core.source_filters", async (params) => {
+    try {
+      return ok(true, { filters: JSON.parse(core.extractSourceFilters(params.sql)) })
+    } catch (e) {
+      return fail(e)
+    }
+  })
+
+  // dbt config/Jinja lint over a RAW model ({{ config() }} parsed by minijinja in core).
+  register("altimate_core.dbt_config_lint", async (params) => {
+    try {
+      return ok(true, { findings: JSON.parse(core.dbtConfigLint(params.sql)) })
+    } catch (e) {
+      return fail(e)
+    }
+  })
+  register("altimate_core.dbt_config_diff", async (params) => {
+    try {
+      return ok(true, { findings: JSON.parse(core.dbtConfigDiff(params.base_sql ?? "", params.head_sql ?? "")) })
+    } catch (e) {
+      return fail(e)
+    }
+  })
+  // AST base-vs-head structural diff — the `*_change` SQL rules, moved off diff-line regex.
+  register("altimate_core.structural_diff", async (params) => {
+    try {
+      return ok(true, {
+        findings: JSON.parse(core.reviewStructuralDiff(params.base_sql ?? "", params.head_sql ?? "")),
+      })
+    } catch (e) {
+      return fail(e)
+    }
+  })
+  // altimate_change end
 
   // 7. altimate_core.fix
   register("altimate_core.fix", async (params) => {
@@ -233,7 +320,13 @@ export function registerAll(): void {
   register("altimate_core.equivalence", async (params) => {
     try {
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema)
+      // Pass the optional dialect hint so dialect-specific compiled warehouse SQL
+      // (e.g. Snowflake semi-structured `col:field`) parses and the pair is
+      // decidable instead of abstaining on a syntax error. Supported since
+      // altimate-core@0.5.1. Use `|| undefined` (not `??`) so the default empty
+      // string from ReviewConfig.dialect coerces to "no hint": the engine throws
+      // on an unknown dialect "", and "" must mean auto-detect, not a real dialect.
+      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema, params.dialect || undefined)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -245,7 +338,7 @@ export function registerAll(): void {
   register("altimate_core.migration", async (params) => {
     try {
       // Build schema from old_ddl, analyze new_ddl against it
-      const schema = core.Schema.fromDdl(params.old_ddl, params.dialect || undefined)
+      const schema = core.Schema.fromDdl(params.old_ddl, params.dialect ?? undefined)
       const raw = core.analyzeMigration(params.new_ddl, schema)
       const data = toData(raw)
       return ok(true, data)
@@ -339,7 +432,7 @@ export function registerAll(): void {
   register("altimate_core.column_lineage", async (params) => {
     try {
       const schema = resolveSchema(params.schema_path, params.schema_context)
-      const raw = core.columnLineage(params.sql, params.dialect || undefined, schema ?? undefined)
+      const raw = core.columnLineage(params.sql, params.dialect ?? undefined, schema ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -360,7 +453,7 @@ export function registerAll(): void {
   // 22. altimate_core.format
   register("altimate_core.format", async (params) => {
     try {
-      const raw = core.formatSql(params.sql, params.dialect || undefined)
+      const raw = core.formatSql(params.sql, params.dialect ?? undefined)
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -371,7 +464,7 @@ export function registerAll(): void {
   // 23. altimate_core.metadata
   register("altimate_core.metadata", async (params) => {
     try {
-      const raw = core.extractMetadata(params.sql, params.dialect || undefined)
+      const raw = core.extractMetadata(params.sql, params.dialect ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -381,7 +474,7 @@ export function registerAll(): void {
   // 24. altimate_core.compare
   register("altimate_core.compare", async (params) => {
     try {
-      const raw = core.compareQueries(params.left_sql, params.right_sql, params.dialect || undefined)
+      const raw = core.compareQueries(params.left_sql, params.right_sql, params.dialect ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -435,7 +528,7 @@ export function registerAll(): void {
   // 29. altimate_core.import_ddl — returns Schema, must serialize
   register("altimate_core.import_ddl", async (params) => {
     try {
-      const schema = core.importDdl(params.ddl, params.dialect || undefined)
+      const schema = core.importDdl(params.ddl, params.dialect ?? undefined)
       const jsonObj = schema.toJson()
       return ok(true, { success: true, schema: toData(jsonObj) })
     } catch (e) {

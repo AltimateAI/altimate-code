@@ -2,7 +2,7 @@
 
 ## Overview
 
-Altimate Code connects to 12 databases natively via TypeScript drivers. No Python dependency required. Drivers are loaded lazily, so only the driver you need is imported at runtime.
+Altimate Code connects to 13 databases natively via TypeScript drivers. No Python dependency required. Drivers are loaded lazily, so only the driver you need is imported at runtime.
 
 ## Support Matrix
 
@@ -17,8 +17,9 @@ Altimate Code connects to 12 databases natively via TypeScript drivers. No Pytho
 | Snowflake | `snowflake-sdk` | Password, Key-Pair (unencrypted + encrypted), OAuth | ✅ Live account | 37 E2E tests, key-pair with passphrase support |
 | BigQuery | `@google-cloud/bigquery` | Service Account, ADC | ✅ Live account | 25 E2E tests, UNNEST/STRUCT/DATE types |
 | Databricks | `@databricks/sql` | PAT, OAuth | ✅ Live account | 24 E2E tests, Unity Catalog support |
-| MongoDB | `mongodb` | Password, Connection String | ✅ Docker | 90 E2E tests, MQL queries, aggregation pipelines |
+| MongoDB | `mongodb` | Password, Connection String | ❌ Needs MongoDB server | 90 E2E tests, MQL queries, aggregation pipelines |
 | ClickHouse | `@clickhouse/client` | Password, Connection String, TLS | ✅ Docker | HTTP(S) protocol, ClickHouse Cloud support |
+| Trino | `trino-client` | None, Basic, Bearer Token | ❌ Needs Trino cluster | HTTP(S) protocol, catalog/schema support |
 | Oracle | `oracledb` (thin) | Password | ❌ Needs Oracle 12.1+ | Thin mode only, no Instant Client |
 
 ## Installation
@@ -43,6 +44,7 @@ bun add snowflake-sdk             # Snowflake
 bun add @google-cloud/bigquery    # BigQuery
 bun add @databricks/sql           # Databricks
 bun add @clickhouse/client        # ClickHouse
+bun add trino-client              # Trino
 bun add oracledb                  # Oracle (thin mode)
 ```
 
@@ -121,6 +123,24 @@ Optional: `location` (e.g. `us`, `eu`, `us-central1`, `asia-northeast1`). Requir
 |--------|--------------|
 | PAT | `server_hostname`, `http_path`, `access_token` |
 
+### Trino
+
+| Method | Config Fields |
+|--------|--------------|
+| No auth | `host`, `port`, `catalog`, `schema`, `user` |
+| Basic | `host`, `port`, `catalog`, `schema`, `user`, `password` |
+| Bearer token | `host`, `port`, `catalog`, `schema`, `access_token` |
+| Connection String | `connection_string: "https://trino.example.com:8443"` |
+
+Trino uses the official `trino-client` package over HTTP(S). Set `catalog` for schema/table introspection. Query history is not exposed as a durable history source by the native driver.
+
+> **Migration note:** earlier versions mapped the dbt `trino` adapter onto the PostgreSQL driver. It now uses this native Trino driver. If you have an existing `trino` connection or dbt profile, switch `database`/`dbname` to `catalog` (the `database` alias still resolves) and use `access_token` (aliased from `token`) for bearer auth. Behavior is otherwise compatible.
+
+**Troubleshooting:**
+- *Catalog required* — `listTables`/`describeTable` need `catalog` set; without it, introspection errors. Set `catalog` (or `database`, which is aliased to it).
+- *Auth conflict* — configuring both `password` (Basic) and `access_token` (Bearer) is rejected; use exactly one.
+- *Connection refused / TLS* — confirm the `protocol` (`http` vs `https`) and port; the driver defaults to `8080` for HTTP and `8443` for HTTPS.
+
 ### MySQL
 | Method | Config Fields |
 |--------|--------------|
@@ -193,7 +213,7 @@ SSH auth types: `"key"` (default) or `"password"` (set `ssh_password`).
 
 The CLI auto-discovers connections from:
 
-1. **Docker containers**: detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, ClickHouse, MongoDB containers
+1. **Docker containers**: detects running PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, ClickHouse, Trino containers
 2. **dbt profiles**: parses `~/.dbt/profiles.yml` for all supported adapters
 3. **Environment variables**: detects `SNOWFLAKE_ACCOUNT`, `PGHOST`, `MYSQL_HOST`, `MSSQL_HOST`, `ORACLE_HOST`, `DUCKDB_PATH`, `SQLITE_PATH`, etc.
 

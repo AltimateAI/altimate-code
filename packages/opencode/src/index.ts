@@ -23,6 +23,9 @@ import { GithubCommand } from "./cli/cmd/github"
 // altimate_change start — gitlab: native GitLab MR review integration
 import { GitlabCommand } from "./cli/cmd/gitlab"
 // altimate_change end
+// altimate_change start — review: dbt PR review command
+import { ReviewCommand } from "./cli/cmd/review"
+// altimate_change end
 import { ExportCommand } from "./cli/cmd/export"
 import { ImportCommand } from "./cli/cmd/import"
 import { AttachCommand } from "./cli/cmd/tui/attach"
@@ -204,6 +207,9 @@ let cli = yargs(hideBin(process.argv))
   .command(GithubCommand)
   // altimate_change start — gitlab: native GitLab MR review integration
   .command(GitlabCommand)
+  // altimate_change end
+  // altimate_change start — review: dbt PR review command
+  .command(ReviewCommand)
   // altimate_change end
   .command(PrCommand)
   .command(SessionCommand)

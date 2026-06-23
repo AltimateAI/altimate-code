@@ -7,7 +7,7 @@ description: Analyze and optimize SQL queries for better performance
 
 ## Requirements
 **Agent:** any (read-only analysis)
-**Tools used:** sql_optimize, sql_analyze, sql_explain, altimate_core_equivalence, read, glob, schema_inspect, warehouse_list
+**Tools used:** altimate_core_rewrite (with `verify_equivalence: true`), sql_analyze, sql_explain, read, glob, schema_inspect, warehouse_list
 
 Analyze SQL queries for performance issues and suggest concrete optimizations including rewritten SQL.
 
@@ -20,9 +20,9 @@ Analyze SQL queries for performance issues and suggest concrete optimizations in
 
 2. **Determine the dialect** -- Default to `snowflake`. If the user specifies a dialect (postgres, bigquery, duckdb, etc.), use that instead. Check the project for warehouse connections using `warehouse_list` if unsure.
 
-3. **Run the optimizer**:
-   - Call `sql_optimize` with the SQL, dialect, and schema context if available
-   - If the user has a warehouse connection, first call `schema_inspect` on the relevant tables to build schema context for better optimization (e.g., SELECT * expansion)
+3. **Run the verified optimizer**:
+   - If the user has a warehouse connection, first call `schema_inspect` on the relevant tables to build schema context (needed both for better rewrites — e.g. SELECT * expansion — and to verify equivalence)
+   - Call `altimate_core_rewrite` with the SQL, schema context, and **`verify_equivalence: true`**. This proposes rewrites AND proves each one returns the same results as the original in a single step. The result is partitioned into **verified-equivalent** rewrites (safe to apply) and **unverified** rewrites (review before applying), so you never recommend a rewrite that silently changes semantics.
 
 4. **Run detailed analysis**:
    - Call `sql_analyze` with the same SQL and dialect to get the full anti-pattern breakdown with recommendations
@@ -32,10 +32,10 @@ Analyze SQL queries for performance issues and suggest concrete optimizations in
    - Look for: full table scans, sort operations on large datasets, inefficient join strategies, missing partition pruning
    - Include key findings in the report under "Execution Plan Insights"
 
-6. **Verify rewrites preserve correctness**:
-   - If `sql_optimize` produced a rewritten query, call `altimate_core_equivalence` to verify the original and optimized queries produce the same result set
-   - If not equivalent, flag the difference and present both versions for the user to decide
-   - This prevents "optimization" that silently changes query semantics
+6. **Equivalence verification is built into step 3** (`verify_equivalence: true`):
+   - Present the **verified-equivalent** rewrites as safe to apply.
+   - Present **unverified** rewrites separately with their reason ("review before applying") — do not recommend applying these without manual review.
+   - If no schema was available, all rewrites come back unverified; say so and recommend supplying a schema (or a warehouse connection) to enable verification.
 
 7. **Present findings** in a structured format:
 
@@ -83,4 +83,4 @@ The user invokes this skill with SQL or a file path:
 - `/query-optimize models/staging/stg_orders.sql` -- Optimize SQL from a file
 - `/query-optimize` -- Optimize the most recently discussed SQL in the conversation
 
-Use the tools: `sql_optimize`, `sql_analyze`, `sql_explain` (execution plans), `altimate_core_equivalence` (rewrite verification), `read` (for file-based SQL), `glob` (to find SQL files), `schema_inspect` (for schema context), `warehouse_list` (to check connections).
+Use the tools: `altimate_core_rewrite` with `verify_equivalence: true` (proposes rewrites AND proves they preserve results in one step), `sql_analyze`, `sql_explain` (execution plans), `read` (for file-based SQL), `glob` (to find SQL files), `schema_inspect` (for schema context), `warehouse_list` (to check connections).

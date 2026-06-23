@@ -14,6 +14,25 @@ export interface GitInfo {
   isRepo: boolean
   branch?: string
   remoteUrl?: string
+  /**
+   * True if `git` was reachable on the host (regardless of whether the cwd
+   * is a git repo). False ONLY when `safeSpawnSync(["git", ...])` failed
+   * to spawn — most commonly because git is not installed / not in PATH.
+   * Distinct from `isRepo` so callers record the "missing git" signal
+   * separately from "this directory is not a git repo".
+   * Undefined for callers that don't care.
+   */
+  gitAvailable?: boolean
+  /**
+   * Captures the case where git ran but produced a non-standard error
+   * (corrupted .git, permission denied, etc. — anything that isn't a
+   * clean "not a repo" exit-128). Lets callers distinguish:
+   *   isRepo=false, gitAvailable=true, gitError=undefined → clean non-repo
+   *   isRepo=false, gitAvailable=true, gitError=<exit>   → degraded git
+   *   isRepo=false, gitAvailable=false                    → git missing
+   * Undefined when irrelevant.
+   */
+  gitError?: { exitCode: number; stderr?: string }
 }
 
 export interface DbtProjectInfo {
@@ -47,31 +66,126 @@ export interface ConfigFileInfo {
 
 // --- Detection functions (exported for testing) ---
 
+/**
+ * Run a subprocess that may or may not exist on the host.
+ *
+ * `Bun.spawnSync` throws when the binary is missing from $PATH (e.g.
+ * `Executable not found in $PATH: "git"`) — not just when it exits non-zero.
+ * Telemetry shows this fingerprint hitting ~437 distinct users on
+ * `project_scan` (the binary name `"git"` was masked to `?` downstream,
+ * which made it look like a generic shell error). Wrap every spawn so a
+ * missing binary degrades gracefully instead of crashing the whole tool.
+ *
+ * Return value semantics:
+ *   - `null`         → could not spawn (binary missing, permission denied,
+ *                      Bun internal failure). Distinct from "ran and failed".
+ *   - `{exitCode: 0, stdout}`         → ran successfully.
+ *   - `{exitCode: N>0, stdout}`       → ran and exited non-zero.
+ *   - `{exitCode: 1, stdout: ""}`     → also returned when `Bun.spawnSync`
+ *                                       gives back `exitCode: null` (signaled
+ *                                       child). Coalesced to `1` because no
+ *                                       current caller distinguishes "killed
+ *                                       by signal" from "exited with status 1";
+ *                                       expand this contract if that changes.
+ */
+export function safeSpawnSync(
+  args: string[],
+  opts?: { timeout?: number },
+): { exitCode: number; stdout: string; stderr: string } | null {
+  try {
+    const result = Bun.spawnSync(args, {
+      stdout: "pipe",
+      stderr: "pipe",
+      ...(opts?.timeout !== undefined && { timeout: opts.timeout }),
+    })
+    return {
+      exitCode: result.exitCode ?? 1,
+      stdout: result.stdout?.toString() ?? "",
+      stderr: result.stderr?.toString() ?? "",
+    }
+  } catch {
+    // Binary missing from PATH, permission denied, etc. — treat as
+    // "command failed" so the caller sees a deterministic result instead
+    // of an exception bubbling up.
+    return null
+  }
+}
+
 export async function detectGit(): Promise<GitInfo> {
-  const isRepoResult = Bun.spawnSync(["git", "rev-parse", "--is-inside-work-tree"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
+  const isRepoResult = safeSpawnSync(["git", "rev-parse", "--is-inside-work-tree"])
+  // Distinguish three cases that all produce isRepo=false:
+  //   1. Git binary missing (null result) — record "git" in degraded.
+  //   2. Git ran with exit 128 — clean "not a repo" signal.
+  //   3. Git ran with non-zero, non-128 — degraded git (corrupted .git,
+  //      permission denied, etc.); still record "git" in degraded so the
+  //      caller doesn't silently bucket a real failure as "not a repo".
+  // Collapsing all three into a bare `{ isRepo: false }` would re-introduce
+  // the original 437-user telemetry opacity — "Executable not found in
+  // $PATH: ?" masked to look like a generic shell error.
+  if (!isRepoResult) {
+    return { isRepo: false, gitAvailable: false }
+  }
   if (isRepoResult.exitCode !== 0) {
-    return { isRepo: false }
+    // Exit 128 is git's standard "fatal" for not-in-a-repo. Anything else
+    // is unusual — surface it via gitError so the caller can decide
+    // whether to record it in degraded.
+    if (isRepoResult.exitCode === 128) {
+      return { isRepo: false, gitAvailable: true }
+    }
+    // Run stderr through the telemetry masker BEFORE persisting so emails,
+    // bearer tokens, and api-keys can't leak into LLM-visible metadata,
+    // session transcripts, or App Insights via `metadata.git.gitError`.
+    // Cap at 240 chars after masking (mask replacements can shorten or
+    // lengthen the input minimally).
+    const maskedStderr = isRepoResult.stderr
+      ? Telemetry.maskString(isRepoResult.stderr.trim()).slice(0, 240) || undefined
+      : undefined
+    return {
+      isRepo: false,
+      gitAvailable: true,
+      gitError: { exitCode: isRepoResult.exitCode, stderr: maskedStderr },
+    }
   }
 
-  const branchResult = Bun.spawnSync(["git", "branch", "--show-current"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const branch = branchResult.exitCode === 0 ? branchResult.stdout.toString().trim() || undefined : undefined
+  const branchResult = safeSpawnSync(["git", "branch", "--show-current"])
+  const branch =
+    branchResult && branchResult.exitCode === 0 ? branchResult.stdout.trim() || undefined : undefined
 
   let remoteUrl: string | undefined
-  const remoteResult = Bun.spawnSync(["git", "remote", "get-url", "origin"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  if (remoteResult.exitCode === 0) {
-    remoteUrl = remoteResult.stdout.toString().trim()
+  const remoteResult = safeSpawnSync(["git", "remote", "get-url", "origin"])
+  if (remoteResult && remoteResult.exitCode === 0) {
+    remoteUrl = stripGitRemoteCredentials(remoteResult.stdout.trim())
   }
 
-  return { isRepo: true, branch, remoteUrl }
+  return { isRepo: true, gitAvailable: true, branch, remoteUrl }
+}
+
+/**
+ * Strip embedded credentials from a git remote URL before surfacing it.
+ *
+ * `git remote get-url origin` returns the URL verbatim including HTTPS
+ * basic-auth (e.g. `https://x-access-token:ghp_xxx@github.com/...`) when
+ * the user committed creds into the remote. `remoteUrl` flows into tool
+ * result metadata that ships to the LLM provider AND is persisted in
+ * session transcripts — leaving creds in there is a recurring exfil path.
+ *
+ * SSH-form remotes (`git@github.com:owner/repo.git`) have no userinfo
+ * concept and are left untouched. URLs we can't parse are dropped to
+ * undefined (better to lose the breadcrumb than leak creds).
+ */
+function stripGitRemoteCredentials(url: string): string | undefined {
+  if (!url) return undefined
+  // SSH form: `git@host:path` — no creds to strip.
+  if (/^[\w.-]+@[\w.-]+:/.test(url) && !url.includes("://")) return url
+  try {
+    const parsed = new URL(url)
+    parsed.username = ""
+    parsed.password = ""
+    return parsed.toString()
+  } catch {
+    // Unparseable — drop entirely rather than risk leaking embedded creds.
+    return undefined
+  }
 }
 
 export async function detectDbtProject(startDir: string): Promise<DbtProjectInfo> {
@@ -233,6 +347,20 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
         connection_string: "CLICKHOUSE_URL",
       },
     },
+    {
+      type: "trino",
+      signals: ["TRINO_HOST", "TRINO_SERVER", "TRINO_URL"],
+      configMap: {
+        host: "TRINO_HOST",
+        port: "TRINO_PORT",
+        user: ["TRINO_USER", "TRINO_USERNAME"],
+        password: "TRINO_PASSWORD",
+        catalog: ["TRINO_CATALOG", "TRINO_DATABASE"],
+        schema: "TRINO_SCHEMA",
+        connection_string: ["TRINO_URL", "TRINO_SERVER"],
+        access_token: ["TRINO_TOKEN", "TRINO_ACCESS_TOKEN"],
+      },
+    },
   ]
 
   for (const wh of warehouses) {
@@ -296,6 +424,10 @@ export async function detectEnvVars(): Promise<EnvVarConnection[]> {
       clickhouse: "clickhouse",
       "clickhouse+http": "clickhouse",
       "clickhouse+https": "clickhouse",
+      trino: "trino",
+      "trino+http": "trino",
+      "trino+https": "trino",
+      presto: "trino",
     }
     const dbType = schemeTypeMap[scheme] ?? "postgres"
     // Only add if we don't already have this type detected from other env vars
@@ -335,25 +467,23 @@ export function parseToolVersion(output: string): string | undefined {
 export async function detectDataTools(skip: boolean): Promise<DataToolInfo[]> {
   if (skip) return []
 
+  // Route through safeSpawnSync for consistency with detectGit. The previous
+  // implementation used a bare try/catch around Bun.spawnSync — same outcome
+  // for the caller, but the two functions solved the same problem two
+  // different ways. Using one helper keeps the contract uniform: `null`
+  // means "could not spawn" (binary missing), distinct from "ran and exited
+  // non-zero" (binary present but the version check failed).
   const results = await Promise.all(
     DATA_TOOL_NAMES.map(async (tool): Promise<DataToolInfo> => {
-      try {
-        const result = Bun.spawnSync([tool, "--version"], {
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 5000,
-        })
-        if (result.exitCode === 0) {
-          return {
-            name: tool,
-            installed: true,
-            version: parseToolVersion(result.stdout.toString()),
-          }
+      const result = safeSpawnSync([tool, "--version"], { timeout: 5000 })
+      if (result && result.exitCode === 0) {
+        return {
+          name: tool,
+          installed: true,
+          version: parseToolVersion(result.stdout),
         }
-        return { name: tool, installed: false }
-      } catch {
-        return { name: tool, installed: false }
       }
+      return { name: tool, installed: false }
     }),
   )
 
@@ -454,40 +584,88 @@ export const ProjectScanTool = Tool.define("project_scan", {
   async execute(args, ctx) {
     const cwd = process.cwd()
 
-    // Run local detections in parallel
+    // Track which sub-detections failed so the LLM can see partial results
+    // instead of getting a single opaque "Executable not found in $PATH: ?"
+    // failure (the previous behavior — see safeSpawnSync above).
+    //
+    // Set rather than [] so adjacent `.catch` blocks (or any future
+    // refactor that wraps Dispatcher calls at two layers) can't record the
+    // same key twice. `.add()` is idempotent. Serialized as a sorted array
+    // for `metadata.degraded` at the end so dashboard queries see a stable
+    // shape.
+    const degraded = new Set<string>()
+
+    // Run local detections in parallel. Every detection function is now
+    // expected to fail-safe (return a "not found" or empty result) rather
+    // than throw — see detectGit + detectDataTools.
     const [git, dbtProject, envVars, dataTools, configFiles] = await Promise.all([
-      detectGit(),
-      detectDbtProject(cwd),
-      detectEnvVars(),
-      detectDataTools(!!args.skip_tools),
-      detectConfigFiles(cwd),
+      detectGit().catch(() => {
+        degraded.add("git")
+        return { isRepo: false } as GitInfo
+      }),
+      detectDbtProject(cwd).catch(() => {
+        degraded.add("dbt-project")
+        return { found: false } as DbtProjectInfo
+      }),
+      detectEnvVars().catch(() => {
+        degraded.add("env-vars")
+        return [] as EnvVarConnection[]
+      }),
+      detectDataTools(!!args.skip_tools).catch(() => {
+        degraded.add("data-tools")
+        return [] as DataToolInfo[]
+      }),
+      detectConfigFiles(cwd).catch(() => {
+        degraded.add("config-files")
+        return { altimateConfig: false, sqlfluff: false, preCommit: false } as ConfigFileInfo
+      }),
     ])
 
-    // Run bridge-dependent detections with individual error handling
+    // Run bridge-dependent detections with individual error handling. A
+    // dispatcher failure on any one of these is expected (Python engine may
+    // not be running locally) — degrade silently and report in metadata.
     const engineHealth = await Dispatcher.call("ping", {} as any)
       .then((r) => ({ healthy: true, status: r.status }))
-      .catch(() => ({ healthy: false, status: undefined as string | undefined }))
+      .catch(() => {
+        degraded.add("python-engine")
+        return { healthy: false, status: undefined as string | undefined }
+      })
 
     const existingConnections = await Dispatcher.call("warehouse.list", {})
       .then((r) => r.warehouses)
-      .catch(() => [] as Array<{ name: string; type: string; database?: string }>)
+      .catch(() => {
+        degraded.add("warehouse.list")
+        return [] as Array<{ name: string; type: string; database?: string }>
+      })
 
     const dbtProfiles = await Dispatcher.call("dbt.profiles", {
       projectDir: dbtProject.found ? dbtProject.path : undefined,
     })
       .then((r) => r.connections ?? [])
-      .catch(() => [] as Array<{ name: string; type: string; config: Record<string, unknown> }>)
+      .catch(() => {
+        degraded.add("dbt.profiles")
+        return [] as Array<{ name: string; type: string; config: Record<string, unknown> }>
+      })
 
     const dockerContainers = args.skip_docker
       ? []
       : await Dispatcher.call("warehouse.discover", {} as any)
           .then((r) => r.containers ?? [])
-          .catch(() => [] as Array<{ name: string; db_type: string; host: string; port: number; database?: string }>)
+          .catch(() => {
+            degraded.add("warehouse.discover")
+            return [] as Array<{ name: string; db_type: string; host: string; port: number; database?: string }>
+          })
 
-    const schemaCache = await Dispatcher.call("schema.cache_status", {}).catch(() => null)
+    const schemaCache = await Dispatcher.call("schema.cache_status", {}).catch(() => {
+      degraded.add("schema.cache_status")
+      return null
+    })
 
     const dbtManifest = dbtProject.manifestPath
-      ? await Dispatcher.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => null)
+      ? await Dispatcher.call("dbt.manifest", { path: dbtProject.manifestPath }).catch(() => {
+          degraded.add("dbt.manifest")
+          return null
+        })
       : null
 
     // Deduplicate connections
@@ -512,6 +690,22 @@ export const ProjectScanTool = Tool.define("project_scan", {
     if (git.isRepo) {
       const remote = git.remoteUrl ? ` (origin: ${git.remoteUrl})` : ""
       lines.push(`✓ Git repo on branch \`${git.branch ?? "unknown"}\`${remote}`)
+    } else if (git.gitAvailable === false) {
+      // Distinguish "git not installed" from "not a repo" so the LLM /
+      // user can act differently (suggest installing git vs initialising a
+      // repo). Also record in degraded so dashboards spot the pattern —
+      // detectGit no longer throws, so the .catch() above never fires for
+      // this case and only this explicit add() records it.
+      lines.push("✗ git binary not found in PATH (install git or add it to PATH)")
+      degraded.add("git")
+    } else if (git.gitError) {
+      // Git ran but produced a non-128 error — corrupted .git, permission
+      // denied, etc. Surface the exit code + stderr (truncated) so the user
+      // can self-diagnose. Record in degraded so this case doesn't silently
+      // bucket as a clean "not a repo".
+      const stderrSuffix = git.gitError.stderr ? `: ${git.gitError.stderr.slice(0, 120)}` : ""
+      lines.push(`✗ git error (exit ${git.gitError.exitCode})${stderrSuffix}`)
+      degraded.add("git")
     } else {
       lines.push("✗ Not a git repository")
     }
@@ -549,7 +743,10 @@ export const ProjectScanTool = Tool.define("project_scan", {
           suggestionsShown: ["dbt-develop", "dbt-troubleshoot", "dbt-analyze"],
         })
       } catch {
-        // Telemetry must never break scan output
+        // Telemetry must never break scan output, but record it in the
+        // degraded list so we can see post-deploy whether the dynamic
+        // import is silently failing for some users.
+        degraded.add("post-connect-suggestions")
       }
       // altimate_change end
     } else {
@@ -655,7 +852,12 @@ export const ProjectScanTool = Tool.define("project_scan", {
     if (connections.newFromDocker.length > 0) connectionSources.push("docker")
     if (connections.newFromEnv.length > 0) connectionSources.push("env-var")
 
-    const mcpConfig = (await Config.get()).mcp ?? {}
+    const mcpConfig = await Config.get()
+      .then((c) => c.mcp ?? {})
+      .catch(() => {
+        degraded.add("config")
+        return {}
+      })
     const mcpServerCount = Object.keys(mcpConfig).length
 
     const enabledFlags: string[] = []
@@ -669,7 +871,10 @@ export const ProjectScanTool = Tool.define("project_scan", {
 
     const skillCount = await Skill.all()
       .then((s) => s.length)
-      .catch(() => 0)
+      .catch(() => {
+        degraded.add("skills")
+        return 0
+      })
 
     Telemetry.track({
       type: "environment_census",
@@ -702,14 +907,38 @@ export const ProjectScanTool = Tool.define("project_scan", {
       feature_flags: enabledFlags,
     })
 
+    // Surface degraded detections in the output so the LLM can recommend
+    // installing the missing pieces without thinking the tool itself failed.
+    // Sort the keys so the output is stable across runs (Set iteration
+    // order is insertion order, which depends on which detection failed
+    // first — not useful to the human reader).
+    const degradedList = [...degraded].sort()
+    if (degradedList.length > 0) {
+      lines.push("")
+      lines.push(`## Degraded Detections (${degradedList.length})`)
+      lines.push(
+        `The following sub-detections failed and were skipped (the rest of the scan is still valid):`,
+      )
+      for (const d of degradedList) {
+        lines.push(`- ${d}`)
+      }
+    }
+
     // Build metadata
     const toolsFound = dataTools.filter((t) => t.installed).map((t) => t.name)
 
+    const degradedSuffix = degradedList.length > 0 ? ` (${degradedList.length} degraded)` : ""
+
     return {
-      title: `Scan: ${totalConnections} connection(s), ${dbtProject.found ? "dbt found" : "no dbt"}`,
+      title: `Scan: ${totalConnections} connection(s), ${dbtProject.found ? "dbt found" : "no dbt"}${degradedSuffix}`,
       metadata: {
         engine_healthy: engineHealth.healthy,
-        git: { isRepo: git.isRepo, branch: git.branch },
+        git: {
+          isRepo: git.isRepo,
+          branch: git.branch,
+          gitAvailable: git.gitAvailable,
+          gitError: git.gitError,
+        },
         dbt: {
           found: dbtProject.found,
           name: dbtProject.name,
@@ -729,6 +958,10 @@ export const ProjectScanTool = Tool.define("project_scan", {
             }
           : { warehouses: 0, tables: 0, columns: 0 },
         tools_found: toolsFound,
+        // Always emit as an array (sorted, deduplicated) — never `undefined` —
+        // so dashboard queries don't need null coalescing. Empty array means
+        // "no degradation" cleanly.
+        degraded: degradedList,
       },
       output: lines.join("\n"),
     }

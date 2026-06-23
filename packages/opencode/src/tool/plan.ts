@@ -24,17 +24,19 @@ export const PlanExitTool = Tool.define("plan_exit", {
     const plan = path.relative(Instance.worktree, Session.plan(session))
     const answers = await Question.ask({
       sessionID: ctx.sessionID,
+      // altimate_change start — UI copy reflects canonical agent name (renamed from "build")
       questions: [
         {
-          question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
-          header: "Build Agent",
+          question: `Plan at ${plan} is complete. Would you like to switch to the builder agent and start implementing?`,
+          header: "Builder Agent",
           custom: false,
           options: [
-            { label: "Yes", description: "Switch to build agent and start implementing the plan" },
+            { label: "Yes", description: "Switch to builder agent and start implementing the plan" },
             { label: "No", description: "Stay with plan agent to continue refining the plan" },
           ],
         },
       ],
+      // altimate_change end
       tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
     })
 
@@ -53,7 +55,17 @@ export const PlanExitTool = Tool.define("plan_exit", {
       time: {
         created: Date.now(),
       },
-      agent: "build",
+      // altimate_change start — use canonical "builder" name (renamed from "build")
+      // The Agent.get() alias in agent.ts:408 maps the legacy "build" to "builder"
+      // so the session still executes correctly, but the telemetry agent_outcome
+      // event in prompt.ts records the literal `lastUser.agent` value. Hardcoding
+      // "build" here meant every plan-exit invocation showed up as a separate
+      // (and confusingly-named) `agent: "build"` row in agent_outcome telemetry —
+      // 133 invocations in 14 days, 0% completion in the dashboard, distinct
+      // from builder's actual numbers. Using the canonical name folds these
+      // back into the right bucket.
+      agent: "builder",
+      // altimate_change end
       model,
     }
     await Session.updateMessage(userMsg)
@@ -66,11 +78,13 @@ export const PlanExitTool = Tool.define("plan_exit", {
       synthetic: true,
     } satisfies MessageV2.TextPart)
 
+    // altimate_change start — title/output text reflects canonical "builder" name (renamed from "build")
     return {
-      title: "Switching to build agent",
-      output: "User approved switching to build agent. Wait for further instructions.",
+      title: "Switching to builder agent",
+      output: "User approved switching to builder agent. Wait for further instructions.",
       metadata: {},
     }
+    // altimate_change end
   },
 })
 

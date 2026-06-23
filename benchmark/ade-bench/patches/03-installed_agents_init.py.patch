@@ -1,0 +1,14 @@
+diff --git a/ade_bench/agents/installed_agents/__init__.py b/ade_bench/agents/installed_agents/__init__.py
+index bbedf13..7c3e2e5 100644
+--- a/ade_bench/agents/installed_agents/__init__.py
++++ b/ade_bench/agents/installed_agents/__init__.py
+@@ -8,5 +8,8 @@ from ade_bench.agents.installed_agents.gemini_cli.gemini_cli_agent import (
+     GeminiCLIAgent,
+ )
+ from ade_bench.agents.installed_agents.macro.macro_agent import MacroAgent
++from ade_bench.agents.installed_agents.altimate_code.altimate_code_agent import (
++    AltimateCodeAgent,
++)
+ 
+-__all__ = ["ClaudeCodeAgent", "OpenAICodexAgent", "GeminiCLIAgent", "MacroAgent"]
++__all__ = ["ClaudeCodeAgent", "OpenAICodexAgent", "GeminiCLIAgent", "MacroAgent", "AltimateCodeAgent"]

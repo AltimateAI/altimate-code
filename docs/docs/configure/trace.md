@@ -325,7 +325,7 @@ Traces are designed to survive process crashes:
 
 2. **Incremental snapshots.** After every tool call and generation completion, the trace file is updated atomically (write to temp file, then rename). The file on disk always contains a valid, complete JSON document.
 
-3. **Crash handlers.** The `run` command registers `SIGINT`/`SIGTERM`/`beforeExit` handlers that flush the trace synchronously with a `"crashed"` status.
+3. **Crash handlers.** The `run` and `serve` commands register `SIGINT`/`SIGTERM`/`beforeExit` handlers that finalize in-flight traces on shutdown. (`run` flushes synchronously with a `"crashed"` status; `serve` drains and finalizes its active sessions.)
 
 4. **Status indicators.** Trace status tells you exactly what happened:
 

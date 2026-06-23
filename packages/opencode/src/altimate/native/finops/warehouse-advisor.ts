@@ -6,6 +6,7 @@
 
 import * as Registry from "../connections/registry"
 import { bqRegionFor, interpolateBqRegion } from "./bq-utils"
+import { resolveFinopsWarehouse, DEFAULT_FINOPS_TYPES } from "./warehouse-resolver"
 import type {
   WarehouseAdvisorParams,
   WarehouseAdvisorResult,
@@ -122,11 +123,7 @@ const SIZE_ORDER = ["X-Small", "Small", "Medium", "Large", "X-Large", "2X-Large"
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getWhType(warehouse: string): string {
-  const warehouses = Registry.list().warehouses
-  const wh = warehouses.find((w) => w.name === warehouse)
-  return wh?.type || "unknown"
-}
+const ADVISOR_SUPPORTED_TYPES = DEFAULT_FINOPS_TYPES
 
 function buildLoadSql(whType: string, days: number, bqRegion?: unknown): string | null {
   if (whType === "snowflake") return SNOWFLAKE_LOAD_SQL.replace("{days}", String(days))
@@ -220,9 +217,26 @@ function generateSizingRecommendations(
 // ---------------------------------------------------------------------------
 
 export async function adviseWarehouse(params: WarehouseAdvisorParams): Promise<WarehouseAdvisorResult> {
-  const whType = getWhType(params.warehouse)
   const days = params.days ?? 14
-  const bqRegion = whType === "bigquery" ? bqRegionFor(params.warehouse) : undefined
+
+  const resolved = resolveFinopsWarehouse({
+    requested: params.warehouse,
+    supportedTypes: ADVISOR_SUPPORTED_TYPES,
+    operationName: "Warehouse sizing advice",
+  })
+  if (resolved.kind === "error") {
+    return {
+      success: false,
+      warehouse_load: [],
+      warehouse_performance: [],
+      recommendations: [],
+      days_analyzed: days,
+      error: resolved.error,
+    }
+  }
+
+  const { warehouse: whName, type: whType } = resolved
+  const bqRegion = whType === "bigquery" ? bqRegionFor(whName) : undefined
 
   const loadSql = buildLoadSql(whType, days, bqRegion)
   const sizingSql = buildSizingSql(whType, days, bqRegion)
@@ -234,12 +248,12 @@ export async function adviseWarehouse(params: WarehouseAdvisorParams): Promise<W
       warehouse_performance: [],
       recommendations: [],
       days_analyzed: days,
-      error: `Warehouse sizing advice is not available for ${whType} warehouses.`,
+      error: `Internal error: advisor SQL templates missing for ${whType}.`,
     }
   }
 
   try {
-    const connector = await Registry.get(params.warehouse)
+    const connector = await Registry.get(whName)
 
     // Run load and sizing queries in parallel
     const [loadResult, sizingResult] = await Promise.all([
@@ -284,7 +298,7 @@ export async function adviseWarehouse(params: WarehouseAdvisorParams): Promise<W
       warehouse_performance: [],
       recommendations: [],
       days_analyzed: days,
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
     }
   }
 }

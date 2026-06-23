@@ -169,7 +169,9 @@ describe("flushSync — crash recovery", () => {
       model: "anthropic/claude-sonnet-4-20250514",
       agent: "builder",
     })
-    await new Promise((r) => setTimeout(r, 50))
+    // Deterministic wait for the startTrace snapshot — `await sleep(50)`
+    // races on slow CI runners (this test failed on CI run 25448250105).
+    await tracer.flush()
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
@@ -181,8 +183,8 @@ describe("flushSync — crash recovery", () => {
       id: "1", reason: "tool_calls", cost: 0.005,
       tokens: { input: 1000, output: 200, reasoning: 50, cache: { read: 100, write: 25 } },
     })
-    // Wait for logStepFinish snapshot
-    await new Promise((r) => setTimeout(r, 50))
+    // Deterministic wait for the logStepFinish snapshot.
+    await tracer.flush()
 
     tracer.logStepStart({ id: "2" })
     // Crash mid-generation
@@ -495,18 +497,23 @@ describe("flushSync — multiple calls", () => {
     expect(traceFile.summary.status).toBe("crashed")
   })
 
-  test("flushSync then endTrace — endTrace overwrites crashed status", async () => {
+  test("flushSync then endTrace — flushSync's crashed status is preserved (M3 fix)", async () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("s-flush-then-end", { prompt: "test" })
     await new Promise((r) => setTimeout(r, 50))
 
     tracer.flushSync("early crash")
+    const flushedPath = tracer.getTracePath()!
 
-    // But actually the process survived — endTrace completes normally
-    const filePath = await tracer.endTrace()
-    const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    // endTrace should overwrite with "completed"
-    expect(traceFile.summary.status).toBe("completed")
+    // After flushSync, endTrace short-circuits and returns the canonical
+    // crashed file path. The crashed write is authoritative — endTrace
+    // does not call any exporter once Trace.crashed is set.
+    const endPath = await tracer.endTrace()
+    expect(endPath).toBe(flushedPath)
+
+    const traceFile: TraceFile = JSON.parse(await fs.readFile(flushedPath, "utf-8"))
+    expect(traceFile.summary.status).toBe("crashed")
+    expect(traceFile.summary.error).toContain("early crash")
   })
 })
 

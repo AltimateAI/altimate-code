@@ -44,3 +44,4 @@ __pycache__
 **/.github/meta/commit.txt
 **/.github/meta/diff.txt
 **/.github/meta/pr-body-*.md
+*.bak
