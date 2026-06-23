@@ -197,7 +197,9 @@ describe("Skip Files / Keep Ours Consistency", () => {
     const configPath = join(repoRoot, "script/upstream/utils/config.ts")
     const configSource = readFileSync(configPath, "utf-8")
 
-    const criticalSkipPatterns = ["packages/app/**", "packages/desktop/**", "packages/web/**"]
+    // packages/app and packages/desktop are adopted into the fork and no longer
+    // skipped. packages/web/console/enterprise remain upstream-only and skipped.
+    const criticalSkipPatterns = ["packages/web/**", "packages/console/**", "packages/enterprise/**"]
     for (const pattern of criticalSkipPatterns) {
       expect(configSource).toContain(pattern)
     }

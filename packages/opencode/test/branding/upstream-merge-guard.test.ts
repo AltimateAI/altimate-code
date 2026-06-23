@@ -121,17 +121,15 @@ describe("Root package.json integrity", () => {
 // ---------------------------------------------------------------------------
 describe("Deleted packages stay deleted", () => {
   const forbiddenDirs = [
-    "packages/app",
+    // packages/app, packages/ui, packages/desktop, packages/desktop-electron
+    // are adopted into the fork and DO exist on disk — excluded here.
     "packages/console",
-    "packages/desktop",
-    "packages/desktop-electron",
     "packages/enterprise",
     "packages/extensions",
     "packages/function",
     "packages/identity",
     "packages/slack",
     "packages/storybook",
-    "packages/ui",
     "packages/web",
     "infra",
     "nix",
