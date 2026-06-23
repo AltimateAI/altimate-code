@@ -467,6 +467,16 @@ pub fn spawn_command(
         cmd
     };
 
+    // altimate_change start — spawn the sidecar in a bounded, empty working dir.
+    // Launched via `open`, the app's cwd is `/`; the server's startup config/project
+    // resolution walks/scans the cwd tree, so cwd=`/` (or $HOME) hangs startup
+    // indefinitely. A dedicated empty dir keeps it bounded — real projects are
+    // opened explicitly by the user, so the default cwd never needs to be a project.
+    let server_cwd = state_dir.join("server-cwd");
+    let _ = std::fs::create_dir_all(&server_cwd);
+    cmd.current_dir(&server_cwd);
+    // altimate_change end
+
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
