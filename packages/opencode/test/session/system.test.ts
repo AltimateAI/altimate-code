@@ -1,186 +1,86 @@
-import { describe, expect, setSystemTime, test } from "bun:test"
-import path from "path"
-import { Agent } from "../../src/agent/agent"
-import { Instance } from "../../src/project/instance"
+import { describe, expect } from "bun:test"
+import { Effect, Layer } from "effect"
+import type { Agent } from "../../src/agent/agent"
+import { NamedError } from "@opencode-ai/core/util/error"
+import { Skill } from "../../src/skill"
+import { Permission } from "../../src/permission"
 import { SystemPrompt } from "../../src/session/system"
-import type { Provider } from "../../src/provider/provider"
-import { tmpdir } from "../fixture/fixture"
+import { LocationServiceMap } from "@opencode-ai/core/location-layer"
+import { testEffect } from "../lib/effect"
 
-function makeModel(overrides: { apiId: string; family?: string; providerID?: string }): Provider.Model {
-  return {
-    id: overrides.apiId as any,
-    providerID: (overrides.providerID ?? "test") as Provider.Model["providerID"],
-    api: { id: overrides.apiId, url: "", npm: "@ai-sdk/openai-compatible" },
-    name: overrides.apiId,
-    family: overrides.family,
-    capabilities: {
-      temperature: true,
-      reasoning: false,
-      attachment: false,
-      toolcall: true,
-      input: { text: true, audio: false, image: false, video: false, pdf: false },
-      output: { text: true, audio: false, image: false, video: false, pdf: false },
-      interleaved: false,
-    },
-    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-    limit: { context: 0, output: 0 },
-    status: "active",
-    options: {},
-    headers: {},
-    release_date: "2025-01-01",
-  } as Provider.Model
+const skills: Skill.Info[] = [
+  {
+    name: "zeta-skill",
+    description: "Zeta skill.",
+    location: "/tmp/zeta-skill/SKILL.md",
+    content: "# zeta-skill",
+  },
+  {
+    name: "alpha-skill",
+    description: "Alpha skill.",
+    location: "/tmp/alpha-skill/SKILL.md",
+    content: "# alpha-skill",
+  },
+  {
+    name: "middle-skill",
+    description: "Middle skill.",
+    location: "/tmp/middle-skill/SKILL.md",
+    content: "# middle-skill",
+  },
+  {
+    name: "manual-skill",
+    location: "/tmp/manual-skill/SKILL.md",
+    content: "# manual-skill",
+  },
+]
+
+const build: Agent.Info = {
+  name: "build",
+  mode: "primary",
+  permission: Permission.fromConfig({ "*": "allow" }),
+  options: {},
 }
 
-describe("session.system.provider routing", () => {
-  // `codex_header.txt` (GPT-5 prompt) is the only base prompt with `## Editing
-  // constraints` / `apply_patch`. The Claude-style fallback (`qwen.txt`) is the
-  // only base prompt that begins with "Refuse to write code or explain code
-  // that may be used maliciously".
-
-  test("altimate-default routes to GPT-5 prompt via provider+family, not the Anthropic fallback", () => {
-    const prompts = SystemPrompt.provider(
-      makeModel({ apiId: "altimate-default", providerID: "altimate-backend", family: "openai" }),
-    )
-    expect(prompts).toHaveLength(1)
-    expect(prompts[0]).toMatch(/## Editing constraints/)
-    expect(prompts[0]).toMatch(/apply_patch/)
-    expect(prompts[0]).not.toMatch(/Refuse to write code or explain code that may be used maliciously/)
-  })
-
-  test("altimate-backend anthropic-family routes to the same Claude prompt as direct anthropic", () => {
-    const prompts = SystemPrompt.provider(
-      makeModel({ apiId: "altimate-something", providerID: "altimate-backend", family: "anthropic" }),
-    )
-    const baselineAnthropic = SystemPrompt.provider(
-      makeModel({ apiId: "claude-3-7-sonnet", providerID: "anthropic", family: "anthropic" }),
-    )
-    expect(prompts).toEqual(baselineAnthropic)
-  })
-
-  test("altimate-backend with unknown / missing family defaults to GPT-5 codex (gateway is openai-compatible)", () => {
-    // Without this default the unknown-family branch would fall through to
-    // PROMPT_ANTHROPIC_WITHOUT_TODO, recreating the GH #887 routing problem
-    // the moment a new family value appears in config.
-    for (const family of [undefined, "", "unknown-future-family"]) {
-      const prompts = SystemPrompt.provider(
-        makeModel({ apiId: "altimate-default", providerID: "altimate-backend", family }),
-      )
-      expect(prompts[0]).toMatch(/## Editing constraints/)
-      expect(prompts[0]).not.toMatch(/Refuse to write code or explain code that may be used maliciously/)
-    }
-  })
-
-  test("altimate-backend family lookup is case-insensitive", () => {
-    const lower = SystemPrompt.provider(
-      makeModel({ apiId: "altimate-default", providerID: "altimate-backend", family: "anthropic" }),
-    )
-    const upper = SystemPrompt.provider(
-      makeModel({ apiId: "altimate-default", providerID: "altimate-backend", family: "Anthropic" }),
-    )
-    const mixed = SystemPrompt.provider(
-      makeModel({ apiId: "altimate-default", providerID: "altimate-backend", family: "ANTHROPIC" }),
-    )
-    expect(upper).toEqual(lower)
-    expect(mixed).toEqual(lower)
-  })
-
-  test("altimate-backend gemini-family routes to the same prompt as a direct gemini model", () => {
-    // familyVendor maps the specific gateway family values (`gemini-pro`,
-    // `gemini-flash`, …) to "gemini", so an altimate-backend Gemini model must
-    // land on PROMPT_GEMINI — not fall through to the codex default. Guards the
-    // #888 J1 class for the gemini branch specifically.
-    const prompts = SystemPrompt.provider(
-      makeModel({ apiId: "altimate-default", providerID: "altimate-backend", family: "gemini-pro" }),
-    )
-    const baselineGemini = SystemPrompt.provider(makeModel({ apiId: "gemini-2.0-flash", providerID: "google" }))
-    expect(prompts).toEqual(baselineGemini)
-    // And it must NOT be the codex default that an unknown family gets.
-    const codexDefault = SystemPrompt.provider(
-      makeModel({ apiId: "altimate-default", providerID: "altimate-backend", family: "unknown-future-family" }),
-    )
-    expect(prompts).not.toEqual(codexDefault)
-  })
-
-  test("non-altimate openai models still use the existing api.id matching", () => {
-    const gpt5 = SystemPrompt.provider(makeModel({ apiId: "gpt-5", providerID: "openai" }))
-    expect(gpt5[0]).toMatch(/## Editing constraints/)
-    const gpt4 = SystemPrompt.provider(makeModel({ apiId: "gpt-4o", providerID: "openai" }))
-    expect(gpt4[0]).not.toMatch(/## Editing constraints/)
-  })
-})
+const it = testEffect(
+  SystemPrompt.layer.pipe(
+    Layer.provide(LocationServiceMap.layer),
+    Layer.provide(
+      Layer.succeed(
+        Skill.Service,
+        Skill.Service.of({
+          get: (name) => Effect.succeed(skills.find((skill) => skill.name === name)),
+          require: (name) => {
+            const info = skills.find((skill) => skill.name === name)
+            if (info) return Effect.succeed(info)
+            return Effect.fail(new Skill.NotFoundError({ name, available: skills.map((skill) => skill.name) }))
+          },
+          all: () => Effect.succeed(skills),
+          dirs: () => Effect.succeed([]),
+          available: () => Effect.succeed(skills),
+        }),
+      ),
+    ),
+  ),
+)
 
 describe("session.system", () => {
-  test("skills output is sorted by name and stable across calls", async () => {
-    await using tmp = await tmpdir({
-      git: true,
-      init: async (dir) => {
-        for (const [name, description] of [
-          ["zeta-skill", "Zeta skill."],
-          ["alpha-skill", "Alpha skill."],
-          ["middle-skill", "Middle skill."],
-        ]) {
-          const skillDir = path.join(dir, ".opencode", "skill", name)
-          await Bun.write(
-            path.join(skillDir, "SKILL.md"),
-            `---
-name: ${name}
-description: ${description}
----
+  it.effect("skills output is sorted by name and stable across calls", () =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      const first = yield* prompt.skills(build)
+      const second = yield* prompt.skills(build)
+      const output = first ?? (yield* Effect.fail(new NamedError.Unknown({ message: "missing skills output" })))
 
-# ${name}
-`,
-          )
-        }
-      },
-    })
+      expect(first).toBe(second)
 
-    const home = process.env.OPENCODE_TEST_HOME
-    process.env.OPENCODE_TEST_HOME = tmp.path
+      const alpha = output.indexOf("<name>alpha-skill</name>")
+      const middle = output.indexOf("<name>middle-skill</name>")
+      const zeta = output.indexOf("<name>zeta-skill</name>")
 
-    try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const build = await Agent.get("build")
-          const first = await SystemPrompt.skills(build!)
-          const second = await SystemPrompt.skills(build!)
-
-          expect(first).toBe(second)
-
-          const alpha = first!.indexOf("<name>alpha-skill</name>")
-          const middle = first!.indexOf("<name>middle-skill</name>")
-          const zeta = first!.indexOf("<name>zeta-skill</name>")
-
-          expect(alpha).toBeGreaterThan(-1)
-          expect(middle).toBeGreaterThan(alpha)
-          expect(zeta).toBeGreaterThan(middle)
-        },
-      })
-    } finally {
-      process.env.OPENCODE_TEST_HOME = home
-    }
-  })
-
-  test("environment() keeps the volatile date out of the cached system prefix", async () => {
-    // Freeze the clock so the captured `today` and the `new Date()` inside
-    // currentDate() read the same instant — otherwise the assertion can race
-    // across midnight.
-    setSystemTime(new Date("2026-06-17T12:00:00.000Z"))
-    try {
-      await using tmp = await tmpdir({ git: true })
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const today = new Date().toDateString()
-          const [env] = await SystemPrompt.environment(makeModel({ apiId: "claude-3-7-sonnet" }))
-          expect(env).toMatch(/<env>/)
-          expect(env).not.toMatch(/Today's date/)
-          expect(env).not.toContain(today)
-          expect(SystemPrompt.currentDate()).toContain(today)
-        },
-      })
-    } finally {
-      setSystemTime()
-    }
-  })
+      expect(alpha).toBeGreaterThan(-1)
+      expect(middle).toBeGreaterThan(alpha)
+      expect(zeta).toBeGreaterThan(middle)
+      expect(output).not.toContain("manual-skill")
+    }),
+  )
 })

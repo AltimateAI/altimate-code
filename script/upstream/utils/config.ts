@@ -386,6 +386,10 @@ export const defaultConfig: MergeConfig = {
     "packages/function/**",
     "packages/identity/**",
     "packages/slack/**",
+    // Hosted stats dashboard (stats-app web routes + stats-core/server) — not shipped
+    // by the CLI fork. stats-app depends on @opencode-ai/ui (skipped), and nothing in
+    // our shipped packages references @opencode-ai/stats-*.
+    "packages/stats/**",
     "packages/storybook/**",
     "packages/ui/**",
     "packages/web/**",

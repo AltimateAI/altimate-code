@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
-import { Filesystem } from "../../src/util/filesystem"
+import { Filesystem } from "@/util/filesystem"
 import { tmpdir } from "../fixture/fixture"
 
 describe("filesystem", () => {
@@ -80,6 +80,95 @@ describe("filesystem", () => {
       // Directories have size on some systems
       const size = await Filesystem.size(dirpath)
       expect(typeof size).toBe("number")
+    })
+  })
+
+  describe("findUp()", () => {
+    test("keeps previous nearest-first behavior for single target", async () => {
+      await using tmp = await tmpdir()
+      const parent = path.join(tmp.path, "parent")
+      const child = path.join(parent, "child")
+      await fs.mkdir(child, { recursive: true })
+      await fs.writeFile(path.join(tmp.path, "marker"), "root", "utf-8")
+      await fs.writeFile(path.join(parent, "marker"), "parent", "utf-8")
+
+      const result = await Filesystem.findUp("marker", child, tmp.path)
+
+      expect(result).toEqual([path.join(parent, "marker"), path.join(tmp.path, "marker")])
+    })
+
+    test("respects stop boundary", async () => {
+      await using tmp = await tmpdir()
+      const parent = path.join(tmp.path, "parent")
+      const child = path.join(parent, "child")
+      await fs.mkdir(child, { recursive: true })
+      await fs.writeFile(path.join(tmp.path, "marker"), "root", "utf-8")
+      await fs.writeFile(path.join(parent, "marker"), "parent", "utf-8")
+
+      const result = await Filesystem.findUp("marker", child, parent)
+
+      expect(result).toEqual([path.join(parent, "marker")])
+    })
+
+    test("supports multiple targets with nearest-first default ordering", async () => {
+      await using tmp = await tmpdir()
+      const parent = path.join(tmp.path, "parent")
+      const child = path.join(parent, "child")
+      await fs.mkdir(child, { recursive: true })
+
+      await fs.writeFile(path.join(parent, "cfg.jsonc"), "{}", "utf-8")
+      await fs.writeFile(path.join(tmp.path, "cfg.json"), "{}", "utf-8")
+      await fs.writeFile(path.join(tmp.path, "cfg.jsonc"), "{}", "utf-8")
+
+      const result = await Filesystem.findUp(["cfg.json", "cfg.jsonc"], child, tmp.path)
+
+      expect(result).toEqual([
+        path.join(parent, "cfg.jsonc"),
+        path.join(tmp.path, "cfg.json"),
+        path.join(tmp.path, "cfg.jsonc"),
+      ])
+    })
+
+    test("supports rootFirst ordering for multiple targets", async () => {
+      await using tmp = await tmpdir()
+      const parent = path.join(tmp.path, "parent")
+      const child = path.join(parent, "child")
+      await fs.mkdir(child, { recursive: true })
+
+      await fs.writeFile(path.join(parent, "cfg.jsonc"), "{}", "utf-8")
+      await fs.writeFile(path.join(tmp.path, "cfg.json"), "{}", "utf-8")
+      await fs.writeFile(path.join(tmp.path, "cfg.jsonc"), "{}", "utf-8")
+
+      const result = await Filesystem.findUp(["cfg.json", "cfg.jsonc"], child, tmp.path, { rootFirst: true })
+
+      expect(result).toEqual([
+        path.join(tmp.path, "cfg.json"),
+        path.join(tmp.path, "cfg.jsonc"),
+        path.join(parent, "cfg.jsonc"),
+      ])
+    })
+
+    test("rootFirst preserves json then jsonc order per directory", async () => {
+      await using tmp = await tmpdir()
+      const project = path.join(tmp.path, "project")
+      const nested = path.join(project, "nested")
+      await fs.mkdir(nested, { recursive: true })
+
+      await fs.writeFile(path.join(tmp.path, "opencode.json"), "{}", "utf-8")
+      await fs.writeFile(path.join(tmp.path, "opencode.jsonc"), "{}", "utf-8")
+      await fs.writeFile(path.join(project, "opencode.json"), "{}", "utf-8")
+      await fs.writeFile(path.join(project, "opencode.jsonc"), "{}", "utf-8")
+
+      const result = await Filesystem.findUp(["opencode.json", "opencode.jsonc"], nested, tmp.path, {
+        rootFirst: true,
+      })
+
+      expect(result).toEqual([
+        path.join(tmp.path, "opencode.json"),
+        path.join(tmp.path, "opencode.jsonc"),
+        path.join(project, "opencode.json"),
+        path.join(project, "opencode.jsonc"),
+      ])
     })
   })
 
@@ -258,31 +347,31 @@ describe("filesystem", () => {
   })
 
   describe("mimeType()", () => {
-    test("returns correct MIME type for JSON", () => {
-      expect(Filesystem.mimeType("test.json")).toContain("application/json")
+    test("returns correct MIME type for JSON", async () => {
+      expect(await Filesystem.mimeType("test.json")).toContain("application/json")
     })
 
-    test("returns correct MIME type for JavaScript", () => {
-      expect(Filesystem.mimeType("test.js")).toContain("javascript")
+    test("returns correct MIME type for JavaScript", async () => {
+      expect(await Filesystem.mimeType("test.js")).toContain("javascript")
     })
 
-    test("returns MIME type for TypeScript (or video/mp2t due to extension conflict)", () => {
-      const mime = Filesystem.mimeType("test.ts")
+    test("returns MIME type for TypeScript (or video/mp2t due to extension conflict)", async () => {
+      const mime = await Filesystem.mimeType("test.ts")
       // .ts is ambiguous: TypeScript vs MPEG-2 TS video
       expect(mime === "video/mp2t" || mime === "application/typescript" || mime === "text/typescript").toBe(true)
     })
 
-    test("returns correct MIME type for images", () => {
-      expect(Filesystem.mimeType("test.png")).toContain("image/png")
-      expect(Filesystem.mimeType("test.jpg")).toContain("image/jpeg")
+    test("returns correct MIME type for images", async () => {
+      expect(await Filesystem.mimeType("test.png")).toContain("image/png")
+      expect(await Filesystem.mimeType("test.jpg")).toContain("image/jpeg")
     })
 
-    test("returns default for unknown extension", () => {
-      expect(Filesystem.mimeType("test.unknown")).toBe("application/octet-stream")
+    test("returns default for unknown extension", async () => {
+      expect(await Filesystem.mimeType("test.unknown")).toBe("application/octet-stream")
     })
 
-    test("handles files without extension", () => {
-      expect(Filesystem.mimeType("Makefile")).toBe("application/octet-stream")
+    test("handles files without extension", async () => {
+      expect(await Filesystem.mimeType("Makefile")).toBe("application/octet-stream")
     })
   })
 
@@ -556,148 +645,12 @@ describe("filesystem", () => {
     })
   })
 
-  describe("findUp()", () => {
-    test("finds file at start directory", async () => {
+  describe("normalizePathPattern()", () => {
+    test("preserves drive root globs on Windows", async () => {
+      if (process.platform !== "win32") return
       await using tmp = await tmpdir()
-      const target = path.join(tmp.path, "AGENTS.md")
-      await fs.writeFile(target, "root instructions")
-
-      const results = await Filesystem.findUp("AGENTS.md", tmp.path)
-      expect(results).toEqual([target])
-    })
-
-    test("finds files at multiple levels walking upward", async () => {
-      await using tmp = await tmpdir()
-      // Create nested dirs: root/a/b/c
-      const dirA = path.join(tmp.path, "a")
-      const dirB = path.join(tmp.path, "a", "b")
-      const dirC = path.join(tmp.path, "a", "b", "c")
-      await fs.mkdir(dirC, { recursive: true })
-
-      // Place AGENTS.md at root and at a/b (but not at a or a/b/c)
-      await fs.writeFile(path.join(tmp.path, "AGENTS.md"), "root")
-      await fs.writeFile(path.join(dirB, "AGENTS.md"), "mid")
-
-      // Start from a/b/c, walk up to root
-      const results = await Filesystem.findUp("AGENTS.md", dirC, tmp.path)
-      // Should find mid-level first (closer to start), then root
-      expect(results).toEqual([
-        path.join(dirB, "AGENTS.md"),
-        path.join(tmp.path, "AGENTS.md"),
-      ])
-    })
-
-    test("stop directory is inclusive (file at stop level is found)", async () => {
-      await using tmp = await tmpdir()
-      const child = path.join(tmp.path, "child")
-      await fs.mkdir(child)
-      await fs.writeFile(path.join(tmp.path, "AGENTS.md"), "at stop level")
-
-      const results = await Filesystem.findUp("AGENTS.md", child, tmp.path)
-      expect(results).toEqual([path.join(tmp.path, "AGENTS.md")])
-    })
-
-    test("returns empty when file does not exist anywhere", async () => {
-      await using tmp = await tmpdir()
-      const child = path.join(tmp.path, "nested")
-      await fs.mkdir(child)
-
-      const results = await Filesystem.findUp("AGENTS.md", child, tmp.path)
-      expect(results).toEqual([])
-    })
-
-    test("does not traverse past stop directory", async () => {
-      await using tmp = await tmpdir()
-      const stopDir = path.join(tmp.path, "stop")
-      const startDir = path.join(tmp.path, "stop", "deep")
-      await fs.mkdir(startDir, { recursive: true })
-
-      // Place file above the stop directory — should NOT be found
-      await fs.writeFile(path.join(tmp.path, "AGENTS.md"), "above stop")
-
-      const results = await Filesystem.findUp("AGENTS.md", startDir, stopDir)
-      expect(results).toEqual([])
-    })
-  })
-
-  describe("globUp()", () => {
-    test("finds files matching glob pattern at multiple levels", async () => {
-      await using tmp = await tmpdir()
-      const child = path.join(tmp.path, "sub")
-      await fs.mkdir(child)
-
-      await fs.writeFile(path.join(tmp.path, "notes.md"), "root notes")
-      await fs.writeFile(path.join(child, "readme.md"), "sub readme")
-
-      const results = await Filesystem.globUp("*.md", child, tmp.path)
-      // Child level first, then root level
-      expect(results.length).toBe(2)
-      expect(results).toContain(path.join(child, "readme.md"))
-      expect(results).toContain(path.join(tmp.path, "notes.md"))
-    })
-
-    test("wildcard matches multiple files at one level", async () => {
-      await using tmp = await tmpdir()
-      await fs.writeFile(path.join(tmp.path, "a.md"), "a")
-      await fs.writeFile(path.join(tmp.path, "b.md"), "b")
-      await fs.writeFile(path.join(tmp.path, "c.txt"), "c")
-
-      const results = await Filesystem.globUp("*.md", tmp.path, tmp.path)
-      expect(results.length).toBe(2)
-      expect(results.some((r) => r.endsWith("a.md"))).toBe(true)
-      expect(results.some((r) => r.endsWith("b.md"))).toBe(true)
-    })
-
-    test("returns empty when no matches exist", async () => {
-      await using tmp = await tmpdir()
-      const results = await Filesystem.globUp("*.md", tmp.path, tmp.path)
-      expect(results).toEqual([])
-    })
-
-    test("does not traverse past stop directory", async () => {
-      await using tmp = await tmpdir()
-      const stopDir = path.join(tmp.path, "stop")
-      const startDir = path.join(tmp.path, "stop", "deep")
-      await fs.mkdir(startDir, { recursive: true })
-
-      await fs.writeFile(path.join(tmp.path, "notes.md"), "above stop")
-
-      const results = await Filesystem.globUp("*.md", startDir, stopDir)
-      expect(results).toEqual([])
-    })
-  })
-
-  describe("overlaps()", () => {
-    test("same path overlaps with itself", () => {
-      expect(Filesystem.overlaps("/a/b", "/a/b")).toBe(true)
-    })
-
-    test("parent and child overlap", () => {
-      expect(Filesystem.overlaps("/a", "/a/b")).toBe(true)
-      expect(Filesystem.overlaps("/a/b", "/a")).toBe(true)
-    })
-
-    test("sibling directories do not overlap", () => {
-      expect(Filesystem.overlaps("/a/b", "/a/c")).toBe(false)
-    })
-
-    test("unrelated paths do not overlap", () => {
-      expect(Filesystem.overlaps("/foo", "/bar")).toBe(false)
-    })
-
-    test("path that is a string prefix but not an ancestor does not overlap", () => {
-      // /foo/bar and /foo/barbaz — "barbaz" starts with "bar" but is a sibling
-      expect(Filesystem.overlaps("/foo/bar", "/foo/barbaz")).toBe(false)
-    })
-
-    test("trailing slash does not affect result", () => {
-      expect(Filesystem.overlaps("/a/b/", "/a/b")).toBe(true)
-      expect(Filesystem.overlaps("/a/b", "/a/b/")).toBe(true)
-    })
-
-    test("root overlaps with everything", () => {
-      expect(Filesystem.overlaps("/", "/any/path")).toBe(true)
-      expect(Filesystem.overlaps("/any/path", "/")).toBe(true)
+      const root = path.parse(tmp.path).root
+      expect(Filesystem.normalizePathPattern(path.join(root, "*"))).toBe(path.join(root, "*"))
     })
   })
 })

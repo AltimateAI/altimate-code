@@ -3,6 +3,7 @@ node_modules
 .worktrees
 .sst
 .env
+.env.local
 .idea
 .vscode
 .codex
@@ -14,6 +15,8 @@ ts-dist
 .turbo
 **/.serena
 .serena/
+**/.omo
+.omo/
 /result
 refs
 Session.vim
@@ -29,19 +32,3 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
-
-# Python artifacts
-__pycache__
-*.pyc
-.venv/
-
-# Transient commit-message and PR-body templates per CLAUDE.md commit
-# workflow. Do NOT track — they're per-developer scratch files that
-# intentionally quote upstream brand strings when describing rebrand
-# fixes, and tracking them produces false-positive branding leaks.
-# Use **/ so nested .github/meta paths (e.g. packages/*/.github/meta/)
-# are also covered — a flat anchor would silently miss them.
-**/.github/meta/commit.txt
-**/.github/meta/diff.txt
-**/.github/meta/pr-body-*.md
-*.bak
