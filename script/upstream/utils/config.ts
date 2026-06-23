@@ -175,6 +175,45 @@ const socialRules: StringReplacement[] = [
   },
 ]
 
+// Desktop deep-link URL scheme. Upstream registers `opencode://` (used for
+// `opencode://open-project?directory=...`). We rebrand to `altimate://`.
+// NOTE: the internal Tauri IPC event name "opencode:deep-link" is lowercase and
+// NOT a URL scheme — it stays as-is (no "//" so these rules don't touch it).
+const schemeRules: StringReplacement[] = [
+  {
+    pattern: /opencode:\/\//g,
+    replacement: "altimate://",
+    description: "Deep-link URL scheme",
+  },
+  {
+    pattern: /"schemes":\s*\["opencode"\]/g,
+    replacement: '"schemes": ["altimate"]',
+    description: "Tauri deep-link scheme registration",
+  },
+]
+
+// Desktop Tauri Rust crate names. Not user-facing, but renamed for a fully
+// leak-free build (log filenames, EnvFilter targets). These are NOT covered by
+// the OpenCode product-name rule (lowercase, with suffixes), so they need
+// dedicated rules to survive future merges. Order longest-first.
+const crateRules: StringReplacement[] = [
+  {
+    pattern: /opencode-desktop/g,
+    replacement: "altimate-code-desktop",
+    description: "Desktop Cargo package / log filename",
+  },
+  {
+    pattern: /opencode_desktop/g,
+    replacement: "altimate_code_desktop",
+    description: "Desktop bin crate (EnvFilter target)",
+  },
+  {
+    pattern: /opencode_lib/g,
+    replacement: "altimate_code_lib",
+    description: "Desktop lib crate name",
+  },
+]
+
 const productNameRules: StringReplacement[] = [
   {
     pattern: /OpenCode Desktop/g,
@@ -315,6 +354,29 @@ export const defaultConfig: MergeConfig = {
     // upstream brand strings when describing rebrand fixes. See CLAUDE.md
     // commit workflow conventions.
     ".github/meta/**",
+    // --- Desktop app (adopted from upstream v1.2.20) — files we fully own ---
+    // Tauri configs carry OUR updater signing pubkey + AltimateAI release
+    // endpoints + rebranded identifiers/productName. Never take upstream's.
+    "packages/desktop/src-tauri/tauri.conf.json",
+    "packages/desktop/src-tauri/tauri.beta.conf.json",
+    "packages/desktop/src-tauri/tauri.prod.conf.json",
+    // Brand binary assets (cannot carry text markers) + rebranded AppStream.
+    "packages/desktop/src-tauri/icons/**",
+    "packages/desktop/src-tauri/assets/**",
+    "packages/desktop/src-tauri/release/appstream.metainfo.xml",
+    // Sidecar build/copy scripts adapted to our binary naming + CI artifact contract.
+    "packages/desktop/scripts/utils.ts",
+    "packages/desktop/scripts/predev.ts",
+    "packages/desktop/scripts/prepare.ts",
+    "packages/desktop/scripts/copy-bundles.ts",
+    "packages/desktop/scripts/finalize-latest-json.ts",
+    // Web UI brand assets (favicons, social share, PWA icons, manifest).
+    "packages/app/public/favicon*",
+    "packages/app/public/apple-touch-icon*",
+    "packages/app/public/web-app-manifest*",
+    "packages/app/public/social-share*",
+    "packages/ui/src/assets/favicon/**",
+    "packages/ui/src/assets/images/social-share*",
   ],
 
   // Files with altimate behavioral patches that MUST be marked + reviewed on
@@ -371,15 +433,20 @@ export const defaultConfig: MergeConfig = {
     // Session error display + LLM UA
     "packages/opencode/src/session/llm.ts",
     "packages/opencode/src/util/error.ts",
+    // Desktop CLI: install dir/binary + WSL installer point at OUR altimate paths
+    // (functional divergence, not just branding) — must keep altimate_change markers.
+    "packages/desktop/src-tauri/src/cli.rs",
   ],
 
   skipFiles: [
-    // Hosted platform packages (not needed for CLI)
-    "packages/app/**",
+    // NOTE: packages/app, packages/ui, packages/desktop, packages/desktop-electron
+    // are NO LONGER skipped — we adopted the desktop app (Tauri primary + Electron
+    // secondary) and its SolidJS web UI. Upstream changes to them flow through the
+    // merge and get rebranded by the branding transforms; files we diverge on are
+    // protected via altimate_change markers / keepOurs (see desktop entries below).
+    // Hosted platform packages we still don't ship:
     "packages/console/**",
     "packages/containers/**",
-    "packages/desktop/**",
-    "packages/desktop-electron/**",
     "packages/docs/**",
     "packages/enterprise/**",
     "packages/extensions/**",
@@ -387,7 +454,6 @@ export const defaultConfig: MergeConfig = {
     "packages/identity/**",
     "packages/slack/**",
     "packages/storybook/**",
-    "packages/ui/**",
     "packages/web/**",
     // Nix packaging
     "nix/**",
@@ -417,7 +483,7 @@ export const defaultConfig: MergeConfig = {
     ".opencode/command/rmslop.md",
     ".opencode/command/ai-deps.md",
     ".opencode/command/spellcheck.md",
-    // Storybook CI (packages/storybook and packages/ui are deleted)
+    // Storybook CI (packages/storybook is not adopted; packages/ui now IS)
     ".github/workflows/storybook.yml",
     // Upstream Zed extension sync (no workflow references it)
     "script/sync-zed.ts",
@@ -449,6 +515,8 @@ export const defaultConfig: MergeConfig = {
     ...emailRules,
     ...appIdRules,
     ...socialRules,
+    ...schemeRules,
+    ...crateRules,
     ...productNameRules,
     ...npmInstallRules,
     ...cliBinaryRules,
@@ -470,6 +538,9 @@ export const defaultConfig: MergeConfig = {
     'from "@opencode-ai',
     'require("@opencode-ai',
     "import { ",
+    // External dependency hosted under anomalyco's org — no Altimate fork exists,
+    // rebranding the source URL would break the install. Keep as-is.
+    "anomalyco/ghostty-web",
   ],
 
   transformableExtensions: [

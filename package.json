@@ -29,7 +29,11 @@
       "packages/util",
       "packages/sdk/js",
       "packages/dbt-tools",
-      "packages/drivers"
+      "packages/drivers",
+      "packages/app",
+      "packages/ui",
+      "packages/desktop",
+      "packages/desktop-electron"
     ],
     "catalog": {
       "@types/bun": "1.3.9",

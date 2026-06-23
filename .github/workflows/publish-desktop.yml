@@ -1,0 +1,192 @@
+# Build, sign, and publish the Altimate Code desktop app (Tauri).
+#
+# READY, NOT WIRED: this workflow is correct in structure but needs org-provided
+# secrets before the first real run. See packages/desktop/README.md for the
+# signing/keygen runbook. Required repo secrets/vars:
+#   - APPLE_CERTIFICATE              base64 of the Developer ID Application .p12
+#   - APPLE_CERTIFICATE_PASSWORD     password for that .p12
+#   - APPLE_SIGNING_IDENTITY         e.g. "Developer ID Application: Altimate Inc (TEAMID)"
+#   - APPLE_API_KEY                  App Store Connect API key id (for notarization)
+#   - APPLE_API_ISSUER               App Store Connect API issuer id
+#   - APPLE_API_KEY_BASE64           base64 of the AuthKey_XXXX.p8
+#   - TAURI_SIGNING_PRIVATE_KEY      our updater private key (scratchpad altimate-updater.key)
+#   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD  (empty if the key has no password)
+# Windows code-signing (optional) can be added to the matrix later.
+#
+# The desktop build matrix below MUST stay in sync with `allTargets` in
+# packages/opencode/script/build.ts — the sidecar only builds for platforms that
+# have an @altimateai/altimate-core NAPI prebuild.
+
+name: publish-desktop
+run-name: "desktop ${{ inputs.version || github.ref_name }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.8.11)"
+        required: true
+        type: string
+      channel:
+        description: "Release channel"
+        required: true
+        default: prod
+        type: choice
+        options:
+          - prod
+          - beta
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version }}
+
+permissions:
+  contents: write
+  actions: read # prepare.ts uses `gh run download` to fetch the opencode-cli artifact
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ inputs.version }}
+      tag: v${{ inputs.version }}
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ inputs.version }}"
+          existing=$(gh release view "$tag" --json databaseId --jq .databaseId 2>/dev/null || true)
+          if [ -z "$existing" ]; then
+            gh release create "$tag" --draft --title "Altimate Code $tag" --notes "Altimate Code desktop $tag"
+          fi
+          id=$(gh release view "$tag" --json databaseId --jq .databaseId)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build-cli:
+    # Builds the opencode/altimate sidecar binaries for every target and uploads
+    # them as the `opencode-cli` artifact that packages/desktop/scripts/prepare.ts
+    # downloads. Artifact name is internal — keep it `opencode-cli`.
+    needs: prepare-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - name: Build CLI (all targets)
+        run: bun ./packages/opencode/script/build.ts
+        env:
+          OPENCODE_VERSION: ${{ inputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-cli
+          path: packages/opencode/dist
+
+  build-tauri:
+    needs: [prepare-release, build-cli]
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: macos-latest
+            target: x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install Linux deps
+        if: contains(matrix.settings.host, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/desktop/src-tauri
+          shared-key: ${{ matrix.settings.target }}
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Stage notarization API key
+        # `secrets.*` cannot be referenced in `if:` — pass it via env and check in bash.
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          if [ -n "$APPLE_API_KEY_BASE64" ]; then
+            echo "$APPLE_API_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/apple-api-key.p8"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple-api-key.p8" >> "$GITHUB_ENV"
+          fi
+
+      - name: Prepare sidecar (download opencode-cli, copy into src-tauri/sidecars)
+        run: |
+          cd packages/desktop
+          bun ./scripts/prepare.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          RUST_TARGET: ${{ matrix.settings.target }}
+          OPENCODE_VERSION: ${{ inputs.version }}
+
+      - name: Build, sign, and upload
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        with:
+          projectPath: packages/desktop
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
+          tagName: ${{ needs.prepare-release.outputs.tag }}
+          releaseDraft: true
+          updaterJsonPreferNsis: true
+          releaseAssetNamePattern: altimate-code-desktop-[platform]-[arch][ext]
+          args: >-
+            --target ${{ matrix.settings.target }}
+            --config ${{ (inputs.channel == 'beta' && './src-tauri/tauri.beta.conf.json') || './src-tauri/tauri.prod.conf.json' }}
+
+  finalize:
+    needs: [prepare-release, build-tauri]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - name: Finalize latest.json (updater manifest)
+        run: bun ./packages/desktop/scripts/finalize-latest-json.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          OPENCODE_RELEASE: ${{ needs.prepare-release.outputs.release_id }}
+          OPENCODE_VERSION: ${{ inputs.version }}

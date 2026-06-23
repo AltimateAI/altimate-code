@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Altimate Code Beta",
+  "identifier": "ai.altimate.code.desktop.beta",
+  "bundle": {
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/beta/32x32.png",
+      "icons/beta/128x128.png",
+      "icons/beta/128x128@2x.png",
+      "icons/beta/icon.icns",
+      "icons/beta/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/beta/icon.ico"
+      }
+    },
+    "linux": {
+      "rpm": {
+        "compression": {
+          "type": "none"
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDNzA4ODQzNkU0OTk4NjYKUldSbW1FbHVRNGh3UEpIVXFmdGErM0NRcHVaY0ZLZUg3blQxaGlpeWd0THZIOXFpakt3WVNXUjQK",
+      "endpoints": ["https://github.com/AltimateAI/altimate-code-beta/releases/latest/download/latest.json"]
+    }
+  }
+}

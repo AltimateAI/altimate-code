@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>ai.altimate.code</id>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Altimate Code</name>
+  <summary>AI coding agent for data teams</summary>
+
+  <developer id="ai.altimate">
+    <name>Altimate Inc</name>
+  </developer>
+
+  <description>
+    <p>
+      Altimate Code is an AI coding agent for data teams — SQL, dbt, warehouse,
+      and FinOps workflows backed by the Altimate engine and gateway.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">ai.altimate.code.desktop</launchable>
+
+  <content_rating type="oars-1.1" />
+
+  <url type="bugtracker">https://github.com/AltimateAI/altimate-code/issues</url>
+  <url type="homepage">https://www.altimate.ai</url>
+  <url type="vcs-browser">https://github.com/AltimateAI/altimate-code</url>
+
+  <releases>
+    <release version="0.8.10" date="2026-06-23">
+      <url type="details">https://github.com/AltimateAI/altimate-code/releases</url>
+    </release>
+  </releases>
+</component>
