@@ -15,11 +15,10 @@ const rootPkg = JSON.parse(readFileSync(rootPkgPath, "utf-8"))
 describe("upstream merge guards", () => {
   describe("skip files configuration", () => {
     const expectedSkipPatterns = [
-      "packages/app/**",
+      // packages/app, packages/ui, packages/desktop, packages/desktop-electron
+      // are adopted into the fork and intentionally NOT skipped.
       "packages/console/**",
       "packages/containers/**",
-      "packages/desktop/**",
-      "packages/desktop-electron/**",
       "packages/docs/**",
       "packages/enterprise/**",
       "packages/extensions/**",
@@ -27,7 +26,6 @@ describe("upstream merge guards", () => {
       "packages/identity/**",
       "packages/slack/**",
       "packages/storybook/**",
-      "packages/ui/**",
       "packages/web/**",
       "infra/**",
       "nix/**",
@@ -81,11 +79,10 @@ describe("upstream merge guards", () => {
 
   describe("skipped packages do not exist on disk", () => {
     const skippedPackageDirs = [
-      "packages/app",
+      // packages/app, packages/ui, packages/desktop, packages/desktop-electron
+      // are adopted into the fork and DO exist on disk — excluded here.
       "packages/console",
       "packages/containers",
-      "packages/desktop",
-      "packages/desktop-electron",
       "packages/docs",
       "packages/enterprise",
       "packages/extensions",
@@ -93,7 +90,6 @@ describe("upstream merge guards", () => {
       "packages/identity",
       "packages/slack",
       "packages/storybook",
-      "packages/ui",
       "packages/web",
     ]
 
@@ -235,11 +231,10 @@ describe("upstream merge guards", () => {
     })
 
     const forbiddenPackages = [
-      "packages/app",
+      // packages/app, packages/ui, packages/desktop, packages/desktop-electron
+      // are adopted into the fork and DO exist on disk — excluded here.
       "packages/console",
       "packages/containers",
-      "packages/desktop",
-      "packages/desktop-electron",
       "packages/docs",
       "packages/enterprise",
       "packages/extensions",
@@ -247,7 +242,6 @@ describe("upstream merge guards", () => {
       "packages/identity",
       "packages/slack",
       "packages/storybook",
-      "packages/ui",
       "packages/web",
     ]
 
