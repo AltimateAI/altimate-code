@@ -688,7 +688,9 @@ export const defaultLayer = Layer.suspend(() =>
 
 const locationServiceMapNode = LayerNode.make(LocationServiceMap.layer, [])
 
-export const node = LayerNode.make(layer, [
+// altimate_change start — upstream_fix: thunk defers reading cyclically-imported facade
+// `.node` exports (Plugin/Provider/...) until buildLayer runs, avoiding load-time undefined.
+export const node = LayerNode.make(layer, () => [
   Config.node,
   Auth.node,
   Plugin.node,
@@ -696,6 +698,7 @@ export const node = LayerNode.make(layer, [
   Provider.node,
   locationServiceMapNode,
 ])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the HTTP server consumes Agent.list() directly.

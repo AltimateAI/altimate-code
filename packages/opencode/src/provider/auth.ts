@@ -231,7 +231,10 @@ export const defaultLayer = Layer.suspend(() =>
   layer.pipe(Layer.provide(Auth.defaultLayer), Layer.provide(Plugin.defaultLayer)),
 )
 
-export const node = LayerNode.make(layer, [Auth.node, Plugin.node])
+// altimate_change start — upstream_fix: thunk defers reading cyclically-imported facade
+// `.node` exports until buildLayer runs, avoiding load-time undefined.
+export const node = LayerNode.make(layer, () => [Auth.node, Plugin.node])
+// altimate_change end
 
 // altimate_change start — restore imperative Promise wrappers for the HTTP route layer
 // (server/routes/provider.ts) which the Effect-only migration dropped. ProviderV2.ID is a

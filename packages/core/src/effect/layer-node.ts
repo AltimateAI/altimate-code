@@ -14,26 +14,40 @@ type CheckDependencies<Implementation extends Layer.Any, Dependencies extends No
 declare const $OutputType: unique symbol
 declare const $ErrorType: unique symbol
 
+// altimate_change start — upstream_fix: dependencies must be resolvable lazily.
+// The fork's namespace facades (Plugin/Provider/Session/...) form import cycles, so a
+// consumer module can evaluate `LayerNode.make(layer, [Plugin.node, ...])` at load time
+// before the cyclically-imported facade has finished assigning its own `node` export,
+// yielding `undefined` deps. Allowing `dependencies` to be a thunk defers reading the
+// sibling `.node` references until `buildLayer` runs (after all modules initialize),
+// which is behavior-preserving since deps are only ever consumed there.
+type LazyDeps<Items extends NodeList> = Items | (() => Items)
+
+function resolveDependencies(deps: readonly AnyNode[] | (() => readonly AnyNode[])): readonly AnyNode[] {
+  return typeof deps === "function" ? deps() : deps
+}
+
 export type Node<A, E = never> = {
   readonly kind: "layer" | "group"
   readonly implementation?: Layer.Any
-  readonly dependencies: readonly AnyNode[]
+  readonly dependencies: readonly AnyNode[] | (() => readonly AnyNode[])
   readonly [$OutputType]?: () => A
   readonly [$ErrorType]?: () => E
 }
 
 export function make<const Implementation extends Layer.Any, const Items extends NodeList>(
   implementation: Implementation,
-  dependencies: Items & CheckDependencies<Implementation, NoInfer<Items>>,
+  dependencies: LazyDeps<Items> & CheckDependencies<Implementation, NoInfer<Items>>,
 ): Node<Layer.Success<Implementation>, Layer.Error<Implementation> | Error<Items[number]>> {
   return { kind: "layer", implementation: implementation as Layer.Any, dependencies }
 }
 
 export function group<const Items extends NodeList>(
-  dependencies: Items,
+  dependencies: LazyDeps<Items>,
 ): Node<Output<Items[number]>, Error<Items[number]>> {
   return { kind: "group", dependencies }
 }
+// altimate_change end
 
 export type Replacement<A = unknown> = {
   readonly source: Node<A, unknown>
@@ -78,7 +92,9 @@ export function buildLayer<A, E>(node: Node<A, E>, options?: { readonly replacem
     visiting.add(node)
     stack.push(node)
     try {
-      const dependencies = node.dependencies.map(visit)
+      // altimate_change start — upstream_fix: resolve lazy dependency thunks (see make())
+      const dependencies = resolveDependencies(node.dependencies).map(visit)
+      // altimate_change end
       const nonEmpty = dependencies as [RuntimeLayer, ...RuntimeLayer[]]
       const result =
         node.kind === "group"

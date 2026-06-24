@@ -100,7 +100,9 @@ export const defaultLayer = Layer.suspend(() =>
 )
 // altimate_change end
 
-export const node = LayerNode.make(layer, [
+// altimate_change start — upstream_fix: thunk defers reading cyclically-imported facade
+// `.node` exports until buildLayer runs, avoiding load-time undefined.
+export const node = LayerNode.make(layer, () => [
   Plugin.node,
   ShareNext.node,
   Format.node,
@@ -110,6 +112,7 @@ export const node = LayerNode.make(layer, [
   Project.node,
   EventV2Bridge.node,
 ])
+// altimate_change end
 
 // altimate_change start — imperative bootstrap entrypoint for the fork's ALS-based
 // `Instance.provide({ init })` path (server.ts / project.ts / serve-upgrade-check.ts).
