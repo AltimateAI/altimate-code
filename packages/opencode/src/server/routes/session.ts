@@ -25,6 +25,7 @@ import { PermissionNext } from "@/permission/next"
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { errors } from "../error"
+import { NotFoundError as StorageNotFoundError } from "../../storage/db"
 import { lazy } from "../../util/lazy"
 import { Bus } from "../../bus"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -503,9 +504,50 @@ export const SessionRoutes = lazy(() =>
         }),
       ),
       async (c) => {
-        const sessionID = c.req.valid("param").sessionID
+        // altimate_change start — the zod brand adapter accepts any string at runtime.
+        // Validate with the Effect Schema constructor so malformed transcript IDs return
+        // the documented 400 instead of falling through to storage and surfacing as 500.
+        const rawSessionID = c.req.param("sessionID")
+        let sessionID: SessionID
+        try {
+          sessionID = SessionID.make(rawSessionID)
+        } catch {
+          return c.json(
+            {
+              data: { sessionID: rawSessionID },
+              errors: [{ message: "Invalid sessionID" }],
+              success: false as const,
+            },
+            400,
+          )
+        }
+        // altimate_change end
         const query = c.req.valid("query")
-        const session = await Session.get(sessionID)
+        let session: Session.Info
+        try {
+          session = await Session.get(sessionID)
+        } catch (error) {
+          // altimate_change start — legacy Server.Default imports the core NamedError
+          // base, while storage/session NotFoundError uses the util NamedError base.
+          // Map this expected domain miss locally so transcript keeps its declared 404.
+          if (error instanceof StorageNotFoundError || StorageNotFoundError.isInstance(error)) {
+            const notFound =
+              error instanceof StorageNotFoundError
+                ? error
+                : new StorageNotFoundError({
+                    message:
+                      typeof error === "object" &&
+                      error !== null &&
+                      "data" in error &&
+                      typeof (error as { data?: { message?: unknown } }).data?.message === "string"
+                        ? (error as { data: { message: string } }).data.message
+                        : `Session not found: ${sessionID}`,
+                  })
+            return c.json(notFound.toObject(), 404)
+          }
+          // altimate_change end
+          throw error
+        }
         const messages = await Session.messages({ sessionID })
         const transcript = formatTranscript(session, messages, {
           thinking: query.thinking,

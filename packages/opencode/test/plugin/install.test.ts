@@ -122,8 +122,8 @@ describe("plugin.install.task", () => {
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(true)
 
-    const server = await read(path.join(tmp.path, ".opencode", "opencode.jsonc"))
-    const tui = await read(path.join(tmp.path, ".opencode", "tui.jsonc"))
+    const server = await read(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))
+    const tui = await read(path.join(tmp.path, ".altimate-code", "tui.jsonc"))
     expect(server.plugin).toEqual(["acme@1.2.3"])
     expect(tui.plugin).toEqual(["acme@1.2.3"])
   })
@@ -144,8 +144,8 @@ describe("plugin.install.task", () => {
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(true)
 
-    const server = await read(path.join(tmp.path, ".opencode", "opencode.jsonc"))
-    const tui = await read(path.join(tmp.path, ".opencode", "tui.jsonc"))
+    const server = await read(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))
+    const tui = await read(path.join(tmp.path, ".altimate-code", "tui.jsonc"))
     expect(server.plugin).toEqual([["acme@1.2.3", { custom: true, other: false }]])
     expect(tui.plugin).toEqual([["acme@1.2.3", { compact: true }]])
   })
@@ -257,7 +257,7 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(true)
-    const server = await read(path.join(tmp.path, ".opencode", "opencode.jsonc"))
+    const server = await read(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))
     expect(server.plugin).toEqual(["acme@1.2.3"])
   })
 
@@ -366,8 +366,8 @@ describe("plugin.install.task", () => {
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(true)
 
-    expect(await Filesystem.exists(path.join(global, "opencode.jsonc"))).toBe(true)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(global, "altimate-code.jsonc"))).toBe(true)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
   })
 
   test("writes local scope under directory when vcs is not git", async () => {
@@ -386,8 +386,8 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctxDir(directory, worktree))
     expect(ok).toBe(true)
-    expect(await Filesystem.exists(path.join(directory, ".opencode", "opencode.jsonc"))).toBe(true)
-    expect(await Filesystem.exists(path.join(worktree, ".opencode", "opencode.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(directory, ".altimate-code", "altimate-code.jsonc"))).toBe(true)
+    expect(await Filesystem.exists(path.join(worktree, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
   })
 
   test("writes local scope under directory when worktree is root slash", async () => {
@@ -404,7 +404,7 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctxRoot(directory))
     expect(ok).toBe(true)
-    expect(await Filesystem.exists(path.join(directory, ".opencode", "opencode.jsonc"))).toBe(true)
+    expect(await Filesystem.exists(path.join(directory, ".altimate-code", "altimate-code.jsonc"))).toBe(true)
   })
 
   test("writes tui local scope under directory when worktree is root slash", async () => {
@@ -421,7 +421,7 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctxRoot(directory))
     expect(ok).toBe(true)
-    expect(await Filesystem.exists(path.join(directory, ".opencode", "tui.jsonc"))).toBe(true)
+    expect(await Filesystem.exists(path.join(directory, ".altimate-code", "tui.jsonc"))).toBe(true)
   })
 
   test("writes only tui config for tui-only plugins", async () => {
@@ -436,8 +436,8 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(true)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "tui.jsonc"))).toBe(true)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "tui.jsonc"))).toBe(true)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
   })
 
   test("writes tui config for oc-themes-only packages", async () => {
@@ -454,10 +454,10 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(true)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "tui.jsonc"))).toBe(true)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "tui.jsonc"))).toBe(true)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
 
-    const tui = await read(path.join(tmp.path, ".opencode", "tui.jsonc"))
+    const tui = await read(path.join(tmp.path, ".altimate-code", "tui.jsonc"))
     expect(tui.plugin).toEqual(["acme@1.2.3"])
   })
 
@@ -473,8 +473,8 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(false)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "tui.jsonc"))).toBe(false)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "tui.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
   })
 
   test("force replaces version in both server and tui configs", async () => {
@@ -534,8 +534,8 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(false)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "tui.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "tui.jsonc"))).toBe(false)
   })
 
   test("returns false when manifest cannot be read", async () => {
@@ -551,7 +551,7 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(false)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
   })
 
   test("returns false when install fails", async () => {
@@ -565,6 +565,6 @@ describe("plugin.install.task", () => {
 
     const ok = await run(ctx(tmp.path))
     expect(ok).toBe(false)
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
   })
 })

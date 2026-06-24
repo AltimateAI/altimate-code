@@ -171,7 +171,9 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
 
     const upgradeFailure = (method: Method, result?: { code: number; stdout: string; stderr: string }) => {
       if (method === "choco") return "not running from an elevated command shell"
-      if (result) return result.stderr || `Upgrade failed for ${method} (exit code ${result.code}).`
+      // altimate_change start — do not echo package-manager/install-script stderr; it can contain tokens or env
+      if (result) return `Upgrade failed for ${method} (exit code ${result.code}).`
+      // altimate_change end
       return `Upgrade failed for ${method}.`
     }
 

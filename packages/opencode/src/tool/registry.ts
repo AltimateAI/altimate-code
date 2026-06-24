@@ -20,6 +20,9 @@ import { SkillTool } from "./skill"
 import type { Agent } from "../agent/agent"
 import { Tool } from "./tool"
 import { Instance } from "../project/instance"
+// altimate_change start — restore Instance ALS for the Effect Service facade
+import { InstanceRef } from "../effect/instance-ref"
+// altimate_change end
 import { Config } from "../config/config"
 import path from "path"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -34,13 +37,13 @@ import { LspTool } from "./lsp"
 // altimate_change start — bridge legacy plugin tools to the Effect Tool API (v1.17.9)
 import { Effect } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
-import { legacyToInit } from "../altimate/tool-zod-compat"
+import { legacyToInit, isZodType } from "../altimate/tool-zod-compat"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
 // altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
 // ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
 // compile. Delegates to the existing namespace functions; behavior preserved.
-import { Context, Layer } from "effect"
+import { Context, Layer, Option } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change end
 
@@ -160,29 +163,72 @@ export namespace ToolRegistry {
       const namespace = path.basename(match, path.extname(match))
       const mod = await import(pathToFileURL(match).href)
       for (const [id, def] of Object.entries<ToolDefinition>(mod)) {
+        // altimate_change start — only register exports that are actual tool definitions
+        // (object with an `execute` function). A custom tool file may also export helpers
+        // and other named values that must not be registered as tools.
+        if (typeof def !== "object" || def === null || typeof (def as ToolDefinition).execute !== "function") continue
+        // altimate_change end
         custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
       }
     }
 
-    const plugins = await Plugin.list()
-    for (const plugin of plugins) {
-      for (const [id, def] of Object.entries(plugin.tool ?? {})) {
-        custom.push(fromPlugin(id, def))
-      }
-    }
-
+    // altimate_change start — `state` only caches the file-scanned custom tools. Plugin tools
+    // are appended separately (see `pluginTools`) from the Plugin Effect Service so Effect
+    // consumers that swap the Plugin.Service layer are honored, instead of always reading the
+    // process-wide Plugin.list() facade.
     return { custom }
+    // altimate_change end
   })
 
   // altimate_change start — v1.17.9 Tool API: init now returns an Effect of a legacy-shaped
   // def. We build the old plain-object def and bridge it to the new Effect API via
   // legacyToInit; output truncation is handled centrally by Tool.wrap, so we return raw output.
+  // altimate_change start — build a zod object from a tool definition's `args`. Args may be a
+  // ZodRawShape (modern plugin tools) or a legacy JSON-Schema-shaped map (`{ field: { type,
+  // description, ... } }`). A bare JSON-Schema value is not a zod type, so it must be converted
+  // before `z.object`, otherwise `z.toJSONSchema` crashes on `schema._zod`.
+  function jsonSchemaFieldToZod(schema: Record<string, unknown>): z.ZodType {
+    let base: z.ZodType
+    switch (schema.type) {
+      case "number":
+      case "integer":
+        base = z.number()
+        break
+      case "boolean":
+        base = z.boolean()
+        break
+      case "array":
+        base = z.array(z.unknown())
+        break
+      case "object":
+        base = z.object({}).loose()
+        break
+      default:
+        base = z.string()
+    }
+    if (typeof schema.description === "string") base = base.describe(schema.description)
+    return base
+  }
+
+  function argsToZodShape(args: ToolDefinition["args"] | undefined): z.ZodRawShape {
+    if (!args || typeof args !== "object") return {}
+    return Object.fromEntries(
+      Object.entries(args as Record<string, unknown>).map(([key, value]) => [
+        key,
+        isZodType(value) ? (value as z.ZodType) : jsonSchemaFieldToZod(value as Record<string, unknown>),
+      ]),
+    ) as z.ZodRawShape
+  }
+  // altimate_change end
+
   function fromPlugin(id: string, def: ToolDefinition): Tool.Info {
     return {
       id,
       init: () =>
         legacyToInit({
-          parameters: z.object(def.args),
+          // altimate_change start — tolerate JSON-Schema-shaped legacy args (see argsToZodShape)
+          parameters: z.object(argsToZodShape(def.args)),
+          // altimate_change end
           description: def.description,
           execute: async (args, ctx) => {
             const pluginCtx = {
@@ -216,8 +262,26 @@ export namespace ToolRegistry {
     custom.push(tool)
   }
 
-  async function all(): Promise<Tool.Info[]> {
+  // altimate_change start — collect plugin-provided tools. Accepts an explicit plugin list so the
+  // Effect Service can pass the (possibly layer-overridden) Plugin.Service result; imperative
+  // callers fall back to the process-wide Plugin.list() facade.
+  async function pluginTools(plugins?: Awaited<ReturnType<typeof Plugin.list>>): Promise<Tool.Info[]> {
+    const list = plugins ?? (await Plugin.list())
+    const result: Tool.Info[] = []
+    for (const plugin of list) {
+      for (const [id, def] of Object.entries(plugin.tool ?? {})) {
+        result.push(fromPlugin(id, def))
+      }
+    }
+    return result
+  }
+  // altimate_change end
+
+  async function all(plugins?: Awaited<ReturnType<typeof Plugin.list>>): Promise<Tool.Info[]> {
     const custom = await state().then((x) => x.custom)
+    // altimate_change start — append plugin tools (from the Effect Service or the facade)
+    const pluginCustom = await pluginTools(plugins)
+    // altimate_change end
     const config = await Config.get()
     const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
 
@@ -353,17 +417,19 @@ export namespace ToolRegistry {
       Effect.scoped(Effect.all(builtins).pipe(Effect.provide(FetchHttpClient.layer))),
     )
     // altimate_change end
-    return [...resolved, ...custom]
+    // altimate_change end
+    // altimate_change start — include plugin-provided custom tools
+    return [...resolved, ...custom, ...pluginCustom]
     // altimate_change end
   }
 
   /** All tool infos without model/provider filtering. */
-  export async function allInfos(): Promise<Tool.Info[]> {
-    return all()
+  export async function allInfos(plugins?: Awaited<ReturnType<typeof Plugin.list>>): Promise<Tool.Info[]> {
+    return all(plugins)
   }
 
-  export async function ids() {
-    return all().then((x) => x.map((t) => t.id))
+  export async function ids(plugins?: Awaited<ReturnType<typeof Plugin.list>>) {
+    return all(plugins).then((x) => x.map((t) => t.id))
   }
 
   export async function tools(
@@ -372,8 +438,9 @@ export namespace ToolRegistry {
       modelID: ModelID
     },
     agent?: Agent.Info,
+    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
   ) {
-    const tools = await all()
+    const tools = await all(plugins)
     const result = await Promise.all(
       tools
         .filter((t) => {
@@ -428,21 +495,50 @@ export namespace ToolRegistry {
 
   export class Service extends Context.Service<Service, Interface>()("@opencode/ToolRegistry") {}
 
-  export const layer = Layer.succeed(
+  // altimate_change start — the async namespace functions read Instance.directory from
+  // AsyncLocalStorage. Effect consumers provide the instance via InstanceRef (the Effect
+  // reference), not the ALS — e.g. tool-registry tests using store.provide(). Restore the
+  // ALS from InstanceRef before invoking the async fn so `Instance.state` resolves.
+  const bridge = <T>(fn: () => Promise<T>): Effect.Effect<T> =>
+    Effect.gen(function* () {
+      const instance = yield* InstanceRef
+      return yield* Effect.promise(() => (instance ? Instance.restore(instance, fn) : fn()))
+    })
+  // altimate_change end
+
+  export const layer = Layer.effect(
     Service,
-    Service.of({
-      ids: () => Effect.promise(() => ids()),
-      allInfos: () => Effect.promise(() => allInfos()),
-      register: (tool) => Effect.promise(() => register(tool)),
-      tools: (model) =>
-        Effect.promise(() =>
-          tools({ providerID: model.providerID, modelID: model.modelID }, model.agent),
-        ),
+    // altimate_change start — capture the Plugin Effect Service at build time so a swapped
+    // Plugin.Service layer (e.g. tests) is honored. The plugin list resolved here is passed to
+    // the async namespace functions instead of the process-wide Plugin.list() facade.
+    Effect.gen(function* () {
+      const pluginSvc = yield* Effect.serviceOption(Plugin.Service)
+      const resolvePlugins = (): Effect.Effect<Awaited<ReturnType<typeof Plugin.list>> | undefined> =>
+        Option.isSome(pluginSvc) ? pluginSvc.value.list() : Effect.succeed(undefined)
+      const bridgeWithPlugins = <T>(
+        fn: (plugins?: Awaited<ReturnType<typeof Plugin.list>>) => Promise<T>,
+      ): Effect.Effect<T> =>
+        Effect.gen(function* () {
+          const plugins = yield* resolvePlugins()
+          return yield* bridge(() => fn(plugins))
+        })
+      return Service.of({
+        ids: () => bridgeWithPlugins((plugins) => ids(plugins)),
+        allInfos: () => bridgeWithPlugins((plugins) => allInfos(plugins)),
+        register: (tool) => bridge(() => register(tool)),
+        tools: (model) =>
+          bridgeWithPlugins((plugins) =>
+            tools({ providerID: model.providerID, modelID: model.modelID }, model.agent, plugins),
+          ),
+      })
     }),
+    // altimate_change end
   )
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // altimate_change start — declare Plugin.node so swapped Plugin.Service layers reach this layer
+  export const node = LayerNode.make(layer, () => [Plugin.node])
+  // altimate_change end
   // altimate_change end
 }

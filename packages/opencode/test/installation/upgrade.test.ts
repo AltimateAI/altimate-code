@@ -1,15 +1,35 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { readFileSync } from "fs"
 import { join, resolve } from "path"
 import { Glob } from "bun"
+import { Effect, Layer } from "effect"
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import { AppProcess } from "@opencode-ai/core/process"
 import { Installation } from "../../src/installation"
 
 const srcDir = resolve(import.meta.dir, "..", "..", "src")
-const fetch0 = globalThis.fetch
+const coreVersionSrc = resolve(import.meta.dir, "..", "..", "..", "core", "src", "installation", "version.ts")
 
-afterEach(() => {
-  globalThis.fetch = fetch0
-})
+function mockHttpClient(handler: (request: HttpClientRequest.HttpClientRequest) => Response) {
+  const client = HttpClient.make((request) => Effect.succeed(HttpClientResponse.fromWeb(request, handler(request))))
+  return Layer.succeed(HttpClient.HttpClient, client)
+}
+
+function latestWith(body: unknown, method: Installation.Method) {
+  const layer = Installation.layer.pipe(
+    Layer.provide(
+      mockHttpClient(
+        () =>
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    ),
+    Layer.provide(AppProcess.defaultLayer),
+  )
+  return Effect.runPromise(Installation.use.latest(method).pipe(Effect.provide(layer)))
+}
 
 // ---------------------------------------------------------------------------
 // 1. VERSION normalization
@@ -22,8 +42,8 @@ describe("VERSION normalization", () => {
     }
   })
 
-  test("installation/index.ts trims and strips 'v' prefix from OPENCODE_VERSION", () => {
-    const content = readFileSync(join(srcDir, "installation", "index.ts"), "utf-8")
+  test("shared InstallationVersion trims and strips 'v' prefix from OPENCODE_VERSION", () => {
+    const content = readFileSync(coreVersionSrc, "utf-8")
     // Verify the VERSION definition includes .trim().replace(/^v/, "")
     expect(content).toContain('.trim().replace(/^v/, "")')
   })
@@ -34,14 +54,7 @@ describe("VERSION normalization", () => {
 // ---------------------------------------------------------------------------
 describe("upgrade version comparison", () => {
   test("same version from GitHub API matches (no false upgrade)", async () => {
-    // Simulate GitHub API returning v0.4.1 → latest() returns "0.4.1"
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ tag_name: "v0.4.1" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      })) as unknown as typeof fetch
-
-    const latest = await Installation.latest("unknown")
+    const latest = await latestWith({ tag_name: "v0.4.1" }, "unknown")
     // If VERSION were "0.4.1" (normalized), they'd match → upgrade skipped
     expect(latest).toBe("0.4.1")
     // Verify no "v" prefix that would cause mismatch
@@ -49,34 +62,22 @@ describe("upgrade version comparison", () => {
   })
 
   test("same version from npm API matches (no false upgrade)", async () => {
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ version: "0.4.1" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      })) as unknown as typeof fetch
-
-    const latest = await Installation.latest("npm")
+    const latest = await latestWith({ version: "0.4.1" }, "npm")
     expect(latest).toBe("0.4.1")
     expect(latest.startsWith("v")).toBe(false)
   })
 
   test("different version correctly triggers upgrade", async () => {
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ tag_name: "v0.5.0" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      })) as unknown as typeof fetch
-
-    const latest = await Installation.latest("unknown")
+    const latest = await latestWith({ tag_name: "v0.5.0" }, "unknown")
     expect(latest).toBe("0.5.0")
     // "0.4.1" !== "0.5.0" → upgrade proceeds
     expect("0.4.1").not.toBe(latest)
   })
 
   test("auto-upgrade also uses normalized comparison", () => {
-    // The auto-upgrade in cli/upgrade.ts uses the same Installation.VERSION
+    // The auto-upgrade in cli/upgrade.ts uses the same normalized shared InstallationVersion
     const content = readFileSync(join(srcDir, "cli", "upgrade.ts"), "utf-8")
-    expect(content).toContain("Installation.VERSION === latest")
+    expect(content).toContain("InstallationVersion === latest")
   })
 })
 
@@ -87,8 +88,8 @@ describe("user-facing strings use 'altimate' not 'opencode'", () => {
   // Patterns that indicate user-facing strings containing "opencode" where it should be "altimate"
   const userFacingOpencode = /(?:run|Run)\s+[`'"]opencode\s|opencode\s+upgrade|opencode\s+auth/
 
-  test("app.tsx toast uses 'altimate upgrade' not 'opencode upgrade'", () => {
-    const content = readFileSync(join(srcDir, "cli", "cmd", "tui", "app.tsx"), "utf-8")
+  test("upgrade command uses 'altimate upgrade' not 'opencode upgrade'", () => {
+    const content = readFileSync(join(srcDir, "cli", "cmd", "upgrade.ts"), "utf-8")
     expect(content).toContain("altimate upgrade")
     expect(content).not.toMatch(/opencode upgrade/)
   })
@@ -104,14 +105,14 @@ describe("user-facing strings use 'altimate' not 'opencode'", () => {
     expect(content).not.toMatch(/`opencode auth/)
   })
 
-  test("acp/agent.ts uses 'altimate auth' not 'opencode auth'", () => {
-    const content = readFileSync(join(srcDir, "acp", "agent.ts"), "utf-8")
+  test("acp/service.ts uses 'altimate auth' not 'opencode auth'", () => {
+    const content = readFileSync(join(srcDir, "acp", "service.ts"), "utf-8")
     expect(content).not.toMatch(/`opencode auth/)
     expect(content).toContain("`altimate auth")
   })
 
-  test("acp/agent.ts terminal-auth command uses 'altimate' binary", () => {
-    const content = readFileSync(join(srcDir, "acp", "agent.ts"), "utf-8")
+  test("acp/service.ts terminal-auth command uses 'altimate' binary", () => {
+    const content = readFileSync(join(srcDir, "acp", "service.ts"), "utf-8")
     // The terminal-auth capability tells IDEs which command to run for auth
     expect(content).toMatch(/command:\s*"altimate"/)
     expect(content).not.toMatch(/command:\s*"opencode"/)

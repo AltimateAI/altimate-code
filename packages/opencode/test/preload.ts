@@ -83,8 +83,11 @@ delete process.env["OTEL_EXPORTER_OTLP_ENDPOINT"]
 delete process.env["OTEL_EXPORTER_OTLP_HEADERS"]
 delete process.env["OTEL_RESOURCE_ATTRIBUTES"]
 
-// Use in-memory sqlite
-process.env["OPENCODE_DB"] = ":memory:"
+// Use a file-backed sqlite DB so Effect SQL services and legacy compatibility
+// wrappers see the same rows during the v1.17.9 transition.
+const testDb = path.join(dir, "share", "altimate-code", "opencode-local.db")
+await fs.mkdir(path.dirname(testDb), { recursive: true })
+process.env["OPENCODE_DB"] = testDb
 
 // Now safe to import from src/
 const { initProjectors } = await import("../src/server/projectors")

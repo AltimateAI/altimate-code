@@ -15,7 +15,7 @@ function scriptBlock(start: string, end: string) {
 }
 
 function upgradePowershellBlock() {
-  const startIndex = INSTALLATION_TS.indexOf("async function upgradePowershell")
+  const startIndex = INSTALLATION_TS.indexOf("const upgradePowershell = Effect.fnUntraced")
   expect(startIndex).toBeGreaterThanOrEqual(0)
   const endIndex = INSTALLATION_TS.indexOf("// altimate_change end", startIndex)
   expect(endIndex).toBeGreaterThan(startIndex)
@@ -181,24 +181,23 @@ describe("PR #930 installation/index.ts Windows upgrade wiring", () => {
     const upgradeBlock = upgradePowershellBlock()
     expect(INSTALLATION_TS).toContain('const UPGRADE_INSTALL_PS_URL = "https://www.altimate.sh/install.ps1"')
     expect(INSTALLATION_TS).toContain("const UPGRADE_FETCH_TIMEOUT_MS = 15_000")
-    expect(upgradeBlock).toContain('method: "HEAD"')
-    expect(upgradeBlock).toContain("AbortSignal.timeout(UPGRADE_FETCH_TIMEOUT_MS)")
-    expect(upgradeBlock).toContain("if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)")
+    expect(upgradeBlock).toContain("HttpClientRequest.head(UPGRADE_INSTALL_PS_URL)")
+    expect(upgradeBlock).toContain("Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS)")
+    expect(upgradeBlock).toContain("httpOk")
   })
 
   test("passes the target version through env VERSION and avoids npm/node for win32 curl upgrades", () => {
     const upgradeBlock = upgradePowershellBlock()
     expect(upgradeBlock).toContain('["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"')
     expect(upgradeBlock).toContain("VERSION: target")
-    expect(upgradeBlock).toContain("nothrow: true")
     expect(upgradeBlock).not.toMatch(/\bnpm\b|\bnode\b/)
   })
 
   test("includes a manual recovery message that does not leak environment data", () => {
     const upgradeBlock = upgradePowershellBlock()
     const errorMessage = upgradeBlock.slice(
-      upgradeBlock.indexOf("throw new Error("),
-      upgradeBlock.indexOf("return Process.run"),
+      upgradeBlock.indexOf("new UpgradeFailedError({"),
+      upgradeBlock.indexOf("return yield* run"),
     )
     expect(upgradeBlock).toContain("Could not download install script from ${UPGRADE_INSTALL_PS_URL}")
     expect(upgradeBlock).toContain('powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex"')

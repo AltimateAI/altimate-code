@@ -25,17 +25,39 @@ import { WebFetchTool } from "../../src/tool/webfetch"
 import { Parameters as WebSearch } from "../../src/tool/websearch"
 import { Parameters as Write } from "../../src/tool/write"
 
-const GlobDef = await initTool(GlobTool)
+// Some tools (skill, task) read instance-scoped state (available skills/agents) at
+// init time, which only needs the instance ALS (directory/worktree) — not a fully
+// bootstrapped project (that would touch the shared project database). Set a minimal
+// instance context via Instance.restore so skill/agent discovery resolves to an empty
+// isolated tmpdir without DB side effects.
+import { Instance, type InstanceContext } from "../../src/project/instance"
+import { tmpdir } from "../fixture/fixture"
+const tmp = await tmpdir({ git: true })
+const minimalInstance = {
+  directory: tmp.path,
+  worktree: tmp.path,
+  project: { id: "test", worktree: tmp.path } as unknown,
+} as InstanceContext
+const {
+  GlobDef,
+  PlanDef,
+  QuestionDef,
+  SkillDef,
+  TaskDef,
+  WebFetchDef,
+} = await Instance.restore(minimalInstance, async () => ({
+  GlobDef: await initTool(GlobTool),
+  PlanDef: await initTool(PlanExitTool),
+  QuestionDef: await initTool(QuestionTool),
+  SkillDef: await initTool(SkillTool),
+  TaskDef: await initTool(TaskTool),
+  WebFetchDef: await initTool(WebFetchTool),
+}))
 const Glob = GlobDef.parameters
-const PlanDef = await initTool(PlanExitTool)
 const Plan = PlanDef.parameters
-const QuestionDef = await initTool(QuestionTool)
 const Question = QuestionDef.parameters
-const SkillDef = await initTool(SkillTool)
 const Skill = SkillDef.parameters
-const TaskDef = await initTool(TaskTool)
 const Task = TaskDef.parameters
-const WebFetchDef = await initTool(WebFetchTool)
 const WebFetch = WebFetchDef.parameters
 
 const toToolJsonSchema = (tool: unknown) =>

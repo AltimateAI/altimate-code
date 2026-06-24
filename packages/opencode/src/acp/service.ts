@@ -91,17 +91,21 @@ export function make(input: {
   const initialize = Effect.fn("ACP.initialize")(function* (params: InitializeRequest) {
     const started = performance.now()
     const authMethod: AuthMethod = {
-      description: "Run `opencode auth login` in the terminal",
-      name: "Login with opencode",
+      // altimate_change start — user-facing ACP auth branding
+      description: "Run `altimate auth login` in the terminal",
+      name: "Login with altimate",
+      // altimate_change end
       id: AuthMethodID,
     }
 
     if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
       authMethod._meta = {
         "terminal-auth": {
-          command: "opencode",
+          // altimate_change start — user-facing ACP auth branding
+          command: "altimate",
           args: ["auth", "login"],
-          label: "OpenCode Login",
+          label: "Altimate Code Login",
+          // altimate_change end
         },
       }
     }
@@ -127,7 +131,9 @@ export function make(input: {
       },
       authMethods: [authMethod],
       agentInfo: {
-        name: "OpenCode",
+        // altimate_change start — user-facing ACP agent branding
+        name: "Altimate Code",
+        // altimate_change end
         version: InstallationVersion,
       },
     }
@@ -1020,7 +1026,9 @@ function fromUnknownError(error: unknown, service?: string): Error {
   if (isAuthRequired(error)) {
     return new ACPError.AuthRequiredError({ providerId: findProviderID(error) })
   }
-  return new ACPError.ServiceFailureError({ safeMessage: "OpenCode service failure", service })
+  // altimate_change start — user-facing ACP error branding
+  return new ACPError.ServiceFailureError({ safeMessage: "Altimate Code service failure", service })
+  // altimate_change end
 }
 
 function isACPError(error: unknown): error is Error {

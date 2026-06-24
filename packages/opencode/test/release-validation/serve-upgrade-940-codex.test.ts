@@ -153,9 +153,9 @@ describe("PR #940 serve startup upgrade trigger", () => {
   })
 
   test("serve handler schedules the check only after the listener is created and never awaits it", () => {
-    const listenIndex = serveSource.indexOf("const server = await Server.listen(opts)")
+    const listenIndex = serveSource.indexOf("const server = yield* Effect.sync(() => Server.listen(opts))")
     const scheduleIndex = serveSource.indexOf("scheduleStartupUpgradeCheck()")
-    const foreverWaitIndex = serveSource.indexOf("await new Promise(() => {})")
+    const foreverWaitIndex = serveSource.indexOf("yield* Effect.never")
 
     expect(listenIndex).toBeGreaterThan(-1)
     expect(scheduleIndex).toBeGreaterThan(listenIndex)

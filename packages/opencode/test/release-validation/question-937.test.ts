@@ -8,7 +8,7 @@
 // Style/imports follow packages/opencode/test/tool/question.test.ts and
 // packages/opencode/test/tool/bash.test.ts.
 
-import { describe, expect, test, spyOn, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, spyOn, beforeAll, beforeEach, afterEach } from "bun:test"
 import { QuestionTool } from "../../src/tool/question"
 import * as QuestionModule from "../../src/question"
 import { BashTool } from "../../src/tool/bash"
@@ -17,11 +17,12 @@ import { SessionID, MessageID } from "../../src/session/schema"
 // altimate_change start — upstream v1.17.9 made tools Effect definitions (no static .init());
 // resolve the executable tool via the shared initTool fixture.
 import { initTool } from "../altimate/tool-fixture"
+import { prepareReleaseValidationDatabase } from "./db-prepare"
 // altimate_change end
 
 const ctx = {
   sessionID: SessionID.make("ses_test-session"),
-  messageID: MessageID.make("test-message"),
+  messageID: MessageID.make("msg_test-message"),
   callID: "test-call",
   agent: "test-agent",
   abort: AbortSignal.any([]),
@@ -29,6 +30,8 @@ const ctx = {
   metadata: () => {},
   ask: async () => {},
 }
+
+beforeAll(() => prepareReleaseValidationDatabase())
 
 // ---------------------------------------------------------------------------
 // Gap #1 — empty-string ALTIMATE_NON_INTERACTIVE behaves interactive.

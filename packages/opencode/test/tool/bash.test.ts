@@ -10,10 +10,46 @@ import type { PermissionNext } from "../../src/permission/next"
 import { Truncate } from "../../src/tool/truncation"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { initTool } from "../altimate/tool-fixture"
+import { Effect, Layer, ManagedRuntime } from "effect"
+import { Agent } from "../../src/agent/agent"
+import { Truncate as TruncateService } from "../../src/tool/truncate"
+import { InstanceRef } from "../../src/effect/instance-ref"
+
+// The shared tool fixture stubs Truncate with a no-op so most tool tests don't
+// truncate. Truncation tests need the REAL Truncate service, so build the tool
+// through the live Truncate layer here instead of going through initTool. The
+// layer forks a scoped cleanup fiber, so it must live in a ManagedRuntime (a
+// bare Effect.runPromise tears the scope down and interrupts the fiber).
+const truncateToolLayer = Layer.mergeAll(Agent.defaultLayer, TruncateService.defaultLayer)
+const truncateRuntime = ManagedRuntime.make(truncateToolLayer)
+function toEffectValue(value: any): Effect.Effect<void> {
+  if (Effect.isEffect(value)) return value as Effect.Effect<void>
+  if (value && typeof value.then === "function") return Effect.promise(() => value)
+  return Effect.void
+}
+async function initToolWithTruncate(tool: typeof BashTool) {
+  const def = await truncateRuntime.runPromise(
+    tool.pipe(Effect.flatMap((info) => info.init())) as Effect.Effect<any, never, any>,
+  )
+  return {
+    ...def,
+    execute: (args: any, c: any) => {
+      const effectCtx = {
+        ...c,
+        metadata: (input: any) => toEffectValue(c.metadata?.(input)),
+        ask: (input: any) => toEffectValue(c.ask?.(input)),
+      }
+      // Bridge the ambient Instance ALS (set by Instance.provide in the test) into
+      // the Effect InstanceRef so the real Truncate/Agent services resolve.
+      const instance = Instance.current
+      return truncateRuntime.runPromise(def.execute(args, effectCtx).pipe(Effect.provideService(InstanceRef, instance)))
+    },
+  }
+}
 
 const ctx = {
   sessionID: SessionID.make("ses_test"),
-  messageID: MessageID.make(""),
+  messageID: MessageID.make("msg_test"),
   callID: "",
   agent: "build",
   abort: AbortSignal.any([]),
@@ -321,7 +357,7 @@ describe("tool.bash truncation", () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
-        const bash = await initTool(BashTool)
+        const bash = await initToolWithTruncate(BashTool)
         const lineCount = Truncate.MAX_LINES + 500
         const result = await bash.execute(
           {
@@ -341,7 +377,7 @@ describe("tool.bash truncation", () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
-        const bash = await initTool(BashTool)
+        const bash = await initToolWithTruncate(BashTool)
         const byteCount = Truncate.MAX_BYTES + 10000
         const result = await bash.execute(
           {
@@ -380,7 +416,7 @@ describe("tool.bash truncation", () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
-        const bash = await initTool(BashTool)
+        const bash = await initToolWithTruncate(BashTool)
         const lineCount = Truncate.MAX_LINES + 100
         const result = await bash.execute(
           {

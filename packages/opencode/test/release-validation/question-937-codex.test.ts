@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
 import { QuestionTool } from "../../src/tool/question"
 import * as QuestionModule from "../../src/question"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -51,12 +51,11 @@ async function withQuestionAsk<T>(
   implementation: typeof QuestionModule.Question.ask,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const original = QuestionModule.Question.ask
-  ;(QuestionModule.Question as any).ask = implementation
+  const askSpy = spyOn(QuestionModule.Question, "ask").mockImplementation(implementation)
   try {
     return await fn()
   } finally {
-    ;(QuestionModule.Question as any).ask = original
+    askSpy.mockRestore()
   }
 }
 

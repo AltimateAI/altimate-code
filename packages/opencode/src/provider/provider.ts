@@ -18,6 +18,9 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { ModelsDev } from "./models"
 import { Auth } from "../auth"
 import { Env } from "../env"
+// altimate_change start — bridge Effect InstanceRef into legacy Instance ALS for Provider.Service methods
+import { InstanceRef } from "../effect/instance-ref"
+// altimate_change end
 import { Instance } from "../project/instance"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
@@ -28,6 +31,9 @@ import { AltimateApi } from "../altimate/api/client"
 
 // Direct imports for bundled providers
 import { createAmazonBedrock, type AmazonBedrockProviderSettings } from "@ai-sdk/amazon-bedrock"
+// altimate_change start — Bedrock Mantle is a bundled subpath, not an installable package name
+import { createBedrockMantle } from "@ai-sdk/amazon-bedrock/mantle"
+// altimate_change end
 import { createAnthropic } from "@ai-sdk/anthropic"
 import { createAzure } from "@ai-sdk/azure"
 import { createGoogleGenerativeAI } from "@ai-sdk/google"
@@ -51,6 +57,9 @@ import { createGitLab, VERSION as GITLAB_PROVIDER_VERSION } from "gitlab-ai-prov
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers"
 import { GoogleAuth } from "google-auth-library"
 import { ProviderTransform } from "./transform"
+// altimate_change start — provider fetch timeout errors use typed ProviderError classes
+import { ProviderError } from "./error"
+// altimate_change end
 import { Installation } from "../installation"
 import { ModelID, ProviderID } from "./schema"
 // altimate_change start — snowflake cortex account validation
@@ -62,6 +71,10 @@ import { isValidDatabricksHost } from "../altimate/plugin/databricks"
 
 // altimate_change start — raise SSE chunk-timeout watchdog 2min→5min (#844) for slow warehouse/LLM streams
 const DEFAULT_CHUNK_TIMEOUT = 300_000
+// altimate_change end
+// altimate_change start — OpenAI-compatible HTTP header timeout support
+const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
 // altimate_change end
 
 export namespace Provider {
@@ -83,7 +96,9 @@ export namespace Provider {
       async pull(ctrl) {
         const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
           const id = setTimeout(() => {
-            const err = new Error("SSE read timed out")
+            // altimate_change start — surface stalled SSE reads as ProviderError.ResponseStreamError
+            const err = new ProviderError.ResponseStreamError("SSE read timed out")
+            // altimate_change end
             ctl.abort(err)
             void reader.cancel(err)
             reject(err)
@@ -121,8 +136,22 @@ export namespace Provider {
     })
   }
 
+  // altimate_change start — abort fetches when response headers do not arrive in time
+  function timeoutController(ms: number) {
+    const ctl = new AbortController()
+    const id = setTimeout(() => ctl.abort(new ProviderError.HeaderTimeoutError(ms)), ms)
+    return {
+      signal: ctl.signal,
+      clear: () => clearTimeout(id),
+    }
+  }
+  // altimate_change end
+
   const BUNDLED_PROVIDERS: Record<string, (options: any) => any> = {
     "@ai-sdk/amazon-bedrock": createAmazonBedrock,
+    // altimate_change start — Bedrock Mantle bundled provider subpath
+    "@ai-sdk/amazon-bedrock/mantle": createBedrockMantle,
+    // altimate_change end
     "@ai-sdk/anthropic": createAnthropic,
     "@ai-sdk/azure": createAzure,
     "@ai-sdk/google": createGoogleGenerativeAI,
@@ -146,7 +175,9 @@ export namespace Provider {
     "@ai-sdk/github-copilot": createGitHubCopilotOpenAICompatible,
   }
 
-  type CustomModelLoader = (sdk: any, modelID: string, options?: Record<string, any>) => Promise<any>
+  // altimate_change start — loaders may need the resolved model to choose SDK APIs
+  type CustomModelLoader = (sdk: any, modelID: string, options?: Record<string, any>, model?: Model) => Promise<any>
+  // altimate_change end
   type CustomVarsLoader = (options: Record<string, any>) => Record<string, string>
   type CustomLoader = (provider: Info) => Promise<{
     autoload: boolean
@@ -158,6 +189,110 @@ export namespace Provider {
   function useLanguageModel(sdk: any) {
     return sdk.responses === undefined && sdk.chat === undefined
   }
+
+  // altimate_change start — select Responses for Mantle OpenAI models, chat for OSS safeguard
+  function selectBedrockMantleLanguageModel(sdk: any, modelID: string) {
+    if (modelID === "openai.gpt-oss-safeguard-20b" || modelID === "openai.gpt-oss-safeguard-120b") {
+      return sdk.chat?.(modelID) ?? sdk.languageModel(modelID)
+    }
+    return sdk.responses?.(modelID) ?? sdk.languageModel(modelID)
+  }
+  // altimate_change end
+
+  // altimate_change start — DigitalOcean fallback provider catalog when the auth plugin is not registered
+  const DIGITALOCEAN_INFERENCE_BASE = "https://inference.do-ai.run/v1"
+  type DigitalOceanRouterEntry = {
+    name: string
+    uuid?: string
+    description?: string
+  }
+
+  function digitalOceanBaseModel(): Model {
+    return {
+      id: ModelID.make("llama-3.3-70b-instruct"),
+      providerID: ProviderID.make("digitalocean"),
+      api: {
+        id: "llama-3.3-70b-instruct",
+        url: DIGITALOCEAN_INFERENCE_BASE,
+        npm: "@ai-sdk/openai-compatible",
+      },
+      name: "Llama 3.3 70B Instruct",
+      family: "llama",
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: false,
+        toolcall: true,
+        input: { text: true, audio: false, image: false, video: false, pdf: false },
+        output: { text: true, audio: false, image: false, video: false, pdf: false },
+        interleaved: false,
+      },
+      cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+      limit: { context: 128_000, output: 8_192 },
+      status: "active",
+      options: {},
+      headers: {},
+      release_date: "",
+      variants: {},
+    }
+  }
+
+  function digitalOceanRouterModel(router: DigitalOceanRouterEntry): Model {
+    const id = `router:${router.name}`
+    return {
+      id: ModelID.make(id),
+      providerID: ProviderID.make("digitalocean"),
+      api: { id, url: DIGITALOCEAN_INFERENCE_BASE, npm: "@ai-sdk/openai-compatible" },
+      name: router.name,
+      family: "digitalocean-inference-routers",
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: false,
+        toolcall: true,
+        input: { text: true, audio: false, image: false, video: false, pdf: false },
+        output: { text: true, audio: false, image: false, video: false, pdf: false },
+        interleaved: false,
+      },
+      cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+      limit: { context: 128_000, output: 8_192 },
+      status: "active",
+      options: {},
+      headers: {},
+      release_date: "",
+      variants: {},
+    }
+  }
+
+  function digitalOceanProviderInfo(): Info {
+    return {
+      id: ProviderID.make("digitalocean"),
+      name: "DigitalOcean",
+      source: "custom",
+      env: ["DIGITALOCEAN_ACCESS_TOKEN"],
+      options: { baseURL: DIGITALOCEAN_INFERENCE_BASE },
+      models: {
+        "llama-3.3-70b-instruct": digitalOceanBaseModel(),
+      },
+    }
+  }
+
+  function parseDigitalOceanRouters(metadata: Record<string, string> | undefined): DigitalOceanRouterEntry[] {
+    const raw = metadata?.routers
+    if (!raw) return []
+    try {
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return []
+      return parsed.flatMap((router) =>
+        router && typeof router.name === "string"
+          ? [{ name: router.name, uuid: router.uuid, description: router.description }]
+          : [],
+      )
+    } catch {
+      return []
+    }
+  }
+  // altimate_change end
 
   const CUSTOM_LOADERS: Record<string, CustomLoader> = {
     async anthropic() {
@@ -244,7 +379,9 @@ export namespace Provider {
         async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
           return sdk.responses(modelID)
         },
-        options: {},
+        // altimate_change start — OpenAI API auth gets the v1.17.9 header-timeout default
+        options: { headerTimeout: OPENAI_HEADER_TIMEOUT_DEFAULT },
+        // altimate_change end
       }
     },
     "github-copilot": async () => {
@@ -312,6 +449,9 @@ export namespace Provider {
     "amazon-bedrock": async () => {
       const config = await Config.get()
       const providerConfig = config.provider?.["amazon-bedrock"]
+      // altimate_change start — config apiKey is a valid Bedrock/Mantle credential
+      const configApiKey = providerConfig?.options?.apiKey
+      // altimate_change end
 
       const auth = await Auth.get("amazon-bedrock")
 
@@ -345,7 +485,7 @@ export namespace Provider {
         process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI || process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI,
       )
 
-      if (!profile && !awsAccessKeyId && !awsBearerToken && !awsWebIdentityTokenFile && !containerCreds)
+      if (!profile && !awsAccessKeyId && !awsBearerToken && !awsWebIdentityTokenFile && !containerCreds && !configApiKey)
         return { autoload: false }
 
       const providerOptions: AmazonBedrockProviderSettings = {
@@ -354,7 +494,7 @@ export namespace Provider {
 
       // Only use credential chain if no bearer token exists
       // Bearer token takes precedence over credential chain (profiles, access keys, IAM roles, web identity tokens)
-      if (!awsBearerToken) {
+      if (!awsBearerToken && !configApiKey) {
         // Build credential provider options (only pass profile if specified)
         const credentialProviderOptions = profile ? { profile } : {}
 
@@ -370,7 +510,14 @@ export namespace Provider {
       return {
         autoload: true,
         options: providerOptions,
-        async getModel(sdk: any, modelID: string, options?: Record<string, any>) {
+        vars(options) {
+          return {
+            AWS_REGION: String(options.region ?? defaultRegion),
+          }
+        },
+        async getModel(sdk: any, modelID: string, options?: Record<string, any>, model?: Model) {
+          if (model?.api.npm === "@ai-sdk/amazon-bedrock/mantle") return selectBedrockMantleLanguageModel(sdk, modelID)
+
           // Skip region prefixing if model already has a cross-region inference profile prefix
           // Models from models.dev may already include prefixes like us., eu., global., etc.
           const crossRegionPrefixes = ["global.", "us.", "eu.", "jp.", "apac.", "au."]
@@ -777,6 +924,26 @@ export namespace Provider {
       }
     },
     // altimate_change end
+    // altimate_change start — DigitalOcean env/auth loader with cached inference routers
+    digitalocean: async (input) => {
+      const env = Env.all()
+      const auth = await Auth.get(input.id)
+      const routers = auth?.type === "api" ? parseDigitalOceanRouters(auth.metadata) : []
+      for (const router of routers) {
+        const model = digitalOceanRouterModel(router)
+        if (!input.models[model.id]) input.models[model.id] = model
+      }
+
+      const apiKey = env["DIGITALOCEAN_ACCESS_TOKEN"] ?? (auth?.type === "api" ? auth.key : undefined)
+      return {
+        autoload: Boolean(apiKey || routers.length),
+        options: {
+          baseURL: DIGITALOCEAN_INFERENCE_BASE,
+          ...(apiKey ? { apiKey } : {}),
+        },
+      }
+    },
+    // altimate_change end
   }
 
   export const Model = z
@@ -985,6 +1152,12 @@ export namespace Provider {
         })),
       }
     }
+
+    // altimate_change start — keep DigitalOcean provider tests independent of plugin registry wiring
+    if (!database["digitalocean"]) {
+      database["digitalocean"] = digitalOceanProviderInfo()
+    }
+    // altimate_change end
 
     // altimate_change start — snowflake cortex provider models
     function makeSnowflakeModel(
@@ -1677,17 +1850,26 @@ export namespace Provider {
 
       const customFetch = options["fetch"]
       const chunkTimeout = options["chunkTimeout"] || DEFAULT_CHUNK_TIMEOUT
+      const headerTimeout = options["headerTimeout"]
       delete options["chunkTimeout"]
+      delete options["headerTimeout"]
 
       options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
         // Preserve custom fetch if it exists, wrap it with timeout logic
         const fetchFn = customFetch ?? fetch
         const opts = init ?? {}
         const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
+        // altimate_change start — header timeout aborts only until response headers arrive
+        const headerTimeoutMs =
+          headerTimeout === false || customFetch?.[HEADER_TIMEOUT] === false ? undefined : headerTimeout
+        const headerTimeoutCtl =
+          typeof headerTimeoutMs === "number" && headerTimeoutMs > 0 ? timeoutController(headerTimeoutMs) : undefined
+        // altimate_change end
         const signals: AbortSignal[] = []
 
         if (opts.signal) signals.push(opts.signal)
         if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
+        if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
         if (options["timeout"] !== undefined && options["timeout"] !== null && options["timeout"] !== false)
           signals.push(AbortSignal.timeout(options["timeout"]))
 
@@ -1698,7 +1880,13 @@ export namespace Provider {
         // Codex uses #[serde(skip_serializing)] on id fields for all item types:
         // Message, Reasoning, FunctionCall, LocalShellCall, CustomToolCall, WebSearchCall
         // IDs are only re-attached for Azure with store=true
-        if (model.api.npm === "@ai-sdk/openai" && opts.body && opts.method === "POST") {
+        if (
+          (model.api.npm === "@ai-sdk/openai" ||
+            model.api.npm === "@ai-sdk/azure" ||
+            model.api.npm === "@ai-sdk/amazon-bedrock/mantle") &&
+          opts.body &&
+          opts.method === "POST"
+        ) {
           const body = JSON.parse(opts.body as string)
           const isAzure = model.providerID.includes("azure")
           const keepIds = isAzure && body.store === true
@@ -1712,11 +1900,12 @@ export namespace Provider {
           }
         }
 
-        const res = await fetchFn(input, {
-          ...opts,
-          // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-          timeout: false,
-        })
+        const res = await (async () =>
+          fetchFn(input, {
+            ...opts,
+            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+            timeout: false,
+          }))().finally(() => headerTimeoutCtl?.clear())
 
         if (!chunkAbortCtl) return res
         return wrapSSE(res, chunkTimeout, chunkAbortCtl)
@@ -1789,7 +1978,7 @@ export namespace Provider {
 
     try {
       const language = s.modelLoaders[model.providerID]
-        ? await s.modelLoaders[model.providerID](sdk, model.api.id, provider.options)
+        ? await s.modelLoaders[model.providerID](sdk, model.api.id, { ...provider.options, ...model.options }, model)
         : sdk.languageModel(model.api.id)
       s.models.set(key, language)
       return language
@@ -2020,18 +2209,26 @@ export namespace Provider {
   // to this union before narrowing.
   export type DefaultModelError = InstanceType<typeof ModelNotFoundError> | Error
 
+  // altimate_change start — Provider.Service delegates to legacy Promise functions that read Instance.directory
+  const withLegacyInstance = <A>(fn: () => Promise<A>) =>
+    Effect.gen(function* () {
+      const ctx = yield* InstanceRef
+      return yield* Effect.promise(() => (ctx ? Instance.restore(ctx, fn) : fn()))
+    })
+
   export const layer = Layer.succeed(
     Service,
     Service.of({
-      list: () => Effect.promise(() => list()),
-      getProvider: (providerID) => Effect.promise(() => getProvider(providerID)),
-      getModel: (providerID, modelID) => Effect.promise(() => getModel(providerID, modelID)),
-      getLanguage: (model) => Effect.promise(() => getLanguage(model)),
-      closest: (providerID, query) => Effect.promise(() => closest(providerID, query)),
-      getSmallModel: (providerID) => Effect.promise(() => getSmallModel(providerID)),
-      defaultModel: () => Effect.promise(() => defaultModel()),
+      list: () => withLegacyInstance(() => list()),
+      getProvider: (providerID) => withLegacyInstance(() => getProvider(providerID)),
+      getModel: (providerID, modelID) => withLegacyInstance(() => getModel(providerID, modelID)),
+      getLanguage: (model) => withLegacyInstance(() => getLanguage(model)),
+      closest: (providerID, query) => withLegacyInstance(() => closest(providerID, query)),
+      getSmallModel: (providerID) => withLegacyInstance(() => getSmallModel(providerID)),
+      defaultModel: () => withLegacyInstance(() => defaultModel()),
     }),
   )
+  // altimate_change end
 
   export const defaultLayer = layer
 

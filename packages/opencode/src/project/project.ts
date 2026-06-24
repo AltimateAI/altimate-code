@@ -2,8 +2,9 @@ import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import path from "path"
 import { and, Database, eq } from "../storage/db"
-import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { ProjectDirectoryTable, ProjectTable } from "@opencode-ai/core/project/sql"
 import { SessionTable } from "@opencode-ai/core/session/sql"
+import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 // altimate_change start — core SQL tables brand project ids as "Project.ID"; the fork uses
 // the "ProjectID" brand. ProjectV2.ID.make re-brands fork->core for column reads/writes
 // (identity at runtime). ProjectID.make re-brands core->fork.
@@ -11,6 +12,8 @@ import { ProjectV2 } from "@opencode-ai/core/project"
 // core ProjectTable brands worktree/sandboxes columns as AbsolutePath; AbsolutePath.make
 // re-brands plain strings (identity at runtime).
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { Database as EffectDatabase } from "@opencode-ai/core/database/database"
+import { ProjectDirectories } from "@opencode-ai/core/project/directories"
 // altimate_change end
 import { Log } from "../util/log"
 import { Flag } from "@/flag/flag"
@@ -30,6 +33,7 @@ import { ProjectID } from "./schema"
 import { Context, Effect, Layer, Schema } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
 
 export namespace Project {
@@ -114,10 +118,12 @@ export namespace Project {
   type Row = typeof ProjectTable.$inferSelect
 
   export function fromRow(row: Row): Info {
+    // altimate_change start — include icon override when decoding core project rows.
     const icon =
-      row.icon_url || row.icon_color
-        ? { url: row.icon_url ?? undefined, color: row.icon_color ?? undefined }
+      row.icon_url || row.icon_url_override || row.icon_color
+        ? { url: row.icon_url ?? undefined, override: row.icon_url_override ?? undefined, color: row.icon_color ?? undefined }
         : undefined
+    // altimate_change end
     return {
       id: ProjectID.make(row.id),
       worktree: row.worktree,
@@ -548,36 +554,289 @@ export namespace Project {
 
   export class Service extends Context.Service<Service, Interface>()("@opencode/Project") {}
 
-  export const layer: Layer.Layer<Service> = Layer.succeed(
+  // altimate_change start — implement the Effect facade against the core Effect DB.
+  // The old namespace API above still writes through the legacy DB singleton, but Effect
+  // session/workspace projectors enforce FKs in core Database.Service and need the
+  // parent project row in that same database before they project child rows.
+  function toEffectRow(info: Info): typeof ProjectTable.$inferInsert {
+    return {
+      id: ProjectV2.ID.make(info.id),
+      worktree: AbsolutePath.make(info.worktree),
+      vcs: info.vcs ?? null,
+      name: info.name,
+      icon_url: info.icon?.url,
+      icon_url_override: info.icon?.override,
+      icon_color: info.icon?.color,
+      time_created: info.time.created,
+      time_updated: info.time.updated,
+      time_initialized: info.time.initialized,
+      sandboxes: info.sandboxes.map((item) => AbsolutePath.make(item)),
+      commands: info.commands,
+    }
+  }
+
+  export const layer: Layer.Layer<
     Service,
-    Service.of({
-      fromDirectory: (directory) => Effect.promise(() => fromDirectory(directory)),
-      discover: (input) => Effect.promise(() => discover(input)),
-      list: () => Effect.sync(() => list()),
-      get: (id) => Effect.sync(() => get(ProjectID.make(id))),
-      update: (input) =>
-        Effect.tryPromise({
-          try: () => update({ ...input, projectID: ProjectID.make(input.projectID) }),
-          // The only failure the namespace `update` raises is "project not found".
-          catch: () => new NotFoundError({ projectID: ProjectID.make(input.projectID) }),
-        }),
-      initGit: (input) => Effect.promise(() => initGit(input)),
-      setInitialized: (id) => Effect.sync(() => setInitialized(ProjectID.make(id))),
-      sandboxes: (id) => Effect.promise(() => sandboxes(ProjectID.make(id))),
-      addSandbox: (id, directory) => Effect.promise(() => addSandbox(ProjectID.make(id), directory).then(() => undefined)),
-      removeSandbox: (id, directory) =>
-        Effect.promise(() => removeSandbox(ProjectID.make(id), directory).then(() => undefined)),
+    never,
+    EffectDatabase.Service | ProjectV2.Service | ProjectDirectories.Service | RuntimeFlags.Service
+  > = Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const { db } = yield* EffectDatabase.Service
+      const resolver = yield* ProjectV2.Service
+      const directories = yield* ProjectDirectories.Service
+      const flags = yield* RuntimeFlags.Service
+
+      const emitUpdated = (info: Info) =>
+        Effect.sync(() =>
+          GlobalBus.emit("event", {
+            payload: {
+              type: Event.Updated.type,
+              properties: info,
+            },
+          }),
+        )
+
+      const getEffect = Effect.fn("Project.get")(function* (id: AnyProjectID) {
+        const row = yield* db
+          .select()
+          .from(ProjectTable)
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+          .get()
+          .pipe(Effect.orDie)
+        return row ? fromRow(row) : undefined
+      })
+
+      const listEffect = Effect.fn("Project.list")(function* () {
+        const rows = yield* db.select().from(ProjectTable).all().pipe(Effect.orDie)
+        return rows.map((row) => fromRow(row))
+      })
+
+      const updateEffect = Effect.fn("Project.update")(function* (input: UpdateInput) {
+        const row = yield* db
+          .update(ProjectTable)
+          .set({
+            name: input.name,
+            icon_url: input.icon?.url,
+            icon_url_override: input.icon?.override,
+            icon_color: input.icon?.color,
+            commands: input.commands,
+            time_updated: Date.now(),
+          })
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(input.projectID)))
+          .returning()
+          .get()
+          .pipe(Effect.orDie)
+        if (!row) return yield* new NotFoundError({ projectID: ProjectID.make(input.projectID) })
+        const info = fromRow(row)
+        yield* emitUpdated(info)
+        return info
+      })
+
+      const discoverEffect = Effect.fn("Project.discover")(function* (input: Info) {
+        if (input.vcs !== "git") return
+        if (input.icon?.override) return
+        if (input.icon?.url) return
+        const matches = yield* Effect.promise(() =>
+          Glob.scan("**/favicon.{ico,png,svg,jpg,jpeg,webp}", {
+            cwd: input.worktree,
+            absolute: true,
+            include: "file",
+          }),
+        )
+        const shortest = matches.sort((a, b) => a.length - b.length)[0]
+        if (!shortest) return
+        const buffer = yield* Effect.promise(() => Filesystem.readBytes(shortest))
+        const base64 = buffer.toString("base64")
+        const mime = Filesystem.mimeType(shortest) || "image/png"
+        yield* updateEffect({
+          projectID: input.id,
+          icon: {
+            url: `data:${mime};base64,${base64}`,
+          },
+        }).pipe(Effect.ignore)
+      })
+
+      const fromDirectoryEffect = Effect.fn("Project.fromDirectory")(function* (directory: string) {
+        const resolved = yield* resolver.resolve(AbsolutePath.make(path.resolve(directory)))
+        const id = ProjectID.make(resolved.id)
+        const previous = resolved.previous ? ProjectID.make(resolved.previous) : undefined
+        const previousCore = previous ? ProjectV2.ID.make(previous) : undefined
+        const projectCore = ProjectV2.ID.make(id)
+        const activeDirectory = AbsolutePath.make(resolved.directory)
+        const now = Date.now()
+
+        const existingRow =
+          id === ProjectID.global
+            ? undefined
+            : yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, projectCore)).get().pipe(Effect.orDie)
+        const previousRow =
+          previousCore && previous !== id && previous !== ProjectID.global
+            ? yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, previousCore)).get().pipe(Effect.orDie)
+            : undefined
+
+        const existing = existingRow ? fromRow(existingRow) : previousRow ? fromRow(previousRow) : undefined
+        const sandboxes = existing?.sandboxes.filter((item) => existsSync(item)) ?? []
+        const worktree = existing?.worktree ?? activeDirectory
+        if (activeDirectory !== worktree && !sandboxes.includes(activeDirectory)) sandboxes.push(activeDirectory)
+
+        const result: Info = {
+          id,
+          worktree,
+          vcs: resolved.vcs ? "git" : undefined,
+          name: existing?.name,
+          icon: existing?.icon,
+          commands: existing?.commands,
+          time: {
+            created: existing?.time.created ?? now,
+            updated: now,
+            initialized: existing?.time.initialized,
+          },
+          sandboxes,
+        }
+
+        const row = toEffectRow(result)
+        const updateSet = {
+          worktree: row.worktree,
+          vcs: row.vcs,
+          name: row.name,
+          icon_url: row.icon_url,
+          icon_url_override: row.icon_url_override,
+          icon_color: row.icon_color,
+          time_updated: row.time_updated,
+          time_initialized: row.time_initialized,
+          sandboxes: row.sandboxes,
+          commands: row.commands,
+        }
+
+        yield* db
+          .transaction((tx) =>
+            Effect.gen(function* () {
+              yield* tx
+                .insert(ProjectTable)
+                .values(row)
+                .onConflictDoUpdate({ target: ProjectTable.id, set: updateSet })
+                .run()
+              if (previousCore && previous !== id && previous !== ProjectID.global) {
+                yield* tx.update(SessionTable).set({ project_id: projectCore }).where(eq(SessionTable.project_id, previousCore)).run()
+                yield* tx
+                  .update(WorkspaceTable)
+                  .set({ project_id: projectCore })
+                  .where(eq(WorkspaceTable.project_id, previousCore))
+                  .run()
+                yield* tx.delete(ProjectDirectoryTable).where(eq(ProjectDirectoryTable.project_id, previousCore)).run()
+                yield* tx.delete(ProjectTable).where(eq(ProjectTable.id, previousCore)).run()
+              }
+              if (id !== ProjectID.global) {
+                yield* tx
+                  .update(SessionTable)
+                  .set({ project_id: projectCore })
+                  .where(
+                    and(
+                      eq(SessionTable.project_id, ProjectV2.ID.make(ProjectID.global)),
+                      eq(SessionTable.directory, activeDirectory),
+                    ),
+                  )
+                  .run()
+              }
+              yield* tx
+                .insert(ProjectDirectoryTable)
+                .values({ project_id: projectCore, directory: activeDirectory })
+                .onConflictDoNothing()
+                .run()
+            }),
+          )
+          .pipe(Effect.orDie)
+
+        if (resolved.vcs && id !== ProjectID.global) yield* resolver.commit({ store: resolved.vcs.store, id: resolved.id })
+        yield* emitUpdated(result)
+        if (flags.experimentalIconDiscovery) yield* discoverEffect(result)
+        return { project: result, sandbox: activeDirectory }
+      })
+
+      const setInitializedEffect = Effect.fn("Project.setInitialized")(function* (id: AnyProjectID) {
+        yield* db
+          .update(ProjectTable)
+          .set({
+            time_initialized: Date.now(),
+          })
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+          .run()
+          .pipe(Effect.orDie)
+      })
+
+      const sandboxesEffect = Effect.fn("Project.sandboxes")(function* (id: AnyProjectID) {
+        const row = yield* db
+          .select()
+          .from(ProjectTable)
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+          .get()
+          .pipe(Effect.orDie)
+        if (!row) return []
+        return row.sandboxes.filter((item) => Filesystem.stat(item)?.isDirectory())
+      })
+
+      const addSandboxEffect = Effect.fn("Project.addSandbox")(function* (id: AnyProjectID, directory: string) {
+        const info = yield* getEffect(id)
+        if (!info) return
+        const sandboxes = info.sandboxes.includes(directory) ? info.sandboxes : [...info.sandboxes, directory]
+        const row = yield* db
+          .update(ProjectTable)
+          .set({ sandboxes: sandboxes.map((item) => AbsolutePath.make(item)), time_updated: Date.now() })
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+          .returning()
+          .get()
+          .pipe(Effect.orDie)
+        if (row) yield* emitUpdated(fromRow(row))
+      })
+
+      const removeSandboxEffect = Effect.fn("Project.removeSandbox")(function* (id: AnyProjectID, directory: string) {
+        const info = yield* getEffect(id)
+        if (!info) return
+        const row = yield* db
+          .update(ProjectTable)
+          .set({
+            sandboxes: info.sandboxes.filter((item) => item !== directory).map((item) => AbsolutePath.make(item)),
+            time_updated: Date.now(),
+          })
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+          .returning()
+          .get()
+          .pipe(Effect.orDie)
+        if (row) yield* emitUpdated(fromRow(row))
+      })
+
+      return Service.of({
+        fromDirectory: fromDirectoryEffect,
+        discover: discoverEffect,
+        list: listEffect,
+        get: getEffect,
+        update: updateEffect,
+        initGit: (input) => Effect.promise(() => initGit(input)),
+        setInitialized: setInitializedEffect,
+        sandboxes: sandboxesEffect,
+        addSandbox: addSandboxEffect,
+        removeSandbox: removeSandboxEffect,
+      })
     }),
   )
 
-  export const defaultLayer = layer
+  export const defaultLayer = Layer.suspend(() =>
+    layer.pipe(
+      Layer.provide(EffectDatabase.defaultLayer),
+      Layer.provide(ProjectV2.defaultLayer),
+      Layer.provide(ProjectDirectories.defaultLayer),
+      Layer.provide(RuntimeFlags.defaultLayer),
+    ),
+  )
+  // altimate_change end
 
   // altimate_change start — `use` accessor mirrors Session.use so tests/consumers can call
   // Project.use.get(...) etc. without the explicit Service.use((p) => p.get(...)) wrapper.
   export const use = serviceUse(Service)
   // altimate_change end
 
-  export const node = LayerNode.make(layer, [])
+  export const node = LayerNode.make(layer, [EffectDatabase.node, ProjectV2.node, ProjectDirectories.node, RuntimeFlags.node])
   // altimate_change end
 }
 

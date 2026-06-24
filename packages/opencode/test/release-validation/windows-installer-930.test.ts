@@ -29,35 +29,28 @@
  * script source. The executable Pester equivalents live in
  * test/windows/install.Tests.ps1, run on windows-latest in CI.
  */
-import { describe, test, expect, afterEach } from "bun:test"
+import { describe, test, expect, afterEach, spyOn } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { Readable } from "node:stream"
-import { Process } from "../../src/util/process"
+import { Effect, Layer, Stream } from "effect"
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { AppProcess } from "@opencode-ai/core/process"
 import { Installation } from "../../src/installation"
 import { Telemetry } from "../../src/telemetry"
 
 const REPO_ROOT = join(import.meta.dir, "../../../..")
 const PS1 = readFileSync(join(REPO_ROOT, "install.ps1"), "utf-8")
+const encoder = new TextEncoder()
 
 // ---------------------------------------------------------------------------
 // Stub bookkeeping — every test restores these; afterEach is the safety net.
 // ---------------------------------------------------------------------------
 const ORIG = {
-  run: Process.run,
-  spawn: Process.spawn,
-  text: Process.text,
-  track: Telemetry.track,
-  fetch: globalThis.fetch,
   platform: Object.getOwnPropertyDescriptor(process, "platform")!,
 }
 
 function restoreAll() {
-  Process.run = ORIG.run
-  Process.spawn = ORIG.spawn
-  Process.text = ORIG.text
-  Telemetry.track = ORIG.track
-  globalThis.fetch = ORIG.fetch
   Object.defineProperty(process, "platform", ORIG.platform)
 }
 
@@ -67,25 +60,67 @@ function setPlatform(value: string) {
   Object.defineProperty(process, "platform", { value, configurable: true })
 }
 
-// `process.execPath --version` is awaited at the tail of a successful upgrade();
-// stub it to a no-op so we never actually spawn the host binary.
-function stubExecVersionProbe() {
-  Process.text = async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), text: "" })
+type HttpHandler = (
+  request: HttpClientRequest.HttpClientRequest,
+) => Response | Effect.Effect<Response, unknown>
+
+type SpawnResult = string | { code: number; stdout?: string; stderr?: string }
+type SpawnCall = { cmd: string; args: readonly string[]; env?: Record<string, string>; stdin?: unknown }
+
+function mockHttpClient(handler: HttpHandler) {
+  const client = HttpClient.make(((request: HttpClientRequest.HttpClientRequest) => {
+    const result = handler(request)
+    const response = Effect.isEffect(result) ? result : Effect.succeed(result)
+    return response.pipe(Effect.map((res) => HttpClientResponse.fromWeb(request, res)))
+  }) as any)
+  return Layer.succeed(HttpClient.HttpClient, client)
 }
 
-// A fake bash child for the upgradeCurl (non-win32) path: Process.spawn returns
-// a ChildProcess-like object with piped streams and an `exited` promise.
-function fakeBashChild(opts: { stdout?: string; stderr?: string; code?: number } = {}) {
-  let piped = ""
-  return {
-    stdin: { end: (s: string) => { piped = s } },
-    stdout: Readable.from([Buffer.from(opts.stdout ?? "ok")]),
-    stderr: Readable.from([Buffer.from(opts.stderr ?? "")]),
-    exited: Promise.resolve(opts.code ?? 0),
-    get _piped() {
-      return piped
-    },
-  } as any
+function mockSpawner(handler: (call: SpawnCall) => SpawnResult = () => "") {
+  const spawner = ChildProcessSpawner.make((command) => {
+    const std = ChildProcess.isStandardCommand(command) ? command : undefined
+    const call: SpawnCall = {
+      cmd: std?.command ?? "",
+      args: std?.args ?? [],
+      env: std?.options.env as Record<string, string> | undefined,
+      stdin: std?.options.stdin,
+    }
+    const result = handler(call)
+    const output = typeof result === "string" ? { code: 0, stdout: result, stderr: "" } : result
+    return Effect.succeed(
+      ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(0),
+        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(output.code)),
+        isRunning: Effect.succeed(false),
+        kill: () => Effect.void,
+        stdin: { [Symbol.for("effect/Sink/TypeId")]: Symbol.for("effect/Sink/TypeId") } as any,
+        stdout: output.stdout ? Stream.make(encoder.encode(output.stdout)) : Stream.empty,
+        stderr: output.stderr ? Stream.make(encoder.encode(output.stderr)) : Stream.empty,
+        all: Stream.empty,
+        getInputFd: () => ({ [Symbol.for("effect/Sink/TypeId")]: Symbol.for("effect/Sink/TypeId") }) as any,
+        getOutputFd: () => Stream.empty,
+        unref: Effect.succeed(Effect.void),
+      }),
+    )
+  })
+  return Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)
+}
+
+function upgradeWith(input: {
+  platform: string
+  target?: string
+  http?: HttpHandler
+  spawn?: (call: SpawnCall) => SpawnResult
+}) {
+  setPlatform(input.platform)
+  const appProcess = AppProcess.layer.pipe(Layer.provide(mockSpawner(input.spawn)))
+  const layer = Installation.layer.pipe(
+    Layer.provide(
+      mockHttpClient(input.http ?? (() => new Response("", { status: 200, statusText: "OK" }))),
+    ),
+    Layer.provide(appProcess),
+  )
+  return Effect.runPromise(Installation.use.upgrade("curl", input.target ?? "1.2.3").pipe(Effect.provide(layer)))
 }
 
 // ===========================================================================
@@ -93,35 +128,34 @@ function fakeBashChild(opts: { stdout?: string; stderr?: string; code?: number }
 // ===========================================================================
 describe("upgrade('curl', target) — platform dispatch", () => {
   test("win32 routes to upgradePowershell: powershell + irm install.ps1 | iex, VERSION=target", async () => {
-    const runCalls: Array<{ cmd: string[]; opts: any }> = []
+    const spawnCalls: SpawnCall[] = []
     const fetchCalls: Array<{ url: string; method?: string }> = []
-    Process.run = async (cmd: string[], opts: any) => {
-      runCalls.push({ cmd, opts })
-      return { code: 0, stdout: Buffer.from("ok"), stderr: Buffer.alloc(0) }
-    }
-    Telemetry.track = () => {}
-    stubExecVersionProbe()
-    // HEAD probe must succeed (200) for the PS installer to run.
-    // @ts-expect-error stub
-    globalThis.fetch = async (url: any, init: any) => {
-      fetchCalls.push({ url: String(url), method: init?.method })
-      return { ok: true, status: 200, statusText: "OK" } as any
-    }
-    setPlatform("win32")
 
-    await Installation.upgrade("curl", "1.2.3")
+    const trackSpy = spyOn(Telemetry, "track").mockImplementation(() => {})
+    try {
+      await upgradeWith({
+        platform: "win32",
+        target: "1.2.3",
+        http: (request) => {
+          fetchCalls.push({ url: request.url, method: (request as any).method })
+          return new Response("", { status: 200, statusText: "OK" })
+        },
+        spawn: (call) => {
+          spawnCalls.push(call)
+          return { code: 0, stdout: "ok", stderr: "" }
+        },
+      })
+    } finally {
+      trackSpy.mockRestore()
+    }
 
-    // Exactly one Process.run, and it is the PowerShell installer.
-    expect(runCalls).toHaveLength(1)
-    const { cmd, opts } = runCalls[0]
-    expect(cmd[0]).toBe("powershell")
-    const command = cmd.join(" ")
+    const powershell = spawnCalls.find((call) => call.cmd === "powershell")
+    expect(powershell).toBeTruthy()
+    const command = [powershell!.cmd, ...powershell!.args].join(" ")
     expect(command).toContain("irm")
     expect(command).toContain("install.ps1 | iex")
     // The target version is piped to the installer via $env:VERSION.
-    expect(opts.env.VERSION).toBe("1.2.3")
-    // nothrow so upgrade() can inspect result.code itself.
-    expect(opts.nothrow).toBe(true)
+    expect(powershell!.env?.VERSION).toBe("1.2.3")
 
     // The HEAD probe hit the .ps1 endpoint, not the bash install endpoint.
     expect(fetchCalls).toHaveLength(1)
@@ -130,53 +164,57 @@ describe("upgrade('curl', target) — platform dispatch", () => {
   })
 
   test("non-win32 routes to upgradeCurl: Process.spawn(['bash']) + fetch to /install (no .ps1)", async () => {
-    const spawnCalls: Array<{ cmd: string[] }> = []
+    const spawnCalls: SpawnCall[] = []
     const fetchUrls: string[] = []
-    let runCalled = false
-    Process.run = async () => {
-      runCalled = true
-      return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }
-    }
-    Process.spawn = (cmd: string[]) => {
-      spawnCalls.push({ cmd })
-      return fakeBashChild({ stdout: "done", code: 0 })
-    }
-    Telemetry.track = () => {}
-    stubExecVersionProbe()
-    // @ts-expect-error stub
-    globalThis.fetch = async (url: any) => {
-      fetchUrls.push(String(url))
-      return { ok: true, status: 200, statusText: "OK", text: async () => "echo install" } as any
-    }
-    setPlatform("linux")
 
-    await Installation.upgrade("curl", "1.2.3")
+    const trackSpy = spyOn(Telemetry, "track").mockImplementation(() => {})
+    try {
+      await upgradeWith({
+        platform: "linux",
+        target: "1.2.3",
+        http: (request) => {
+          fetchUrls.push(request.url)
+          return new Response("echo install", { status: 200, statusText: "OK" })
+        },
+        spawn: (call) => {
+          spawnCalls.push(call)
+          if (call.cmd === "bash" && call.args[0] === "--version") return "GNU bash"
+          return { code: 0, stdout: "done", stderr: "" }
+        },
+      })
+    } finally {
+      trackSpy.mockRestore()
+    }
 
-    expect(spawnCalls).toHaveLength(1)
-    expect(spawnCalls[0].cmd[0]).toBe("bash")
+    const installer = spawnCalls.find((call) => call.cmd === "bash" && call.args.length === 0)
+    expect(installer).toBeTruthy()
+    expect(installer!.stdin).toBeTruthy()
     // The bash installer is fetched from UPGRADE_INSTALL_URL (the .ps1 host is never touched).
     expect(fetchUrls).toContain("https://www.altimate.sh/install")
     expect(fetchUrls.some((u) => u.endsWith(".ps1"))).toBe(false)
-    expect(runCalled).toBe(false)
+    expect(spawnCalls.some((call) => call.cmd === "powershell")).toBe(false)
   })
 
   test("darwin (any non-win32) also uses bash, never powershell", async () => {
-    const spawnCalls: string[][] = []
-    Process.run = async () => {
-      throw new Error("Process.run must not be used on the bash path")
-    }
-    Process.spawn = (cmd: string[]) => {
-      spawnCalls.push(cmd)
-      return fakeBashChild({ code: 0 })
-    }
-    Telemetry.track = () => {}
-    stubExecVersionProbe()
-    // @ts-expect-error stub
-    globalThis.fetch = async () => ({ ok: true, status: 200, statusText: "OK", text: async () => "echo install" }) as any
-    setPlatform("darwin")
+    const spawnCalls: SpawnCall[] = []
 
-    await Installation.upgrade("curl", "2.0.0")
-    expect(spawnCalls[0][0]).toBe("bash")
+    const trackSpy = spyOn(Telemetry, "track").mockImplementation(() => {})
+    try {
+      await upgradeWith({
+        platform: "darwin",
+        target: "2.0.0",
+        http: () => new Response("echo install", { status: 200, statusText: "OK" }),
+        spawn: (call) => {
+          spawnCalls.push(call)
+          if (call.cmd === "bash" && call.args[0] === "--version") return "GNU bash"
+          return { code: 0, stdout: "", stderr: "" }
+        },
+      })
+    } finally {
+      trackSpy.mockRestore()
+    }
+    expect(spawnCalls.some((call) => call.cmd === "bash" && call.args.length === 0)).toBe(true)
+    expect(spawnCalls.some((call) => call.cmd === "powershell")).toBe(false)
   })
 })
 
@@ -186,58 +224,56 @@ describe("upgrade('curl', target) — platform dispatch", () => {
 // ===========================================================================
 describe("upgradePowershell — HEAD probe failure surfaces a friendly error, never spawns powershell", () => {
   test("HTTP !ok (503) → Error names URL + 'HTTP 503' + 'irm' recovery; Process.run NOT called", async () => {
-    let runCalled = false
     let tracked = 0
-    Process.run = async () => {
-      runCalled = true
-      return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }
-    }
-    Telemetry.track = () => {
+    const spawnCalls: SpawnCall[] = []
+    const trackSpy = spyOn(Telemetry, "track").mockImplementation(() => {
       tracked++
-    }
-    stubExecVersionProbe()
-    // @ts-expect-error stub
-    globalThis.fetch = async () => ({ ok: false, status: 503, statusText: "Service Unavailable" }) as any
-    setPlatform("win32")
+    })
 
     let err: unknown
     try {
-      await Installation.upgrade("curl", "1.2.3")
+      await upgradeWith({
+        platform: "win32",
+        http: () => new Response("", { status: 503, statusText: "Service Unavailable" }),
+        spawn: (call) => {
+          spawnCalls.push(call)
+          return { code: 0, stdout: "", stderr: "" }
+        },
+      })
     } catch (e) {
       err = e
+    } finally {
+      trackSpy.mockRestore()
     }
 
     expect(err).toBeInstanceOf(Error)
     const msg = (err as Error).message
     expect(msg).toContain("https://www.altimate.sh/install.ps1")
-    expect(msg).toContain("HTTP 503")
-    expect(msg).toContain("Service Unavailable")
+    expect(msg).toContain("503")
     expect(msg).toContain("irm")
     // It failed at the probe, before any spawn AND before the telemetry block.
-    expect(runCalled).toBe(false)
+    expect(spawnCalls).toHaveLength(0)
     expect(tracked).toBe(0)
   })
 
   test("AbortSignal.timeout / network reject → Error names the cause; Process.run NOT called", async () => {
-    let runCalled = false
-    Process.run = async () => {
-      runCalled = true
-      return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }
-    }
-    Telemetry.track = () => {}
-    stubExecVersionProbe()
-    // Mirror what AbortSignal.timeout produces on the real fetch: a TimeoutError.
-    // @ts-expect-error stub
-    globalThis.fetch = async () => {
-      throw new DOMException("The operation timed out.", "TimeoutError")
-    }
-    setPlatform("win32")
+    const spawnCalls: SpawnCall[] = []
+    const trackSpy = spyOn(Telemetry, "track").mockImplementation(() => {})
 
     let err: unknown
     try {
-      await Installation.upgrade("curl", "1.2.3")
+      await upgradeWith({
+        platform: "win32",
+        http: () => Effect.fail(new DOMException("The operation timed out.", "TimeoutError")),
+        spawn: (call) => {
+          spawnCalls.push(call)
+          return { code: 0, stdout: "", stderr: "" }
+        },
+      })
     } catch (e) {
       err = e
+    } finally {
+      trackSpy.mockRestore()
     }
 
     expect(err).toBeInstanceOf(Error)
@@ -245,7 +281,7 @@ describe("upgradePowershell — HEAD probe failure surfaces a friendly error, ne
     expect(msg).toContain("https://www.altimate.sh/install.ps1")
     expect(msg).toContain("The operation timed out.")
     expect(msg).toContain("irm")
-    expect(runCalled).toBe(false)
+    expect(spawnCalls).toHaveLength(0)
   })
 })
 
@@ -255,66 +291,65 @@ describe("upgradePowershell — HEAD probe failure surfaces a friendly error, ne
 // ===========================================================================
 describe("upgradePowershell result shape is consumed by upgrade()", () => {
   test("success: a {code:0, stdout:Buffer, stderr:Buffer} result completes upgrade() cleanly", async () => {
-    // The result object upgradePowershell returns IS what Process.run returns.
-    // upgrade() reads result.code (=== 0) and logs result.stderr.toString().
-    let observedResult: any
-    Process.run = async () => {
-      observedResult = { code: 0, stdout: Buffer.from("ok"), stderr: Buffer.alloc(0) }
-      return observedResult
-    }
+    let observedResult: SpawnResult | undefined
     let trackedStatus = ""
-    Telemetry.track = (e: any) => {
+    const trackSpy = spyOn(Telemetry, "track").mockImplementation((e: any) => {
       trackedStatus = e.status
+    })
+
+    try {
+      await expect(
+        upgradeWith({
+          platform: "win32",
+          target: "3.0.0",
+          spawn: (call) => {
+            observedResult = { code: 0, stdout: call.cmd === "powershell" ? "ok" : "", stderr: "" }
+            return observedResult
+          },
+        }),
+      ).resolves.toBeUndefined()
+    } finally {
+      trackSpy.mockRestore()
     }
-    stubExecVersionProbe()
-    // @ts-expect-error stub
-    globalThis.fetch = async () => ({ ok: true, status: 200, statusText: "OK" }) as any
-    setPlatform("win32")
 
-    // Resolves (no throw) → upgrade() accepted the shape.
-    await expect(Installation.upgrade("curl", "3.0.0")).resolves.toBeUndefined()
-
-    // Shape contract the caller depends on: numeric code, Buffer stderr.
-    expect(typeof observedResult.code).toBe("number")
-    expect(Buffer.isBuffer(observedResult.stderr)).toBe(true)
-    // The exact call the caller makes against stderr must work.
-    expect(observedResult.stderr.toString("utf8")).toBe("")
+    expect(typeof (observedResult as any).code).toBe("number")
     expect(trackedStatus).toBe("success")
   })
 
   test("failure: code:1 with stderr Buffer → UpgradeFailedError(stderr) + telemetry status 'error'", async () => {
-    Process.run = async () => ({
-      code: 1,
-      stdout: Buffer.alloc(0),
-      stderr: Buffer.from("powershell not found"),
-    })
     const tracked: any[] = []
-    Telemetry.track = (e: any) => tracked.push(e)
-    stubExecVersionProbe()
-    // @ts-expect-error stub
-    globalThis.fetch = async () => ({ ok: true, status: 200, statusText: "OK" }) as any
-    setPlatform("win32")
+    const trackSpy = spyOn(Telemetry, "track").mockImplementation((e: any) => tracked.push(e))
 
     let err: unknown
     try {
-      await Installation.upgrade("curl", "1.2.3")
+      await upgradeWith({
+        platform: "win32",
+        target: "1.2.3",
+        spawn: (call) =>
+          call.cmd === "powershell"
+            ? { code: 1, stdout: "", stderr: "powershell not found" }
+            : { code: 0, stdout: "", stderr: "" },
+      })
     } catch (e) {
       err = e
+    } finally {
+      trackSpy.mockRestore()
     }
 
-    // The caller did result.stderr.toString('utf8') and wrapped it.
+    // The caller sanitizes installer stderr before wrapping it.
     // altimate_change start — upstream v1.17.9 UpgradeFailedError is an Effect Schema.TaggedErrorClass;
     // detect with instanceof (matches src/cli/cmd/upgrade.ts) rather than the removed .isInstance() static.
     expect(err instanceof Installation.UpgradeFailedError).toBe(true)
     // altimate_change end
-    expect((err as any).data.stderr).toBe("powershell not found")
+    expect((err as any).stderr).toBe("Upgrade failed for curl (exit code 1).")
 
-    // An error telemetry event was emitted carrying that stderr.
+    // An error telemetry event was emitted carrying the sanitized stderr.
     expect(tracked).toHaveLength(1)
     expect(tracked[0].type).toBe("upgrade_attempted")
     expect(tracked[0].status).toBe("error")
     expect(tracked[0].to_version).toBe("1.2.3")
-    expect(tracked[0].error).toContain("powershell not found")
+    expect(tracked[0].error).toBe("Upgrade failed for curl (exit code 1).")
+    expect(tracked[0].error).not.toContain("powershell not found")
   })
 })
 

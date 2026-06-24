@@ -386,6 +386,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         ),
       )) as unknown as SessionV1.WithParts
     })
+    // altimate_change end
 
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {
       params: { sessionID: SessionID }

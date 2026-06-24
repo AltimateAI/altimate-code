@@ -9,7 +9,7 @@
 // provide lambda defaultDeps uses (Instance.provide + InstanceBootstrap) and
 // injects a run that calls the real Bus.publish — proving the wrapping gives
 // Bus.publish a valid Instance context rather than throwing Context.NotFound.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { Log } from "../../src/util/log"
 import {
   runStartupUpgradeCheck,
@@ -21,6 +21,7 @@ import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { tmpdir } from "../fixture/fixture"
+import { prepareReleaseValidationDatabase } from "./db-prepare"
 // altimate_change start — upstream v1.17.9 migrated Installation.Event.UpdateAvailable to a core
 // EventV2.define (Effect Schema), which is no longer a fork BusEvent.Definition, and notify() now
 // emits via GlobalBus.emit rather than Bus.publish. This sub-block validates the provide-wrap (that
@@ -38,6 +39,8 @@ const UpdateAvailableProbe = BusEvent.define(
 Log.init({ print: false })
 
 describe("PR #940 serve-upgrade-check behavior", () => {
+  beforeAll(() => prepareReleaseValidationDatabase())
+
   // ---------------------------------------------------------------------------
   // Finding #1: defaultDeps actually establishes a working Bus.publish context.
   //

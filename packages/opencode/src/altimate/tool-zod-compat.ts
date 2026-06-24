@@ -10,10 +10,12 @@
 // plugin tools in tool/registry.ts `fromPlugin` (Schema.declare + z.toJSONSchema +
 // EffectBridge to bridge the Effect-based `ask`/`metadata` back to Promises). Tool
 // logic stays byte-for-byte identical.
-import { Effect, Schema } from "effect"
+import { Effect, Schema, SchemaGetter } from "effect"
 import z from "zod"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { EffectBridge } from "@/effect/bridge"
+import { InstanceRef } from "@/effect/instance-ref"
+import { Instance, type InstanceContext } from "@/project/instance"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { Agent } from "@/agent/agent"
@@ -145,29 +147,67 @@ export function zodToJsonSchema(schema: z.ZodType): JSONSchema7 {
 function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
   return {
     description: legacy.description,
-    parameters: Schema.declare<unknown>((u): u is unknown => legacy.parameters.safeParse(u).success),
+    // altimate_change start — decode THROUGH zod's `parse` so defaults, coercions and transforms
+    // are applied to the value `execute` receives (and that callers see via decode). A plain
+    // Schema.declare only validates and passes the raw input through, silently dropping zod
+    // `.default()`/`.transform()`. Validation failures still surface as Effect SchemaIssues whose
+    // `actual` carries the original input (used by formatValidationError above).
+    parameters: Schema.declare<unknown>((u): u is unknown => legacy.parameters.safeParse(u).success).pipe(
+      Schema.decodeTo(Schema.Unknown, {
+        decode: SchemaGetter.transform((u: unknown) => legacy.parameters.parse(u)),
+        encode: SchemaGetter.transform((u: unknown) => u),
+      }),
+    ),
+    // altimate_change end
     jsonSchema: zodToJsonSchema(legacy.parameters),
     ...(legacy.formatValidationError
-      ? { formatValidationError: (error: unknown) => legacy.formatValidationError!(error as z.ZodError) }
+      ? {
+          // altimate_change start — the new Tool API decodes via Schema.declare, so the
+          // error reaching us is an Effect SchemaIssue (no zod `.issues`/`.path`), not a
+          // z.ZodError. Recover the original input from the issue's `actual` field and
+          // re-run the zod schema to produce the real z.ZodError the legacy formatter
+          // expects; fall back to a stringified error if recovery is impossible.
+          formatValidationError: (error: unknown) => {
+            const actual = (error as { actual?: unknown })?.actual
+            if (actual !== undefined) {
+              const parsed = legacy.parameters.safeParse(actual)
+              if (!parsed.success) return legacy.formatValidationError!(parsed.error)
+            }
+            return legacy.formatValidationError!(error as z.ZodError)
+          },
+          // altimate_change end
+        }
       : {}),
     execute: (args: unknown, ctx: NewContext) =>
-      Effect.gen(function* () {
-        const bridge = yield* EffectBridge.make()
-        const legacyCtx: LegacyContext = {
-          sessionID: ctx.sessionID,
-          messageID: ctx.messageID,
-          agent: ctx.agent,
-          abort: ctx.abort,
-          callID: ctx.callID,
-          extra: ctx.extra as { [key: string]: any } | undefined,
-          messages: ctx.messages,
-          metadata: (input) => {
-            void bridge.promise(ctx.metadata(input))
-          },
-          ask: (input) => bridge.promise(ctx.ask(input)),
-        }
-        return yield* Effect.promise(() => legacy.execute(args as never, legacyCtx))
-      }),
+      // altimate_change start — bridge the ambient Instance ALS into the Effect InstanceRef so
+      // legacy tools whose execute calls async facades (Skill.get, Agent.list, …) — which resolve
+      // instance state via makeRuntime → attach() reading the CURRENT fiber's InstanceRef —
+      // succeed even when only the ALS is set (e.g. tests that wrap the call in Instance.restore).
+      withAlsInstanceRef(
+        Effect.gen(function* () {
+          const bridge = yield* EffectBridge.make()
+          // Also restore the ALS for tools that read Instance.directory/worktree synchronously
+          // (AsyncLocalStorage-backed) when only InstanceRef (the Effect reference) is provided.
+          const instance = yield* InstanceRef
+          const legacyCtx: LegacyContext = {
+            sessionID: ctx.sessionID,
+            messageID: ctx.messageID,
+            agent: ctx.agent,
+            abort: ctx.abort,
+            callID: ctx.callID,
+            extra: ctx.extra as { [key: string]: any } | undefined,
+            messages: ctx.messages,
+            metadata: (input) => {
+              void bridge.promise(ctx.metadata(input))
+            },
+            ask: (input) => bridge.promise(ctx.ask(input)),
+          }
+          return yield* Effect.promise(() =>
+            instance ? Instance.restore(instance, () => legacy.execute(args as never, legacyCtx)) : legacy.execute(args as never, legacyCtx),
+          )
+        }),
+      ),
+    // altimate_change end
   }
 }
 
@@ -180,6 +220,25 @@ export function legacyToInit(legacy: LegacyToolDef): Effect.Effect<DefWithoutID>
   return Effect.sync(() => legacyDefToDef(legacy))
 }
 
+// altimate_change start — bridge the ambient Instance ALS into the Effect InstanceRef while a
+// legacy init factory runs. Legacy factories (skill/task) call async facades (Skill.available,
+// Agent.list) that resolve instance state through makeRuntime → attach(), which prefers the
+// CURRENT fiber's InstanceRef and only falls back to the ALS when no fiber is active. Because the
+// factory runs inside this init Effect's fiber, attach would read an unset InstanceRef and fail
+// ("InstanceRef not provided"). Provide the ALS instance as InstanceRef so attach finds it.
+function withAlsInstanceRef<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
+  return Effect.suspend(() => {
+    let instance: InstanceContext | undefined
+    try {
+      instance = Instance.current
+    } catch {
+      instance = undefined
+    }
+    return instance ? effect.pipe(Effect.provideService(InstanceRef, instance)) : effect
+  })
+}
+// altimate_change end
+
 /**
  * Convert an old-style deferred tool factory into a new init Effect. The factory
  * runs once per init; the new Tool API does not thread the calling agent into
@@ -188,6 +247,9 @@ export function legacyToInit(legacy: LegacyToolDef): Effect.Effect<DefWithoutID>
  * permission checks still enforce access.
  */
 export function legacyInitFnToInit(fn: LegacyInitFn): Effect.Effect<DefWithoutID> {
-  return Effect.promise(() => fn({})).pipe(Effect.map(legacyDefToDef))
+  // altimate_change start — see withAlsInstanceRef: keep the instance context available to the
+  // factory's async facade calls (Skill.available/Agent.list) which resolve via makeRuntime.
+  return withAlsInstanceRef(Effect.promise(() => fn({}))).pipe(Effect.map(legacyDefToDef))
+  // altimate_change end
 }
 // altimate_change end

@@ -40,6 +40,15 @@ export const GlobTool = Tool.define("glob", {
     search = path.isAbsolute(search) ? search : path.resolve(Instance.directory, search)
     await assertExternalDirectoryLegacy(ctx, search, { kind: "directory" })
 
+    // altimate_change start — reject non-directory paths with a clear error so a
+    // file path doesn't surface as a confusing "No such file or directory" from
+    // ripgrep treating the file as a cwd.
+    const searchStats = Filesystem.stat(search)
+    if (searchStats && !searchStats.isDirectory()) {
+      throw new Error(`glob path must be a directory, got a file: "${search}"`)
+    }
+    // altimate_change end
+
     // altimate_change start — block home/root directory to prevent scanning entire filesystem
     const homeDir = os.homedir()
     if (search === "/" || search === homeDir) {

@@ -82,7 +82,8 @@ describe("plugin.install.concurrent", () => {
     expect(out.map((x) => x.code)).toEqual(Array.from({ length: all.length }, () => 0))
     expect(out.map((x) => x.stderr.toString()).filter(Boolean)).toEqual([])
 
-    const cfg = await read(path.join(tmp.path, ".opencode", "opencode.jsonc"))
+    // altimate brand: new server config lands at .altimate-code/altimate-code.jsonc
+    const cfg = await read(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))
     expectPlugins(cfg.plugin, all)
   }, 25_000)
 
@@ -105,8 +106,9 @@ describe("plugin.install.concurrent", () => {
     expect(out.map((x) => x.code)).toEqual(Array.from({ length: all.length }, () => 0))
     expect(out.map((x) => x.stderr.toString()).filter(Boolean)).toEqual([])
 
-    const server = await read(path.join(tmp.path, ".opencode", "opencode.jsonc"))
-    const tui = await read(path.join(tmp.path, ".opencode", "tui.jsonc"))
+    // altimate brand: server -> altimate-code.jsonc, tui -> tui.jsonc, both under .altimate-code/
+    const server = await read(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))
+    const tui = await read(path.join(tmp.path, ".altimate-code", "tui.jsonc"))
     expectPlugins(server.plugin, all)
     expectPlugins(tui.plugin, all)
   }, 25_000)
@@ -114,7 +116,8 @@ describe("plugin.install.concurrent", () => {
   test("preserves updates when existing config uses .json", async () => {
     await using tmp = await tmpdir()
     const target = await plugin(tmp.path, ["server"])
-    const cfg = path.join(tmp.path, ".opencode", "opencode.json")
+    // altimate brand: an existing server config that uses the .json extension is reused in place
+    const cfg = path.join(tmp.path, ".altimate-code", "altimate-code.json")
     await fs.mkdir(path.dirname(cfg), { recursive: true })
     await Bun.write(cfg, JSON.stringify({ plugin: ["seed@1.0.0"] }, null, 2))
 
@@ -135,6 +138,7 @@ describe("plugin.install.concurrent", () => {
 
     const json = await read(cfg)
     expectPlugins(json.plugin, ["seed@1.0.0", ...next])
-    expect(await Filesystem.exists(path.join(tmp.path, ".opencode", "opencode.jsonc"))).toBe(false)
+    // the existing .json file is updated in place; no new .jsonc is created
+    expect(await Filesystem.exists(path.join(tmp.path, ".altimate-code", "altimate-code.jsonc"))).toBe(false)
   }, 25_000)
 })

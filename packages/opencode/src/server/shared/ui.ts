@@ -6,7 +6,9 @@ import { ProxyUtil } from "../proxy-util"
 
 let embeddedUIPromise: Promise<Record<string, string> | null> | undefined
 
-export const UI_UPSTREAM = new URL("https://app.opencode.ai")
+// altimate_change start — hosted UI upstream branding
+export const UI_UPSTREAM = new URL("https://app.altimate.ai")
+// altimate_change end
 
 export const csp = (hash = "") =>
   `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'${hash ? ` 'sha256-${hash}'` : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src * data:`

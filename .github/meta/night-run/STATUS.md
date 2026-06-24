@@ -77,3 +77,43 @@
 - codex doing real azure verify runs (minimal spend, logged in BUDGET.md).
 - DO NOT interfere (codex editing source + running verifies). Let it complete its verify loop.
 - When codex done: review ALL its edits (db.ts fresh-db init correctness, effect-zod tuple, any others), strip [diag], verify (bootstrap+run.boot+id tests + typecheck0 + run-cmd), commit ckpt36, resume P1-P6.
+
+## CHECKPOINT 10 — GATE CLEARED, agent runs end-to-end (ckpt36 committed 9e5d731ae5) — 2026-06-24
+- BOOTSTRAP DEADLOCK FIXED + VERIFIED. Root causes (codex diagnosed, I verified independently):
+  (1) withStatics() infinite recursion in core/schema.ts -> ProjectID.make() self-recursed.
+  (2) re-entrant runtime: Plugin.init->Config.get() lost instance ctx outside Effect fiber.
+  + follow-ons: db.ts fresh-db init, config branding regression (was importing core/global not fork ../global -> wrong ~/.config dir!), effect-zod tuple, session summary/status legacy-path idle-exit, truncation skip-malformed.
+- VERIFIED (re-ran myself): instance-bootstrap+run.boot+id = 21 pass/0 fail/no-hang; typecheck=0; REAL run (azure/gpt-4o-mini) -> "> builder · gpt-4o-mini" -> "WORKING" exit 0. THE MERGED AGENT WORKS END-TO-END.
+- 14 files committed ckpt36. Diags stripped. db.ts +199 flagged for deeper schema-parity review.
+- NOW RUNNING: chunked full suite -> /tmp/suite_results/SUMMARY.txt (per-area logs, 240s/chunk timeout, isolates hangs). PID 83110. This gives first real full pass/fail.
+- NEXT (after suite results): triage failures->0 (codex for source edits — Claude subagents WERE weekly-limited, retest), THEN P1 (fork carry-forward: flag-resolution/reviewer-agent/TUI-smoke) + P2 (v1.17.9 UPI adversarial from upstream-inventory.md, no dup test/upstream/*) + P3 + P4 real-e2e (free Ollama bulk + Azure quality, cap $45) + P5 TUI smoke + P6 PR. Disjoint slices, never 2 source-editors overlapping.
+- Don't write tests until suite results known (know what's failing first; avoid collision with running suite).
+
+## CHECKPOINT 11 — PARALLEL TRIAGE (5 workers) — 2026-06-24
+- Full suite measured: 9581 pass / 868 fail (~92%). Failures cluster by ROOT CAUSE (disjoint -> parallelized):
+- 5 WORKERS RUNNING (disjoint scopes, told to avoid each other's dirs + the recently-fixed run-service/plugin-index/config/db.ts):
+  - codex #1 (/tmp/codex_provider.log): test/provider (~160: toEqual drift + "No context found").
+  - codex #2 (/tmp/codex_db.log): test/session + test/control-plane + server-FK (~300: effect/sql FOREIGN KEY on session/workspace insert — parent project/workspace not seeded in fixtures, NOT codex's legacy db.ts).
+  - codex #3 (/tmp/codex_install.log): test/install + installation + branding + release-validation (~109: content/assertion drift + possible branding leaks; env-only -> .todo+ENV note).
+  - Claude agent a60eb71e: test/plugin (~36: ENOENT + not-a-function).
+  - Claude agent acf7cdd1: test/tool (~40).
+- Claude subagents WORK AGAIN (quota reset after re-login) — a60eb71e + acf7cdd1 launched OK.
+- DGX (dgx-india): reachable but data-infra box (Superset/Oracle/langfuse containers via Multica :13000), no bun/codex/claude on host PATH -> NOT practical for this worktree triage. Possible later use: independent P4 real-model e2e (embarrassingly parallel) if branch synced.
+- REMAINING for WAVE 2 (~113, after these land + re-measure): command(22) config(12) cli(11) agent(8) file(7) share(7) mcp(6) altimate(26) skill(14) effect(1) + server non-FK toBe(~?) failures.
+- ON WAKE: check the 5 worker logs (codex: log byte-growth + tail; Claude: notifications). As each lands, VERIFY its area green + no typecheck regression, watch for cross-worker COLLISION (5 concurrent editors — scoped disjoint but verify `git status` sane). When all done: commit, RE-RUN full suite (/tmp/run_suite.sh), measure, launch WAVE 2 on remainder, then P4 real-e2e, P5 TUI, P6 PR.
+- Suite re-run cmd: `nohup /tmp/run_suite.sh >/tmp/suite_runner.out 2>&1 &` -> /tmp/suite_results/SUMMARY.txt
+
+## CHECKPOINT 12 — DGX provisioning + plugin done — 2026-06-24
+- plugin cluster DONE (142 pass/0 fail, Claude agent a60eb71e). 4 workers still running (codex provider/db/install + Claude tool acf7cdd1).
+- DGX: codex IS there (~/.npm-global/bin/codex v0.133.0 + ~/.bun/bin/bun); NOT on default PATH (use full paths or bash -lc). GitHub SSH auth FAILS (key not authorized for AltimateAI private repo). SOLUTION: rsync source (no node_modules/.git) Mac->DGX:~/altimate-merge-dgx + bun install there. Running in background PID 17132, log /tmp/dgx_setup.log. Pushed ckpt36 to origin too (origin=git@github.com:AltimateAI/altimate-code.git, used --no-verify to skip husky pre-push).
+- DGX usage plan once ready: route WAVE-2 disjoint clusters (command/config/cli/agent/file/share/mcp/altimate/skill) to DGX codex via `ssh dgx-india "bash -lc 'cd ~/altimate-merge-dgx && ~/.npm-global/bin/codex exec --dangerously-bypass-approvals-and-sandbox ...'"`. SYNC BACK: DGX repo has NO .git (rsync excluded it) -> rsync the specific changed test/src dirs back from DGX to Mac (disjoint from local work = safe). Verify+commit locally.
+- ON WAKE: (1) check /tmp/dgx_setup.log for "DGX READY" + typecheck count. (2) check 4 local workers (codex logs byte-growth+tail; Claude notifications). (3) as workers land, verify area green+typecheck0, watch collisions, commit batches. (4) when DGX ready, dispatch wave-2 to it + local. (5) when all green, re-run /tmp/run_suite.sh, then P4 e2e (free Ollama + Azure, cap $45), P5 TUI, P6 PR.
+
+## CHECKPOINT 13 — spark-ec36 = the usable remote DGX — 2026-06-24
+- USER'S DGX WITH GITHUB KEY = spark-ec36 (anand@100.123.226.52, Tailscale, 20 cores). HAS: github auth (clones private repo ✅, sees ckpt36), ~/.bun/bin/bun, codex /home/anand/.local/bin/codex v0.125.0 AUTHED (~/.codex/auth.json chatgpt mode). ALSO the Ollama host (free models for P4).
+- (dgx-india/spark-80ca = ankit's, NO github key, rsync attempt /tmp/dgx_setup.log — abandon, use ec36. spark-036d = no access.)
+- ec36 provisioning: clone branch upstream/merge-v1.17.9 + bun install, BG PID 20503, log /tmp/ec36_setup.log. Watch for "READY" + typecheck count.
+- ec36 SYNC-BACK is CLEAN (it's a real git clone): after ec36 codex fixes a wave-2 cluster, `ssh anand@100.123.226.52 "cd ~/altimate-merge && git diff -- <paths>"` -> apply locally with `git apply`. Or git add+commit+push a sub-branch and cherry-pick. Disjoint clusters = safe.
+- DISPATCH PLAN once ec36 ready: give ec36 codex a batch of wave-2 disjoint clusters (e.g. command+config+cli+mcp), keep local codex/Claude on others (agent+file+share+altimate+skill + server-non-FK). 
+- LOCAL NOW: plugin DONE. Running: codex provider/db/install + Claude tool(acf7cdd1).
+- ON WAKE: check ec36 READY (/tmp/ec36_setup.log), check local workers, dispatch wave-2 (local + ec36), as clusters land verify+commit, then re-run suite, P4 e2e (ec36 Ollama free + Azure), P5, P6.

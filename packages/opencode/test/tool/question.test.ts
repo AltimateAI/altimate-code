@@ -6,7 +6,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Truncate } from "@/tool/truncate"
-import { testEffect } from "../lib/effect"
+import { testEffectShared } from "../lib/effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 
 const ctx = {
@@ -20,7 +20,12 @@ const ctx = {
   ask: () => Effect.void,
 }
 
-const it = testEffect(
+// The QuestionTool is a legacy tool whose execute calls the async Question.ask() facade,
+// which resolves Question.Service through the process-wide memoMap runtime. Build the test
+// layer through that same memoMap (testEffectShared) so the service the test drives
+// (list/reply/events) is the SAME instance the tool publishes to — otherwise the Asked
+// event never reaches the test's listener and pending() times out.
+const it = testEffectShared(
   Layer.mergeAll(
     Question.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer)),
     CrossSpawnSpawner.defaultLayer,
