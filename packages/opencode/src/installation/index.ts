@@ -478,7 +478,9 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppProcess.defaultLayer))
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppProcess.defaultLayer)))
+// altimate_change end
 
 const { runPromise } = makeRuntime(Service, defaultLayer)
 
@@ -486,7 +488,9 @@ export const latest = (...args: Parameters<Interface["latest"]>) => runPromise((
 export const method = () => runPromise((s) => s.method())
 export const upgrade = (...args: Parameters<Interface["upgrade"]>) => runPromise((s) => s.upgrade(...args))
 
-export const node = LayerNode.make(layer, [httpClient, AppProcess.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [httpClient, AppProcess.node])
+// altimate_change end
 
 // altimate_change start — re-export the version constant under the old Installation.VERSION name
 // (upstream moved it to InstallationVersion in @opencode-ai/core/installation/version). Keeps the

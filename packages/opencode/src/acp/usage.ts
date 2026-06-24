@@ -223,10 +223,12 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(contextLimitLoaderLayer),
   Layer.provide(Provider.defaultLayer),
   Layer.provide(InstanceStore.defaultLayer),
-)
+))
+// altimate_change end
 
 export * as UsageService from "./usage"

@@ -646,9 +646,12 @@ export const appLayer = layer.pipe(
   Layer.provide(NodePath.layer),
 )
 
-export const defaultLayer = appLayer.pipe(Layer.provide(InstanceLayer.layer))
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => appLayer.pipe(Layer.provide(InstanceLayer.layer)))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [
   FSUtil.node,
   path,
   AppProcess.node,
@@ -657,6 +660,7 @@ export const node = LayerNode.make(layer, [
   InstanceStore.node,
   Database.node,
 ])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers the server routes
 // (server/routes/experimental.ts) call from plain async code. The makeRuntime bridge keeps

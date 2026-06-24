@@ -108,10 +108,12 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(BackgroundJob.defaultLayer),
   Layer.provide(SessionStatus.defaultLayer),
-)
+))
+// altimate_change end
 
 const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(function* (
   background: BackgroundJob.Interface,
@@ -151,6 +153,8 @@ function busyError(sessionID: SessionID) {
   return new Session.BusyError({ sessionID })
 }
 
-export const node = LayerNode.make(layer, [BackgroundJob.node, SessionStatus.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [BackgroundJob.node, SessionStatus.node])
+// altimate_change end
 
 export * as SessionRunState from "./run-state"

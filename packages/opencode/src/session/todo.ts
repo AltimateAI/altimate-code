@@ -86,9 +86,13 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(EventV2Bridge.defaultLayer), Layer.provide(Database.defaultLayer))
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EventV2Bridge.defaultLayer), Layer.provide(Database.defaultLayer)))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [EventV2Bridge.node, Database.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [EventV2Bridge.node, Database.node])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; server/routes/session.ts reads the todo list from plain async code.

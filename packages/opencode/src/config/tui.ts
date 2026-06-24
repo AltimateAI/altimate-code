@@ -257,7 +257,9 @@ export const layer = Layer.effect(
   }).pipe(Effect.withSpan("TuiConfig.layer")),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Npm.defaultLayer), Layer.provide(FSUtil.defaultLayer))
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(Npm.defaultLayer), Layer.provide(FSUtil.defaultLayer)))
+// altimate_change end
 
 const { runPromise } = makeRuntime(Service, defaultLayer)
 

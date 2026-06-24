@@ -1,15 +1,16 @@
-wip: v1.17.9 — start runtime circular-init fix (Layer.suspend) (checkpoint 33)
+wip: v1.17.9 — broad Layer.suspend sweep (typecheck+TDZ green, KNOWN bootstrap hang) (checkpoint 35)
 
-Typecheck-green exposed runtime module-init-order failures: the fork Service facades added cross-module
-.defaultLayer/.node references that, combined with import cycles, evaluate to `undefined` at module load
-(e.g. `Plugin.defaultLayer`/`Plugin.node` undefined while a consumer module's body runs). Tests now LOAD
-and run (11 pass on the smoke set) but app-runtime import fails mid-init.
+The circular-init sweep wrapped ~33 modules' `defaultLayer` in `Layer.suspend` + thunked their
+`LayerNode` deps. This fixes typecheck (0) AND the `AppRuntime`-before-initialization TDZ that
+preload.ts:13 hit in afterAll — small/pure tests now pass (24/24 on id+util sample).
 
-Fix (in progress): wrap the eager facade-layer compositions in Layer.suspend so the .defaultLayer reads
-defer past the circular init. Done: src/project/bootstrap.ts defaultLayer, src/effect/app-runtime.ts
-AppLayer, src/agent/agent.ts defaultLayer. Still failing at agent.ts node (LayerNode.make refs Plugin.node)
-— LayerNode graphs need a different deferral than Layer.suspend, and more modules compose facade layers/
-nodes at eval. Typecheck stays GREEN.
+KNOWN REGRESSION (next to fix): bootstrap-heavy paths HANG. `bun test
+test/project/instance-bootstrap.test.ts` hangs (was a fast TDZ error at ckpt34); the headless
+`run` command boots through db-migrations then hangs before the agent loop (both Ollama + Azure,
+EXIT after timeout, no output past migrations). Root-cause hypothesis: Layer.suspend OVER-applied
+-> layer-build deadlock during AppLayer construction, likely via per-module makeRuntime runtimes
+sharing memoMap with non-memoized suspended layers rebuilding. Isolation proven: stashing these
+edits removes the hang (reverts to the fast TDZ). Fix = bisect which suspend(s) deadlock / fix the
+real import cycle at source while keeping the TDZ fixed.
 
-NEXT: finish the circular-init pass (defer/restructure facade .node compositions + break the import cycle
-where cleaner), get `bun -e import app-runtime` clean, then run the full suite.
+Committing as WIP so the typecheck+TDZ progress isn't lost while the hang is diagnosed from a clean base.

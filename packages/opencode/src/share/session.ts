@@ -49,13 +49,17 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(ShareNext.defaultLayer),
   Layer.provide(Session.defaultLayer),
   Layer.provide(Config.defaultLayer),
   Layer.provide(RuntimeFlags.defaultLayer),
-)
+))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [Config.node, Session.node, ShareNext.node, RuntimeFlags.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [Config.node, Session.node, ShareNext.node, RuntimeFlags.node])
+// altimate_change end
 
 export * as SessionShare from "./session"

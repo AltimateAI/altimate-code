@@ -71,7 +71,9 @@ export const layer = (overrides: Partial<Info> = {}) =>
     }),
   ).pipe(Layer.provide(emptyConfigLayer))
 
-export const defaultLayer = Service.defaultLayer.pipe(Layer.orDie)
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => Service.defaultLayer.pipe(Layer.orDie))
+// altimate_change end
 
 export const node = LayerNode.make(defaultLayer, [])
 

@@ -498,14 +498,18 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(Config.defaultLayer),
   Layer.provide(RuntimeFlags.defaultLayer),
   Layer.provide(EventV2Bridge.defaultLayer),
-)
+))
+// altimate_change end
 
 export * as Diagnostic from "./diagnostic"
 
-export const node = LayerNode.make(layer, [Config.node, RuntimeFlags.node, FSUtil.node, EventV2Bridge.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [Config.node, RuntimeFlags.node, FSUtil.node, EventV2Bridge.node])
+// altimate_change end
 
 export * as LSP from "./lsp"

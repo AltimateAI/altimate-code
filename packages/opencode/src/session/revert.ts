@@ -151,7 +151,8 @@ export const defaultLayer = Layer.suspend(() =>
   ),
 )
 
-export const node = LayerNode.make(layer, [
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [
   Session.node,
   Snapshot.node,
   Storage.node,
@@ -159,6 +160,7 @@ export const node = LayerNode.make(layer, [
   SessionSummary.node,
   SessionRunState.node,
 ])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the session prompt loop consumes SessionRevert.cleanup directly.

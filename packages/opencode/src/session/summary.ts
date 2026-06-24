@@ -163,7 +163,9 @@ export const DiffInput = Schema.Struct({
 })
 export type DiffInput = Schema.Schema.Type<typeof DiffInput>
 
-export const node = LayerNode.make(layer, [Session.node, Snapshot.node, EventV2Bridge.node, Config.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [Session.node, Snapshot.node, EventV2Bridge.node, Config.node])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the session prompt loop kicks off summarization directly.

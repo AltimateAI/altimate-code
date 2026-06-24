@@ -453,7 +453,9 @@ export namespace Account {
     }),
   )
 
-  export const defaultLayer = layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(FetchHttpClient.layer))
+  // altimate_change start — Layer.suspend defers facade refs past circular module-init
+  export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(FetchHttpClient.layer)))
+  // altimate_change end
 
   export const { runPromise } = makeRuntime(Service, defaultLayer)
 

@@ -110,11 +110,13 @@ export namespace Discovery {
       }),
     )
 
-  export const defaultLayer: Layer.Layer<Service> = layer.pipe(
+  // altimate_change start — Layer.suspend defers facade refs past circular module-init
+  export const defaultLayer: Layer.Layer<Service> = Layer.suspend(() => layer.pipe(
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(FSUtil.defaultLayer),
     Layer.provide(NodePath.layer),
-  )
+  ))
+  // altimate_change end
 
   // altimate_change start — node for LayerNode wiring (Skill.node depends on it). The
   // defaultLayer is self-contained, so this node has no remaining dependencies.

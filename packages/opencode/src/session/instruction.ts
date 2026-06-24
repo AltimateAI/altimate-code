@@ -227,19 +227,23 @@ export const layer: Layer.Layer<
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(Config.defaultLayer),
   Layer.provide(Global.layer),
   Layer.provide(FSUtil.defaultLayer),
   Layer.provide(FetchHttpClient.layer),
   Layer.provide(RuntimeFlags.defaultLayer),
-)
+))
+// altimate_change end
 
 export function loaded(messages: SessionV1.WithParts[]) {
   return extract(messages)
 }
 
-export const node = LayerNode.make(layer, [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise-based facade upstream removed in the
 // Effect-only migration; the session prompt loop consumes these synchronously.

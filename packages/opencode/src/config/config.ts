@@ -782,7 +782,8 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(EffectFlock.defaultLayer),
   Layer.provide(FSUtil.defaultLayer),
   Layer.provide(Env.defaultLayer),
@@ -790,9 +791,12 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Account.defaultLayer),
   Layer.provide(Npm.defaultLayer),
   Layer.provide(FetchHttpClient.layer),
-)
+))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [FSUtil.node, Auth.node, Account.node, Env.node, Npm.node, httpClient])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [FSUtil.node, Auth.node, Account.node, Env.node, Npm.node, httpClient])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the
 // Effect-only migration. Our altimate consumers (and several upstream-shared callers) still

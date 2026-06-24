@@ -1153,15 +1153,19 @@ export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
 
 // --- Per-service runtime ---
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(McpAuth.defaultLayer),
   Layer.provide(EventV2Bridge.defaultLayer),
   Layer.provide(Config.defaultLayer),
   Layer.provide(CrossSpawnSpawner.defaultLayer),
   Layer.provide(FSUtil.defaultLayer),
-)
+))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the
 // Effect-only migration. Our datamate/mcp-discover tools call these from plain async code; the

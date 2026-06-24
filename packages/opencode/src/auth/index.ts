@@ -103,9 +103,13 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(FSUtil.defaultLayer))
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FSUtil.defaultLayer)))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [FSUtil.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [FSUtil.node])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the
 // Effect-only migration; backed by the instance-bound makeRuntime so reads/writes stay scoped.

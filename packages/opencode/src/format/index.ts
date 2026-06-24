@@ -197,13 +197,17 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(Config.defaultLayer),
   Layer.provide(AppProcess.defaultLayer),
   Layer.provide(RuntimeFlags.defaultLayer),
-)
+))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [Config.node, AppProcess.node, RuntimeFlags.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [Config.node, AppProcess.node, RuntimeFlags.node])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the HTTP server consumes Format.status() directly.

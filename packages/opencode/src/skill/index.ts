@@ -334,14 +334,16 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(Discovery.defaultLayer),
   Layer.provide(Config.defaultLayer),
   Layer.provide(EventV2Bridge.defaultLayer),
   Layer.provide(FSUtil.defaultLayer),
   Layer.provide(Global.layer),
   Layer.provide(RuntimeFlags.defaultLayer),
-)
+))
+// altimate_change end
 
 export function fmt(list: Info[], opts: { verbose: boolean }) {
   const described = list.filter((skill) => skill.description !== undefined)
@@ -370,7 +372,8 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
   ].join("\n")
 }
 
-export const node = LayerNode.make(layer, [
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [
   Discovery.node,
   Config.node,
   EventV2Bridge.node,
@@ -378,6 +381,7 @@ export const node = LayerNode.make(layer, [
   Global.node,
   RuntimeFlags.node,
 ])
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed. project-scan's
 // environment census calls `await Skill.all()` from plain async code; bind it through makeRuntime.

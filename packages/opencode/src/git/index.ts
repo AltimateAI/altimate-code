@@ -343,8 +343,12 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(AppProcess.defaultLayer))
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(AppProcess.defaultLayer)))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [AppProcess.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [AppProcess.node])
+// altimate_change end
 
 export * as Git from "."

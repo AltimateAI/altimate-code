@@ -800,13 +800,17 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
   }),
 )
 
-export const defaultLayer = layer.pipe(
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(
   Layer.provide(AppProcess.defaultLayer),
   Layer.provide(FSUtil.defaultLayer),
   Layer.provide(Config.defaultLayer),
-)
+))
+// altimate_change end
 
-export const node = LayerNode.make(layer, [FSUtil.node, AppProcess.node, Config.node])
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [FSUtil.node, AppProcess.node, Config.node])
+// altimate_change end
 
 // altimate_change start — restore imperative Promise wrappers for the session processor, which
 // drives snapshot tracking from a Promise-based stream loop (not an Effect context).
