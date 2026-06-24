@@ -1,15 +1,9 @@
-wip: v1.17.9 reconciliation — restore Auth/Env Promise wrappers (checkpoint 15)
+fix: [v1.17.9] Env wrappers must be synchronous (checkpoint 16)
 
-Same proven makeRuntime compat-wrapper pattern as Config/MCP/Skill (ckpt 3): upstream removed the
-imperative Promise wrappers on Auth and Env in the Effect-only migration, but survivor files
-(provider/provider.ts, session/llm.ts, server/server.ts + provider tests) still call
-`await Auth.get()` / `Env.set()` etc. Both Services retain get/all/set/remove as Effect methods
-with self-contained defaultLayers, so the wrappers are a clean restore (instance-bound runtime
-keeps reads/writes scoped):
+Env is backed by process.env (no async IO) and fork callers read it synchronously
+(provider/provider.ts: `const env = Env.all(); env[key]`, and `Env.get()` assigned to string).
+The previous async Promise wrappers (ckpt 15) produced Promise-vs-value type errors. Switch the
+Env wrappers to makeRuntime runSync, returning plain values — matching the pre-merge sync Env API.
+(Auth stays async: it does file IO.)
 
-- src/auth/index.ts — restore get/all/set/remove Promise wrappers.
-- src/env/index.ts  — restore get/all/set/remove Promise wrappers.
-
-opencode 2428 -> 2298 (-130). Both modules typecheck clean. Confirms compat wrappers are the
-high-leverage lever for the remaining survivor Effect-API breaks (next: Provider.defaultModel/
-getModel/getSmallModel, LLM.stream).
+opencode 2298 -> 2284. Env module clean.

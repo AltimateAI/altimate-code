@@ -43,20 +43,21 @@ export const defaultLayer = layer
 
 export const node = LayerNode.make(layer, [])
 
-// altimate_change start — restore the imperative Promise wrappers upstream removed in the
-// Effect-only migration; backed by the instance-bound makeRuntime so reads/writes stay scoped.
-const { runPromise: runEnv } = makeRuntime(Service, defaultLayer)
-export async function get(key: string) {
-  return runEnv((s) => s.get(key))
+// altimate_change start — restore the imperative wrappers upstream removed in the Effect-only
+// migration. Env is backed by process.env (no async IO), and the fork callers read it
+// synchronously, so these run the Service effects via runSync and return plain values.
+const { runSync: runEnvSync } = makeRuntime(Service, defaultLayer)
+export function get(key: string) {
+  return runEnvSync((s) => s.get(key))
 }
-export async function all() {
-  return runEnv((s) => s.all())
+export function all() {
+  return runEnvSync((s) => s.all())
 }
-export async function set(key: string, value: string) {
-  return runEnv((s) => s.set(key, value))
+export function set(key: string, value: string) {
+  return runEnvSync((s) => s.set(key, value))
 }
-export async function remove(key: string) {
-  return runEnv((s) => s.remove(key))
+export function remove(key: string) {
+  return runEnvSync((s) => s.remove(key))
 }
 // altimate_change end
 
