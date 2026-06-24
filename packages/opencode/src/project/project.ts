@@ -23,6 +23,13 @@ import { git } from "../util/git"
 import { Glob } from "../util/glob"
 import { which } from "../util/which"
 import { ProjectID } from "./schema"
+// altimate_change start — Effect Context.Service facade so upstream consumers that do
+// `yield* Project.Service` / `Project.defaultLayer` / `Project.node` compile. Delegates each
+// method to the existing namespace functions below (behavior preserved). Imperative callers
+// keep using the namespace API directly.
+import { Context, Effect, Layer, Schema } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 
 export namespace Project {
   const log = Log.create({ service: "project" })
@@ -475,4 +482,82 @@ export namespace Project {
     })
     return data
   }
+
+  // altimate_change start — Effect Context.Service facade (see import note above).
+  // Re-brand helper: core (`Project.ID`) and fork (`ProjectID`) ids are identity at runtime;
+  // accept either brand and re-brand to the fork brand before delegating.
+  type AnyProjectID = ProjectID | ProjectV2.ID
+
+  export type UpdateInput = {
+    projectID: AnyProjectID
+    name?: string
+    icon?: Info["icon"]
+    commands?: Info["commands"]
+  }
+
+  export type UpdatePayload = Omit<UpdateInput, "projectID">
+
+  // Tagged error consumers catch via `Effect.catchTag("Project.NotFoundError", ...)`.
+  export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Project.NotFoundError", {
+    projectID: Schema.String,
+  }) {}
+
+  export interface Interface {
+    readonly fromDirectory: (directory: string) => Effect.Effect<{ project: Info; sandbox: string }>
+    readonly discover: (input: Info) => Effect.Effect<void>
+    readonly list: () => Effect.Effect<Info[]>
+    readonly get: (id: AnyProjectID) => Effect.Effect<Info | undefined>
+    readonly update: (input: UpdateInput) => Effect.Effect<Info, NotFoundError>
+    readonly initGit: (input: { directory: string; project: Info }) => Effect.Effect<Info>
+    readonly setInitialized: (id: AnyProjectID) => Effect.Effect<void>
+    readonly sandboxes: (id: AnyProjectID) => Effect.Effect<string[]>
+    readonly addSandbox: (id: AnyProjectID, directory: string) => Effect.Effect<void>
+    readonly removeSandbox: (id: AnyProjectID, directory: string) => Effect.Effect<void>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/Project") {}
+
+  export const layer: Layer.Layer<Service> = Layer.succeed(
+    Service,
+    Service.of({
+      fromDirectory: (directory) => Effect.promise(() => fromDirectory(directory)),
+      discover: (input) => Effect.promise(() => discover(input)),
+      list: () => Effect.sync(() => list()),
+      get: (id) => Effect.sync(() => get(ProjectID.make(id))),
+      update: (input) =>
+        Effect.tryPromise({
+          try: () => update({ ...input, projectID: ProjectID.make(input.projectID) }),
+          // The only failure the namespace `update` raises is "project not found".
+          catch: () => new NotFoundError({ projectID: ProjectID.make(input.projectID) }),
+        }),
+      initGit: (input) => Effect.promise(() => initGit(input)),
+      setInitialized: (id) => Effect.sync(() => setInitialized(ProjectID.make(id))),
+      sandboxes: (id) => Effect.promise(() => sandboxes(ProjectID.make(id))),
+      addSandbox: (id, directory) => Effect.promise(() => addSandbox(ProjectID.make(id), directory).then(() => undefined)),
+      removeSandbox: (id, directory) =>
+        Effect.promise(() => removeSandbox(ProjectID.make(id), directory).then(() => undefined)),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }
+
+// altimate_change start — instance-store.ts does `import * as Project from "./project"` and
+// references the Effect facade at module scope (Project.Service / Project.Info /
+// Project.defaultLayer / Project.node). Re-export the namespace members at module scope so that
+// flat-import style resolves, without disturbing the `import { Project }` namespace consumers.
+export type Info = Project.Info
+export type Interface = Project.Interface
+export const Service = Project.Service
+export type Service = Project.Service
+export const NotFoundError = Project.NotFoundError
+export type NotFoundError = Project.NotFoundError
+export type UpdateInput = Project.UpdateInput
+export type UpdatePayload = Project.UpdatePayload
+export const layer = Project.layer
+export const defaultLayer = Project.defaultLayer
+export const node = Project.node
+// altimate_change end

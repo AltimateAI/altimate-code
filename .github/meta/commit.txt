@@ -1,19 +1,13 @@
-wip: v1.17.9 reconciliation — server routes + tool/mcp/skill batch (checkpoint 27)
+wip: v1.17.9 reconciliation — Service facades: Project/ShareNext/SessionPrompt/SessionCompaction (ckpt 28)
 
-6-agent batch: server/routes/{session,mcp,experimental,question} + tool/batch + mcp/discover +
-skill/discovery + plugin/openai/ws all -> 0. Total 1757 -> 1602 (src 451 -> 358). Session-resume
-cumulative: 3181 -> 1602.
+Task #9 (the AppLayer/Service cluster) — facade approach validated via 4 parallel agents. Each adds
+an Effect Context.Service (+ layer/defaultLayer/node) that DELEGATES to the existing namespace
+functions (Effect.promise/Effect.sync wrap), so the new upstream consumers (app-runtime AppLayer,
+httpapi handlers, control-plane, share/session, github.handler, instance-store) compile while
+behavior is preserved and all existing namespace exports + Promise wrappers stay intact. Project
+recovered its exact Interface + Project.NotFoundError tagged error + UpdateInput/UpdatePayload from
+upstream git history (commit 3e1972fd92).
 
-Patterns: zod() AST-walker (util/effect-zod) at resolver()/validator() sites for Effect-Schema
-Info types; many more Promise wrappers (MCP.{resources,supportsOAuth,startAuth,finishAuth,
-authenticate,removeAuth}, Worktree.{create,list,remove,reset}, Question.{list,reply,reject},
-SessionStatus.list, Todo.get, SessionSummary.diff, SessionRevert.{revert,unrevert}); restored
-fork PermissionID brand + ResponseStreamError/HeaderTimeoutError (provider/error.ts) + ConfigPaths
-env-substitution helpers; Tool-API legacy form for BatchTool; ConfigMCPV1.Info; Project.ID brand
-boundaries.
-
-REMAINING (~358 src) is now dominated by task #9: ~10 core modules (Provider, Plugin, Project,
-SessionPrompt, SessionCompaction, ShareNext, Worktree, ToolRegistry, LLM, SessionProcessor,
-InstanceBootstrap) are fork namespaces but the new upstream consumers (app-runtime AppLayer,
-httpapi handlers, control-plane, share/session, provider/auth, agent.ts) need them as Effect
-Context.Services. That migration is the critical path for the bulk of the rest.
+opencode 1602 -> 1503 (src 358 -> 305). app-runtime now needs only Plugin/Provider/SessionProcessor/
+LLM/ToolRegistry (next wave). Facade modules themselves clean (residual share-next *.sql + compaction
+brand are pre-existing, separate). All additions altimate_change-marked.

@@ -16,6 +16,11 @@ import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change start — Effect Context.Service facade for the upstream runtime
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { serviceUse } from "@opencode-ai/core/effect/service-use"
+// altimate_change end
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
@@ -426,4 +431,34 @@ When constructing the summary, try to stick to this template:
       })
     },
   )
+
+  // altimate_change start — Effect Context.Service facade so the upstream runtime
+  // (app-runtime defaultLayer, httpapi node, session handler `yield* Service`) can
+  // compose this module. Each method delegates to the existing namespace fns, which
+  // self-manage Instance/Session state, so no dependency layers are required.
+  export interface Interface {
+    readonly create: (input: {
+      sessionID: SessionID
+      agent: string
+      model: { providerID: ProviderID; modelID: ModelID }
+      auto: boolean
+      overflow?: boolean
+    }) => Effect.Effect<void>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
+
+  export const use = serviceUse(Service)
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      create: (input) => Effect.promise(() => create(input)),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

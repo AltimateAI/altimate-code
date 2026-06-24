@@ -57,7 +57,8 @@ import { decodeDataUrl } from "@/util/data-url"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { ToolJsonSchema } from "@/tool/json-schema"
-import { Effect } from "effect"
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change end
 // altimate_change start - import fingerprint for env-based skill selection
 import { Fingerprint } from "../altimate/fingerprint"
@@ -2662,7 +2663,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
    * Does not match when preceded by word characters or backticks (to avoid email addresses and quoted references)
    */
 
-  export async function command(input: CommandInput) {
+  export async function command(input: CommandInput): Promise<MessageV2.WithParts> {
     log.info("command", input)
 
     // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
@@ -3021,4 +3022,48 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return Session.setTitle({ sessionID: input.session.id, title })
     }
   }
+
+  // altimate_change start — Effect Context.Service facade over the existing Promise namespace.
+  //
+  // Upstream v1.17.9 composes SessionPrompt into the Effect runtime as a
+  // Context.Service; consumers do `yield* SessionPrompt.Service` and call the
+  // resolved methods, plus reference `SessionPrompt.defaultLayer` / `.node`.
+  // The fork keeps SessionPrompt as a Promise-based namespace (imperative callers
+  // still use `SessionPrompt.prompt(...)` etc.), so this facade just delegates each
+  // Service method to the existing namespace function — behavior is unchanged.
+  //
+  // Error channels are chosen to match how consumers compose the methods:
+  //   - prompt: mapped to BadRequest by the HTTP handler (any error channel works).
+  //   - shell:  wrapped by SessionError.mapBusy, which requires the error channel
+  //             to be Session.BusyError (shell throws BusyError when the session is
+  //             already running), so we surface it via Effect.tryPromise.
+  export interface Interface {
+    readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts>
+    readonly loop: (input: z.infer<typeof LoopInput>) => Effect.Effect<MessageV2.WithParts>
+    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+    readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+    readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      prompt: (input) => Effect.promise(() => prompt(input)),
+      loop: (input) => Effect.promise(() => loop(input)),
+      cancel: (sessionID) => Effect.promise(() => cancel(sessionID)),
+      shell: (input) =>
+        Effect.tryPromise({
+          try: () => shell(input),
+          catch: (e) => (e instanceof Session.BusyError ? e : new Session.BusyError(input.sessionID)),
+        }),
+      command: (input) => Effect.promise(() => command(input)),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

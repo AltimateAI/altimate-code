@@ -10,11 +10,15 @@ import { Database, eq } from "@/storage/db"
 import { SessionShareTable } from "./share.sql"
 import { Log } from "@/util/log"
 import type * as SDK from "@opencode-ai/sdk/v2"
+// altimate_change start — Effect Context.Service facade for new upstream consumers
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 
 export namespace ShareNext {
   const log = Log.create({ service: "share-next" })
 
-  type ApiEndpoints = {
+  export type ApiEndpoints = {
     create: string
     sync: (shareId: string) => string
     remove: (shareId: string) => string
@@ -287,4 +291,38 @@ export namespace ShareNext {
       },
     ])
   }
+
+  // altimate_change start — Effect Context.Service facade (delegates to namespace fns above)
+  export type ShareResult = { id: string; url: string; secret: string }
+  export type ShareRequest = {
+    headers: Record<string, string>
+    api: ApiEndpoints
+    baseUrl: string
+  }
+
+  export interface Interface {
+    readonly init: () => Effect.Effect<void>
+    readonly url: () => Effect.Effect<string>
+    readonly request: () => Effect.Effect<ShareRequest>
+    readonly create: (sessionID: SessionID) => Effect.Effect<ShareResult>
+    readonly remove: (sessionID: SessionID) => Effect.Effect<void>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/ShareNext") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      init: () => Effect.promise(() => init()),
+      url: () => Effect.promise(() => url()),
+      request: () => Effect.promise(() => request()),
+      create: (sessionID) => Effect.promise(() => create(sessionID)),
+      remove: (sessionID) => Effect.promise(() => remove(sessionID)),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }
