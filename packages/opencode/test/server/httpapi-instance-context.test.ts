@@ -8,6 +8,7 @@ import { mkdir } from "node:fs/promises"
 import path from "node:path"
 import { registerAdapter } from "../../src/control-plane/adapters"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import type { WorkspaceAdapter } from "../../src/control-plane/types"
 import { Workspace } from "../../src/control-plane/workspace"
@@ -76,13 +77,15 @@ const localAdapter = (directory: string): WorkspaceAdapter => ({
 const createLocalWorkspace = (input: { projectID: Project.Info["id"]; type: string; directory: string }) =>
   Effect.acquireRelease(
     Effect.gen(function* () {
-      registerAdapter(input.projectID, input.type, localAdapter(input.directory))
+      // Re-brand fork ProjectID -> core ProjectV2.ID (identity at runtime) at the control-plane boundary.
+      const projectID = ProjectV2.ID.make(input.projectID)
+      registerAdapter(projectID, input.type, localAdapter(input.directory))
       const workspace = yield* Workspace.Service
       return yield* workspace.create({
         type: input.type,
         branch: null,
         extra: null,
-        projectID: input.projectID,
+        projectID,
       })
     }),
     (info) => Workspace.use.remove(info.id).pipe(Effect.ignore),

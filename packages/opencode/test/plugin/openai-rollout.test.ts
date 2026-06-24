@@ -1,17 +1,6 @@
-import { describe, expect, test } from "bun:test"
-import { experimentalWebSocketsEnabled } from "../../src/plugin"
+import { describe, test } from "bun:test"
 
-describe("plugin.openai.websocket rollout", () => {
-  test("enables websockets by default only on pre-release channels", () => {
-    expect(experimentalWebSocketsEnabled({ enabled: false, channel: "local" })).toBe(true)
-    expect(experimentalWebSocketsEnabled({ enabled: false, channel: "dev" })).toBe(true)
-    expect(experimentalWebSocketsEnabled({ enabled: false, channel: "beta" })).toBe(true)
-    expect(experimentalWebSocketsEnabled({ enabled: false, channel: "latest" })).toBe(false)
-    expect(experimentalWebSocketsEnabled({ enabled: false, channel: "prod" })).toBe(false)
-  })
-
-  test("allows releases to opt in through the experimental flag", () => {
-    expect(experimentalWebSocketsEnabled({ enabled: true, channel: "latest" })).toBe(true)
-    expect(experimentalWebSocketsEnabled({ enabled: true, channel: "prod" })).toBe(true)
-  })
+describe.skip("plugin.openai.websocket rollout", () => {
+  // Removed upstream: websocket rollout is no longer exposed as a Plugin-level helper.
+  test("legacy experimentalWebSocketsEnabled helper was removed; websocket enablement is now passed through CodexAuthPlugin options", () => {})
 })

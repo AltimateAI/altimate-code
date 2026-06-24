@@ -51,7 +51,7 @@ describe("control-plane/workspace-server SSE", () => {
           if (next.type !== "workspace.test") return
           clearTimeout(timeout)
           resolve()
-        }).catch((error) => {
+        }).catch((error: unknown) => {
           clearTimeout(timeout)
           reject(error)
         })

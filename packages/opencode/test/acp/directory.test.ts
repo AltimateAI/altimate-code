@@ -4,6 +4,10 @@ import { Command } from "@/command"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
+// altimate_change start — fork Provider.Info/Model ids are branded ProviderID/ModelID (src/provider/schema.ts),
+// distinct from core ProviderV2.ID/ModelV2.ID used by the Directory snapshot keys; re-brand at the boundary.
+import { ProviderID, ModelID } from "@/provider/schema"
+// altimate_change end
 import { Effect, Layer } from "effect"
 import { it } from "../lib/effect"
 
@@ -14,8 +18,8 @@ const command = (name: string): Command.Info => ({
   hints: [],
 })
 
-const model = (providerID: ProviderV2.ID, id: string, variants?: Directory.ModelVariants): Provider.Model => ({
-  id: ModelV2.ID.make(id),
+const model = (providerID: ProviderID, id: string, variants?: Directory.ModelVariants): Provider.Model => ({
+  id: ModelID.make(id),
   providerID,
   api: {
     id,
@@ -50,8 +54,8 @@ const model = (providerID: ProviderV2.ID, id: string, variants?: Directory.Model
 })
 
 const snapshot = (directory: string) => {
-  const providerID = ProviderV2.ID.make(`provider-${directory}`)
-  const modelID = ModelV2.ID.make(`model-${directory}`)
+  const providerID = ProviderID.make(`provider-${directory}`)
+  const modelID = ModelID.make(`model-${directory}`)
   const providers = {
     [providerID]: {
       id: providerID,
@@ -64,10 +68,10 @@ const snapshot = (directory: string) => {
           low: { reasoningEffort: "low" },
           high: { reasoningEffort: "high" },
         }),
-        [ModelV2.ID.make(`plain-${directory}`)]: model(providerID, `plain-${directory}`),
+        [ModelID.make(`plain-${directory}`)]: model(providerID, `plain-${directory}`),
       },
     },
-  } satisfies Record<ProviderV2.ID, Provider.Info>
+  } satisfies Record<ProviderID, Provider.Info>
 
   return Directory.build({
     directory,
@@ -78,7 +82,8 @@ const snapshot = (directory: string) => {
     ],
     defaultModeID: "build",
     commands: [command(`init-${directory}`), command(`review-${directory}`)],
-    defaultModel: { providerID, modelID },
+    // re-brand fork ProviderID/ModelID to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+    defaultModel: { providerID: ProviderV2.ID.make(providerID), modelID: ModelV2.ID.make(modelID) },
   })
 }
 

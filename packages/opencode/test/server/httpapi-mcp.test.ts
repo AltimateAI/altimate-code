@@ -17,7 +17,7 @@ const testStateLayer = Layer.effectDiscard(
 const it = testEffect(testStateLayer)
 
 function app() {
-  return Server.Default().app
+  return Server.Default()
 }
 type TestApp = ReturnType<typeof app>
 type TestHandler = ReturnType<typeof HttpApiApp.webHandler>

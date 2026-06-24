@@ -1,21 +1,30 @@
 import { describe, test, expect } from "bun:test"
+import { Result, Schema } from "effect"
 import { BatchTool } from "../../src/tool/batch"
+import { initTool } from "../altimate/tool-fixture"
 
-// BatchTool is a Tool.Info object; call .init() to get schema + helpers.
+// BatchTool is an Effect Tool definition; initialize through the test bridge.
 async function getToolInfo() {
-  return BatchTool.init()
+  return initTool(BatchTool)
+}
+
+function safeParse<S extends Schema.Decoder<unknown>>(schema: S, input: unknown) {
+  const result = Schema.decodeUnknownResult(schema)(input)
+  return Result.isSuccess(result)
+    ? { success: true as const, data: result.success as S["Type"] }
+    : { success: false as const, error: result.failure }
 }
 
 describe("BatchTool: schema validation", () => {
   test("rejects empty tool_calls array", async () => {
     const tool = await getToolInfo()
-    const result = tool.parameters.safeParse({ tool_calls: [] })
+    const result = safeParse(tool.parameters, { tool_calls: [] })
     expect(result.success).toBe(false)
   })
 
   test("accepts single tool call", async () => {
     const tool = await getToolInfo()
-    const result = tool.parameters.safeParse({
+    const result = safeParse(tool.parameters, {
       tool_calls: [{ tool: "read", parameters: { file_path: "/tmp/x" } }],
     })
     expect(result.success).toBe(true)
@@ -23,7 +32,7 @@ describe("BatchTool: schema validation", () => {
 
   test("accepts multiple tool calls", async () => {
     const tool = await getToolInfo()
-    const result = tool.parameters.safeParse({
+    const result = safeParse(tool.parameters, {
       tool_calls: [
         { tool: "read", parameters: { file_path: "/tmp/a" } },
         { tool: "grep", parameters: { pattern: "foo" } },
@@ -34,7 +43,7 @@ describe("BatchTool: schema validation", () => {
 
   test("rejects tool call without tool name", async () => {
     const tool = await getToolInfo()
-    const result = tool.parameters.safeParse({
+    const result = safeParse(tool.parameters, {
       tool_calls: [{ parameters: { file_path: "/tmp/x" } }],
     })
     expect(result.success).toBe(false)
@@ -42,7 +51,7 @@ describe("BatchTool: schema validation", () => {
 
   test("rejects tool call without parameters object", async () => {
     const tool = await getToolInfo()
-    const result = tool.parameters.safeParse({
+    const result = safeParse(tool.parameters, {
       tool_calls: [{ tool: "read" }],
     })
     expect(result.success).toBe(false)
@@ -50,7 +59,7 @@ describe("BatchTool: schema validation", () => {
 
   test("accepts tool call with empty parameters", async () => {
     const tool = await getToolInfo()
-    const result = tool.parameters.safeParse({
+    const result = safeParse(tool.parameters, {
       tool_calls: [{ tool: "read", parameters: {} }],
     })
     expect(result.success).toBe(true)
@@ -66,7 +75,7 @@ describe("BatchTool: formatValidationError", () => {
   test("produces readable error message for empty array", async () => {
     const tool = await getToolInfo()
     expect(tool.formatValidationError).toBeDefined()
-    const result = tool.parameters.safeParse({ tool_calls: [] })
+    const result = safeParse(tool.parameters, { tool_calls: [] })
     expect(result.success).toBe(false)
     if (!result.success) {
       const msg = tool.formatValidationError!(result.error)
@@ -78,7 +87,7 @@ describe("BatchTool: formatValidationError", () => {
   test("includes field path in type error", async () => {
     const tool = await getToolInfo()
     expect(tool.formatValidationError).toBeDefined()
-    const result = tool.parameters.safeParse({
+    const result = safeParse(tool.parameters, {
       tool_calls: [{ tool: 123, parameters: {} }],
     })
     expect(result.success).toBe(false)
@@ -107,7 +116,7 @@ describe("BatchTool: DISALLOWED set enforcement", () => {
       tool: `tool_${i}`,
       parameters: {},
     }))
-    const result = tool.parameters.safeParse({ tool_calls: calls })
+    const result = safeParse(tool.parameters, { tool_calls: calls })
     expect(result.success).toBe(true)
   })
 
@@ -117,7 +126,7 @@ describe("BatchTool: DISALLOWED set enforcement", () => {
       tool: `tool_${i}`,
       parameters: {},
     }))
-    const result = tool.parameters.safeParse({ tool_calls: calls })
+    const result = safeParse(tool.parameters, { tool_calls: calls })
     // Schema allows it — the 25-cap is enforced in execute()
     expect(result.success).toBe(true)
   })

@@ -67,7 +67,7 @@ describe("discover-and-add-mcps builtin command", () => {
 
   test("has correct metadata", async () => {
     await withInstance(async () => {
-      const cmd = await Command.get("discover-and-add-mcps")
+      const cmd = (await Command.get("discover-and-add-mcps"))!
       expect(cmd).toBeDefined()
       expect(cmd.name).toBe("discover-and-add-mcps")
       expect(cmd.source).toBe("command")
@@ -77,7 +77,7 @@ describe("discover-and-add-mcps builtin command", () => {
 
   test("template references mcp_discover tool", async () => {
     await withInstance(async () => {
-      const cmd = await Command.get("discover-and-add-mcps")
+      const cmd = (await Command.get("discover-and-add-mcps"))!
       const template = await cmd.template
       expect(template).toContain("mcp_discover")
     })
@@ -85,7 +85,7 @@ describe("discover-and-add-mcps builtin command", () => {
 
   test("is not a subtask", async () => {
     await withInstance(async () => {
-      const cmd = await Command.get("discover-and-add-mcps")
+      const cmd = (await Command.get("discover-and-add-mcps"))!
       expect(cmd.subtask).toBeUndefined()
     })
   })

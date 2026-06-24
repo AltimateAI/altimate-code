@@ -10,6 +10,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Session } from "@/session/session"
 import type { SessionPrompt } from "../../src/session/prompt"
+import type { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
@@ -22,14 +23,19 @@ import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { ModelID, ProviderID } from "@/provider/schema"
 
 afterEach(async () => {
   await disposeAllInstances()
 })
 
-const ref = {
+const coreRef = {
   providerID: ProviderV2.ID.make("test"),
   modelID: ModelV2.ID.make("test-model"),
+}
+const ref = {
+  providerID: ProviderID.make(coreRef.providerID),
+  modelID: ModelID.make(coreRef.modelID),
 }
 
 const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
@@ -67,7 +73,7 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
     role: "user",
     sessionID: chat.id,
     agent: "build",
-    model: ref,
+    model: coreRef,
     time: { created: Date.now() },
   })
   const assistant: SessionV1.Assistant = {
@@ -80,8 +86,8 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
     cost: 0,
     path: { cwd: "/tmp", root: "/tmp" },
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-    modelID: ref.modelID,
-    providerID: ref.providerID,
+    modelID: coreRef.modelID,
+    providerID: coreRef.providerID,
     variant: "xhigh",
     time: { created: Date.now() },
   }
@@ -101,7 +107,7 @@ function stubOps(opts?: { onPrompt?: (input: SessionPrompt.PromptInput) => void;
   }
 }
 
-function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithParts {
+function reply(input: SessionPrompt.PromptInput, text: string): MessageV2.WithParts {
   const id = MessageID.ascending()
   return {
     info: {
@@ -462,7 +468,7 @@ describe("tool.task", () => {
             prompt: "look into the cache key path",
             subagent_type: "general",
             background: true,
-          },
+          } as any,
           {
             sessionID: chat.id,
             messageID: assistant.id,
@@ -559,7 +565,7 @@ describe("tool.task", () => {
           prompt: "look into the cache key path",
           subagent_type: "general",
           background: true,
-        },
+        } as any,
         {
           sessionID: chat.id,
           messageID: assistant.id,
@@ -625,7 +631,7 @@ describe("tool.task", () => {
           prompt: "look into the cache key path",
           subagent_type: "general",
           background: true,
-        },
+        } as any,
         context,
       )
       const result = yield* def.execute(
@@ -671,7 +677,7 @@ describe("tool.task", () => {
           prompt: "look into the cache key path",
           subagent_type: "general",
           background: true,
-        },
+        } as any,
         {
           sessionID: chat.id,
           messageID: assistant.id,
@@ -704,7 +710,7 @@ describe("tool.task", () => {
           prompt: "look into the cache key path",
           subagent_type: "general",
           background: true,
-        },
+        } as any,
         {
           sessionID: chat.id,
           messageID: assistant.id,
@@ -743,7 +749,7 @@ describe("tool.task", () => {
           prompt: "look into the cache key path",
           subagent_type: "general",
           background: true,
-        },
+        } as any,
         {
           sessionID: chat.id,
           messageID: assistant.id,
@@ -782,7 +788,7 @@ describe("tool.task", () => {
           prompt: "look into the cache key path",
           subagent_type: "general",
           background: true,
-        },
+        } as any,
         {
           sessionID: chat.id,
           messageID: assistant.id,
@@ -821,7 +827,7 @@ describe("tool.task", () => {
           prompt: "look into the cache key path",
           subagent_type: "general",
           background: true,
-        },
+        } as any,
         {
           sessionID: chat.id,
           messageID: assistant.id,

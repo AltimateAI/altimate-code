@@ -6,6 +6,7 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { ProjectV2 } from "@opencode-ai/core/project"
+import { ProjectID } from "../../src/project/schema"
 import { SessionID } from "../../src/session/schema"
 import { $ } from "bun"
 import { tmpdirScoped } from "../fixture/fixture"
@@ -68,7 +69,7 @@ describe("migrateFromGlobal", () => {
       yield* Effect.promise(() => $`git config commit.gpgsign false`.cwd(tmp).quiet())
       const projects = yield* Project.Service
       const { project: pre } = yield* projects.fromDirectory(tmp)
-      expect(pre.id).toBe(ProjectV2.ID.global)
+      expect(pre.id).toBe(ProjectID.global)
 
       // 2. Seed a session under "global" with matching directory
       const id = legacySessionID()
@@ -85,7 +86,7 @@ describe("migrateFromGlobal", () => {
         db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie),
       )
       expect(row).toBeDefined()
-      expect(row!.project_id).toBe(real.id)
+      expect(row!.project_id).toBe(ProjectV2.ID.make(real.id))
     }),
   )
 
@@ -114,7 +115,7 @@ describe("migrateFromGlobal", () => {
         db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie),
       )
       expect(row).toBeDefined()
-      expect(row!.project_id).toBe(project.id)
+      expect(row!.project_id).toBe(ProjectV2.ID.make(project.id))
     }),
   )
 

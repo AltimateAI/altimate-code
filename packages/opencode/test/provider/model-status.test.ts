@@ -27,7 +27,8 @@ describe("provider model status schemas", () => {
       }).status,
     ).toBeUndefined()
     expect(
-      Schema.decodeUnknownSync(Provider.Model)({
+      // Provider.Model is a zod schema (not an Effect Schema) — parse with zod.
+      Provider.Model.parse({
         id: "test-model",
         providerID: "test-provider",
         api: {

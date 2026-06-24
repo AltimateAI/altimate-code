@@ -4,6 +4,7 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Database } from "@opencode-ai/core/database/database"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import path from "path"
@@ -120,7 +121,7 @@ describe("plugin.workspace", () => {
         type,
         branch: null,
         extra: { key: "value" },
-        projectID: ctx.project.id,
+        projectID: ProjectV2.ID.make(ctx.project.id),
       })
 
       expect(info.type).toBe(type)

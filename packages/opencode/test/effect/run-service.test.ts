@@ -2,7 +2,7 @@ import { expect } from "bun:test"
 import { Effect, Layer, Context } from "effect"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { makeRuntime } from "../../src/effect/run-service"
-import { ProjectV2 } from "@opencode-ai/core/project"
+import { ProjectID } from "../../src/project/schema"
 import { it } from "../lib/effect"
 
 class Shared extends Context.Service<Shared, { readonly id: number }>()("@test/Shared") {}
@@ -79,7 +79,7 @@ it.live("makeRuntime inherits InstanceRef from the current fiber", () =>
       directory: testDirectory,
       worktree: testDirectory,
       project: {
-        id: ProjectV2.ID.global,
+        id: ProjectID.global,
         worktree: testDirectory,
         time: { created: 0, updated: 0 },
         sandboxes: [],

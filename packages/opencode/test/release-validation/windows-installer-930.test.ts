@@ -303,7 +303,10 @@ describe("upgradePowershell result shape is consumed by upgrade()", () => {
     }
 
     // The caller did result.stderr.toString('utf8') and wrapped it.
-    expect(Installation.UpgradeFailedError.isInstance(err)).toBe(true)
+    // altimate_change start — upstream v1.17.9 UpgradeFailedError is an Effect Schema.TaggedErrorClass;
+    // detect with instanceof (matches src/cli/cmd/upgrade.ts) rather than the removed .isInstance() static.
+    expect(err instanceof Installation.UpgradeFailedError).toBe(true)
+    // altimate_change end
     expect((err as any).data.stderr).toBe("powershell not found")
 
     // An error telemetry event was emitted carrying that stderr.

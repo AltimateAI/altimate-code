@@ -125,6 +125,7 @@
     "gitlab-ai-provider": "6.9.3",
     "glob": "13.0.5",
     "google-auth-library": "10.5.0",
+    "@hono/standard-validator": "catalog:",
     "gray-matter": "4.0.3",
     "hono": "catalog:",
     "hono-openapi": "catalog:",

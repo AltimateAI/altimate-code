@@ -13,6 +13,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll, beforeEach } from "bun:test"
+import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
 beforeAll(async () => {
@@ -67,7 +68,7 @@ function describeToolErrorPropagation(opts: {
       }))
 
       const mod = await import(opts.importPath)
-      const tool = await mod[opts.exportName].init()
+      const tool = await initTool(mod[opts.exportName])
       const result = await tool.execute(opts.args, stubCtx())
 
       expect(result.metadata.error).toContain("Dispatcher-level failure")
@@ -78,7 +79,7 @@ function describeToolErrorPropagation(opts: {
       Dispatcher.register(opts.dispatcherMethod as any, async () => opts.dataErrorResponse)
 
       const mod = await import(opts.importPath)
-      const tool = await mod[opts.exportName].init()
+      const tool = await initTool(mod[opts.exportName])
       const result = await tool.execute(opts.args, stubCtx())
 
       expect(result.metadata.error).toBeDefined()
@@ -92,7 +93,7 @@ function describeToolErrorPropagation(opts: {
       })
 
       const mod = await import(opts.importPath)
-      const tool = await mod[opts.exportName].init()
+      const tool = await initTool(mod[opts.exportName])
       const result = await tool.execute(opts.args, stubCtx())
 
       expect(result.metadata.success).toBe(false)
@@ -104,7 +105,7 @@ function describeToolErrorPropagation(opts: {
       Dispatcher.register(opts.dispatcherMethod as any, async () => opts.successResponse)
 
       const mod = await import(opts.importPath)
-      const tool = await mod[opts.exportName].init()
+      const tool = await initTool(mod[opts.exportName])
       const result = await tool.execute(opts.args, stubCtx())
 
       expect(result.metadata.error).toBeUndefined()
@@ -331,7 +332,7 @@ describe("impact_analysis catch error propagation", () => {
     })
 
     const { ImpactAnalysisTool } = await import("../../src/altimate/tools/impact-analysis")
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       {
         model: "stg_orders",
@@ -364,7 +365,7 @@ describe("sql_fix conditional error spread", () => {
     }))
 
     const { SqlFixTool } = await import("../../src/altimate/tools/sql-fix")
-    const tool = await SqlFixTool.init()
+    const tool = await initTool(SqlFixTool)
     const result = await tool.execute(
       { sql: "SELECT foo FROM t", error_message: "Column 'foo' not found", dialect: "snowflake" },
       stubCtx(),
@@ -385,7 +386,7 @@ describe("sql_fix conditional error spread", () => {
     }))
 
     const { SqlFixTool } = await import("../../src/altimate/tools/sql-fix")
-    const tool = await SqlFixTool.init()
+    const tool = await initTool(SqlFixTool)
     const result = await tool.execute({ sql: "SELCT", error_message: "syntax error", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.error).toBe("Parse failure")
@@ -406,7 +407,7 @@ describe("altimate_core_complete null data guard", () => {
     }))
 
     const { AltimateCoreCompleteTool } = await import("../../src/altimate/tools/altimate-core-complete")
-    const tool = await AltimateCoreCompleteTool.init()
+    const tool = await initTool(AltimateCoreCompleteTool)
     const result = await tool.execute({ sql: "SEL", cursor_pos: 3 }, stubCtx())
 
     expect(result.metadata.error).toBe("Engine crashed")
@@ -420,7 +421,7 @@ describe("altimate_core_complete null data guard", () => {
     }))
 
     const { AltimateCoreCompleteTool } = await import("../../src/altimate/tools/altimate-core-complete")
-    const tool = await AltimateCoreCompleteTool.init()
+    const tool = await initTool(AltimateCoreCompleteTool)
     const result = await tool.execute({ sql: "SEL", cursor_pos: 3 }, stubCtx())
 
     expect(result.metadata.error).toBe("No handler")
@@ -441,7 +442,7 @@ describe("altimate_core_grade null data guard", () => {
     }))
 
     const { AltimateCoreGradeTool } = await import("../../src/altimate/tools/altimate-core-grade")
-    const tool = await AltimateCoreGradeTool.init()
+    const tool = await initTool(AltimateCoreGradeTool)
     const result = await tool.execute({ sql: "SELECT 1" }, stubCtx())
 
     expect(result.metadata.error).toBe("Grading engine unavailable")
@@ -463,7 +464,7 @@ describe("lineage_check error propagation", () => {
     }))
 
     const { LineageCheckTool } = await import("../../src/altimate/tools/lineage-check")
-    const tool = await LineageCheckTool.init()
+    const tool = await initTool(LineageCheckTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.success).toBe(false)
@@ -477,7 +478,7 @@ describe("lineage_check error propagation", () => {
     }))
 
     const { LineageCheckTool } = await import("../../src/altimate/tools/lineage-check")
-    const tool = await LineageCheckTool.init()
+    const tool = await initTool(LineageCheckTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.error).toContain("Partial lineage")
@@ -489,7 +490,7 @@ describe("lineage_check error propagation", () => {
     })
 
     const { LineageCheckTool } = await import("../../src/altimate/tools/lineage-check")
-    const tool = await LineageCheckTool.init()
+    const tool = await initTool(LineageCheckTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.success).toBe(false)
@@ -504,7 +505,7 @@ describe("lineage_check error propagation", () => {
     }))
 
     const { LineageCheckTool } = await import("../../src/altimate/tools/lineage-check")
-    const tool = await LineageCheckTool.init()
+    const tool = await initTool(LineageCheckTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, stubCtx())
 
     expect(result.metadata.error).toBe("Engine crashed")

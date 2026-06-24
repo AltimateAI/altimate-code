@@ -9,6 +9,7 @@
  */
 
 import { describe, test, expect, mock, beforeEach, afterEach, afterAll, spyOn } from "bun:test"
+import { initTool } from "./tool-fixture"
 import fs from "fs/promises"
 import path from "path"
 
@@ -94,7 +95,7 @@ describe("warehouse-add e2e: post-connect suggestions", () => {
       throw new Error(`Unexpected method: ${method}`)
     })
 
-    const tool = await WarehouseAddTool.init()
+    const tool = await initTool(WarehouseAddTool)
     const result = await tool.execute(
       { name: "test_wh", config: { type: "snowflake", account: "xy12345", user: "admin", password: "test-fake-password" } },
       ctx as any,
@@ -130,7 +131,7 @@ describe("warehouse-add e2e: post-connect suggestions", () => {
       throw new Error(`Unexpected method: ${method}`)
     })
 
-    const tool = await WarehouseAddTool.init()
+    const tool = await initTool(WarehouseAddTool)
     const result = await tool.execute(
       { name: "test_wh", config: { type: "snowflake", account: "xy12345", user: "admin", password: "test-fake-password" } },
       ctx as any,
@@ -164,7 +165,7 @@ describe("warehouse-add e2e: post-connect suggestions", () => {
       throw new Error(`Unexpected method: ${method}`)
     })
 
-    const tool = await WarehouseAddTool.init()
+    const tool = await initTool(WarehouseAddTool)
     const result = await tool.execute(
       { name: "test_wh", config: { type: "snowflake", account: "xy12345" } },
       ctx as any,
@@ -187,7 +188,7 @@ describe("warehouse-add e2e: post-connect suggestions", () => {
       throw new Error(`Unexpected method: ${method}`)
     })
 
-    const tool = await WarehouseAddTool.init()
+    const tool = await initTool(WarehouseAddTool)
     const result = await tool.execute(
       { name: "test_wh", config: { type: "snowflake", account: "xy12345" } },
       ctx as any,
@@ -211,7 +212,7 @@ describe("warehouse-add e2e: post-connect suggestions", () => {
       throw new Error(`Unexpected method: ${method}`)
     })
 
-    const tool = await WarehouseAddTool.init()
+    const tool = await initTool(WarehouseAddTool)
     const result = await tool.execute(
       { name: "test_wh", config: { type: "snowflake", account: "xy12345", user: "admin", password: "test-fake-password" } },
       ctx as any,
@@ -223,7 +224,7 @@ describe("warehouse-add e2e: post-connect suggestions", () => {
   })
 
   test("missing type in config returns helpful error", async () => {
-    const tool = await WarehouseAddTool.init()
+    const tool = await initTool(WarehouseAddTool)
     const result = await tool.execute(
       { name: "test_wh", config: { host: "localhost" } },
       ctx as any,
@@ -248,7 +249,7 @@ describe("progressive disclosure e2e", () => {
       truncated: false,
     }))
 
-    const tool = await SqlExecuteTool.init()
+    const tool = await initTool(SqlExecuteTool)
     const result = await tool.execute(
       { query: "SELECT id, name FROM users", limit: 100 },
       ctx as any,
@@ -272,7 +273,7 @@ describe("progressive disclosure e2e", () => {
       confidence_factors: [],
     }))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute(
       { sql: "SELECT id FROM users", dialect: "snowflake" },
       ctx as any,
@@ -294,7 +295,7 @@ describe("progressive disclosure e2e", () => {
       row_count: 100,
     }))
 
-    const tool = await SchemaInspectTool.init()
+    const tool = await initTool(SchemaInspectTool)
     const result = await tool.execute(
       { table: "users" },
       ctx as any,
@@ -315,7 +316,7 @@ describe("progressive disclosure e2e", () => {
       type: "snowflake",
     }))
 
-    const tool = await SchemaIndexTool.init()
+    const tool = await initTool(SchemaIndexTool)
     const result = await tool.execute(
       { warehouse: "test_wh" },
       ctx as any,
@@ -334,7 +335,7 @@ describe("progressive disclosure e2e", () => {
     dispatcherSpy?.mockRestore()
     dispatcherSpy = spyOn(Dispatcher, "call").mockRejectedValue(new Error("connection failed"))
 
-    const tool = await SqlExecuteTool.init()
+    const tool = await initTool(SqlExecuteTool)
     const result = await tool.execute(
       { query: "SELECT 1", limit: 100 },
       ctx as any,
@@ -355,7 +356,7 @@ describe("progressive disclosure e2e", () => {
     dispatcherSpy?.mockRestore()
     dispatcherSpy = spyOn(Dispatcher, "call").mockRejectedValue(new Error("analysis engine down"))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute(
       { sql: "SELECT 1", dialect: "snowflake" },
       ctx as any,

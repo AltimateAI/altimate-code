@@ -28,10 +28,11 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import { QuestionTool } from "../../src/tool/question"
+import { initTool } from "../altimate/tool-fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { addMcpToConfig } from "../../src/mcp/config"
 import { parse as parseJsonc } from "jsonc-parser"
-import type { Config } from "../../src/config/config"
+import type { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import {
   runStartupUpgradeCheck,
   scheduleStartupUpgradeCheck,
@@ -77,7 +78,7 @@ describe("v0.8.8 #937: question tool non-interactive hostile inputs", () => {
   })
 
   test("no AUTO_ANSWER → every question Unanswered, no invented answer, never throws", async () => {
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const result = await tool.execute(
       { questions: [q("Pick one?", [{ label: "Snowflake", description: "a" }, { label: "BigQuery", description: "b" }])] },
       ctx,
@@ -88,7 +89,7 @@ describe("v0.8.8 #937: question tool non-interactive hostile inputs", () => {
 
   test("garbage/injection-shaped AUTO_ANSWER that matches no label → Unanswered (no crash, no leak)", async () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "'; DROP TABLE options; --"
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const result = await tool.execute(
       { questions: [q("Pick?", [{ label: "yes", description: "a" }, { label: "no", description: "b" }])] },
       ctx,
@@ -101,7 +102,7 @@ describe("v0.8.8 #937: question tool non-interactive hostile inputs", () => {
   test("AUTO_ANSWER=first/last with an EMPTY options list → Unanswered, no out-of-bounds crash", async () => {
     for (const mode of ["first", "last"]) {
       process.env["ALTIMATE_AUTO_ANSWER"] = mode
-      const tool = await QuestionTool.init()
+      const tool = await initTool(QuestionTool)
       const result = await tool.execute({ questions: [q("Empty?", [])] }, ctx)
       expect(result.metadata.answers).toEqual([[]])
     }
@@ -109,7 +110,7 @@ describe("v0.8.8 #937: question tool non-interactive hostile inputs", () => {
 
   test("AUTO_ANSWER label match is case-insensitive and selects exactly that option", async () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "snowflake"
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const result = await tool.execute(
       { questions: [q("WH?", [{ label: "Snowflake", description: "a" }, { label: "BigQuery", description: "b" }])] },
       ctx,
@@ -119,7 +120,7 @@ describe("v0.8.8 #937: question tool non-interactive hostile inputs", () => {
 
   test("oversized question text + many questions is formatted without throwing", async () => {
     const huge = "x".repeat(50_000)
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const questions = Array.from({ length: 20 }, (_, i) =>
       q(`${huge}-${i}?`, [{ label: `opt${i}`, description: "d" }]),
     )
@@ -134,7 +135,7 @@ describe("v0.8.8 #937: question tool non-interactive hostile inputs", () => {
 // ---------------------------------------------------------------------------
 describe("v0.8.8 #893: addMcpToConfig parse-guard", () => {
   let dir: string
-  const remote: Config.Mcp = { type: "remote", url: "https://example.test/mcp", enabled: true } as Config.Mcp
+  const remote: ConfigMCPV1.Info = { type: "remote", url: "https://example.test/mcp", enabled: true } as ConfigMCPV1.Info
 
   beforeEach(async () => {
     dir = path.join(os.tmpdir(), `mcpcfg-adv-${Date.now()}-${Math.random().toString(36).slice(2)}`)

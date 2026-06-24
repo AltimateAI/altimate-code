@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
+import type { z } from "zod"
 
 import { Session } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
@@ -28,6 +29,11 @@ const workspaceID = Schema.decodeUnknownSync(WorkspaceV2.ID)("wrk-primary")
 function decodeUnknown<S extends Schema.Top>(schema: S) {
   const decode = Schema.decodeUnknownSync(schema as any)
   return (input: unknown): Schema.Schema.Type<S> => decode(input) as Schema.Schema.Type<S>
+}
+
+// SessionPrompt.*Input remained zod schemas through the Effect migration; decode them with zod.
+function decodeUnknownZod<S extends z.ZodType>(schema: S) {
+  return (input: unknown): z.infer<S> => schema.parse(input)
 }
 
 describe("Session.Info", () => {
@@ -263,12 +269,12 @@ describe("Todo.Info", () => {
 
 describe("SessionPrompt input schemas", () => {
   test("LoopInput is just sessionID", () => {
-    const decode = decodeUnknown(SessionPrompt.LoopInput)
+    const decode = decodeUnknownZod(SessionPrompt.LoopInput)
     expect(decode({ sessionID })).toEqual({ sessionID })
   })
 
   test("ShellInput requires agent + command", () => {
-    const decode = decodeUnknown(SessionPrompt.ShellInput)
+    const decode = decodeUnknownZod(SessionPrompt.ShellInput)
     const expected = { sessionID, agent: "build", command: "echo hi" }
     const input: unknown = expected
     expect(decode(input)).toEqual(expected)
@@ -276,7 +282,7 @@ describe("SessionPrompt input schemas", () => {
   })
 
   test("PromptInput accepts a text part and a file part", () => {
-    const decode = decodeUnknown(SessionPrompt.PromptInput)
+    const decode = decodeUnknownZod(SessionPrompt.PromptInput)
     const expected = {
       sessionID,
       parts: [
@@ -292,7 +298,7 @@ describe("SessionPrompt input schemas", () => {
   })
 
   test("PromptInput rejects unknown part type", () => {
-    const decode = decodeUnknown(SessionPrompt.PromptInput)
+    const decode = decodeUnknownZod(SessionPrompt.PromptInput)
     const bad = {
       sessionID,
       parts: [{ type: "nonsense", payload: 42 }],
@@ -301,7 +307,7 @@ describe("SessionPrompt input schemas", () => {
   })
 
   test("CommandInput round-trips core fields", () => {
-    const decode = decodeUnknown(SessionPrompt.CommandInput)
+    const decode = decodeUnknownZod(SessionPrompt.CommandInput)
     const expected = {
       sessionID,
       arguments: "--flag",

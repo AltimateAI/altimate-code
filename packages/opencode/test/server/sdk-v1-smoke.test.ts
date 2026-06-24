@@ -17,7 +17,7 @@ function client(directory: string) {
   return createOpencodeClient({
     baseUrl: "http://test",
     directory,
-    fetch: ((req: Request) => Server.Default().app.fetch(req)) as unknown as typeof fetch,
+    fetch: ((req: Request) => Server.Default().fetch(req)) as unknown as typeof fetch,
   })
 }
 

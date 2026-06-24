@@ -10,7 +10,7 @@ afterEach(async () => {
 })
 
 function app() {
-  return Server.Default().app
+  return Server.Default()
 }
 
 // /config echoes the config back. Padding the config pushes the response body

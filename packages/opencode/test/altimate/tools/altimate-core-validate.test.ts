@@ -9,6 +9,7 @@
  * core (syntax/dialect checks that do not need a schema).
  */
 import { describe, test, expect, spyOn, afterEach, beforeEach } from "bun:test"
+import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import {
   AltimateCoreValidateTool,
@@ -188,7 +189,7 @@ describe("AltimateCoreValidateTool.execute", () => {
       data: { valid: true, errors: [] },
     })
 
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute({ sql: "SELECT 1" }, ctx as any)
 
     // The engine ran, so success should be true.
@@ -207,7 +208,7 @@ describe("AltimateCoreValidateTool.execute", () => {
       data: { valid: true, errors: [] },
     })
 
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute(
       {
         sql: "SELECT id FROM users",
@@ -231,7 +232,7 @@ describe("AltimateCoreValidateTool.execute", () => {
       data: { valid: true, errors: [] },
     })
 
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute(
       { sql: "SELECT 1", schema_path: "/tmp/schema.yaml" },
       ctx as any,
@@ -246,7 +247,7 @@ describe("AltimateCoreValidateTool.execute", () => {
       data: { valid: true, errors: [] },
     })
 
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute({ sql: "SELECT 1", schema_context: {} }, ctx as any)
 
     expect(result.metadata.has_schema).toBe(false)
@@ -264,7 +265,7 @@ describe("AltimateCoreValidateTool.execute", () => {
       },
     })
 
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute(
       {
         sql: "SELECT xyz FROOM users",
@@ -291,7 +292,7 @@ describe("AltimateCoreValidateTool.execute", () => {
       throw new Error("core engine crashed")
     })
 
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute({ sql: "SELECT 1" }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -307,7 +308,7 @@ describe("AltimateCoreValidateTool.execute", () => {
       async () => ({ success: true, data: { valid: true, errors: [] } }) as never,
     )
 
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     await tool.execute({ sql: "SELECT 1" }, ctx as any)
 
     expect(spy).toHaveBeenCalledTimes(1)

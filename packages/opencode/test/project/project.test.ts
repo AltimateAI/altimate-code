@@ -19,6 +19,7 @@ import { NodePath } from "@effect/platform-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { AppProcess } from "@opencode-ai/core/process"
 import { ProjectV2 } from "@opencode-ai/core/project"
+import { ProjectID } from "@/project/schema"
 import { ProjectDirectories } from "@opencode-ai/core/project/directories"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
@@ -29,8 +30,11 @@ const encoder = new TextEncoder()
 const layer = Layer.mergeAll(Project.defaultLayer, Database.defaultLayer, CrossSpawnSpawner.defaultLayer)
 const it = testEffect(layer)
 
+// Return the fork-branded ProjectID so it compares directly against
+// `result.project.id` (which carries the fork "ProjectID" brand). At drizzle
+// column boundaries re-brand with ProjectV2.ID.make (identity at runtime).
 function remoteProjectID(remote: string) {
-  return ProjectV2.ID.make(Hash.fast(`git-remote:${remote}`))
+  return ProjectID.make(Hash.fast(`git-remote:${remote}`))
 }
 
 /**
@@ -102,7 +106,7 @@ const iconDiscoveryIt = testEffect(
   Layer.provideMerge(projectLayerWithRuntimeFlags({ experimentalIconDiscovery: true }), CrossSpawnSpawner.defaultLayer),
 )
 
-function waitForProjectIcon(id: ProjectV2.ID, attempts = 50): Effect.Effect<Project.Info, never, Project.Service> {
+function waitForProjectIcon(id: ProjectID, attempts = 50): Effect.Effect<Project.Info, never, Project.Service> {
   return Effect.gen(function* () {
     const project = yield* Project.Service
     const info = yield* project.get(id)
@@ -123,7 +127,7 @@ describe("Project.fromDirectory", () => {
       const result = yield* project.fromDirectory(tmp)
 
       expect(result.project).toBeDefined()
-      expect(result.project.id).toBe(ProjectV2.ID.global)
+      expect(result.project.id).toBe(ProjectID.global)
       expect(result.project.vcs).toBe("git")
       expect(result.project.worktree).toBe(tmp)
 
@@ -140,7 +144,7 @@ describe("Project.fromDirectory", () => {
       const result = yield* project.fromDirectory(tmp)
 
       expect(result.project).toBeDefined()
-      expect(result.project.id).not.toBe(ProjectV2.ID.global)
+      expect(result.project.id).not.toBe(ProjectID.global)
       expect(result.project.vcs).toBe("git")
       expect(result.project.worktree).toBe(tmp)
     }),
@@ -151,7 +155,7 @@ describe("Project.fromDirectory", () => {
       const project = yield* Project.Service
       const tmp = yield* tmpdirScoped()
       const result = yield* project.fromDirectory(tmp)
-      expect(result.project.id).toBe(ProjectV2.ID.global)
+      expect(result.project.id).toBe(ProjectID.global)
     }),
   )
 
@@ -208,7 +212,7 @@ describe("Project.fromDirectory", () => {
         .insert(SessionTable)
         .values({
           id: sessionID,
-          project_id: rootProject.id,
+          project_id: ProjectV2.ID.make(rootProject.id),
           slug: sessionID,
           directory: tmp,
           title: "test",
@@ -220,7 +224,7 @@ describe("Project.fromDirectory", () => {
         .pipe(Effect.orDie)
       yield* db
         .insert(WorkspaceTable)
-        .values({ id: workspaceID, type: "local", name: "test", project_id: rootProject.id })
+        .values({ id: workspaceID, type: "local", name: "test", project_id: ProjectV2.ID.make(rootProject.id) })
         .run()
         .pipe(Effect.orDie)
       yield* Effect.promise(() => $`git remote add origin git@github.com:acme/app.git`.cwd(tmp).quiet())
@@ -229,16 +233,21 @@ describe("Project.fromDirectory", () => {
 
       expect(result.project.id).toBe(remoteID)
       expect(
-        yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, rootProject.id)).get().pipe(Effect.orDie),
+        yield* db
+          .select()
+          .from(ProjectTable)
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(rootProject.id)))
+          .get()
+          .pipe(Effect.orDie),
       ).toBeUndefined()
       expect(
         (yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie))
           ?.project_id,
-      ).toBe(remoteID)
+      ).toBe(ProjectV2.ID.make(remoteID))
       expect(
         (yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get().pipe(Effect.orDie))
           ?.project_id,
-      ).toBe(remoteID)
+      ).toBe(ProjectV2.ID.make(remoteID))
     }),
   )
 })
@@ -253,7 +262,7 @@ describe("Project.fromDirectory git failure paths", () => {
       // rev-list fails because HEAD doesn't exist yet: this is the natural scenario.
       const result = yield* project.fromDirectory(tmp)
       expect(result.project.vcs).toBe("git")
-      expect(result.project.id).toBe(ProjectV2.ID.global)
+      expect(result.project.id).toBe(ProjectID.global)
       expect(result.project.worktree).toBe(tmp)
     }),
   )
@@ -740,7 +749,7 @@ describe("Project.fromDirectory with bare repos", () => {
 
       const result = yield* project.fromDirectory(worktreePath)
 
-      expect(result.project.id).not.toBe(ProjectV2.ID.global)
+      expect(result.project.id).not.toBe(ProjectID.global)
       expect(result.project.worktree).toBe(worktreePath)
 
       const correctCache = path.join(barePath, "opencode")
@@ -805,7 +814,7 @@ describe("Project.fromDirectory with bare repos", () => {
 
       const result = yield* project.fromDirectory(worktreePath)
 
-      expect(result.project.id).not.toBe(ProjectV2.ID.global)
+      expect(result.project.id).not.toBe(ProjectID.global)
       expect(result.project.worktree).toBe(worktreePath)
 
       const correctCache = path.join(barePath, "opencode")

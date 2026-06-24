@@ -56,9 +56,10 @@ describe("HttpApi Server.listen mDNS", () => {
     Flag.OPENCODE_SERVER_USERNAME = "opencode"
     const listener = await Server.listen({ hostname: "0.0.0.0", port: 0, mdns: true })
     try {
-      const published = events.filter((e) => e.kind === "publish")
+      const published = events.filter((e): e is Extract<Event, { kind: "publish" }> => e.kind === "publish")
       expect(published.length).toBe(1)
-      expect(published[0]!.port).toBe(listener.port)
+      // Bun Server.port is typed number | undefined; the server is listening here so it is set.
+      expect(published[0]!.port).toBe(listener.port!)
       expect(published[0]!.name).toBe(`opencode-${listener.port}`)
     } finally {
       await withTimeout(listener.stop(true), 10_000, "timed out stopping mdns listener")

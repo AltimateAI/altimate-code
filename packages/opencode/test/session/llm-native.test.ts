@@ -9,12 +9,11 @@ import type { Provider } from "@/provider/provider"
 
 import { OAUTH_DUMMY_KEY } from "@/auth"
 import { testEffect } from "../lib/effect"
-import { ProviderV2 } from "@opencode-ai/core/provider"
-import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderID, ModelID } from "../../src/provider/schema"
 
 const baseModel: Provider.Model = {
-  id: ModelV2.ID.make("gpt-5-mini"),
-  providerID: ProviderV2.ID.make("openai"),
+  id: ModelID.make("gpt-5-mini"),
+  providerID: ProviderID.make("openai"),
   api: {
     id: "gpt-5-mini",
     url: "https://api.openai.com/v1",
@@ -64,7 +63,7 @@ const baseModel: Provider.Model = {
 }
 
 const providerInfo: Provider.Info = {
-  id: ProviderV2.ID.make("openai"),
+  id: ProviderID.make("openai"),
   name: "OpenAI",
   source: "config",
   env: ["OPENAI_API_KEY"],
@@ -356,7 +355,7 @@ describe("session.llm-native.request", () => {
     const compatible = LLMNative.model({
       model: {
         ...baseModel,
-        providerID: ProviderV2.ID.make("opencode"),
+        providerID: ProviderID.make("opencode"),
         api: { ...baseModel.api, url: "https://ai.example.test/v1", npm: "@ai-sdk/openai-compatible" },
       },
       apiKey: "test-key",
@@ -390,8 +389,8 @@ describe("session.llm-native.request", () => {
     })
     expect(
       LLMNativeRuntime.status({
-        model: { ...baseModel, providerID: ProviderV2.ID.make("opencode") },
-        provider: { ...providerInfo, id: ProviderV2.ID.make("opencode") },
+        model: { ...baseModel, providerID: ProviderID.make("opencode") },
+        provider: { ...providerInfo, id: ProviderID.make("opencode") },
         auth: undefined,
       }),
     ).toMatchObject({
@@ -402,10 +401,10 @@ describe("session.llm-native.request", () => {
       LLMNativeRuntime.status({
         model: {
           ...baseModel,
-          providerID: ProviderV2.ID.make("opencode"),
+          providerID: ProviderID.make("opencode"),
           api: { ...baseModel.api, npm: "@ai-sdk/openai-compatible" },
         },
-        provider: { ...providerInfo, id: ProviderV2.ID.make("opencode") },
+        provider: { ...providerInfo, id: ProviderID.make("opencode") },
         auth: undefined,
       }),
     ).toMatchObject({
@@ -414,8 +413,8 @@ describe("session.llm-native.request", () => {
     })
     expect(
       LLMNativeRuntime.status({
-        model: { ...baseModel, providerID: ProviderV2.ID.make("google") },
-        provider: { ...providerInfo, id: ProviderV2.ID.make("google") },
+        model: { ...baseModel, providerID: ProviderID.make("google") },
+        provider: { ...providerInfo, id: ProviderID.make("google") },
         auth: undefined,
       }),
     ).toEqual({ type: "unsupported", reason: "provider is not openai, opencode, or anthropic" })
@@ -456,12 +455,12 @@ describe("session.llm-native.request", () => {
       LLMNativeRuntime.status({
         model: {
           ...baseModel,
-          providerID: ProviderV2.ID.make("anthropic"),
+          providerID: ProviderID.make("anthropic"),
           api: { ...baseModel.api, npm: "@ai-sdk/anthropic", url: "https://api.anthropic.com/v1" },
         },
         provider: {
           ...providerInfo,
-          id: ProviderV2.ID.make("anthropic"),
+          id: ProviderID.make("anthropic"),
           name: "Anthropic",
           env: ["ANTHROPIC_API_KEY"],
           options: { apiKey: "test-anthropic-key" },
@@ -474,10 +473,10 @@ describe("session.llm-native.request", () => {
   test("prefers console provider api key over stored opencode auth", () => {
     expect(
       LLMNativeRuntime.status({
-        model: { ...baseModel, providerID: ProviderV2.ID.make("opencode") },
+        model: { ...baseModel, providerID: ProviderID.make("opencode") },
         provider: {
           ...providerInfo,
-          id: ProviderV2.ID.make("opencode"),
+          id: ProviderID.make("opencode"),
           options: { apiKey: "console-token" },
           key: "zen-token",
         },

@@ -18,6 +18,7 @@ import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceBootstrap as InstanceBootstrapService } from "../../src/project/bootstrap-service"
 import { InstanceStore } from "../../src/project/instance-store"
 import { Project } from "../../src/project/project"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
 import * as HttpSessionError from "../../src/server/routes/instance/httpapi/handlers/session-errors"
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
@@ -114,13 +115,15 @@ const localAdapter = (directory: string): WorkspaceAdapter => ({
 const createLocalWorkspace = (input: { projectID: Project.Info["id"]; type: string; directory: string }) =>
   Effect.acquireRelease(
     Effect.gen(function* () {
-      registerAdapter(input.projectID, input.type, localAdapter(input.directory))
+      // Re-brand fork ProjectID -> core ProjectV2.ID (identity at runtime) at the control-plane boundary.
+      const projectID = ProjectV2.ID.make(input.projectID)
+      registerAdapter(projectID, input.type, localAdapter(input.directory))
       return yield* Workspace.Service.use((svc) =>
         svc.create({
           type: input.type,
           branch: null,
           extra: null,
-          projectID: input.projectID,
+          projectID,
         }),
       )
     }),

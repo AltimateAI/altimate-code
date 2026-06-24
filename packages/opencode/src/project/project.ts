@@ -29,6 +29,7 @@ import { ProjectID } from "./schema"
 // keep using the namespace API directly.
 import { Context, Effect, Layer, Schema } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { serviceUse } from "@opencode-ai/core/effect/service-use"
 // altimate_change end
 
 export namespace Project {
@@ -570,6 +571,11 @@ export namespace Project {
   )
 
   export const defaultLayer = layer
+
+  // altimate_change start — `use` accessor mirrors Session.use so tests/consumers can call
+  // Project.use.get(...) etc. without the explicit Service.use((p) => p.get(...)) wrapper.
+  export const use = serviceUse(Service)
+  // altimate_change end
 
   export const node = LayerNode.make(layer, [])
   // altimate_change end

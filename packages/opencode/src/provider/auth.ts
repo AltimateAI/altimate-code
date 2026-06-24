@@ -246,6 +246,12 @@ export async function authorize(input: { providerID: string } & AuthorizeInput) 
 export async function callback(input: { providerID: string } & CallbackInput) {
   return runProviderAuth((svc) => svc.callback({ ...input, providerID: ProviderV2.ID.make(input.providerID) }))
 }
+// Persist an API-key credential for a provider. Restored after the Effect-only
+// migration dropped it; delegates straight to Auth (the Service had no extra
+// behavior beyond the auth.set above).
+export async function api(input: { providerID: string; key: string }) {
+  return Auth.set(input.providerID, { type: "api", key: input.key })
+}
 // altimate_change end
 
 export * as ProviderAuth from "./auth"

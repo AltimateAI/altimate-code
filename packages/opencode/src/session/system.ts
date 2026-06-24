@@ -24,6 +24,10 @@ import { Skill } from "@/skill"
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
+// altimate_change start — Effect Service facade for SystemPrompt.skills (see bottom of namespace)
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 // altimate_change end
 
 export namespace SystemPrompt {
@@ -241,5 +245,20 @@ export namespace SystemPrompt {
     }
     return false
   }
+  // altimate_change end
+
+  // altimate_change start — Effect Service facade delegating to the namespace skills() fn
+  export interface Interface {
+    readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
+  }
+  export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      skills: (agent: Agent.Info) => Effect.promise(() => skills(agent)),
+    }),
+  )
+  export const defaultLayer = layer
+  export const node = LayerNode.make(layer, [])
   // altimate_change end
 }

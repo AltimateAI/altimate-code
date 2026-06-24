@@ -4,6 +4,10 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { UsageService } from "@/acp/usage"
 import { Provider } from "@/provider/provider"
+// altimate_change start — fork Provider.Info/Model ids are branded ProviderID/ModelID (src/provider/schema.ts),
+// distinct from core ProviderV2.ID/ModelV2.ID used by the usage layer; re-brand at the Provider.Info/Model boundary.
+import { ProviderID, ModelID } from "@/provider/schema"
+// altimate_change end
 import { Effect, Layer } from "effect"
 import { it } from "../lib/effect"
 
@@ -43,8 +47,8 @@ const assistantWithoutProvider = (): UsageService.SessionMessage => ({
 })
 
 const model = (providerID: ProviderV2.ID, modelID: ModelV2.ID, context: number): Provider.Model => ({
-  id: modelID,
-  providerID,
+  id: ModelID.make(modelID),
+  providerID: ProviderID.make(providerID),
   api: {
     id: modelID,
     url: "https://example.com",
@@ -81,7 +85,7 @@ const providers = (context = 128_000): Record<ProviderV2.ID, Provider.Info> => {
   const modelID = ModelV2.ID.make("claude-sonnet")
   return {
     [providerID]: {
-      id: providerID,
+      id: ProviderID.make(providerID),
       name: "Anthropic",
       source: "config",
       env: [],

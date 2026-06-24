@@ -17,6 +17,7 @@ import { mkdir } from "node:fs/promises"
 import path from "node:path"
 import { registerAdapter } from "../../src/control-plane/adapters"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import type { WorkspaceAdapter } from "../../src/control-plane/types"
 import { Workspace } from "../../src/control-plane/workspace"
 import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
@@ -126,13 +127,15 @@ const syncResponse = (request: HttpServerRequest.HttpServerRequest) => {
 const createWorkspace = (input: { projectID: Project.Info["id"]; type: string; adapter: WorkspaceAdapter }) =>
   Effect.acquireRelease(
     Effect.gen(function* () {
-      registerAdapter(input.projectID, input.type, input.adapter)
+      // Re-brand fork ProjectID -> core ProjectV2.ID (identity at runtime) at the control-plane boundary.
+      const projectID = ProjectV2.ID.make(input.projectID)
+      registerAdapter(projectID, input.type, input.adapter)
       const workspace = yield* Workspace.Service
       return yield* workspace.create({
         type: input.type,
         branch: null,
         extra: null,
-        projectID: input.projectID,
+        projectID,
       })
     }),
     (info) => Workspace.use.remove(info.id).pipe(Effect.ignore),
@@ -169,11 +172,13 @@ const insertRemoteWorkspaceWithoutSync = (input: {
 }) =>
   Effect.gen(function* () {
     const id = WorkspaceV2.ID.ascending()
-    registerAdapter(input.projectID, input.type, remoteAdapter(path.join(input.dir, `.${input.type}`), input.url))
+    // Re-brand fork ProjectID -> core ProjectV2.ID (identity at runtime) at the control-plane boundary.
+    const projectID = ProjectV2.ID.make(input.projectID)
+    registerAdapter(projectID, input.type, remoteAdapter(path.join(input.dir, `.${input.type}`), input.url))
     const { db } = yield* Database.Service
     yield* db
       .insert(WorkspaceTable)
-      .values({ id, type: input.type, project_id: input.projectID })
+      .values({ id, type: input.type, project_id: projectID })
       .run()
       .pipe(Effect.orDie)
     return id
@@ -346,7 +351,11 @@ describe("HttpApi workspace routing middleware", () => {
           { status: 202, headers: { [FenceHeader]: JSON.stringify({ aggregate: 3 }) } },
         ),
       )
-      registerAdapter(project.project.id, type, remoteAdapter(path.join(dir, `.${type}`), `${remoteUrl}/base`))
+      registerAdapter(
+        ProjectV2.ID.make(project.project.id),
+        type,
+        remoteAdapter(path.join(dir, `.${type}`), `${remoteUrl}/base`),
+      )
 
       const workspace = Workspace.Service.of({
         create: () => Effect.die("unused"),
@@ -363,7 +372,7 @@ describe("HttpApi workspace routing middleware", () => {
                   name: "remote-http-fence-target",
                   directory: null,
                   extra: null,
-                  projectID: project.project.id,
+                  projectID: ProjectV2.ID.make(project.project.id),
                   timeUsed: Date.now(),
                 }
               : undefined,

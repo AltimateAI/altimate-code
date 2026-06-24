@@ -85,7 +85,8 @@ describe("HttpApi CORS", () => {
   it.live("uses custom CORS origins passed to the server", () =>
     Effect.gen(function* () {
       const listener = yield* Effect.acquireRelease(
-        Effect.promise(() => Server.listen({ hostname: "127.0.0.1", port: 0, cors: ["https://custom.example"] })),
+        // Server.listen is synchronous and returns a Bun Server.
+        Effect.sync(() => Server.listen({ hostname: "127.0.0.1", port: 0, cors: ["https://custom.example"] })),
         (listener) => Effect.promise(() => listener.stop(true)),
       )
 

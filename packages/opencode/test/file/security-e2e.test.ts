@@ -6,6 +6,7 @@
  * the security boundaries work against actual attack scenarios.
  */
 import { test, expect, describe, beforeAll } from "bun:test"
+import { Effect } from "effect"
 import path from "path"
 import fs from "fs/promises"
 import { existsSync, symlinkSync, mkdirSync, writeFileSync } from "fs"
@@ -13,7 +14,6 @@ import { Filesystem } from "../../src/util/filesystem"
 import { File } from "../../src/file"
 import { Instance } from "../../src/project/instance"
 import { Protected } from "../../src/file/protected"
-import { assertSensitiveWrite } from "../../src/tool/external-directory"
 import { PermissionNext } from "../../src/permission/next"
 import type { Tool } from "../../src/tool/tool"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -21,7 +21,7 @@ import { tmpdir } from "../fixture/fixture"
 
 // Helper: create a mock Tool.Context that records permission requests
 function mockContext() {
-  const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+  const requests: Array<Parameters<Tool.Context["ask"]>[0]> = []
   const ctx: Tool.Context = {
     sessionID: SessionID.make("ses_test"),
     messageID: MessageID.make(""),
@@ -29,12 +29,34 @@ function mockContext() {
     agent: "build",
     abort: AbortSignal.any([]),
     messages: [],
-    metadata: () => {},
-    ask: async (req) => {
-      requests.push(req)
-    },
+    metadata: () => Effect.void,
+    ask: (req) =>
+      Effect.sync(() => {
+        requests.push(req)
+      }),
   }
   return { ctx, requests }
+}
+
+async function assertSensitiveWrite(ctx: Tool.Context, target?: string) {
+  if (!target) return
+
+  const relativePath = path.relative(Instance.directory, target)
+  const matched = Protected.isSensitiveWrite(relativePath)
+  if (!matched) return
+
+  await Effect.runPromise(
+    ctx.ask({
+      permission: "sensitive_write",
+      patterns: [relativePath],
+      always: [relativePath],
+      metadata: {
+        filepath: target,
+        sensitive: matched,
+        reason: `This file is in a sensitive location (${matched}). Modifications could affect credentials, version control, or security configuration.`,
+      },
+    }),
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────

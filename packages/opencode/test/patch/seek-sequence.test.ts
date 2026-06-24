@@ -32,7 +32,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         old_lines: ["line2"],
         new_lines: ["REPLACED"],
       },
-    ])
+    ], content)
 
     expect(result.content).toBe("line1\nREPLACED\nline3\n")
     expect(result.unified_diff).toContain("-line2")
@@ -50,7 +50,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         old_lines: ["line2"],
         new_lines: ["REPLACED"],
       },
-    ])
+    ], content)
 
     expect(result.content).toContain("REPLACED")
   })
@@ -66,7 +66,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         old_lines: ["return 1"],
         new_lines: ["return 42"],
       },
-    ])
+    ], content)
 
     expect(result.content).toContain("return 42")
   })
@@ -82,7 +82,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         old_lines: ['const msg = "Hello World"'],
         new_lines: ['const msg = "Goodbye World"'],
       },
-    ])
+    ], content)
 
     expect(result.content).toContain("Goodbye World")
   })
@@ -98,7 +98,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         old_lines: ["value - description"],
         new_lines: ["value - updated"],
       },
-    ])
+    ], content)
 
     expect(result.content).toContain("updated")
   })
@@ -115,7 +115,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         new_lines: ["LAST"],
         is_end_of_file: true,
       },
-    ])
+    ], content)
 
     expect(result.content).toBe("line1\nline2\nline3\nLAST\n")
   })
@@ -132,7 +132,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         new_lines: ["  return 99"],
         change_context: "function bar() {",
       },
-    ])
+    ], content)
 
     expect(result.content).toContain("function foo() {\n  return 1")
     expect(result.content).toContain("function bar() {\n  return 99")
@@ -149,11 +149,14 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
           old_lines: ["nonexistent line"],
           new_lines: ["replacement"],
         },
-      ]),
+      ], "hello\nworld\n"),
     ).toThrow("Failed to find expected lines")
   })
 
-  test("throws when file does not exist", async () => {
+  // altimate_change start — upstream v1.17.9 changed deriveNewContentsFromChunks to accept
+  // originalText directly instead of reading from disk, so the "Failed to read file" path no
+  // longer exists in this function (file reads moved to the caller).
+  test.skip("throws when file does not exist (file read moved out of function in upstream v1.17.9)", async () => {
     await using tmp = await tmpdir()
     expect(() =>
       Patch.deriveNewContentsFromChunks(path.join(tmp.path, "nonexistent-file.txt"), [
@@ -161,9 +164,10 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
           old_lines: ["x"],
           new_lines: ["y"],
         },
-      ]),
+      ], ""),
     ).toThrow("Failed to read file")
   })
+  // altimate_change end
 
   test("multiple chunks applied in sequence", async () => {
     await using tmp = await tmpdir()
@@ -180,7 +184,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         old_lines: ["delta"],
         new_lines: ["DELTA"],
       },
-    ])
+    ], content)
 
     expect(result.content).toBe("alpha\nBETA\ngamma\nDELTA\n")
   })
@@ -195,7 +199,7 @@ describe("Patch.deriveNewContentsFromChunks — seekSequence matching", () => {
         old_lines: [],
         new_lines: ["new_line"],
       },
-    ])
+    ], "existing\n")
 
     expect(result.content).toContain("existing")
     expect(result.content).toContain("new_line")

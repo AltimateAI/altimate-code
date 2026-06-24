@@ -1,15 +1,21 @@
-wip: v1.17.9 reconciliation — packages/opencode/src is GREEN (checkpoint 31)
+wip: v1.17.9 reconciliation — opencode TYPECHECK GREEN (0 errors) (checkpoint 32)
 
-Final src wave (3 parallel agents) cleared the last 52 errors. packages/opencode/src/ now typechecks
-with ZERO errors. Session-resume trajectory: opencode 3181 -> 1222 (all remaining are test/ only).
+The entire packages/opencode typecheck (src + test + the drivers it references) is now GREEN — 0
+errors, down from 3181 at the start of this reconciliation. packages/core, packages/tui,
+packages/plugin remain green.
 
-Last fixes: Locale named-imports across cli/cmd/run/*; MessageV2.SYNTHETIC_ATTACHMENT_PROMPT +
-Filesystem.resolveFilePath shared helpers; plugin experimental_workspace adapter registry +
-config.plugin [spec,options] normalization; SessionShareTable -> @opencode-ai/core/share/sql;
-SDK.FileDiff -> SnapshotFileDiff; ProviderV2/ModelV2<->fork brand re-maps at remaining boundaries;
-LanguageModelV3 specificationVersion; Effect.scoped + FetchHttpClient for ToolRegistry builtins;
-workspace-router-middleware repointed to the Workspace Effect Service; Identifier.create ascending arg.
+This wave: cleared the full ~1222 test-fixture backlog via dual-runtime parallelism — codex (3 rounds:
+test/altimate, test/tool+command, and the loose dirs) + ~13 Claude agents (session, control-plane,
+server, provider, config, skill, effect, project, release-validation, id, patch, acp). Test fixtures
+reconciled to the new APIs: brand re-maps (ProviderV2/ModelV2/Project.ID <-> fork), MessageV2<->SessionV1
+shape casts, Effect Service access (X.Service.use / AppRuntime.runPromise), the new Effect Tool API via
+a shared test/altimate/tool-fixture.ts (initTool) helper, sync-ified namespace fns, zod()/Schema bridges.
+Removed-feature tests .skip-ped with marked notes (ToolRegistry.named, SystemPrompt-as-pure-Service skills
+injection, ProviderTransform.smallOptions variants, keybind/color util removals).
 
-packages/core + packages/tui + packages/plugin already green. Remaining: ~1222 test errors (many
-were src cascades, now stable) — fixture brand-mismatches, MessageV2/SessionV1 shape diffs, and
-tests tracking the new Effect Service/Schema APIs. Next: dual-runtime (codex + Claude) test phase.
+Also: restored ConfigPaths.parseText + ProviderAuth.api + Provider.use/Project.use + control-plane/sse.ts
++ MessageV2.latest + Log.init + tool .txt assets (bash.txt) + sync/event.sql; added SystemPrompt Service
+facade; added @hono/standard-validator dep (test runtime); drivers/sqlserver Azure optional-peer typed any.
+
+NEXT: actually RUN the suite (bun test) — typecheck-green != tests-pass; runtime failures + the skipped
+tests are the remaining work. Then marker-guard --strict cleanup + review/PR.

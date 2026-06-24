@@ -9,18 +9,20 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Database } from "@opencode-ai/core/database/database"
 import { ProjectDirectoryTable, ProjectTable } from "@opencode-ai/core/project/sql"
 import { ProjectV2 } from "@opencode-ai/core/project"
+import { ProjectID } from "@/project/schema"
 import { Project } from "@/project/project"
 import { tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(Layer.mergeAll(Project.defaultLayer, Database.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
-function directories(projectID: ProjectV2.ID) {
+function directories(projectID: ProjectID | ProjectV2.ID) {
   return Database.Service.use(({ db }) =>
     db
       .select()
       .from(ProjectDirectoryTable)
-      .where(eq(ProjectDirectoryTable.project_id, projectID))
+      // re-brand fork ProjectID -> core "Project.ID" for the column read (identity at runtime)
+      .where(eq(ProjectDirectoryTable.project_id, ProjectV2.ID.make(projectID)))
       .all()
       .pipe(
         Effect.orDie,
@@ -184,7 +186,7 @@ describe("Project directory persistence", () => {
       const { db } = yield* Database.Service
       yield* db
         .insert(ProjectDirectoryTable)
-        .values({ project_id: original.project.id, directory: stale })
+        .values({ project_id: ProjectV2.ID.make(original.project.id), directory: stale })
         .run()
         .pipe(Effect.orDie)
       const remoteID = ProjectV2.ID.make(Hash.fast("git-remote:github.com/project-directory-test/migration"))

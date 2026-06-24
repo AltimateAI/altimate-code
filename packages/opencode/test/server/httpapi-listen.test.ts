@@ -293,7 +293,7 @@ describe("HttpApi Server.listen", () => {
       return true
     }) as typeof process.stderr.write
     try {
-      const response = await Server.Default().app.request("/status")
+      const response = await Server.Default().request("/status")
       expect(response.status).toBe(200)
     } finally {
       process.stderr.write = original

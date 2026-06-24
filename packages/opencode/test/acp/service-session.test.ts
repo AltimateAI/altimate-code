@@ -13,6 +13,10 @@ import type {
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+// altimate_change start — fork Provider.Info/Model ids are branded ProviderID/ModelID (src/provider/schema.ts),
+// distinct from core ProviderV2.ID/ModelV2.ID used by the ACP session layer; re-brand at the Provider.Info literal.
+import { ProviderID, ModelID } from "@/provider/schema"
+// altimate_change end
 import { Effect } from "effect"
 import * as ACPService from "@/acp/service"
 import * as ACPError from "@/acp/error"
@@ -25,15 +29,15 @@ const configuredModelID = ModelV2.ID.make("configured-model")
 const secondModelID = ModelV2.ID.make("second-model")
 
 const provider: Provider.Info = {
-  id: providerID,
+  id: ProviderID.make(providerID),
   name: "Test",
   source: "config",
   env: [],
   options: {},
   models: {
     [modelID]: {
-      id: modelID,
-      providerID,
+      id: ModelID.make(modelID),
+      providerID: ProviderID.make(providerID),
       api: {
         id: modelID,
         url: "https://example.com",
@@ -69,8 +73,8 @@ const provider: Provider.Info = {
       },
     },
     [configuredModelID]: {
-      id: configuredModelID,
-      providerID,
+      id: ModelID.make(configuredModelID),
+      providerID: ProviderID.make(providerID),
       api: {
         id: configuredModelID,
         url: "https://example.com",
@@ -102,8 +106,8 @@ const provider: Provider.Info = {
       release_date: "2026-01-01",
     },
     [secondModelID]: {
-      id: secondModelID,
-      providerID,
+      id: ModelID.make(secondModelID),
+      providerID: ProviderID.make(providerID),
       api: {
         id: secondModelID,
         url: "https://example.com",

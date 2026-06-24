@@ -20,8 +20,20 @@ import {
 import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
-import { Installation } from "../../src/installation"
 import { tmpdir } from "../fixture/fixture"
+// altimate_change start — upstream v1.17.9 migrated Installation.Event.UpdateAvailable to a core
+// EventV2.define (Effect Schema), which is no longer a fork BusEvent.Definition, and notify() now
+// emits via GlobalBus.emit rather than Bus.publish. This sub-block validates the provide-wrap (that
+// Instance.provide gives Bus.publish a working Instance context), which is event-agnostic — exercise
+// it with a fork BusEvent instead of the migrated Installation event.
+import { BusEvent } from "../../src/bus/bus-event"
+import { z } from "zod"
+
+const UpdateAvailableProbe = BusEvent.define(
+  "test.serve-upgrade-940.update-available",
+  z.object({ version: z.string() }),
+)
+// altimate_change end
 
 Log.init({ print: false })
 
@@ -56,12 +68,12 @@ describe("PR #940 serve-upgrade-check behavior", () => {
       const deps: StartupUpgradeDeps = {
         provide,
         run: async () => {
-          Bus.subscribe(Installation.Event.UpdateAvailable, (evt) => {
+          Bus.subscribe(UpdateAvailableProbe, (evt) => {
             received.push(evt.properties.version)
           })
           await Bun.sleep(10)
           try {
-            await Bus.publish(Installation.Event.UpdateAvailable, { version: "99.99.99" })
+            await Bus.publish(UpdateAvailableProbe, { version: "99.99.99" })
           } catch (err) {
             // A missing instance context surfaces as Context.NotFound here.
             publishThrew = err
@@ -88,7 +100,7 @@ describe("PR #940 serve-upgrade-check behavior", () => {
       // must fail. This is what would happen if the provide wrap regressed.
       let threw = false
       try {
-        await Bus.publish(Installation.Event.UpdateAvailable, { version: "99.99.99" })
+        await Bus.publish(UpdateAvailableProbe, { version: "99.99.99" })
       } catch {
         threw = true
       }

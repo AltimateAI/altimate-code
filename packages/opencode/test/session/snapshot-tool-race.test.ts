@@ -168,7 +168,7 @@ it.live("tool execution produces non-empty session diff (snapshot race)", () =>
       // Verify the tool call completed (in the first assistant message)
       const allMsgs = yield* MessageV2.filterCompactedEffect(session.id)
       const user = allMsgs.find(
-        (msg): msg is SessionV1.WithParts & { info: SessionV1.User } => msg.info.role === "user",
+        (msg): msg is MessageV2.WithParts & { info: MessageV2.User } => msg.info.role === "user",
       )
       const tool = allMsgs
         .flatMap((m) => m.parts)

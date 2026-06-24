@@ -122,7 +122,7 @@ describe("ShareNext", () => {
       Effect.gen(function* () {
         yield* seed("https://control.example.com", "org-1")
 
-        const req = yield* ShareNext.use.request()
+        const req = yield* ShareNext.Service.use((svc) => svc.request())
 
         expect(req.api.create).toBe("/api/shares")
         expect(req.api.sync("shr_123")).toBe("/api/shares/shr_123/sync")

@@ -43,7 +43,7 @@ const effectIt = testEffect(
 )
 
 function app() {
-  return Server.Default().app
+  return Server.Default()
 }
 
 function serverUrl() {

@@ -156,7 +156,7 @@ describe("step-finish token propagation via event", () => {
           if (event.type === MessageV2.Event.PartUpdated.type)
             Deferred.doneUnsafe(
               received,
-              Effect.succeed((event.data as typeof MessageV2.Event.PartUpdated.data.Type).part as SessionV1.Part),
+              Effect.succeed((event.data as { part: MessageV2.Part }).part as unknown as SessionV1.Part),
             )
           return Effect.void
         })

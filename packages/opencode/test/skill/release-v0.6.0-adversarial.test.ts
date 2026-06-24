@@ -18,6 +18,7 @@ import {
 } from "../../src/altimate/plugin/databricks"
 import { LLM } from "../../src/session/llm"
 import { DataDiffTool } from "../../src/altimate/tools/data-diff"
+import { initTool } from "../altimate/tool-fixture"
 import type { ModelMessage } from "ai"
 
 // ---------------------------------------------------------------------------
@@ -291,7 +292,7 @@ describe("toolNamesFromMessages — validation guards", () => {
 
 describe("data_diff tool description — release contract", () => {
   test("description mentions all 5 algorithms (auto, joindiff, hashdiff, profile, cascade)", async () => {
-    const info = await DataDiffTool.init()
+    const info = await initTool(DataDiffTool)
     expect(info.description).toContain("auto:")
     expect(info.description).toContain("joindiff:")
     expect(info.description).toContain("hashdiff:")
@@ -301,18 +302,18 @@ describe("data_diff tool description — release contract", () => {
   })
 
   test("description warns about PII/PHI/PCI data (Chaos Gremlin P0 partial fix)", async () => {
-    const info = await DataDiffTool.init()
+    const info = await initTool(DataDiffTool)
     expect(info.description.toLowerCase()).toMatch(/pii|phi|pci|compliance/)
     expect(info.description).toContain("profile")
   })
 
   test("description mentions partition threshold", async () => {
-    const info = await DataDiffTool.init()
+    const info = await initTool(DataDiffTool)
     expect(info.description.toLowerCase()).toContain("partition")
   })
 
   test("tool parameters enum includes cascade", async () => {
-    const info = await DataDiffTool.init()
+    const info = await initTool(DataDiffTool)
     const algorithmField = (info.parameters as any).shape?.algorithm
     expect(algorithmField).toBeDefined()
     // Walk zod 4 .def tree through wrapper nodes (default, optional) to find the enum

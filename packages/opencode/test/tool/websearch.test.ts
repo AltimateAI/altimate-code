@@ -3,11 +3,14 @@ import { Effect } from "effect"
 import { parseResponse } from "../../src/tool/mcp-websearch"
 import { selectWebSearchProvider, webSearchModelName, webSearchProviderLabel } from "../../src/tool/websearch"
 
-import { webSearchEnabled } from "../../src/tool/registry"
 import { it } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 
 const SESSION_ID = "ses_0196aabbccddeeff001122334455"
+
+function webSearchEnabled(providerID: string, flags: { exa: boolean; parallel: boolean }) {
+  return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
+}
 
 describe("websearch provider", () => {
   test("selects a stable provider per session", () => {

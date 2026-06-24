@@ -3,6 +3,7 @@ import { Schema } from "effect"
 // altimate_change start — Effect Context.Service facade deps (added to existing namespace)
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { serviceUse } from "@opencode-ai/core/effect/service-use"
 // altimate_change end
 import os from "os"
 import fuzzysort from "fuzzysort"
@@ -2035,5 +2036,10 @@ export namespace Provider {
   export const defaultLayer = layer
 
   export const node = LayerNode.make(layer, [])
+
+  // Effect accessor over the Service (mirrors Env.use): `Provider.use.list()`
+  // returns an Effect requiring `Provider.Service` in R. Used by tests/consumers
+  // that compose Provider into an Effect runtime via `Provider.defaultLayer`.
+  export const use = serviceUse(Service)
   // altimate_change end
 }

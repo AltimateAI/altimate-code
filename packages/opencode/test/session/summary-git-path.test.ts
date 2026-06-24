@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test"
 import { SessionSummary } from "../../src/session/summary"
 import { Instance } from "../../src/project/instance"
 import { Storage } from "../../src/storage/storage"
+import { AppRuntime } from "../../src/effect/app-runtime"
 import { Log } from "../../src/util/log"
 import { Identifier } from "../../src/id/id"
 import { tmpdir } from "../fixture/fixture"
@@ -32,9 +33,9 @@ async function roundtrip(files: string[]): Promise<string[]> {
     status: "added" as const,
   }))
 
-  await Storage.write(["session_diff", sessionID], diffs)
+  await AppRuntime.runPromise(Storage.Service.use((s) => s.write(["session_diff", sessionID], diffs)))
   const result = await SessionSummary.diff({ sessionID })
-  return result.map((d) => d.file)
+  return result.map((d) => d.file).filter((f): f is string => f !== undefined)
 }
 
 describe("SessionSummary.diff: unquoteGitPath decoding", () => {

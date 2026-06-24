@@ -1,5 +1,7 @@
 import { describe, expect, test, beforeEach, afterAll } from "bun:test"
 import Bun from "bun"
+import { Result, Schema } from "effect"
+import { initTool } from "../altimate/tool-fixture"
 
 // ---------------------------------------------------------------------------
 // Mock state — controls what the mocked bun `$` returns per sequential call
@@ -94,6 +96,13 @@ const ctx = {
   ask: async () => {},
 } as any
 
+function safeParse<S extends Schema.Decoder<unknown>>(schema: S, input: unknown) {
+  const result = Schema.decodeUnknownResult(schema)(input)
+  return Result.isSuccess(result)
+    ? { success: true as const, data: result.success as S["Type"] }
+    : { success: false as const, error: result.failure }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -113,14 +122,14 @@ describe("tool.feedback_submit", () => {
     })
 
     test("has correct description mentioning feedback and GitHub", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
       expect(tool.description).toContain("feedback")
       expect(tool.description).toContain("GitHub issue")
       expect(tool.description).toContain("gh")
     })
 
     test("has parameter schema defined", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
       expect(tool.parameters).toBeDefined()
     })
   })
@@ -131,8 +140,8 @@ describe("tool.feedback_submit", () => {
 
   describe("parameter validation", () => {
     test("accepts valid parameters with all fields", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "Test issue",
         category: "bug",
         description: "Something is broken",
@@ -148,8 +157,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("defaults include_context to false when omitted", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "Test",
         category: "bug",
         description: "test",
@@ -161,8 +170,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects empty title", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "",
         category: "bug",
         description: "test",
@@ -171,8 +180,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects whitespace-only title", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "   ",
         category: "bug",
         description: "test",
@@ -181,8 +190,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects empty description", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "Test",
         category: "bug",
         description: "",
@@ -191,8 +200,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects whitespace-only description", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "Test",
         category: "bug",
         description: "   ",
@@ -201,8 +210,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects missing title", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         category: "bug",
         description: "test",
       })
@@ -210,8 +219,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects missing category", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "Test",
         description: "test",
       })
@@ -219,8 +228,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects invalid category", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "Test",
         category: "invalid-category",
         description: "test",
@@ -229,8 +238,8 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects missing description", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {
         title: "Test",
         category: "bug",
       })
@@ -238,15 +247,15 @@ describe("tool.feedback_submit", () => {
     })
 
     test("rejects empty object", async () => {
-      const tool = await FeedbackSubmitTool.init()
-      const result = tool.parameters.safeParse({})
+      const tool = await initTool(FeedbackSubmitTool)
+      const result = safeParse(tool.parameters, {})
       expect(result.success).toBe(false)
     })
 
     test("accepts all valid categories", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
       for (const category of ["bug", "feature", "improvement", "ux"]) {
-        const result = tool.parameters.safeParse({
+        const result = safeParse(tool.parameters, {
           title: "Test",
           category,
           description: "test",
@@ -262,7 +271,7 @@ describe("tool.feedback_submit", () => {
 
   describe("gh CLI not available", () => {
     test("returns error with install instructions when gh is not found", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       // gh --version returns empty string (not found)
       pushShellResult("")
@@ -286,7 +295,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("returns error when gh --version output does not start with 'gh version'", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("command not found: gh")
 
@@ -305,7 +314,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("returns error when gh binary spawn throws ENOENT", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       // Simulate ENOENT — binary not on PATH
       pushShellThrow()
@@ -331,7 +340,7 @@ describe("tool.feedback_submit", () => {
 
   describe("gh auth status throws", () => {
     test("returns gh_auth_check_failed (not gh_not_installed) when auth check throws", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       // gh --version succeeds
       pushShellResult("gh version 2.40.0")
@@ -360,7 +369,7 @@ describe("tool.feedback_submit", () => {
 
   describe("gh CLI not authenticated", () => {
     test("returns error with auth instructions when not logged in", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       // gh --version succeeds
       pushShellResult("gh version 2.40.0")
@@ -390,7 +399,7 @@ describe("tool.feedback_submit", () => {
 
   describe("successful issue creation", () => {
     test("returns success with issue URL", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       // gh --version
       pushShellResult("gh version 2.40.0")
@@ -417,7 +426,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("returns failure when both label and no-label attempts have no github URL", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       // gh --version
       pushShellResult("gh version 2.40.0")
@@ -444,7 +453,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("returns failure when both attempts return empty output", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -468,7 +477,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("succeeds via fallback when label creation fails but no-label attempt works", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -493,7 +502,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("returns failure when label attempt has non-zero exitCode and retry also fails", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -517,7 +526,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("returns failure when issue creation throws", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -539,7 +548,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("returns failure when retry without labels throws", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -569,7 +578,7 @@ describe("tool.feedback_submit", () => {
 
   describe("category label mapping", () => {
     async function createIssueWithCategory(category: string) {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
       resetShellMock()
 
       pushShellResult("gh version 2.40.0")
@@ -622,7 +631,7 @@ describe("tool.feedback_submit", () => {
 
   describe("metadata in issue body", () => {
     async function getIssueBody(includeContext: boolean) {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
       resetShellMock()
 
       pushShellResult("gh version 2.40.0")
@@ -698,7 +707,7 @@ describe("tool.feedback_submit", () => {
 
   describe("issue creation", () => {
     test("targets the AltimateAI/altimate-code repository", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -719,7 +728,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("passes the title to gh issue create", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -740,7 +749,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("makes exactly 3 shell calls for successful submission when labels exist", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -760,7 +769,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("makes exactly 4 shell calls when label attempt fails and retry succeeds", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("Logged in", 0)
@@ -786,7 +795,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("makes only 1 shell call when gh is not installed", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("")
 
@@ -804,7 +813,7 @@ describe("tool.feedback_submit", () => {
     })
 
     test("makes only 2 shell calls when gh is not authenticated", async () => {
-      const tool = await FeedbackSubmitTool.init()
+      const tool = await initTool(FeedbackSubmitTool)
 
       pushShellResult("gh version 2.40.0")
       pushShellResult("", 1)

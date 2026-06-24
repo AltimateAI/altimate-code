@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll, mock } from "bun:test"
+import { initTool } from "./tool-fixture"
 
 // Mock DuckDB driver so sql.execute tests don't need native duckdb
 mock.module("@altimateai/drivers/duckdb", () => ({
@@ -302,7 +303,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -320,7 +321,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -343,7 +344,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -363,7 +364,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -384,7 +385,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -404,7 +405,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         try {
           await tool.execute(
             { query: "DROP SCHEMA public CASCADE", limit: 100 },
@@ -427,7 +428,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         await expect(
           tool.execute(
             { query: "SELECT 1; DROP DATABASE prod", limit: 100 },
@@ -444,7 +445,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -466,7 +467,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -490,7 +491,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const askRequests: any[] = []
         const testCtx = {
           ...baseCtx,
@@ -515,7 +516,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const result = await tool.execute(
           { query: "SELECT 1", limit: 100 },
           baseCtx,
@@ -533,7 +534,7 @@ describe("User perspective: sql_execute permission flow", () => {
       directory: tmp.path,
       fn: async () => {
         Registry.setConfigs({ test: { type: "duckdb", path: ":memory:" } })
-        const tool = await SqlExecuteTool.init()
+        const tool = await initTool(SqlExecuteTool)
         const longQuery = "SELECT " + Array(100).fill("col").join(", ") + " FROM table"
         const result = await tool.execute(
           { query: longQuery, limit: 100 },

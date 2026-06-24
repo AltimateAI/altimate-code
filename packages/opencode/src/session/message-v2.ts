@@ -616,7 +616,9 @@ export namespace MessageV2 {
   export const toModelMessagesEffect = Effect.fnUntraced(function* (
     input: WithParts[],
     model: Provider.Model,
-    options?: { stripMedia?: boolean },
+    // altimate_change start — toolOutputMaxChars caps tool output length for compaction
+    options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+    // altimate_change end
   ) {
     const result: UIMessage[] = []
     const toolNames = new Set<string>()
@@ -754,7 +756,18 @@ export namespace MessageV2 {
           if (part.type === "tool") {
             toolNames.add(part.tool)
             if (part.state.status === "completed") {
-              const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
+              // altimate_change start — toolOutputMaxChars truncates long tool output for compaction
+              const rawOutputText = part.state.time.compacted
+                ? "[Old tool result content cleared]"
+                : part.state.output
+              const maxChars = options?.toolOutputMaxChars
+              const outputText =
+                !part.state.time.compacted && maxChars !== undefined && rawOutputText.length > maxChars
+                  ? `${rawOutputText.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${
+                      rawOutputText.length - maxChars
+                    } chars]`
+                  : rawOutputText
+              // altimate_change end
               const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
               // For providers that don't support media in tool results, extract media files
@@ -857,7 +870,9 @@ export namespace MessageV2 {
   export function toModelMessages(
     input: WithParts[],
     model: Provider.Model,
-    options?: { stripMedia?: boolean },
+    // altimate_change start — toolOutputMaxChars caps tool output length for compaction
+    options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+    // altimate_change end
   ): Promise<ModelMessage[]> {
     return Effect.runPromise(toModelMessagesEffect(input, model, options))
   }
@@ -964,6 +979,44 @@ export namespace MessageV2 {
   export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
     return filterCompacted(stream(sessionID))
   })
+
+  // altimate_change start — extract loop "latest message state" selection into a testable helper.
+  // Message IDs are monotonic/chronological, so selection must be by id, not array position:
+  // filterCompacted reorders messages (#27145), so picking the array-latest finished assistant
+  // lands on the pre-compaction overflow assistant and bypasses the summary overflow guard.
+  export interface Latest {
+    user?: User
+    assistant?: Assistant
+    finished?: Assistant
+    tasks: (CompactionPart | SubtaskPart)[]
+  }
+
+  export function latest(msgs: Iterable<MessageV2.WithParts>): Latest {
+    const list = [...msgs]
+    let user: User | undefined
+    let assistant: Assistant | undefined
+    let finished: Assistant | undefined
+    for (const msg of list) {
+      if (msg.info.role === "user") {
+        if (!user || msg.info.id > user.id) user = msg.info as User
+        continue
+      }
+      if (msg.info.role === "assistant") {
+        const info = msg.info as Assistant
+        if (!assistant || info.id > assistant.id) assistant = info
+        if (info.finish && (!finished || info.id > finished.id)) finished = info
+      }
+    }
+    const tasks: (CompactionPart | SubtaskPart)[] = []
+    for (const msg of list) {
+      if (finished && msg.info.id <= finished.id) continue
+      for (const part of msg.parts) {
+        if (part.type === "compaction" || part.type === "subtask") tasks.push(part)
+      }
+    }
+    return { user, assistant, finished, tasks }
+  }
+  // altimate_change end
 
   export function fromError(
     e: unknown,

@@ -18,6 +18,7 @@ import { disposeAllInstances, provideInstance, tmpdirScoped } from "../fixture/f
 import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
 import { Project } from "../../src/project/project"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { InstancePaths } from "../../src/server/routes/instance/httpapi/groups/instance"
 import { testEffect } from "../lib/effect"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
@@ -49,7 +50,7 @@ function requestDefault(path: string, directory: string, init: RequestInit = {})
 function requestServer(path: string, directory: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
   headers.set("x-opencode-directory", directory)
-  return Effect.promise(() => Promise.resolve(Server.Default().app.request(path, { ...init, headers })))
+  return Effect.promise(() => Promise.resolve(Server.Default().request(path, { ...init, headers })))
 }
 
 function localAdapter(directory: string): WorkspaceAdapter {
@@ -93,7 +94,9 @@ function listedAdapter(directory: string, type: string): WorkspaceAdapter {
           branch: "listed/main",
           directory,
           extra: { listed: true },
-          projectID: context?.instance?.project.id ?? missingAdapterContext(),
+          projectID: context?.instance
+            ? ProjectV2.ID.make(context.instance.project.id)
+            : missingAdapterContext(),
         },
       ]
     },
@@ -212,7 +215,7 @@ describe("workspace HttpApi", () => {
       Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = true
       const dir = yield* tmpdirScoped({ git: true })
       const project = yield* Project.use.fromDirectory(dir)
-      registerAdapter(project.project.id, "local-test", localAdapter(path.join(dir, ".workspace")))
+      registerAdapter(ProjectV2.ID.make(project.project.id), "local-test", localAdapter(path.join(dir, ".workspace")))
 
       const created = yield* request(WorkspacePaths.list, dir, {
         method: "POST",
@@ -247,7 +250,7 @@ describe("workspace HttpApi", () => {
       const dir = yield* tmpdirScoped({ git: true })
       const project = yield* Project.use.fromDirectory(dir)
       const type = `listed-${Math.random().toString(36).slice(2)}`
-      registerAdapter(project.project.id, type, listedAdapter(path.join(dir, ".listed"), type))
+      registerAdapter(ProjectV2.ID.make(project.project.id), type, listedAdapter(path.join(dir, ".listed"), type))
 
       const response = yield* request(WorkspacePaths.syncList, dir, { method: "POST" })
 
@@ -290,7 +293,7 @@ describe("workspace HttpApi", () => {
       Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = true
       const dir = yield* tmpdirScoped({ git: true })
       const project = yield* Project.use.fromDirectory(dir)
-      registerAdapter(project.project.id, "local-test", localAdapter(path.join(dir, ".workspace")))
+      registerAdapter(ProjectV2.ID.make(project.project.id), "local-test", localAdapter(path.join(dir, ".workspace")))
 
       const created = yield* request(WorkspacePaths.list, dir, {
         method: "POST",
@@ -330,7 +333,7 @@ describe("workspace HttpApi", () => {
       const dir = yield* tmpdirScoped({ git: true })
       const workspaceDir = path.join(dir, ".workspace-local")
       const project = yield* Project.use.fromDirectory(dir)
-      registerAdapter(project.project.id, "local-target", localAdapter(workspaceDir))
+      registerAdapter(ProjectV2.ID.make(project.project.id), "local-target", localAdapter(workspaceDir))
       const created = yield* request(WorkspacePaths.list, dir, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -381,7 +384,7 @@ describe("workspace HttpApi", () => {
 
       const project = yield* Project.use.fromDirectory(dir)
       registerAdapter(
-        project.project.id,
+        ProjectV2.ID.make(project.project.id),
         "remote-target",
         remoteAdapter(path.join(dir, ".remote"), `http://127.0.0.1:${remote.port}/base`, {
           "x-target-auth": "secret",
@@ -459,7 +462,7 @@ describe("workspace HttpApi", () => {
 
       const project = yield* Project.use.fromDirectory(dir)
       registerAdapter(
-        project.project.id,
+        ProjectV2.ID.make(project.project.id),
         "remote-session-target",
         remoteAdapter(path.join(dir, ".remote-session"), `http://127.0.0.1:${remote.port}/base`),
       )

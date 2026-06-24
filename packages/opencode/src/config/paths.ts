@@ -6,6 +6,12 @@ import { Global } from "@opencode-ai/core/global"
 import { unique } from "remeda"
 import * as Effect from "effect/Effect"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+// altimate_change start — imports for restored parseText (JSONC + env/file substitution)
+import os from "os"
+import { type ParseError as JsoncParseError, parse as parseJsonc, printParseErrorCode } from "jsonc-parser"
+import { Filesystem } from "@/util/filesystem"
+import { JsonError, InvalidError } from "@opencode-ai/core/v1/config/error"
+// altimate_change end
 
 export const files = Effect.fn("ConfigPaths.projectFiles")(function* (
   name: string,
@@ -114,5 +120,146 @@ export function newEnvSubstitutionStats(): EnvSubstitutionStats {
     legacyBraceUnresolved: 0,
     unresolvedNames: [],
   }
+}
+
+// Restored after the v1.17.9 upstream rewrite of paths.ts dropped these fork
+// helpers. Tests at test/config/paths-parsetext.test.ts exercise this surface.
+// JsonError/InvalidError now live in @opencode-ai/core/v1/config/error and are
+// re-exported here under the names the fork's call sites/tests expect.
+export { JsonError, InvalidError }
+
+type ParseSource = string | { source: string; dir: string }
+
+function source(input: ParseSource) {
+  return typeof input === "string" ? input : input.source
+}
+
+function dir(input: ParseSource) {
+  return typeof input === "string" ? path.dirname(input) : input.dir
+}
+
+/** Apply ${VAR}/${VAR:-default}/$${VAR}/{env:VAR} and {file:path} substitutions to config text. */
+async function substitute(text: string, input: ParseSource, missing: "error" | "empty" = "error") {
+  // Single-pass substitution against the ORIGINAL text prevents output of one
+  // pattern being re-matched by another (e.g. {env:A}="${B}" expanding B).
+  // Uses the shared ENV_VAR_PATTERN grammar, adding JSON-escaping for values
+  // substituted into raw JSON text (which is then parsed). This is the ONLY
+  // call site that applies JSON escaping; raw-string callers should use
+  // `resolveEnvVarsInString` instead.
+  const stats = newEnvSubstitutionStats()
+  text = text.replace(ENV_VAR_PATTERN, (match, escaped, dollarVar, dollarDefault, braceVar) => {
+    if (escaped !== undefined) {
+      stats.dollarEscaped++
+      return "$" + escaped
+    }
+    if (dollarVar !== undefined) {
+      stats.dollarRefs++
+      const envValue = process.env[dollarVar]
+      const resolved = envValue !== undefined && envValue !== ""
+      if (!resolved && dollarDefault !== undefined) stats.dollarDefaulted++
+      if (!resolved && dollarDefault === undefined) {
+        stats.dollarUnresolved++
+        stats.unresolvedNames.push(dollarVar)
+      }
+      const value = resolved ? envValue : (dollarDefault ?? "")
+      // JSON-escape because this substitution happens against raw JSON text.
+      return JSON.stringify(value).slice(1, -1)
+    }
+    if (braceVar !== undefined) {
+      // {env:VAR} → raw text injection (backward compat)
+      stats.legacyBraceRefs++
+      const v = process.env[braceVar]
+      if (v === undefined || v === "") {
+        stats.legacyBraceUnresolved++
+        stats.unresolvedNames.push(braceVar)
+      }
+      return v || ""
+    }
+    return match
+  })
+
+  const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
+  if (!fileMatches.length) return text
+
+  const configDir = dir(input)
+  const configSource = source(input)
+  let out = ""
+  let cursor = 0
+
+  for (const match of fileMatches) {
+    const token = match[0]
+    const index = match.index!
+    out += text.slice(cursor, index)
+
+    const lineStart = text.lastIndexOf("\n", index - 1) + 1
+    const prefix = text.slice(lineStart, index).trimStart()
+    if (prefix.startsWith("//")) {
+      out += token
+      cursor = index + token.length
+      continue
+    }
+
+    let filePath = token.replace(/^\{file:/, "").replace(/\}$/, "")
+    if (filePath.startsWith("~/")) {
+      filePath = path.join(os.homedir(), filePath.slice(2))
+    }
+
+    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(configDir, filePath)
+    const fileContent = (
+      await Filesystem.readText(resolvedPath).catch((error: NodeJS.ErrnoException) => {
+        if (missing === "empty") return ""
+
+        const errMsg = `bad file reference: "${token}"`
+        if (error.code === "ENOENT") {
+          throw new InvalidError(
+            {
+              path: configSource,
+              message: errMsg + ` ${resolvedPath} does not exist`,
+            },
+            { cause: error },
+          )
+        }
+        throw new InvalidError({ path: configSource, message: errMsg }, { cause: error })
+      })
+    ).trim()
+
+    out += JSON.stringify(fileContent).slice(1, -1)
+    cursor = index + token.length
+  }
+
+  out += text.slice(cursor)
+  return out
+}
+
+/** Substitute and parse JSONC text, throwing JsonError on syntax errors. */
+export async function parseText(text: string, input: ParseSource, missing: "error" | "empty" = "error"): Promise<any> {
+  const configSource = source(input)
+  text = await substitute(text, input, missing)
+
+  const errors: JsoncParseError[] = []
+  const data = parseJsonc(text, errors, { allowTrailingComma: true })
+  if (errors.length) {
+    const lines = text.split("\n")
+    const errorDetails = errors
+      .map((e) => {
+        const beforeOffset = text.substring(0, e.offset).split("\n")
+        const line = beforeOffset.length
+        const column = beforeOffset[beforeOffset.length - 1].length + 1
+        const problemLine = lines[line - 1]
+
+        const error = `${printParseErrorCode(e.error)} at line ${line}, column ${column}`
+        if (!problemLine) return error
+
+        return `${error}\n   Line ${line}: ${problemLine}\n${"".padStart(column + 9)}^`
+      })
+      .join("\n")
+
+    throw new JsonError({
+      path: configSource,
+      message: `\n--- JSONC Input ---\n${text}\n--- Errors ---\n${errorDetails}\n--- End ---`,
+    })
+  }
+
+  return data
 }
 // altimate_change end

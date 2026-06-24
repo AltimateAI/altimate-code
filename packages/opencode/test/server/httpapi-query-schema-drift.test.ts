@@ -95,7 +95,7 @@ const pathParamPatterns = [
 ] satisfies Array<{ method: Method; path: string; name: string; pattern: string }>
 
 function app() {
-  return Server.Default().app
+  return Server.Default()
 }
 
 function request(url: string, init?: RequestInit) {

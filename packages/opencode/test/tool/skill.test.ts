@@ -3,8 +3,6 @@ import { afterEach, describe, expect, test } from "bun:test"
 // altimate_change end
 import path from "path"
 import { pathToFileURL } from "url"
-import type { PermissionNext } from "../../src/permission/next"
-import type { Tool } from "../../src/tool/tool"
 import { Instance } from "../../src/project/instance"
 import { SkillTool } from "../../src/tool/skill"
 import { tmpdir } from "../fixture/fixture"
@@ -13,9 +11,10 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { resetSkillSelectorCache, selectSkillsWithLLM, type SkillSelectorDeps } from "../../src/altimate/skill-selector"
 import type { Skill } from "../../src/skill"
 import { Fingerprint } from "../../src/altimate/fingerprint/index"
+import { initTool, type TestToolContext } from "../altimate/tool-fixture"
 // altimate_change end
 
-const baseCtx: Omit<Tool.Context, "ask"> = {
+const baseCtx: Omit<TestToolContext, "ask"> = {
   sessionID: SessionID.make("ses_test"),
   messageID: MessageID.make(""),
   callID: "",
@@ -24,6 +23,7 @@ const baseCtx: Omit<Tool.Context, "ask"> = {
   messages: [],
   metadata: () => {},
 }
+type TestPermissionRequest = Parameters<NonNullable<TestToolContext["ask"]>>[0]
 
 // altimate_change start - helpers for env fingerprint skill selection tests
 /** Pre-populate the skill selector cache with a specific subset */
@@ -75,7 +75,7 @@ description: Skill for tool tests.
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const tool = await SkillTool.init()
+          const tool = await initTool(SkillTool)
           const skillPath = path.join(tmp.path, ".opencode", "skill", "tool-skill", "SKILL.md")
           // altimate_change start - updated assertion to match XML skill description format
           expect(tool.description).toContain(`<name>tool-skill</name>`)
@@ -116,9 +116,9 @@ Use this skill.
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const tool = await SkillTool.init()
-          const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-          const ctx: Tool.Context = {
+          const tool = await initTool(SkillTool)
+          const requests: TestPermissionRequest[] = []
+          const ctx: TestToolContext = {
             ...baseCtx,
             ask: async (req) => {
               requests.push(req)
@@ -173,8 +173,8 @@ Build models with dbt.
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const tool = await SkillTool.init()
-          const ctx: Tool.Context = {
+          const tool = await initTool(SkillTool)
+          const ctx: TestToolContext = {
             ...baseCtx,
             ask: async () => {},
           }
@@ -231,8 +231,8 @@ Do custom things.
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const tool = await SkillTool.init()
-          const ctx: Tool.Context = {
+          const tool = await initTool(SkillTool)
+          const ctx: TestToolContext = {
             ...baseCtx,
             ask: async () => {},
           }
@@ -278,7 +278,7 @@ Do custom things.
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const tool = await SkillTool.init()
+          const tool = await initTool(SkillTool)
           // No config set → default false → selector bypassed → both skills appear
           expect(tool.description).toContain("<name>skill-alpha</name>")
           expect(tool.description).toContain("<name>skill-beta</name>")
@@ -318,7 +318,7 @@ Do custom things.
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const tool = await SkillTool.init()
+          const tool = await initTool(SkillTool)
           // Selector was bypassed → both skills appear (from Skill.available, not cache)
           expect(tool.description).toContain("<name>skill-alpha</name>")
           expect(tool.description).toContain("<name>skill-beta</name>")
@@ -367,7 +367,7 @@ Do custom things.
       await Instance.provide({
         directory: tmp.path,
         fn: async () => {
-          const tool = await SkillTool.init()
+          const tool = await initTool(SkillTool)
           // Selector was called → returns cached subset (only skill-alpha)
           expect(tool.description).toContain("<name>skill-alpha</name>")
           expect(tool.description).not.toContain("<name>skill-beta</name>")

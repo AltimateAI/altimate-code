@@ -397,13 +397,13 @@ describe("workspace CRUD", () => {
         const workspace = yield* Workspace.Service
         const otherProjectID = ProjectV2.ID.make("project-other")
         yield* insertProject(otherProjectID, "/tmp/other")
-        const a = workspaceInfo(instance.project.id, "manual", {
+        const a = workspaceInfo(ProjectV2.ID.make(instance.project.id), "manual", {
           id: WorkspaceV2.ID.ascending("wrk_a_list"),
           branch: "a",
           directory: "/a",
           extra: { a: true },
         })
-        const b = workspaceInfo(instance.project.id, "manual", {
+        const b = workspaceInfo(ProjectV2.ID.make(instance.project.id), "manual", {
           id: WorkspaceV2.ID.ascending("wrk_b_list"),
           branch: "b",
           directory: "/b",
@@ -450,13 +450,13 @@ describe("workspace CRUD", () => {
             return { type: "local", directory: targetDir }
           },
         })
-        registerAdapter(instance.project.id, type, recorded.adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), type, recorded.adapter)
 
         const info = yield* workspace.create({
           id: workspaceID,
           type,
           branch: null,
-          projectID: instance.project.id,
+          projectID: ProjectV2.ID.make(instance.project.id),
           extra: null,
         })
 
@@ -467,7 +467,7 @@ describe("workspace CRUD", () => {
           name: "Configured Name",
           directory: targetDir,
           extra: { configured: true },
-          projectID: instance.project.id,
+          projectID: ProjectV2.ID.make(instance.project.id),
           timeUsed: info.timeUsed,
         })
         expect(yield* workspace.get(workspaceID)).toEqual(info)
@@ -482,7 +482,7 @@ describe("workspace CRUD", () => {
           name: "Configured Name",
           directory: targetDir,
           extra: { configured: true },
-          projectID: instance.project.id,
+          projectID: ProjectV2.ID.make(instance.project.id),
         })
         expect(JSON.parse(recorded.calls.create[0].env.OPENCODE_AUTH_CONTENT ?? "{}")).toEqual({
           test: { type: "api", key: "secret" },
@@ -508,7 +508,7 @@ describe("workspace CRUD", () => {
         const workspace = yield* Workspace.Service
         const type = unique("configure-failure")
         registerAdapter(
-          instance.project.id,
+          ProjectV2.ID.make(instance.project.id),
           type,
           recordedAdapter({
             configure() {
@@ -521,7 +521,7 @@ describe("workspace CRUD", () => {
         )
 
         expectExitContains(
-          yield* Effect.exit(workspace.create({ type, branch: null, projectID: instance.project.id, extra: null })),
+          yield* Effect.exit(workspace.create({ type, branch: null, projectID: ProjectV2.ID.make(instance.project.id), extra: null })),
           "configure exploded",
         )
         expect(yield* workspace.list(instance.project)).toEqual([])
@@ -544,11 +544,11 @@ describe("workspace CRUD", () => {
             return { type: "local", directory: "/unused" }
           },
         })
-        registerAdapter(instance.project.id, type, recorded.adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), type, recorded.adapter)
 
         expectExitContains(
           yield* Effect.exit(
-            workspace.create({ type, branch: "branch", projectID: instance.project.id, extra: { x: 1 } }),
+            workspace.create({ type, branch: "branch", projectID: ProjectV2.ID.make(instance.project.id), extra: { x: 1 } }),
           ),
           "create exploded",
         )
@@ -571,9 +571,9 @@ describe("workspace CRUD", () => {
         const type = unique("local-error")
         const missing = path.join(instance.directory, "missing-local-target")
         const recorded = localAdapter(missing, { createDir: false })
-        registerAdapter(instance.project.id, type, recorded.adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), type, recorded.adapter)
 
-        const info = yield* workspace.create({ type, branch: null, projectID: instance.project.id, extra: null })
+        const info = yield* workspace.create({ type, branch: null, projectID: ProjectV2.ID.make(instance.project.id), extra: null })
 
         expect(info.directory).toBe(missing)
         expect((yield* workspace.status()).find((item) => item.workspaceID === info.id)?.status).toBe("error")
@@ -589,7 +589,7 @@ describe("workspace CRUD", () => {
         const instance = yield* requireInstance
         const workspace = yield* Workspace.Service
         const type = unique("list-sync")
-        const existing = workspaceInfo(instance.project.id, type, {
+        const existing = workspaceInfo(ProjectV2.ID.make(instance.project.id), type, {
           id: WorkspaceV2.ID.ascending("wrk_list_sync_existing"),
           name: "existing",
           directory: path.join(instance.directory, "existing"),
@@ -602,7 +602,7 @@ describe("workspace CRUD", () => {
           branch: "feature/discovered",
           directory: path.join(instance.directory, "discovered"),
           extra: { source: "adapter" },
-          projectID: instance.project.id,
+          projectID: ProjectV2.ID.make(instance.project.id),
         }
         const recorded = recordedAdapter({
           list() {
@@ -613,7 +613,7 @@ describe("workspace CRUD", () => {
                 branch: "ignored",
                 directory: path.join(instance.directory, "ignored"),
                 extra: null,
-                projectID: instance.project.id,
+                projectID: ProjectV2.ID.make(instance.project.id),
               },
               discovered,
             ]
@@ -622,7 +622,7 @@ describe("workspace CRUD", () => {
             return { type: "local", directory: info.directory ?? instance.directory }
           },
         })
-        registerAdapter(instance.project.id, type, recorded.adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), type, recorded.adapter)
 
         yield* workspace.syncList(instance.project)
         const synced = (yield* workspace.list(instance.project)).filter((item) => item.name === discovered.name)
@@ -656,7 +656,7 @@ describe("workspace CRUD", () => {
                 branch: null,
                 directory: path.join(instance.directory, "adapter-a"),
                 extra: null,
-                projectID: instance.project.id,
+                projectID: ProjectV2.ID.make(instance.project.id),
               },
             ]
           },
@@ -673,7 +673,7 @@ describe("workspace CRUD", () => {
                 branch: null,
                 directory: path.join(instance.directory, "adapter-b"),
                 extra: null,
-                projectID: instance.project.id,
+                projectID: ProjectV2.ID.make(instance.project.id),
               },
             ]
           },
@@ -686,9 +686,9 @@ describe("workspace CRUD", () => {
             return { type: "local", directory: instance.directory }
           },
         })
-        registerAdapter(instance.project.id, typeA, adapterA.adapter)
-        registerAdapter(instance.project.id, typeB, adapterB.adapter)
-        registerAdapter(instance.project.id, unique("list-sync-none"), noList.adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), typeA, adapterA.adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), typeB, adapterB.adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), unique("list-sync-none"), noList.adapter)
 
         yield* workspace.syncList(instance.project)
         const synced = yield* workspace.list(instance.project)
@@ -735,9 +735,9 @@ describe("workspace CRUD", () => {
             const instance = yield* requireInstance
             const type = unique("remote-create")
             const recorded = remoteAdapter(`${url}/base/?ignored=1#hash`, { directory: dir })
-            registerAdapter(instance.project.id, type, recorded.adapter)
+            registerAdapter(ProjectV2.ID.make(instance.project.id), type, recorded.adapter)
 
-            const info = yield* workspace.create({ type, branch: null, projectID: instance.project.id, extra: null })
+            const info = yield* workspace.create({ type, branch: null, projectID: ProjectV2.ID.make(instance.project.id), extra: null })
 
             expect(
               calls.map((call) => `${call.method} ${call.url.pathname}${call.url.search}${call.url.hash}`),
@@ -775,8 +775,8 @@ describe("workspace CRUD", () => {
         const sessionSvc = yield* SessionNs.Service
         const type = unique("remove-local")
         const recorded = localAdapter(path.join(dir, "remove-local"))
-        registerAdapter(instance.project.id, type, recorded.adapter)
-        const info = yield* workspace.create({ type, branch: null, projectID: instance.project.id, extra: null })
+        registerAdapter(ProjectV2.ID.make(instance.project.id), type, recorded.adapter)
+        const info = yield* workspace.create({ type, branch: null, projectID: ProjectV2.ID.make(instance.project.id), extra: null })
         const one = yield* sessionSvc.create({})
         const two = yield* sessionSvc.create({})
         yield* attachSessionToWorkspace(one.id, info.id)
@@ -809,9 +809,9 @@ describe("workspace CRUD", () => {
         const instance = yield* requireInstance
         const workspace = yield* Workspace.Service
         const type = unique("remove-throws")
-        const info = workspaceInfo(instance.project.id, type, { id: WorkspaceV2.ID.ascending("wrk_remove_throws") })
+        const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type, { id: WorkspaceV2.ID.ascending("wrk_remove_throws") })
         registerAdapter(
-          instance.project.id,
+          ProjectV2.ID.make(instance.project.id),
           type,
           recordedAdapter({
             async remove() {
@@ -840,12 +840,12 @@ describe("workspace CRUD", () => {
         const sessionSvc = yield* SessionNs.Service
         const previousType = unique("warp-prev-local")
         const targetType = unique("warp-target-local")
-        const previous = workspaceInfo(instance.project.id, previousType)
-        const target = workspaceInfo(instance.project.id, targetType)
+        const previous = workspaceInfo(ProjectV2.ID.make(instance.project.id), previousType)
+        const target = workspaceInfo(ProjectV2.ID.make(instance.project.id), targetType)
         yield* insertWorkspace(previous)
         yield* insertWorkspace(target)
-        registerAdapter(instance.project.id, previousType, localAdapter(path.join(dir, "warp-prev-local")).adapter)
-        registerAdapter(instance.project.id, targetType, localAdapter(path.join(dir, "warp-target-local")).adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), previousType, localAdapter(path.join(dir, "warp-prev-local")).adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), targetType, localAdapter(path.join(dir, "warp-target-local")).adapter)
         const session = yield* sessionSvc.create({})
         yield* attachSessionToWorkspace(session.id, previous.id)
 
@@ -883,12 +883,12 @@ describe("workspace CRUD", () => {
         yield* Effect.promise(() => fs.writeFile(path.join(previousDir, "tracked.txt"), "changed\n"))
         yield* Effect.promise(() => fs.writeFile(path.join(previousDir, "new.txt"), "new\n"))
 
-        const previous = workspaceInfo(instance.project.id, previousType)
-        const target = workspaceInfo(instance.project.id, targetType)
+        const previous = workspaceInfo(ProjectV2.ID.make(instance.project.id), previousType)
+        const target = workspaceInfo(ProjectV2.ID.make(instance.project.id), targetType)
         yield* insertWorkspace(previous)
         yield* insertWorkspace(target)
-        registerAdapter(instance.project.id, previousType, localAdapter(previousDir, { createDir: false }).adapter)
-        registerAdapter(instance.project.id, targetType, localAdapter(targetDir, { createDir: false }).adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), previousType, localAdapter(previousDir, { createDir: false }).adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), targetType, localAdapter(targetDir, { createDir: false }).adapter)
         const session = yield* sessionSvc.create({})
         yield* attachSessionToWorkspace(session.id, previous.id)
 
@@ -910,9 +910,9 @@ describe("workspace CRUD", () => {
         const workspace = yield* Workspace.Service
         const sessionSvc = yield* SessionNs.Service
         const previousType = unique("warp-detach-local")
-        const previous = workspaceInfo(instance.project.id, previousType)
+        const previous = workspaceInfo(ProjectV2.ID.make(instance.project.id), previousType)
         yield* insertWorkspace(previous)
-        registerAdapter(instance.project.id, previousType, localAdapter(path.join(dir, "warp-detach-local")).adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), previousType, localAdapter(path.join(dir, "warp-detach-local")).adapter)
         const session = yield* sessionSvc.create({})
         yield* attachSessionToWorkspace(session.id, previous.id)
 
@@ -927,7 +927,7 @@ describe("workspace CRUD", () => {
             .get()
             .pipe(Effect.orDie))?.workspaceID,
         ).toBeNull()
-        expect(yield* sessionSequenceOwner(session.id)).toBe(instance.project.id)
+        expect(yield* sessionSequenceOwner(session.id)).toBe(ProjectV2.ID.make(instance.project.id))
       })
     },
     { git: true },
@@ -939,7 +939,7 @@ describe("workspace CRUD", () => {
     () =>
       Effect.gen(function* () {
         const instance = yield* requireInstance
-        const projectID = instance.project.id
+        const projectID = ProjectV2.ID.make(instance.project.id)
         const workspace = yield* Workspace.Service
         const sessionSvc = yield* SessionNs.Service
         const previousType = unique("warp-detach-workspace-instance")
@@ -1022,12 +1022,12 @@ describe("workspace CRUD", () => {
             const instance = yield* requireInstance
             const previousType = unique("warp-remote-source")
             const targetType = unique("warp-remote-target")
-            const previous = workspaceInfo(instance.project.id, previousType)
-            const target = workspaceInfo(instance.project.id, targetType, { directory: "remote-target-dir" })
+            const previous = workspaceInfo(ProjectV2.ID.make(instance.project.id), previousType)
+            const target = workspaceInfo(ProjectV2.ID.make(instance.project.id), targetType, { directory: "remote-target-dir" })
             yield* insertWorkspace(previous)
             yield* insertWorkspace(target)
-            registerAdapter(instance.project.id, previousType, remoteAdapter(`${url}/warp-source`).adapter)
-            registerAdapter(instance.project.id, targetType, remoteAdapter(`${url}/warp-target`).adapter)
+            registerAdapter(ProjectV2.ID.make(instance.project.id), previousType, remoteAdapter(`${url}/warp-source`).adapter)
+            registerAdapter(ProjectV2.ID.make(instance.project.id), targetType, remoteAdapter(`${url}/warp-target`).adapter)
             const session = yield* sessionSvc.create({})
             yield* attachSessionToWorkspace(session.id, previous.id)
             historySessionID = session.id
@@ -1080,13 +1080,13 @@ describe("workspace sync state", () => {
         const workspace = yield* Workspace.Service
         const sessionSvc = yield* SessionNs.Service
         const type = unique("flag-disabled")
-        const info = workspaceInfo(instance.project.id, type)
+        const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
         const session = yield* sessionSvc.create({})
         yield* attachSessionToWorkspace(session.id, info.id)
         yield* insertWorkspace(info)
-        registerAdapter(instance.project.id, type, localAdapter(path.join(dir, "flag-disabled")).adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), type, localAdapter(path.join(dir, "flag-disabled")).adapter)
 
-        yield* Effect.promise(() => startWorkspaceSyncingWithFlag(instance.project.id, false))
+        yield* Effect.promise(() => startWorkspaceSyncingWithFlag(ProjectV2.ID.make(instance.project.id), false))
         yield* Effect.sleep("25 millis")
 
         expect((yield* workspace.status()).find((item) => item.workspaceID === info.id)?.status).toBeUndefined()
@@ -1101,7 +1101,7 @@ describe("workspace sync state", () => {
         const { directory: dir } = yield* TestInstance
         const instance = yield* requireInstance
         const workspace = yield* Workspace.Service
-        const projectID = instance.project.id
+        const projectID = ProjectV2.ID.make(instance.project.id)
         const firstType = unique("first")
         const secondType = unique("second")
         const first = workspaceInfo(projectID, firstType)
@@ -1138,16 +1138,16 @@ describe("workspace sync state", () => {
         const workspace = yield* Workspace.Service
         const sessionSvc = yield* SessionNs.Service
         const type = unique("missing-local")
-        const info = workspaceInfo(instance.project.id, type)
+        const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
         yield* insertWorkspace(info)
         registerAdapter(
-          instance.project.id,
+          ProjectV2.ID.make(instance.project.id),
           type,
           localAdapter(path.join(dir, "missing-target"), { createDir: false }).adapter,
         )
         yield* attachSessionToWorkspace((yield* sessionSvc.create({})).id, info.id)
 
-        yield* workspace.startWorkspaceSyncing(instance.project.id)
+        yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
 
         yield* eventuallyEffect(
           Effect.gen(function* () {
@@ -1172,15 +1172,15 @@ describe("workspace sync state", () => {
         const captured = captureGlobalEvents()
         yield* Effect.addFinalizer(() => Effect.sync(() => captured.dispose()))
         const type = unique("dedupe-local")
-        const info = workspaceInfo(instance.project.id, type)
+        const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
         const target = path.join(dir, "dedupe-local")
         yield* Effect.promise(() => fs.mkdir(target, { recursive: true }))
         yield* insertWorkspace(info)
-        registerAdapter(instance.project.id, type, localAdapter(target).adapter)
+        registerAdapter(ProjectV2.ID.make(instance.project.id), type, localAdapter(target).adapter)
         yield* attachSessionToWorkspace((yield* sessionSvc.create({})).id, info.id)
 
-        yield* workspace.startWorkspaceSyncing(instance.project.id)
-        yield* workspace.startWorkspaceSyncing(instance.project.id)
+        yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
+        yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
 
         yield* eventuallyEffect(
           Effect.gen(function* () {
@@ -1228,12 +1228,12 @@ describe("workspace sync state", () => {
             const captured = captureGlobalEvents()
             try {
               const type = unique("remote-start")
-              const info = workspaceInfo(instance.project.id, type)
+              const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
               yield* insertWorkspace(info)
-              registerAdapter(instance.project.id, type, remoteAdapter(`${url}/sync`).adapter)
+              registerAdapter(ProjectV2.ID.make(instance.project.id), type, remoteAdapter(`${url}/sync`).adapter)
               yield* attachSessionToWorkspace((yield* sessionSvc.create({})).id, info.id)
 
-              yield* workspace.startWorkspaceSyncing(instance.project.id)
+              yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
               yield* eventuallyEffect(
                 Effect.gen(function* () {
                   expect((yield* workspace.status()).find((item) => item.workspaceID === info.id)?.status).toBe(
@@ -1241,7 +1241,7 @@ describe("workspace sync state", () => {
                   )
                 }),
               )
-              yield* workspace.startWorkspaceSyncing(instance.project.id)
+              yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
               yield* Effect.sleep("25 millis")
 
               expect(
@@ -1282,12 +1282,12 @@ describe("workspace sync state", () => {
             const sessionSvc = yield* SessionNs.Service
             const instance = yield* requireInstance
             const type = unique("remote-connect-fail")
-            const info = workspaceInfo(instance.project.id, type)
+            const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
             yield* insertWorkspace(info)
-            registerAdapter(instance.project.id, type, remoteAdapter(`${url}/failed`).adapter)
+            registerAdapter(ProjectV2.ID.make(instance.project.id), type, remoteAdapter(`${url}/failed`).adapter)
             yield* attachSessionToWorkspace((yield* sessionSvc.create({})).id, info.id)
 
-            yield* workspace.startWorkspaceSyncing(instance.project.id)
+            yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
 
             yield* eventuallyEffect(
               Effect.gen(function* () {
@@ -1323,12 +1323,12 @@ describe("workspace sync state", () => {
             const sessionSvc = yield* SessionNs.Service
             const instance = yield* requireInstance
             const type = unique("remote-history-fail")
-            const info = workspaceInfo(instance.project.id, type)
+            const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
             yield* insertWorkspace(info)
-            registerAdapter(instance.project.id, type, remoteAdapter(`${url}/history-failed`).adapter)
+            registerAdapter(ProjectV2.ID.make(instance.project.id), type, remoteAdapter(`${url}/history-failed`).adapter)
             yield* attachSessionToWorkspace((yield* sessionSvc.create({})).id, info.id)
 
-            yield* workspace.startWorkspaceSyncing(instance.project.id)
+            yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
 
             yield* eventuallyEffect(
               Effect.gen(function* () {
@@ -1382,16 +1382,16 @@ describe("workspace sync state", () => {
             const captured = captureGlobalEvents()
             try {
               const type = unique("history-replay")
-              const info = workspaceInfo(instance.project.id, type)
+              const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
               yield* insertWorkspace(info)
-              registerAdapter(instance.project.id, type, remoteAdapter(`${url}/history`).adapter)
+              registerAdapter(ProjectV2.ID.make(instance.project.id), type, remoteAdapter(`${url}/history`).adapter)
               const session = yield* sessionSvc.create({ title: "before history" })
               yield* attachSessionToWorkspace(session.id, info.id)
               historySessionID = session.id
               historySession = { ...session, workspaceID: info.id, title: "from history" }
               historyNextSeq = ((yield* sessionSequence(session.id)) ?? -1) + 1
 
-              yield* workspace.startWorkspaceSyncing(instance.project.id)
+              yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
 
               yield* eventuallyEffect(
                 Effect.gen(function* () {
@@ -1452,12 +1452,12 @@ describe("workspace sync state", () => {
             const captured = captureGlobalEvents()
             try {
               const type = unique("sse-forward")
-              const info = workspaceInfo(instance.project.id, type)
+              const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
               yield* insertWorkspace(info)
-              registerAdapter(instance.project.id, type, remoteAdapter(`${url}/sse-forward`).adapter)
+              registerAdapter(ProjectV2.ID.make(instance.project.id), type, remoteAdapter(`${url}/sse-forward`).adapter)
               yield* attachSessionToWorkspace((yield* sessionSvc.create({})).id, info.id)
 
-              yield* workspace.startWorkspaceSyncing(instance.project.id)
+              yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
 
               yield* eventuallyEffect(
                 Effect.sync(() =>
@@ -1535,16 +1535,16 @@ describe("workspace sync state", () => {
             const captured = captureGlobalEvents()
             try {
               const type = unique("sse-sync")
-              const info = workspaceInfo(instance.project.id, type)
+              const info = workspaceInfo(ProjectV2.ID.make(instance.project.id), type)
               yield* insertWorkspace(info)
-              registerAdapter(instance.project.id, type, remoteAdapter(`${url}/sse-sync`).adapter)
+              registerAdapter(ProjectV2.ID.make(instance.project.id), type, remoteAdapter(`${url}/sse-sync`).adapter)
               const session = yield* sessionSvc.create({ title: "before sse" })
               yield* attachSessionToWorkspace(session.id, info.id)
               sseSessionID = session.id
               sseSession = { ...session, workspaceID: info.id, title: "from sse" }
               sseNextSeq = ((yield* sessionSequence(session.id)) ?? -1) + 1
 
-              yield* workspace.startWorkspaceSyncing(instance.project.id)
+              yield* workspace.startWorkspaceSyncing(ProjectV2.ID.make(instance.project.id))
 
               yield* eventuallyEffect(
                 Effect.gen(function* () {

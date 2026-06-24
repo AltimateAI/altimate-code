@@ -9,7 +9,7 @@ afterEach(async () => {
 })
 
 function app() {
-  return Server.Default().app
+  return Server.Default()
 }
 
 const PREFLIGHT_HEADERS = {

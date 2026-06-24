@@ -24,7 +24,7 @@ describe("reference HttpApi", () => {
       },
     })
 
-    const response = await Server.Default().app.request("/api/reference", {
+    const response = await Server.Default().request("/api/reference", {
       headers: { "x-opencode-directory": tmp.path },
     })
 

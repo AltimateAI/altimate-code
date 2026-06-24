@@ -16,6 +16,7 @@ import * as Socket from "effect/unstable/socket/Socket"
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/unstable/httpapi"
 import { mkdir } from "node:fs/promises"
 import { registerAdapter } from "../../src/control-plane/adapters"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import type { WorkspaceAdapter } from "../../src/control-plane/types"
 import { Workspace } from "../../src/control-plane/workspace"
@@ -82,7 +83,11 @@ const setupWorkspace = (kind: string) =>
   Effect.gen(function* () {
     const dir = yield* tmpdirScoped({ git: true })
     yield* Project.use.fromDirectory(dir)
-    const projectID = yield* Project.Service.use((svc) => svc.fromDirectory(dir).pipe(Effect.map((p) => p.project.id)))
+    const forkProjectID = yield* Project.Service.use((svc) =>
+      svc.fromDirectory(dir).pipe(Effect.map((p) => p.project.id)),
+    )
+    // Re-brand fork ProjectID -> core ProjectV2.ID (identity at runtime) at the control-plane boundary.
+    const projectID = ProjectV2.ID.make(forkProjectID)
     registerAdapter(projectID, kind, localAdapter(dir))
     const workspace = yield* Workspace.Service.use((svc) =>
       svc.create({ type: kind, branch: null, extra: null, projectID }),

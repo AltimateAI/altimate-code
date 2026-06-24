@@ -8,6 +8,7 @@
  *   4. Translating verbatim DB errors into actionable messages.
  */
 import { describe, test, expect, spyOn, afterEach, beforeEach } from "bun:test"
+import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import {
   SqlExplainTool,
@@ -398,7 +399,7 @@ describe("SqlExplainTool.execute", () => {
 
   test("rejects empty sql before calling dispatcher", async () => {
     const spy = spyOn(Dispatcher, "call")
-    const tool = await SqlExplainTool.init()
+    const tool = await initTool(SqlExplainTool)
     const result = await tool.execute({ sql: "", analyze: false }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -410,7 +411,7 @@ describe("SqlExplainTool.execute", () => {
 
   test("rejects bare `?` sql before calling dispatcher", async () => {
     const spy = spyOn(Dispatcher, "call")
-    const tool = await SqlExplainTool.init()
+    const tool = await initTool(SqlExplainTool)
     const result = await tool.execute({ sql: "?", analyze: false }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -422,7 +423,7 @@ describe("SqlExplainTool.execute", () => {
 
   test("rejects `?` warehouse name before calling dispatcher", async () => {
     const spy = spyOn(Dispatcher, "call")
-    const tool = await SqlExplainTool.init()
+    const tool = await initTool(SqlExplainTool)
     const result = await tool.execute(
       { sql: "SELECT 1 FROM dual", warehouse: "?", analyze: false },
       ctx as any,
@@ -444,7 +445,7 @@ describe("SqlExplainTool.execute", () => {
       analyzed: false,
     })
 
-    const tool = await SqlExplainTool.init()
+    const tool = await initTool(SqlExplainTool)
     const result = await tool.execute({ sql: "SELECT * FROM users", analyze: false }, ctx as any)
 
     expect(result.metadata.success).toBe(true)
@@ -462,7 +463,7 @@ describe("SqlExplainTool.execute", () => {
       analyzed: false,
     })
 
-    const tool = await SqlExplainTool.init()
+    const tool = await initTool(SqlExplainTool)
     const result = await tool.execute(
       { sql: "SELECT * FROM users", warehouse: "prod", analyze: false },
       ctx as any,
@@ -478,7 +479,7 @@ describe("SqlExplainTool.execute", () => {
       throw new Error("dispatcher exploded")
     })
 
-    const tool = await SqlExplainTool.init()
+    const tool = await initTool(SqlExplainTool)
     const result = await tool.execute({ sql: "SELECT 1 FROM dual", analyze: false }, ctx as any)
 
     expect(result.metadata.success).toBe(false)

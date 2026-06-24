@@ -8,7 +8,7 @@ import { it } from "../lib/effect"
 import { waitGlobalBusEvent } from "./global-bus"
 
 function app() {
-  return Server.Default().app
+  return Server.Default()
 }
 
 function waitDisposed(directory: string) {

@@ -3,9 +3,11 @@ import { Provider } from "../../src/provider/provider"
 
 import { Effect } from "effect"
 import { testEffect } from "../lib/effect"
-import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ProviderID } from "@/provider/schema"
 
-const DIGITALOCEAN = ProviderV2.ID.make("digitalocean")
+// Re-branded to the fork's ProviderID so it indexes Provider.list()'s
+// Record<ProviderID, Info> (core ProviderV2.ID is a distinct brand).
+const DIGITALOCEAN = ProviderID.make("digitalocean")
 const it = testEffect(Provider.defaultLayer)
 
 const withEnv = <A, E, R>(values: Record<string, string>, effect: Effect.Effect<A, E, R>) =>

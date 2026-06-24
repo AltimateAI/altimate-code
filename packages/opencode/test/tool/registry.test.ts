@@ -17,8 +17,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { MessageID, SessionID } from "@/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { ProviderV2 } from "@opencode-ai/core/provider"
-import { ModelV2 } from "@opencode-ai/core/model"
+import { ModelID, ProviderID } from "@/provider/schema"
 
 const configLayer = TestConfig.layer({
   directories: () => InstanceState.directory.pipe(Effect.map((dir) => [path.join(dir, ".opencode")])),
@@ -82,8 +81,8 @@ describe("tool.registry", () => {
       const build = yield* agent.get("build")
       if (!build) throw new Error("build agent not found")
       const task = (yield* registry.tools({
-        providerID: ProviderV2.ID.opencode,
-        modelID: ModelV2.ID.make("test"),
+        providerID: ProviderID.opencode,
+        modelID: ModelID.make("test"),
         agent: build,
       })).find((tool) => tool.id === "task")
 
@@ -176,8 +175,9 @@ describe("tool.registry", () => {
       // Built-in tools must still load — a single malformed custom tool must
       // not poison the whole registry.
       expect(ids).toContain("read")
-      const loaded = (yield* registry.all()).find((t) => t.id === "noargs")
-      if (!loaded) throw new Error("noargs tool was not loaded")
+      const loadedInfo = (yield* registry.allInfos()).find((tool) => tool.id === "noargs")
+      if (!loadedInfo) throw new Error("noargs tool was not loaded")
+      const loaded = yield* Tool.init(loadedInfo)
       expect(loaded.jsonSchema).toMatchObject({ type: "object", properties: {} })
     }),
   )
@@ -246,8 +246,9 @@ describe("tool.registry", () => {
       )
 
       const registry = yield* ToolRegistry.Service
-      const loaded = (yield* registry.all()).find((tool) => tool.id === "sql")
-      if (!loaded) throw new Error("custom sql tool was not loaded")
+      const loadedInfo = (yield* registry.allInfos()).find((tool) => tool.id === "sql")
+      if (!loadedInfo) throw new Error("custom sql tool was not loaded")
+      const loaded = yield* Tool.init(loadedInfo)
       expect(loaded?.jsonSchema).toMatchObject({
         type: "object",
         properties: {
@@ -260,8 +261,8 @@ describe("tool.registry", () => {
 
       const agents = yield* Agent.Service
       const promptTools = yield* registry.tools({
-        providerID: ProviderV2.ID.opencode,
-        modelID: ModelV2.ID.make("test"),
+        providerID: ProviderID.opencode,
+        modelID: ModelID.make("test"),
         agent: yield* agents.defaultInfo(),
       })
       const promptTool = promptTools.find((tool) => tool.id === "sql")
@@ -329,8 +330,9 @@ describe("tool.registry", () => {
         )
 
         const registry = yield* ToolRegistry.Service
-        const loaded = (yield* registry.all()).find((tool) => tool.id === "addition")
-        if (!loaded) throw new Error("custom addition tool was not loaded")
+        const loadedInfo = (yield* registry.allInfos()).find((tool) => tool.id === "addition")
+        if (!loadedInfo) throw new Error("custom addition tool was not loaded")
+        const loaded = yield* Tool.init(loadedInfo)
 
         expect(ToolJsonSchema.fromTool(loaded)).toMatchObject({
           properties: {
@@ -367,8 +369,9 @@ describe("tool.registry", () => {
       )
 
       const registry = yield* ToolRegistry.Service
-      const loaded = (yield* registry.all()).find((tool) => tool.id === "image")
-      if (!loaded) throw new Error("custom image tool was not loaded")
+      const loadedInfo = (yield* registry.allInfos()).find((tool) => tool.id === "image")
+      if (!loadedInfo) throw new Error("custom image tool was not loaded")
+      const loaded = yield* Tool.init(loadedInfo)
       const agents = yield* Agent.Service
       const result = yield* loaded.execute({}, {
         sessionID: SessionID.make("ses_test"),
@@ -407,8 +410,9 @@ describe("tool.registry", () => {
       )
 
       const registry = yield* ToolRegistry.Service
-      const loaded = (yield* registry.all()).find((tool) => tool.id === "legacy")
-      if (!loaded) throw new Error("legacy custom tool was not loaded")
+      const loadedInfo = (yield* registry.allInfos()).find((tool) => tool.id === "legacy")
+      if (!loadedInfo) throw new Error("legacy custom tool was not loaded")
+      const loaded = yield* Tool.init(loadedInfo)
       expect(ToolJsonSchema.fromTool(loaded)).toMatchObject({
         type: "object",
         properties: {

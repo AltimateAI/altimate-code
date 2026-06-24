@@ -15,6 +15,7 @@ import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { ProviderID, ModelID } from "@/provider/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -235,6 +236,37 @@ const boot = Effect.fn("test.boot")(function* () {
   return { processors, session, provider }
 })
 
+// The fork keeps the imperative SessionProcessor.create() handle (sync construct,
+// async `process`). Re-brand the core ProviderV2.ID/ModelV2.ID refs to the fork's
+// ProviderID/ModelID for getModel(), and bridge the Promise-returning `process` into
+// an interruptible Effect that aborts its AbortController on fiber interruption so the
+// abort/interrupt assertions still fail with interrupt-only causes.
+const refModel = (provider: Provider.Interface) =>
+  provider.getModel(ProviderID.make(ref.providerID), ModelID.make(ref.modelID))
+
+const userInput = (parent: { id: MessageID; time: { created: number }; agent: string }, sessionID: SessionID) =>
+  ({
+    id: parent.id,
+    sessionID,
+    role: "user",
+    time: parent.time,
+    agent: parent.agent,
+    model: { providerID: ref.providerID, modelID: ref.modelID },
+  }) as unknown as MessageV2.User
+
+const runProcess = (
+  handle: SessionProcessor.Info,
+  controller: AbortController,
+  input: Omit<LLM.StreamInput, "abort">,
+) =>
+  Effect.callback<SessionProcessor.Result>((resume) => {
+    handle.process({ ...input, abort: controller.signal } as LLM.StreamInput).then(
+      (result) => resume(Effect.succeed(result)),
+      (error) => resume(Effect.die(error)),
+    )
+    return Effect.sync(() => controller.abort())
+  })
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -251,32 +283,27 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "hi")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
         const input = {
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
           system: [],
           messages: [{ role: "user", content: "hi" }],
           tools: {},
-        } satisfies LLM.StreamInput
+        } satisfies Omit<LLM.StreamInput, "abort">
 
-        const value = yield* handle.process(input)
-        const parts = yield* MessageV2.parts(msg.id)
+        const value = yield* runProcess(handle, controller, input)
+        const parts = MessageV2.parts(msg.id)
         const calls = yield* llm.calls
 
         expect(value).toBe("continue")
@@ -323,34 +350,27 @@ it.live("session.processor effect tests preserve text start time", () =>
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "hi")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const run = yield* handle
-          .process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies SessionV1.User,
+        const run = yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
             sessionID: chat.id,
             model: mdl,
             agent: agent(),
             system: [],
             messages: [{ role: "user", content: "hi" }],
             tools: {},
-          })
-          .pipe(Effect.forkChild)
+          }).pipe(Effect.forkChild)
 
         yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
+          Effect.sync(() => MessageV2.parts(msg.id)).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.TextPart => part.type === "text")),
             Effect.provideService(Database.Service, database),
           ),
@@ -360,7 +380,7 @@ it.live("session.processor effect tests preserve text start time", () =>
         gate.resolve()
 
         const exit = yield* Fiber.await(run)
-        const text = (yield* MessageV2.parts(msg.id)).find((part): part is SessionV1.TextPart => part.type === "text")
+        const text = (MessageV2.parts(msg.id)).find((part): part is SessionV1.TextPart => part.type === "text")
 
         expect(Exit.isSuccess(exit)).toBe(true)
         expect(text?.text).toBe("hello")
@@ -385,23 +405,18 @@ it.live("session.processor effect tests stop after token overflow requests compa
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "compact")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const base = yield* provider.getModel(ref.providerID, ref.modelID)
+        const base = yield* refModel(provider)
         const mdl = { ...base, limit: { context: 20, output: 10 } }
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -410,7 +425,7 @@ it.live("session.processor effect tests stop after token overflow requests compa
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
 
         expect(value).toBe("compact")
         expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
@@ -432,22 +447,17 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "reason")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -456,7 +466,7 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
         const reasoning = parts.find((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
         const text = parts.find((part): part is SessionV1.TextPart => part.type === "text")
 
@@ -480,22 +490,17 @@ it.live("session.processor effect tests reset reasoning state across retries", (
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "reason")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -504,7 +509,7 @@ it.live("session.processor effect tests reset reasoning state across retries", (
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
         const reasoning = parts.filter((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
 
         expect(value).toBe("continue")
@@ -527,22 +532,17 @@ it.live("session.processor effect tests do not retry unknown json errors", () =>
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "json")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -571,22 +571,17 @@ it.live("session.processor effect tests retry recognized structured json errors"
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "retry json")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -595,7 +590,7 @@ it.live("session.processor effect tests retry recognized structured json errors"
           tools: {},
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
 
         expect(value).toBe("continue")
         expect(yield* llm.calls).toBe(2)
@@ -619,7 +614,7 @@ it.live("session.processor effect tests publish retry status updates", () =>
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "retry")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
         const states: number[] = []
         const off = yield* events.listen((evt) => {
           if (evt.type !== SessionStatus.Event.Status.type) return Effect.void
@@ -627,21 +622,16 @@ it.live("session.processor effect tests publish retry status updates", () =>
           if (data.sessionID === chat.id && data.status.type === "retry") states.push(data.status.attempt)
           return Effect.void
         })
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -671,22 +661,17 @@ it.live("session.processor effect tests compact on structured context overflow",
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "compact json")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -714,22 +699,17 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "tool")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        const value = yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -748,7 +728,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
           },
         })
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
         expect(value).toBe("continue")
@@ -780,35 +760,28 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "tool abort")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const run = yield* handle
-          .process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies SessionV1.User,
+        const run = yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
             sessionID: chat.id,
             model: mdl,
             agent: agent(),
             system: [],
             messages: [{ role: "user", content: "tool abort" }],
             tools: {},
-          })
-          .pipe(Effect.forkChild)
+          }).pipe(Effect.forkChild)
 
         yield* llm.wait(1)
         yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
+          Effect.sync(() => MessageV2.parts(msg.id)).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.ToolPart => part.type === "tool")),
             Effect.provideService(Database.Service, database),
           ),
@@ -817,7 +790,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
         expect(Exit.isFailure(exit)).toBe(true)
@@ -850,7 +823,7 @@ it.live("session.processor effect tests record aborted errors and idle state", (
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "abort")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
         const errs: string[] = []
         const off = yield* events.listen((evt) => {
           if (evt.type !== Session.Event.Error.type) return Effect.void
@@ -860,37 +833,30 @@ it.live("session.processor effect tests record aborted errors and idle state", (
           seen.resolve()
           return Effect.void
         })
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const run = yield* handle
-          .process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies SessionV1.User,
+        const run = yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
             sessionID: chat.id,
             model: mdl,
             agent: agent(),
             system: [],
             messages: [{ role: "user", content: "abort" }],
             tools: {},
-          })
-          .pipe(Effect.forkChild)
+          }).pipe(Effect.forkChild)
 
         yield* llm.wait(1)
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
         yield* Effect.promise(() => seen.promise)
-        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        const stored = MessageV2.get({ sessionID: chat.id, messageID: msg.id })
         const state = yield* sts.get(chat.id)
         yield* off
 
@@ -922,37 +888,30 @@ it.live("session.processor effect tests mark interruptions aborted without manua
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "interrupt")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
         const handle = yield* processors.create({
-          assistantMessage: msg,
+          assistantMessage: msg as unknown as MessageV2.Assistant,
           sessionID: chat.id,
           model: mdl,
+          abort: controller.signal,
         })
 
-        const run = yield* handle
-          .process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies SessionV1.User,
+        const run = yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
             sessionID: chat.id,
             model: mdl,
             agent: agent(),
             system: [],
             messages: [{ role: "user", content: "interrupt" }],
             tools: {},
-          })
-          .pipe(Effect.forkChild)
+          }).pipe(Effect.forkChild)
 
         yield* llm.wait(1)
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
-        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        const stored = MessageV2.get({ sessionID: chat.id, messageID: msg.id })
         const state = yield* sts.get(chat.id)
 
         expect(Exit.isFailure(exit)).toBe(true)
@@ -977,24 +936,23 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "provider tool error")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
         const settlements: Array<typeof SessionEvent.Tool.Failed.Type> = []
         const off = yield* events.listen((event) => {
           if (event.type === SessionEvent.Tool.Failed.type)
             settlements.push(event as typeof SessionEvent.Tool.Failed.Type)
           return Effect.void
         })
-        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id,
+          model: mdl,
+          abort: controller.signal,
+        })
 
-        yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
+        yield* runProcess(handle, controller, {
+          user: userInput(parent, chat.id),
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
@@ -1004,7 +962,7 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
         })
         yield* off
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
         expect(call?.state.status).toBe("error")
         if (call?.state.status === "error") expect(call.state.error).toBe("provider boom")
@@ -1030,7 +988,7 @@ itFragmentFailure.live("session.processor effect tests flush partial v2 fragment
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "provider failure")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
         const seen: string[] = []
         let text: string | undefined
         let reasoning: string | undefined
@@ -1042,18 +1000,17 @@ itFragmentFailure.live("session.processor effect tests flush partial v2 fragment
             reasoning = (event.data as typeof SessionEvent.Reasoning.Ended.data.Type).text
           return Effect.void
         })
-        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id,
+          model: mdl,
+          abort: controller.signal,
+        })
 
         expect(
-          yield* handle.process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies SessionV1.User,
+          yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
             sessionID: chat.id,
             model: mdl,
             agent: agent(),

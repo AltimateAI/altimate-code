@@ -25,7 +25,23 @@ export namespace Log {
   }
 
   function shouldLog(input: Level): boolean {
-    return levelPriority[input] >= levelPriority[level]
+    return printEnabled && levelPriority[input] >= levelPriority[level]
+  }
+
+  // Upstream's util/log.ts had an async `init({ print, level })` used by entrypoints
+  // and tests (`Log.init({ print: false })` to silence output). The Effect-logging
+  // migration dropped it; reproduce a synchronous no-op-friendly surface here so the
+  // many importers/tests keep type-checking. File logging is intentionally not
+  // reproduced — this shim only writes to stderr.
+  let printEnabled = true
+  export interface InitOptions {
+    print: boolean
+    dev?: boolean
+    level?: Level
+  }
+  export function init(options: InitOptions): void {
+    if (options.level) level = options.level
+    printEnabled = options.print
   }
 
   export type Logger = {

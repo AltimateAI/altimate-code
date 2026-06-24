@@ -6,6 +6,7 @@
  * Incorrect introspection leads to wrong tool calls.
  */
 import { describe, test, expect, beforeEach, afterAll } from "bun:test"
+import { initTool, legacyToolInfo } from "./tool-fixture"
 import z from "zod"
 import { ToolLookupTool } from "../../src/altimate/tools/tool-lookup"
 import { ToolRegistry } from "../../src/tool/registry"
@@ -37,9 +38,8 @@ describe("ToolLookupTool: Zod schema introspection", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const testTool = {
-          id: "__test_lookup_mixed",
-          init: async () => ({
+        await ToolRegistry.register(
+          await legacyToolInfo("__test_lookup_mixed", {
             description: "Test tool with mixed params",
             parameters: z.object({
               name: z.string().describe("The name"),
@@ -50,10 +50,9 @@ describe("ToolLookupTool: Zod schema introspection", () => {
             }),
             execute: async () => ({ title: "", output: "", metadata: {} }),
           }),
-        }
-        await ToolRegistry.register(testTool)
+        )
 
-        const tool = await ToolLookupTool.init()
+        const tool = await initTool(ToolLookupTool)
         const result = await tool.execute({ tool_name: "__test_lookup_mixed" }, ctx as any)
 
         // Required string param
@@ -86,7 +85,7 @@ describe("ToolLookupTool: Zod schema introspection", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const tool = await ToolLookupTool.init()
+        const tool = await initTool(ToolLookupTool)
         const result = await tool.execute({ tool_name: "nonexistent_tool_xyz" }, ctx as any)
         expect(result.title).toBe("Tool not found")
         expect(result.output).toContain('No tool named "nonexistent_tool_xyz"')
@@ -100,17 +99,15 @@ describe("ToolLookupTool: Zod schema introspection", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const testTool = {
-          id: "__test_lookup_empty",
-          init: async () => ({
+        await ToolRegistry.register(
+          await legacyToolInfo("__test_lookup_empty", {
             description: "Tool with empty params",
             parameters: z.object({}),
             execute: async () => ({ title: "", output: "", metadata: {} }),
           }),
-        }
-        await ToolRegistry.register(testTool)
+        )
 
-        const tool = await ToolLookupTool.init()
+        const tool = await initTool(ToolLookupTool)
         const result = await tool.execute({ tool_name: "__test_lookup_empty" }, ctx as any)
         expect(result.output).toContain("No parameters")
       },
@@ -122,9 +119,8 @@ describe("ToolLookupTool: Zod schema introspection", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const testTool = {
-          id: "__test_lookup_nested",
-          init: async () => ({
+        await ToolRegistry.register(
+          await legacyToolInfo("__test_lookup_nested", {
             description: "Tool with nested wrappers",
             parameters: z.object({
               // default wrapping optional wrapping string
@@ -132,10 +128,9 @@ describe("ToolLookupTool: Zod schema introspection", () => {
             }),
             execute: async () => ({ title: "", output: "", metadata: {} }),
           }),
-        }
-        await ToolRegistry.register(testTool)
+        )
 
-        const tool = await ToolLookupTool.init()
+        const tool = await initTool(ToolLookupTool)
         const result = await tool.execute({ tool_name: "__test_lookup_nested" }, ctx as any)
 
         // Should unwrap to the inner string type

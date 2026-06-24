@@ -18,10 +18,14 @@ import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { ModelID, ProviderID } from "../../src/provider/schema"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
+import { Bus } from "@/bus"
 
 import type { Provider } from "@/provider/provider"
 import * as SessionProcessorModule from "../../src/session/processor"
@@ -32,8 +36,42 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestConfig } from "../fixture/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { LLMEvent, Usage } from "@opencode-ai/llm"
-import { ProviderV2 } from "@opencode-ai/core/provider"
-import { ModelV2 } from "@opencode-ai/core/model"
+
+// SessionCompaction exposes imperative async namespace fns (only `create` is also on
+// the Effect Service). Wrap them as Effects so the existing Effect.gen test bodies can
+// `yield*` them without restructuring.
+const compactionEffect = {
+  isOverflow: (input: Parameters<typeof SessionCompaction.isOverflow>[0]) =>
+    Effect.promise(() => SessionCompaction.isOverflow(input)),
+  create: (input: Omit<Parameters<typeof SessionCompaction.create>[0], "model"> & { model: typeof ref }) =>
+    Effect.promise(() =>
+      SessionCompaction.create({
+        ...input,
+        // re-brand core ProviderV2.ID/ModelV2.ID to fork ProviderID/ModelID (identity at runtime)
+        model: { providerID: ProviderID.make(input.model.providerID), modelID: ModelID.make(input.model.modelID) },
+      }),
+    ),
+  prune: (input: Parameters<typeof SessionCompaction.prune>[0]) =>
+    Effect.promise(() => SessionCompaction.prune(input)),
+}
+
+// `process` is an imperative async fn taking an AbortSignal. Effect.promise hands us a
+// signal that fires on fiber interruption, so this preserves the abort-during-process
+// behavior the interrupt tests assert.
+type ProcessInput = Omit<Parameters<typeof SessionCompaction.process>[0], "abort" | "messages"> & {
+  // `ssn.messages` returns core SessionV1.WithParts; process wants fork MessageV2.WithParts.
+  // They are structurally identical, so widen here and re-narrow at the call boundary.
+  messages: readonly unknown[]
+}
+function runCompactionProcess(input: ProcessInput) {
+  return Effect.promise((signal) =>
+    SessionCompaction.process({
+      ...input,
+      messages: input.messages as Parameters<typeof SessionCompaction.process>[0]["messages"],
+      abort: signal,
+    }),
+  )
+}
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -213,7 +251,11 @@ function layer(result: "continue" | "compact") {
   return Layer.succeed(
     SessionProcessorModule.SessionProcessor.Service,
     SessionProcessorModule.SessionProcessor.Service.of({
-      create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result))),
+      // fake() returns a structurally-identical Handle; the assistantMessage brand resolves
+      // through a second MessageV2 module identity at this boundary, so re-narrow explicitly.
+      create: Effect.fn("TestSessionProcessor.create")((input) =>
+        Effect.succeed(fake(input, result)),
+      ) as unknown as SessionProcessorModule.SessionProcessor.Interface["create"],
     }),
   )
 }
@@ -295,7 +337,15 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
 }
 
 function createSummaryCompaction(sessionID: SessionID) {
-  return SessionCompaction.use.create({ sessionID, agent: "build", model: ref, auto: false })
+  // SessionCompaction.create wants the fork-branded model ids; re-brand at the boundary.
+  return Effect.promise(() =>
+    SessionCompaction.create({
+      sessionID,
+      agent: "build",
+      model: { providerID: ProviderID.make(ref.providerID), modelID: ModelID.make(ref.modelID) },
+      auto: false,
+    }),
+  )
 }
 
 function readCompactionPart(sessionID: SessionID) {
@@ -310,11 +360,11 @@ function readCompactionPart(sessionID: SessionID) {
 
 function llm() {
   const queue: Array<
-    Stream.Stream<LLMEvent, unknown> | ((input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown>)
+    Stream.Stream<LLMEvent, unknown> | ((input: Omit<LLM.StreamInput, "abort">) => Stream.Stream<LLMEvent, unknown>)
   > = []
 
   return {
-    push(stream: Stream.Stream<LLMEvent, unknown> | ((input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown>)) {
+    push(stream: Stream.Stream<LLMEvent, unknown> | ((input: Omit<LLM.StreamInput, "abort">) => Stream.Stream<LLMEvent, unknown>)) {
       queue.push(stream)
     },
     layer: Layer.succeed(
@@ -332,8 +382,8 @@ function llm() {
 
 function reply(
   text: string,
-  capture?: (input: LLM.StreamInput) => void,
-): (input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown> {
+  capture?: (input: Omit<LLM.StreamInput, "abort">) => void,
+): (input: Omit<LLM.StreamInput, "abort">) => Stream.Stream<LLMEvent, unknown> {
   return (input) => {
     capture?.(input)
     return Stream.make(
@@ -386,7 +436,7 @@ describe("session.compaction.isOverflow", () => {
     "returns true when token count exceeds usable context",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const model = createModel({ context: 100_000, output: 32_000 })
         const tokens = { input: 75_000, output: 5_000, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
@@ -398,7 +448,7 @@ describe("session.compaction.isOverflow", () => {
     "returns false when token count within usable context",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const model = createModel({ context: 200_000, output: 32_000 })
         const tokens = { input: 100_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
@@ -410,7 +460,7 @@ describe("session.compaction.isOverflow", () => {
     "includes cache.read in token count",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const model = createModel({ context: 100_000, output: 32_000 })
         const tokens = { input: 60_000, output: 10_000, reasoning: 0, cache: { read: 10_000, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
@@ -422,7 +472,7 @@ describe("session.compaction.isOverflow", () => {
     "respects input limit for input caps",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
         const tokens = { input: 271_000, output: 1_000, reasoning: 0, cache: { read: 2_000, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
@@ -434,7 +484,7 @@ describe("session.compaction.isOverflow", () => {
     "returns false when input/output are within input caps",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
         const tokens = { input: 200_000, output: 20_000, reasoning: 0, cache: { read: 10_000, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
@@ -446,7 +496,7 @@ describe("session.compaction.isOverflow", () => {
     "returns false when output within limit with input caps",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const model = createModel({ context: 200_000, input: 120_000, output: 10_000 })
         const tokens = { input: 50_000, output: 9_999, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
@@ -470,7 +520,7 @@ describe("session.compaction.isOverflow", () => {
     "BUG: no headroom when limit.input is set — compaction should trigger near boundary but does not",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         // Simulate Claude with prompt caching: input limit = 200K, output limit = 32K
         const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
 
@@ -496,7 +546,7 @@ describe("session.compaction.isOverflow", () => {
     "BUG: without limit.input, same token count correctly triggers compaction",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         // Same model but without limit.input — uses context - output instead
         const model = createModel({ context: 200_000, output: 32_000 })
 
@@ -516,7 +566,7 @@ describe("session.compaction.isOverflow", () => {
     "BUG: asymmetry — limit.input model allows 30K more usage before compaction than equivalent model without it",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         // Two models with identical context/output limits, differing only in limit.input
         const withInputLimit = createModel({ context: 200_000, input: 200_000, output: 32_000 })
         const withoutInputLimit = createModel({ context: 200_000, output: 32_000 })
@@ -538,7 +588,7 @@ describe("session.compaction.isOverflow", () => {
     "returns false when model context limit is 0",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const model = createModel({ context: 0, output: 32_000 })
         const tokens = { input: 100_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
@@ -551,7 +601,7 @@ describe("session.compaction.isOverflow", () => {
     provideTmpdirInstance(
       () =>
         Effect.gen(function* () {
-          const compact = yield* SessionCompaction.Service
+          const compact = compactionEffect
           const model = createModel({ context: 100_000, output: 32_000 })
           const tokens = { input: 75_000, output: 5_000, reasoning: 0, cache: { read: 0, write: 0 } }
           expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
@@ -570,7 +620,7 @@ describe("session.compaction.create", () => {
     "creates a compaction user message and part",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const ssn = yield* SessionNs.Service
 
         const info = yield* ssn.create({})
@@ -600,7 +650,7 @@ describe("session.compaction.create", () => {
     "projects a compaction message to v2 (v2 projector disabled)",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const ssn = yield* SessionNs.Service
         const info = yield* ssn.create({})
 
@@ -632,7 +682,7 @@ describe("session.compaction.prune", () => {
     provideTmpdirInstance(
       (dir) =>
         Effect.gen(function* () {
-          const compact = yield* SessionCompaction.Service
+          const compact = compactionEffect
           const ssn = yield* SessionNs.Service
           const info = yield* ssn.create({})
           const a = yield* ssn.updateMessage({
@@ -728,7 +778,7 @@ describe("session.compaction.prune", () => {
     "skips protected skill tool output",
     provideTmpdirInstance((dir) =>
       Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
+        const compact = compactionEffect
         const ssn = yield* SessionNs.Service
         const info = yield* ssn.create({})
         const a = yield* ssn.updateMessage({
@@ -826,7 +876,7 @@ describe("session.compaction.process", () => {
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
       const exit = yield* Effect.exit(
-        SessionCompaction.use.process({
+        runCompactionProcess({
           parentID: reply.id,
           messages: msgs,
           sessionID: session.id,
@@ -848,24 +898,21 @@ describe("session.compaction.process", () => {
   it.instance(
     "publishes compacted event on continue",
     Effect.gen(function* () {
-      const events = yield* EventV2Bridge.Service
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
       const msg = yield* createUserMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const done = yield* Deferred.make<void, Error>()
       let seen = false
-      const unsub = yield* events.listen((evt) => {
-        if (evt.type !== SessionCompaction.Event.Compacted.type) return Effect.void
-        if ((evt.data as typeof SessionCompaction.Event.Compacted.data.Type).sessionID !== session.id)
-          return Effect.void
+      // Event.Compacted is an imperative Bus event published by SessionCompaction.process.
+      const unsub = Bus.subscribe(SessionCompaction.Event.Compacted, (evt) => {
+        if (evt.properties.sessionID !== session.id) return
         seen = true
         Deferred.doneUnsafe(done, Effect.void)
-        return Effect.void
       })
-      yield* Effect.addFinalizer(() => unsub)
+      yield* Effect.addFinalizer(() => Effect.sync(unsub))
 
-      const result = yield* SessionCompaction.use.process({
+      const result = yield* runCompactionProcess({
         parentID: msg.id,
         messages: msgs,
         sessionID: session.id,
@@ -886,7 +933,7 @@ describe("session.compaction.process", () => {
       const msg = yield* createUserMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
-      const result = yield* SessionCompaction.use.process({
+      const result = yield* runCompactionProcess({
         parentID: msg.id,
         messages: msgs,
         sessionID: session.id,
@@ -914,7 +961,7 @@ describe("session.compaction.process", () => {
       const msg = yield* createUserMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
-      const result = yield* SessionCompaction.use.process({
+      const result = yield* runCompactionProcess({
         parentID: msg.id,
         messages: msgs,
         sessionID: session.id,
@@ -950,7 +997,7 @@ describe("session.compaction.process", () => {
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
-      yield* SessionCompaction.use.process({
+      yield* runCompactionProcess({
         parentID: parent!,
         messages: msgs,
         sessionID: session.id,
@@ -976,7 +1023,7 @@ describe("session.compaction.process", () => {
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
-      yield* SessionCompaction.use.process({
+      yield* runCompactionProcess({
         parentID: parent!,
         messages: msgs,
         sessionID: session.id,
@@ -1005,7 +1052,7 @@ describe("session.compaction.process", () => {
         const msgs = yield* ssn.messages({ sessionID: session.id })
         const parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         const part = yield* readCompactionPart(session.id)
         expect(part?.type).toBe("compaction")
@@ -1041,7 +1088,7 @@ describe("session.compaction.process", () => {
         const msgs = yield* ssn.messages({ sessionID: session.id })
         const parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         const part = yield* readCompactionPart(session.id)
         expect(part?.type).toBe("compaction")
@@ -1086,7 +1133,7 @@ describe("session.compaction.process", () => {
         const msgs = yield* ssn.messages({ sessionID: session.id })
         const parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         const part = yield* readCompactionPart(session.id)
         expect(part?.type).toBe("compaction")
@@ -1094,7 +1141,7 @@ describe("session.compaction.process", () => {
         expect(captured).toContain("zzzz")
         expect(captured).not.toContain("keep tail")
 
-        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
         expect(filtered.map((msg) => msg.info.id).slice(0, 3)).toEqual([parent!, expect.any(String), keep.id])
         expect(filtered[1]?.info.role).toBe("assistant")
         expect(filtered[1]?.info.role === "assistant" ? filtered[1].info.summary : false).toBe(true)
@@ -1112,7 +1159,7 @@ describe("session.compaction.process", () => {
       const msg = yield* createUserMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
-      const result = yield* SessionCompaction.use.process({
+      const result = yield* runCompactionProcess({
         parentID: msg.id,
         messages: msgs,
         sessionID: session.id,
@@ -1155,7 +1202,7 @@ describe("session.compaction.process", () => {
       const msg = yield* createUserMessage(session.id, "current")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
-      const result = yield* SessionCompaction.use.process({
+      const result = yield* runCompactionProcess({
         parentID: msg.id,
         messages: msgs,
         sessionID: session.id,
@@ -1183,7 +1230,7 @@ describe("session.compaction.process", () => {
       const msg = yield* createUserMessage(session.id, "current")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
-      const result = yield* SessionCompaction.use.process({
+      const result = yield* runCompactionProcess({
         parentID: msg.id,
         messages: msgs,
         sessionID: session.id,
@@ -1241,8 +1288,7 @@ describe("session.compaction.process", () => {
         })
         yield* Effect.addFinalizer(() => off)
 
-        const fiber = yield* SessionCompaction.use
-          .process({
+        const fiber = yield* runCompactionProcess({
             parentID: msg.id,
             messages: msgs,
             sessionID: session.id,
@@ -1275,8 +1321,7 @@ describe("session.compaction.process", () => {
           const session = yield* ssn.create({})
           const msg = yield* createUserMessage(session.id, "hello")
           const msgs = yield* ssn.messages({ sessionID: session.id })
-          const fiber = yield* SessionCompaction.use
-            .process({
+          const fiber = yield* runCompactionProcess({
               parentID: msg.id,
               messages: msgs,
               sessionID: session.id,
@@ -1319,7 +1364,7 @@ describe("session.compaction.process", () => {
         const session = yield* ssn.create({})
         const msg = yield* createUserMessage(session.id, "hello")
         const msgs = yield* ssn.messages({ sessionID: session.id })
-        yield* SessionCompaction.use.process({
+        yield* runCompactionProcess({
           parentID: msg.id,
           messages: msgs,
           sessionID: session.id,
@@ -1360,7 +1405,7 @@ describe("session.compaction.process", () => {
         const session = yield* ssn.create({})
         const msg = yield* createUserMessage(session.id, "hello")
         const msgs = yield* ssn.messages({ sessionID: session.id })
-        yield* SessionCompaction.use.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
+        yield* runCompactionProcess({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
 
         const summary = (yield* ssn.messages({ sessionID: session.id })).find(
           (item) => item.info.role === "assistant" && item.info.summary,
@@ -1394,7 +1439,7 @@ describe("session.compaction.process", () => {
         const msgs = yield* ssn.messages({ sessionID: session.id })
         const parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({
+        yield* runCompactionProcess({
           parentID: parent!,
           messages: msgs,
           sessionID: session.id,
@@ -1432,15 +1477,15 @@ describe("session.compaction.process", () => {
         let msgs = yield* ssn.messages({ sessionID: session.id })
         let parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         yield* createUserMessage(session.id, "latest turn")
         yield* createCompactionMarker(session.id)
 
-        msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        msgs = MessageV2.filterCompacted(MessageV2.stream(session.id)) as unknown as typeof msgs
         parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         expect(captured).toContain("<previous-summary>")
         expect(captured).toContain("summary one")
@@ -1468,17 +1513,17 @@ describe("session.compaction.process", () => {
       let msgs = yield* ssn.messages({ sessionID: session.id })
       let parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
-      yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+      yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
       const u4 = yield* createUserMessage(session.id, "four")
       yield* createCompactionMarker(session.id)
 
-      msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+      msgs = MessageV2.filterCompacted(MessageV2.stream(session.id)) as unknown as typeof msgs
       parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
-      yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+      yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-      const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+      const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
       const ids = filtered.map((msg) => msg.info.id)
 
       expect(ids).not.toContain(u1.id)
@@ -1528,7 +1573,7 @@ describe("session.compaction.process", () => {
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
-      yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+      yield* runCompactionProcess({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
       const part = yield* readCompactionPart(session.id)
       expect(part?.type).toBe("compaction")
@@ -1689,7 +1734,10 @@ describe("SessionNs.getUsage", () => {
     expect(result.cost).toBe(0.04473525)
   })
 
-  test("uses matching context cost tier before over-200k fallback", () => {
+  // The fork's Provider.Model.cost carries `experimentalOver200K` but not upstream's
+  // `tiers` array (see session.ts getUsage), so over-200K context always resolves to the
+  // experimentalOver200K price.
+  test("applies over-200k pricing when context exceeds 200k", () => {
     const model = createModel({
       context: 1_000_000,
       output: 32_000,
@@ -1697,20 +1745,6 @@ describe("SessionNs.getUsage", () => {
         input: 1,
         output: 2,
         cache: { read: 0.1, write: 0.5 },
-        tiers: [
-          {
-            input: 3,
-            output: 4,
-            cache: { read: 0.3, write: 1.5 },
-            tier: { type: "context", size: 200_000 },
-          },
-          {
-            input: 5,
-            output: 6,
-            cache: { read: 0.5, write: 2.5 },
-            tier: { type: "context", size: 500_000 },
-          },
-        ],
         experimentalOver200K: {
           input: 100,
           output: 100,
@@ -1729,10 +1763,11 @@ describe("SessionNs.getUsage", () => {
     })
 
     expect(result.tokens.input).toBe(550_000)
-    expect(result.cost).toBe(2.75 + 0.6 + 0.05)
+    // 550K input + 100K output + 100K cacheRead, all at the over-200K rate of 100/MTok
+    expect(result.cost).toBe(55 + 10 + 10)
   })
 
-  test("falls back to over-200k pricing when no cost tier matches", () => {
+  test("falls back to over-200k pricing when context exceeds 200k", () => {
     const model = createModel({
       context: 1_000_000,
       output: 32_000,
@@ -1740,14 +1775,6 @@ describe("SessionNs.getUsage", () => {
         input: 1,
         output: 2,
         cache: { read: 0.1, write: 0.5 },
-        tiers: [
-          {
-            input: 5,
-            output: 6,
-            cache: { read: 0.5, write: 2.5 },
-            tier: { type: "context", size: 500_000 },
-          },
-        ],
         experimentalOver200K: {
           input: 3,
           output: 4,

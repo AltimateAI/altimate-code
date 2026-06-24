@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Deferred, Effect, Layer } from "effect"
 import { Project } from "@/project/project"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Session as SessionNs } from "@/session/session"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
@@ -36,9 +37,11 @@ describe("session.listGlobal", () => {
         const firstItem = sessions.find((session) => session.id === firstSession.id)
         const secondItem = sessions.find((session) => session.id === secondSession.id)
 
-        expect(firstItem?.project?.id).toBe(firstProject?.id)
+        // GlobalInfo.project.id is core-branded (ProjectV2.ID); re-brand the fork-branded
+        // Project.use.get result (identity at runtime) so toBe's type guard matches.
+        expect(firstItem?.project?.id).toBe(firstProject ? ProjectV2.ID.make(firstProject.id) : undefined)
         expect(firstItem?.project?.worktree).toBe(firstProject?.worktree)
-        expect(secondItem?.project?.id).toBe(secondProject?.id)
+        expect(secondItem?.project?.id).toBe(secondProject ? ProjectV2.ID.make(secondProject.id) : undefined)
         expect(secondItem?.project?.worktree).toBe(secondProject?.worktree)
         expect(first.directory).not.toBe(second)
       }),

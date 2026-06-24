@@ -29,12 +29,12 @@ const stateLayer = Layer.effectDiscard(
 
 const it = testEffect(stateLayer)
 const worktreeTest = process.platform === "win32" ? it.instance.skip : it.instance
-type TestServer = ReturnType<typeof Server.Default>["app"]
+type TestServer = ReturnType<typeof Server.Default>
 type CreatedWorktree = { directory: string }
 type ScopedWorktree = { directory: string; body: CreatedWorktree; ready: Effect.Effect<void, Error> }
 
 function serverScoped() {
-  return Effect.sync(() => Server.Default().app)
+  return Effect.sync(() => Server.Default())
 }
 
 function request(server: TestServer, input: string, init?: RequestInit) {
