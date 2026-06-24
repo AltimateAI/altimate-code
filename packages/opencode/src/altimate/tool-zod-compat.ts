@@ -16,6 +16,7 @@ import type { JSONSchema7 } from "@ai-sdk/provider"
 import { EffectBridge } from "@/effect/bridge"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import type { Agent } from "@/agent/agent"
 import type { SessionID, MessageID } from "../session/schema"
 import type { Context as NewContext, DefWithoutID } from "../tool/tool"
 
@@ -49,6 +50,20 @@ export interface LegacyToolDef<P extends z.ZodType = z.ZodType, M extends Metada
   formatValidationError?(error: z.ZodError): string
 }
 
+/** The old fork init context passed to a deferred (async-function) tool def. */
+export interface LegacyInitContext {
+  agent?: Agent.Info
+}
+
+/**
+ * Old-style deferred tool factory: `Tool.define(id, async (ctx) => ({ ... }))`.
+ * The factory runs once per init and returns the plain `LegacyToolDef`. Used by
+ * tools whose description/parameters depend on runtime state (skills, agents).
+ */
+export type LegacyInitFn<P extends z.ZodType = z.ZodType, M extends Metadata = Metadata> = (
+  ctx?: LegacyInitContext,
+) => Promise<LegacyToolDef<P, M>>
+
 export function isZodType(value: unknown): value is z.ZodType {
   return typeof value === "object" && value !== null && "_zod" in value
 }
@@ -62,6 +77,15 @@ export function isLegacyToolDef(init: unknown): init is LegacyToolDef {
     "execute" in init &&
     isZodType((init as { parameters?: unknown }).parameters)
   )
+}
+
+/**
+ * True when `init` is an old-style deferred tool factory (a plain function
+ * returning a `LegacyToolDef`). Distinct from an Effect (also callable but
+ * tagged) and from the new Effect-based init.
+ */
+export function isLegacyInitFn(init: unknown): init is LegacyInitFn {
+  return typeof init === "function" && !Effect.isEffect(init)
 }
 
 function isJsonSchemaObject(value: unknown): value is Record<string, unknown> {
@@ -117,13 +141,9 @@ export function zodToJsonSchema(schema: z.ZodType): JSONSchema7 {
     : rest) as JSONSchema7
 }
 
-/**
- * Convert an old-style tool object into the new `DefWithoutID` (minus id), wrapped
- * in an Effect the way `Tool.define` expects. The returned `execute` bridges the
- * Effect-based context back into the Promise-based `LegacyContext` our tools use.
- */
-export function legacyToInit(legacy: LegacyToolDef): Effect.Effect<DefWithoutID> {
-  return Effect.sync(() => ({
+/** Build a `DefWithoutID` from a resolved legacy tool object (no Effect wrapper). */
+function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
+  return {
     description: legacy.description,
     parameters: Schema.declare<unknown>((u): u is unknown => legacy.parameters.safeParse(u).success),
     jsonSchema: zodToJsonSchema(legacy.parameters),
@@ -148,6 +168,26 @@ export function legacyToInit(legacy: LegacyToolDef): Effect.Effect<DefWithoutID>
         }
         return yield* Effect.promise(() => legacy.execute(args as never, legacyCtx))
       }),
-  }))
+  }
+}
+
+/**
+ * Convert an old-style tool object into the new `DefWithoutID` (minus id), wrapped
+ * in an Effect the way `Tool.define` expects. The returned `execute` bridges the
+ * Effect-based context back into the Promise-based `LegacyContext` our tools use.
+ */
+export function legacyToInit(legacy: LegacyToolDef): Effect.Effect<DefWithoutID> {
+  return Effect.sync(() => legacyDefToDef(legacy))
+}
+
+/**
+ * Convert an old-style deferred tool factory into a new init Effect. The factory
+ * runs once per init; the new Tool API does not thread the calling agent into
+ * `init()`, so the factory receives an empty init context (agent undefined) and
+ * any per-agent description filtering degrades to "show all" — execute-time
+ * permission checks still enforce access.
+ */
+export function legacyInitFnToInit(fn: LegacyInitFn): Effect.Effect<DefWithoutID> {
+  return Effect.promise(() => fn({})).pipe(Effect.map(legacyDefToDef))
 }
 // altimate_change end

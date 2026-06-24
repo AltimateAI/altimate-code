@@ -13,7 +13,21 @@ import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
 // altimate_change start — log unhandled cancel rejections
 import { Log } from "@/util/log"
+// re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands SessionPrompt expects
+import { ModelID, ProviderID } from "@/provider/schema"
+import type { Effect } from "effect"
 const log = Log.create({ service: "tool.task" })
+
+/**
+ * Effect-based prompt operations the task tool drives through `ctx.extra.promptOps`.
+ * Injected by session/tools so the tool stays decoupled from SessionPrompt's
+ * concrete service and is straightforward to stub in tests.
+ */
+export interface TaskPromptOps {
+  readonly resolvePromptParts: (template: string) => Effect.Effect<SessionPrompt.PromptInput["parts"]>
+  readonly prompt: (input: SessionPrompt.PromptInput) => Effect.Effect<MessageV2.WithParts>
+  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+}
 // altimate_change end
 
 const parameters = z.object({
@@ -139,8 +153,11 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         messageID,
         sessionID: session.id,
         model: {
-          modelID: model.modelID,
-          providerID: model.providerID,
+          // altimate_change start — re-brand to provider/schema ModelID/ProviderID
+          // (identity at runtime); agent.model carries the core ModelV2/ProviderV2 brands.
+          modelID: ModelID.make(model.modelID),
+          providerID: ProviderID.make(model.providerID),
+          // altimate_change end
         },
         agent: agent.name,
         tools: {

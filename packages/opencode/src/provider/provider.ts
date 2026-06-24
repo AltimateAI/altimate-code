@@ -1953,6 +1953,44 @@ export namespace Provider {
     providerID: ProviderID,
   })
 
+  // altimate_change start — upstream httpapi additions consumed by the experimental
+  // provider handler/group and the debug agent CLI. NoModelsError mirrors the plain
+  // "no models found" throw in defaultModel(); toPublicInfo/defaultModelIDs/ListResult
+  // back the provider.list HttpApi endpoint (behavior matches the legacy Hono route:
+  // `all` is the Info list verbatim, `default` is the top-sorted model id per provider).
+  export const NoModelsError = NamedError.create("ProviderNoModelsError", {
+    providerID: ProviderID,
+  })
+
+  /** Public projection of a provider Info for the list endpoint (identity today). */
+  export function toPublicInfo(info: Info): Info {
+    return info
+  }
+
+  /** Map of providerID -> default (top-sorted) model id, skipping providers with no models. */
+  export function defaultModelIDs(providers: Record<string, Info>): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const [key, provider] of Object.entries(providers)) {
+      const [model] = sort(Object.values(provider.models))
+      if (model) out[key] = model.id
+    }
+    return out
+  }
+
+  /**
+   * Effect Schema for the provider.list response. The `all` element reuses the fork's
+   * rich zod `Info` validator via Schema.declare (same recipe as tool-zod-compat) so the
+   * effect HttpApi layer gets correct types without hand-mirroring the model schema.
+   */
+  const InfoSchema = Schema.declare<Info>((u): u is Info => Info.safeParse(u).success)
+  export const ListResult = Schema.Struct({
+    all: Schema.Array(InfoSchema),
+    default: Schema.Record(Schema.String, Schema.String),
+    connected: Schema.Array(Schema.String),
+  }).annotate({ identifier: "ProviderListResult" })
+  export type ListResult = Schema.Schema.Type<typeof ListResult>
+  // altimate_change end
+
   // altimate_change start — Effect Context.Service facade over the existing namespace
   // functions. New upstream consumers compose Provider into the Effect runtime via
   // `yield* Provider.Service` / `Provider.defaultLayer` / `Provider.node`. This is a

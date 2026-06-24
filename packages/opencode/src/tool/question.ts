@@ -3,6 +3,26 @@ import { Tool } from "./tool"
 import { Question } from "../question"
 import DESCRIPTION from "./question.txt"
 
+// altimate_change start — zod mirror of Question.Prompt (Info minus `custom`).
+// The Question module schemas moved to Effect Schema upstream (no `.omit`), but
+// this legacy zod tool needs a zod parameter schema. Kept in sync with
+// question/index.ts `base`.
+const QuestionPrompt = z.object({
+  question: z.string().describe("Complete question"),
+  header: z.string().describe("Very short label (max 30 chars)"),
+  options: z
+    .array(
+      z.object({
+        label: z.string().describe("Display text (1-5 words, concise)"),
+        description: z.string().describe("Explanation of choice"),
+      }),
+    )
+    .describe("Available choices"),
+  multiple: z.boolean().describe("Allow selecting multiple choices").optional(),
+})
+type QuestionPrompt = z.infer<typeof QuestionPrompt>
+// altimate_change end
+
 // altimate_change start — non-interactive handling for the question tool.
 //
 // Question.ask() resolves via either a TUI click or an HTTP reply at
@@ -42,7 +62,7 @@ function isNonInteractive(): boolean {
   return process.env["ALTIMATE_NON_INTERACTIVE"] === "1"
 }
 
-function autoAnswer(questions: Question.Info[]): Question.Answer[] {
+function autoAnswer(questions: QuestionPrompt[]): Question.Answer[] {
   const mode = process.env["ALTIMATE_AUTO_ANSWER"]?.toLowerCase()
   return questions.map((q) => {
     if (!mode) return [] // default — Unanswered, agent decides
@@ -60,7 +80,7 @@ function autoAnswer(questions: Question.Info[]): Question.Answer[] {
 export const QuestionTool = Tool.define("question", {
   description: DESCRIPTION,
   parameters: z.object({
-    questions: z.array(Question.Info.omit({ custom: true })).describe("Questions to ask"),
+    questions: z.array(QuestionPrompt).describe("Questions to ask"),
   }),
   async execute(params, ctx) {
     // altimate_change start — short-circuit when no human is listening.
@@ -68,7 +88,7 @@ export const QuestionTool = Tool.define("question", {
     // we want the result prefix to describe the path the answer actually
     // came from, not whatever state we observe later.
     const nonInteractive = isNonInteractive()
-    let answers: Question.Answer[]
+    let answers: ReadonlyArray<Question.Answer>
     if (nonInteractive) {
       answers = autoAnswer(params.questions)
     } else {

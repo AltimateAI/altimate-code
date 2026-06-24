@@ -7,7 +7,7 @@ import { Project } from "@/project/project"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
-import type { ProjectV2 } from "@opencode-ai/core/project"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { errorMessage } from "../util/error"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -294,7 +294,9 @@ export const layer: Layer.Layer<
         },
       })
 
-      yield* runStartScripts(info.directory, { projectID, extra })
+      // altimate_change start — re-brand fork ProjectID -> core ProjectV2.ID at the boundary (identity at runtime)
+      yield* runStartScripts(info.directory, { projectID: ProjectV2.ID.make(projectID), extra })
+      // altimate_change end
     })
 
     const createFromInfo = Effect.fn("Worktree.createFromInfo")(function* (info: Info, startCommand?: string) {
@@ -621,7 +623,9 @@ export const layer: Layer.Layer<
         return yield* new ResetFailedError({ message: `Worktree reset left local changes:\n${status.text.trim()}` })
       }
 
-      yield* runStartScripts(worktreePath, { projectID: ctx.project.id }).pipe(
+      // altimate_change start — re-brand fork ProjectID -> core ProjectV2.ID at the boundary (identity at runtime)
+      yield* runStartScripts(worktreePath, { projectID: ProjectV2.ID.make(ctx.project.id) }).pipe(
+        // altimate_change end
         Effect.catchCause((cause) => Effect.logError("worktree start task failed", { cause })),
         Effect.forkIn(scope),
       )

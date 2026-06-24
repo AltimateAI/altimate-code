@@ -18,8 +18,7 @@ import { Session } from "./session"
 import { SessionProcessor } from "./processor"
 import { PartID } from "./schema"
 import { EffectBridge } from "@/effect/bridge"
-import { ProviderV2 } from "@opencode-ai/core/provider"
-import { ModelV2 } from "@opencode-ai/core/model"
+import { ModelID } from "@/provider/schema"
 
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
@@ -72,7 +71,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   })
 
   for (const item of yield* registry.tools({
-    modelID: ModelV2.ID.make(input.model.api.id),
+    modelID: ModelID.make(input.model.api.id),
     providerID: input.model.providerID,
     agent: input.agent,
   })) {

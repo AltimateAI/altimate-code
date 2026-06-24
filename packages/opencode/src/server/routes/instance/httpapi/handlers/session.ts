@@ -15,6 +15,10 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+// altimate_change start — re-brand ProviderV2.ID/ModelV2.ID payload ids to the fork's
+// ProviderID/ModelID brand (identity at runtime) at the SessionCompaction boundary
+import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change end
 // altimate_change start — fork MessageV2.page/.get are SYNC and throw the storage NotFoundError; wrap in Effect.try for the Effect handler
 import type { NotFoundError as StorageNotFoundError } from "@/storage/storage"
 // altimate_change end
@@ -38,7 +42,7 @@ import {
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
-import { PermissionNotFoundError } from "../errors"
+import { PermissionNotFoundError, SessionBusyError } from "../errors"
 import * as SessionError from "./session-errors"
 
 const tryParseJson = (text: string) =>
@@ -134,7 +138,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         }),
         // altimate_change end
       )
-      if (!page.cursor) return page.items
+      // MessageV2.WithParts items are runtime-identical to SessionV1.WithParts (branded ids
+      // differ only at the type level); re-type at the API boundary like Session.messages does.
+      if (!page.cursor) return page.items as unknown as SessionV1.WithParts[]
 
       const request = yield* HttpServerRequest.HttpServerRequest
       // toURL() honors the Host + x-forwarded-proto headers, so the Link
@@ -155,9 +161,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
       return yield* SessionError.mapStorageNotFound(
-        // altimate_change start — fork MessageV2.get is sync + throws NotFoundError
+        // altimate_change start — fork MessageV2.get is sync + throws NotFoundError; its
+        // MessageV2.WithParts is runtime-identical to SessionV1.WithParts (branded ids differ
+        // only at the type level), so re-type at the API boundary like Session.messages does.
         Effect.try({
-          try: () => MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
+          try: () =>
+            MessageV2.get({
+              sessionID: ctx.params.sessionID,
+              messageID: ctx.params.messageID,
+            }) as unknown as SessionV1.WithParts,
           catch: (error) => error as StorageNotFoundError,
         }),
         // altimate_change end
@@ -295,8 +307,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         sessionID: ctx.params.sessionID,
         agent: currentAgent,
         model: {
-          providerID: ctx.payload.providerID,
-          modelID: ctx.payload.modelID,
+          providerID: ProviderID.make(ctx.payload.providerID),
+          modelID: ModelID.make(ctx.payload.modelID),
         },
         auto: ctx.payload.auto ?? false,
       })
@@ -345,9 +357,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof CommandPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* promptSvc
+      // MessageV2.WithParts is runtime-identical to SessionV1.WithParts (branded ids differ
+      // only at the type level); re-type at the API boundary like Session.messages does.
+      return (yield* promptSvc
         .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))) as unknown as SessionV1.WithParts
     })
 
     const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
@@ -355,7 +369,22 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof ShellPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
+      // altimate_change start — SessionPrompt.shell's error channel is the plain
+      // `@/session/index` BusyError (positional ctor), not the tagged `@/session/session`
+      // BusyError that SessionError.mapBusy's catchTag matches. Map it directly here (it
+      // carries `.sessionID`) to the API SessionBusyError, and re-type the WithParts result
+      // (MessageV2.WithParts ≡ SessionV1.WithParts at runtime; branded ids differ only at the
+      // type level). The split-brain BusyError pair (index vs session) lives in
+      // src/session/prompt.ts and should be reconciled there during the merge.
+      return (yield* promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+        Effect.mapError(
+          (error) =>
+            new SessionBusyError({
+              sessionID: error.sessionID,
+              message: `Session is busy: ${error.sessionID}`,
+            }),
+        ),
+      )) as unknown as SessionV1.WithParts
     })
 
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {

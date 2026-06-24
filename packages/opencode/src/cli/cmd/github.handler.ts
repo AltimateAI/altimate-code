@@ -26,7 +26,6 @@ import { MessageID, PartID } from "../../session/schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "../../session/message-v2"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { EventV2 } from "@opencode-ai/core/event"
 import { SessionPrompt } from "@/session/prompt"
 import { Git } from "@/git"
 import { setTimeout as sleep } from "node:timers/promises"
@@ -868,7 +867,7 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
       await runLocalEffect(
         events.listen((evt) => {
           if (evt.type !== MessageV2.Event.PartUpdated.type) return Effect.void
-          const data = evt.data as EventV2.Data<typeof MessageV2.Event.PartUpdated>
+          const data = evt.data as { sessionID: string; part: MessageV2.Part; time: number }
           if (data.part.sessionID !== session.id) return Effect.void
           //if (evt.properties.part.messageID === messageID) return
           const part = data.part
@@ -962,7 +961,8 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
             throw new Error(`${err.name}: ${message}`)
           }
 
-          const text = extractResponseText(result.parts)
+          // fork MessageV2.Part[] ≡ core SessionV1.Part[] at this boundary
+          const text = extractResponseText(result.parts as Parameters<typeof extractResponseText>[0])
           if (text) return text
 
           console.log("Requesting summary from agent...")
@@ -992,7 +992,7 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
             throw new Error(`${err.name}: ${message}`)
           }
 
-          const summaryText = extractResponseText(summary.parts)
+          const summaryText = extractResponseText(summary.parts as Parameters<typeof extractResponseText>[0])
           if (!summaryText) throw new Error("Failed to get summary from agent")
           return summaryText
         }),

@@ -559,7 +559,9 @@ export const layer: Layer.Layer<
         id: SessionID.descending(input.id),
         slug: Slug.create(),
         version: InstallationVersion,
-        projectID: ctx.project.id,
+        // altimate_change start — re-brand fork ProjectID to core Project.ID (identity at runtime)
+        projectID: ProjectV2.ID.make(ctx.project.id),
+        // altimate_change end
         directory: input.directory,
         path: input.path,
         workspaceID: input.workspaceID,
@@ -592,7 +594,9 @@ export const layer: Layer.Layer<
     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
       const ctx = yield* InstanceState.context
       return yield* listByProject(db, {
-        projectID: ctx.project.id,
+        // altimate_change start — re-brand fork ProjectID to core Project.ID (identity at runtime)
+        projectID: ProjectV2.ID.make(ctx.project.id),
+        // altimate_change end
         experimentalWorkspaces: flags.experimentalWorkspaces,
         ...input,
       })

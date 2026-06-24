@@ -811,6 +811,9 @@ export async function getConsoleState() {
 export async function update(config: Info) {
   return runConfig((svc) => svc.update(config))
 }
+export async function updateGlobal(config: Info) {
+  return runConfig((svc) => svc.updateGlobal(config))
+}
 export async function invalidate() {
   return runConfig((svc) => svc.invalidate())
 }

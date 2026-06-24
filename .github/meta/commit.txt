@@ -1,14 +1,22 @@
-wip: v1.17.9 reconciliation — Service facades: Provider/Plugin/LLM/ToolRegistry/SessionProcessor (ckpt 29)
+wip: v1.17.9 reconciliation — long-tail survivor batch, src 248->52 (checkpoint 30)
 
-Completes the task #9 Service-facade migration (2nd wave, 5 parallel agents). Each adds an Effect
-Context.Service (+ layer/defaultLayer/node) delegating to the existing namespace functions, preserving
-all fork logic (Provider keeps altimate-backend/gitlab/snowflake/databricks loaders intact) and the
-Promise wrappers. Interfaces recovered from upstream git history (9581bf0670, 2638e2acfa, 3e1972fd92).
-LLM facade adapted to Effect 4.0 beta.74 Stream API + the fork's LLMEvent adapter.
+7-parallel-agent batch over ~40 files cleared the post-Service-cluster long tail. Total 1477->1277,
+src 248 -> 52. Session-resume cumulative: opencode 3181 -> 1277 (src now ~52). No duplicate-export
+conflicts from the concurrent shared-file work.
 
-Result: src/effect/app-runtime.ts 10 -> 1 error (only Discovery.node left), agent/agent.ts 10 -> 2.
-opencode 1503 -> 1477 (src 305 -> 248). Session-resume cumulative: 3181 -> 1477.
+Highlights:
+- Restored dropped fork files from main: server/routes/event.ts, server/middleware.ts,
+  sync/event.sql.ts, session/prompt/max-steps.txt (runtime assets), permission/permission.sql.ts,
+  Ripgrep async-generator namespace (file/ripgrep.ts).
+- Effect Tool-API: extended tool-zod-compat for the deferred-factory Tool.define form (skill/task/
+  bash tools); assertExternalDirectoryLegacy for ls/glob.
+- bootstrap.ts rewritten to the Effect-Service form (InstanceBootstrap.defaultLayer/.node) —
+  cleared ripples in instance-store/layer, app-runtime, worktree, control-plane/workspace.
+- More Promise wrappers (Vcs.diff/defaultBranch, Question.ask, Skill.get/available, Config.updateGlobal,
+  provider/auth methods/authorize/callback); Provider additions NoModelsError/toPublicInfo/
+  defaultModelIDs/ListResult; Project.InfoSchema; pty -> @opencode-ai/core/pty + PtyID shim.
+- zod() AST-walker across remaining Hono routes; ProviderV2/ModelV2<->fork brand re-maps; lsp/index
+  rewritten to the new context-aware LSPServer/LSPClient API; ServiceMap->Context in auth services.
+- Deleted stale duplicate config/migrate-tui-config.ts.
 
-Long tail remaining: Discovery facade (app-runtime:108), agent.ts brand/2, a few pre-existing in-file
-errors (plugin state loop, provider NoModelsError/toPublicInfo/defaultModelIDs additions), missing
-runtime assets (event.sql, max-steps.txt), then ~1226 tests.
+Remaining ~52 src across ~20 files (<=5 each) + ~1222 tests.

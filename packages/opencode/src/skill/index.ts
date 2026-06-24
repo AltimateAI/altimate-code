@@ -42,6 +42,12 @@ export const Info = Schema.Struct({
   description: Schema.optional(Schema.String),
   location: Schema.String,
   content: Schema.String,
+  // altimate_change start — auto-load frontmatter fields (Cursor-style "Always Apply"/"Auto Attached");
+  //   alwaysApply: true            — unconditional auto-load into the system prompt
+  //   applyPaths:  "dbt_project.yml" | ["pyproject.toml", "schema.yml"] — glob-gated auto-load
+  alwaysApply: Schema.optional(Schema.Boolean),
+  applyPaths: Schema.optional(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+  // altimate_change end
 })
 export type Info = Schema.Schema.Type<typeof Info>
 
@@ -53,7 +59,9 @@ const Issue = Schema.StructWithRest(
   [Schema.Record(Schema.String, Schema.Unknown)],
 )
 
-function isSkillFrontmatter(data: unknown): data is { name: string; description?: string } {
+function isSkillFrontmatter(
+  data: unknown,
+): data is { name: string; description?: string; alwaysApply?: boolean; applyPaths?: string | string[] } {
   return (
     isRecord(data) &&
     typeof data.name === "string" &&
@@ -139,6 +147,11 @@ const add = Effect.fnUntraced(function* (state: State, match: string, events: Ev
     description: md.data.description,
     location: match,
     content: md.content,
+    // altimate_change start — carry auto-load frontmatter through to Info
+    alwaysApply: typeof md.data.alwaysApply === "boolean" ? md.data.alwaysApply : undefined,
+    applyPaths:
+      typeof md.data.applyPaths === "string" || Array.isArray(md.data.applyPaths) ? md.data.applyPaths : undefined,
+    // altimate_change end
   }
 })
 
@@ -371,6 +384,12 @@ export const node = LayerNode.make(layer, [
 const { runPromise: runSkill } = makeRuntime(Service, defaultLayer)
 export async function all() {
   return runSkill((svc) => svc.all())
+}
+export async function get(name: string) {
+  return runSkill((svc) => svc.get(name))
+}
+export async function available(agent?: Agent.Info) {
+  return runSkill((svc) => svc.available(agent))
 }
 // altimate_change end
 

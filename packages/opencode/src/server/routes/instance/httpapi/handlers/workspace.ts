@@ -2,6 +2,7 @@ import { listAdapters } from "@/control-plane/adapters"
 import { Workspace } from "@/control-plane/workspace"
 import * as InstanceState from "@/effect/instance-state"
 import { Vcs } from "@/project/vcs"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Cause, Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
@@ -15,7 +16,7 @@ export const workspaceHandlers = HttpApiBuilder.group(InstanceHttpApi, "workspac
 
     const adapters = Effect.fn("WorkspaceHttpApi.adapters")(function* () {
       const instance = yield* InstanceState.context
-      return yield* Effect.sync(() => listAdapters(instance.project.id))
+      return yield* Effect.sync(() => listAdapters(ProjectV2.ID.make(instance.project.id)))
     })
 
     const list = Effect.fn("WorkspaceHttpApi.list")(function* () {
@@ -28,7 +29,7 @@ export const workspaceHandlers = HttpApiBuilder.group(InstanceHttpApi, "workspac
         .create({
           ...ctx.payload,
           extra: ctx.payload.extra ?? null,
-          projectID: instance.project.id,
+          projectID: ProjectV2.ID.make(instance.project.id),
         })
         .pipe(
           Effect.catchCause((cause) => {

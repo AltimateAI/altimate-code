@@ -67,9 +67,27 @@ export const SummarizePayload = Schema.Struct({
   modelID: ModelV2.ID,
   auto: Schema.optional(Schema.Boolean),
 })
-export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID"]))
-export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
-export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.fields, ["sessionID"]))
+// altimate_change start — SessionPrompt.{Prompt,Command,Shell}Input remain zod schemas in the
+// fork (no `.fields`), so bridge them into the effect HttpApi layer via Schema.declare. The
+// declared Type is the fork's input minus `sessionID`, and validation reuses the existing zod
+// schema (`.omit({ sessionID })`), so payload typing/validation stay in lockstep with the
+// SessionPrompt service the handler delegates to.
+type PromptPayloadType = Omit<SessionPrompt.PromptInput, "sessionID">
+type CommandPayloadType = Omit<SessionPrompt.CommandInput, "sessionID">
+type ShellPayloadType = Omit<SessionPrompt.ShellInput, "sessionID">
+const PromptPayloadZod = SessionPrompt.PromptInput.omit({ sessionID: true })
+const CommandPayloadZod = SessionPrompt.CommandInput.omit({ sessionID: true })
+const ShellPayloadZod = SessionPrompt.ShellInput.omit({ sessionID: true })
+export const PromptPayload = Schema.declare<PromptPayloadType>(
+  (u): u is PromptPayloadType => PromptPayloadZod.safeParse(u).success,
+).annotate({ identifier: "PromptInput" })
+export const CommandPayload = Schema.declare<CommandPayloadType>(
+  (u): u is CommandPayloadType => CommandPayloadZod.safeParse(u).success,
+).annotate({ identifier: "CommandInput" })
+export const ShellPayload = Schema.declare<ShellPayloadType>(
+  (u): u is ShellPayloadType => ShellPayloadZod.safeParse(u).success,
+).annotate({ identifier: "ShellInput" })
+// altimate_change end
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
 export const PermissionResponsePayload = Schema.Struct({
   response: PermissionV1.Reply,

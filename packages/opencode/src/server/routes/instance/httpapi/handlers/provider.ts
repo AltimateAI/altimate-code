@@ -48,7 +48,9 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
       }
       const connected = yield* provider.list()
       const providers = Object.assign(
-        mapValues(filtered, (item) => Provider.fromModelsDevProvider(item)),
+        // ModelsDev.Service yields a deeply-readonly Provider; fromModelsDevProvider only
+        // reads it, so widen the readonly shape to the mutable signature it expects.
+        mapValues(filtered, (item) => Provider.fromModelsDevProvider(item as Parameters<typeof Provider.fromModelsDevProvider>[0])),
         connected,
       )
       return {

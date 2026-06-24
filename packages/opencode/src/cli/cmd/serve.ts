@@ -31,7 +31,7 @@ export const ServeCommand = effectCmd({
     const { syncDatamateUrlFromVscodeMcp } = yield* Effect.promise(() => import("../../altimate/datamate-transport"))
     yield* Effect.promise(() => syncDatamateUrlFromVscodeMcp(process.cwd()))
     // altimate_change end
-    const server = yield* Effect.promise(() => Server.listen(opts))
+    const server = yield* Effect.sync(() => Server.listen(opts))
     // altimate_change start — upstream_fix: branding regression in log line
     console.log(`altimate-code server listening on http://${server.hostname}:${server.port}`)
     // altimate_change end

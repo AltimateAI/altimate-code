@@ -7,12 +7,12 @@ import { Context } from "../util/context"
 import { lazy } from "../util/lazy"
 import { Global } from "../global"
 import { Log } from "../util/log"
-import { NamedError } from "@opencode-ai/core/util/error"
+import { NamedError } from "@opencode-ai/util/error"
 import z from "zod"
 import path from "path"
 import { readFileSync, readdirSync, existsSync } from "fs"
 import * as schema from "./schema"
-import { Installation } from "../installation"
+import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
 
@@ -29,7 +29,7 @@ const log = Log.create({ service: "db" })
 
 export namespace Database {
   export const Path = iife(() => {
-    const channel = Installation.CHANNEL
+    const channel = InstallationChannel
     if (["latest", "beta"].includes(channel) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
       return path.join(Global.Path.data, "opencode.db")
     const safe = channel.replace(/[^a-zA-Z0-9._-]/g, "-")

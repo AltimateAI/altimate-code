@@ -1,6 +1,10 @@
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
-import { type IPty } from "bun-pty"
+// altimate_change start — upstream moved the pty spawn backend into @opencode-ai/core
+// (#pty bun/node condition). The fork keeps its own Pty manager, so import the spawn
+// function + process type from core's bun backend instead of the dropped `bun-pty` dep.
+import { spawn as ptySpawn, type Proc as IPty } from "@opencode-ai/core/pty/pty.bun"
+// altimate_change end
 import z from "zod"
 import { Log } from "../util/log"
 import { Instance } from "../project/instance"
@@ -36,8 +40,7 @@ export namespace Pty {
   }
 
   const pty = lazy(async () => {
-    const { spawn } = await import("bun-pty")
-    return spawn
+    return ptySpawn
   })
 
   export const Info = z

@@ -75,9 +75,14 @@ export namespace SessionRetry {
       return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
     }
 
+    // altimate_change start — core NamedError.toObject() now types `data` as `unknown`;
+    // narrow to an optional-message view for the generic (non-typed-error) paths below.
+    const data = error.data as { message?: unknown } | undefined
+    // altimate_change end
+
     // altimate_change start — bridge upstream PR #21355: detect plain-text rate-limit
     // messages so providers (Alibaba/DashScope, etc.) that return non-JSON 429s get retried.
-    const msg = error.data?.message
+    const msg = data?.message
     if (typeof msg === "string") {
       const lower = msg.toLowerCase()
       if (
@@ -92,12 +97,12 @@ export namespace SessionRetry {
 
     const json = iife(() => {
       try {
-        if (typeof error.data?.message === "string") {
-          const parsed = JSON.parse(error.data.message)
+        if (typeof data?.message === "string") {
+          const parsed = JSON.parse(data.message)
           return parsed
         }
 
-        return JSON.parse(error.data.message)
+        return JSON.parse(data?.message as string)
       } catch {
         return undefined
       }

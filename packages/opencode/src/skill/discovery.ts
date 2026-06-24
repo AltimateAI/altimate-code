@@ -1,4 +1,5 @@
 import { NodePath } from "@effect/platform-node"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Path, Schema, Context } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { withTransientReadRetry } from "@/util/effect-http-client"
@@ -114,6 +115,11 @@ export namespace Discovery {
     Layer.provide(FSUtil.defaultLayer),
     Layer.provide(NodePath.layer),
   )
+
+  // altimate_change start — node for LayerNode wiring (Skill.node depends on it). The
+  // defaultLayer is self-contained, so this node has no remaining dependencies.
+  export const node = LayerNode.make(defaultLayer, [])
+  // altimate_change end
 
   // altimate_change start — bridge merge: top-level async wrapper for skill loader
   const { runPromise } = makeRuntime(Service, defaultLayer)

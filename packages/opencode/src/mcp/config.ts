@@ -1,7 +1,7 @@
 import path from "path"
 import { modify, applyEdits, parse, parseTree, findNodeAtLocation, getNodeValue, type ParseError } from "jsonc-parser"
 import { Filesystem } from "../util/filesystem"
-import type { Config } from "../config/config"
+import type { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 
 // altimate_change start — primary config filename is altimate-code.json; opencode.json
 // is fallback for users with pre-existing upstream installs. New writes land in
@@ -32,7 +32,7 @@ export async function resolveConfigPath(baseDir: string, global = false) {
   return candidates[0]
 }
 
-export async function addMcpToConfig(name: string, mcpConfig: Config.Mcp, configPath: string) {
+export async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configPath: string) {
   let text = "{}"
   if (await Filesystem.exists(configPath)) {
     text = await Filesystem.readText(configPath)
@@ -123,7 +123,7 @@ export async function findAllConfigPaths(projectDir: string, globalDir: string):
 export async function readMcpEntryFromDisk(
   name: string,
   configPath: string,
-): Promise<Config.Mcp | undefined> {
+): Promise<ConfigMCPV1.Info | undefined> {
   if (!(await Filesystem.exists(configPath))) return undefined
 
   const text = await Filesystem.readText(configPath)
@@ -137,5 +137,5 @@ export async function readMcpEntryFromDisk(
   // `prop.children[1].value` would silently drop array/object fields (command,
   // environment, headers, oauth) — jsonc-parser only populates `Node.value` for
   // primitives — corrupting the entry on the next disk write.
-  return getNodeValue(node) as Config.Mcp
+  return getNodeValue(node) as ConfigMCPV1.Info
 }

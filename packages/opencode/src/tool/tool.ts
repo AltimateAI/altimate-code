@@ -8,7 +8,14 @@ import { Agent } from "@/agent/agent"
 // altimate_change start — telemetry instrumentation + legacy zod-tool adapter
 import z from "zod"
 import { Telemetry } from "../altimate/telemetry"
-import { isLegacyToolDef, legacyToInit, type LegacyToolDef } from "../altimate/tool-zod-compat"
+import {
+  isLegacyToolDef,
+  isLegacyInitFn,
+  legacyToInit,
+  legacyInitFnToInit,
+  type LegacyToolDef,
+  type LegacyInitFn,
+} from "../altimate/tool-zod-compat"
 // altimate_change end
 
 interface Metadata {
@@ -291,6 +298,11 @@ export function define<P extends z.ZodType, M extends Metadata = Metadata, ID ex
   id: ID,
   legacy: LegacyToolDef<P, M>,
 ): Effect.Effect<Info<Schema.Decoder<z.infer<P>>, M>, never, Truncate.Service | Agent.Service> & { id: ID }
+// legacy overload: accept old-style deferred (async-function) tool factories.
+export function define<P extends z.ZodType, M extends Metadata = Metadata, ID extends string = string>(
+  id: ID,
+  legacy: LegacyInitFn<P, M>,
+): Effect.Effect<Info<Schema.Decoder<z.infer<P>>, M>, never, Truncate.Service | Agent.Service> & { id: ID }
 // altimate_change end
 export function define<
   Parameters extends Schema.Decoder<unknown>,
@@ -303,7 +315,12 @@ export function define<
 ): Effect.Effect<Info<Parameters, Result>, never, R | Truncate.Service | Agent.Service> & { id: ID }
 export function define(id: string, init: any): any {
   // altimate_change start — adapt legacy plain-object tool defs (the fork's 77 tools)
-  const resolvedInit: Effect.Effect<any, never, any> = isLegacyToolDef(init) ? legacyToInit(init) : init
+  // and legacy deferred (async-function) factories (skill/task/bash).
+  const resolvedInit: Effect.Effect<any, never, any> = isLegacyToolDef(init)
+    ? legacyToInit(init)
+    : isLegacyInitFn(init)
+      ? legacyInitFnToInit(init)
+      : init
   // altimate_change end
   return Object.assign(
     Effect.gen(function* () {

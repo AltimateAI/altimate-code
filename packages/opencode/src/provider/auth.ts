@@ -1,4 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change start — makeRuntime for restored Promise wrappers (see bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import type { AuthOAuthResult, Hooks } from "@opencode-ai/plugin"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Auth } from "@/auth"
@@ -229,5 +232,20 @@ export const defaultLayer = Layer.suspend(() =>
 )
 
 export const node = LayerNode.make(layer, [Auth.node, Plugin.node])
+
+// altimate_change start — restore imperative Promise wrappers for the HTTP route layer
+// (server/routes/provider.ts) which the Effect-only migration dropped. ProviderV2.ID is a
+// runtime-identity brand, so accepting a string providerID and re-branding is safe.
+const { runPromise: runProviderAuth } = makeRuntime(Service, defaultLayer)
+export async function methods() {
+  return runProviderAuth((svc) => svc.methods())
+}
+export async function authorize(input: { providerID: string } & AuthorizeInput) {
+  return runProviderAuth((svc) => svc.authorize({ ...input, providerID: ProviderV2.ID.make(input.providerID) }))
+}
+export async function callback(input: { providerID: string } & CallbackInput) {
+  return runProviderAuth((svc) => svc.callback({ ...input, providerID: ProviderV2.ID.make(input.providerID) }))
+}
+// altimate_change end
 
 export * as ProviderAuth from "./auth"

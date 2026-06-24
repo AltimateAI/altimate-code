@@ -5,6 +5,9 @@ import { basename } from "path"
 import { Cause, Effect } from "effect"
 import { Agent } from "../../../agent/agent"
 import { Provider } from "@/provider/provider"
+import { ModelID, ProviderID } from "@/provider/schema"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Session } from "@/session/session"
 import type { MessageV2 } from "../../../session/message-v2"
 import { MessageID, PartID } from "../../../session/schema"
@@ -75,14 +78,17 @@ const getAvailableTools = Effect.fn("Cli.debug.agent.getAvailableTools")(functio
         onFailure: (cause) => {
           const error = Cause.squash(cause) as Provider.DefaultModelError
           if (error instanceof Provider.ModelNotFoundError) {
-            return fail(`Model not found: ${error.providerID}/${error.modelID}`)
+            return fail(`Model not found: ${error.data.providerID}/${error.data.modelID}`)
           }
-          if (error instanceof Provider.NoModelsError) return fail(`No models found for provider ${error.providerID}`)
-          return fail("No providers found")
+          return fail(error instanceof Error ? error.message : "No providers found")
         },
       }),
     ))
-  return yield* registry.tools({ ...model, agent })
+  return yield* registry.tools({
+    providerID: ProviderID.make(model.providerID),
+    modelID: ModelID.make(model.modelID),
+    agent,
+  })
 })
 
 function resolveTools(agent: Agent.Info, availableTools: { id: string }[]) {
@@ -140,11 +146,9 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
             onFailure: (cause) => {
               const error = Cause.squash(cause) as Provider.DefaultModelError
               if (error instanceof Provider.ModelNotFoundError) {
-                return fail(`Model not found: ${error.providerID}/${error.modelID}`)
+                return fail(`Model not found: ${error.data.providerID}/${error.data.modelID}`)
               }
-              if (error instanceof Provider.NoModelsError)
-                return fail(`No models found for provider ${error.providerID}`)
-              return fail("No providers found")
+              return fail(error instanceof Error ? error.message : "No providers found")
             },
           }),
         )
@@ -156,8 +160,8 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
     role: "assistant",
     time: { created: now },
     parentID: messageID,
-    modelID: model.modelID,
-    providerID: model.providerID,
+    modelID: ModelV2.ID.make(model.modelID),
+    providerID: ProviderV2.ID.make(model.providerID),
     mode: "debug",
     agent: agent.name,
     path: {

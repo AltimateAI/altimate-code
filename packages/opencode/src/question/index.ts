@@ -233,6 +233,9 @@ export const node = LayerNode.make(layer, [EventV2Bridge.node])
 // (server/routes/question.ts) call from plain async code. The makeRuntime bridge keeps the
 // question reads/mutations bound to the active workspace/instance.
 const { runPromise: runQuestion } = makeRuntime(Service, defaultLayer)
+export function ask(input: { sessionID: SessionID; questions: ReadonlyArray<Info>; tool?: Tool }) {
+  return runQuestion((svc) => svc.ask(input))
+}
 export function list() {
   return runQuestion((svc) => svc.list())
 }

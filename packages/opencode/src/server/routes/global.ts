@@ -11,6 +11,8 @@ import { Installation } from "@/installation"
 import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
 import { Config } from "../../config/config"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { zod } from "@/util/effect-zod"
 import { errors } from "../error"
 
 const log = Log.create({ service: "server" })
@@ -188,7 +190,7 @@ export const GlobalRoutes = lazy(() =>
             description: "Get global config info",
             content: {
               "application/json": {
-                schema: resolver(Config.Info),
+                schema: resolver(zod(ConfigV1.Info)),
               },
             },
           },
@@ -209,18 +211,18 @@ export const GlobalRoutes = lazy(() =>
             description: "Successfully updated global config",
             content: {
               "application/json": {
-                schema: resolver(Config.Info),
+                schema: resolver(zod(ConfigV1.Info)),
               },
             },
           },
           ...errors(400),
         },
       }),
-      validator("json", Config.Info),
+      validator("json", zod(ConfigV1.Info)),
       async (c) => {
-        const config = c.req.valid("json")
+        const config = c.req.valid("json") as ConfigV1.Info
         const next = await Config.updateGlobal(config)
-        return c.json(next)
+        return c.json(next.info)
       },
     )
     .post(

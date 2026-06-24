@@ -437,6 +437,12 @@ const { runPromise: runVcs } = makeRuntime(Service, defaultLayer)
 export async function branch() {
   return runVcs((s) => s.branch())
 }
+export async function defaultBranch() {
+  return runVcs((s) => s.defaultBranch())
+}
+export async function diff(mode: Mode, options?: DiffOptions) {
+  return runVcs((s) => s.diff(mode, options))
+}
 // altimate_change end
 
 export * as Vcs from "./vcs"

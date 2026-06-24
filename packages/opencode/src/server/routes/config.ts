@@ -2,11 +2,13 @@ import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { Config } from "../../config/config"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Provider } from "../../provider/provider"
 import { mapValues } from "remeda"
 import { errors } from "../error"
 import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
+import { zod } from "@/util/effect-zod"
 
 const log = Log.create({ service: "server" })
 
@@ -23,7 +25,7 @@ export const ConfigRoutes = lazy(() =>
             description: "Get config info",
             content: {
               "application/json": {
-                schema: resolver(Config.Info),
+                schema: resolver(zod(ConfigV1.Info)),
               },
             },
           },
@@ -44,16 +46,16 @@ export const ConfigRoutes = lazy(() =>
             description: "Successfully updated config",
             content: {
               "application/json": {
-                schema: resolver(Config.Info),
+                schema: resolver(zod(ConfigV1.Info)),
               },
             },
           },
           ...errors(400),
         },
       }),
-      validator("json", Config.Info),
+      validator("json", zod(ConfigV1.Info)),
       async (c) => {
-        const config = c.req.valid("json")
+        const config = c.req.valid("json") as ConfigV1.Info
         await Config.update(config)
         return c.json(config)
       },

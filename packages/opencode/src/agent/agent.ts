@@ -35,6 +35,9 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { AbsolutePath, type DeepMutable } from "@opencode-ai/core/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+// altimate_change start — fork ID brands for re-branding at the namespace/core boundary
+import { ProviderID, ModelID } from "@/provider/schema"
+// altimate_change end
 import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 import { PluginBoot } from "@opencode-ai/core/plugin/boot"
 import { Reference } from "@opencode-ai/core/reference"
@@ -486,7 +489,15 @@ export const layer = Layer.effect(
               options: {},
               native: false,
             }
-          if (value.model) item.model = Provider.parseModel(value.model)
+          if (value.model) {
+            // altimate_change start — re-brand fork ProviderID/ModelID to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+            const parsed = Provider.parseModel(value.model)
+            item.model = {
+              providerID: ProviderV2.ID.make(parsed.providerID),
+              modelID: ModelV2.ID.make(parsed.modelID),
+            }
+            // altimate_change end
+          }
           item.variant = value.variant ?? item.variant
           item.prompt = value.prompt ?? item.prompt
           item.description = value.description ?? item.description
@@ -590,7 +601,12 @@ export const layer = Layer.effect(
       }) {
         const cfg = yield* config.get()
         const model = input.model ?? (yield* provider.defaultModel())
-        const resolved = yield* provider.getModel(model.providerID, model.modelID)
+        const resolved = yield* provider.getModel(
+          // altimate_change start — re-brand core/fork ID union to fork ProviderID/ModelID (identity at runtime)
+          ProviderID.make(model.providerID),
+          ModelID.make(model.modelID),
+          // altimate_change end
+        )
         const language = yield* provider.getLanguage(resolved)
         const tracer = cfg.experimental?.openTelemetry
           ? Option.getOrUndefined(yield* Effect.serviceOption(OtelTracer.OtelTracer))

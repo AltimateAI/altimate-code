@@ -2,6 +2,7 @@
 import { EOL } from "os"
 import path from "path"
 import fs from "fs/promises"
+import { Glob as BunGlob } from "bun"
 import { Skill } from "../../skill"
 import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
@@ -210,7 +211,7 @@ const SkillListCommand = cmd({
         const rawToolStr = tools.length > 0 ? tools.join(", ") : "—"
         const toolStr = rawToolStr.length > toolsWidth ? rawToolStr.slice(0, toolsWidth - 3) + "..." : rawToolStr
         // Truncate on word boundary
-        let desc = skill.description
+        let desc = skill.description ?? ""
         if (desc.length > 60) {
           desc = desc.slice(0, 60)
           const lastSpace = desc.lastIndexOf(" ")
@@ -381,7 +382,7 @@ const SkillTestCommand = cmd({
         fail(`Frontmatter incomplete — name and description are required`)
       }
 
-      if (skill.description.startsWith("TODO")) {
+      if (skill.description?.startsWith("TODO")) {
         warn(`Description starts with "TODO" — update it before sharing`)
       }
 
@@ -571,7 +572,6 @@ const SkillInstallCommand = cmd({
       }
 
       // Find all SKILL.md files in the source
-      const { Glob: BunGlob } = globalThis.Bun
       const glob = new BunGlob("**/SKILL.md")
       const matches: string[] = []
       for await (const match of glob.scan({ cwd: skillDir, absolute: true })) {

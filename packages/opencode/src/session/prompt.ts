@@ -1953,8 +1953,9 @@ export namespace SessionPrompt {
                   },
                 ]
 
-                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; init() yields the executable def
-                await AppRuntime.runPromise(Effect.flatMap(ReadTool, (info) => info.init()))
+                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; init() yields the executable def.
+                // ReadTool requires Scope.Scope — discharge it with Effect.scoped before running on AppRuntime.
+                await AppRuntime.runPromise(Effect.scoped(Effect.flatMap(ReadTool, (info) => info.init())))
                   // altimate_change end
                   .then(async (t) => {
                     const model = await Provider.getModel(info.model.providerID, info.model.modelID)
@@ -2033,10 +2034,13 @@ export namespace SessionPrompt {
                   ask: () => Effect.void,
                   // altimate_change end
                 }
-                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; execute returns an Effect
+                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; execute returns an Effect.
+                // ReadTool requires Scope.Scope — discharge it with Effect.scoped before running on AppRuntime.
                 const result = await AppRuntime.runPromise(
-                  Effect.flatMap(ReadTool, (info) => info.init()).pipe(
-                    Effect.flatMap((t) => t.execute(args, listCtx)),
+                  Effect.scoped(
+                    Effect.flatMap(ReadTool, (info) => info.init()).pipe(
+                      Effect.flatMap((t) => t.execute(args, listCtx)),
+                    ),
                   ),
                 )
                 // altimate_change end

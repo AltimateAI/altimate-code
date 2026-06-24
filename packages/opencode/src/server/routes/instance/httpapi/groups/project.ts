@@ -9,10 +9,10 @@ import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware
 import { described } from "./metadata"
 
 const root = "/project"
-const UpdatePayload = Schema.Struct({
+export const UpdatePayload = Schema.Struct({
   name: Schema.optional(Schema.String),
-  icon: Schema.optional(Project.Info.fields.icon),
-  commands: Schema.optional(Project.Info.fields.commands),
+  icon: Schema.optional(Project.InfoSchema.fields.icon),
+  commands: Schema.optional(Project.InfoSchema.fields.commands),
 })
 
 export const ProjectApi = HttpApi.make("project")
@@ -21,7 +21,7 @@ export const ProjectApi = HttpApi.make("project")
       .add(
         HttpApiEndpoint.get("list", root, {
           query: WorkspaceRoutingQuery,
-          success: described(Schema.Array(Project.Info), "List of projects"),
+          success: described(Schema.Array(Project.InfoSchema), "List of projects"),
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "project.list",
@@ -31,7 +31,7 @@ export const ProjectApi = HttpApi.make("project")
         ),
         HttpApiEndpoint.get("current", `${root}/current`, {
           query: WorkspaceRoutingQuery,
-          success: described(Project.Info, "Current project information"),
+          success: described(Project.InfoSchema, "Current project information"),
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "project.current",
@@ -41,7 +41,7 @@ export const ProjectApi = HttpApi.make("project")
         ),
         HttpApiEndpoint.post("initGit", `${root}/git/init`, {
           query: WorkspaceRoutingQuery,
-          success: described(Project.Info, "Project information after git initialization"),
+          success: described(Project.InfoSchema, "Project information after git initialization"),
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "project.initGit",
@@ -53,7 +53,7 @@ export const ProjectApi = HttpApi.make("project")
           params: { projectID: ProjectV2.ID },
           query: WorkspaceRoutingQuery,
           payload: UpdatePayload,
-          success: described(Project.Info, "Updated project information"),
+          success: described(Project.InfoSchema, "Updated project information"),
           error: [HttpApiError.BadRequest, ProjectNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({

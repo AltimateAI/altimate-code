@@ -5,7 +5,7 @@ import { Filesystem } from "../util/filesystem"
 import DESCRIPTION from "./glob.txt"
 import { Ripgrep } from "../file/ripgrep"
 import { Instance } from "../project/instance"
-import { assertExternalDirectory } from "./external-directory"
+import { assertExternalDirectoryLegacy } from "./external-directory"
 // altimate_change start — glob hardening: timeout, home/root blocking, default exclusions
 import os from "os"
 import { abortAfter } from "../util/abort"
@@ -38,7 +38,7 @@ export const GlobTool = Tool.define("glob", {
 
     let search = params.path ?? Instance.directory
     search = path.isAbsolute(search) ? search : path.resolve(Instance.directory, search)
-    await assertExternalDirectory(ctx, search, { kind: "directory" })
+    await assertExternalDirectoryLegacy(ctx, search, { kind: "directory" })
 
     // altimate_change start — block home/root directory to prevent scanning entire filesystem
     const homeDir = os.homedir()

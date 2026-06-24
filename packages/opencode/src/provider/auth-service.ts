@@ -1,4 +1,4 @@
-import { Effect, Layer, Record, ServiceMap, Struct } from "effect"
+import { Context, Effect, Layer, Record, Struct } from "effect"
 import { Instance } from "@/project/instance"
 import { Plugin } from "../plugin"
 import { filter, fromEntries, map, pipe } from "remeda"
@@ -30,21 +30,15 @@ export const Authorization = z
   })
 export type Authorization = z.infer<typeof Authorization>
 
-export const OauthMissing = NamedError.create(
-  "ProviderAuthOauthMissing",
-  z.object({
-    providerID: ProviderID.zod,
-  }),
-)
+export const OauthMissing = NamedError.create("ProviderAuthOauthMissing", {
+  providerID: ProviderID,
+})
 
-export const OauthCodeMissing = NamedError.create(
-  "ProviderAuthOauthCodeMissing",
-  z.object({
-    providerID: ProviderID.zod,
-  }),
-)
+export const OauthCodeMissing = NamedError.create("ProviderAuthOauthCodeMissing", {
+  providerID: ProviderID,
+})
 
-export const OauthCallbackFailed = NamedError.create("ProviderAuthOauthCallbackFailed", z.object({}))
+export const OauthCallbackFailed = NamedError.create("ProviderAuthOauthCallbackFailed", {})
 
 export type ProviderAuthError =
   | Auth.AuthServiceError
@@ -72,7 +66,7 @@ export namespace ProviderAuthService {
   }
 }
 
-export class ProviderAuthService extends ServiceMap.Service<ProviderAuthService, ProviderAuthService.Service>()(
+export class ProviderAuthService extends Context.Service<ProviderAuthService, ProviderAuthService.Service>()(
   "@opencode/ProviderAuth",
 ) {
   static readonly layer = Layer.effect(

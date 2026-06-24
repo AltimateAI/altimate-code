@@ -228,7 +228,8 @@ export namespace ProviderTransform {
           lastType !== "tool-approval-request" &&
           lastType !== "tool-approval-response"
         ) {
-          lastContent.providerOptions = mergeDeep(lastContent.providerOptions ?? {}, providerOptions)
+          const part = lastContent as { providerOptions?: Record<string, any> }
+          part.providerOptions = mergeDeep(part.providerOptions ?? {}, providerOptions)
           continue
         }
         // altimate_change end
@@ -321,7 +322,7 @@ export namespace ProviderTransform {
               return { ...part }
             }
             // altimate_change end
-            return { ...part, providerOptions: remap(part.providerOptions) }
+            return { ...part, providerOptions: remap((part as { providerOptions?: Record<string, any> }).providerOptions) }
           }),
         } as typeof msg
       })
@@ -952,8 +953,11 @@ export namespace ProviderTransform {
     return { [key]: options }
   }
 
-  export function maxOutputTokens(model: Provider.Model): number {
-    return Math.min(model.limit.output, OUTPUT_TOKEN_MAX) || OUTPUT_TOKEN_MAX
+  export function maxOutputTokens(model: Provider.Model, override?: number): number {
+    // altimate_change start — honor OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX override (fork feature)
+    const ceiling = override && override > 0 ? Math.min(override, OUTPUT_TOKEN_MAX) : OUTPUT_TOKEN_MAX
+    return Math.min(model.limit.output, ceiling) || ceiling
+    // altimate_change end
   }
 
   export function schema(model: Provider.Model, schema: JSONSchema.BaseSchema | JSONSchema7): JSONSchema7 {

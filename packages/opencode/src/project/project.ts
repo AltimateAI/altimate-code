@@ -76,6 +76,36 @@ export namespace Project {
     })
   export type Info = z.infer<typeof Info>
 
+  // altimate_change start — effect Schema mirror of the zod `Info` above, for the experimental
+  // HttpApi project group/handler (effect HttpApi requires effect Schemas). Field shape is
+  // kept in lockstep with the zod `Info`; `.fields.icon`/`.fields.commands` back the group's
+  // UpdatePayload. Runtime data is produced by the zod path (fromRow); both validate the same shape.
+  export const InfoSchema = Schema.Struct({
+    id: ProjectV2.ID,
+    worktree: Schema.String,
+    vcs: Schema.optional(Schema.Literal("git")),
+    name: Schema.optional(Schema.String),
+    icon: Schema.optional(
+      Schema.Struct({
+        url: Schema.optional(Schema.String),
+        override: Schema.optional(Schema.String),
+        color: Schema.optional(Schema.String),
+      }),
+    ),
+    commands: Schema.optional(
+      Schema.Struct({
+        start: Schema.optional(Schema.String),
+      }),
+    ),
+    time: Schema.Struct({
+      created: Schema.Number,
+      updated: Schema.Number,
+      initialized: Schema.optional(Schema.Number),
+    }),
+    sandboxes: Schema.Array(Schema.String),
+  }).annotate({ identifier: "Project" })
+  // altimate_change end
+
   export const Event = {
     Updated: BusEvent.define("project.updated", Info),
   }
