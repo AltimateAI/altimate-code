@@ -48,6 +48,9 @@ import { websocket } from "hono/bun"
 import { HTTPException } from "hono/http-exception"
 import { errors } from "./error"
 import { Filesystem } from "@/util/filesystem"
+// altimate_change start — effect→zod converter for HTTP schemas whose modules migrated to Effect Schema
+import { zod } from "@/util/effect-zod"
+// altimate_change end
 import { QuestionRoutes } from "./routes/question"
 import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
@@ -160,7 +163,9 @@ export namespace Server {
             providerID: ProviderID.zod,
           }),
         ),
-        validator("json", Auth.Info.zod),
+        // altimate_change start — Auth.Info migrated to Effect Schema; convert to zod for the validator
+        validator("json", zod(Auth.Info)),
+        // altimate_change end
         async (c) => {
           const providerID = c.req.valid("param").providerID
           const info = c.req.valid("json")
@@ -332,7 +337,7 @@ export namespace Server {
               description: "VCS info",
               content: {
                 "application/json": {
-                  schema: resolver(Vcs.Info),
+                  schema: resolver(zod(Vcs.Info)),
                 },
               },
             },
@@ -356,7 +361,7 @@ export namespace Server {
               description: "List of commands",
               content: {
                 "application/json": {
-                  schema: resolver(Command.Info.array()),
+                  schema: resolver(z.array(zod(Command.Info))),
                 },
               },
             },
@@ -430,7 +435,7 @@ export namespace Server {
               description: "List of agents",
               content: {
                 "application/json": {
-                  schema: resolver(Agent.Info.array()),
+                  schema: resolver(z.array(zod(Agent.Info))),
                 },
               },
             },
@@ -501,7 +506,7 @@ export namespace Server {
               description: "Formatter status",
               content: {
                 "application/json": {
-                  schema: resolver(Format.Status.array()),
+                  schema: resolver(z.array(zod(Format.Status))),
                 },
               },
             },

@@ -1,10 +1,13 @@
 import { BusEvent } from "@/bus/bus-event"
 import { SessionID, MessageID, PartID } from "./schema"
 import z from "zod"
-import { NamedError } from "@opencode-ai/core/util/error"
+// altimate_change start — upstream v1.17.9 repointed this to the Effect-Schema
+// NamedError in @opencode-ai/core; this file's schema tree is zod (the SyncEvent
+// event system below requires zod schemas), so keep the zod NamedError whose
+// `.Schema` is a zod schema and `.create(name, z.object(...))` matches the calls.
+import { NamedError } from "@opencode-ai/util/error"
+// altimate_change end
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
-import { LSP } from "../lsp"
-import { Snapshot } from "@/snapshot"
 import { SyncEvent } from "../sync"
 import { Database, NotFoundError, and, desc, eq, inArray, lt, or } from "@/storage/db"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
@@ -27,6 +30,29 @@ export namespace MessageV2 {
   export function isMedia(mime: string) {
     return mime.startsWith("image/") || mime === "application/pdf"
   }
+
+  // altimate_change start — upstream v1.17.9 moved the branded IDs, LSP.Range and
+  // Snapshot.FileDiff to Effect Schema. This file's schema tree (and the SyncEvent
+  // event system) is zod, so reconstruct the zod equivalents locally. Shapes are
+  // identical to the Effect-Schema sources (id/id.ts, lsp/lsp.ts, snapshot/index.ts).
+  const SessionIDSchema = z.string().pipe(z.custom<SessionID>())
+  const MessageIDSchema = z.string().pipe(z.custom<MessageID>())
+  const PartIDSchema = z.string().pipe(z.custom<PartID>())
+
+  const RangeSchema = z.object({
+    start: z.object({ line: z.number(), character: z.number() }),
+    end: z.object({ line: z.number(), character: z.number() }),
+  })
+
+  // Mirrors Snapshot.FileDiff: file/patch optional (legacy on-disk summary_diffs).
+  const FileDiffSchema = z.object({
+    file: z.string().optional(),
+    patch: z.string().optional(),
+    additions: z.number(),
+    deletions: z.number(),
+    status: z.enum(["added", "deleted", "modified"]).optional(),
+  })
+  // altimate_change end
 
   export const OutputLengthError = NamedError.create("MessageOutputLengthError", z.object({}))
   export const AbortedError = NamedError.create("MessageAbortedError", z.object({ message: z.string() }))
@@ -85,9 +111,9 @@ export namespace MessageV2 {
   export type OutputFormat = z.infer<typeof Format>
 
   const PartBase = z.object({
-    id: PartID.zod,
-    sessionID: SessionID.zod,
-    messageID: MessageID.zod,
+    id: PartIDSchema,
+    sessionID: SessionIDSchema,
+    messageID: MessageIDSchema,
   })
 
   export const SnapshotPart = PartBase.extend({
@@ -159,7 +185,7 @@ export namespace MessageV2 {
   export const SymbolSource = FilePartSourceBase.extend({
     type: z.literal("symbol"),
     path: z.string(),
-    range: LSP.Range,
+    range: RangeSchema,
     name: z.string(),
     kind: z.number().int(),
   }).meta({
@@ -350,8 +376,8 @@ export namespace MessageV2 {
   export type ToolPart = z.infer<typeof ToolPart>
 
   const Base = z.object({
-    id: MessageID.zod,
-    sessionID: SessionID.zod,
+    id: MessageIDSchema,
+    sessionID: SessionIDSchema,
   })
 
   export const User = Base.extend({
@@ -364,7 +390,7 @@ export namespace MessageV2 {
       .object({
         title: z.string().optional(),
         body: z.string().optional(),
-        diffs: Snapshot.FileDiff.array(),
+        diffs: FileDiffSchema.array(),
       })
       .optional(),
     agent: z.string(),
@@ -421,7 +447,7 @@ export namespace MessageV2 {
         APIError.Schema,
       ])
       .optional(),
-    parentID: MessageID.zod,
+    parentID: MessageIDSchema,
     modelID: ModelID.zod,
     providerID: ProviderID.zod,
     /**
@@ -464,7 +490,7 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
+        sessionID: SessionIDSchema,
         info: Info,
       }),
     }),
@@ -473,8 +499,8 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
-        messageID: MessageID.zod,
+        sessionID: SessionIDSchema,
+        messageID: MessageIDSchema,
       }),
     }),
     PartUpdated: SyncEvent.define({
@@ -482,7 +508,7 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
+        sessionID: SessionIDSchema,
         part: Part,
         time: z.number(),
       }),
@@ -490,9 +516,9 @@ export namespace MessageV2 {
     PartDelta: BusEvent.define(
       "message.part.delta",
       z.object({
-        sessionID: SessionID.zod,
-        messageID: MessageID.zod,
-        partID: PartID.zod,
+        sessionID: SessionIDSchema,
+        messageID: MessageIDSchema,
+        partID: PartIDSchema,
         field: z.string(),
         delta: z.string(),
       }),
@@ -502,9 +528,9 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
-        messageID: MessageID.zod,
-        partID: PartID.zod,
+        sessionID: SessionIDSchema,
+        messageID: MessageIDSchema,
+        partID: PartIDSchema,
       }),
     }),
   }
@@ -516,7 +542,7 @@ export namespace MessageV2 {
   export type WithParts = z.infer<typeof WithParts>
 
   const Cursor = z.object({
-    id: MessageID.zod,
+    id: MessageIDSchema,
     time: z.number(),
   })
   type Cursor = z.infer<typeof Cursor>
@@ -535,7 +561,11 @@ export namespace MessageV2 {
       ...row.data,
       id: row.id,
       sessionID: row.session_id,
-    }) as MessageV2.Info
+      // altimate_change start — upstream v1.17.9 made MessageTable.data an
+      // Effect-Schema type that no longer structurally overlaps the zod-inferred
+      // MessageV2.Info; cast through unknown (runtime shape is unchanged).
+    }) as unknown as MessageV2.Info
+  // altimate_change end
 
   const part = (row: typeof PartTable.$inferSelect) =>
     ({
@@ -803,7 +833,10 @@ export namespace MessageV2 {
 
     const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
-    return yield* Effect.sync(() =>
+    // altimate_change start — upstream v1.17.9 made convertToModelMessages async
+    // (returns Promise<ModelMessage[]>); use Effect.promise so the Effect resolves
+    // to ModelMessage[] rather than Promise<ModelMessage[]>.
+    return yield* Effect.promise(() =>
       convertToModelMessages(
         result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
         {
@@ -812,6 +845,7 @@ export namespace MessageV2 {
         },
       ),
     )
+    // altimate_change end
   })
 
   export function toModelMessages(

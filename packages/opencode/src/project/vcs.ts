@@ -1,4 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import { Effect, Layer, Context, Schema, Stream, Scope } from "effect"
 import { formatPatch, structuredPatch } from "diff"
 import { InstanceState } from "@/effect/instance-state"
@@ -427,5 +430,13 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
 export const defaultLayer = layer.pipe(Layer.provide(Git.defaultLayer), Layer.provide(EventV2Bridge.defaultLayer))
 
 export const node = LayerNode.make(layer, [Git.node, EventV2Bridge.node])
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed in the
+// Effect-only migration; the HTTP server consumes Vcs.branch() directly.
+const { runPromise: runVcs } = makeRuntime(Service, defaultLayer)
+export async function branch() {
+  return runVcs((s) => s.branch())
+}
+// altimate_change end
 
 export * as Vcs from "./vcs"

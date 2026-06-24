@@ -1,9 +1,22 @@
-wip: v1.17.9 reconciliation — repoint moved .sql table-def imports to core (checkpoint 24)
+wip: v1.17.9 reconciliation — fix provider/session/server core files (checkpoint 25)
 
-session/project Drizzle table definitions moved to @opencode-ai/core/{session,project}/sql; some
-survivor files still imported the old ./session.sql / ./project.sql paths (which now resolve to
-the raw `*.sql` ambient module, hence the "no exported member MessageTable" errors). Repointed
-message-v2.ts, session/projectors.ts, server/projectors.ts, project/project.ts to the core paths.
+Four highest-error survivor files driven to 0 (3 via parallel subagents + provider by hand);
+src 788 -> 653, total 2091 -> 1977.
 
-opencode 2093 -> 2091. Cross-cutting wins now exhausted; remaining is deep per-file Effect/Schema/
-Drizzle migration in the session/provider/server survivors + their tests.
+- provider/provider.ts (106->0 cumulative): LanguageModelV2->V3 alias, ./sdk/copilot ->
+  @opencode-ai/core/github-copilot/copilot-provider, @gitlab/gitlab-ai-provider ->
+  gitlab-ai-provider (upstream rename, dep already present), NamedError.create zod->Effect Schema
+  fields (+ import Schema), interleaved.field enum += "reasoning".
+- session/message-v2.ts (28->0): zod NamedError kept via @opencode-ai/util/error; local zod brand
+  schemas for SessionID/MessageID/PartID (.zod dropped on core brands); inline LSP.Range/FileDiff
+  zod mirrors; convertToModelMessages now async (Effect.promise).
+- session/index.ts (43->0): restored fork ProjectID (src/project/schema.ts) + re-added fork ID
+  statics .zod/.make/.ascending (src/session/schema.ts) — unblocks ~10 consumer files; re-brand at
+  the core-drizzle Project.ID<->ProjectID boundary; Storage.read via AppRuntime+Service.
+- server/server.ts (20->0): restored dropped flat Hono routes + lsp/index.ts + server/error.ts +
+  control-plane/schema.ts + util/effect-zod.ts from main; Promise wrappers on Vcs/Command/Agent/
+  Format; WorkspaceID re-based on core WorkspaceV2.ID; zod() AST-walker at HTTP schema call sites.
+
+NOTE: the restored flat route files (routes/{mcp,question,experimental,...}.ts) carry their own
+internal API errors (why the overlay dropped them) — server.ts imports now resolve; their internals
+are follow-up. All fork additions altimate_change-marked.

@@ -1,4 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import { Effect, Layer, Context, Schema } from "effect"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { ChildProcess } from "effect/unstable/process"
@@ -201,5 +204,13 @@ export const defaultLayer = layer.pipe(
 )
 
 export const node = LayerNode.make(layer, [Config.node, AppProcess.node, RuntimeFlags.node])
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed in the
+// Effect-only migration; the HTTP server consumes Format.status() directly.
+const { runPromise: runFormat } = makeRuntime(Service, defaultLayer)
+export async function status() {
+  return runFormat((s) => s.status())
+}
+// altimate_change end
 
 export * as Format from "."

@@ -1,4 +1,5 @@
 import z from "zod"
+import { Schema } from "effect"
 import os from "os"
 import fuzzysort from "fuzzysort"
 import { Config } from "../config/config"
@@ -29,8 +30,8 @@ import { createVertex } from "@ai-sdk/google-vertex"
 import { createVertexAnthropic } from "@ai-sdk/google-vertex/anthropic"
 import { createOpenAI } from "@ai-sdk/openai"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
-import { createOpenRouter, type LanguageModelV2 } from "@openrouter/ai-sdk-provider"
-import { createOpenaiCompatible as createGitHubCopilotOpenAICompatible } from "./sdk/copilot"
+import { createOpenRouter, type LanguageModelV3 as LanguageModelV2 } from "@openrouter/ai-sdk-provider"
+import { createOpenaiCompatible as createGitHubCopilotOpenAICompatible } from "@opencode-ai/core/github-copilot/copilot-provider"
 import { createXai } from "@ai-sdk/xai"
 import { createMistral } from "@ai-sdk/mistral"
 import { createGroq } from "@ai-sdk/groq"
@@ -41,7 +42,7 @@ import { createGateway } from "@ai-sdk/gateway"
 import { createTogetherAI } from "@ai-sdk/togetherai"
 import { createPerplexity } from "@ai-sdk/perplexity"
 import { createVercel } from "@ai-sdk/vercel"
-import { createGitLab, VERSION as GITLAB_PROVIDER_VERSION } from "@gitlab/gitlab-ai-provider"
+import { createGitLab, VERSION as GITLAB_PROVIDER_VERSION } from "gitlab-ai-provider"
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers"
 import { GoogleAuth } from "google-auth-library"
 import { ProviderTransform } from "./transform"
@@ -806,7 +807,7 @@ export namespace Provider {
         interleaved: z.union([
           z.boolean(),
           z.object({
-            field: z.enum(["reasoning_content", "reasoning_details"]),
+            field: z.enum(["reasoning", "reasoning_content", "reasoning_details"]),
           }),
         ]),
       }),
@@ -1938,19 +1939,13 @@ export namespace Provider {
     }
   }
 
-  export const ModelNotFoundError = NamedError.create(
-    "ProviderModelNotFoundError",
-    z.object({
-      providerID: ProviderID.zod,
-      modelID: ModelID.zod,
-      suggestions: z.array(z.string()).optional(),
-    }),
-  )
+  export const ModelNotFoundError = NamedError.create("ProviderModelNotFoundError", {
+    providerID: ProviderID,
+    modelID: ModelID,
+    suggestions: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
+  })
 
-  export const InitError = NamedError.create(
-    "ProviderInitError",
-    z.object({
-      providerID: ProviderID.zod,
-    }),
-  )
+  export const InitError = NamedError.create("ProviderInitError", {
+    providerID: ProviderID,
+  })
 }
