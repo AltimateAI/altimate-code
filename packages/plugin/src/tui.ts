@@ -611,6 +611,13 @@ export type TuiPluginApi = {
   kv: TuiKV
   state: TuiState
   theme: TuiTheme
+  // altimate_change start — expose the active prompt input ref to plugins (used by the fork
+  // prompt-enhance plugin to read/replace the prompt text). Backed by the host's PromptRef context.
+  prompt: {
+    /** The currently active (focused/mounted) prompt input, or undefined when none is mounted. */
+    active(): TuiPromptRef | undefined
+  }
+  // altimate_change end
   client: OpencodeClient
   event: TuiEventBus
   renderer: CliRenderer

@@ -617,6 +617,9 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
     keymap,
     mode: createScopedMode(api.mode, scope),
     route,
+    // altimate_change start — pass through the active-prompt accessor (prompt-enhance plugin)
+    prompt: api.prompt,
+    // altimate_change end
     ui: api.ui,
     tuiConfig: api.tuiConfig,
     kv: api.kv,

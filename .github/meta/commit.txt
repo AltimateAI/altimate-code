@@ -1,22 +1,18 @@
-feat: [v1.17.9] port 4 fork TUI features to host-registered plugins (checkpoint 12)
+feat: [v1.17.9] fully restore prompt-enhance via api.prompt.active() extension (checkpoint 13)
 
-Per the ADR (docs/internal/2026-06-23-tui-fork-features-as-plugins-adr.md), the fork TUI
-features that depend on opencode-package code are now plugins in
-packages/opencode/src/plugin/tui/altimate/, registered via altimateTuiPlugins() into the host
-plugin list. Upstream packages/tui stays untouched. opencode typecheck unchanged at 2431 (all
-4 plugins compile clean).
+Completes the prompt-enhance fork feature. The plugin api had no accessor for the active prompt
+input, so the enhance read/write was deferred (ckpt 12). Added the sanctioned plugin-contract
+extension (the designed extension point — not inline edits scattered through upstream render code):
 
-- provider-credentials.tsx — palette cmd "Connect altimate-backend" → credential DialogPrompt
-  backed by AltimateApi.{parseAltimateKey,validateCredentials,saveCredentials}.
-- skill-ops.tsx — "/skills" list (api.client.app.skills + detectToolReferences categorization),
-  create/install/test/show/edit/remove ops, ctrl+a/n/i → registered commands.
-- trace-viewer.tsx — "/trace" command + trace-list dialog + open-in-browser, with the
-  Bun.serve trace viewer server kept opencode-side (renderTraceViewer/Trace.* from
-  altimate/observability). This is exactly why it belongs in an opencode-side plugin.
-- prompt-enhance.tsx — "enhance prompt" command + enhancePrompt logic ready; the prompt
-  read/write is gated on a small plugin-API extension (api.prompt.active(): TuiPromptRef) that
-  TuiPluginApi doesn't yet expose — tracked as the next step to fully restore it.
+- packages/plugin/src/tui.ts — add `prompt: { active(): TuiPromptRef | undefined }` to TuiPluginApi.
+- packages/tui/src/plugin/adapters.tsx — implement it from the host's usePromptRef context
+  (PromptRef is structurally TuiPromptRef); thread promptRef through the adapter Input.
+- packages/tui/src/app.tsx — pass the already-available promptRef into createTuiApiAdapters.
+- packages/opencode/src/plugin/tui/runtime.ts — pass api.prompt through the scoped legacy host api.
+- packages/opencode/test/fixture/tui-plugin.ts — add prompt.active() to the test api mock.
+- altimate/prompt-enhance.tsx — the "Enhance prompt" command now reads api.prompt.active().current.input,
+  awaits enhancePrompt(), and writes back via ref.set(). Auto-enhance-before-submit stays deferred
+  (needs a pre-submit hook; isAutoEnhanceEnabled kept ready).
 
-Each file is fork-owned and fully wrapped in altimate_change markers. Documented per-plugin
-deferrals (all needing a typed SDK/api addition, none a feature drop): skill cache-reload flag,
-per-dialog keybind scoping, provider in-list trigger, prompt active-ref accessor.
+All four fork TUI plugins are now functional. packages/tui + packages/core + packages/plugin green;
+opencode unchanged at 2431. All additions altimate_change-marked.

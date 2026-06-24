@@ -394,6 +394,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       renderer,
       attention,
       Slot: pluginRuntime.Slot,
+      // altimate_change start — expose the active prompt ref to plugins (prompt-enhance)
+      promptRef,
+      // altimate_change end
     }),
   )
   const [ready, setReady] = createSignal(false)

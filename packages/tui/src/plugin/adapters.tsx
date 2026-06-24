@@ -1,6 +1,7 @@
-import type { TuiDialogSelectOption, TuiPluginApi, TuiSlotProps } from "@opencode-ai/plugin/tui"
+import type { TuiDialogSelectOption, TuiPluginApi, TuiPromptRef, TuiSlotProps } from "@opencode-ai/plugin/tui"
 import type { TuiConfig } from "../config"
 import type { useEvent } from "../context/event"
+import type { usePromptRef } from "../context/prompt"
 import type { useRoute } from "../context/route"
 import type { useSDK } from "../context/sdk"
 import type { useSync } from "../context/sync"
@@ -36,6 +37,9 @@ type Input = {
   renderer: TuiPluginApi["renderer"]
   attention: TuiPluginApi["attention"]
   Slot: TuiPluginApi["ui"]["Slot"]
+  // altimate_change start — active prompt ref accessor (for the fork prompt-enhance plugin)
+  promptRef: ReturnType<typeof usePromptRef>
+  // altimate_change end
 }
 
 function routeNavigate(route: ReturnType<typeof useRoute>, name: string, params?: Record<string, unknown>) {
@@ -203,6 +207,13 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
         return routeCurrent(input.route)
       },
     },
+    // altimate_change start — active prompt ref accessor (PromptRef is structurally TuiPromptRef)
+    prompt: {
+      active(): TuiPromptRef | undefined {
+        return input.promptRef.current as TuiPromptRef | undefined
+      },
+    },
+    // altimate_change end
     ui: {
       Dialog(props) {
         return (

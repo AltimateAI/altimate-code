@@ -190,6 +190,13 @@ export function createTuiPluginApi(opts: Opts = {}): HostPluginApi {
         return opts.app?.version ?? "0.0.0-test"
       },
     },
+    // altimate_change start — active-prompt accessor mock (prompt-enhance plugin api extension)
+    prompt: {
+      active() {
+        return undefined
+      },
+    },
+    // altimate_change end
     attention: {
       async notify(input) {
         return opts.attention?.notify?.(input) ?? { ok: false, notification: false, sound: false }
