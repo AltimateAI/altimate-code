@@ -1,3 +1,6 @@
+// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Context, Schema } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -161,5 +164,13 @@ export const DiffInput = Schema.Struct({
 export type DiffInput = Schema.Schema.Type<typeof DiffInput>
 
 export const node = LayerNode.make(layer, [Session.node, Snapshot.node, EventV2Bridge.node, Config.node])
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed in the
+// Effect-only migration; the session prompt loop kicks off summarization directly.
+const { runPromise: runSummary } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+export async function summarize(input: { sessionID: SessionID; messageID: MessageID }) {
+  return runSummary((s) => s.summarize(input))
+}
+// altimate_change end
 
 export * as SessionSummary from "./summary"

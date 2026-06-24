@@ -9,6 +9,9 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Hash } from "@opencode-ai/core/util/hash"
 import { Config } from "@/config/config"
 import { Global } from "@opencode-ai/core/global"
+// altimate_change start — makeRuntime bridge for the restored Promise wrappers (see bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 
 export const Patch = Schema.Struct({
   hash: Schema.String,
@@ -804,5 +807,16 @@ export const defaultLayer = layer.pipe(
 )
 
 export const node = LayerNode.make(layer, [FSUtil.node, AppProcess.node, Config.node])
+
+// altimate_change start — restore imperative Promise wrappers for the session processor, which
+// drives snapshot tracking from a Promise-based stream loop (not an Effect context).
+const { runPromise: runSnapshot } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+export async function track() {
+  return runSnapshot((s) => s.track())
+}
+export async function patch(hash: string) {
+  return runSnapshot((s) => s.patch(hash))
+}
+// altimate_change end
 
 export * as Snapshot from "."

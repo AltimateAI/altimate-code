@@ -30,16 +30,21 @@ import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
 import { Config } from "../../config/config"
 
-type ToolProps<T extends Tool.Info> = {
-  input: Tool.InferParameters<T>
+// When a tool's parameters can't be statically inferred (legacy fork tools whose
+// param schema erases to `unknown`), fall back to a string-keyed record so the
+// display helpers can still read fields like `input.name`/`input.command`.
+type ToolInput<T> = unknown extends Tool.InferParameters<T> ? Record<string, unknown> : Tool.InferParameters<T>
+
+type ToolProps<T = Tool.Info> = {
+  input: ToolInput<T>
   metadata: Tool.InferMetadata<T>
   part: ToolPart
 }
 
-function props<T extends Tool.Info>(part: ToolPart): ToolProps<T> {
+function props<T = Tool.Info>(part: ToolPart): ToolProps<T> {
   const state = part.state
   return {
-    input: state.input as Tool.InferParameters<T>,
+    input: state.input as ToolInput<T>,
     metadata: ("metadata" in state ? state.metadata : {}) as Tool.InferMetadata<T>,
     part,
   }

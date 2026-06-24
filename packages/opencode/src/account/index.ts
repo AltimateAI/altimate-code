@@ -1,4 +1,4 @@
-import { Cache, Clock, Duration, Effect, Layer, Option, Schema, SchemaGetter, ServiceMap } from "effect"
+import { Cache, Clock, Context, Duration, Effect, Layer, Option, Schema, SchemaGetter } from "effect"
 import {
   FetchHttpClient,
   HttpClient,
@@ -181,12 +181,12 @@ export namespace Account {
     readonly poll: (input: Login) => Effect.Effect<PollResult, AccountError>
   }
 
-  export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/Account") {}
+  export class Service extends Context.Service<Service, Interface>()("@opencode/Account") {}
 
-  export const layer: Layer.Layer<Service, never, AccountRepo | HttpClient.HttpClient> = Layer.effect(
+  export const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpClient> = Layer.effect(
     Service,
     Effect.gen(function* () {
-      const repo = yield* AccountRepo
+      const repo = yield* AccountRepo.Service
       const http = yield* HttpClient.HttpClient
       const httpRead = withTransientReadRetry(http)
       const httpOk = HttpClient.filterStatusOk(http)
@@ -453,7 +453,7 @@ export namespace Account {
     }),
   )
 
-  export const defaultLayer = layer.pipe(Layer.provide(AccountRepo.layer), Layer.provide(FetchHttpClient.layer))
+  export const defaultLayer = layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(FetchHttpClient.layer))
 
   export const { runPromise } = makeRuntime(Service, defaultLayer)
 

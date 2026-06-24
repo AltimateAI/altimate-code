@@ -12,7 +12,7 @@ import { BatchTool } from "./batch"
 // altimate_change end
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
-import { TodoWriteTool, TodoReadTool } from "./todo"
+import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
@@ -31,7 +31,11 @@ import { CodeSearchTool } from "./codesearch"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
 import { LspTool } from "./lsp"
-import { Truncate } from "./truncation"
+// altimate_change start — bridge legacy plugin tools to the Effect Tool API (v1.17.9)
+import { Effect } from "effect"
+import { legacyToInit } from "../altimate/tool-zod-compat"
+import { AppRuntime } from "@/effect/app-runtime"
+// altimate_change end
 
 import { ApplyPatchTool } from "./apply_patch"
 import { Glob } from "../util/glob"
@@ -163,29 +167,37 @@ export namespace ToolRegistry {
     return { custom }
   })
 
+  // altimate_change start — v1.17.9 Tool API: init now returns an Effect of a legacy-shaped
+  // def. We build the old plain-object def and bridge it to the new Effect API via
+  // legacyToInit; output truncation is handled centrally by Tool.wrap, so we return raw output.
   function fromPlugin(id: string, def: ToolDefinition): Tool.Info {
     return {
       id,
-      init: async (initCtx) => ({
-        parameters: z.object(def.args),
-        description: def.description,
-        execute: async (args, ctx) => {
-          const pluginCtx = {
-            ...ctx,
-            directory: Instance.directory,
-            worktree: Instance.worktree,
-          } as unknown as PluginToolContext
-          const result = await def.execute(args as any, pluginCtx)
-          const out = await Truncate.output(result, {}, initCtx?.agent)
-          return {
-            title: "",
-            output: out.truncated ? out.content : result,
-            metadata: { truncated: out.truncated, outputPath: out.truncated ? out.outputPath : undefined },
-          }
-        },
-      }),
+      init: () =>
+        legacyToInit({
+          parameters: z.object(def.args),
+          description: def.description,
+          execute: async (args, ctx) => {
+            const pluginCtx = {
+              ...ctx,
+              directory: Instance.directory,
+              worktree: Instance.worktree,
+            } as unknown as PluginToolContext
+            const result = await def.execute(args as any, pluginCtx)
+            if (typeof result === "string") {
+              return { title: "", output: result, metadata: {} }
+            }
+            return {
+              title: result.title ?? "",
+              output: result.output,
+              metadata: result.metadata ?? {},
+              ...(result.attachments ? { attachments: result.attachments as any } : {}),
+            }
+          },
+        }),
     }
   }
+  // altimate_change end
 
   export async function register(tool: Tool.Info) {
     const { custom } = await state()
@@ -202,7 +214,9 @@ export namespace ToolRegistry {
     const config = await Config.get()
     const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
 
-    return [
+    // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
+    // built-in tool-definition effects against the AppRuntime layers (Truncate/Agent) before use.
+    const builtins = [
       InvalidTool,
       ...(question ? [QuestionTool] : []),
       BashTool,
@@ -324,8 +338,10 @@ export namespace ToolRegistry {
       // altimate_change start - register dbt PR review tool
       DbtPrReviewTool,
       // altimate_change end
-      ...custom,
     ]
+    const resolved = await AppRuntime.runPromise(Effect.all(builtins))
+    return [...resolved, ...custom]
+    // altimate_change end
   }
 
   /** All tool infos without model/provider filtering. */
@@ -363,7 +379,9 @@ export namespace ToolRegistry {
         })
         .map(async (t) => {
           using _ = log.time(t.id)
-          const tool = await t.init({ agent })
+          // altimate_change start — v1.17.9: Tool.Info.init() returns an Effect of DefWithoutID
+          const tool = await Effect.runPromise(t.init())
+          // altimate_change end
           const output = {
             description: tool.description,
             parameters: tool.parameters,

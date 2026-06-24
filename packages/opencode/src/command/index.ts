@@ -261,6 +261,9 @@ const { runPromise: runCommand } = makeRuntime(Service, defaultLayer as Layer.La
 export async function list() {
   return runCommand((s) => s.list())
 }
+export async function get(name: string) {
+  return runCommand((s) => s.get(name))
+}
 // altimate_change end
 
 export * as Command from "."

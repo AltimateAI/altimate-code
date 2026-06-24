@@ -1,3 +1,6 @@
+// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Context, Schema } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -156,5 +159,13 @@ export const node = LayerNode.make(layer, [
   SessionSummary.node,
   SessionRunState.node,
 ])
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed in the
+// Effect-only migration; the session prompt loop consumes SessionRevert.cleanup directly.
+const { runPromise: runRevert } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+export async function cleanup(session: Session.Info) {
+  return runRevert((s) => s.cleanup(session))
+}
+// altimate_change end
 
 export * as SessionRevert from "./revert"

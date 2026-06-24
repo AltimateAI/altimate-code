@@ -11,6 +11,9 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Database } from "@opencode-ai/core/database/database"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
+// altimate_change start — legacy Bus for publishing zod-based PartDelta events
+import { Bus } from "@/bus"
+// altimate_change end
 import { EventV2 } from "@opencode-ai/core/event"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
@@ -424,14 +427,15 @@ export const getUsage = (input: { model: Provider.Model; usage: Usage; metadata?
     },
   }
 
+  // altimate_change start — upstream_fix: the fork's Provider.Model.cost shape carries
+  // `experimentalOver200K` but not the upstream `tiers` array, so resolve the tiered price
+  // from experimentalOver200K only (matches the fork's pre-merge getUsage behavior).
   const contextTokens = inputTokens
   const costInfo =
-    input.model.cost?.tiers
-      ?.filter((item) => item.tier.type === "context" && contextTokens > item.tier.size)
-      .sort((a, b) => b.tier.size - a.tier.size)[0] ??
-    (input.model.cost?.experimentalOver200K && contextTokens > 200_000
+    input.model.cost?.experimentalOver200K && contextTokens > 200_000
       ? input.model.cost.experimentalOver200K
-      : input.model.cost)
+      : input.model.cost
+  // altimate_change end
   const totalNanoAiu = input.metadata?.["copilot"]?.["totalNanoAiu"]
   return {
     cost:
@@ -856,21 +860,22 @@ export const layer: Layer.Layer<
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
       if (input.limit) {
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).pipe(
-          Effect.provideService(Database.Service, database),
-        )).items
+        // altimate_change start — MessageV2.page is now a synchronous helper (ambient Database.use),
+        // not an Effect; its MessageV2.WithParts items are runtime-identical to SessionV1.WithParts.
+        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items as unknown as SessionV1.WithParts[]
+        // altimate_change end
       }
 
       const size = 50
       const result = [] as SessionV1.WithParts[]
       let before: string | undefined
       while (true) {
-        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before }).pipe(
-          Effect.provideService(Database.Service, database),
-        )
+        // altimate_change start — synchronous MessageV2.page (items re-typed to SessionV1.WithParts)
+        const page = MessageV2.page({ sessionID: input.sessionID, limit: size, before })
+        // altimate_change end
         if (page.items.length === 0) break
         for (let i = page.items.length - 1; i >= 0; i--) {
-          const item = page.items[i]
+          const item = page.items[i] as unknown as SessionV1.WithParts | undefined
           if (item) result.push(item)
         }
         if (!page.more || !page.cursor) break
@@ -910,7 +915,10 @@ export const layer: Layer.Layer<
       field: string
       delta: string
     }) {
-      yield* events.publish(MessageV2.Event.PartDelta, input)
+      // altimate_change start — PartDelta is a legacy zod BusEvent (not a core EventV2 def), so
+      // publish it through the legacy Bus module wrapper instead of the EventV2Bridge.
+      yield* Effect.promise(() => Bus.publish(MessageV2.Event.PartDelta, input))
+      // altimate_change end
     })
 
     /** Finds the first message matching the predicate, searching newest-first. */
@@ -918,12 +926,12 @@ export const layer: Layer.Layer<
       const size = 50
       let before: string | undefined
       while (true) {
-        const page = yield* MessageV2.page({ sessionID, limit: size, before }).pipe(
-          Effect.provideService(Database.Service, database),
-        )
+        // altimate_change start — synchronous MessageV2.page
+        const page = MessageV2.page({ sessionID, limit: size, before })
+        // altimate_change end
         if (page.items.length === 0) break
         for (let i = page.items.length - 1; i >= 0; i--) {
-          const item = page.items[i]
+          const item = page.items[i] as unknown as SessionV1.WithParts | undefined
           if (item && predicate(item)) return Option.some(item)
         }
         if (!page.more || !page.cursor) break

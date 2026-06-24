@@ -776,7 +776,13 @@ function defaultModelFromConfig(
   configuredModel: string | undefined,
   providers: Record<ProviderV2.ID, Provider.Info>,
 ): Directory.DefaultModel | undefined {
-  const configured = configuredModel ? Provider.parseModel(configuredModel) : undefined
+  // altimate_change start — fork Provider ids are branded ProviderID/ModelID; re-brand to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+  const configured = configuredModel
+    ? (() => {
+        const parsed = Provider.parseModel(configuredModel)
+        return { providerID: ProviderV2.ID.make(parsed.providerID), modelID: ModelV2.ID.make(parsed.modelID) }
+      })()
+    : undefined
   if (configured && providers[configured.providerID]?.models[configured.modelID]) return configured
 
   // First-session ACP startup must not scan historical sessions just to infer
@@ -784,11 +790,13 @@ function defaultModelFromConfig(
   // the protocol response deterministic without extra session/message reads.
   const opencodeProvider = providers[ProviderV2.ID.make("opencode")]
   const opencodeModel = opencodeProvider ? Provider.sort(Object.values(opencodeProvider.models))[0] : undefined
-  if (opencodeProvider && opencodeModel) return { providerID: opencodeProvider.id, modelID: opencodeModel.id }
+  if (opencodeProvider && opencodeModel)
+    return { providerID: ProviderV2.ID.make(opencodeProvider.id), modelID: ModelV2.ID.make(opencodeModel.id) }
 
   const best = Provider.sort(Object.values(providers).flatMap((provider) => Object.values(provider.models)))[0]
-  if (best) return { providerID: best.providerID, modelID: best.id }
+  if (best) return { providerID: ProviderV2.ID.make(best.providerID), modelID: ModelV2.ID.make(best.id) }
   if (configured) return configured
+  // altimate_change end
 }
 
 function selectDefaultModel(snapshot: Directory.Snapshot) {
@@ -869,8 +877,10 @@ function parseSelectedModel(snapshot: Directory.Snapshot, modelId: string) {
   }
   return Effect.succeed({
     model: {
-      providerID: provider.id,
-      modelID: model.id,
+      // altimate_change start — fork Provider.Info ids are branded ProviderID/ModelID; re-brand to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+      providerID: ProviderV2.ID.make(provider.id),
+      modelID: ModelV2.ID.make(model.id),
+      // altimate_change end
     },
     variant: selected.variant,
   })

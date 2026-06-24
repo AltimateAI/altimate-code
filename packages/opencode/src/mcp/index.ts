@@ -1182,6 +1182,9 @@ export async function connect(name: string) {
 export async function disconnect(name: string) {
   return runMcp((svc) => svc.disconnect(name))
 }
+export async function readResource(clientName: string, resourceUri: string) {
+  return runMcp((svc) => svc.readResource(clientName, resourceUri))
+}
 // altimate_change end
 
 export * as MCP from "."

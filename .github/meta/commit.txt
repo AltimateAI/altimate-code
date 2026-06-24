@@ -1,22 +1,18 @@
-wip: v1.17.9 reconciliation — fix provider/session/server core files (checkpoint 25)
+wip: v1.17.9 reconciliation — 11 survivor files via 5-agent batch (checkpoint 26)
 
-Four highest-error survivor files driven to 0 (3 via parallel subagents + provider by hand);
-src 788 -> 653, total 2091 -> 1977.
+session/prompt, cli/cmd/run + run/tool, account/index, project/project, acp/service + directory,
+tool/registry, session/session, session/processor — all driven to 0. Total 1977 -> 1757
+(src 653 -> 451). Session-resume cumulative: 3181 -> 1757.
 
-- provider/provider.ts (106->0 cumulative): LanguageModelV2->V3 alias, ./sdk/copilot ->
-  @opencode-ai/core/github-copilot/copilot-provider, @gitlab/gitlab-ai-provider ->
-  gitlab-ai-provider (upstream rename, dep already present), NamedError.create zod->Effect Schema
-  fields (+ import Schema), interleaved.field enum += "reasoning".
-- session/message-v2.ts (28->0): zod NamedError kept via @opencode-ai/util/error; local zod brand
-  schemas for SessionID/MessageID/PartID (.zod dropped on core brands); inline LSP.Range/FileDiff
-  zod mirrors; convertToModelMessages now async (Effect.promise).
-- session/index.ts (43->0): restored fork ProjectID (src/project/schema.ts) + re-added fork ID
-  statics .zod/.make/.ascending (src/session/schema.ts) — unblocks ~10 consumer files; re-brand at
-  the core-drizzle Project.ID<->ProjectID boundary; Storage.read via AppRuntime+Service.
-- server/server.ts (20->0): restored dropped flat Hono routes + lsp/index.ts + server/error.ts +
-  control-plane/schema.ts + util/effect-zod.ts from main; Promise wrappers on Vcs/Command/Agent/
-  Format; WorkspaceID re-based on core WorkspaceV2.ID; zod() AST-walker at HTTP schema call sites.
+Patterns applied (all marker-wrapped): Promise-wrapper restores on more Service modules
+(Agent.get/defaultAgent, SessionRevert.cleanup, SessionStatus.set/get, SessionSummary.summarize,
+Command.get, MCP.readResource, Config.waitForDependencies, Snapshot.track/patch, Instruction
+facade); EventV2 publish/subscribe via Bus shim / EventV2Bridge; Effect Tool-API exec loop
+(AppRuntime.runPromise of init()/execute, ToolJsonSchema.fromTool, legacyToInit fromPlugin bridge);
+ProviderV2/ModelV2/Project.ID <-> fork brand re-mapping with .make() at core-drizzle boundaries;
+restored dropped fork tools tool/{ls,codesearch}.ts from main.
 
-NOTE: the restored flat route files (routes/{mcp,question,experimental,...}.ts) carry their own
-internal API errors (why the overlay dropped them) — server.ts imports now resolve; their internals
-are follow-up. All fork additions altimate_change-marked.
+KNOWN STRUCTURAL FOLLOW-UP (surfaced by 4 agents): Provider / Plugin / Project / ToolRegistry are
+fork namespace/Promise modules, but consumers (agent/agent.ts, project/instance-store, app-runtime,
+session/tools) expect Effect Services (.Service/.defaultLayer/.node). Decide: migrate those modules
+to Services vs adapt consumers. This is the next major cluster (agent.ts ~10 errs gated on it).

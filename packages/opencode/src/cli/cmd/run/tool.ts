@@ -34,7 +34,7 @@ import type { WebFetchTool } from "@/tool/webfetch"
 import { webSearchProviderLabel, type WebSearchTool } from "@/tool/websearch"
 import type { WriteTool } from "@/tool/write"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
-import * as Locale from "@/util/locale"
+import { Locale } from "@/util/locale"
 import type { RunEntryBody, StreamCommit, ToolSnapshot } from "./types"
 
 export type ToolView = {
@@ -73,15 +73,21 @@ export type ToolPermissionInfo = {
   file?: string
 }
 
+// When a tool's parameters can't be statically inferred (legacy fork tools whose
+// param schema erases to `unknown`), fall back to an open string-keyed dict so the
+// display helpers can still read fields like `input.command`.
+type ToolInput<T> = unknown extends Tool.InferParameters<T> ? Record<string, any> : Partial<Tool.InferParameters<T>>
+type ToolMeta<T> = unknown extends Tool.InferMetadata<T> ? Record<string, any> : Partial<Tool.InferMetadata<T>>
+
 export type ToolProps<T = Tool.Info> = {
-  input: Partial<Tool.InferParameters<T>>
-  metadata: Partial<Tool.InferMetadata<T>>
+  input: ToolInput<T>
+  metadata: ToolMeta<T>
   frame: ToolFrame
 }
 
 type ToolPermissionProps<T = Tool.Info> = {
-  input: Partial<Tool.InferParameters<T>>
-  metadata: Partial<Tool.InferMetadata<T>>
+  input: ToolInput<T>
+  metadata: ToolMeta<T>
   patterns: string[]
 }
 
@@ -1243,7 +1249,10 @@ function rule(name?: string): AnyToolRule | undefined {
     return undefined
   }
 
-  return TOOL_RULES[name]
+  // Per-tool rules are keyed by the matching tool name; the union of
+  // `ToolRule<specificTool>` is contravariantly incompatible with the erased
+  // `AnyToolRule`, but each rule only ever receives its own tool's frame.
+  return TOOL_RULES[name] as AnyToolRule
 }
 
 function frame(part: ToolPart): ToolFrame {

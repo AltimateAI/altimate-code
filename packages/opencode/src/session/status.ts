@@ -1,3 +1,6 @@
+// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { InstanceState } from "@/effect/instance-state"
 import { SessionID } from "./schema"
@@ -93,5 +96,16 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(Layer.provide(EventV2Bridge.defaultLayer))
 
 export const node = LayerNode.make(layer, [EventV2Bridge.node])
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed in the
+// Effect-only migration; the session prompt loop sets status synchronously.
+const { runPromise: runStatus } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+export async function set(sessionID: SessionID, status: Info) {
+  return runStatus((s) => s.set(sessionID, status))
+}
+export async function get(sessionID: SessionID) {
+  return runStatus((s) => s.get(sessionID))
+}
+// altimate_change end
 
 export * as SessionStatus from "./status"

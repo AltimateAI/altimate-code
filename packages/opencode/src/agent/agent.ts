@@ -683,6 +683,12 @@ const { runPromise: runAgent } = makeRuntime(Service, defaultLayer as Layer.Laye
 export async function list() {
   return runAgent((s) => s.list())
 }
+export async function get(agent: string) {
+  return runAgent((s) => s.get(agent))
+}
+export async function defaultAgent() {
+  return runAgent((s) => s.defaultAgent())
+}
 // altimate_change end
 
 export * as Agent from "./agent"

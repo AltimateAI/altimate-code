@@ -4,6 +4,14 @@ import path from "path"
 import { and, Database, eq } from "../storage/db"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { SessionTable } from "@opencode-ai/core/session/sql"
+// altimate_change start — core SQL tables brand project ids as "Project.ID"; the fork uses
+// the "ProjectID" brand. ProjectV2.ID.make re-brands fork->core for column reads/writes
+// (identity at runtime). ProjectID.make re-brands core->fork.
+import { ProjectV2 } from "@opencode-ai/core/project"
+// core ProjectTable brands worktree/sandboxes columns as AbsolutePath; AbsolutePath.make
+// re-brands plain strings (identity at runtime).
+import { AbsolutePath } from "@opencode-ai/core/schema"
+// altimate_change end
 import { Log } from "../util/log"
 import { Flag } from "@/flag/flag"
 import { fn } from "@/util/fn"
@@ -223,7 +231,9 @@ export namespace Project {
       }
     })
 
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, data.id)).get())
+    const row = Database.use((db) =>
+      db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(data.id))).get(),
+    )
     const existing = row
       ? fromRow(row)
       : {
@@ -252,8 +262,8 @@ export namespace Project {
       result.sandboxes.push(data.sandbox)
     result.sandboxes = result.sandboxes.filter((x) => existsSync(x))
     const insert = {
-      id: result.id,
-      worktree: result.worktree,
+      id: ProjectV2.ID.make(result.id),
+      worktree: AbsolutePath.make(result.worktree),
       vcs: result.vcs ?? null,
       name: result.name,
       icon_url: result.icon?.url,
@@ -261,18 +271,18 @@ export namespace Project {
       time_created: result.time.created,
       time_updated: result.time.updated,
       time_initialized: result.time.initialized,
-      sandboxes: result.sandboxes,
+      sandboxes: result.sandboxes.map((x) => AbsolutePath.make(x)),
       commands: result.commands,
     }
     const updateSet = {
-      worktree: result.worktree,
+      worktree: AbsolutePath.make(result.worktree),
       vcs: result.vcs ?? null,
       name: result.name,
       icon_url: result.icon?.url,
       icon_color: result.icon?.color,
       time_updated: result.time.updated,
       time_initialized: result.time.initialized,
-      sandboxes: result.sandboxes,
+      sandboxes: result.sandboxes.map((x) => AbsolutePath.make(x)),
       commands: result.commands,
     }
     Database.use((db) =>
@@ -285,8 +295,13 @@ export namespace Project {
       Database.use((db) =>
         db
           .update(SessionTable)
-          .set({ project_id: data.id })
-          .where(and(eq(SessionTable.project_id, ProjectID.global), eq(SessionTable.directory, data.worktree)))
+          .set({ project_id: ProjectV2.ID.make(data.id) })
+          .where(
+            and(
+              eq(SessionTable.project_id, ProjectV2.ID.make(ProjectID.global)),
+              eq(SessionTable.directory, data.worktree),
+            ),
+          )
           .run(),
       )
     }
@@ -330,7 +345,7 @@ export namespace Project {
         .set({
           time_initialized: Date.now(),
         })
-        .where(eq(ProjectTable.id, id))
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
         .run(),
     )
   }
@@ -346,7 +361,7 @@ export namespace Project {
   }
 
   export function get(id: ProjectID): Info | undefined {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
     if (!row) return undefined
     return fromRow(row)
   }
@@ -385,7 +400,7 @@ export namespace Project {
             commands: input.commands,
             time_updated: Date.now(),
           })
-          .where(eq(ProjectTable.id, id))
+          .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
           .returning()
           .get(),
       )
@@ -402,27 +417,28 @@ export namespace Project {
   )
 
   export async function sandboxes(id: ProjectID) {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
     if (!row) return []
     const data = fromRow(row)
     const valid: string[] = []
     for (const dir of data.sandboxes) {
-      const s = Filesystem.stat(dir)
+      const s = Filesystem.stat(AbsolutePath.make(dir))
       if (s?.isDirectory()) valid.push(dir)
     }
     return valid
   }
 
   export async function addSandbox(id: ProjectID, directory: string) {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
     if (!row) throw new Error(`Project not found: ${id}`)
     const sandboxes = [...row.sandboxes]
-    if (!sandboxes.includes(directory)) sandboxes.push(directory)
+    const sandbox = AbsolutePath.make(directory)
+    if (!sandboxes.includes(sandbox)) sandboxes.push(sandbox)
     const result = Database.use((db) =>
       db
         .update(ProjectTable)
         .set({ sandboxes, time_updated: Date.now() })
-        .where(eq(ProjectTable.id, id))
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
         .returning()
         .get(),
     )
@@ -438,14 +454,14 @@ export namespace Project {
   }
 
   export async function removeSandbox(id: ProjectID, directory: string) {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
     if (!row) throw new Error(`Project not found: ${id}`)
     const sandboxes = row.sandboxes.filter((s) => s !== directory)
     const result = Database.use((db) =>
       db
         .update(ProjectTable)
         .set({ sandboxes, time_updated: Date.now() })
-        .where(eq(ProjectTable.id, id))
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
         .returning()
         .get(),
     )

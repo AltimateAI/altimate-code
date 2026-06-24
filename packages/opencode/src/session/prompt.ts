@@ -53,6 +53,12 @@ import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
 import { decodeDataUrl } from "@/util/data-url"
+// altimate_change start — bridge the Effect-based Tool API (v1.17.9) back to this Promise-based module
+import { AppRuntime } from "@/effect/app-runtime"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { ToolJsonSchema } from "@/tool/json-schema"
+import { Effect } from "effect"
+// altimate_change end
 // altimate_change start - import fingerprint for env-based skill selection
 import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change end
@@ -212,7 +218,9 @@ export namespace SessionPrompt {
 
   export const prompt = fn(PromptInput, async (input) => {
     const session = await Session.get(input.sessionID)
-    await SessionRevert.cleanup(session)
+    // altimate_change start — fork Session.Info (index zod) ≡ core Session.Info (session.ts) at the SessionRevert boundary
+    await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
+    // altimate_change end
 
     const message = await createUserMessage(input)
     await Session.touch(input.sessionID)
@@ -423,9 +431,12 @@ export namespace SessionPrompt {
     // so the next resolveTools() call (once per LLM turn) naturally picks up fresh
     // tools without any extra work here. This subscription makes the session layer
     // explicitly aware of the reconnect and logs it so it is traceable in prod.
-    const unsubscribeToolsChanged = Bus.subscribe(MCP.ToolsChanged, (event) => {
+    // MCP.ToolsChanged migrated to an EventV2 definition upstream; the EventV2Bridge
+    // republishes it onto the legacy Bus by type, so filter the wildcard stream.
+    const unsubscribeToolsChanged = Bus.subscribeAll((event) => {
+      if (event.type !== MCP.ToolsChanged.type) return
       log.info("MCP.ToolsChanged received — tools will refresh on next turn", {
-        server: event.properties.server,
+        server: (event.properties as { server?: string })?.server,
         sessionID,
       })
     })
@@ -495,7 +506,11 @@ export namespace SessionPrompt {
       // pending subtask
       // TODO: centralize "invoke tool" logic
       if (task?.type === "subtask") {
-        const taskTool = await TaskTool.init()
+        // altimate_change start — v1.17.9: TaskTool is an Effect of Info; init() yields the executable def
+        const taskTool = await AppRuntime.runPromise(
+          Effect.flatMap(TaskTool, (info) => info.init()),
+        )
+        // altimate_change end
         const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
         const assistantMessage = (await Session.updateMessage({
           id: MessageID.ascending(),
@@ -566,26 +581,33 @@ export namespace SessionPrompt {
           abort,
           callID: part.callID,
           extra: { bypassAgentCheck: true },
-          messages: msgs,
-          async metadata(input) {
-            part = (await Session.updatePart({
-              ...part,
-              type: "tool",
-              state: {
-                ...part.state,
-                ...input,
-              },
-            } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
-          },
-          async ask(req) {
-            await PermissionNext.ask({
-              ...req,
-              sessionID: sessionID,
-              ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
-            })
-          },
+          // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
+          messages: msgs as unknown as Tool.Context["messages"],
+          metadata: (input) =>
+            // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+            Effect.promise(async () => {
+              part = (await Session.updatePart({
+                ...part,
+                type: "tool",
+                state: {
+                  ...part.state,
+                  ...input,
+                },
+              } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
+            }),
+          ask: (req) =>
+            Effect.promise(async () => {
+              // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
+              await PermissionNext.ask({
+                ...req,
+                sessionID: sessionID,
+                ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
+              } as Parameters<typeof PermissionNext.ask>[0])
+              // altimate_change end
+            }),
+          // altimate_change end
         }
-        const result = await taskTool.execute(taskArgs, taskCtx).catch((error) => {
+        const result = await AppRuntime.runPromise(taskTool.execute(taskArgs, taskCtx)).catch((error) => {
           executionError = error
           log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
           return undefined
@@ -1504,39 +1526,49 @@ export namespace SessionPrompt {
       callID: options.toolCallId,
       extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
       agent: input.agent.name,
-      messages: input.messages,
-      metadata: async (val: { title?: string; metadata?: any }) => {
-        const match = input.processor.partFromToolCall(options.toolCallId)
-        if (match && match.state.status === "running") {
-          await Session.updatePart({
-            ...match,
-            state: {
-              title: val.title,
-              metadata: val.metadata,
-              status: "running",
-              input: args,
-              time: {
-                start: Date.now(),
+      // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
+      messages: input.messages as unknown as Tool.Context["messages"],
+      // altimate_change end
+      metadata: (val: { title?: string; metadata?: any }) =>
+        // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+        Effect.promise(async () => {
+          const match = input.processor.partFromToolCall(options.toolCallId)
+          if (match && match.state.status === "running") {
+            await Session.updatePart({
+              ...match,
+              state: {
+                title: val.title,
+                metadata: val.metadata,
+                status: "running",
+                input: args,
+                time: {
+                  start: Date.now(),
+                },
               },
-            },
-          })
-        }
-      },
-      async ask(req) {
-        await PermissionNext.ask({
-          ...req,
-          sessionID: input.session.id,
-          tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-          ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
-        })
-      },
+            })
+          }
+        }),
+      ask: (req) =>
+        Effect.promise(async () => {
+          // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
+          await PermissionNext.ask({
+            ...req,
+            sessionID: input.session.id,
+            tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+            ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+          } as Parameters<typeof PermissionNext.ask>[0])
+          // altimate_change end
+        }),
+      // altimate_change end
     })
 
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
     )) {
-      const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+      // altimate_change start — v1.17.9: tool parameters are Effect Schema; derive JSON Schema via ToolJsonSchema
+      const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
+      // altimate_change end
       tools[item.id] = tool({
         id: item.id as any,
         description: item.description,
@@ -1554,7 +1586,9 @@ export namespace SessionPrompt {
               args,
             },
           )
-          const result = await item.execute(args, ctx)
+          // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
+          const result = await AppRuntime.runPromise(item.execute(args, ctx))
+          // altimate_change end
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({
@@ -1719,7 +1753,13 @@ export namespace SessionPrompt {
       throw new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
     }
 
-    const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    const model = {
+      providerID: ProviderID.make(resolvedModel.providerID),
+      modelID: ModelID.make(resolvedModel.modelID),
+    }
+    // altimate_change end
     // Use agent.variant only when the user did not provide an explicit model
     // override; if the user picked a different model, agent.variant doesn't apply.
     const useAgentModel = !input.model
@@ -1912,7 +1952,9 @@ export namespace SessionPrompt {
                   },
                 ]
 
-                await ReadTool.init()
+                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; init() yields the executable def
+                await AppRuntime.runPromise(Effect.flatMap(ReadTool, (info) => info.init()))
+                  // altimate_change end
                   .then(async (t) => {
                     const model = await Provider.getModel(info.model.providerID, info.model.modelID)
                     const readCtx: Tool.Context = {
@@ -1922,10 +1964,14 @@ export namespace SessionPrompt {
                       messageID: info.id,
                       extra: { bypassCwdCheck: true, model },
                       messages: [],
-                      metadata: async () => {},
-                      ask: async () => {},
+                      // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+                      metadata: () => Effect.void,
+                      ask: () => Effect.void,
+                      // altimate_change end
                     }
-                    const result = await t.execute(args, readCtx)
+                    // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
+                    const result = await AppRuntime.runPromise(t.execute(args, readCtx))
+                    // altimate_change end
                     pieces.push({
                       messageID: info.id,
                       sessionID: input.sessionID,
@@ -1981,10 +2027,18 @@ export namespace SessionPrompt {
                   messageID: info.id,
                   extra: { bypassCwdCheck: true },
                   messages: [],
-                  metadata: async () => {},
-                  ask: async () => {},
+                  // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+                  metadata: () => Effect.void,
+                  ask: () => Effect.void,
+                  // altimate_change end
                 }
-                const result = await ReadTool.init().then((t) => t.execute(args, listCtx))
+                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; execute returns an Effect
+                const result = await AppRuntime.runPromise(
+                  Effect.flatMap(ReadTool, (info) => info.init()).pipe(
+                    Effect.flatMap((t) => t.execute(args, listCtx)),
+                  ),
+                )
+                // altimate_change end
                 return [
                   {
                     messageID: info.id,
@@ -2349,10 +2403,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const session = await Session.get(input.sessionID)
     if (session.revert) {
-      await SessionRevert.cleanup(session)
+      // altimate_change start — fork Session.Info (index zod) ≡ core Session.Info (session.ts) at the SessionRevert boundary
+      await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
+      // altimate_change end
     }
     const agent = await Agent.get(input.agent)
-    const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    const model = {
+      providerID: ProviderID.make(resolvedModel.providerID),
+      modelID: ModelID.make(resolvedModel.modelID),
+    }
+    // altimate_change end
     const userMsg: MessageV2.User = {
       id: MessageID.ascending(),
       sessionID: input.sessionID,
@@ -2627,10 +2689,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           type: "text", text: responseText, time: { start: now, end: now },
         }
         await Session.updatePart(textPart)
-        Bus.publish(Command.Event.Executed, {
-          name: input.command, sessionID: input.sessionID,
-          arguments: input.arguments, messageID: assistantMsg.id,
-        })
+        AppRuntime.runPromise(
+          EventV2Bridge.Service.use((events) =>
+            events.publish(Command.Event.Executed, {
+              name: input.command,
+              sessionID: input.sessionID,
+              arguments: input.arguments,
+              messageID: assistantMsg.id,
+            }),
+          ),
+        )
         return { info: assistantMsg, parts: [textPart] } as MessageV2.WithParts
       }
       const trimmed = input.arguments.trim()
@@ -2772,7 +2840,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }
     template = template.trim()
 
-    const taskModel = await (async () => {
+    const taskModelRaw = await (async () => {
       if (command.model) {
         return Provider.parseModel(command.model)
       }
@@ -2785,6 +2853,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       if (input.model) return Provider.parseModel(input.model)
       return await lastModel(input.sessionID)
     })()
+    // altimate_change start — cmdAgent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+    const taskModel = {
+      providerID: ProviderID.make(taskModelRaw.providerID),
+      modelID: ModelID.make(taskModelRaw.modelID),
+    }
+    // altimate_change end
 
     try {
       await Provider.getModel(taskModel.providerID, taskModel.modelID)
@@ -2856,12 +2930,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       variant: input.variant,
     })) as MessageV2.WithParts
 
-    Bus.publish(Command.Event.Executed, {
-      name: input.command,
-      sessionID: input.sessionID,
-      arguments: input.arguments,
-      messageID: result.info.id,
-    })
+    AppRuntime.runPromise(
+      EventV2Bridge.Service.use((events) =>
+        events.publish(Command.Event.Executed, {
+          name: input.command,
+          sessionID: input.sessionID,
+          arguments: input.arguments,
+          messageID: result.info.id,
+        }),
+      ),
+    )
 
     return result
   }
@@ -2899,7 +2977,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const agent = await Agent.get("title")
     if (!agent) return
     const model = await iife(async () => {
-      if (agent.model) return await Provider.getModel(agent.model.providerID, agent.model.modelID)
+      // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+      if (agent.model)
+        return await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
+      // altimate_change end
       return (
         (await Provider.getSmallModel(input.providerID)) ?? (await Provider.getModel(input.providerID, input.modelID))
       )

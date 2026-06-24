@@ -1,7 +1,4 @@
-import { Agent } from "@/agent/agent"
 import { Command } from "@/command"
-import { InstanceRef } from "@/effect/instance-ref"
-import { InstanceStore } from "@/project/instance-store"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
@@ -69,9 +66,11 @@ export const build = (input: {
     Object.values(input.providers).flatMap((provider) =>
       Object.values(provider.models).map((model) => ({
         id: model.id,
-        providerID: provider.id,
+        // altimate_change start — fork Provider.Info ids are branded ProviderID/ModelID; re-brand to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+        providerID: ProviderV2.ID.make(provider.id),
         providerName: provider.name,
-        modelID: model.id,
+        modelID: ModelV2.ID.make(model.id),
+        // altimate_change end
         modelName: model.name,
       })),
     ),
@@ -89,7 +88,19 @@ export const build = (input: {
     variantsByModel: Object.fromEntries(
       Object.values(input.providers).flatMap((provider) =>
         Object.values(provider.models).flatMap((model) =>
-          model.variants ? [[modelKey({ providerID: provider.id, modelID: model.id }), model.variants]] : [],
+          model.variants
+            ? // altimate_change start — re-brand fork ProviderID/ModelID to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+              [
+                [
+                  modelKey({
+                    providerID: ProviderV2.ID.make(provider.id),
+                    modelID: ModelV2.ID.make(model.id),
+                  }),
+                  model.variants,
+                ],
+              ]
+            : // altimate_change end
+              [],
         ),
       ),
     ),
@@ -101,43 +112,6 @@ export const build = (input: {
     ...(input.defaultModel ? { defaultModel: input.defaultModel } : {}),
   }
 }
-
-export const loaderLayer = Layer.effect(
-  Loader,
-  Effect.gen(function* () {
-    const store = yield* InstanceStore.Service
-    const provider = yield* Provider.Service
-    const agent = yield* Agent.Service
-    const command = yield* Command.Service
-
-    return Loader.of({
-      load: Effect.fn("ACPDirectoryLoader.load")(function* (directory) {
-        const ctx = yield* store.load({ directory })
-        return yield* Effect.gen(function* () {
-          const providers = yield* provider.list()
-          const [agents, defaultAgent, commands, defaultModel] = yield* Effect.all(
-            [agent.list(), agent.defaultInfo(), command.list(), provider.defaultModel().pipe(Effect.option)],
-            { concurrency: "unbounded" },
-          )
-          return build({
-            directory,
-            providers,
-            modes: agents
-              .filter((item) => item.mode !== "subagent" && item.hidden !== true)
-              .map((item) => ({
-                id: item.name,
-                name: item.name,
-                ...(item.description ? { description: item.description } : {}),
-              })),
-            defaultModeID: defaultAgent.name,
-            commands: commands.toSorted((a, b) => a.name.localeCompare(b.name)),
-            ...(defaultModel._tag === "Some" ? { defaultModel: defaultModel.value } : {}),
-          })
-        }).pipe(Effect.provideService(InstanceRef, ctx))
-      }),
-    })
-  }),
-)
 
 export const layer = Layer.effect(
   Service,
@@ -197,14 +171,6 @@ export const layer = Layer.effect(
       variants,
     })
   }),
-)
-
-export const defaultLayer = layer.pipe(
-  Layer.provide(loaderLayer),
-  Layer.provide(Provider.defaultLayer),
-  Layer.provide(Agent.defaultLayer),
-  Layer.provide(Command.defaultLayer),
-  Layer.provide(InstanceStore.defaultLayer),
 )
 
 export * as Directory from "./directory"

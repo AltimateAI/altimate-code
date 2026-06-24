@@ -284,11 +284,13 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
     })
 }
 
-// altimate_change start — legacy overload: accept old-style zod/Promise tool objects
+// altimate_change start — legacy overload: accept old-style zod/Promise tool objects.
+// Preserve the zod-inferred parameter type so `Tool.InferParameters<typeof XTool>`
+// resolves to `z.infer<P>` (not `unknown`) for run-command display helpers.
 export function define<P extends z.ZodType, M extends Metadata = Metadata, ID extends string = string>(
   id: ID,
   legacy: LegacyToolDef<P, M>,
-): Effect.Effect<Info<Schema.Decoder<unknown>, M>, never, Truncate.Service | Agent.Service> & { id: ID }
+): Effect.Effect<Info<Schema.Decoder<z.infer<P>>, M>, never, Truncate.Service | Agent.Service> & { id: ID }
 // altimate_change end
 export function define<
   Parameters extends Schema.Decoder<unknown>,

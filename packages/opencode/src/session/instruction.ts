@@ -1,3 +1,6 @@
+// altimate_change start — makeRuntime for the restored Promise-based InstructionPrompt facade (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
 import path from "path"
@@ -237,5 +240,28 @@ export function loaded(messages: SessionV1.WithParts[]) {
 }
 
 export const node = LayerNode.make(layer, [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient])
+
+// altimate_change start — restore the imperative Promise-based facade upstream removed in the
+// Effect-only migration; the session prompt loop consumes these synchronously.
+const { runPromise: runInstruction } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+
+export namespace InstructionPrompt {
+  export function clear(messageID: MessageID) {
+    return runInstruction((s) => s.clear(messageID))
+  }
+  export function system() {
+    return runInstruction((s) => s.system())
+  }
+  export function systemPaths() {
+    return runInstruction((s) => s.systemPaths())
+  }
+  export function find(dir: string) {
+    return runInstruction((s) => s.find(dir))
+  }
+  export function resolve(messages: SessionV1.WithParts[], filepath: string, messageID: MessageID) {
+    return runInstruction((s) => s.resolve(messages, filepath, messageID))
+  }
+}
+// altimate_change end
 
 export * as Instruction from "./instruction"

@@ -817,6 +817,9 @@ export async function invalidate() {
 export async function directories() {
   return runConfig((svc) => svc.directories())
 }
+export async function waitForDependencies() {
+  return runConfig((svc) => svc.waitForDependencies())
+}
 // altimate_change end
 
 export * as Config from "./config"
