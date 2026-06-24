@@ -28,6 +28,10 @@ import { errors } from "../error"
 import { lazy } from "../../util/lazy"
 import { Bus } from "../../bus"
 import { NamedError } from "@opencode-ai/core/util/error"
+// altimate_change start — SessionStatus/Todo/Snapshot/SessionRevert Info+Input schemas migrated to
+// Effect Schema in v1.17.9; convert to zod for hono-openapi resolvers/validators
+import { zod } from "@/util/effect-zod"
+// altimate_change end
 
 const log = Log.create({ service: "server" })
 
@@ -89,7 +93,7 @@ export const SessionRoutes = lazy(() =>
             description: "Get session status",
             content: {
               "application/json": {
-                schema: resolver(z.record(z.string(), SessionStatus.Info)),
+                schema: resolver(z.record(z.string(), zod(SessionStatus.Info))),
               },
             },
           },
@@ -175,7 +179,7 @@ export const SessionRoutes = lazy(() =>
             description: "Todo list",
             content: {
               "application/json": {
-                schema: resolver(Todo.Info.array()),
+                schema: resolver(z.array(zod(Todo.Info))),
               },
             },
           },
@@ -435,7 +439,7 @@ export const SessionRoutes = lazy(() =>
             description: "Successfully retrieved diff",
             content: {
               "application/json": {
-                schema: resolver(Snapshot.FileDiff.array()),
+                schema: resolver(z.array(zod(Snapshot.FileDiff))),
               },
             },
           },
@@ -579,7 +583,10 @@ export const SessionRoutes = lazy(() =>
         const sessionID = c.req.valid("param").sessionID
         const body = c.req.valid("json")
         const session = await Session.get(sessionID)
-        await SessionRevert.cleanup(session)
+        // altimate_change start — bridge fork zod Session.Info (projectID brand "ProjectID") to the
+        // core Effect Session.Info (brand "Project.ID") SessionRevert.cleanup expects; identity at runtime
+        await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
+        // altimate_change end
         const msgs = await Session.messages({ sessionID })
         let currentAgent = await Agent.defaultAgent()
         for (let i = msgs.length - 1; i >= 0; i--) {
@@ -1008,7 +1015,16 @@ export const SessionRoutes = lazy(() =>
           sessionID: SessionID.zod,
         }),
       ),
-      validator("json", SessionRevert.RevertInput.omit({ sessionID: true })),
+      // altimate_change start — RevertInput migrated to Effect Schema; build the sessionID-omitted
+      // payload schema directly from the branded fork IDs (matches the other route validators here)
+      validator(
+        "json",
+        z.object({
+          messageID: MessageID.zod,
+          partID: PartID.zod.optional(),
+        }),
+      ),
+      // altimate_change end
       async (c) => {
         const sessionID = c.req.valid("param").sessionID
         log.info("revert", c.req.valid("json"))

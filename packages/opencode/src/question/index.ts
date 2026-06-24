@@ -5,6 +5,9 @@ import { SessionID, MessageID } from "@/session/schema"
 import { QuestionID } from "./schema"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+// altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 
 // Schemas — these are pure data; nothing checks class identity (see PR
 // description) so they're plain `Schema.Struct` + type alias. That lets
@@ -225,5 +228,20 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(Layer.provide(EventV2Bridge.defaultLayer))
 
 export const node = LayerNode.make(layer, [EventV2Bridge.node])
+
+// altimate_change start — restore the imperative Promise wrappers the server routes
+// (server/routes/question.ts) call from plain async code. The makeRuntime bridge keeps the
+// question reads/mutations bound to the active workspace/instance.
+const { runPromise: runQuestion } = makeRuntime(Service, defaultLayer)
+export function list() {
+  return runQuestion((svc) => svc.list())
+}
+export function reply(input: { requestID: QuestionID; answers: ReadonlyArray<Answer> }) {
+  return runQuestion((svc) => svc.reply(input))
+}
+export function reject(requestID: QuestionID) {
+  return runQuestion((svc) => svc.reject(requestID))
+}
+// altimate_change end
 
 export * as Question from "."

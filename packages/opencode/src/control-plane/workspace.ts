@@ -733,7 +733,7 @@ export const layer = Layer.effect(
       return (yield* db
         .select()
         .from(WorkspaceTable)
-        .where(eq(WorkspaceTable.project_id, project.id))
+        .where(eq(WorkspaceTable.project_id, ProjectV2.ID.make(project.id)))
         .all()
         .pipe(Effect.orDie))
         .map(fromRow)
@@ -743,7 +743,7 @@ export const layer = Layer.effect(
     const syncList = Effect.fn("Workspace.syncList")(function* (project: Project.Info) {
       const names = new Set((yield* list(project)).map((workspace) => workspace.name))
       const discovered = yield* Effect.forEach(
-        registeredAdapters(project.id),
+        registeredAdapters(ProjectV2.ID.make(project.id)),
         ([type, adapter]) =>
           WorkspaceAdapterRuntime.list(adapter).pipe(
             Effect.catchCause((error) =>

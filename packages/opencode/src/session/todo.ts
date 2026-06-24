@@ -7,6 +7,9 @@ import { asc } from "drizzle-orm"
 import { TodoTable } from "@opencode-ai/core/session/sql"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 
 export const Info = Schema.Struct({
   content: Schema.String.annotate({ description: "Brief description of the task" }),
@@ -86,5 +89,13 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(Layer.provide(EventV2Bridge.defaultLayer), Layer.provide(Database.defaultLayer))
 
 export const node = LayerNode.make(layer, [EventV2Bridge.node, Database.node])
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed in the
+// Effect-only migration; server/routes/session.ts reads the todo list from plain async code.
+const { runPromise: runTodo } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+export async function get(sessionID: SessionID) {
+  return runTodo((s) => s.get(sessionID))
+}
+// altimate_change end
 
 export * as Todo from "./todo"

@@ -1,8 +1,8 @@
 import { NodePath } from "@effect/platform-node"
-import { Effect, Layer, Path, Schema, ServiceMap } from "effect"
+import { Effect, Layer, Path, Schema, Context } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { withTransientReadRetry } from "@/util/effect-http-client"
-import { AppFileSystem } from "@/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { makeRuntime } from "@/effect/run-service"
 import { Global } from "../global"
 import { Log } from "../util/log"
@@ -24,14 +24,14 @@ export namespace Discovery {
     readonly pull: (url: string) => Effect.Effect<string[]>
   }
 
-  export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/SkillDiscovery") {}
+  export class Service extends Context.Service<Service, Interface>()("@opencode/SkillDiscovery") {}
 
-  export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Path.Path | HttpClient.HttpClient> =
+  export const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient.HttpClient> =
     Layer.effect(
       Service,
       Effect.gen(function* () {
         const log = Log.create({ service: "skill-discovery" })
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FSUtil.Service
         const path = yield* Path.Path
         const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
         const cache = path.join(Global.Path.cache, "skills")
@@ -111,7 +111,7 @@ export namespace Discovery {
 
   export const defaultLayer: Layer.Layer<Service> = layer.pipe(
     Layer.provide(FetchHttpClient.layer),
-    Layer.provide(AppFileSystem.defaultLayer),
+    Layer.provide(FSUtil.defaultLayer),
     Layer.provide(NodePath.layer),
   )
 

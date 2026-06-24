@@ -15,6 +15,9 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+// altimate_change start — fork MessageV2.page/.get are SYNC and throw the storage NotFoundError; wrap in Effect.try for the Effect handler
+import type { NotFoundError as StorageNotFoundError } from "@/storage/storage"
+// altimate_change end
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
@@ -119,11 +122,17 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       }
 
       const page = yield* SessionError.mapStorageNotFound(
-        MessageV2.page({
-          sessionID: ctx.params.sessionID,
-          limit: ctx.query.limit,
-          before: ctx.query.before,
+        // altimate_change start — fork MessageV2.page is sync + throws NotFoundError
+        Effect.try({
+          try: () =>
+            MessageV2.page({
+              sessionID: ctx.params.sessionID,
+              limit: ctx.query.limit!,
+              before: ctx.query.before,
+            }),
+          catch: (error) => error as StorageNotFoundError,
         }),
+        // altimate_change end
       )
       if (!page.cursor) return page.items
 
@@ -146,7 +155,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
       return yield* SessionError.mapStorageNotFound(
-        MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
+        // altimate_change start — fork MessageV2.get is sync + throws NotFoundError
+        Effect.try({
+          try: () => MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
+          catch: (error) => error as StorageNotFoundError,
+        }),
+        // altimate_change end
       )
     })
 

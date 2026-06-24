@@ -106,6 +106,9 @@ export async function set(sessionID: SessionID, status: Info) {
 export async function get(sessionID: SessionID) {
   return runStatus((s) => s.get(sessionID))
 }
+export async function list() {
+  return runStatus((s) => s.list())
+}
 // altimate_change end
 
 export * as SessionStatus from "./status"

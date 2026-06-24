@@ -4,6 +4,27 @@ import { iife } from "@/util/iife"
 import type { ProviderID } from "./schema"
 
 export namespace ProviderError {
+  // altimate_change start — restore upstream v1.17.9 error classes dropped during
+  // the bridge merge. Upstream defines these as top-level `export class` in this
+  // module; the fork keeps ProviderError as a namespace, so they live here as
+  // namespaced classes (referenced by plugin/openai/ws.ts, ws-pool.ts, and tests).
+  export class HeaderTimeoutError extends Error {
+    public override readonly name = "ProviderHeaderTimeoutError"
+
+    constructor(public readonly ms: number) {
+      super(`Provider response headers timed out after ${ms}ms`)
+    }
+  }
+
+  export class ResponseStreamError extends Error {
+    public override readonly name = "ProviderResponseStreamError"
+
+    constructor(message: string, options?: ErrorOptions) {
+      super(message, options)
+    }
+  }
+  // altimate_change end
+
   // Adapted from overflow detection patterns in:
   // https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/utils/overflow.ts
   const OVERFLOW_PATTERNS = [

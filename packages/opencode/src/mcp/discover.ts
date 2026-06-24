@@ -5,7 +5,7 @@ import { Log } from "../util/log"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
 import { ConfigPaths } from "../config/paths"
-import type { Config } from "../config/config"
+import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 
 const log = Log.create({ service: "mcp.discover" })
 
@@ -62,7 +62,7 @@ const SOURCES: ExternalMcpSource[] = [
 ]
 
 /**
- * Transform a single external MCP entry into our Config.Mcp shape.
+ * Transform a single external MCP entry into our ConfigMCPV1.Info shape.
  * Returns undefined if the entry is invalid (no command or url).
  * Preserves recognized fields: timeout, enabled.
  *
@@ -74,7 +74,7 @@ function transform(
   // altimate_change start — context for env-var resolution warnings
   context: { server: string; source: string },
   // altimate_change end
-): Config.Mcp | undefined {
+): ConfigMCPV1.Info | undefined {
   // Remote server — handle both "url" and Claude Code's "type: http" format
   if (entry.url && typeof entry.url === "string") {
     const result: Record<string, any> = {
@@ -91,18 +91,25 @@ function transform(
     }
     if (typeof entry.timeout === "number") result.timeout = entry.timeout
     if (typeof entry.enabled === "boolean") result.enabled = entry.enabled
-    return result as Config.Mcp
+    return result as ConfigMCPV1.Info
   }
 
   // Local server
   if (entry.command) {
     const safeStr = (x: unknown): string => {
       if (typeof x === "string") return x
-      try { return String(x) } catch { return "[invalid]" }
+      try {
+        return String(x)
+      } catch {
+        return "[invalid]"
+      }
     }
     const cmd = Array.isArray(entry.command)
       ? entry.command.filter((x: unknown) => x != null).map(safeStr)
-      : [safeStr(entry.command), ...(Array.isArray(entry.args) ? entry.args.filter((x: unknown) => x != null).map(safeStr) : [])]
+      : [
+          safeStr(entry.command),
+          ...(Array.isArray(entry.args) ? entry.args.filter((x: unknown) => x != null).map(safeStr) : []),
+        ]
 
     const result: Record<string, any> = {
       type: "local" as const,
@@ -118,7 +125,7 @@ function transform(
     }
     if (typeof entry.timeout === "number") result.timeout = entry.timeout
     if (typeof entry.enabled === "boolean") result.enabled = entry.enabled
-    return result as Config.Mcp
+    return result as ConfigMCPV1.Info
   }
 
   return undefined
@@ -131,7 +138,7 @@ function transform(
 function addServersFromFile(
   servers: Record<string, any> | undefined,
   sourceLabel: string,
-  result: Record<string, Config.Mcp>,
+  result: Record<string, ConfigMCPV1.Info>,
   contributingSources: string[],
   projectScoped = false,
 ) {
@@ -187,7 +194,7 @@ async function readJsonSafe(filePath: string): Promise<any | undefined> {
  */
 async function discoverClaudeCode(
   worktree: string,
-  result: Record<string, Config.Mcp>,
+  result: Record<string, ConfigMCPV1.Info>,
   contributingSources: string[],
 ) {
   const claudeJsonPath = path.join(os.homedir(), ".claude.json")
@@ -249,11 +256,11 @@ function mergeServerKeys(parsed: Record<string, any>): Record<string, any> {
  * First-discovered-wins per server name across sources.
  */
 export async function discoverExternalMcp(projectDir: string): Promise<{
-  servers: Record<string, Config.Mcp>
+  servers: Record<string, ConfigMCPV1.Info>
   sources: string[]
 }> {
   log.info("Discovering MCP servers from external AI tool configs...")
-  const result: Record<string, Config.Mcp> = Object.create(null)
+  const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()
 
@@ -267,25 +274,33 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   const toRel = (abs: string) => path.relative(projectDir, abs).split(path.sep).join("/")
   let mcpJsonFiles: string[] = []
   try {
-    const scanned = await Glob.scan("**/mcp.json", {
-      cwd: projectDir,
-      absolute: true,
-      dot: true,
-      ignore: [
-        "**/node_modules/**",
-        "**/.git/**",
-        "**/dist/**",
-        "**/build/**",
-        "**/.pnpm/**",
-        "**/target/**",
-        "**/.next/**",
-        "**/out/**",
-        "**/vendor/**",
-        "**/coverage/**",
-        "**/.venv/**",
-        "**/.turbo/**",
-      ],
+    // altimate_change start — Glob.scan dropped its `ignore` option in v1.17.9; filter
+    // the scan results manually against the same exclusion globs to preserve behavior.
+    const IGNORE_GLOBS = [
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.pnpm/**",
+      "**/target/**",
+      "**/.next/**",
+      "**/out/**",
+      "**/vendor/**",
+      "**/coverage/**",
+      "**/.venv/**",
+      "**/.turbo/**",
+    ]
+    const scanned = (
+      await Glob.scan("**/mcp.json", {
+        cwd: projectDir,
+        absolute: true,
+        dot: true,
+      })
+    ).filter((abs) => {
+      const rel = toRel(abs)
+      return !IGNORE_GLOBS.some((pattern) => Glob.match(pattern, rel))
     })
+    // altimate_change end
     const rank = (abs: string) => {
       const i = IDE_PRECEDENCE.indexOf(toRel(abs))
       return i === -1 ? IDE_PRECEDENCE.length : i
@@ -334,7 +349,9 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
 
   const serverNames = Object.keys(result)
   if (serverNames.length > 0) {
-    log.info(`Discovered ${serverNames.length} MCP server(s) from ${contributingSources.join(", ")}: ${serverNames.join(", ")}`)
+    log.info(
+      `Discovered ${serverNames.length} MCP server(s) from ${contributingSources.join(", ")}: ${serverNames.join(", ")}`,
+    )
   } else {
     log.info("No external MCP configs found")
   }

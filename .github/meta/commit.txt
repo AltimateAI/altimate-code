@@ -1,18 +1,19 @@
-wip: v1.17.9 reconciliation — 11 survivor files via 5-agent batch (checkpoint 26)
+wip: v1.17.9 reconciliation — server routes + tool/mcp/skill batch (checkpoint 27)
 
-session/prompt, cli/cmd/run + run/tool, account/index, project/project, acp/service + directory,
-tool/registry, session/session, session/processor — all driven to 0. Total 1977 -> 1757
-(src 653 -> 451). Session-resume cumulative: 3181 -> 1757.
+6-agent batch: server/routes/{session,mcp,experimental,question} + tool/batch + mcp/discover +
+skill/discovery + plugin/openai/ws all -> 0. Total 1757 -> 1602 (src 451 -> 358). Session-resume
+cumulative: 3181 -> 1602.
 
-Patterns applied (all marker-wrapped): Promise-wrapper restores on more Service modules
-(Agent.get/defaultAgent, SessionRevert.cleanup, SessionStatus.set/get, SessionSummary.summarize,
-Command.get, MCP.readResource, Config.waitForDependencies, Snapshot.track/patch, Instruction
-facade); EventV2 publish/subscribe via Bus shim / EventV2Bridge; Effect Tool-API exec loop
-(AppRuntime.runPromise of init()/execute, ToolJsonSchema.fromTool, legacyToInit fromPlugin bridge);
-ProviderV2/ModelV2/Project.ID <-> fork brand re-mapping with .make() at core-drizzle boundaries;
-restored dropped fork tools tool/{ls,codesearch}.ts from main.
+Patterns: zod() AST-walker (util/effect-zod) at resolver()/validator() sites for Effect-Schema
+Info types; many more Promise wrappers (MCP.{resources,supportsOAuth,startAuth,finishAuth,
+authenticate,removeAuth}, Worktree.{create,list,remove,reset}, Question.{list,reply,reject},
+SessionStatus.list, Todo.get, SessionSummary.diff, SessionRevert.{revert,unrevert}); restored
+fork PermissionID brand + ResponseStreamError/HeaderTimeoutError (provider/error.ts) + ConfigPaths
+env-substitution helpers; Tool-API legacy form for BatchTool; ConfigMCPV1.Info; Project.ID brand
+boundaries.
 
-KNOWN STRUCTURAL FOLLOW-UP (surfaced by 4 agents): Provider / Plugin / Project / ToolRegistry are
-fork namespace/Promise modules, but consumers (agent/agent.ts, project/instance-store, app-runtime,
-session/tools) expect Effect Services (.Service/.defaultLayer/.node). Decide: migrate those modules
-to Services vs adapt consumers. This is the next major cluster (agent.ts ~10 errs gated on it).
+REMAINING (~358 src) is now dominated by task #9: ~10 core modules (Provider, Plugin, Project,
+SessionPrompt, SessionCompaction, ShareNext, Worktree, ToolRegistry, LLM, SessionProcessor,
+InstanceBootstrap) are fork namespaces but the new upstream consumers (app-runtime AppLayer,
+httpapi handlers, control-plane, share/session, provider/auth, agent.ts) need them as Effect
+Context.Services. That migration is the critical path for the bulk of the rest.

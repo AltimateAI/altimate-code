@@ -19,6 +19,9 @@ import { NodePath } from "@effect/platform-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { AppProcess } from "@opencode-ai/core/process"
 import { InstanceState } from "@/effect/instance-state"
+// altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 
 export const Event = {
   Ready: EventV2.define({
@@ -650,5 +653,23 @@ export const node = LayerNode.make(layer, [
   InstanceStore.node,
   Database.node,
 ])
+
+// altimate_change start — restore the imperative Promise wrappers the server routes
+// (server/routes/experimental.ts) call from plain async code. The makeRuntime bridge keeps
+// the worktree operations bound to the active workspace/instance.
+const { runPromise: runWorktree } = makeRuntime(Service, defaultLayer)
+export function create(input?: CreateInput) {
+  return runWorktree((svc) => svc.create(input))
+}
+export function list() {
+  return runWorktree((svc) => svc.list())
+}
+export function remove(input: RemoveInput) {
+  return runWorktree((svc) => svc.remove(input))
+}
+export function reset(input: ResetInput) {
+  return runWorktree((svc) => svc.reset(input))
+}
+// altimate_change end
 
 export * as Worktree from "."

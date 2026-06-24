@@ -166,6 +166,12 @@ const { runPromise: runRevert } = makeRuntime(Service, defaultLayer as Layer.Lay
 export async function cleanup(session: Session.Info) {
   return runRevert((s) => s.cleanup(session))
 }
+export async function revert(input: RevertInput) {
+  return runRevert((s) => s.revert(input))
+}
+export async function unrevert(input: { sessionID: SessionID }) {
+  return runRevert((s) => s.unrevert(input))
+}
 // altimate_change end
 
 export * as SessionRevert from "./revert"

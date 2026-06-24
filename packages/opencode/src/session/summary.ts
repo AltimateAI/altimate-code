@@ -171,6 +171,9 @@ const { runPromise: runSummary } = makeRuntime(Service, defaultLayer as Layer.La
 export async function summarize(input: { sessionID: SessionID; messageID: MessageID }) {
   return runSummary((s) => s.summarize(input))
 }
+export async function diff(input: { sessionID: SessionID; messageID?: MessageID }) {
+  return runSummary((s) => s.diff(input))
+}
 // altimate_change end
 
 export * as SessionSummary from "./summary"

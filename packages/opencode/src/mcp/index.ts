@@ -1185,6 +1185,24 @@ export async function disconnect(name: string) {
 export async function readResource(clientName: string, resourceUri: string) {
   return runMcp((svc) => svc.readResource(clientName, resourceUri))
 }
+export async function supportsOAuth(mcpName: string) {
+  return runMcp((svc) => svc.supportsOAuth(mcpName))
+}
+export async function startAuth(mcpName: string) {
+  return runMcp((svc) => svc.startAuth(mcpName))
+}
+export async function finishAuth(mcpName: string, authorizationCode: string) {
+  return runMcp((svc) => svc.finishAuth(mcpName, authorizationCode))
+}
+export async function authenticate(mcpName: string) {
+  return runMcp((svc) => svc.authenticate(mcpName))
+}
+export async function removeAuth(mcpName: string) {
+  return runMcp((svc) => svc.removeAuth(mcpName))
+}
+export async function resources() {
+  return runMcp((svc) => svc.resources())
+}
 // altimate_change end
 
 export * as MCP from "."
