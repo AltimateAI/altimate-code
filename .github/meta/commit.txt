@@ -1,10 +1,11 @@
-wip: v1.17.9 reconciliation — util/schema shim + branded-type make() fix (checkpoint 21)
+wip: v1.17.9 reconciliation — permission/project/filesystem/npm core shims (checkpoint 22)
 
-- src/util/schema.ts re-export shim: `export * from "@opencode-ai/core/schema"` (withStatics et al
-  moved to core).
-- src/provider/schema.ts: new Effect Schema brand constructor is `.make()` not `.makeUnsafe()`.
-  Fixed the 15 ProviderID/ModelID brand constructions. The fork keeps its branded ProviderID/ModelID
-  (callers use ProviderID.make()/.opencode etc.) — only the internal Schema API updated.
+Re-export shims for modules moved to @opencode-ai/core:
+- src/permission/schema.ts -> core/permission/schema
+- src/project/schema.ts -> core/project/schema
+- src/filesystem.ts -> core/filesystem
+- src/npm/index.ts -> core/npm
 
-opencode 2197 -> 2109 (-88; the brand fix cascades across all provider/model-ID usages in
-provider.ts, session/prompt.ts, share-next.ts, tool/batch.ts). Session-resume: 3181 -> 2109.
+opencode 2109 -> 2108 (low net — resolving these imports exposes the importing files' deeper
+type errors). Module-not-found shims now largely exhausted; remaining ~2108 is per-file type work
+(TS2339 Service/branded, TS2345/2322 type mismatches, Effect call sites) + ~1240 tests.
