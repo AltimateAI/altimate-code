@@ -359,7 +359,13 @@ export function terminalMode(colors: TerminalColors): "dark" | "light" | undefin
 
 export function generateSystem(colors: TerminalColors, mode: "dark" | "light"): ThemeJson {
   const bg = RGBA.fromHex(colors.defaultBackground ?? colors.palette[0]!)
-  const fg = RGBA.fromHex(colors.defaultForeground ?? colors.palette[7]!)
+  // altimate_change start — fix: light-mode foreground fallback (#704)
+  // Dark mode keeps palette[7] (standard light-gray fg on dark bg).
+  // Light mode: palette[7] is typically #c0c0c0 — invisible on white.
+  // Prefer the user's palette[0] (near-black) when present; #1a1a1a otherwise.
+  const fgFallback = mode == "dark" ? colors.palette[7]! : (colors.palette[0] ?? "#1a1a1a")
+  const fg = RGBA.fromHex(colors.defaultForeground ?? fgFallback)
+  // altimate_change end
   const transparent = RGBA.fromValues(bg.r, bg.g, bg.b, 0)
   const isDark = mode == "dark"
 
@@ -872,13 +878,20 @@ function getSyntaxRules(theme: Theme) {
       scope: ["markup.raw", "markup.raw.block"],
       style: {
         foreground: theme.markdownCode,
+        // altimate_change start — upstream_fix: add background to prevent invisible code blocks on light themes
+        // backgroundElement (not background) gives fenced code blocks visible contrast on light themes
+        background: theme.backgroundElement,
+        // altimate_change end
       },
     },
     {
       scope: ["markup.raw.inline"],
       style: {
         foreground: theme.markdownCode,
-        background: theme.background,
+        // altimate_change start — fix: inline code contrast on transparent backgrounds
+        // NOTE: upstream ships `theme.background` here; fork uses backgroundElement for stronger inline contrast
+        background: theme.backgroundElement,
+        // altimate_change end
       },
     },
     {

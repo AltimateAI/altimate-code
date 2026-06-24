@@ -31,6 +31,9 @@ import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
+// altimate_change start - yolo mode + smooth streaming
+import { Flag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -149,6 +152,43 @@ export const {
       hydratingSessions.get(sessionID)?.parts.add(partID)
     }
 
+    // altimate_change start - line streaming: buffer deltas, flush only on \n or message completion
+    const lineBuffer = new Map<string, string>()
+
+    function flushLineBuffer(messageID: string, partID: string, field: string, forceAll: boolean) {
+      const key = `${messageID}:${partID}:${field}`
+      const buffer = lineBuffer.get(key)
+      if (!buffer) return
+      let textToFlush: string
+      if (forceAll) {
+        textToFlush = buffer
+        lineBuffer.delete(key)
+      } else {
+        const lastNewline = buffer.lastIndexOf("\n")
+        if (lastNewline === -1) return
+        textToFlush = buffer.slice(0, lastNewline + 1)
+        const remainder = buffer.slice(lastNewline + 1)
+        if (remainder) lineBuffer.set(key, remainder)
+        else lineBuffer.delete(key)
+      }
+      if (!textToFlush) return
+      const parts = store.part[messageID]
+      if (!parts) return
+      const result = search(parts, partID, (p) => p.id)
+      if (!result.found) return
+      const existing = parts[result.index][field as keyof (typeof parts)[number]] as string | undefined
+      setStore("part", messageID, result.index, field as any, ((existing ?? "") + textToFlush) as any)
+    }
+
+    function flushAllBuffersForMessage(messageID: string) {
+      for (const [key] of lineBuffer) {
+        if (!key.startsWith(messageID + ":")) continue
+        const [, partID, field] = key.split(":")
+        flushLineBuffer(messageID, partID, field, true)
+      }
+    }
+    // altimate_change end
+
     function sessionListQuery(): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
@@ -187,6 +227,23 @@ export const {
 
         case "permission.asked": {
           const request = event.properties
+          // altimate_change start - yolo mode: auto-approve without showing prompt
+          if (Flag.ALTIMATE_CLI_YOLO) {
+            void sdk.client.permission
+              .reply({
+                requestID: request.id,
+                reply: "once",
+                workspace,
+              })
+              .catch((e) => {
+                console.error("yolo mode auto-approve failed", {
+                  error: e instanceof Error ? e.message : String(e),
+                  requestID: request.id,
+                })
+              })
+            break
+          }
+          // altimate_change end
           const requests = store.permission[request.sessionID]
           if (!requests) {
             setStore("permission", request.sessionID, [request])
@@ -303,6 +360,15 @@ export const {
 
         case "message.updated": {
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
+          // altimate_change start - line streaming: flush remaining buffer when message completes
+          if (
+            Flag.ALTIMATE_LINE_STREAMING &&
+            "completed" in event.properties.info.time &&
+            event.properties.info.time.completed
+          ) {
+            flushAllBuffersForMessage(event.properties.info.id)
+          }
+          // altimate_change end
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
@@ -343,6 +409,11 @@ export const {
         }
         case "message.removed": {
           touchMessage(event.properties.sessionID, event.properties.messageID)
+          // altimate_change start - line streaming: clean up buffers for removed/aborted messages
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            flushAllBuffersForMessage(event.properties.messageID)
+          }
+          // altimate_change end
           const messages = store.message[event.properties.sessionID]
           const result = search(messages, event.properties.messageID, (m) => m.id)
           if (result.found) {
@@ -358,6 +429,17 @@ export const {
         }
         case "message.part.updated": {
           touchPart(event.properties.part.sessionID, event.properties.part.id)
+          // altimate_change start - line streaming: discard buffered text when part is
+          // authoritatively set by the server (via reconcile). Without this, the buffer
+          // would append stale text on top of the server's complete content, duplicating
+          // the trailing partial line.
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            const { messageID, id: partID } = event.properties.part
+            for (const key of lineBuffer.keys()) {
+              if (key.startsWith(`${messageID}:${partID}:`)) lineBuffer.delete(key)
+            }
+          }
+          // altimate_change end
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
             setStore("part", event.properties.part.messageID, [event.properties.part])
@@ -384,21 +466,56 @@ export const {
           const result = search(parts, event.properties.partID, (p) => p.id)
           if (!result.found) break
           touchPart(event.properties.sessionID, event.properties.partID)
-          setStore(
-            "part",
-            event.properties.messageID,
-            produce((draft) => {
-              const part = draft[result.index]
-              const field = event.properties.field as keyof typeof part
-              const existing = part[field] as string | undefined
-              ;(part[field] as string) = (existing ?? "") + event.properties.delta
-            }),
-          )
+          // altimate_change start - line streaming: buffer deltas, flush only on \n
+          // Note: when line streaming is enabled (including via calm mode), this branch
+          // handles all delta processing and breaks — the smooth streaming branch below
+          // is not reached. This is intentional: flushLineBuffer already does direct
+          // store path updates, so the produce() bypass is not needed.
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            const { messageID, partID, field, delta } = event.properties
+            const key = `${messageID}:${partID}:${field}`
+            lineBuffer.set(key, (lineBuffer.get(key) ?? "") + delta)
+            flushLineBuffer(messageID, partID, field, false)
+            break
+          }
+          // altimate_change end
+          // altimate_change start - smooth streaming: direct path update avoids produce() proxy overhead
+          if (Flag.ALTIMATE_SMOOTH_STREAMING) {
+            const field = event.properties.field as keyof (typeof parts)[number]
+            const existing = parts[result.index][field] as string | undefined
+            setStore(
+              "part",
+              event.properties.messageID,
+              result.index,
+              field as any,
+              ((existing ?? "") + event.properties.delta) as any,
+            )
+          } else {
+            setStore(
+              "part",
+              event.properties.messageID,
+              produce((draft) => {
+                const part = draft[result.index]
+                const field = event.properties.field as keyof typeof part
+                const existing = part[field] as string | undefined
+                ;(part[field] as string) = (existing ?? "") + event.properties.delta
+              }),
+            )
+          }
+          // altimate_change end
           break
         }
 
         case "message.part.removed": {
           touchPart(event.properties.sessionID, event.properties.partID)
+          // altimate_change start - line streaming: discard buffers for removed parts
+          if (Flag.ALTIMATE_LINE_STREAMING) {
+            const { messageID, partID } = event.properties
+            for (const key of lineBuffer.keys()) {
+              if (key.startsWith(`${messageID}:${partID}:`)) lineBuffer.delete(key)
+            }
+          }
+          // altimate_change end
           const parts = store.part[event.properties.messageID]
           const result = search(parts, event.properties.partID, (p) => p.id)
           if (result.found) {

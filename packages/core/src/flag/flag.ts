@@ -11,6 +11,12 @@ export function truthy(key: string) {
 function altTruthy(altKey: string, openKey: string) {
   return truthy(altKey) || truthy(openKey)
 }
+function numberEnv(key: string) {
+  const value = process.env[key]
+  if (!value) return undefined
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
 // altimate_change end
 
 const copy = process.env["OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
@@ -90,6 +96,16 @@ export const Flag = {
   },
   get ALTIMATE_SMOOTH_STREAMING() {
     return this.ALTIMATE_CALM_MODE || altTruthy("ALTIMATE_SMOOTH_STREAMING", "OPENCODE_SMOOTH_STREAMING")
+  },
+  get ALTIMATE_LINE_STREAMING() {
+    return this.ALTIMATE_CALM_MODE || altTruthy("ALTIMATE_LINE_STREAMING", "OPENCODE_LINE_STREAMING")
+  },
+  get ALTIMATE_CONTENT_MAX_WIDTH() {
+    return (
+      numberEnv("ALTIMATE_CONTENT_MAX_WIDTH") ??
+      numberEnv("OPENCODE_CONTENT_MAX_WIDTH") ??
+      (this.ALTIMATE_CALM_MODE ? 100 : undefined)
+    )
   },
   get ALTIMATE_CLI_YOLO() {
     const alt = process.env["ALTIMATE_CLI_YOLO"]

@@ -280,6 +280,17 @@ const TIPS: Tip[] = [
   "Use {highlight}/review{/highlight} to review uncommitted changes, branches, or PRs",
   (shortcuts) => `Use ${commandText("/help", shortcuts.helpShow())} to show the help dialog`,
   "Use {highlight}/rename{/highlight} to rename the current session",
+  // altimate_change start — prioritized beginner & data engineering tips
+  "Run {highlight}/discover{/highlight} to auto-detect your dbt project and warehouse connections",
+  "Use {highlight}/cost-report{/highlight} to analyze warehouse spending",
+  "Use {highlight}/dbt-docs{/highlight} to generate dbt model documentation",
+  "Use {highlight}/generate-tests{/highlight} to auto-generate dbt tests for your models",
+  "Use {highlight}/sql-review{/highlight} to review SQL for correctness and performance",
+  "Use {highlight}/migrate-sql{/highlight} to translate SQL between warehouse dialects",
+  "Use {highlight}/ci-check{/highlight} to run pre-merge SQL validation on changed files",
+  "Ask me to analyze a SQL query for anti-patterns — I'll detect 19+ issue types with zero false positives",
+  "Ask me to trace column-level lineage for any SQL query across dialects",
+  // altimate_change end
 ]
 
 const INPUT_UNDO_TIP: Tip = (shortcuts) => press(shortcuts.inputUndo(), "to undo changes in your prompt")

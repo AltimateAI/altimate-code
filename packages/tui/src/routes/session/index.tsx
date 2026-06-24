@@ -81,6 +81,9 @@ import { DialogRetryAction } from "../../component/dialog-retry-action"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { PathFormatterProvider, usePathFormatter } from "../../context/path-format"
+// altimate_change start — smooth streaming flag
+import { Flag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 
 addDefaultParsers(parsers.parsers)
 
@@ -320,7 +323,13 @@ export function Session() {
     if (part.id === lastSwitch) return
 
     if (part.tool === "plan_exit") {
-      local.agent.set("build")
+      // altimate_change start — canonical "builder" agent name (renamed from "build")
+      // Previously wrote "build" here which then flowed into the next session.prompt
+      // request as `agent: "build"`, leaking the legacy name into telemetry. Even
+      // though prompt.ts now normalizes at the emit boundary, write the canonical
+      // value at the source so debugging dumps / inspection see consistent state.
+      local.agent.set("builder")
+      // altimate_change end
       lastSwitch = part.id
     } else if (part.tool === "plan_enter") {
       local.agent.set("plan")
@@ -409,10 +418,15 @@ export function Session() {
   }
 
   function toBottom() {
-    setTimeout(() => {
-      if (!scroll || scroll.isDestroyed) return
-      scroll.scrollTo(scroll.scrollHeight)
-    }, 50)
+    // altimate_change start - smooth streaming: reduce scroll lag
+    setTimeout(
+      () => {
+        if (!scroll || scroll.isDestroyed) return
+        scroll.scrollTo(scroll.scrollHeight)
+      },
+      Flag.ALTIMATE_SMOOTH_STREAMING ? 0 : 50,
+    )
+    // altimate_change end
   }
 
   const local = useLocal()
@@ -1686,9 +1700,28 @@ function ReasoningHeader(props: {
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
+  // altimate_change start - calm mode: cap content width for readability, respect small screens
+  const cappedWidth = createMemo(() => {
+    const cap = Flag.ALTIMATE_CONTENT_MAX_WIDTH
+    if (!cap) return undefined
+    const available = ctx.width
+    // +3 accounts for paddingLeft on this box
+    const desired = cap + 3
+    // On small screens, don't constrain — let it use full available width
+    return available <= desired ? undefined : desired
+  })
+  // altimate_change end
   return (
     <Show when={props.part.text.trim()}>
-      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
+      <box
+        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+        paddingLeft={3}
+        marginTop={1}
+        flexShrink={0}
+        // altimate_change start - calm mode: apply capped content width
+        maxWidth={cappedWidth()}
+        // altimate_change end
+      >
         <markdown
           syntaxStyle={syntax()}
           streaming={true}

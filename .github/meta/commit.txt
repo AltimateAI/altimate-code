@@ -1,38 +1,38 @@
-wip: v1.17.9 reconciliation — §4 re-home TUI customizations into packages/tui (checkpoint 5)
+wip: v1.17.9 reconciliation — §4 re-home TUI batch 2 + line-streaming flags (checkpoint 6)
 
-The TUI was extracted upstream to packages/tui (live) from cli/cmd/tui/** (dead — no
-@tui alias resolves it). Re-apply the fork customizations into the live package,
-preserving altimate_change markers. packages/tui + packages/core both typecheck GREEN.
+Second re-homing wave into packages/tui (live TUI). packages/tui + packages/core both
+typecheck GREEN.
 
-Re-homed (functional + branding):
-- context/sdk.tsx — smooth-streaming delta pre-merge (ALTIMATE_SMOOTH_STREAMING).
-  Adapted to v2 GlobalEvent (discriminant nested under `.payload`, not top-level).
-- routes/session/footer.tsx — YOLO-mode badge (ALTIMATE_CLI_YOLO).
-- routes/session/sidebar.tsx — "Altimate Code" branding (uses InstallationVersion).
-- component/logo.tsx — restore brand colors (primary/accent vs textMuted/text) in the
-  rewritten 8-arg renderLine call-site.
-- component/dialog-status.tsx — `altimate mcp auth` branding fix.
-- component/error-component.tsx — `altimate-code: fatal:` title + AltimateAI/altimate-code
-  issue URL (was anomalyco/opencode brand leak).
-- context/route.tsx — restore dropped navigate debug log (console.debug; tui has no
-  structured logger).
+Re-homed (functional):
+- context/sync.tsx — full streaming feature set: yolo auto-approve (adapted to the new
+  permission.reply API: workspace arg + reply:"once"), smooth-streaming direct-path delta
+  update, and the complete line-streaming buffer feature (lineBuffer + flushLineBuffer +
+  flushAllBuffersForMessage + the 5 event-handler hooks). event.type/.properties is correct
+  here (useEvent unwraps GlobalEvent.payload, unlike sdk.tsx).
+- routes/session/index.tsx — `builder` agent name on plan_exit, smooth-streaming scroll
+  (toBottom 0ms), calm-mode content width cap (maxWidth via ALTIMATE_CONTENT_MAX_WIDTH).
+- theme/index.ts — light-mode fg fallback (#704), code-block + inline-code backgrounds for
+  light-theme contrast. NOTE: inline-code uses theme.backgroundElement vs upstream's new
+  theme.background — flagged inline for the next merge's human review.
+- feature-plugins/home/tips-view.tsx — fork DE-specific tips (/discover, /cost-report,
+  /dbt-docs, /sql-review, /migrate-sql, lineage, anti-patterns) folded into the new Tip pool.
 
-Flag re-home (packages/core/src/flag/flag.ts): added ALTIMATE_CALM_MODE,
-ALTIMATE_SMOOTH_STREAMING, ALTIMATE_CLI_YOLO getters + altTruthy helper, since packages/tui
-depends on @opencode-ai/core (not opencode) and could not otherwise see the fork flags.
+Flags re-homed into packages/core/src/flag/flag.ts (tui depends on core, not opencode):
+ALTIMATE_LINE_STREAMING, ALTIMATE_CONTENT_MAX_WIDTH (+ numberEnv helper), joining the
+ALTIMATE_CALM_MODE/SMOOTH_STREAMING/CLI_YOLO added in checkpoint 5.
 
-MOOT (not re-applied — upstream issue gone): dialog-mcp / dialog-workspace-list logger
-fixes (tui uses console.* throughout, has no structured logger, the old console.log/debug
-prints don't exist in the rewritten files).
+MOOT (upstream v1.17.9 shipped equivalents — dropped per upstream_fix rule):
+- prompt skills-dialog keybind → upstream `prompt_skills` keybind.
+- session workspace-gate, smooth-streaming memoize, light-theme md fg (upstream ships
+  fg=markdownText + bg=background).
 
-DEFERRED (tracked, code re-architected into other owner files — next pass):
-- theme #704 light-fg + code-block/inline-code bg → packages/tui/src/theme/index.ts
-  (generateSystem/getSyntaxRules). One human decision: inline-code backgroundElement vs
-  upstream's new background.
-- beginner/first-time tips + onboarding hint → feature-plugins/home/{tips,tips-view}.tsx
-  (home is now a plugin-slot shell).
-- UpgradeIndicator: component + utils exist only in the old tree, not ported → blocks the
-  footer + home upgrade-indicator blocks until ported into packages/tui/src/component.
-- sidebar trace section → sidebar_content plugin slot.
+DEFERRED — architectural (tracked): enhance feature (enhance-prompt.ts), dialog-provider
+(AltimateApi), dialog-skill (skill-helpers + keymap port). All three depend on opencode-package
+code unreachable from packages/tui — need the shared code moved into @opencode-ai/core, routed
+via SDK/server, or implemented as tui plugins. Real features; not dropped.
 
-OLD cli/cmd/tui/** files untouched (deleted later in §3.4 after all re-homing verified).
+DEFERRED — render-rewritten: session/index TextPart code-during-streaming, tips first-time-only
+behavior, sidebar trace section (sidebar_content slot), footer/home UpgradeIndicator (component
+not yet ported into packages/tui).
+
+OLD cli/cmd/tui/** files untouched (deleted in §3.4 after all re-homing verified).
