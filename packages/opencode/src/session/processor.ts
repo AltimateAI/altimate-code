@@ -19,6 +19,13 @@ import type { SessionID, MessageID } from "./schema"
 // altimate_change start — import Telemetry for per-generation token tracking
 import { Telemetry } from "@/altimate/telemetry"
 // altimate_change end
+// altimate_change start — Effect Context.Service facade so the upstream Effect runtime
+// (app-runtime AppLayer + httpapi server LayerNode list) can compose SessionProcessor as
+// a Service. The fork keeps the imperative `create()` namespace function below; this is a
+// thin delegating facade that preserves behavior exactly.
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Context, Effect, Layer } from "effect"
+// altimate_change end
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -614,4 +621,46 @@ export namespace SessionProcessor {
     }
     return result
   }
+
+  // altimate_change start — Effect Context.Service facade (delegates to the namespace `create` above)
+  // Upstream's Effect-shaped processor handle, referenced by session/tools.ts and the
+  // processor effect tests. Pure type — the fork's imperative `create()` Promise wrappers
+  // are unaffected; consumers pick/construct from this type independently.
+  export interface Handle {
+    readonly message: MessageV2.Assistant
+    readonly updateToolCall: (
+      toolCallID: string,
+      update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
+    ) => Effect.Effect<MessageV2.ToolPart | undefined>
+    readonly completeToolCall: (
+      toolCallID: string,
+      output: {
+        title: string
+        metadata: Record<string, any>
+        output: string
+        attachments?: MessageV2.FilePart[]
+      },
+    ) => Effect.Effect<void>
+    readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  }
+
+  type CreateInput = Parameters<typeof create>[0]
+
+  export interface Interface {
+    readonly create: (input: CreateInput) => Effect.Effect<Info>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/SessionProcessor") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      create: (input: CreateInput) => Effect.sync(() => create(input)),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

@@ -2,6 +2,10 @@ import type { Hooks, PluginInput, Plugin as PluginInstance } from "@opencode-ai/
 import { Config } from "../config/config"
 import { Bus } from "../bus"
 import { Log } from "../util/log"
+// altimate_change start — Effect Context.Service facade imports
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 import { createOpencodeClient } from "@opencode-ai/sdk"
 import { Server } from "../server/server"
 import { BunProc } from "../bun"
@@ -179,4 +183,44 @@ export namespace Plugin {
       }
     })
   }
+
+  // altimate_change start — Effect Context.Service facade.
+  // Upstream v1.17.9 composes Plugin into the Effect runtime as a Context.Service.
+  // This facade exposes Service/layer/defaultLayer/node by delegating each method to
+  // the existing namespace functions above (which self-manage Instance state via
+  // `Instance.state`). The imperative Promise-based exports (trigger/list/init) remain
+  // the source of truth; this only adds an Effect-shaped wrapper for new consumers.
+  type TriggerName = {
+    [K in keyof Hooks]-?: NonNullable<Hooks[K]> extends (input: any, output: any) => Promise<void> ? K : never
+  }[keyof Hooks]
+
+  export interface Interface {
+    readonly trigger: <
+      Name extends TriggerName,
+      Input = Parameters<Required<Hooks>[Name]>[0],
+      Output = Parameters<Required<Hooks>[Name]>[1],
+    >(
+      name: Name,
+      input: Input,
+      output: Output,
+    ) => Effect.Effect<Output>
+    readonly list: () => Effect.Effect<Hooks[]>
+    readonly init: () => Effect.Effect<void>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/Plugin") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      trigger: (name, input, output) => Effect.promise(() => trigger(name as any, input, output)),
+      list: () => Effect.promise(() => list()),
+      init: () => Effect.promise(() => init()),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

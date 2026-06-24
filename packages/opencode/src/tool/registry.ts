@@ -36,6 +36,12 @@ import { Effect } from "effect"
 import { legacyToInit } from "../altimate/tool-zod-compat"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
+// altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
+// ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
+// compile. Delegates to the existing namespace functions; behavior preserved.
+import { Context, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 
 import { ApplyPatchTool } from "./apply_patch"
 import { Glob } from "../util/glob"
@@ -397,4 +403,39 @@ export namespace ToolRegistry {
     )
     return result
   }
+
+  // altimate_change start — Effect Context.Service facade (see import marker). The fork keeps the
+  // async namespace functions above as the source of truth; this Service delegates to them so the
+  // upstream Effect consumers (session/tools, experimental httpapi, debug agent, app-runtime,
+  // server node wiring) compile without changing imperative callers.
+  export interface Interface {
+    readonly ids: () => Effect.Effect<string[]>
+    readonly allInfos: () => Effect.Effect<Tool.Info[]>
+    readonly register: (tool: Tool.Info) => Effect.Effect<void>
+    readonly tools: (model: {
+      providerID: ProviderID
+      modelID: ModelID
+      agent?: Agent.Info
+    }) => Effect.Effect<Awaited<ReturnType<typeof tools>>>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/ToolRegistry") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      ids: () => Effect.promise(() => ids()),
+      allInfos: () => Effect.promise(() => allInfos()),
+      register: (tool) => Effect.promise(() => register(tool)),
+      tools: (model) =>
+        Effect.promise(() =>
+          tools({ providerID: model.providerID, modelID: model.modelID }, model.agent),
+        ),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

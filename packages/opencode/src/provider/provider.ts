@@ -1,5 +1,9 @@
 import z from "zod"
 import { Schema } from "effect"
+// altimate_change start — Effect Context.Service facade deps (added to existing namespace)
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 import os from "os"
 import fuzzysort from "fuzzysort"
 import { Config } from "../config/config"
@@ -1948,4 +1952,50 @@ export namespace Provider {
   export const InitError = NamedError.create("ProviderInitError", {
     providerID: ProviderID,
   })
+
+  // altimate_change start — Effect Context.Service facade over the existing namespace
+  // functions. New upstream consumers compose Provider into the Effect runtime via
+  // `yield* Provider.Service` / `Provider.defaultLayer` / `Provider.node`. This is a
+  // thin facade: every method delegates to the existing Promise-returning namespace
+  // function above (which self-manages Instance state), so behavior is unchanged. The
+  // imperative wrappers (list/getModel/getLanguage/defaultModel/...) remain exported
+  // for the fork's synchronous callers.
+  export interface Interface {
+    readonly list: () => Effect.Effect<Record<ProviderID, Info>>
+    readonly getProvider: (providerID: ProviderID) => Effect.Effect<Info>
+    readonly getModel: (providerID: ProviderID, modelID: ModelID) => Effect.Effect<Model>
+    readonly getLanguage: (model: Model) => Effect.Effect<LanguageModelV2>
+    readonly closest: (
+      providerID: ProviderID,
+      query: string[],
+    ) => Effect.Effect<{ providerID: ProviderID; modelID: string } | undefined>
+    readonly getSmallModel: (providerID: ProviderID) => Effect.Effect<Model | undefined>
+    readonly defaultModel: () => Effect.Effect<{ providerID: ProviderID; modelID: ModelID }>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/Provider") {}
+
+  // Failure type surfaced by the resolved service (consumers narrow with `instanceof`).
+  // `defaultModel`/`getModel`/`getLanguage` reject with `ModelNotFoundError` or a plain
+  // `Error` ("no providers found" / "no models found"); callers cast the squashed cause
+  // to this union before narrowing.
+  export type DefaultModelError = InstanceType<typeof ModelNotFoundError> | Error
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      list: () => Effect.promise(() => list()),
+      getProvider: (providerID) => Effect.promise(() => getProvider(providerID)),
+      getModel: (providerID, modelID) => Effect.promise(() => getModel(providerID, modelID)),
+      getLanguage: (model) => Effect.promise(() => getLanguage(model)),
+      closest: (providerID, query) => Effect.promise(() => closest(providerID, query)),
+      getSmallModel: (providerID) => Effect.promise(() => getSmallModel(providerID)),
+      defaultModel: () => Effect.promise(() => defaultModel()),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }
