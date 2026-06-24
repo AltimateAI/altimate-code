@@ -1,19 +1,13 @@
-wip: v1.17.9 reconciliation — delete dead old-TUI tree (§3.4 part 1) (checkpoint 8)
+wip: v1.17.9 reconciliation — restore dropped hono dep (checkpoint 9)
 
-The old TUI tree packages/opencode/src/cli/cmd/tui/** (31 files) is dead: the live TUI is
-packages/tui (@opencode-ai/tui), launched via cli/cmd/tui.ts; opencode has no @tui path
-alias so the old tree never resolved. All its fork customizations were re-homed into
-packages/tui (checkpoints 5-7) or documented as architecturally-deferred; the originals
-remain on main + git history for reference.
+hono + hono-openapi were dropped from packages/opencode/package.json during the overlay
+(present on main as catalog: refs, still in the workspace catalog). The live Hono server
+(server/server.ts, loaded by cli/cmd/serve.ts) and its routes need them. Re-added both as
+catalog: deps.
 
-- Repoint the one live cross-import: server/routes/session.ts formatTranscript now imports
-  from @opencode-ai/tui/util/transcript (the util moved to packages/tui). Added the
-  ./util/transcript entry to packages/tui's exports map.
-- git rm -r packages/opencode/src/cli/cmd/tui (31 files).
+opencode typecheck: 2582 -> 2486 (-96; 27 direct hono module errors + cascades resolved).
 
-opencode typecheck: 3037 -> 2582 errors (-455, the dead TUI tree).
-
-CORRECTION to the earlier deletion plan: server/server.ts is NOT stale — cli/cmd/serve.ts
-loads it as the live server (it is the Hono server; upstream's httpapi tree is unused here).
-So the server cluster (~282 errors) is SURVIVOR reconciliation (restore the hono dep, repoint
-moved imports util/log/bus/error/permission-schema), not deletion. Next cluster.
+Remaining are per-file survivor reconciliation: moved-module repoints (util/log, @/bus,
+../error → core/shims) and Effect-API migration in survivor files (provider/server/session),
+plus the test suite. No more dropped-dep batch wins (only bun-pty left, 2 errors in a
+stale pty file that moved to core).
