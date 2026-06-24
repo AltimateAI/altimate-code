@@ -1,9 +1,9 @@
-wip: v1.17.9 reconciliation — delete stale old-TUI tests (checkpoint 23)
+wip: v1.17.9 reconciliation — repoint moved .sql table-def imports to core (checkpoint 24)
 
-Delete 7 test files that import the deleted cli/cmd/tui tree (upgrade-indicator, theme
-light-mode #704, worker, thread). The features they covered were re-homed into packages/tui /
-the fork plugins; these tests are unrunnable here. Recoverable from main; test coverage should be
-re-homed to packages/tui in a follow-up.
+session/project Drizzle table definitions moved to @opencode-ai/core/{session,project}/sql; some
+survivor files still imported the old ./session.sql / ./project.sql paths (which now resolve to
+the raw `*.sql` ambient module, hence the "no exported member MessageTable" errors). Repointed
+message-v2.ts, session/projectors.ts, server/projectors.ts, project/project.ts to the core paths.
 
-opencode 2108 -> 2093 (src 788 / test 1302). Remaining is deep per-file Effect-API migration in
-the session/provider/server survivors + the test suite tracking those API changes.
+opencode 2093 -> 2091. Cross-cutting wins now exhausted; remaining is deep per-file Effect/Schema/
+Drizzle migration in the session/provider/server survivors + their tests.
