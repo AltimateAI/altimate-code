@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { withTimeout } from "../../src/util/timeout"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { disposeAllInstances } from "../fixture/fixture"
 
 type Event = { kind: "publish"; port: number; name: string } | { kind: "unpublishAll" } | { kind: "destroy" }

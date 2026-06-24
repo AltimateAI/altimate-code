@@ -70,12 +70,14 @@ export function resolveThreadDirectory(project?: string, envPWD = process.env.PW
 
 export const TuiThreadCommand = cmd({
   command: "$0 [project]",
-  describe: "start opencode tui",
+  // altimate_change — rebrand --help text
+  describe: "start altimate-code tui",
   builder: (yargs) =>
     withNetworkOptions(yargs)
       .positional("project", {
         type: "string",
-        describe: "path to start opencode in",
+        // altimate_change — rebrand --help text
+        describe: "path to start altimate-code in",
       })
       .option("model", {
         type: "string",

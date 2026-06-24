@@ -33,7 +33,7 @@ import {
   WorkspaceRoutingQuery,
   workspaceRoutingLayer,
 } from "../../src/server/routes/instance/httpapi/middleware/workspace-routing"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { disposeAllInstances, tmpdirScoped } from "../fixture/fixture"
 import { workspaceLayerWithRuntimeFlags } from "../fixture/workspace"
 import { testEffect } from "../lib/effect"

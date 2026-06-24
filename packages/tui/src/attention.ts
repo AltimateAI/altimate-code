@@ -47,7 +47,7 @@ const TITLE_LIMIT = 80
 const MESSAGE_LIMIT = 240
 const BUILTIN_PACK: RegisteredSoundPack = {
   id: DEFAULT_PACK_ID,
-  name: "OpenCode Default",
+  name: "Altimate Code Default",
   builtin: true,
   sounds: {
     default: defaultSoundPath,

@@ -9,7 +9,7 @@ import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/se
 import { SyncPaths } from "../../src/server/routes/instance/httpapi/groups/sync"
 import { MessageID, PartID } from "../../src/session/schema"
 import { PartTable } from "@opencode-ai/core/session/sql"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"

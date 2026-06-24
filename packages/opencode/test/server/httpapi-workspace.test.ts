@@ -12,8 +12,7 @@ import { EventPaths } from "../../src/server/routes/instance/httpapi/groups/even
 import { Session } from "@/session/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
-import { Server } from "../../src/server/server"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { disposeAllInstances, provideInstance, tmpdirScoped } from "../fixture/fixture"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
@@ -45,12 +44,6 @@ function request(path: string, directory: string, init: RequestInit = {}) {
 
 function requestDefault(path: string, directory: string, init: RequestInit = {}) {
   return requestInDirectory(path, directory, init)
-}
-
-function requestServer(path: string, directory: string, init: RequestInit = {}) {
-  const headers = new Headers(init.headers)
-  headers.set("x-opencode-directory", directory)
-  return Effect.promise(() => Promise.resolve(Server.Default().request(path, { ...init, headers })))
 }
 
 function localAdapter(directory: string): WorkspaceAdapter {
@@ -314,13 +307,13 @@ describe("workspace HttpApi", () => {
       Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = true
       const dir = yield* tmpdirScoped({ git: true })
 
-      const created = yield* requestServer(WorkspacePaths.list, dir, {
+      const created = yield* request(WorkspacePaths.list, dir, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "worktree", branch: null }),
       })
 
-      const body = yield* Effect.promise(() => created.text())
+      const body = yield* created.text
       expect({ status: created.status, body }).toMatchObject({ status: 200 })
       const workspace = JSON.parse(body) as Workspace.Info
       expect(workspace).toMatchObject({ type: "worktree" })

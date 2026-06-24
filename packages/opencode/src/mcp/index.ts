@@ -47,6 +47,7 @@ import { Telemetry } from "@/telemetry"
 const DEFAULT_TIMEOUT = 30_000
 const CLIENT_OPTIONS = {
   capabilities: {
+    // altimate_change start — upstream issue-tracker references (capabilities pending upstream); acknowledged, not a brand leak
     // https://github.com/anomalyco/opencode/issues/11948
     // sampling: {},
     // https://github.com/anomalyco/opencode/issues/23066
@@ -55,6 +56,7 @@ const CLIENT_OPTIONS = {
     roots: {},
     // https://github.com/anomalyco/opencode/issues/28567
     // tasks: {},
+    // altimate_change end
   },
 } satisfies ClientOptions
 

@@ -21,7 +21,8 @@ describe("opencode acp initialize/auth subprocess", () => {
         expect(initialized.agentCapabilities?.sessionCapabilities?.fork).toEqual({})
         expect(initialized.agentCapabilities?.sessionCapabilities?.list).toEqual({})
         expect(initialized.agentCapabilities?.sessionCapabilities?.resume).toEqual({})
-        expect(initialized.agentInfo?.name).toBe("OpenCode")
+        // altimate_change — fork advertises its branded agent name over ACP.
+        expect(initialized.agentInfo?.name).toBe("Altimate Code")
       }),
     60_000,
   )

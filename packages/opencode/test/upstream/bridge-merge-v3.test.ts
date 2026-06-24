@@ -76,9 +76,14 @@ describe("bridge merge cycle 1: Account.active() is async — every caller await
     }
   })
 
-  test("config/config.ts awaits Account.active()", async () => {
+  test("config/config.ts reads the active account (via Effect Account.Service)", async () => {
+    // v1.17.9 migrated config.ts to the Effect Service pattern: it resolves the
+    // account through `Account.Service` and calls `accountSvc.active()` inside an
+    // Effect.gen (no longer the legacy top-level `await Account.active()`). The
+    // intent — config loads the active account's org config — is preserved.
     const content = await readText(path.join(srcDir, "config", "config.ts"))
-    expect(content).toMatch(/await\s+Account\.active\s*\(\s*\)/)
+    expect(content).toMatch(/yield\*\s+Account\.Service/)
+    expect(content).toMatch(/accountSvc\.active\s*\(\s*\)/)
   })
 
   test("altimate/telemetry/index.ts awaits Account.active()", async () => {
@@ -165,14 +170,20 @@ describe("bridge merge cycle 2: XSS — HTML error pages must escape interpolate
   })
 
   test("mcp/oauth-callback.ts HTML_ERROR uses escapeHtml around interpolated error", async () => {
+    // v1.17.9 refactored the inline escapeHtml into a shared `@/util/html` helper.
+    // The security invariant is unchanged: the ${error} interpolation must still
+    // flow through escapeHtml (now imported rather than locally defined).
     const content = await readText(path.join(srcDir, "mcp", "oauth-callback.ts"))
-    expect(content).toMatch(/function\s+escapeHtml\s*\(/)
+    expect(content).toMatch(/escapeHtml/)
     expect(content).toContain("${escapeHtml(error)}")
     expect(content).not.toMatch(/\$\{error\}(?![^"]*"\s*,\s*escapeHtml)/)
   })
 
-  test("escapeHtml in both files covers <, >, &, \" and '", async () => {
-    for (const file of [path.join(srcDir, "plugin", "codex.ts"), path.join(srcDir, "mcp", "oauth-callback.ts")]) {
+  test("escapeHtml covers <, >, &, \" and ' (codex inline + shared util)", async () => {
+    // codex.ts keeps an inline escapeHtml; oauth-callback.ts imports the shared
+    // `util/html.ts` helper. Verify the entity coverage at whichever site defines it.
+    const escapingFiles = [path.join(srcDir, "plugin", "codex.ts"), path.join(srcDir, "util", "html.ts")]
+    for (const file of escapingFiles) {
       const content = await readText(file)
       expect(content).toContain("&amp;")
       expect(content).toContain("&lt;")
@@ -180,6 +191,9 @@ describe("bridge merge cycle 2: XSS — HTML error pages must escape interpolate
       expect(content).toContain("&quot;")
       expect(content).toContain("&#39;")
     }
+    // oauth-callback.ts must import the shared escaper (no raw error interpolation).
+    const callback = await readText(path.join(srcDir, "mcp", "oauth-callback.ts"))
+    expect(callback).toMatch(/import\s+\{\s*escapeHtml\s*\}\s+from\s+["']@\/util\/html["']/)
   })
 })
 
@@ -216,38 +230,27 @@ describe("bridge merge cycle 2: `mcp remove` command restored", () => {
 // Cycle 2 — v3 type drift: we stay on @ai-sdk/provider@2.0.1
 // ---------------------------------------------------------------------------
 
-describe("bridge merge cycle 2: v3 type drift — pinned to ai-sdk v2", () => {
-  test("packages/opencode/package.json pins @ai-sdk/provider to 2.x", async () => {
+describe("bridge merge cycle 2: ai-sdk v3 (v1.17.9 upgraded from v2)", () => {
+  test("packages/opencode/package.json pins @ai-sdk/provider to 3.x", async () => {
+    // v1.17.9 upgraded the ai-sdk family to v3 (LanguageModelV3 / specificationVersion v3).
     const pkg = JSON.parse(await readText(path.join(repoRoot, "packages", "opencode", "package.json")))
     const dep = pkg.dependencies?.["@ai-sdk/provider"] ?? pkg.devDependencies?.["@ai-sdk/provider"]
     expect(dep).toBeDefined()
-    expect(dep.startsWith("2.") || dep.startsWith("^2.") || dep.startsWith("~2.")).toBe(true)
-  })
-
-  test("packages/opencode/package.json pins @ai-sdk/provider-utils to 3.x", async () => {
-    const pkg = JSON.parse(await readText(path.join(repoRoot, "packages", "opencode", "package.json")))
-    const dep = pkg.dependencies?.["@ai-sdk/provider-utils"] ?? pkg.devDependencies?.["@ai-sdk/provider-utils"]
-    expect(dep).toBeDefined()
-    // v4 introduced createProviderToolFactoryWithOutputSchema rename — we stay on v3.
     expect(dep.startsWith("3.") || dep.startsWith("^3.") || dep.startsWith("~3.")).toBe(true)
   })
 
-  test("no source file imports LanguageModelV3 / SharedV3 type aliases", async () => {
-    const files = await walkSource(srcDir)
-    const violations: string[] = []
-    for (const file of files) {
-      const content = await readText(file)
-      // Match identifier; allow comments to mention v3 historically.
-      const lines = content.split("\n")
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
-        if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue
-        if (/\bLanguageModelV3\w*\b/.test(line) || /\bSharedV3\w*\b/.test(line)) {
-          violations.push(`${path.relative(repoRoot, file)}:${i + 1}: ${line.trim()}`)
-        }
-      }
-    }
-    expect(violations).toEqual([])
+  test("@ai-sdk/provider-utils resolves to 4.x (transitive in v3 stack)", async () => {
+    // v3 of the ai-sdk family pulls provider-utils@4.x transitively (it is no longer
+    // a direct opencode dependency). Verify the resolved version in the lockfile.
+    const lock = await readText(path.join(repoRoot, "bun.lock"))
+    expect(lock).toMatch(/"@ai-sdk\/provider-utils":\s*\[\s*"@ai-sdk\/provider-utils@4\./)
+  })
+
+  test("provider stack uses LanguageModelV3 (v1.17.9 moved off the V2 aliases)", async () => {
+    // v1.17.9 moved the provider layer to the V3 model interface. provider.ts imports
+    // `LanguageModelV3` (aliased locally to keep the rest of the file on the V2 name).
+    const content = await readText(path.join(srcDir, "provider", "provider.ts"))
+    expect(content).toMatch(/\bLanguageModelV3\b/)
   })
 
   test("no source file imports createProviderToolFactoryWithOutputSchema (v4 rename)", async () => {
@@ -285,9 +288,11 @@ describe("bridge merge cycle 2: v3 type drift — pinned to ai-sdk v2", () => {
     expect(factoryUseCount).toBeGreaterThan(0)
   })
 
-  test("session/llm.ts middleware does NOT carry specificationVersion: 'v3'", async () => {
+  test("session/llm.ts middleware carries specificationVersion: 'v3'", async () => {
+    // v1.17.9 moved to the ai-sdk v3 model interface; the wrapLanguageModel
+    // middleware must declare specificationVersion: 'v3' to match.
     const content = await readText(path.join(srcDir, "session", "llm.ts"))
-    expect(content).not.toMatch(/specificationVersion\s*:\s*["']v3["']/)
+    expect(content).toMatch(/specificationVersion\s*:\s*["']v3["']/)
   })
 })
 
@@ -305,16 +310,15 @@ describe("bridge merge cycle 2: MessageV2.toModelOutput / toModelMessages signat
     expect(content).not.toMatch(/toModelOutput\s*=\s*\(\s*options\s*:\s*\{\s*toolCallId/)
   })
 
-  test("convertToModelMessages is wrapped in Effect.sync (not Effect.promise)", async () => {
+  test("convertToModelMessages is wrapped in Effect.promise (upstream made it async in v1.17.9)", async () => {
+    // v1.17.9's `convertToModelMessages` returns Promise<ModelMessage[]>, so the
+    // Effect wrapper must be Effect.promise (carrying the `// altimate_change`
+    // marker). Effect.sync here would lose the resolved messages.
     const content = await readText(path.join(srcDir, "session", "message-v2.ts"))
-    // Locate the convertToModelMessages call's surrounding Effect wrapper.
-    // Find a line with `Effect.sync(() =>` and ensure `convertToModelMessages` follows
-    // within ~10 lines.
     const lines = content.split("\n")
     let wrapperLine = -1
     for (let i = 0; i < lines.length; i++) {
-      if (/Effect\.sync\s*\(\s*\(\)\s*=>/.test(lines[i])) {
-        // Look ahead 10 lines for convertToModelMessages
+      if (/Effect\.promise\s*\(\s*\(\)\s*=>/.test(lines[i])) {
         const block = lines.slice(i, i + 12).join("\n")
         if (/convertToModelMessages\s*\(/.test(block)) {
           wrapperLine = i
@@ -323,19 +327,6 @@ describe("bridge merge cycle 2: MessageV2.toModelOutput / toModelMessages signat
       }
     }
     expect(wrapperLine).toBeGreaterThan(-1)
-
-    // Negative — Effect.promise wrapping convertToModelMessages would re-introduce
-    // the cycle 2 bug (3 failing tests).
-    for (let i = 0; i < lines.length; i++) {
-      if (/Effect\.promise\s*\(\s*\(\)\s*=>/.test(lines[i])) {
-        const block = lines.slice(i, i + 12).join("\n")
-        if (/convertToModelMessages\s*\(/.test(block)) {
-          throw new Error(
-            `message-v2.ts wraps convertToModelMessages in Effect.promise at line ${i + 1} — should be Effect.sync`,
-          )
-        }
-      }
-    }
   })
 
   test("UserMessage schema has top-level `variant` for cross-message propagation", async () => {
@@ -353,53 +344,34 @@ describe("bridge merge cycle 2: MessageV2.toModelOutput / toModelMessages signat
 // Cycle 2 — TUI compatibility (older opentui)
 // ---------------------------------------------------------------------------
 
-describe("bridge merge cycle 2: TUI compatibility — pinned to older @opentui", () => {
-  test("prompt/index.tsx reads msg.variant (not msg.model.variant)", async () => {
-    const content = await readText(path.join(srcDir, "cli", "cmd", "tui", "component", "prompt", "index.tsx"))
-    // The cycle 2 fix reverted v1.4.0's `msg.model.variant` to top-level `msg.variant`.
-    expect(content).toMatch(/\bmsg\.variant\b/)
-    // Negative — re-introducing v1.4.0's path will break the runtime.
-    const lines = content.split("\n")
-    for (const line of lines) {
-      if (/\bmsg\.model\.variant\b/.test(line) && !line.trim().startsWith("//")) {
-        throw new Error(`prompt/index.tsx uses msg.model.variant (v1.4.0 only): ${line.trim()}`)
-      }
-    }
+describe("bridge merge: TUI relocated to packages/tui (v1.17.9, opentui bumped)", () => {
+  // v1.17.9 moved the TUI out of packages/opencode/src/cli/cmd/tui into the standalone
+  // packages/tui workspace and bumped @opentui. The old cycle-2 workarounds for the
+  // *previous* opentui version are now obsolete:
+  //   - `msg.variant`/`event.text` reverts → modern opentui uses msg.model.variant / event.bytes
+  //   - `(x as any).traits` cast → opentui now types `traits`
+  //   - markdown `@ts-expect-error` on `fg` → opentui now types `fg`
+  // These tests pin the relocation rather than the removed workarounds.
+  const tuiSrc = path.join(repoRoot, "packages", "tui", "src")
+
+  test("TUI moved to packages/tui (old packages/opencode/src/cli/cmd/tui is gone)", () => {
+    expect(existsSync(path.join(srcDir, "cli", "cmd", "tui"))).toBe(false)
+    expect(existsSync(path.join(tuiSrc, "component", "prompt", "index.tsx"))).toBe(true)
   })
 
-  test("prompt/index.tsx PasteEvent uses event.text (not event.bytes)", async () => {
-    const content = await readText(path.join(srcDir, "cli", "cmd", "tui", "component", "prompt", "index.tsx"))
-    // The cycle 2 fix reverted v1.4.0's `event.bytes` to `event.text`.
-    expect(content).toMatch(/PasteEvent[\s\S]{0,400}event\.text/)
-    const lines = content.split("\n")
-    for (const line of lines) {
-      if (/\bevent\.bytes\b/.test(line) && !line.trim().startsWith("//")) {
-        throw new Error(`prompt/index.tsx references event.bytes (v1.4.0 only): ${line.trim()}`)
-      }
-    }
+  test("packages/tui prompt/index.tsx uses the modern opentui paste API", async () => {
+    const content = await readText(path.join(tuiSrc, "component", "prompt", "index.tsx"))
+    expect(content).toContain("PasteEvent")
+    // Modern opentui exposes bytes on PasteEvent; the old event.text revert is gone.
+    expect(content).toMatch(/event\.bytes/)
   })
 
-  test("traits API is cast as `(x as any).traits` in 5 known TUI files", async () => {
-    // The cycle 2 fix cast `traits` as any — opentui at our version doesn't expose it
-    // on the type, but the runtime accepts it. If the cast disappears (e.g. someone
-    // refactors to direct assignment) but we haven't bumped opentui, typecheck breaks.
-    const files = [
-      "cli/cmd/tui/routes/session/permission.tsx",
-      "cli/cmd/tui/routes/session/question.tsx",
-      "cli/cmd/tui/ui/dialog-export-options.tsx",
-      "cli/cmd/tui/ui/dialog-prompt.tsx",
-      "cli/cmd/tui/ui/dialog-select.tsx",
-    ]
-    for (const rel of files) {
-      const content = await readText(path.join(srcDir, rel))
-      expect(content).toMatch(/\(\s*\w+\s+as\s+any\s*\)\s*\.traits\s*=/)
-    }
-  })
-
-  test("session/index.tsx markdown fg prop has @ts-expect-error", async () => {
-    // opentui types don't yet expose `fg` on MarkdownProps, but it works at runtime.
-    const content = await readText(path.join(srcDir, "cli", "cmd", "tui", "routes", "session", "index.tsx"))
-    expect(content).toMatch(/@ts-expect-error[^\n]*fg/)
+  test("packages/tui session route renders markdown with a typed fg prop (no @ts-expect-error)", async () => {
+    const content = await readText(path.join(tuiSrc, "routes", "session", "index.tsx"))
+    // The <markdown> element accepts `fg` directly now (opentui types it), with no
+    // ts-expect-error workaround. Match the element and its fg prop across newlines.
+    expect(content).toMatch(/<markdown[\s\S]{0,400}\bfg=\{/)
+    expect(content).not.toMatch(/@ts-expect-error[^\n]*fg/)
   })
 })
 
@@ -407,30 +379,29 @@ describe("bridge merge cycle 2: TUI compatibility — pinned to older @opentui",
 // Cycle 2 — Effect package version pinning (ServiceMap vs Context)
 // ---------------------------------------------------------------------------
 
-describe("bridge merge cycle 2: effect@4.0.0-beta.43 pinned (beta.58 removed ServiceMap)", () => {
-  test("root package.json has overrides for effect, @effect/platform-node, @effect/platform-node-shared", async () => {
+describe("bridge merge: effect pinned to 4.0.0-beta.74 (v1.17.9, migrated off ServiceMap)", () => {
+  // v1.17.9 bumped effect past the beta.43 pin. beta.58 removed ServiceMap, so the
+  // merge migrated every service to `Context.Service`. The version now lives in the
+  // workspace `catalog` (consumed via `catalog:`), not a top-level `overrides` pin.
+  test("root package.json catalog pins effect + @effect/platform-node to 4.0.0-beta.74", async () => {
     const pkg = JSON.parse(await readText(path.join(repoRoot, "package.json")))
-    const overrides = pkg.overrides ?? {}
-    expect(overrides["effect"]).toBe("4.0.0-beta.43")
-    expect(overrides["@effect/platform-node"]).toBe("4.0.0-beta.43")
-    expect(overrides["@effect/platform-node-shared"]).toBe("4.0.0-beta.43")
+    const catalog = pkg.workspaces?.catalog ?? pkg.catalog ?? {}
+    expect(catalog["effect"]).toBe("4.0.0-beta.74")
+    expect(catalog["@effect/platform-node"]).toBe("4.0.0-beta.74")
   })
 
-  test("at least one source file imports ServiceMap from effect (proof we still need beta.43)", async () => {
+  test("services use Context.Service (ServiceMap was removed from effect in beta.58)", async () => {
     const files = await walkSource(srcDir)
-    let found = false
+    let contextServiceCount = 0
     for (const file of files) {
       const content = await readText(file)
-      if (/from\s+["']effect["'][^\n]*ServiceMap/.test(content)) {
-        found = true
-        break
-      }
-      if (/import\s+\{[^}]*ServiceMap[^}]*\}\s+from\s+["']effect["']/.test(content)) {
-        found = true
-        break
+      if (/\bContext\.Service\b/.test(content)) contextServiceCount++
+      // The legacy `import { ServiceMap } from "effect"` must be gone.
+      if (/import\s+\{[^}]*\bServiceMap\b[^}]*\}\s+from\s+["']effect["']/.test(content)) {
+        throw new Error(`${path.relative(repoRoot, file)} still imports ServiceMap from "effect" (removed in beta.58)`)
       }
     }
-    expect(found).toBe(true)
+    expect(contextServiceCount).toBeGreaterThan(15)
   })
 })
 
@@ -564,7 +535,9 @@ describe("bridge merge cycle 3: hidden bugs surfaced by @ts-nocheck removal", ()
   test("sync.tsx bulk diff fetch does not pass messageID (matches optional schema)", async () => {
     // Cycle 3 alignment — TUI bulk sync calls sdk.client.session.diff({ sessionID })
     // with no messageID. If a future merge re-requires messageID, this test fails.
-    const content = await readText(path.join(srcDir, "cli", "cmd", "tui", "context", "sync.tsx"))
+    // v1.17.9 relocated sync.tsx from packages/opencode/src/cli/cmd/tui/context to
+    // packages/tui/src/context; the call shape is unchanged.
+    const content = await readText(path.join(repoRoot, "packages", "tui", "src", "context", "sync.tsx"))
     expect(content).toMatch(/sdk\.client\.session\.diff\(\s*\{\s*sessionID\s*\}\s*\)/)
   })
 })
@@ -704,10 +677,11 @@ describe("bridge merge: repo-wide invariants", () => {
     }
   })
 
-  test("provider.ts imports LanguageModelV2 (not LanguageModelV3 alias)", async () => {
+  test("provider.ts uses the LanguageModelV3 model interface (v1.17.9 ai-sdk v3)", async () => {
     const content = await readText(path.join(srcDir, "provider", "provider.ts"))
-    // The cycle 2 fix removed the `LanguageModelV3 as LanguageModelV2` alias.
-    expect(content).not.toMatch(/LanguageModelV3\s+as\s+LanguageModelV2/)
+    // v1.17.9 moved to ai-sdk v3. provider.ts imports `LanguageModelV3`, aliasing it
+    // locally to `LanguageModelV2` so the rest of the file keeps the shorter name.
+    expect(content).toMatch(/\bLanguageModelV3\b/)
     expect(content).toMatch(/\bLanguageModelV2\b/)
   })
 })
@@ -829,12 +803,13 @@ describe("bridge merge cycle 5: Account/Auth Service identifier deduplication", 
   })
 
   test("auth/index.ts uses distinct Service identifier from auth/service.ts", async () => {
-    // Both files have a Service definition; cycle 5 renamed the index.ts one to
-    // `@opencode/Auth.cli` so a future Layer.mergeAll cannot silently overwrite.
+    // Both files define a Service; cycle 5 renamed the index.ts one to `@opencode/Auth.cli`
+    // so a future Layer.mergeAll cannot silently overwrite. v1.17.9 migrated the API from
+    // `ServiceMap.Service` to `Context.Service`; the distinct identifiers are preserved.
     const content = await readText(path.join(srcDir, "auth", "index.ts"))
-    expect(content).toMatch(/ServiceMap\.Service<Service, Interface>\(\)\("@opencode\/Auth\.cli"\)/)
+    expect(content).toMatch(/Context\.Service<Service, Interface>\(\)\("@opencode\/Auth\.cli"\)/)
     // auth/service.ts keeps `@opencode/Auth`
     const serviceContent = await readText(path.join(srcDir, "auth", "service.ts"))
-    expect(serviceContent).toMatch(/ServiceMap\.Service<AuthService[^)]+\)\("@opencode\/Auth"\)/)
+    expect(serviceContent).toMatch(/Context\.Service<AuthService[^)]+\)\("@opencode\/Auth"\)/)
   })
 })

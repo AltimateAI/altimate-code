@@ -1,10 +1,10 @@
 import { describe, test, expect } from "bun:test"
 import { SessionSummary } from "../../src/session/summary"
+import { Session } from "../../src/session"
 import { Instance } from "../../src/project/instance"
-import { Storage } from "../../src/storage/storage"
-import { AppRuntime } from "../../src/effect/app-runtime"
 import { Log } from "../../src/util/log"
-import { Identifier } from "../../src/id/id"
+import { MessageID } from "../../src/session/schema"
+import { ModelID, ProviderID } from "../../src/provider/schema"
 import { tmpdir } from "../fixture/fixture"
 
 /**
@@ -23,18 +23,27 @@ Log.init({ print: false })
 
 // Helper: write fake diffs to Storage for a session, then read them back via diff()
 async function roundtrip(files: string[]): Promise<string[]> {
-  const sessionID = Identifier.ascending("session") as any
   const diffs = files.map((file) => ({
     file,
-    before: "",
-    after: "",
     additions: 1,
     deletions: 0,
     status: "added" as const,
   }))
 
-  await AppRuntime.runPromise(Storage.Service.use((s) => s.write(["session_diff", sessionID], diffs)))
-  const result = await SessionSummary.diff({ sessionID })
+  const session = await Session.create({})
+  const messageID = MessageID.ascending()
+  await Session.updateMessage({
+    id: messageID,
+    sessionID: session.id,
+    role: "user",
+    agent: "build",
+    model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+    time: { created: Date.now() },
+    summary: {
+      diffs,
+    },
+  })
+  const result = await SessionSummary.diff({ sessionID: session.id, messageID })
   return result.map((d) => d.file).filter((f): f is string => f !== undefined)
 }
 

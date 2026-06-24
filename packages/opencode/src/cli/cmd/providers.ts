@@ -399,6 +399,9 @@ export const ProvidersLoginCommand = effectCmd({
           value: x.id,
           hint: {
             opencode: "recommended",
+            // altimate_change start — upstream_fix: PR #18186 reversion preserves the Anthropic provider; restore its API-key login hint dropped by the v1.17.9 merge
+            anthropic: "API key",
+            // altimate_change end
             openai: "ChatGPT Plus/Pro or API key",
           }[x.id],
         })),

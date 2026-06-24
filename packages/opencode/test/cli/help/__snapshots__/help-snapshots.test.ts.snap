@@ -29,7 +29,7 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 manage MCP (Model Context Protocol) servers
 
 Commands:
-  altimate-code mcp add [name]     add an MCP server
+  altimate-code mcp add            add an MCP server
   altimate-code mcp list           list MCP servers and their status                   [aliases: ls]
   altimate-code mcp auth [name]    authenticate with an OAuth-enabled MCP server
   altimate-code mcp logout [name]  remove OAuth credentials for an MCP server
@@ -49,7 +49,7 @@ Options:
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode attach --help 1`] = `
 "altimate-code attach <url>
 
-attach to a running opencode server
+attach to a running altimate-code server
 
 Positionals:
   url  http://localhost:4096                                                     [string] [required]
@@ -468,12 +468,9 @@ Options:
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode mcp add --help 1`] = `
-"altimate-code mcp add [name]
+"altimate-code mcp add
 
 add an MCP server
-
-Positionals:
-  name  name of the MCP server                                                              [string]
 
 Options:
   -h, --help        show help                                                              [boolean]
@@ -483,6 +480,7 @@ Options:
       --pure        run without external plugins                                           [boolean]
       --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
+      --name        MCP server name                                                         [string]
       --type        Server type                                [string] [choices: "local", "remote"]
       --url         Server URL (for remote type)                                            [string]
       --command     Command to run (for local type)                                         [string]

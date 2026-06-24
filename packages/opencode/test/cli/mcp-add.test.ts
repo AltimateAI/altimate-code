@@ -8,9 +8,11 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
     "adds a remote server with HTTP headers",
     ({ home, opencode }) =>
       Effect.gen(function* () {
+        // altimate_change — fork's `mcp add` uses an explicit `--name` flag instead of a positional name arg.
         const result = yield* opencode.spawn([
           "mcp",
           "add",
+          "--name",
           "github",
           "--url",
           "https://example.com/mcp",
@@ -40,9 +42,11 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
     "adds a local server while preserving argv and environment values",
     ({ home, opencode }) =>
       Effect.gen(function* () {
+        // altimate_change — fork's `mcp add` uses an explicit `--name` flag instead of a positional name arg.
         const result = yield* opencode.spawn([
           "mcp",
           "add",
+          "--name",
           "local",
           "--env",
           "API_KEY=secret",

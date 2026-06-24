@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createOpencodeClient } from "@opencode-ai/sdk"
 import { Server } from "../../src/server/server"
 import { tmpdir, disposeAllInstances } from "../fixture/fixture"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 
 afterEach(async () => {
   await disposeAllInstances()

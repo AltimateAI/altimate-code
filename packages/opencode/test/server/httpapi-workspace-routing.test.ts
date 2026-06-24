@@ -33,7 +33,7 @@ import {
   workspaceRoutingLayer,
 } from "../../src/server/routes/instance/httpapi/middleware/workspace-routing"
 import { HEADER as FenceHeader } from "../../src/server/shared/fence"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { workspaceLayerWithRuntimeFlags } from "../fixture/workspace"
 import { tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"

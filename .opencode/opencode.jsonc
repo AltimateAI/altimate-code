@@ -12,7 +12,15 @@
       "description": "Contains opencode logs and data",
     },
   },
-  "mcp": {},
+  "mcp": {
+    "github": {
+      "type": "remote",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer X"
+      }
+    }
+  },
   "tools": {
     "github-triage": false,
     "github-pr-search": false,

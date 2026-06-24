@@ -65,6 +65,18 @@ export namespace Server {
 
   export const Default = lazy(() => createApp({}))
 
+  // altimate_change start — legacy zod NamedError instances come from a different
+  // package than the core Effect NamedError, so instanceof misses them.
+  function namedErrorLike(input: unknown): input is { name: string; toObject(): unknown } {
+    return (
+      typeof input === "object" &&
+      input !== null &&
+      typeof (input as { name?: unknown }).name === "string" &&
+      typeof (input as { toObject?: unknown }).toObject === "function"
+    )
+  }
+  // altimate_change end
+
   export const createApp = (opts: { cors?: string[] }): Hono => {
     const app = new Hono()
     return app
@@ -80,6 +92,15 @@ export namespace Server {
           else status = 500
           return c.json(err.toObject(), { status })
         }
+        // altimate_change start — preserve legacy zod NamedError wire/status shape.
+        if (namedErrorLike(err)) {
+          let status: ContentfulStatusCode
+          if (err.name === "NotFoundError") status = 404
+          else if (err.name.startsWith("Worktree")) status = 400
+          else status = 500
+          return c.json(err.toObject(), { status })
+        }
+        // altimate_change end
         if (err instanceof HTTPException) return err.getResponse()
         const message = err instanceof Error && err.stack ? err.stack : err.toString()
         return c.json(new NamedError.Unknown({ message }).toObject(), {

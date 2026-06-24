@@ -167,9 +167,14 @@ export default {
     expect(marker).toContain("id:demo.slot")
     expect(marker).toContain("id:demo.slot:1")
 
-    // no initialization failures
+    // no initialization failures for THIS plugin. Scope the check to demo.slot: TuiPluginRuntime is a
+    // module-level singleton, so under a full-suite run the console.error spy can also capture a
+    // "failed to initialize tui plugin" error leaked from another file's bad-plugin test (e.g. demo.bad).
     const hit = err.mock.calls.find(
-      (item) => typeof item[0] === "string" && item[0].includes("failed to initialize tui plugin"),
+      (item) =>
+        typeof item[0] === "string" &&
+        item[0].includes("failed to initialize tui plugin") &&
+        (item[0].includes("demo.slot") || (item[1] as { id?: string } | undefined)?.id === "demo.slot"),
     )
     expect(hit).toBeUndefined()
   } finally {

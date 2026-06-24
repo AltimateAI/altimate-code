@@ -131,12 +131,13 @@ describe("run permission shared", () => {
   })
 
   test("formats always-allow copy for wildcard and explicit patterns", () => {
+    // altimate_change — fork branding: copy says "Altimate Code", not "OpenCode".
     expect(permissionAlwaysLines(req({ permission: "bash", always: ["*"] }))).toEqual([
-      "This will allow bash until OpenCode is restarted.",
+      "This will allow bash until Altimate Code is restarted.",
     ])
 
     expect(permissionAlwaysLines(req({ always: ["src/**/*.ts", "src/**/*.tsx"] }))).toEqual([
-      "This will allow the following patterns until OpenCode is restarted.",
+      "This will allow the following patterns until Altimate Code is restarted.",
       "- src/**/*.ts",
       "- src/**/*.tsx",
     ])

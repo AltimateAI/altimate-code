@@ -32,7 +32,9 @@ import path from "path"
 import fs from "fs/promises"
 import os from "os"
 import { pathToFileURL } from "url"
-import { Global } from "@opencode-ai/core/global"
+// altimate_change — config.ts reads Global from "@/global" (opencode, app=altimate-code); the
+// test must swap THAT module's Path.config, not core's, or the global config never loads.
+import { Global } from "@/global"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Filesystem } from "@/util/filesystem"
 import { ConfigPlugin } from "@/config/plugin"
@@ -318,13 +320,15 @@ it.instance("falls back to generic username when system user info is unavailable
   }),
 )
 
-it.effect("creates global jsonc config with schema when no global configs exist", () =>
+it.effect("creates global config with schema when no global configs exist", () =>
   withGlobalConfig({}, ({ dir }) =>
     Effect.gen(function* () {
       yield* Config.use.get().pipe(provideInstanceEffect(dir))
 
-      const content = yield* FSUtil.use.readFileString(path.join(dir, "opencode.jsonc"))
-      expect(content).toContain('"$schema": "https://opencode.ai/config.json"')
+      // altimate_change — fork seeds the branded global config file (altimate-code.json) with the
+      // altimate schema URL, not upstream's opencode.jsonc / opencode.ai schema.
+      const content = yield* FSUtil.use.readFileString(path.join(dir, "altimate-code.json"))
+      expect(content).toContain('"$schema": "https://altimate.ai/config.json"')
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(CrossSpawnSpawner.defaultLayer)),
   ),
 )

@@ -4,6 +4,10 @@ import { pathToFileURL } from "url"
 import { Effect, Layer } from "effect"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
+// altimate_change — TuiConfig reads its global config from core's Global (app=opencode), while the
+// server Config service reads from opencode's Global (app=altimate-code). The alignment test below
+// writes its global config to BOTH config dirs so both services observe identical global plugins.
+import { Global as ServerGlobal } from "@/global"
 import { Config } from "@/config/config"
 import { ConfigPlugin } from "@/config/plugin"
 import { CurrentWorkingDirectory } from "@/config/tui-cwd"
@@ -14,9 +18,11 @@ import { testEffect } from "../lib/effect"
 const it = testEffect(Layer.mergeAll(Config.defaultLayer, FSUtil.defaultLayer))
 const winIt = process.platform === "win32" ? it.instance : it.instance.skip
 
-const globalConfigFiles = ["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"].map((file) =>
-  path.join(Global.Path.config, file),
-)
+const globalConfigFiles = [
+  ...["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"].map((file) => path.join(Global.Path.config, file)),
+  // altimate_change — also clean the server's global config dir (ServerGlobal) used by the alignment test.
+  path.join(ServerGlobal.Path.config, "opencode.json"),
+]
 
 const cleanState = Effect.gen(function* () {
   const fs = yield* FSUtil.Service
@@ -86,6 +92,11 @@ it.instance("keeps server and tui plugin merge semantics aligned", () =>
       yield* fs.makeDirectory(local, { recursive: true })
 
       yield* fs.writeJson(path.join(Global.Path.config, "opencode.json"), {
+        plugin: [["shared-plugin@1.0.0", { source: "global" }], "global-only@1.0.0"],
+      })
+      // altimate_change — also seed the server's global config dir so Config.use.get() (which reads
+      // ServerGlobal) sees the same global plugins TuiConfig reads from core Global.
+      yield* fs.writeJson(path.join(ServerGlobal.Path.config, "opencode.json"), {
         plugin: [["shared-plugin@1.0.0", { source: "global" }], "global-only@1.0.0"],
       })
       yield* fs.writeJson(path.join(Global.Path.config, "tui.json"), {

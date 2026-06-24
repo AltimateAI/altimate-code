@@ -1,6 +1,24 @@
 import { test, expect, describe, afterEach } from "bun:test"
+import { createServer } from "net"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
 import { parseRedirectUri } from "../../src/mcp/oauth-provider"
+
+// altimate_change — find a free loopback port at runtime. The ensureRunning tests previously hardcoded
+// ports (18000/18001/…), which collide with whatever else is listening on the dev machine (the server
+// silently no-ops when the port is already in use, leaving isRunning() false and fetches hitting the
+// other process). Binding port 0 lets the OS hand us a guaranteed-free port for each test.
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.unref()
+    srv.on("error", reject)
+    srv.listen(0, "127.0.0.1", () => {
+      const address = srv.address()
+      const port = typeof address === "object" && address ? address.port : 0
+      srv.close(() => resolve(port))
+    })
+  })
+}
 
 describe("parseRedirectUri", () => {
   test("returns defaults when no URI provided", () => {
@@ -28,12 +46,12 @@ describe("McpOAuthCallback.ensureRunning", () => {
   })
 
   test("starts server with custom redirectUri port and path", async () => {
-    await McpOAuthCallback.ensureRunning("http://127.0.0.1:18000/custom/callback")
+    await McpOAuthCallback.ensureRunning(`http://127.0.0.1:${await freePort()}/custom/callback`)
     expect(McpOAuthCallback.isRunning()).toBe(true)
   })
 
   test("stops after the callback completes", async () => {
-    const redirectUri = "http://127.0.0.1:18003/custom/callback"
+    const redirectUri = `http://127.0.0.1:${await freePort()}/custom/callback`
     await McpOAuthCallback.ensureRunning(redirectUri)
     const callback = McpOAuthCallback.waitForCallback("success")
 
@@ -45,7 +63,7 @@ describe("McpOAuthCallback.ensureRunning", () => {
   })
 
   test("escapes provider error markup in callback HTML", async () => {
-    const redirectUri = "http://127.0.0.1:18001/custom/callback"
+    const redirectUri = `http://127.0.0.1:${await freePort()}/custom/callback`
     await McpOAuthCallback.ensureRunning(redirectUri)
 
     const error = `<script>alert("xss" & 'more')</script>`
@@ -60,7 +78,7 @@ describe("McpOAuthCallback.ensureRunning", () => {
   })
 
   test("keeps normal provider errors readable", async () => {
-    const redirectUri = "http://127.0.0.1:18002/custom/callback"
+    const redirectUri = `http://127.0.0.1:${await freePort()}/custom/callback`
     await McpOAuthCallback.ensureRunning(redirectUri)
 
     const response = await fetch(

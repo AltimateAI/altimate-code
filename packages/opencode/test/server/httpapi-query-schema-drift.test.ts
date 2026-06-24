@@ -26,7 +26,7 @@ import {
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
 import { SessionMessagesQuery } from "@opencode-ai/server/groups/message"
 import { QueryBoolean, QueryBooleanOpenApi } from "../../src/server/routes/instance/httpapi/groups/query"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 import { it } from "../lib/effect"
 

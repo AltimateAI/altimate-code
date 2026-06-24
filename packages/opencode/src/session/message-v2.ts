@@ -240,6 +240,8 @@ export namespace MessageV2 {
     type: z.literal("compaction"),
     auto: z.boolean(),
     overflow: z.boolean().optional(),
+    // altimate_change — compaction markers persist the first retained tail message.
+    tail_start_id: MessageIDSchema.optional(),
   }).meta({
     ref: "CompactionPart",
   })
@@ -644,6 +646,10 @@ export namespace MessageV2 {
     })()
 
     const toModelOutput = (output: unknown) => {
+      // altimate_change — unwrap AI SDK v6 tool-result wrapper.
+      if (output && typeof output === "object" && "output" in output && "toolCallId" in output)
+        output = (output as { output: unknown }).output
+
       if (typeof output === "string") {
         return { type: "text", value: output }
       }
@@ -961,17 +967,41 @@ export namespace MessageV2 {
   export function filterCompacted(msgs: Iterable<MessageV2.WithParts>) {
     const result = [] as MessageV2.WithParts[]
     const completed = new Set<string>()
+    // altimate_change — retain the post-summary tail that compaction kept.
+    let includeUntil: MessageID | undefined
+    let tailMove: { summaryIndex: number; compactionIndex: number } | undefined
     for (const msg of msgs) {
       result.push(msg)
+      if (includeUntil && msg.info.id === includeUntil) break
       if (
         msg.info.role === "user" &&
         completed.has(msg.info.id) &&
         msg.parts.some((part) => part.type === "compaction")
-      )
+      ) {
+        const tailStart = msg.parts.find((part) => part.type === "compaction")?.tail_start_id
+        if (tailStart) {
+          includeUntil = tailStart
+          tailMove = {
+            summaryIndex: result.findIndex(
+              (item) => item.info.role === "assistant" && item.info.summary && item.info.parentID === msg.info.id,
+            ),
+            compactionIndex: result.length - 1,
+          }
+          continue
+        }
         break
+      }
       if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
         completed.add(msg.info.parentID)
     }
+    // altimate_change start — render compacted summary before the retained tail.
+    if (tailMove && tailMove.summaryIndex >= 0) {
+      const newer = result.slice(0, tailMove.summaryIndex)
+      const summary = result.slice(tailMove.summaryIndex, tailMove.compactionIndex + 1)
+      const tail = result.slice(tailMove.compactionIndex + 1)
+      return [...newer, ...tail, ...summary].reverse()
+    }
+    // altimate_change end
     result.reverse()
     return result
   }

@@ -1,14 +1,23 @@
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
-import { Server } from "../../src/server/server"
 import { Effect, Fiber } from "effect"
-import { resetDatabase } from "../fixture/db"
+import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
+import { resetDatabase } from "./db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
-import { it } from "../lib/effect"
+import { it, testEffect } from "../lib/effect"
 import { waitGlobalBusEvent } from "./global-bus"
+import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
+
+const httpIt = testEffect(httpApiLayer)
 
 function app() {
-  return Server.Default()
+  const handler = HttpApiApp.webHandler()
+  return {
+    request(input: string | URL | Request, init?: RequestInit) {
+      const request = input instanceof Request ? input : new Request(new URL(input, "http://localhost"), init)
+      return Promise.resolve(handler.handler(request, HttpApiApp.context))
+    },
+  }
 }
 
 function waitDisposed(directory: string) {
@@ -64,7 +73,7 @@ describe("config HttpApi", () => {
     }),
   )
 
-  it.live(
+  httpIt.live(
     "serves config with active provider model status",
     Effect.gen(function* () {
       const tmp = yield* tmpdirEffect({
@@ -83,18 +92,10 @@ describe("config HttpApi", () => {
         },
       })
 
-      const response = yield* Effect.promise(() =>
-        Promise.resolve(
-          app().request("/config", {
-            headers: {
-              "x-opencode-directory": tmp.path,
-            },
-          }),
-        ),
-      )
+      const response = yield* requestInDirectory("/config", tmp.path)
 
       expect(response.status).toBe(200)
-      expect(yield* Effect.promise(() => response.json())).toMatchObject({
+      expect(yield* response.json).toMatchObject({
         provider: {
           omniroute: {
             models: {

@@ -60,10 +60,18 @@ describe("control-plane/workspace-server SSE", () => {
       await done
 
       expect(seen.some((event) => (event as { type?: string }).type === "server.connected")).toBe(true)
-      expect(seen).toContainEqual({
-        type: "workspace.test",
-        properties: { ok: true },
-      })
+      // altimate_change — the workspace SSE pipeline now stamps each forwarded event with a
+      // sequence `id` (evt_…), so match on the meaningful payload (type + properties) rather than
+      // an exact object that omits the server-assigned id.
+      expect(
+        seen.some((event) => {
+          const next = event as { type?: string; properties?: unknown }
+          return (
+            next.type === "workspace.test" &&
+            JSON.stringify(next.properties) === JSON.stringify({ ok: true })
+          )
+        }),
+      ).toBe(true)
     } finally {
       stop.abort()
     }

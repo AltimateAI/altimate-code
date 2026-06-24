@@ -1,17 +1,32 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
-import { Effect, Layer, Option } from "effect"
+import { Cause, Effect, Exit, Layer, Option } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 
-import { NotFoundError } from "@/storage/storage"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(Layer.mergeAll(SessionNs.defaultLayer, Database.defaultLayer))
+
+function expectNotFoundMessage(error: unknown, message: string) {
+  expect(error).toMatchObject({
+    name: "NotFoundError",
+    data: { message },
+  })
+}
+
+function expectThrowNotFoundMessage(fn: () => unknown, message: string) {
+  try {
+    fn()
+    throw new Error("expected NotFoundError")
+  } catch (error) {
+    expectNotFoundMessage(error, message)
+  }
+}
 
 const withSession = <A, E, R>(
   fn: (input: { session: SessionNs.Interface; sessionID: SessionID }) => Effect.Effect<A, E, R>,
@@ -189,7 +204,7 @@ describe("MessageV2.page", () => {
     Effect.sync(() => {
       const fake = "non-existent-session" as SessionID
       // MessageV2.page is a synchronous helper that throws on missing session.
-      expect(() => MessageV2.page({ sessionID: fake, limit: 10 })).toThrow(`Session not found: ${fake}`)
+      expectThrowNotFoundMessage(() => MessageV2.page({ sessionID: fake, limit: 10 }), `Session not found: ${fake}`)
     }),
   )
 
@@ -472,7 +487,7 @@ describe("MessageV2.get", () => {
       Effect.sync(() => {
         const messageID = MessageID.ascending()
         // MessageV2.get is a synchronous helper that throws on missing message.
-        expect(() => MessageV2.get({ sessionID, messageID })).toThrow(`Message not found: ${messageID}`)
+        expectThrowNotFoundMessage(() => MessageV2.get({ sessionID, messageID }), `Message not found: ${messageID}`)
       }),
     ),
   )
@@ -485,7 +500,7 @@ describe("MessageV2.get", () => {
       const [id] = yield* fill(a.id, 1)
 
       // MessageV2.get throws synchronously when the message is not in the session.
-      expect(() => MessageV2.get({ sessionID: b.id, messageID: id })).toThrow(`Message not found: ${id}`)
+      expectThrowNotFoundMessage(() => MessageV2.get({ sessionID: b.id, messageID: id }), `Message not found: ${id}`)
       const result = MessageV2.get({ sessionID: a.id, messageID: id })
       expect(result.info.id).toBe(id)
 
@@ -563,9 +578,11 @@ describe("Session.messages", () => {
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
       const fake = "non-existent-session" as SessionID
-      const error = yield* Effect.flip(session.messages({ sessionID: fake }))
-      expect(error).toBeInstanceOf(NotFoundError)
-      expect(error.message).toBe(`Session not found: ${fake}`)
+      const exit = yield* Effect.exit(session.messages({ sessionID: fake }))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.prettyErrors(exit.cause).join("\n")).toContain("NotFoundError")
+      }
     }),
   )
 })
@@ -585,9 +602,11 @@ describe("Session.findMessage", () => {
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
       const fake = "non-existent-session" as SessionID
-      const error = yield* Effect.flip(session.findMessage(fake, () => true))
-      expect(error).toBeInstanceOf(NotFoundError)
-      expect(error.message).toBe(`Session not found: ${fake}`)
+      const exit = yield* Effect.exit(session.findMessage(fake, () => true))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.prettyErrors(exit.cause).join("\n")).toContain("NotFoundError")
+      }
     }),
   )
 })

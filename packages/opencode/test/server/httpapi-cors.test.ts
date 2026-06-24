@@ -7,7 +7,7 @@ import * as Socket from "effect/unstable/socket/Socket"
 import { Server } from "../../src/server/server"
 import { InstancePaths } from "../../src/server/routes/instance/httpapi/groups/instance"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { testEffect } from "../lib/effect"
 
 const testStateLayer = Layer.effectDiscard(

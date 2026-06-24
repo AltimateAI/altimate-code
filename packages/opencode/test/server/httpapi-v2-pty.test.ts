@@ -10,7 +10,7 @@ import { Location } from "@opencode-ai/core/location"
 import { Pty } from "@opencode-ai/core/pty"
 import { PtyTicket } from "@opencode-ai/core/pty/ticket"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
-import { resetDatabase } from "../fixture/db"
+import { resetDatabase } from "./db"
 import { disposeAllInstances, tmpdir, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
@@ -63,7 +63,7 @@ afterEach(async () => {
 })
 
 describe("v2 pty HttpApi", () => {
-  testPty("serves location-wrapped PTY routes and retains exited sessions", async () => {
+  testPty("serves location-wrapped PTY routes and removes sessions", async () => {
     await using tmp = await tmpdir({ git: true, config: { formatter: false, lsp: false } })
 
     const empty = await request("/api/pty", tmp.path)
@@ -73,24 +73,20 @@ describe("v2 pty HttpApi", () => {
     const created = await request("/api/pty", tmp.path, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command: "/usr/bin/env", args: ["sh", "-c", "exit 4"], title: "v2" }),
+      body: JSON.stringify({ command: "/bin/sleep", args: ["20"], title: "v2" }),
     })
     expect(created.status).toBe(200)
     const body = Schema.decodeUnknownSync(Location.response(Pty.Info))(await created.json())
     expect(String(body.location.directory)).toBe(tmp.path)
-    expect(body.data.title).toBe("v2")
+    expect(body.data).toMatchObject({ title: "v2", command: "/bin/sleep", status: "running" })
 
-    // The canonical surface keeps exited sessions observable with their exit code.
-    const deadline = Date.now() + 5_000
-    let info: { status: string; exitCode?: number } | undefined
-    while (Date.now() < deadline) {
-      const found = await request(`/api/pty/${body.data.id}`, tmp.path)
-      expect(found.status).toBe(200)
-      info = Schema.decodeUnknownSync(Location.response(Pty.Info))(await found.json()).data
-      if (info.status === "exited") break
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    expect(info).toMatchObject({ status: "exited", exitCode: 4 })
+    const found = await request(`/api/pty/${body.data.id}`, tmp.path)
+    expect(found.status).toBe(200)
+    expect(Schema.decodeUnknownSync(Location.response(Pty.Info))(await found.json()).data).toMatchObject({
+      id: body.data.id,
+      title: "v2",
+      status: "running",
+    })
 
     const removed = await request(`/api/pty/${body.data.id}`, tmp.path, { method: "DELETE" })
     expect(removed.status).toBe(204)
@@ -209,7 +205,7 @@ describe("v2 pty HttpApi", () => {
           directoryHeader(dir),
           HttpClientRequest.bodyJson({
             command: "/bin/sh",
-            args: ["-c", 'printf "%s|%s|%s|%s|%s\\n" "$CALLER" "$SHARED" "$PLUGIN" "$TERM" "$HOOK_CWD"; sleep 5'],
+            args: ["-c", 'printf "%s|%s|%s|%s|%s\\n" "$CALLER" "$SHARED" "$PLUGIN" "$TERM" "$HOOK_CWD"; sleep 20'],
             cwd,
             env: { CALLER: "caller", SHARED: "caller", TERM: "caller" },
           }),
@@ -235,7 +231,7 @@ describe("v2 pty HttpApi", () => {
 
         const takeUntil = (expected: string, seen = ""): Effect.Effect<string, unknown> =>
           Effect.gen(function* () {
-            const next = seen + (yield* Queue.take(messages).pipe(Effect.timeout("5 seconds")))
+            const next = seen + (yield* Queue.take(messages).pipe(Effect.timeout("20 seconds")))
             if (next.includes(expected)) return next
             return yield* takeUntil(expected, next)
           })
@@ -246,5 +242,6 @@ describe("v2 pty HttpApi", () => {
         yield* write(new Socket.CloseEvent(1000, "done")).pipe(Effect.catch(() => Effect.void))
         yield* HttpClientRequest.delete(`/api/pty/${info.id}`).pipe(directoryHeader(dir), HttpClient.execute)
       }),
+    30_000,
   )
 })

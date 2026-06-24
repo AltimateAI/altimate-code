@@ -458,20 +458,19 @@ async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configP
 }
 
 export const McpAddCommand = effectCmd({
-  command: "add [name]",
+  command: "add",
   describe: "add an MCP server",
-  // altimate_change start — restore explicit non-interactive flags (--type/--url/--command/--env/--header/--oauth/--global)
-  // overwritten by v1.4.0 bridge merge. Scripts/CI rely on these flags to add MCP servers
-  // without TTY prompts. Upstream v1.17.9 added its own non-interactive path (--url/--env/--header
-  // + command-after-`--`, global-only), but our richer scheme (explicit --type, --command,
-  // oauth:false via --no-oauth, project-vs-global via --global/vcs) is the fork contract. Keep it
-  // as the primary non-interactive branch; fall through to interactive when --type is absent.
+  // altimate_change start — restore explicit non-interactive flags (--name/--type/--url/--command/--env/--header/--oauth/--global)
+  // overwritten by v1.4.0 bridge merge, then re-dropped by the v1.17.9 merge (which replaced
+  // --name with an `add [name]` positional). Scripts/CI rely on the explicit --name flag to add
+  // MCP servers without TTY prompts. Upstream v1.17.9 added its own non-interactive path
+  // (--url/--env/--header + command-after-`--`, global-only), but our richer scheme (explicit
+  // --name + --type, --command, oauth:false via --no-oauth, project-vs-global via --global/vcs)
+  // is the fork contract. Keep it as the primary non-interactive branch; fall through to
+  // interactive when --type is absent.
   builder: (yargs) =>
     yargs
-      .positional("name", {
-        describe: "name of the MCP server",
-        type: "string",
-      })
+      .option("name", { type: "string", describe: "MCP server name" })
       .option("type", { type: "string", describe: "Server type", choices: ["local", "remote"] })
       .option("url", { type: "string", describe: "Server URL (for remote type)" })
       .option("command", { type: "string", describe: "Command to run (for local type)" })

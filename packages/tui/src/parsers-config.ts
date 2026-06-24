@@ -168,13 +168,15 @@ export default {
     },
     {
       filetype: "vue",
-      wasm: "https://github.com/anomalyco/tree-sitter-vue/releases/download/v0.1.2/tree-sitter-vue.wasm",
+      // altimate_change start — rebranded tree-sitter fork URL
+      wasm: "https://github.com/AltimateAI/tree-sitter-vue/releases/download/v0.1.2/tree-sitter-vue.wasm",
       queries: {
         highlights: [
-          "https://raw.githubusercontent.com/anomalyco/tree-sitter-vue/v0.1.2/queries/html_tags/highlights.scm",
-          "https://raw.githubusercontent.com/anomalyco/tree-sitter-vue/v0.1.2/queries/vue/highlights.scm",
+          "https://raw.githubusercontent.com/AltimateAI/tree-sitter-vue/v0.1.2/queries/html_tags/highlights.scm",
+          "https://raw.githubusercontent.com/AltimateAI/tree-sitter-vue/v0.1.2/queries/vue/highlights.scm",
         ],
       },
+      // altimate_change end
     },
     {
       filetype: "hcl",

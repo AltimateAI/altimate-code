@@ -68,25 +68,109 @@ export const SummarizePayload = Schema.Struct({
   auto: Schema.optional(Schema.Boolean),
 })
 // altimate_change start — SessionPrompt.{Prompt,Command,Shell}Input remain zod schemas in the
-// fork (no `.fields`), so bridge them into the effect HttpApi layer via Schema.declare. The
-// declared Type is the fork's input minus `sessionID`, and validation reuses the existing zod
-// schema (`.omit({ sessionID })`), so payload typing/validation stay in lockstep with the
-// SessionPrompt service the handler delegates to.
+// fork (no `.fields`). HttpApi payload decoding needs concrete Effect schemas; Schema.declare
+// serializes as a null payload in this stack. Mirror the public JSON shapes here and re-type
+// them to the fork service input at the handler boundary.
 type PromptPayloadType = Omit<SessionPrompt.PromptInput, "sessionID">
 type CommandPayloadType = Omit<SessionPrompt.CommandInput, "sessionID">
 type ShellPayloadType = Omit<SessionPrompt.ShellInput, "sessionID">
-const PromptPayloadZod = SessionPrompt.PromptInput.omit({ sessionID: true })
-const CommandPayloadZod = SessionPrompt.CommandInput.omit({ sessionID: true })
-const ShellPayloadZod = SessionPrompt.ShellInput.omit({ sessionID: true })
-export const PromptPayload = Schema.declare<PromptPayloadType>(
-  (u): u is PromptPayloadType => PromptPayloadZod.safeParse(u).success,
-).annotate({ identifier: "PromptInput" })
-export const CommandPayload = Schema.declare<CommandPayloadType>(
-  (u): u is CommandPayloadType => CommandPayloadZod.safeParse(u).success,
-).annotate({ identifier: "CommandInput" })
-export const ShellPayload = Schema.declare<ShellPayloadType>(
-  (u): u is ShellPayloadType => ShellPayloadZod.safeParse(u).success,
-).annotate({ identifier: "ShellInput" })
+const PromptModelPayload = Schema.Struct({
+  providerID: ProviderV2.ID,
+  modelID: ModelV2.ID,
+})
+const PartTimePayload = Schema.Struct({
+  start: Schema.Number,
+  end: Schema.optional(Schema.Number),
+})
+const PartMetadataPayload = Schema.Record(Schema.String, Schema.Unknown)
+const FileSourceTextPayload = Schema.Struct({
+  value: Schema.String,
+  start: Schema.Number,
+  end: Schema.Number,
+})
+const FileSourceRangePayload = Schema.Struct({
+  start: Schema.Struct({ line: Schema.Number, character: Schema.Number }),
+  end: Schema.Struct({ line: Schema.Number, character: Schema.Number }),
+})
+const FileSourcePayload = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("file"),
+    path: Schema.String,
+    text: FileSourceTextPayload,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("symbol"),
+    path: Schema.String,
+    range: FileSourceRangePayload,
+    name: Schema.String,
+    kind: Schema.Number,
+    text: FileSourceTextPayload,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("resource"),
+    clientName: Schema.String,
+    uri: Schema.String,
+    text: FileSourceTextPayload,
+  }),
+])
+const TextPartPayload = Schema.Struct({
+  id: Schema.optional(PartID),
+  type: Schema.Literal("text"),
+  text: Schema.String,
+  synthetic: Schema.optional(Schema.Boolean),
+  ignored: Schema.optional(Schema.Boolean),
+  time: Schema.optional(PartTimePayload),
+  metadata: Schema.optional(PartMetadataPayload),
+})
+const FilePartPayload = Schema.Struct({
+  id: Schema.optional(PartID),
+  type: Schema.Literal("file"),
+  mime: Schema.String,
+  filename: Schema.optional(Schema.String),
+  url: Schema.String,
+  source: Schema.optional(FileSourcePayload),
+})
+const AgentPartPayload = Schema.Struct({
+  id: Schema.optional(PartID),
+  type: Schema.Literal("agent"),
+  name: Schema.String,
+  source: Schema.optional(FileSourceTextPayload),
+})
+const SubtaskPartPayload = Schema.Struct({
+  id: Schema.optional(PartID),
+  type: Schema.Literal("subtask"),
+  prompt: Schema.String,
+  description: Schema.String,
+  agent: Schema.String,
+  model: Schema.optional(PromptModelPayload),
+  command: Schema.optional(Schema.String),
+})
+const PromptPartPayload = Schema.Union([TextPartPayload, FilePartPayload, AgentPartPayload, SubtaskPartPayload])
+export const PromptPayload = Schema.Struct({
+  messageID: Schema.optional(MessageID),
+  model: Schema.optional(PromptModelPayload),
+  agent: Schema.optional(Schema.String),
+  noReply: Schema.optional(Schema.Boolean),
+  tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+  format: Schema.optional(Schema.Unknown),
+  system: Schema.optional(Schema.String),
+  variant: Schema.optional(Schema.String),
+  parts: Schema.Array(PromptPartPayload),
+}) as unknown as Schema.Schema<PromptPayloadType>
+export const CommandPayload = Schema.Struct({
+  messageID: Schema.optional(MessageID),
+  agent: Schema.optional(Schema.String),
+  model: Schema.optional(Schema.String),
+  arguments: Schema.String,
+  command: Schema.String,
+  variant: Schema.optional(Schema.String),
+  parts: Schema.optional(Schema.Array(FilePartPayload)),
+}) as unknown as Schema.Schema<CommandPayloadType>
+export const ShellPayload = Schema.Struct({
+  agent: Schema.String,
+  model: Schema.optional(PromptModelPayload),
+  command: Schema.String,
+}) as unknown as Schema.Schema<ShellPayloadType>
 // altimate_change end
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
 export const PermissionResponsePayload = Schema.Struct({
@@ -133,7 +217,7 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "session.list",
             summary: "List sessions",
-            description: "Get a list of all OpenCode sessions, sorted by most recently updated.",
+            description: "Get a list of all Altimate Code sessions, sorted by most recently updated.",
           }),
         ),
         HttpApiEndpoint.get("status", SessionPaths.status, {
@@ -156,7 +240,7 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "session.get",
             summary: "Get session",
-            description: "Retrieve detailed information about a specific OpenCode session.",
+            description: "Retrieve detailed information about a specific Altimate Code session.",
           }),
         ),
         HttpApiEndpoint.get("children", SessionPaths.children, {
@@ -227,7 +311,7 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "session.create",
             summary: "Create session",
-            description: "Create a new OpenCode session for interacting with AI assistants and managing conversations.",
+            description: "Create a new Altimate Code session for interacting with AI assistants and managing conversations.",
           }),
         ),
         HttpApiEndpoint.delete("remove", SessionPaths.remove, {
