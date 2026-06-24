@@ -83,6 +83,9 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>, 
   live.skip = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
     test.skip(name, () => run(value, liveLayer), opts)
 
+  live.todo = <A, E2>(name: string, _value: Body<A, E2, R | Scope.Scope>, _opts?: number | TestOptions) =>
+    test.todo(name, () => {})
+
   const instance = <A, E2, E3 = never>(
     name: string,
     value: Body<A, E2, R | InstanceStore.Service | TestInstance | Scope.Scope>,
@@ -123,6 +126,15 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>, 
       () => run(body(value).pipe(withTmpdirInstance(args.instanceOptions)), liveLayer),
       args.testOptions,
     )
+  }
+
+  instance.todo = <A, E2, E3 = never>(
+    name: string,
+    _value: Body<A, E2, R | InstanceStore.Service | TestInstance | Scope.Scope>,
+    _options?: InstanceOptions<E3, R | Scope.Scope> | number | TestOptions,
+    _opts?: number | TestOptions,
+  ) => {
+    return test.todo(name, () => {})
   }
 
   return { effect, live, instance }

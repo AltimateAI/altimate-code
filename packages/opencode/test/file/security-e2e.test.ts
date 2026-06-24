@@ -24,7 +24,7 @@ function mockContext() {
   const requests: Array<Parameters<Tool.Context["ask"]>[0]> = []
   const ctx: Tool.Context = {
     sessionID: SessionID.make("ses_test"),
-    messageID: MessageID.make(""),
+    messageID: MessageID.make("msg_test"),
     callID: "",
     agent: "build",
     abort: AbortSignal.any([]),

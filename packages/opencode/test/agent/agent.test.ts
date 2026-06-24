@@ -53,7 +53,9 @@ it.instance("returns default native agents when no config", () =>
   Effect.gen(function* () {
     const agents = yield* load((svc) => svc.list())
     const names = agents.map((a) => a.name)
-    expect(names).toContain("build")
+    // altimate fork replaces upstream single "build" agent with builder/analyst/reviewer
+    expect(names).toContain("builder")
+    expect(names).toContain("analyst")
     expect(names).toContain("plan")
     expect(names).toContain("general")
     expect(names).toContain("explore")
@@ -65,12 +67,14 @@ it.instance("returns default native agents when no config", () =>
 
 it.instance("build agent has correct default properties", () =>
   Effect.gen(function* () {
+    // "build" is an alias for the fork's "builder" agent
     const build = yield* load((svc) => svc.get("build"))
     expect(build).toBeDefined()
     expect(build?.mode).toBe("primary")
     expect(build?.native).toBe(true)
     expect(evalPerm(build, "edit")).toBe("allow")
-    expect(evalPerm(build, "bash")).toBe("allow")
+    // altimate fork: bash defaults to "ask" (safety default) rather than "allow"
+    expect(evalPerm(build, "bash")).toBe("ask")
   }),
 )
 
@@ -218,7 +222,8 @@ it.instance(
   "custom agent config overrides native agent properties",
   () =>
     Effect.gen(function* () {
-      const build = yield* load((svc) => svc.get("build"))
+      // altimate fork: override the native "builder" agent (upstream's "build")
+      const build = yield* load((svc) => svc.get("builder"))
       expect(build).toBeDefined()
       expect(String(build?.model?.providerID)).toBe("anthropic")
       expect(String(build?.model?.modelID)).toBe("claude-3")
@@ -230,7 +235,7 @@ it.instance(
   {
     config: {
       agent: {
-        build: {
+        builder: {
           model: "anthropic/claude-3",
           description: "Custom build agent",
           temperature: 0.7,
@@ -654,14 +659,16 @@ it.instance(
 it.instance("defaultAgent returns build when no default_agent config", () =>
   Effect.gen(function* () {
     const agent = yield* load((svc) => svc.defaultAgent())
-    expect(agent).toBe("build")
+    // altimate fork: default primary agent is "builder" (upstream's "build")
+    expect(agent).toBe("builder")
   }),
 )
 
 it.instance("defaultInfo returns resolved build agent when no default_agent config", () =>
   Effect.gen(function* () {
     const agent = yield* load((svc) => svc.defaultInfo())
-    expect(agent.name).toBe("build")
+    // altimate fork: default primary agent is "builder" (upstream's "build")
+    expect(agent.name).toBe("builder")
     expect(agent.mode).toBe("primary")
   }),
 )
@@ -734,13 +741,16 @@ it.instance(
   () =>
     Effect.gen(function* () {
       const agent = yield* load((svc) => svc.defaultAgent())
-      // build is disabled, so it should return plan (next primary agent)
+      // altimate fork: builder/analyst/reviewer are the primary agents before plan;
+      // disabling them all leaves plan as the next visible primary agent
       expect(agent).toBe("plan")
     }),
   {
     config: {
       agent: {
-        build: { disable: true },
+        builder: { disable: true },
+        analyst: { disable: true },
+        reviewer: { disable: true },
       },
     },
   },
@@ -751,8 +761,11 @@ it.instance(
   () => expectDefaultAgentError("no primary visible agent found"),
   {
     config: {
+      // altimate fork: builder/analyst/reviewer/plan are all primary agents
       agent: {
-        build: { disable: true },
+        builder: { disable: true },
+        analyst: { disable: true },
+        reviewer: { disable: true },
         plan: { disable: true },
       },
     },

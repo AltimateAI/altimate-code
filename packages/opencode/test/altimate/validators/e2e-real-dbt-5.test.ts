@@ -117,7 +117,10 @@ models:
     spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
     spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
-    // BUG: reason should mention `foo` by name.
+    // altimate_change: the reason now names the affected model(s) in BOTH the
+    // mismatch path and the errored (spawn/tool-error) path — see
+    // dbt-schema-verify.ts erroredNames. So `foo` is surfaced regardless of which
+    // path the verifier takes in this environment.
     expect(r.reason ?? "").toContain("foo")
   }, E2E_TIMEOUT)
 

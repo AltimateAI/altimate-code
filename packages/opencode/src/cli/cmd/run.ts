@@ -545,6 +545,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
     async function execute(sdk: OpencodeClient) {
       const outputParts: string[] = []
+      // altimate_change start — validate explicit models before starting the session event loop.
+      // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
+      // `run` waiting until the process-level timeout kills it.
+      if (args.model) {
+        const parsed = Provider.parseModel(args.model)
+        const providers = (await sdk.provider.list()).data?.all ?? []
+        const provider = providers.find((item) => item.id === parsed.providerID)
+        if (!provider?.models?.[parsed.modelID]) {
+          throw new Provider.ModelNotFoundError({
+            providerID: parsed.providerID,
+            modelID: parsed.modelID,
+            suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
+          })
+        }
+      }
+      // altimate_change end
 
       function tool(part: ToolPart) {
         try {

@@ -206,24 +206,19 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/MC
 
 export const use = serviceUse(Service)
 
-// altimate_change start — fire-and-forget census telemetry: tool count + resource
-// count for a freshly connected server. Never blocks or fails the connect path.
-function trackCensus(key: string, transport: TransportLabel, toolCount: number, client: MCPClient) {
-  void client
-    .listResources()
-    .catch(() => ({ resources: [] }))
-    .then((resourcesList) => {
-      Telemetry.track({
-        type: "mcp_server_census",
-        timestamp: Date.now(),
-        session_id: Telemetry.getContext().sessionId,
-        server_name: key,
-        transport,
-        tool_count: toolCount,
-        resource_count: resourcesList.resources.length,
-      })
-    })
-    .catch(() => {})
+// altimate_change start — fire-and-forget census telemetry. Do not perform extra
+// MCP list requests here; resource/prompt/tool listing is observable server I/O
+// and is already capability-gated on the normal access paths.
+function trackCensus(key: string, transport: TransportLabel, toolCount: number) {
+  Telemetry.track({
+    type: "mcp_server_census",
+    timestamp: Date.now(),
+    session_id: Telemetry.getContext().sessionId,
+    server_name: key,
+    transport,
+    tool_count: toolCount,
+    resource_count: 0,
+  })
 }
 // altimate_change end
 
@@ -494,7 +489,7 @@ export const layer = Layer.effect(
             return yield* Effect.fail(new Error("Failed to get tools"))
           }
           // altimate_change start — fire-and-forget census telemetry once tools are listed
-          if (transport) trackCensus(key, transport, listed.length, mcpClient)
+          if (transport) trackCensus(key, transport, listed.length)
           // altimate_change end
           return { mcpClient, status, defs: listed, transport } satisfies CreateResult
         }).pipe(

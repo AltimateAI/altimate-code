@@ -15,9 +15,11 @@ import { EventV2 } from "@opencode-ai/core/event"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 // altimate_change start — configure commands for external AI CLIs
+import PROMPT_DISCOVER from "./template/discover.txt"
 import PROMPT_CONFIGURE_CLAUDE from "./template/configure-claude.txt"
 import PROMPT_CONFIGURE_CODEX from "./template/configure-codex.txt"
 import PROMPT_DISCOVER_MCPS from "./template/discover-and-add-mcps.txt"
+import PROMPT_FEEDBACK from "./template/feedback.txt"
 // altimate_change end
 
 type State = {
@@ -65,6 +67,10 @@ export function hints(template: string) {
 
 export const Default = {
   INIT: "init",
+  // altimate_change start — restore altimate built-in command constants after upstream command merge
+  DISCOVER: "discover",
+  FEEDBACK: "feedback",
+  // altimate_change end
   REVIEW: "review",
   // altimate_change start — built-in commands for external AI CLI configuration + MCP discovery
   CONFIGURE_CLAUDE: "configure-claude",
@@ -95,13 +101,26 @@ export const layer = Layer.effect(
 
       commands[Default.INIT] = {
         name: Default.INIT,
-        description: "guided AGENTS.md setup",
+        // altimate_change start — keep public command metadata compatible with shipped tests/docs
+        description: "create/update AGENTS.md",
+        // altimate_change end
         source: "command",
         get template() {
           return PROMPT_INITIALIZE.replace("${path}", ctx.worktree)
         },
         hints: hints(PROMPT_INITIALIZE),
       }
+      // altimate_change start — restore /discover default command after upstream command merge
+      commands[Default.DISCOVER] = {
+        name: Default.DISCOVER,
+        description: "scan data stack and set up connections",
+        source: "command",
+        get template() {
+          return PROMPT_DISCOVER
+        },
+        hints: hints(PROMPT_DISCOVER),
+      }
+      // altimate_change end
       commands[Default.REVIEW] = {
         name: Default.REVIEW,
         description: "review changes [commit|branch|pr], defaults to uncommitted",
@@ -140,6 +159,15 @@ export const layer = Layer.effect(
           return PROMPT_DISCOVER_MCPS
         },
         hints: hints(PROMPT_DISCOVER_MCPS),
+      }
+      commands[Default.FEEDBACK] = {
+        name: Default.FEEDBACK,
+        description: "submit product feedback as a GitHub issue",
+        source: "command",
+        get template() {
+          return PROMPT_FEEDBACK
+        },
+        hints: hints(PROMPT_FEEDBACK),
       }
       commands[Default.MCPS] = {
         name: Default.MCPS,

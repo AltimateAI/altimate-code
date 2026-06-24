@@ -83,12 +83,16 @@ export const effectCmd = <Args, A>(opts: EffectCmdOpts<Args, A>) =>
       }
       const { InstanceStore } = await import("@/project/instance-store")
       const { InstanceRef } = await import("@/effect/instance-ref")
+      const { Instance } = await import("@/project/instance")
       const directory = opts.directory?.(args) ?? process.cwd()
       const { store, ctx } = await AppRuntime.runPromise(
         InstanceStore.Service.use((store) => store.load({ directory }).pipe(Effect.map((ctx) => ({ store, ctx })))),
       )
       try {
-        await AppRuntime.runPromise(opts.handler(args).pipe(Effect.provideService(InstanceRef, ctx)))
+        // altimate_change start — preserve legacy Instance ALS for Promise-based services
+        // still reached from Effect-native CLI handlers (for example Provider.list -> Instance.state).
+        await Instance.restore(ctx, () => AppRuntime.runPromise(opts.handler(args).pipe(Effect.provideService(InstanceRef, ctx))))
+        // altimate_change end
       } finally {
         await AppRuntime.runPromise(store.dispose(ctx))
       }

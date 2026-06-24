@@ -88,6 +88,21 @@ delete process.env["OTEL_RESOURCE_ATTRIBUTES"]
 const testDb = path.join(dir, "share", "altimate-code", "opencode-local.db")
 await fs.mkdir(path.dirname(testDb), { recursive: true })
 process.env["OPENCODE_DB"] = testDb
+process.env["OPENCODE_TEST_CORE_DB_OWNER"] = "1"
+
+// altimate_change start — v1.17.9 merge DB owner: build the shared test DB via
+// core before any legacy storage import can lazily migrate the same sqlite file.
+const [{ Effect }, { Database: CoreDatabase }] = await Promise.all([
+  import("effect"),
+  import("@opencode-ai/core/database/database"),
+])
+await Effect.runPromise(
+  CoreDatabase.Service.use(({ db }) => db.run("PRAGMA wal_checkpoint(FULL)")).pipe(
+    Effect.provide(CoreDatabase.layerFromPath(testDb)),
+    Effect.scoped,
+  ),
+)
+// altimate_change end
 
 // Now safe to import from src/
 const { initProjectors } = await import("../src/server/projectors")

@@ -414,9 +414,9 @@ export const McpLogoutCommand = effectCmd({
 
 async function resolveConfigPath(baseDir: string, global = false) {
   // altimate_change start — upstream_fix: bridge merge wrote new MCP entries to
-  // opencode.json. Mirror main's behavior: prefer altimate-code.json (primary),
-  // accept opencode.json (fallback) for existing installs that have it.
-  const CONFIG_FILENAMES = ["altimate-code.json", "opencode.json", "opencode.jsonc"]
+  // the wrong default path. Mirror main's behavior for new files while accepting
+  // existing altimate-code.json installs.
+  const CONFIG_FILENAMES = ["opencode.json", "opencode.jsonc", "altimate-code.json"]
   const candidates: string[] = []
 
   if (!global) {
@@ -435,7 +435,7 @@ async function resolveConfigPath(baseDir: string, global = false) {
     }
   }
 
-  // Default to altimate-code.json (root) when nothing exists yet
+  // Default to opencode.json when nothing exists yet; existing altimate-code.json files are still discovered above.
   return candidates[0]
   // altimate_change end
 }
@@ -460,7 +460,7 @@ async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configP
 export const McpAddCommand = effectCmd({
   command: "add [name]",
   describe: "add an MCP server",
-  // altimate_change start — restore explicit non-interactive flags (--type/--url/--command/--header/--oauth/--global)
+  // altimate_change start — restore explicit non-interactive flags (--type/--url/--command/--env/--header/--oauth/--global)
   // overwritten by v1.4.0 bridge merge. Scripts/CI rely on these flags to add MCP servers
   // without TTY prompts. Upstream v1.17.9 added its own non-interactive path (--url/--env/--header
   // + command-after-`--`, global-only), but our richer scheme (explicit --type, --command,
@@ -475,6 +475,7 @@ export const McpAddCommand = effectCmd({
       .option("type", { type: "string", describe: "Server type", choices: ["local", "remote"] })
       .option("url", { type: "string", describe: "Server URL (for remote type)" })
       .option("command", { type: "string", describe: "Command to run (for local type)" })
+      .option("env", { type: "array", string: true, describe: "Environment variables as key=value (repeatable)" })
       .option("header", { type: "array", string: true, describe: "HTTP headers as key=value (repeatable)" })
       .option("oauth", { type: "boolean", describe: "Enable OAuth", default: true })
       .option("global", { type: "boolean", describe: "Add to global config", default: false }),
@@ -484,8 +485,11 @@ export const McpAddCommand = effectCmd({
     if (!maybeCtx) return yield* Effect.die("InstanceRef not provided")
     const ctx = maybeCtx
     yield* Effect.promise(async () => {
-      // altimate_change start — non-interactive mode: explicit flags provided (--name + --type)
-      if (args.name && args.type) {
+      // altimate_change start — non-interactive mode: upstream v1.17 form (--url or command after --)
+      // plus the fork's explicit --type/--command form.
+      const passthrough = Array.isArray(args["--"]) ? args["--"] : []
+      const inferredType = args.type ?? (args.url ? "remote" : passthrough.length > 0 || args.command ? "local" : undefined)
+      if (args.name && inferredType) {
         if (!args.name.trim()) {
           console.error("MCP server name cannot be empty")
           process.exitCode = 1
@@ -497,15 +501,27 @@ export const McpAddCommand = effectCmd({
 
         let mcpConfig: ConfigMCPV1.Info
 
-        if (args.type === "local") {
-          if (!args.command?.trim()) {
-            console.error("--command is required for local type")
+        if (inferredType === "local") {
+          const command = passthrough.length > 0 ? passthrough : args.command?.trim().split(/\s+/).filter(Boolean)
+          if (!command?.length) {
+            console.error("A command is required for local type")
             process.exitCode = 1
             return
           }
+          const environment: Record<string, string> = {}
+          for (const item of (args.env ?? []) as string[]) {
+            const eq = item.indexOf("=")
+            if (eq === -1) {
+              console.error(`Invalid env format: ${item} (expected key=value)`)
+              process.exitCode = 1
+              return
+            }
+            environment[item.substring(0, eq)] = item.substring(eq + 1)
+          }
           mcpConfig = {
             type: "local",
-            command: args.command.trim().split(/\s+/).filter(Boolean),
+            command,
+            ...(Object.keys(environment).length > 0 ? { environment } : {}),
           }
         } else {
           if (!args.url) {

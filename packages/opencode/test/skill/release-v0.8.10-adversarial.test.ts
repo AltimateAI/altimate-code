@@ -57,9 +57,19 @@ const model: Provider.Model = {
   release_date: "2026-01-01",
 } as Provider.Model
 
+// altimate_change: post-v1.17.9 the branded IDs enforce prefixes
+// (MessageID → "msg", PartID → "prt"). Normalize the short test ids so the
+// fixtures keep their readable names ("u1", "p1") while satisfying the brand.
+function msgId(id: string) {
+  return MessageID.make(id.startsWith("msg") ? id : `msg_${id}`)
+}
+function partId(id: string) {
+  return PartID.make(id.startsWith("prt") ? id : `prt_${id}`)
+}
+
 function userInfo(id: string): MessageV2.User {
   return {
-    id,
+    id: msgId(id),
     sessionID,
     role: "user",
     time: { created: 0 },
@@ -71,7 +81,7 @@ function userInfo(id: string): MessageV2.User {
 }
 
 function basePart(messageID: string, id: string) {
-  return { id: PartID.make(id), sessionID, messageID: MessageID.make(messageID) }
+  return { id: partId(id), sessionID, messageID: msgId(messageID) }
 }
 
 /**

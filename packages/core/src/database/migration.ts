@@ -8,6 +8,7 @@ import schema from "./schema.gen"
 
 type Database = EffectDrizzleSqlite.EffectSQLiteDatabase
 type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0]
+type Target = Pick<Database, "all" | "get" | "run">
 const lock = Semaphore.makeUnsafe(1)
 
 export type Migration = {
@@ -15,26 +16,48 @@ export type Migration = {
   up: (tx: Transaction) => Effect.Effect<void, unknown>
 }
 
+function userTables(db: Target) {
+  return db.all<{ name: string }>(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+}
+
+function ensureMigrationTable(db: Target) {
+  return db.run(
+    sql`CREATE TABLE IF NOT EXISTS ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)`,
+  )
+}
+
+function markMigrationsApplied(db: Target, input: Migration[]) {
+  return Effect.forEach(input, (migration) =>
+    db.run(
+      sql`INSERT OR IGNORE INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
+    ),
+  )
+}
+
 export function apply(db: Database) {
   return lock.withPermit(
     Effect.gen(function* () {
-      const tables = yield* db.all<{ name: string }>(
-        sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
-      )
+      const tables = yield* userTables(db)
       if (tables.some((table) => table.name === "session")) return yield* applyOnly(db, migrations)
       if (tables.length > 0) return yield* Effect.die("Database is not empty and has no session table")
-      yield* db.transaction((tx) =>
-        Effect.gen(function* () {
-          yield* schema.up(tx)
-          yield* tx.run(
-            sql`CREATE TABLE ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)`,
-          )
-          yield* Effect.forEach(migrations, (migration) =>
-            tx.run(
-              sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
-            ),
-          )
-        }),
+      yield* db.transaction(
+        (tx) =>
+          Effect.gen(function* () {
+            // altimate_change upstream_fix — re-check under BEGIN IMMEDIATE so
+            // core cannot take the fresh CREATE path from a stale empty read.
+            const current = yield* userTables(tx)
+            if (current.some((table) => table.name === "session")) {
+              yield* ensureMigrationTable(tx)
+              yield* markMigrationsApplied(tx, migrations)
+              return
+            }
+            if (current.length > 0) return yield* Effect.die("Database is not empty and has no session table")
+
+            yield* schema.up(tx)
+            yield* ensureMigrationTable(tx)
+            yield* markMigrationsApplied(tx, migrations)
+          }),
+        { behavior: "immediate" },
       )
     }),
   )
@@ -42,9 +65,7 @@ export function apply(db: Database) {
 
 export function applyOnly(db: Database, input: Migration[]) {
   return Effect.gen(function* () {
-    yield* db.run(
-      sql`CREATE TABLE IF NOT EXISTS ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)`,
-    )
+    yield* ensureMigrationTable(db)
     let completed = new Set(
       (yield* db.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)).map((row) => row.id),
     )

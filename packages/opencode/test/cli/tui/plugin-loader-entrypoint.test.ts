@@ -303,6 +303,8 @@ test("does not use npm package main for tui entry", async () => {
   const install = spyOn(Npm, "add").mockResolvedValue({ directory: tmp.extra.mod, entrypoint: undefined })
   const warn = spyOn(console, "warn").mockImplementation(() => {})
   const error = spyOn(console, "error").mockImplementation(() => {})
+  warn.mockClear()
+  error.mockClear()
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })

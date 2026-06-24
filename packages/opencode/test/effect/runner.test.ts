@@ -317,7 +317,14 @@ describe("Runner", () => {
 
       yield* runner.cancel
       const done = yield* Fiber.await(sh)
-      expect(Exit.isSuccess(done)).toBe(true)
+      // The new runner cancels a shell by interrupting its work fiber. With no
+      // `onInterrupt` configured, the shell wrapper turns the interrupt into a
+      // Cancelled failure (see Runner.startShell) — it does NOT resolve with a
+      // success value the way the old abort-signal hook did. So the cancelled
+      // shell fiber exits as a failure (matching "cancel interrupts shell that
+      // ignores abort signal" below). What matters is that cancel stopped it.
+      expect(Exit.isFailure(done)).toBe(true)
+      expect(runner.busy).toBe(false)
     }),
   )
 

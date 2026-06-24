@@ -31,6 +31,13 @@ const log = Log.create({ service: "db" })
 
 export namespace Database {
   export const Path = iife(() => {
+    // altimate_change upstream_fix — keep legacy storage on the same sqlite file
+    // as core when callers override OPENCODE_DB.
+    const overridden = process.env["OPENCODE_DB"]
+    if (overridden) {
+      if (overridden === ":memory:" || path.isAbsolute(overridden)) return overridden
+      return path.join(Global.Path.data, overridden)
+    }
     const channel = InstallationChannel
     if (["latest", "beta"].includes(channel) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
       return path.join(Global.Path.data, "opencode.db")
@@ -149,6 +156,18 @@ export namespace Database {
     sqlite
       .transaction(() => {
         runFreshSchema(sqlite)
+        markDrizzleEntriesApplied(sqlite, entries)
+      })()
+    return true
+  }
+
+  function adoptCoreOwnedDatabase(sqlite: BunDatabase, entries: Journal) {
+    if (process.env["OPENCODE_TEST_CORE_DB_OWNER"] !== "1") return false
+    if (!hasTable(sqlite, "session")) return false
+
+    log.info("adopting core-owned database schema")
+    sqlite
+      .transaction(() => {
         markDrizzleEntriesApplied(sqlite, entries)
       })()
     return true
@@ -343,12 +362,13 @@ export namespace Database {
           item.sql = "select 1;"
         }
       }
-      const initialized = initializeFreshDatabase(sqlite, entries)
-      const repaired = initialized ? false : repairLegacyDatabase(sqlite, entries)
+      const adopted = adoptCoreOwnedDatabase(sqlite, entries)
+      const initialized = adopted ? false : initializeFreshDatabase(sqlite, entries)
+      const repaired = adopted || initialized ? false : repairLegacyDatabase(sqlite, entries)
       // altimate_change start — backfill migration names before migrate
       backfillMigrationNames(sqlite, entries)
       // altimate_change end
-      if (!initialized && !repaired) migrate(db, entries)
+      if (!adopted && !initialized && !repaired) migrate(db, entries)
     }
 
     return db

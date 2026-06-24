@@ -13,6 +13,8 @@ import type * as SDK from "@opencode-ai/sdk/v2"
 // altimate_change start — Effect Context.Service facade for new upstream consumers
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Instance } from "@/project/instance"
+import { InstanceRef } from "@/effect/instance-ref"
 // altimate_change end
 
 export namespace ShareNext {
@@ -310,16 +312,29 @@ export namespace ShareNext {
 
   export class Service extends Context.Service<Service, Interface>()("@opencode/ShareNext") {}
 
+  // altimate_change start — bridge Effect InstanceRef back into the legacy ALS
+  // Instance namespace. The imperative ShareNext functions read Config/Account/
+  // Database via the makeRuntime facades, which resolve the active instance from
+  // the legacy Instance ALS. Without restoring the InstanceRef captured by the
+  // Effect runtime, those reads fail ("InstanceRef not provided"). Mirrors the
+  // Plugin facade bridge in src/plugin/index.ts.
+  const withInstance = <A>(fn: () => Promise<A>) =>
+    Effect.gen(function* () {
+      const ctx = yield* InstanceRef
+      return yield* Effect.promise(() => (ctx ? Instance.restore(ctx, fn) : fn()))
+    })
+
   export const layer = Layer.succeed(
     Service,
     Service.of({
-      init: () => Effect.promise(() => init()),
-      url: () => Effect.promise(() => url()),
-      request: () => Effect.promise(() => request()),
-      create: (sessionID) => Effect.promise(() => create(sessionID)),
-      remove: (sessionID) => Effect.promise(() => remove(sessionID)),
+      init: () => withInstance(() => init()),
+      url: () => withInstance(() => url()),
+      request: () => withInstance(() => request()),
+      create: (sessionID) => withInstance(() => create(sessionID)),
+      remove: (sessionID) => withInstance(() => remove(sessionID)),
     }),
   )
+  // altimate_change end
 
   export const defaultLayer = layer
 
