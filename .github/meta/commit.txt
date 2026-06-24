@@ -1,27 +1,19 @@
-wip: v1.17.9 reconciliation — §4 app.tsx + UpgradeIndicator port (checkpoint 7)
+wip: v1.17.9 reconciliation — delete dead old-TUI tree (§3.4 part 1) (checkpoint 8)
 
-app.tsx re-home into packages/tui/src/app.tsx + UpgradeIndicator component port.
-packages/tui + packages/core both typecheck GREEN.
+The old TUI tree packages/opencode/src/cli/cmd/tui/** (31 files) is dead: the live TUI is
+packages/tui (@opencode-ai/tui), launched via cli/cmd/tui.ts; opencode has no @tui path
+alias so the old tree never resolved. All its fork customizations were re-homed into
+packages/tui (checkpoints 5-7) or documented as architecturally-deferred; the originals
+remain on main + git history for reference.
 
-app.tsx (5 applied):
-- terminal-detection: created fork-original packages/tui/src/terminal-detection.ts
-  (detectModeFromCOLORFGBG, #704) + eager COLORFGBG light-mode short-circuit in the
-  theme-detection path (avoids the 1s waitForThemeMode delay).
-- branding: docs URL opencode.ai/docs -> docs.altimate.sh; DialogAlert update message
-  "OpenCode v…" -> "Altimate Code v…".
-app.tsx MOOT (2): variant_list keybind (upstream v1.17.9 shipped PR #21185 natively);
-disableStdoutInterception (opentui API removed; renderer externalOutputMode handles it).
-app.tsx DEFERRED (7): trace-viewer feature — depends on opencode-side altimate/observability
-(Trace/renderTraceViewer/DialogTraceList), unreachable from packages/tui. Same architectural
-blocker as the dialogs/enhance (task: expose opencode deps to tui).
+- Repoint the one live cross-import: server/routes/session.ts formatTranscript now imports
+  from @opencode-ai/tui/util/transcript (the util moved to packages/tui). Added the
+  ./util/transcript entry to packages/tui's exports map.
+- git rm -r packages/opencode/src/cli/cmd/tui (31 files).
 
-UpgradeIndicator port (fork-original, was deferred — now unblocked since it only needed
-Installation.VERSION = InstallationVersion in core):
-- packages/tui/src/component/upgrade-indicator{,-utils}.tsx — repointed imports to the tui
-  layout, Installation.VERSION -> InstallationVersion. Added semver + @types/semver to
-  packages/tui (were opencode-only deps).
-- routes/session/footer.tsx — wired <UpgradeIndicator /> back into the session footer.
-(home-screen UpgradeIndicator still deferred — lives in the new feature-plugins/home/footer
-plugin, a different surface.)
+opencode typecheck: 3037 -> 2582 errors (-455, the dead TUI tree).
 
-OLD cli/cmd/tui/** files untouched (deleted in §3.4 after remaining re-homing/decisions).
+CORRECTION to the earlier deletion plan: server/server.ts is NOT stale — cli/cmd/serve.ts
+loads it as the live server (it is the Hono server; upstream's httpapi tree is unused here).
+So the server cluster (~282 errors) is SURVIVOR reconciliation (restore the hono dep, repoint
+moved imports util/log/bus/error/permission-schema), not deletion. Next cluster.

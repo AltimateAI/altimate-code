@@ -1,5 +1,7 @@
 import { Hono } from "hono"
-import { formatTranscript } from "@/cli/cmd/tui/util/transcript"
+// altimate_change start — transcript util moved to packages/tui in the v1.17.9 TUI extraction
+import { formatTranscript } from "@opencode-ai/tui/util/transcript"
+// altimate_change end
 import { stream } from "hono/streaming"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import { SessionID, MessageID, PartID } from "@/session/schema"
