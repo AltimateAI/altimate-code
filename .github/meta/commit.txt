@@ -1,15 +1,17 @@
-wip: v1.17.9 reconciliation — moved-to-core util re-export shims (checkpoint 10)
+feat: [v1.17.9] fork TUI features as host-registered plugins — ADR + scaffold (checkpoint 11)
 
-Restore re-export shims at the old util/* paths upstream deleted when those utils moved to
-@opencode-ai/core, so survivor + test importers resolve without per-file repoints (the
-established §2.13 shim pattern, same as error/token/locale):
-- src/util/log.ts   -> @/altimate/util/log (fork Log successor)
-- src/util/glob.ts  -> @opencode-ai/core/util/glob (Glob)
-- src/util/flock.ts -> @opencode-ai/core/util/flock (Flock)
+Architectural decision for the v1.17.9 TUI extraction: fork TUI features that depend on
+opencode-package code (AltimateApi, enhance-prompt, observability) are implemented as
+host-registered TuiPlugins living in opencode-side fork-owned files — NOT as edits inside
+upstream packages/tui. This keeps upstream packages/tui byte-for-byte upstream (clean future
+merges) while the plugins retain their opencode deps and render via TuiPluginApi
+(slots/command/keymap/dialog/client). Full rationale + per-feature re-home plan:
+docs/internal/2026-06-23-tui-fork-features-as-plugins-adr.md.
 
-opencode typecheck: 2582 -> 2431 across checkpoints 8-10 (TUI delete -455, hono dep -96,
-util/log shim -39, glob/flock shims -16).
+- New: packages/opencode/src/plugin/tui/altimate/index.ts — altimateTuiPlugins() aggregator.
+- Wire: plugin/tui/internal.ts appends altimateTuiPlugins(...) to the builtin plugin list
+  (the host already composes the TUI plugin set, so this is the natural injection point).
 
-Remaining ~2431 = heavy per-file survivor reconciliation (no more batch wins): @/bus API
-change (BusEvent->EventV2), server route modules, provider/session Effect-API migration,
-and the test suite (~1446) which tracks src once src is green.
+Compiles clean (opencode typecheck unchanged at 2431). The 4 deferred features
+(provider-credentials, skill-ops, prompt-enhance, trace-viewer) are ported into this directory
+next, per the ADR; their pre-merge sources are preserved on main.
