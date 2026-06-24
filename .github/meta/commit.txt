@@ -1,9 +1,9 @@
-wip: v1.17.9 reconciliation — restore util/{context,abort,lock} + shell shim (ckpt 19)
+wip: v1.17.9 reconciliation — restore bus/index.ts Bus namespace (checkpoint 20)
 
-- Restore src/util/{context,abort,lock}.ts from main (self-contained fork utils with no
-  @opencode-ai/core home — context uses AsyncLocalStorage, abort/lock have no imports).
-- src/shell/shell.ts re-export shim: `export * as Shell from "@opencode-ai/core/shell"` (core
-  ships flat exports; fork callers import the Shell namespace).
+The fork keeps the Bus pattern (bus-event.ts BusEvent.define + bus/global.ts GlobalBus both
+survive, and ~14 files + 60+ call sites use the Bus namespace), but bus/index.ts was dropped in
+the overlay. Restored it from main and fixed the one Effect-version drift: ServiceMap.Service ->
+Context.Service (ServiceMap was removed from effect; matches the env/config Service pattern).
 
-opencode 2226 -> 2216. Remaining module-not-found is mostly @/bus (a real BusEvent->EventV2
-migration, not a shim) + per-file survivor work.
+opencode 2216 -> 2197. bus/index.ts typechecks clean; resolves the @/bus import + Bus.publish/
+subscribe call sites across server/session/provider.
