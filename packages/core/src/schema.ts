@@ -84,8 +84,16 @@ export type DeepMutable<T> = T extends string | number | boolean | bigint | symb
  */
 export const withStatics =
   <S extends object, M extends Record<string, unknown>>(methods: (schema: S) => M) =>
-  (schema: S): S & M =>
-    Object.assign(schema, methods(schema))
+  (schema: S): S & M => {
+    // altimate_change start — pass statics a stable view of the pre-augmented schema.
+    // Some fork schemas intentionally expose `make` as their public static and implement
+    // it by delegating to `schema.make`. Passing the same object that Object.assign later
+    // mutates makes those delegates self-recursive.
+    const base = Object.create(Object.getPrototypeOf(schema))
+    Object.defineProperties(base, Object.getOwnPropertyDescriptors(schema))
+    return Object.assign(schema, methods(base as S))
+    // altimate_change end
+  }
 
 /**
  * Nominal wrapper for scalar types. The class itself is a valid schema —

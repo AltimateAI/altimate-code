@@ -30,6 +30,7 @@ import { AltimateAuthPlugin } from "../altimate/plugin/altimate"
 import { registerAdapter } from "../control-plane/adapters"
 import type { WorkspaceAdapter as ControlPlaneWorkspaceAdapter } from "../control-plane/types"
 import { ProjectV2 } from "@opencode-ai/core/project"
+import { InstanceRef } from "../effect/instance-ref"
 // altimate_change end
 
 export namespace Plugin {
@@ -197,14 +198,19 @@ export namespace Plugin {
       // @ts-expect-error this is because we haven't moved plugin to sdk v2
       await hook.config?.(config)
     }
-    Bus.subscribeAll(async (input) => {
-      const hooks = await state().then((x) => x.hooks)
-      for (const hook of hooks) {
-        hook["event"]?.({
-          event: input,
-        })
-      }
-    })
+    // altimate_change start — event callbacks fire after bootstrap returns, so bind the
+    // current legacy Instance ALS context captured during Plugin.init.
+    Bus.subscribeAll(
+      Instance.bind(async (input) => {
+        const hooks = await state().then((x) => x.hooks)
+        for (const hook of hooks) {
+          hook["event"]?.({
+            event: input,
+          })
+        }
+      }),
+    )
+    // altimate_change end
   }
 
   // altimate_change start — Effect Context.Service facade.
@@ -236,9 +242,26 @@ export namespace Plugin {
   export const layer = Layer.succeed(
     Service,
     Service.of({
-      trigger: (name, input, output) => Effect.promise(() => trigger(name as any, input, output)),
-      list: () => Effect.promise(() => list()),
-      init: () => Effect.promise(() => init()),
+      // altimate_change start — bridge Effect InstanceRef back into the legacy ALS
+      // Instance namespace used by plugin state during bootstrap.
+      trigger: (name, input, output) =>
+        Effect.gen(function* () {
+          const ctx = yield* InstanceRef
+          return yield* Effect.promise(() =>
+            ctx ? Instance.restore(ctx, () => trigger(name as any, input, output)) : trigger(name as any, input, output),
+          )
+        }),
+      list: () =>
+        Effect.gen(function* () {
+          const ctx = yield* InstanceRef
+          return yield* Effect.promise(() => (ctx ? Instance.restore(ctx, () => list()) : list()))
+        }),
+      init: () =>
+        Effect.gen(function* () {
+          const ctx = yield* InstanceRef
+          return yield* Effect.promise(() => (ctx ? Instance.restore(ctx, () => init()) : init()))
+        }),
+      // altimate_change end
     }),
   )
 

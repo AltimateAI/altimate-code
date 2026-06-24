@@ -9,3 +9,5 @@ total_spent_usd: 0.00
 - OpenRouter: config uses {env:OPENROUTER_API_KEY} not set non-interactively — SKIP, not needed.
 STRATEGY: bulk e2e on FREE Ollama; sample quality runs on Azure gpt-4o-mini (cheap). Reserve $50 for Azure/Vertex; Ollama keeps spend ~$0.
 - 23:07:05 e2e-retry Azure gpt-4o-mini, ~$0.01 est (trivial write task)
+- 11:37 codex verify runs using azure/gpt-4o-mini (run "hi" repros, ~$0.01-0.05 total est)
+- 11:55 my verify: azure/gpt-4o-mini run repro (~$0.01)

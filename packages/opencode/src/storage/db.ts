@@ -15,6 +15,8 @@ import * as schema from "./schema"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
+import { Effect } from "effect"
+import freshSchema from "@opencode-ai/core/database/schema.gen"
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -79,6 +81,199 @@ export namespace Database {
 
     return sql.sort((a, b) => a.timestamp - b.timestamp)
   }
+
+  // altimate_change start — fresh dev/test DBs need the current base schema before
+  // fork-local Drizzle migrations can be considered applied. The fork migration
+  // directory only carries deltas, while the canonical full schema lives in core.
+  function userTables(sqlite: BunDatabase) {
+    return (
+      sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+        .all() as { name: string }[]
+    ).map((row) => row.name)
+  }
+
+  function hasTable(sqlite: BunDatabase, table: string) {
+    return !!sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
+  }
+
+  function hasColumn(sqlite: BunDatabase, table: string, column: string) {
+    return (sqlite.prepare(`PRAGMA table_info(${JSON.stringify(table)})`).all() as { name: string }[]).some(
+      (row) => row.name === column,
+    )
+  }
+
+  function addColumn(sqlite: BunDatabase, table: string, column: string, definition: string) {
+    if (!hasTable(sqlite, table) || hasColumn(sqlite, table, column)) return false
+    sqlite.run(`ALTER TABLE ${JSON.stringify(table)} ADD ${JSON.stringify(column)} ${definition}`)
+    return true
+  }
+
+  function ensureDrizzleJournal(sqlite: BunDatabase) {
+    sqlite.run(`
+      CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (
+        id INTEGER PRIMARY KEY,
+        hash text NOT NULL,
+        created_at numeric,
+        name text,
+        applied_at TEXT
+      )
+    `)
+  }
+
+  function markDrizzleEntriesApplied(sqlite: BunDatabase, entries: Journal) {
+    ensureDrizzleJournal(sqlite)
+    const appliedAt = new Date().toISOString()
+    const insert = sqlite.prepare(
+      `INSERT OR IGNORE INTO "__drizzle_migrations" ("hash", "created_at", "name", "applied_at") VALUES (?, ?, ?, ?)`,
+    )
+    for (const entry of entries) {
+      insert.run("", entry.timestamp, entry.name, appliedAt)
+    }
+  }
+
+  function runFreshSchema(sqlite: BunDatabase) {
+    const tx = {
+      run: (query: string) =>
+        Effect.sync(() => {
+          sqlite.run(query)
+        }),
+    }
+    Effect.runSync(freshSchema.up(tx as never))
+  }
+
+  function initializeFreshDatabase(sqlite: BunDatabase, entries: Journal) {
+    if (userTables(sqlite).length > 0) return false
+
+    log.info("initializing fresh database schema")
+    sqlite
+      .transaction(() => {
+        runFreshSchema(sqlite)
+        markDrizzleEntriesApplied(sqlite, entries)
+      })()
+    return true
+  }
+
+  function repairLegacyDatabase(sqlite: BunDatabase, entries: Journal) {
+    if (userTables(sqlite).length === 0) return false
+
+    let changed = false
+    sqlite
+      .transaction(() => {
+        changed = addColumn(sqlite, "project", "icon_url_override", "text") || changed
+        if (changed && hasColumn(sqlite, "project", "icon_url")) {
+          sqlite.run(`UPDATE "project" SET "icon_url_override" = "icon_url" WHERE "icon_url_override" IS NULL`)
+        }
+
+        changed = addColumn(sqlite, "workspace", "time_used", "integer NOT NULL DEFAULT 0") || changed
+        changed = addColumn(sqlite, "event_sequence", "owner_id", "text") || changed
+
+        changed = addColumn(sqlite, "session", "path", "text") || changed
+        changed = addColumn(sqlite, "session", "metadata", "text") || changed
+        changed = addColumn(sqlite, "session", "cost", "real DEFAULT 0 NOT NULL") || changed
+        changed = addColumn(sqlite, "session", "tokens_input", "integer DEFAULT 0 NOT NULL") || changed
+        changed = addColumn(sqlite, "session", "tokens_output", "integer DEFAULT 0 NOT NULL") || changed
+        changed = addColumn(sqlite, "session", "tokens_reasoning", "integer DEFAULT 0 NOT NULL") || changed
+        changed = addColumn(sqlite, "session", "tokens_cache_read", "integer DEFAULT 0 NOT NULL") || changed
+        changed = addColumn(sqlite, "session", "tokens_cache_write", "integer DEFAULT 0 NOT NULL") || changed
+        changed = addColumn(sqlite, "session", "agent", "text") || changed
+        changed = addColumn(sqlite, "session", "model", "text") || changed
+
+        if (!hasTable(sqlite, "project_directory")) {
+          changed = true
+          sqlite.run(`
+            CREATE TABLE "project_directory" (
+              "project_id" text NOT NULL,
+              "directory" text NOT NULL,
+              "type" text,
+              "strategy" text,
+              "time_created" integer NOT NULL,
+              PRIMARY KEY("project_id", "directory"),
+              FOREIGN KEY ("project_id") REFERENCES "project"("id") ON DELETE CASCADE
+            )
+          `)
+        }
+
+        if (!hasTable(sqlite, "session_message")) {
+          changed = true
+          sqlite.run(`
+            CREATE TABLE "session_message" (
+              "id" text PRIMARY KEY,
+              "session_id" text NOT NULL,
+              "type" text NOT NULL,
+              "seq" integer NOT NULL,
+              "time_created" integer NOT NULL,
+              "time_updated" integer NOT NULL,
+              "data" text NOT NULL,
+              FOREIGN KEY ("session_id") REFERENCES "session"("id") ON DELETE CASCADE
+            )
+          `)
+          sqlite.run(`CREATE UNIQUE INDEX IF NOT EXISTS "session_message_session_seq_idx" ON "session_message" ("session_id","seq")`)
+          sqlite.run(`CREATE INDEX IF NOT EXISTS "session_message_session_type_seq_idx" ON "session_message" ("session_id","type","seq")`)
+          sqlite.run(`CREATE INDEX IF NOT EXISTS "session_message_session_time_created_id_idx" ON "session_message" ("session_id","time_created","id")`)
+          sqlite.run(`CREATE INDEX IF NOT EXISTS "session_message_time_created_idx" ON "session_message" ("time_created")`)
+        }
+
+        if (!hasTable(sqlite, "session_input")) {
+          changed = true
+          sqlite.run(`
+            CREATE TABLE "session_input" (
+              "id" text PRIMARY KEY,
+              "session_id" text NOT NULL,
+              "prompt" text NOT NULL,
+              "delivery" text NOT NULL,
+              "admitted_seq" integer NOT NULL,
+              "promoted_seq" integer,
+              "time_created" integer NOT NULL,
+              FOREIGN KEY ("session_id") REFERENCES "session"("id") ON DELETE CASCADE
+            )
+          `)
+          sqlite.run(`CREATE INDEX IF NOT EXISTS "session_input_session_pending_delivery_seq_idx" ON "session_input" ("session_id","promoted_seq","delivery","admitted_seq")`)
+          sqlite.run(`CREATE UNIQUE INDEX IF NOT EXISTS "session_input_session_admitted_seq_idx" ON "session_input" ("session_id","admitted_seq")`)
+          sqlite.run(`CREATE UNIQUE INDEX IF NOT EXISTS "session_input_session_promoted_seq_idx" ON "session_input" ("session_id","promoted_seq")`)
+        }
+
+        if (!hasTable(sqlite, "session_context_epoch")) {
+          changed = true
+          sqlite.run(`
+            CREATE TABLE "session_context_epoch" (
+              "session_id" text PRIMARY KEY,
+              "baseline" text NOT NULL,
+              "agent" text DEFAULT 'build' NOT NULL,
+              "snapshot" text NOT NULL,
+              "baseline_seq" integer NOT NULL,
+              "replacement_seq" integer,
+              "revision" integer DEFAULT 0 NOT NULL,
+              FOREIGN KEY ("session_id") REFERENCES "session"("id") ON DELETE CASCADE
+            )
+          `)
+        }
+
+        if (!hasTable(sqlite, "credential")) {
+          changed = true
+          sqlite.run(`
+            CREATE TABLE "credential" (
+              "id" text PRIMARY KEY,
+              "integration_id" text,
+              "label" text NOT NULL,
+              "value" text NOT NULL,
+              "connector_id" text,
+              "method_id" text,
+              "active" integer,
+              "time_created" integer NOT NULL,
+              "time_updated" integer NOT NULL
+            )
+          `)
+        }
+
+        if (changed) {
+          log.info("repaired legacy database schema")
+          markDrizzleEntriesApplied(sqlite, entries)
+        }
+      })()
+    return changed
+  }
+  // altimate_change end
 
   // altimate_change start — backfill migration names for upgrade compatibility
   function backfillMigrationNames(sqlite: BunDatabase, entries: Journal) {
@@ -148,10 +343,12 @@ export namespace Database {
           item.sql = "select 1;"
         }
       }
+      const initialized = initializeFreshDatabase(sqlite, entries)
+      const repaired = initialized ? false : repairLegacyDatabase(sqlite, entries)
       // altimate_change start — backfill migration names before migrate
       backfillMigrationNames(sqlite, entries)
       // altimate_change end
-      migrate(db, entries)
+      if (!initialized && !repaired) migrate(db, entries)
     }
 
     return db

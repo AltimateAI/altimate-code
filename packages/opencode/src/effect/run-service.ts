@@ -5,6 +5,7 @@ import * as Observability from "@opencode-ai/core/observability"
 import { WorkspaceContext } from "@/control-plane/workspace-context"
 import type { InstanceContext } from "@/project/instance-context"
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
+import { Instance } from "@/project/instance"
 
 type Refs = {
   instance?: InstanceContext
@@ -24,11 +25,27 @@ export function attachWith<A, E, R>(effect: Effect.Effect<A, E, R>, refs: Refs):
 export function attach<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
   const workspace = WorkspaceContext.workspaceID
   const fiber = Fiber.getCurrent()
+  // altimate_change start — legacy Promise code can call makeRuntime facades while
+  // running under Instance ALS but outside an Effect fiber (for example Plugin.init ->
+  // Config.get during InstanceBootstrap). Preserve that instance context.
+  const instance =
+    fiber ? Context.getReferenceUnsafe(fiber.context, InstanceRef) : tryLegacyInstance()
+  // altimate_change end
   return attachWith(effect, {
-    instance: fiber ? Context.getReferenceUnsafe(fiber.context, InstanceRef) : undefined,
+    instance,
     workspace: workspace ?? (fiber ? Context.getReferenceUnsafe(fiber.context, WorkspaceRef) : undefined),
   })
 }
+
+// altimate_change start — see attach().
+function tryLegacyInstance(): InstanceContext | undefined {
+  try {
+    return Instance.current
+  } catch {
+    return undefined
+  }
+}
+// altimate_change end
 
 export function makeRuntime<I, S, E>(service: Context.Service<I, S>, layer: Layer.Layer<I, E>) {
   let rt: ManagedRuntime.ManagedRuntime<I, E> | undefined

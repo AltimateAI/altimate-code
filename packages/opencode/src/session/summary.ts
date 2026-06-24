@@ -1,6 +1,3 @@
-// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
-import { makeRuntime } from "@/effect/run-service"
-// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Context, Schema } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -167,14 +164,68 @@ export type DiffInput = Schema.Schema.Type<typeof DiffInput>
 export const node = LayerNode.make(layer, () => [Session.node, Snapshot.node, EventV2Bridge.node, Config.node])
 // altimate_change end
 
-// altimate_change start — restore the imperative Promise wrapper upstream removed in the
-// Effect-only migration; the session prompt loop kicks off summarization directly.
-const { runPromise: runSummary } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+// altimate_change start — the imperative facade is called from the legacy session
+// processor, whose sessions live in src/storage/db.ts. Do not build the Effect
+// Session layer here; it reads the core database and misses those rows.
+async function legacySession() {
+  return (await import("./index")).Session
+}
+
+async function computeLegacyDiff(messages: Array<{ parts: Array<any> }>): Promise<Snapshot.FileDiff[]> {
+  let from: string | undefined
+  let to: string | undefined
+  for (const item of messages) {
+    if (!from) {
+      for (const part of item.parts) {
+        if (part.type === "step-start" && part.snapshot) {
+          from = part.snapshot
+          break
+        }
+      }
+    }
+    for (const part of item.parts) {
+      if (part.type === "step-finish" && part.snapshot) to = part.snapshot
+    }
+  }
+  if (!from || !to) return []
+  const { AppRuntime } = await import("@/effect/app-runtime")
+  return AppRuntime.runPromise(Snapshot.Service.use((snapshot) => snapshot.diffFull(from, to)))
+}
+
 export async function summarize(input: { sessionID: SessionID; messageID: MessageID }) {
-  return runSummary((s) => s.summarize(input))
+  const sessions = await legacySession()
+  await sessions.setSummary({
+    sessionID: input.sessionID,
+    summary: {
+      additions: 0,
+      deletions: 0,
+      files: 0,
+    },
+  })
+  if ((await Config.get()).snapshot === false) return
+  const all = await sessions.messages({ sessionID: input.sessionID })
+  if (!all.length) return
+  const messages = all.filter(
+    (m) => m.info.id === input.messageID || (m.info.role === "assistant" && m.info.parentID === input.messageID),
+  )
+  const target = messages.find((m) => m.info.id === input.messageID)
+  if (!target || target.info.role !== "user") return
+  const msgDiffs = await computeLegacyDiff(messages)
+  target.info.summary = { ...target.info.summary, diffs: msgDiffs }
+  await sessions.updateMessage(target.info)
 }
 export async function diff(input: { sessionID: SessionID; messageID?: MessageID }) {
-  return runSummary((s) => s.diff(input))
+  if (!input.messageID) return []
+  const sessions = await legacySession()
+  const message = (await sessions.messages({ sessionID: input.sessionID })).find((item) => item.info.id === input.messageID)
+  if (!message || message.info.role !== "user") return []
+  const diffs = message.info.summary?.diffs ?? []
+  return diffs.map((item) => {
+    if (item.file === undefined) return item
+    const file = unquoteGitPath(item.file)
+    if (file === item.file) return item
+    return { ...item, file }
+  })
 }
 // altimate_change end
 

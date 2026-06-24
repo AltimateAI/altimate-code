@@ -13,6 +13,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { Service as BootstrapService } from "./bootstrap-service"
+import { Instance } from "./instance"
 // altimate_change start — upstream_fix: bridge merge dropped the Truncate.init()
 // call below. Without it the hourly Scheduler cleanup task for tool-output files
 // (Global.Path.data/tool-output/tool_*) never registers, so the directory grows
@@ -40,7 +41,9 @@ const runBootstrap = Effect.gen(function* () {
   yield* share.init()
   yield* format.init()
   yield* lsp.init()
-  yield* Effect.sync(() => File.init())
+  // altimate_change start — File.init still uses the legacy Instance.state store.
+  yield* Effect.sync(() => Instance.restore(ctx, () => File.init()))
+  // altimate_change end
   yield* vcs.init()
   yield* snapshot.init()
   // altimate_change start — upstream_fix: see header note for why this is here

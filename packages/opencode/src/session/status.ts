@@ -8,6 +8,9 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Effect, Layer, Context, Schema } from "effect"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+import { Bus } from "@/bus"
+import { BusEvent } from "@/bus/bus-event"
+import z from "zod"
 
 export const Info = Schema.Union([
   Schema.Struct({
@@ -51,6 +54,25 @@ export const Event = {
     },
   }),
 }
+
+// altimate_change start - mirror status events onto the legacy Bus SSE stream
+// consumed by `altimate-code run`.
+const LegacyEvent = {
+  Status: BusEvent.define(
+    "session.status",
+    z.object({
+      sessionID: SessionID.zod,
+      status: z.any(),
+    }),
+  ),
+  Idle: BusEvent.define(
+    "session.idle",
+    z.object({
+      sessionID: SessionID.zod,
+    }),
+  ),
+}
+// altimate_change end
 
 export interface Interface {
   readonly get: (sessionID: SessionID) => Effect.Effect<Info>
@@ -105,7 +127,12 @@ export const node = LayerNode.make(layer, () => [EventV2Bridge.node])
 // Effect-only migration; the session prompt loop sets status synchronously.
 const { runPromise: runStatus } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
 export async function set(sessionID: SessionID, status: Info) {
-  return runStatus((s) => s.set(sessionID, status))
+  const result = await runStatus((s) => s.set(sessionID, status))
+  // altimate_change start - keep legacy /event subscribers in sync with EventV2 status.
+  await Bus.publish(LegacyEvent.Status, { sessionID, status })
+  if (status.type === "idle") await Bus.publish(LegacyEvent.Idle, { sessionID })
+  // altimate_change end
+  return result
 }
 export async function get(sessionID: SessionID) {
   return runStatus((s) => s.get(sessionID))

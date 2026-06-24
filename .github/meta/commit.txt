@@ -1,16 +1,36 @@
-wip: v1.17.9 — broad Layer.suspend sweep (typecheck+TDZ green, KNOWN bootstrap hang) (checkpoint 35)
+fix: [v1.17.9] resolve bootstrap deadlock — agent runs end-to-end (checkpoint 36)
 
-The circular-init sweep wrapped ~33 modules' `defaultLayer` in `Layer.suspend` + thunked their
-`LayerNode` deps. This fixes typecheck (0) AND the `AppRuntime`-before-initialization TDZ that
-preload.ts:13 hit in afterAll — small/pure tests now pass (24/24 on id+util sample).
+The merged runtime hung during instance bootstrap (the `run` command booted through
+db-migrations then deadlocked before the agent loop; bootstrap-heavy tests hung too).
+Typecheck-green had masked it — only real execution surfaced it. Root-caused to TWO
+stacked issues + several follow-on runtime gaps, all now fixed and VERIFIED:
 
-KNOWN REGRESSION (next to fix): bootstrap-heavy paths HANG. `bun test
-test/project/instance-bootstrap.test.ts` hangs (was a fast TDZ error at ckpt34); the headless
-`run` command boots through db-migrations then hangs before the agent loop (both Ollama + Azure,
-EXIT after timeout, no output past migrations). Root-cause hypothesis: Layer.suspend OVER-applied
--> layer-build deadlock during AppLayer construction, likely via per-module makeRuntime runtimes
-sharing memoMap with non-memoized suspended layers rebuilding. Isolation proven: stashing these
-edits removes the hang (reverts to the fast TDZ). Fix = bisect which suspend(s) deadlock / fix the
-real import cycle at source while keeping the TDZ fixed.
+1. `Project.fromDirectory -> ProjectID.make()` INFINITE SELF-RECURSION: `withStatics()`
+   (core/schema.ts) passed the mutable schema into statics then assigned `make` over
+   `schema.make`, so `.make()` called itself forever. Fixed: give statics a stable
+   pre-augmented schema.
+2. RE-ENTRANT runtime build: `Plugin.init -> Config.get()` built the `@opencode/Config`
+   per-module makeRuntime while running under the legacy instance ALS but OUTSIDE an
+   Effect fiber, losing instance context. Fixed: preserve/restore instance context for
+   the legacy Promise facades during Effect bootstrap (run-service.ts, plugin/index.ts,
+   project/bootstrap.ts).
 
-Committing as WIP so the typecheck+TDZ progress isn't lost while the hang is diagnosed from a clean base.
+Follow-on fixes uncovered by driving the run to completion:
+- storage/db.ts: initialize/repair the fork SQLite schema so fresh + legacy DBs work
+  after bootstrap reaches real work (initializeFreshDatabase + skip migrate on fresh).
+- config/config.ts + config/paths.ts: BRANDING REGRESSION — were importing upstream
+  `@opencode-ai/core/global` (~/.config/opencode); restored fork `../global`
+  (~/.config/altimate-code) so fork config (incl. provider creds) loads correctly.
+- util/effect-zod.ts: tuple + StructWithRest conversion for route/config-plugin schemas.
+- session/summary.ts + session/status.ts: keep post-turn legacy session summary/status
+  on the legacy DB/Bus path so `run` exits cleanly on idle.
+- tool/truncation.ts: skip malformed legacy tool_* files during cleanup.
+
+VERIFIED (independently re-run, not just codex's claim):
+- bun test instance-bootstrap + cli/run/runtime.boot + id: 21 pass, 3 skip, 0 fail (4.3s, no hang).
+- typecheck: 0 errors.
+- real run repro (azure/gpt-4o-mini): `> builder · gpt-4o-mini` -> "WORKING", exit 0.
+
+Diagnosis via codex (separate quota); all edits reviewed + independently verified here.
+Diagnostic instrumentation fully removed. db.ts +199 (fresh-db schema) flagged for a
+deeper correctness review (schema parity vs full migrations) in follow-up.
