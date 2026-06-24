@@ -1,11 +1,9 @@
-wip: v1.17.9 reconciliation — permission/project/filesystem/npm core shims (checkpoint 22)
+wip: v1.17.9 reconciliation — delete stale old-TUI tests (checkpoint 23)
 
-Re-export shims for modules moved to @opencode-ai/core:
-- src/permission/schema.ts -> core/permission/schema
-- src/project/schema.ts -> core/project/schema
-- src/filesystem.ts -> core/filesystem
-- src/npm/index.ts -> core/npm
+Delete 7 test files that import the deleted cli/cmd/tui tree (upgrade-indicator, theme
+light-mode #704, worker, thread). The features they covered were re-homed into packages/tui /
+the fork plugins; these tests are unrunnable here. Recoverable from main; test coverage should be
+re-homed to packages/tui in a follow-up.
 
-opencode 2109 -> 2108 (low net — resolving these imports exposes the importing files' deeper
-type errors). Module-not-found shims now largely exhausted; remaining ~2108 is per-file type work
-(TS2339 Service/branded, TS2345/2322 type mismatches, Effect call sites) + ~1240 tests.
+opencode 2108 -> 2093 (src 788 / test 1302). Remaining is deep per-file Effect-API migration in
+the session/provider/server survivors + the test suite tracking those API changes.
