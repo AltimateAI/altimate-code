@@ -488,4 +488,10 @@ export const upgrade = (...args: Parameters<Interface["upgrade"]>) => runPromise
 
 export const node = LayerNode.make(layer, [httpClient, AppProcess.node])
 
+// altimate_change start — re-export the version constant under the old Installation.VERSION name
+// (upstream moved it to InstallationVersion in @opencode-ai/core/installation/version). Keeps the
+// many survivor callers of Installation.VERSION resolving without per-file repoints.
+export const VERSION = InstallationVersion
+// altimate_change end
+
 export * as Installation from "."
