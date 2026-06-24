@@ -7,7 +7,7 @@ import { Session } from "@/session"
 import type { SessionID } from "@/session/schema"
 import { MessageV2 } from "@/session/message-v2"
 import { Database, eq } from "@/storage/db"
-import { SessionShareTable } from "./share.sql"
+import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { Log } from "@/util/log"
 import type * as SDK from "@opencode-ai/sdk/v2"
 // altimate_change start — Effect Context.Service facade for new upstream consumers
@@ -171,7 +171,7 @@ export namespace ShareNext {
       }
     | {
         type: "session_diff"
-        data: SDK.FileDiff[]
+        data: SDK.SnapshotFileDiff[]
       }
     | {
         type: "model"

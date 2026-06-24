@@ -17,7 +17,7 @@ import {
   type ScrollbackSnapshot,
   type ScrollbackWriter,
 } from "@opentui/core"
-import * as Locale from "@/util/locale"
+import { Locale } from "@/util/locale"
 import { go } from "@/cli/logo"
 import type { RunSplashTheme } from "./theme"
 

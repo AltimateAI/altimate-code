@@ -1,7 +1,7 @@
 import type { AgentSideConnection, PermissionOption, RequestPermissionResponse } from "@agentclientprotocol/sdk"
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { applyPatch } from "diff"
-import { exists, readText } from "@/util/filesystem"
+import { Filesystem } from "@/util/filesystem"
 import type { ACPSession } from "./session"
 import { toLocations, toToolKind, type ToolInput } from "./tool"
 import { Effect } from "effect"
@@ -97,7 +97,7 @@ export class Handler {
     const diff = stringValue(metadata.diff)
     if (!filepath || !diff || !this.input.connection.writeTextFile) return
 
-    const content = (await exists(filepath)) ? await readText(filepath) : ""
+    const content = (await Filesystem.exists(filepath)) ? await Filesystem.readText(filepath) : ""
     const next = applyPatch(content, diff)
     if (next === false) {
       return

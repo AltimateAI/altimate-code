@@ -12,7 +12,7 @@ import { normalizePromptContent } from "@opencode-ai/tui/editor"
 import fuzzysort from "fuzzysort"
 import path from "path"
 import { createEffect, createMemo, createResource, createSignal, onCleanup, onMount, type Accessor } from "solid-js"
-import * as Locale from "@/util/locale"
+import { Locale } from "@/util/locale"
 import {
   createPromptHistory,
   displayCharAt,

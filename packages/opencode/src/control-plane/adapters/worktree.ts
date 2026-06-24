@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { type WorkspaceAdapter, type WorkspaceAdapterContext, WorkspaceInfo } from "../types"
 
@@ -73,7 +74,9 @@ export const WorktreeAdapter: WorkspaceAdapter = {
       name: info.name,
       branch: info.branch,
       directory: info.directory,
-      projectID: ctx.project.id,
+      // altimate_change start — re-brand fork ProjectID to core "Project.ID" for WorkspaceListedInfo
+      projectID: ProjectV2.ID.make(ctx.project.id),
+      // altimate_change end
     }))
   },
   async remove(info, context) {

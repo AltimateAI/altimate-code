@@ -222,8 +222,10 @@ export namespace SessionCompaction {
 
     const agent = await Agent.get("compaction")
     const model = agent.model
-      ? await Provider.getModel(agent.model.providerID, agent.model.modelID)
-      : await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+      ? // altimate_change start — re-brand core ProviderV2.ID/ModelV2.ID to fork ProviderID/ModelID
+        await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
+      : // altimate_change end
+        await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
     const msg = (await Session.updateMessage({
       id: MessageID.ascending(),
       role: "assistant",

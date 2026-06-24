@@ -31,6 +31,12 @@ export namespace MessageV2 {
     return mime.startsWith("image/") || mime === "application/pdf"
   }
 
+  // altimate_change start — shared synthetic-attachment prompt text. Used both when
+  // injecting tool-result media as a user message (below) and by the GitHub Copilot
+  // plugin's imgMsg() heuristic so the two stay in sync.
+  export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:"
+  // altimate_change end
+
   // altimate_change start — upstream v1.17.9 moved the branded IDs, LSP.Range and
   // Snapshot.FileDiff to Effect Schema. This file's schema tree (and the SyncEvent
   // event system) is zod, so reconstruct the zod equivalents locally. Shapes are
@@ -817,7 +823,7 @@ export namespace MessageV2 {
               parts: [
                 {
                   type: "text" as const,
-                  text: "Attached image(s) from tool result:",
+                  text: SYNTHETIC_ATTACHMENT_PROMPT,
                 },
                 ...media.map((attachment) => ({
                   type: "file" as const,

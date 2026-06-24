@@ -5,6 +5,10 @@ import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
+// altimate_change start — used by resolveFilePath for "~" expansion and file:// URLs
+import { homedir } from "os"
+import { fileURLToPath } from "url"
+// altimate_change end
 import { Glob } from "./glob"
 
 export namespace Filesystem {
@@ -154,6 +158,17 @@ export namespace Filesystem {
       throw e
     }
   }
+
+  // altimate_change start — resolve a config-supplied file path (theme/sound) that may be
+  // "~"-prefixed, a file:// URL, absolute, or relative to a config root directory.
+  export function resolveFilePath(root: string, file: string): string {
+    let value = file
+    if (value.startsWith("file://")) value = fileURLToPath(value)
+    if (value === "~" || value.startsWith("~/")) value = join(homedir(), value.slice(1))
+    if (isAbsolute(value)) return value
+    return pathResolve(root, value)
+  }
+  // altimate_change end
 
   export function windowsPath(p: string): string {
     if (process.platform !== "win32") return p

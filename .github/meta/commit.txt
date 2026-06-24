@@ -1,22 +1,15 @@
-wip: v1.17.9 reconciliation — long-tail survivor batch, src 248->52 (checkpoint 30)
+wip: v1.17.9 reconciliation — packages/opencode/src is GREEN (checkpoint 31)
 
-7-parallel-agent batch over ~40 files cleared the post-Service-cluster long tail. Total 1477->1277,
-src 248 -> 52. Session-resume cumulative: opencode 3181 -> 1277 (src now ~52). No duplicate-export
-conflicts from the concurrent shared-file work.
+Final src wave (3 parallel agents) cleared the last 52 errors. packages/opencode/src/ now typechecks
+with ZERO errors. Session-resume trajectory: opencode 3181 -> 1222 (all remaining are test/ only).
 
-Highlights:
-- Restored dropped fork files from main: server/routes/event.ts, server/middleware.ts,
-  sync/event.sql.ts, session/prompt/max-steps.txt (runtime assets), permission/permission.sql.ts,
-  Ripgrep async-generator namespace (file/ripgrep.ts).
-- Effect Tool-API: extended tool-zod-compat for the deferred-factory Tool.define form (skill/task/
-  bash tools); assertExternalDirectoryLegacy for ls/glob.
-- bootstrap.ts rewritten to the Effect-Service form (InstanceBootstrap.defaultLayer/.node) —
-  cleared ripples in instance-store/layer, app-runtime, worktree, control-plane/workspace.
-- More Promise wrappers (Vcs.diff/defaultBranch, Question.ask, Skill.get/available, Config.updateGlobal,
-  provider/auth methods/authorize/callback); Provider additions NoModelsError/toPublicInfo/
-  defaultModelIDs/ListResult; Project.InfoSchema; pty -> @opencode-ai/core/pty + PtyID shim.
-- zod() AST-walker across remaining Hono routes; ProviderV2/ModelV2<->fork brand re-maps; lsp/index
-  rewritten to the new context-aware LSPServer/LSPClient API; ServiceMap->Context in auth services.
-- Deleted stale duplicate config/migrate-tui-config.ts.
+Last fixes: Locale named-imports across cli/cmd/run/*; MessageV2.SYNTHETIC_ATTACHMENT_PROMPT +
+Filesystem.resolveFilePath shared helpers; plugin experimental_workspace adapter registry +
+config.plugin [spec,options] normalization; SessionShareTable -> @opencode-ai/core/share/sql;
+SDK.FileDiff -> SnapshotFileDiff; ProviderV2/ModelV2<->fork brand re-maps at remaining boundaries;
+LanguageModelV3 specificationVersion; Effect.scoped + FetchHttpClient for ToolRegistry builtins;
+workspace-router-middleware repointed to the Workspace Effect Service; Identifier.create ascending arg.
 
-Remaining ~52 src across ~20 files (<=5 each) + ~1222 tests.
+packages/core + packages/tui + packages/plugin already green. Remaining: ~1222 test errors (many
+were src cascades, now stable) — fixture brand-mismatches, MessageV2/SessionV1 shape diffs, and
+tests tracking the new Effect Service/Schema APIs. Next: dual-runtime (codex + Claude) test phase.

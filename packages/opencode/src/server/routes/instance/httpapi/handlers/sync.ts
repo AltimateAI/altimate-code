@@ -1,5 +1,6 @@
 import { Workspace } from "@/control-plane/workspace"
 import * as InstanceState from "@/effect/instance-state"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Session } from "@/session/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -26,7 +27,9 @@ export const syncHandlers = HttpApiBuilder.group(InstanceHttpApi, "sync", (handl
 
     const start = Effect.fn("SyncHttpApi.start")(function* () {
       yield* workspace
-        .startWorkspaceSyncing((yield* InstanceState.context).project.id)
+        // altimate_change start — re-brand fork ProjectID to core "Project.ID" at the workspace boundary
+        .startWorkspaceSyncing(ProjectV2.ID.make((yield* InstanceState.context).project.id))
+        // altimate_change end
         .pipe(Effect.ignore, Effect.forkIn(scope))
       return true
     })

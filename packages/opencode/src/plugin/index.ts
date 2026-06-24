@@ -25,6 +25,12 @@ import { DatabricksAuthPlugin } from "../altimate/plugin/databricks"
 // altimate_change start — altimate backend auth plugin
 import { AltimateAuthPlugin } from "../altimate/plugin/altimate"
 // altimate_change end
+// altimate_change start — wire plugin experimental_workspace.register into the
+// control-plane adapter registry consumed by control-plane/workspace.ts
+import { registerAdapter } from "../control-plane/adapters"
+import type { WorkspaceAdapter as ControlPlaneWorkspaceAdapter } from "../control-plane/types"
+import { ProjectV2 } from "@opencode-ai/core/project"
+// altimate_change end
 
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
@@ -67,6 +73,18 @@ export namespace Plugin {
       get serverUrl(): URL {
         return Server.url ?? new URL("http://localhost:4096")
       },
+      // altimate_change start — register plugin-provided workspace adapters with the
+      // control-plane registry, scoped to the current project.
+      experimental_workspace: {
+        register(type, adapter) {
+          registerAdapter(
+            ProjectV2.ID.make(Instance.project.id),
+            type,
+            adapter as unknown as ControlPlaneWorkspaceAdapter,
+          )
+        },
+      },
+      // altimate_change end
       $: Bun.$,
     }
 
@@ -84,7 +102,12 @@ export namespace Plugin {
       plugins = [...BUILTIN, ...plugins]
     }
 
-    for (let plugin of plugins) {
+    for (const entry of plugins) {
+      // altimate_change start — plugin entries may be a bare spec string or a
+      // [spec, options] tuple (upstream v1.17.9); normalize and forward options.
+      let plugin = Array.isArray(entry) ? entry[0] : entry
+      const options = Array.isArray(entry) ? entry[1] : undefined
+      // altimate_change end
       // ignore old codex plugin since it is supported first party now
       if (plugin.includes("opencode-openai-codex-auth") || plugin.includes("opencode-copilot-auth")) continue
       log.info("loading plugin", { path: plugin })
@@ -114,7 +137,7 @@ export namespace Plugin {
           for (const [_name, fn] of Object.entries<PluginInstance>(mod)) {
             if (seen.has(fn)) continue
             seen.add(fn)
-            hooks.push(await fn(input))
+            hooks.push(await fn(input, options))
           }
         })
         .catch((err) => {

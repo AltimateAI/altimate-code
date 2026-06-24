@@ -6,6 +6,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { MCP } from "@/mcp"
 import { Project } from "@/project/project"
+import { ProviderID, ModelID } from "@/provider/schema"
 import { Session } from "@/session/session"
 import type { SessionID } from "@/session/schema"
 import { ToolJsonSchema } from "@/tool/json-schema"
@@ -93,8 +94,10 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
 
     const tool = Effect.fn("ExperimentalHttpApi.tool")(function* (ctx: { query: typeof ToolListQuery.Type }) {
       const list = yield* registry.tools({
-        providerID: ctx.query.provider,
-        modelID: ctx.query.model,
+        // altimate_change start — re-brand ProviderV2.ID/ModelV2.ID (core) to fork ProviderID/ModelID at the registry boundary
+        providerID: ProviderID.make(ctx.query.provider),
+        modelID: ModelID.make(ctx.query.model),
+        // altimate_change end
         agent: yield* agents.defaultInfo(),
       })
       return list.map((item) => ({

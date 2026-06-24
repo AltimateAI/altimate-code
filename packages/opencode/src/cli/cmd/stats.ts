@@ -6,6 +6,9 @@ import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Project } from "@/project/project"
 import { InstanceRef } from "@/effect/instance-ref"
+// altimate_change start — session.projectID uses the core "Project.ID" brand; re-brand Project.Info.id (fork "ProjectID") to compare
+import { ProjectV2 } from "@opencode-ai/core/project"
+// altimate_change end
 
 interface SessionStats {
   totalSessions: number
@@ -115,7 +118,9 @@ const aggregateSessionStats = Effect.fn("Cli.stats.aggregate")(function* (
   if (projectFilter !== undefined) {
     if (projectFilter === "") {
       if (!currentProject) throw new Error("currentProject required when projectFilter is empty string")
-      filteredSessions = filteredSessions.filter((session) => session.projectID === currentProject.id)
+      filteredSessions = filteredSessions.filter(
+        (session) => session.projectID === ProjectV2.ID.make(currentProject.id),
+      )
     } else {
       filteredSessions = filteredSessions.filter((session) => session.projectID === projectFilter)
     }

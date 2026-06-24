@@ -35,7 +35,7 @@ export namespace Truncate {
   }
 
   export async function cleanup() {
-    const cutoff = Identifier.timestamp(Identifier.create("tool", false, Date.now() - RETENTION_MS))
+    const cutoff = Identifier.timestamp(Identifier.create("tool", "ascending", Date.now() - RETENTION_MS))
     const entries = await Glob.scan("tool_*", { cwd: DIR, include: "file" }).catch(() => [] as string[])
     for (const entry of entries) {
       if (Identifier.timestamp(entry) >= cutoff) continue

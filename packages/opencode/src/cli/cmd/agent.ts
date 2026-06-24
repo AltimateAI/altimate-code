@@ -10,6 +10,10 @@ import { EOL } from "os"
 import type { Argv } from "yargs"
 import { Effect } from "effect"
 import { effectCmd } from "../effect-cmd"
+// altimate_change start — re-brand parseModel (ProviderID/ModelID) to the core ProviderV2.ID/ModelV2.ID brands Agent.generate expects
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+// altimate_change end
 
 type AgentMode = "all" | "primary" | "subagent"
 
@@ -128,7 +132,12 @@ const AgentCreateCommand = effectCmd({
       // Generate agent
       const spinner = prompts.spinner()
       spinner.start("Generating agent configuration...")
-      const model = args.model ? Provider.parseModel(args.model) : undefined
+      // altimate_change start — re-brand parseModel result to core ProviderV2.ID/ModelV2.ID (identity at runtime)
+      const parsedModel = args.model ? Provider.parseModel(args.model) : undefined
+      const model = parsedModel
+        ? { providerID: ProviderV2.ID.make(parsedModel.providerID), modelID: ModelV2.ID.make(parsedModel.modelID) }
+        : undefined
+      // altimate_change end
       const generated = await runLocalEffect(agentSvc.generate({ description, model })).catch((error) => {
         spinner.stop(`LLM failed to generate agent: ${error.message}`, 1)
         if (isFullyNonInteractive) process.exit(1)

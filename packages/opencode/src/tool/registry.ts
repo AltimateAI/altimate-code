@@ -33,6 +33,7 @@ import { Log } from "@/util/log"
 import { LspTool } from "./lsp"
 // altimate_change start — bridge legacy plugin tools to the Effect Tool API (v1.17.9)
 import { Effect } from "effect"
+import { FetchHttpClient } from "effect/unstable/http"
 import { legacyToInit } from "../altimate/tool-zod-compat"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
@@ -345,7 +346,13 @@ export namespace ToolRegistry {
       DbtPrReviewTool,
       // altimate_change end
     ]
-    const resolved = await AppRuntime.runPromise(Effect.all(builtins))
+    // altimate_change start — some builtin tool-definition effects yield services not in
+    // AppLayer: websearch yields HttpClient (provide FetchHttpClient) and read yields
+    // Scope (discharge with Effect.scoped) at definition time.
+    const resolved = await AppRuntime.runPromise(
+      Effect.scoped(Effect.all(builtins).pipe(Effect.provide(FetchHttpClient.layer))),
+    )
+    // altimate_change end
     return [...resolved, ...custom]
     // altimate_change end
   }

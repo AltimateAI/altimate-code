@@ -115,10 +115,13 @@ async function backupAndStripLegacy(file: string, source: string) {
 }
 
 async function opencodeFiles(input: { directories: string[]; cwd: string }) {
-  const files = [
-    ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
-    ...(await Filesystem.findUp(["opencode.json", "opencode.jsonc"], input.cwd, undefined, { rootFirst: true })),
-  ]
+  // altimate_change start — upstream Filesystem.findUp(array, …, {rootFirst}) collapsed to Filesystem.up();
+  // collect the generator and reverse to preserve the original root-first ordering.
+  const walkedUp = (
+    await Array.fromAsync(Filesystem.up({ targets: ["opencode.json", "opencode.jsonc"], start: input.cwd }))
+  ).reverse()
+  const files = [...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"), ...walkedUp]
+  // altimate_change end
   for (const dir of unique(input.directories)) {
     files.push(...ConfigPaths.fileInDirectory(dir, "opencode"))
   }
