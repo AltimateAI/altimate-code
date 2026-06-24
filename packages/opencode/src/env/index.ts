@@ -2,6 +2,9 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { InstanceState } from "@/effect/instance-state"
+// altimate_change start — makeRuntime for the restored Promise wrappers (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 
 type State = Record<string, string | undefined>
 
@@ -39,5 +42,22 @@ export const layer = Layer.effect(
 export const defaultLayer = layer
 
 export const node = LayerNode.make(layer, [])
+
+// altimate_change start — restore the imperative Promise wrappers upstream removed in the
+// Effect-only migration; backed by the instance-bound makeRuntime so reads/writes stay scoped.
+const { runPromise: runEnv } = makeRuntime(Service, defaultLayer)
+export async function get(key: string) {
+  return runEnv((s) => s.get(key))
+}
+export async function all() {
+  return runEnv((s) => s.all())
+}
+export async function set(key: string, value: string) {
+  return runEnv((s) => s.set(key, value))
+}
+export async function remove(key: string) {
+  return runEnv((s) => s.remove(key))
+}
+// altimate_change end
 
 export * as Env from "."

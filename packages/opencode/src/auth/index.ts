@@ -4,6 +4,9 @@ import { Effect, Layer, Record, Result, Schema, Context } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Global } from "@opencode-ai/core/global"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+// altimate_change start — makeRuntime for the restored Promise wrappers (bottom of file)
+import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
@@ -103,5 +106,22 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(Layer.provide(FSUtil.defaultLayer))
 
 export const node = LayerNode.make(layer, [FSUtil.node])
+
+// altimate_change start — restore the imperative Promise wrappers upstream removed in the
+// Effect-only migration; backed by the instance-bound makeRuntime so reads/writes stay scoped.
+const { runPromise: runAuth } = makeRuntime(Service, defaultLayer)
+export async function get(providerID: string) {
+  return runAuth((s) => s.get(providerID))
+}
+export async function all() {
+  return runAuth((s) => s.all())
+}
+export async function set(key: string, info: Info) {
+  return runAuth((s) => s.set(key, info))
+}
+export async function remove(key: string) {
+  return runAuth((s) => s.remove(key))
+}
+// altimate_change end
 
 export * as Auth from "."

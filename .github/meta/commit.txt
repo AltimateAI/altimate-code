@@ -1,13 +1,15 @@
-wip: v1.17.9 reconciliation — 3 more moved-to-core util shims (checkpoint 14)
+wip: v1.17.9 reconciliation — restore Auth/Env Promise wrappers (checkpoint 15)
 
-Re-export shims for util modules upstream moved into @opencode-ai/core:
-- src/util/hash.ts  -> @opencode-ai/core/util/hash
-- src/util/which.ts -> @opencode-ai/core/util/which
-- src/file/ripgrep.ts -> @opencode-ai/core/ripgrep
+Same proven makeRuntime compat-wrapper pattern as Config/MCP/Skill (ckpt 3): upstream removed the
+imperative Promise wrappers on Auth and Env in the Effect-only migration, but survivor files
+(provider/provider.ts, session/llm.ts, server/server.ts + provider tests) still call
+`await Auth.get()` / `Env.set()` etc. Both Services retain get/all/set/remove as Effect methods
+with self-contained defaultLayers, so the wrappers are a clean restore (instance-bound runtime
+keeps reads/writes scoped):
 
-opencode 2431 -> 2428. Cheap module-shim wins are now exhausted: remaining importers fail on
-deeper Effect-API breaks too, so shimming one import no longer makes a file green. The rest of
-task #7 (provider.ts 106, session/prompt 73, session/index 72, server/* — Auth/Env makeRuntime
-compat wrappers + @/bus EventV2 migration + dep drift LanguageModelV2->V3) is per-file survivor
-reconciliation. util/fn, util/context, util/abort, util/lock, shell/shell still need locating
-(moved out of the dropped @opencode-ai/util package, not yet found in core).
+- src/auth/index.ts — restore get/all/set/remove Promise wrappers.
+- src/env/index.ts  — restore get/all/set/remove Promise wrappers.
+
+opencode 2428 -> 2298 (-130). Both modules typecheck clean. Confirms compat wrappers are the
+high-leverage lever for the remaining survivor Effect-API breaks (next: Provider.defaultModel/
+getModel/getSmallModel, LLM.stream).
