@@ -1,9 +1,10 @@
-wip: v1.17.9 reconciliation — restore bus/index.ts Bus namespace (checkpoint 20)
+wip: v1.17.9 reconciliation — util/schema shim + branded-type make() fix (checkpoint 21)
 
-The fork keeps the Bus pattern (bus-event.ts BusEvent.define + bus/global.ts GlobalBus both
-survive, and ~14 files + 60+ call sites use the Bus namespace), but bus/index.ts was dropped in
-the overlay. Restored it from main and fixed the one Effect-version drift: ServiceMap.Service ->
-Context.Service (ServiceMap was removed from effect; matches the env/config Service pattern).
+- src/util/schema.ts re-export shim: `export * from "@opencode-ai/core/schema"` (withStatics et al
+  moved to core).
+- src/provider/schema.ts: new Effect Schema brand constructor is `.make()` not `.makeUnsafe()`.
+  Fixed the 15 ProviderID/ModelID brand constructions. The fork keeps its branded ProviderID/ModelID
+  (callers use ProviderID.make()/.opencode etc.) — only the internal Schema API updated.
 
-opencode 2216 -> 2197. bus/index.ts typechecks clean; resolves the @/bus import + Bus.publish/
-subscribe call sites across server/session/provider.
+opencode 2197 -> 2109 (-88; the brand fix cascades across all provider/model-ID usages in
+provider.ts, session/prompt.ts, share-next.ts, tool/batch.ts). Session-resume: 3181 -> 2109.
