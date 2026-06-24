@@ -1,18 +1,13 @@
-feat: [v1.17.9] fully restore prompt-enhance via api.prompt.active() extension (checkpoint 13)
+wip: v1.17.9 reconciliation — 3 more moved-to-core util shims (checkpoint 14)
 
-Completes the prompt-enhance fork feature. The plugin api had no accessor for the active prompt
-input, so the enhance read/write was deferred (ckpt 12). Added the sanctioned plugin-contract
-extension (the designed extension point — not inline edits scattered through upstream render code):
+Re-export shims for util modules upstream moved into @opencode-ai/core:
+- src/util/hash.ts  -> @opencode-ai/core/util/hash
+- src/util/which.ts -> @opencode-ai/core/util/which
+- src/file/ripgrep.ts -> @opencode-ai/core/ripgrep
 
-- packages/plugin/src/tui.ts — add `prompt: { active(): TuiPromptRef | undefined }` to TuiPluginApi.
-- packages/tui/src/plugin/adapters.tsx — implement it from the host's usePromptRef context
-  (PromptRef is structurally TuiPromptRef); thread promptRef through the adapter Input.
-- packages/tui/src/app.tsx — pass the already-available promptRef into createTuiApiAdapters.
-- packages/opencode/src/plugin/tui/runtime.ts — pass api.prompt through the scoped legacy host api.
-- packages/opencode/test/fixture/tui-plugin.ts — add prompt.active() to the test api mock.
-- altimate/prompt-enhance.tsx — the "Enhance prompt" command now reads api.prompt.active().current.input,
-  awaits enhancePrompt(), and writes back via ref.set(). Auto-enhance-before-submit stays deferred
-  (needs a pre-submit hook; isAutoEnhanceEnabled kept ready).
-
-All four fork TUI plugins are now functional. packages/tui + packages/core + packages/plugin green;
-opencode unchanged at 2431. All additions altimate_change-marked.
+opencode 2431 -> 2428. Cheap module-shim wins are now exhausted: remaining importers fail on
+deeper Effect-API breaks too, so shimming one import no longer makes a file green. The rest of
+task #7 (provider.ts 106, session/prompt 73, session/index 72, server/* — Auth/Env makeRuntime
+compat wrappers + @/bus EventV2 migration + dep drift LanguageModelV2->V3) is per-file survivor
+reconciliation. util/fn, util/context, util/abort, util/lock, shell/shell still need locating
+(moved out of the dropped @opencode-ai/util package, not yet found in core).
