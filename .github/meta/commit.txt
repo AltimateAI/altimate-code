@@ -1,8 +1,9 @@
-wip: v1.17.9 reconciliation — restore util/fn + repoint dropped @opencode-ai/util imports (ckpt 18)
+wip: v1.17.9 reconciliation — restore util/{context,abort,lock} + shell shim (ckpt 19)
 
-The @opencode-ai/util package was removed in the extraction; survivor files still imported from it.
-- Restore src/util/fn.ts (the zod fn() helper, from main) — it has no @opencode-ai/core home.
-- Repoint across 14 survivor files: @opencode-ai/util/{error,slug,lazy} -> @opencode-ai/core/util/*;
-  @opencode-ai/util/fn -> @/util/fn.
+- Restore src/util/{context,abort,lock}.ts from main (self-contained fork utils with no
+  @opencode-ai/core home — context uses AsyncLocalStorage, abort/lock have no imports).
+- src/shell/shell.ts re-export shim: `export * as Shell from "@opencode-ai/core/shell"` (core
+  ships flat exports; fork callers import the Shell namespace).
 
-opencode 2240 -> 2226.
+opencode 2226 -> 2216. Remaining module-not-found is mostly @/bus (a real BusEvent->EventV2
+migration, not a shim) + per-file survivor work.
