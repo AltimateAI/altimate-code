@@ -673,14 +673,18 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(Plugin.defaultLayer),
-  Layer.provide(Provider.defaultLayer),
-  Layer.provide(Auth.defaultLayer),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(Skill.defaultLayer),
-  Layer.provide(LocationServiceMap.layer),
+// altimate_change start — Layer.suspend defers facade .defaultLayer reads past circular module-init
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Plugin.defaultLayer),
+    Layer.provide(Provider.defaultLayer),
+    Layer.provide(Auth.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(Skill.defaultLayer),
+    Layer.provide(LocationServiceMap.layer),
+  ),
 )
+// altimate_change end
 
 const locationServiceMapNode = LayerNode.make(LocationServiceMap.layer, [])
 

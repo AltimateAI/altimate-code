@@ -83,16 +83,22 @@ export const layer: Layer.Layer<
   }),
 )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(Plugin.defaultLayer),
-  Layer.provide(ShareNext.defaultLayer),
-  Layer.provide(Format.defaultLayer),
-  Layer.provide(LSP.defaultLayer),
-  Layer.provide(Vcs.defaultLayer),
-  Layer.provide(Snapshot.defaultLayer),
-  Layer.provide(Project.defaultLayer),
-  Layer.provide(EventV2Bridge.defaultLayer),
+// altimate_change start — Layer.suspend defers the facade .defaultLayer reads past the circular
+// module-init (the fork Service facades are added to namespace modules that participate in import
+// cycles; accessing X.defaultLayer at module-eval yielded undefined).
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Plugin.defaultLayer),
+    Layer.provide(ShareNext.defaultLayer),
+    Layer.provide(Format.defaultLayer),
+    Layer.provide(LSP.defaultLayer),
+    Layer.provide(Vcs.defaultLayer),
+    Layer.provide(Snapshot.defaultLayer),
+    Layer.provide(Project.defaultLayer),
+    Layer.provide(EventV2Bridge.defaultLayer),
+  ),
 )
+// altimate_change end
 
 export const node = LayerNode.make(layer, [
   Plugin.node,

@@ -52,7 +52,10 @@ import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 
-export const AppLayer = Layer.mergeAll(
+// altimate_change start — Layer.suspend defers all the .defaultLayer reads past circular
+// module-init (fork Service facades participate in import cycles; eager access yields undefined).
+export const AppLayer = Layer.suspend(() =>
+  Layer.mergeAll(
   Npm.defaultLayer,
   FSUtil.defaultLayer,
   Database.defaultLayer,
@@ -100,10 +103,12 @@ export const AppLayer = Layer.mergeAll(
   ShareNext.defaultLayer,
   SessionShare.defaultLayer,
 ).pipe(
-  Layer.provideMerge(Ripgrep.defaultLayer),
-  Layer.provideMerge(InstanceLayer.layer),
-  Layer.provideMerge(Observability.layer),
+    Layer.provideMerge(Ripgrep.defaultLayer),
+    Layer.provideMerge(InstanceLayer.layer),
+    Layer.provideMerge(Observability.layer),
+  ),
 )
+// altimate_change end
 
 const rt = ManagedRuntime.make(AppLayer, { memoMap })
 type Runtime = Pick<typeof rt, "runSync" | "runPromise" | "runPromiseExit" | "runFork" | "runCallback" | "dispose">

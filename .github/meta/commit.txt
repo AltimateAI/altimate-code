@@ -1,21 +1,15 @@
-wip: v1.17.9 reconciliation — opencode TYPECHECK GREEN (0 errors) (checkpoint 32)
+wip: v1.17.9 — start runtime circular-init fix (Layer.suspend) (checkpoint 33)
 
-The entire packages/opencode typecheck (src + test + the drivers it references) is now GREEN — 0
-errors, down from 3181 at the start of this reconciliation. packages/core, packages/tui,
-packages/plugin remain green.
+Typecheck-green exposed runtime module-init-order failures: the fork Service facades added cross-module
+.defaultLayer/.node references that, combined with import cycles, evaluate to `undefined` at module load
+(e.g. `Plugin.defaultLayer`/`Plugin.node` undefined while a consumer module's body runs). Tests now LOAD
+and run (11 pass on the smoke set) but app-runtime import fails mid-init.
 
-This wave: cleared the full ~1222 test-fixture backlog via dual-runtime parallelism — codex (3 rounds:
-test/altimate, test/tool+command, and the loose dirs) + ~13 Claude agents (session, control-plane,
-server, provider, config, skill, effect, project, release-validation, id, patch, acp). Test fixtures
-reconciled to the new APIs: brand re-maps (ProviderV2/ModelV2/Project.ID <-> fork), MessageV2<->SessionV1
-shape casts, Effect Service access (X.Service.use / AppRuntime.runPromise), the new Effect Tool API via
-a shared test/altimate/tool-fixture.ts (initTool) helper, sync-ified namespace fns, zod()/Schema bridges.
-Removed-feature tests .skip-ped with marked notes (ToolRegistry.named, SystemPrompt-as-pure-Service skills
-injection, ProviderTransform.smallOptions variants, keybind/color util removals).
+Fix (in progress): wrap the eager facade-layer compositions in Layer.suspend so the .defaultLayer reads
+defer past the circular init. Done: src/project/bootstrap.ts defaultLayer, src/effect/app-runtime.ts
+AppLayer, src/agent/agent.ts defaultLayer. Still failing at agent.ts node (LayerNode.make refs Plugin.node)
+— LayerNode graphs need a different deferral than Layer.suspend, and more modules compose facade layers/
+nodes at eval. Typecheck stays GREEN.
 
-Also: restored ConfigPaths.parseText + ProviderAuth.api + Provider.use/Project.use + control-plane/sse.ts
-+ MessageV2.latest + Log.init + tool .txt assets (bash.txt) + sync/event.sql; added SystemPrompt Service
-facade; added @hono/standard-validator dep (test runtime); drivers/sqlserver Azure optional-peer typed any.
-
-NEXT: actually RUN the suite (bun test) — typecheck-green != tests-pass; runtime failures + the skipped
-tests are the remaining work. Then marker-guard --strict cleanup + review/PR.
+NEXT: finish the circular-init pass (defer/restructure facade .node compositions + break the import cycle
+where cleaner), get `bun -e import app-runtime` clean, then run the full suite.
