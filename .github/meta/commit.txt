@@ -1,8 +1,8 @@
-wip: v1.17.9 reconciliation — Installation.VERSION re-export shim (checkpoint 17)
+wip: v1.17.9 reconciliation — restore util/fn + repoint dropped @opencode-ai/util imports (ckpt 18)
 
-Upstream moved the version constant to InstallationVersion (@opencode-ai/core/installation/version).
-Add `export const VERSION = InstallationVersion` to src/installation/index.ts so the many survivor
-callers of Installation.VERSION resolve without per-file repoints (single-line shim; the module
-already imports InstallationVersion).
+The @opencode-ai/util package was removed in the extraction; survivor files still imported from it.
+- Restore src/util/fn.ts (the zod fn() helper, from main) — it has no @opencode-ai/core home.
+- Repoint across 14 survivor files: @opencode-ai/util/{error,slug,lazy} -> @opencode-ai/core/util/*;
+  @opencode-ai/util/fn -> @/util/fn.
 
-opencode 2284 -> 2240 (-44). Session-resume cumulative: 3181 -> 2240 (-941).
+opencode 2240 -> 2226.

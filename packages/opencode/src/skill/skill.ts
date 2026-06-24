@@ -9,7 +9,7 @@ import { Instance } from "../project/instance"
 // altimate_change start — import State for cache invalidation
 import { State } from "../project/state"
 // altimate_change end
-import { NamedError } from "@opencode-ai/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { ConfigMarkdown } from "../config/markdown"
 import { Log } from "../util/log"
 import { Global } from "@/global"

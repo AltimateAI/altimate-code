@@ -9,7 +9,7 @@ import { Instance } from "../project/instance"
 import { Flag } from "../flag/flag"
 import { CodexAuthPlugin } from "./codex"
 import { Session } from "../session"
-import { NamedError } from "@opencode-ai/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { CopilotAuthPlugin } from "./copilot"
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
 // altimate_change start — snowflake cortex plugin import
