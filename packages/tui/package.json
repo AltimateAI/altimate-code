@@ -61,11 +61,13 @@
     "opentui-spinner": "catalog:",
     "remeda": "catalog:",
     "strip-ansi": "7.1.2",
+    "semver": "^7.6.3",
     "solid-js": "catalog:"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
+    "@types/semver": "^7.5.8",
     "@typescript/native-preview": "catalog:"
   }
 }

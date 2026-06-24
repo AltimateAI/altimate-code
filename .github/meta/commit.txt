@@ -1,38 +1,27 @@
-wip: v1.17.9 reconciliation — §4 re-home TUI batch 2 + line-streaming flags (checkpoint 6)
+wip: v1.17.9 reconciliation — §4 app.tsx + UpgradeIndicator port (checkpoint 7)
 
-Second re-homing wave into packages/tui (live TUI). packages/tui + packages/core both
-typecheck GREEN.
+app.tsx re-home into packages/tui/src/app.tsx + UpgradeIndicator component port.
+packages/tui + packages/core both typecheck GREEN.
 
-Re-homed (functional):
-- context/sync.tsx — full streaming feature set: yolo auto-approve (adapted to the new
-  permission.reply API: workspace arg + reply:"once"), smooth-streaming direct-path delta
-  update, and the complete line-streaming buffer feature (lineBuffer + flushLineBuffer +
-  flushAllBuffersForMessage + the 5 event-handler hooks). event.type/.properties is correct
-  here (useEvent unwraps GlobalEvent.payload, unlike sdk.tsx).
-- routes/session/index.tsx — `builder` agent name on plan_exit, smooth-streaming scroll
-  (toBottom 0ms), calm-mode content width cap (maxWidth via ALTIMATE_CONTENT_MAX_WIDTH).
-- theme/index.ts — light-mode fg fallback (#704), code-block + inline-code backgrounds for
-  light-theme contrast. NOTE: inline-code uses theme.backgroundElement vs upstream's new
-  theme.background — flagged inline for the next merge's human review.
-- feature-plugins/home/tips-view.tsx — fork DE-specific tips (/discover, /cost-report,
-  /dbt-docs, /sql-review, /migrate-sql, lineage, anti-patterns) folded into the new Tip pool.
+app.tsx (5 applied):
+- terminal-detection: created fork-original packages/tui/src/terminal-detection.ts
+  (detectModeFromCOLORFGBG, #704) + eager COLORFGBG light-mode short-circuit in the
+  theme-detection path (avoids the 1s waitForThemeMode delay).
+- branding: docs URL opencode.ai/docs -> docs.altimate.sh; DialogAlert update message
+  "OpenCode v…" -> "Altimate Code v…".
+app.tsx MOOT (2): variant_list keybind (upstream v1.17.9 shipped PR #21185 natively);
+disableStdoutInterception (opentui API removed; renderer externalOutputMode handles it).
+app.tsx DEFERRED (7): trace-viewer feature — depends on opencode-side altimate/observability
+(Trace/renderTraceViewer/DialogTraceList), unreachable from packages/tui. Same architectural
+blocker as the dialogs/enhance (task: expose opencode deps to tui).
 
-Flags re-homed into packages/core/src/flag/flag.ts (tui depends on core, not opencode):
-ALTIMATE_LINE_STREAMING, ALTIMATE_CONTENT_MAX_WIDTH (+ numberEnv helper), joining the
-ALTIMATE_CALM_MODE/SMOOTH_STREAMING/CLI_YOLO added in checkpoint 5.
+UpgradeIndicator port (fork-original, was deferred — now unblocked since it only needed
+Installation.VERSION = InstallationVersion in core):
+- packages/tui/src/component/upgrade-indicator{,-utils}.tsx — repointed imports to the tui
+  layout, Installation.VERSION -> InstallationVersion. Added semver + @types/semver to
+  packages/tui (were opencode-only deps).
+- routes/session/footer.tsx — wired <UpgradeIndicator /> back into the session footer.
+(home-screen UpgradeIndicator still deferred — lives in the new feature-plugins/home/footer
+plugin, a different surface.)
 
-MOOT (upstream v1.17.9 shipped equivalents — dropped per upstream_fix rule):
-- prompt skills-dialog keybind → upstream `prompt_skills` keybind.
-- session workspace-gate, smooth-streaming memoize, light-theme md fg (upstream ships
-  fg=markdownText + bg=background).
-
-DEFERRED — architectural (tracked): enhance feature (enhance-prompt.ts), dialog-provider
-(AltimateApi), dialog-skill (skill-helpers + keymap port). All three depend on opencode-package
-code unreachable from packages/tui — need the shared code moved into @opencode-ai/core, routed
-via SDK/server, or implemented as tui plugins. Real features; not dropped.
-
-DEFERRED — render-rewritten: session/index TextPart code-during-streaming, tips first-time-only
-behavior, sidebar trace section (sidebar_content slot), footer/home UpgradeIndicator (component
-not yet ported into packages/tui).
-
-OLD cli/cmd/tui/** files untouched (deleted in §3.4 after all re-homing verified).
+OLD cli/cmd/tui/** files untouched (deleted in §3.4 after remaining re-homing/decisions).

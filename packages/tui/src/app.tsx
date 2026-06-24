@@ -82,6 +82,9 @@ import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
+// altimate_change start — fix: pure helper extracted to terminal-detection for test coverage (#704)
+import { detectModeFromCOLORFGBG } from "./terminal-detection"
+// altimate_change end
 
 const appGlobalBindingCommands = [
   "session.list",
@@ -229,7 +232,10 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       yield* Effect.tryPromise(async () => {
         // Prewarm palette before ThemeProvider mounts so `system` theme avoids a first-paint fallback flash.
         void renderer.getPalette({ size: 16 }).catch(() => undefined)
-        const mode = (await renderer.waitForThemeMode(1000)) ?? "dark"
+        // altimate_change start — fix: check COLORFGBG eagerly to avoid 1s startup delay on terminals without OSC 11 (#704)
+        const envMode = detectModeFromCOLORFGBG(process.env.COLORFGBG)
+        const mode = envMode === "light" ? "light" : ((await renderer.waitForThemeMode(1000)) ?? "dark")
+        // altimate_change end
         if (renderer.isDestroyed) return
 
         await render(() => {
@@ -796,7 +802,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         name: "docs.open",
         title: "Open docs",
         run: () => {
-          open("https://opencode.ai/docs").catch(() => {})
+          // altimate_change start — altimate docs URL
+          open("https://docs.altimate.sh").catch(() => {})
+          // altimate_change end
           dialog.clear()
         },
         category: "System",
@@ -1037,7 +1045,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     await DialogAlert.show(
       dialog,
       "Update Complete",
-      `Successfully updated to OpenCode v${result.data.version}. Please restart the application.`,
+      // altimate_change start — branding: altimate update-complete message
+      `Successfully updated to Altimate Code v${result.data.version}. Please restart the application.`,
+      // altimate_change end
     )
 
     void exit()
