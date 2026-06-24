@@ -18,7 +18,10 @@ export function ErrorComponent(props: { error: Error; reset: () => void; mode?: 
   })
   const [copied, setCopied] = createSignal(false)
 
-  const issueURL = new URL("https://github.com/anomalyco/opencode/issues/new?template=bug-report.yml")
+  // altimate_change start — upstream_fix: bug-report URL pointed at anomalyco/opencode;
+  // we file bugs against AltimateAI/altimate-code.
+  const issueURL = new URL("https://github.com/AltimateAI/altimate-code/issues/new?template=bug-report.yml")
+  // altimate_change end
 
   // Choose safe fallback colors per mode since theme context may not be available
   const isLight = props.mode === "light"
@@ -30,7 +33,10 @@ export function ErrorComponent(props: { error: Error; reset: () => void; mode?: 
   }
 
   if (props.error.message) {
-    issueURL.searchParams.set("title", `opentui: fatal: ${props.error.message}`)
+    // altimate_change start — upstream_fix: prefix said "opentui: fatal:"; we file
+    // bugs against AltimateAI/altimate-code, so use that prefix instead.
+    issueURL.searchParams.set("title", `altimate-code: fatal: ${props.error.message}`)
+    // altimate_change end
   }
 
   if (props.error.stack) {

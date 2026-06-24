@@ -856,14 +856,16 @@ export function Logo(props: { shape?: LogoShape; ink?: RGBA; idle?: boolean } = 
       <For each={ctx.shape.left}>
         {(line, index) => (
           <box flexDirection="row" gap={1}>
+            {/* altimate_change start — upstream merge replaced primary/accent with textMuted/text,
+                killing the altimate-code brand colors. Restore main's colored rendering. */}
             <box flexDirection="row">
-              {renderLine(line, index(), props.ink ?? theme.textMuted, !!props.ink, 0, frame(), dusk(), idleState())}
+              {renderLine(line, index(), props.ink ?? theme.primary, !!props.ink, 0, frame(), dusk(), idleState())}
             </box>
             <box flexDirection="row">
               {renderLine(
                 ctx.shape.right[index()],
                 index(),
-                props.ink ?? theme.text,
+                props.ink ?? theme.accent,
                 true,
                 ctx.LEFT + GAP,
                 frame(),
@@ -871,6 +873,7 @@ export function Logo(props: { shape?: LogoShape; ink?: RGBA; idle?: boolean } = 
                 idleState(),
               )}
             </box>
+            {/* altimate_change end */}
           </box>
         )}
       </For>

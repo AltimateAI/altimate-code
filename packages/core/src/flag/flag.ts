@@ -5,6 +5,14 @@ export function truthy(key: string) {
   return value === "true" || value === "1"
 }
 
+// altimate_change start — dual env var support: ALTIMATE_CLI_* (primary) + OPENCODE_* (fallback).
+// Re-homed from packages/opencode/src/flag/flag.ts so the extracted TUI (packages/tui, which
+// depends on core not opencode) can read the fork flags it uses.
+function altTruthy(altKey: string, openKey: string) {
+  return truthy(altKey) || truthy(openKey)
+}
+// altimate_change end
+
 const copy = process.env["OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
 const fff = process.env["OPENCODE_DISABLE_FFF"]
 
@@ -75,4 +83,22 @@ export const Flag = {
   get OPENCODE_CLIENT() {
     return process.env["OPENCODE_CLIENT"] ?? "cli"
   },
+  // altimate_change start — fork flags used by the extracted TUI (packages/tui). Getters so the
+  // runtime-set yolo flag (set by --yolo middleware after module load) evaluates at access time.
+  get ALTIMATE_CALM_MODE() {
+    return altTruthy("ALTIMATE_CALM_MODE", "OPENCODE_CALM_MODE")
+  },
+  get ALTIMATE_SMOOTH_STREAMING() {
+    return this.ALTIMATE_CALM_MODE || altTruthy("ALTIMATE_SMOOTH_STREAMING", "OPENCODE_SMOOTH_STREAMING")
+  },
+  get ALTIMATE_CLI_YOLO() {
+    const alt = process.env["ALTIMATE_CLI_YOLO"]
+    if (alt !== undefined) {
+      const v = alt.toLowerCase()
+      return v === "true" || v === "1"
+    }
+    const oc = process.env["OPENCODE_YOLO"]?.toLowerCase()
+    return oc === "true" || oc === "1"
+  },
+  // altimate_change end
 }

@@ -1,18 +1,38 @@
-wip: v1.17.9 reconciliation — altimate/ Tool-API surface green (checkpoint 4)
+wip: v1.17.9 reconciliation — §4 re-home TUI customizations into packages/tui (checkpoint 5)
 
-Closes the last 3 typecheck errors in the fork's own src/altimate/** tree via the
-tool-zod-compat adapter (§2.12):
+The TUI was extracted upstream to packages/tui (live) from cli/cmd/tui/** (dead — no
+@tui alias resolves it). Re-apply the fork customizations into the live package,
+preserving altimate_change markers. packages/tui + packages/core both typecheck GREEN.
 
-- altimate-core-rewrite.ts: annotate execute return as the shim's `LegacyResult` so
-  the legacy `Tool.define` overload's metadata type (M) infers cleanly. This tool's
-  execute omits the `ctx` param, so M was being inferred from a complex multi-branch
-  return union and failing overload resolution. `args` still types from `parameters`.
-- tool-lookup.ts: upstream's Tool rewrite made `info.init()` an Effect (was a Promise)
-  and `parameters` an Effect Schema (was zod). Run the init Effect via
-  `Effect.runPromise` and describe parameters from `Def.jsonSchema` (JSON Schema,
-  populated for both native tools and our legacy zod tools) instead of the removed
-  zod introspection. New `describeJsonSchema`/`inferJsonType` replace the zod walkers.
+Re-homed (functional + branding):
+- context/sdk.tsx — smooth-streaming delta pre-merge (ALTIMATE_SMOOTH_STREAMING).
+  Adapted to v2 GlobalEvent (discriminant nested under `.payload`, not top-level).
+- routes/session/footer.tsx — YOLO-mode badge (ALTIMATE_CLI_YOLO).
+- routes/session/sidebar.tsx — "Altimate Code" branding (uses InstallationVersion).
+- component/logo.tsx — restore brand colors (primary/accent vs textMuted/text) in the
+  rewritten 8-arg renderLine call-site.
+- component/dialog-status.tsx — `altimate mcp auth` branding fix.
+- component/error-component.tsx — `altimate-code: fatal:` title + AltimateAI/altimate-code
+  issue URL (was anomalyco/opencode brand leak).
+- context/route.tsx — restore dropped navigate debug log (console.debug; tui has no
+  structured logger).
 
-src/altimate/** now typechecks with 0 errors (was 37 at the start of this resume).
-Package total 3040 -> 3037; the remainder is upstream-shared restructure: stale-file
-deletion (§3.4) + TUI/server re-home (§4) + Effect migration of survivor files.
+Flag re-home (packages/core/src/flag/flag.ts): added ALTIMATE_CALM_MODE,
+ALTIMATE_SMOOTH_STREAMING, ALTIMATE_CLI_YOLO getters + altTruthy helper, since packages/tui
+depends on @opencode-ai/core (not opencode) and could not otherwise see the fork flags.
+
+MOOT (not re-applied — upstream issue gone): dialog-mcp / dialog-workspace-list logger
+fixes (tui uses console.* throughout, has no structured logger, the old console.log/debug
+prints don't exist in the rewritten files).
+
+DEFERRED (tracked, code re-architected into other owner files — next pass):
+- theme #704 light-fg + code-block/inline-code bg → packages/tui/src/theme/index.ts
+  (generateSystem/getSyntaxRules). One human decision: inline-code backgroundElement vs
+  upstream's new background.
+- beginner/first-time tips + onboarding hint → feature-plugins/home/{tips,tips-view}.tsx
+  (home is now a plugin-slot shell).
+- UpgradeIndicator: component + utils exist only in the old tree, not ported → blocks the
+  footer + home upgrade-indicator blocks until ported into packages/tui/src/component.
+- sidebar trace section → sidebar_content plugin slot.
+
+OLD cli/cmd/tui/** files untouched (deleted later in §3.4 after all re-homing verified).

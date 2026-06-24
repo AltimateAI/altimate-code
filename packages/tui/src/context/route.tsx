@@ -35,6 +35,9 @@ export const { use: useRoute, provider: RouteProvider } = createSimpleContext({
         return store
       },
       navigate(route: Route) {
+        // altimate_change start — upstream_fix: navigation debug log was dropped
+        console.debug("navigate", { route })
+        // altimate_change end
         setStore(reconcile(route))
       },
     }
