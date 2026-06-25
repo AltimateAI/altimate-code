@@ -320,3 +320,20 @@ run TWO independent codex audit passes (read-only second opinion), then reconcil
 - Run AFTER implementer is done (mid-edit tree gives noisy test results). Launch pass 1; then a pass 2 from a different
   angle (e.g. security/branding + behavioral-diff focus) for redundancy. Reconcile any disagreements into SHIP-REPORT.md.
 - Deferred (don't collide): implementer is editing src/session/{processor,prompt,message-v2,compaction}.ts now.
+
+## CHECKPOINT 31 — 8 RESTOREs landed + committed; 2 independent codex audits running — 2026-06-24
+- 8 RESTORE + 1 ACCEPT implemented + INDEPENDENTLY VERIFIED (typecheck 0, session 0 fail/46 todo [was 55], production WORKING) + committed.
+- The "52 session regressions" -> RESOLVED: 8 real dropped-v1.17.9-behaviors RESTORED + 1 accept + 46 remaining todo = test-arch injection gaps on intact code + unported upstream features (NOT regressions, per panel consensus DECISIONS.md).
+- 2 INDEPENDENT CODEX AUDITS running (the "extra eye"): audit-1 /tmp/codex_audit1.log (re-derive #1/#2/#3 + review DECISIONS + hunt missed -> CODEX-AUDIT.md); audit-2 /tmp/codex_audit2.log (security/branding leaks + behavioral-diff main..HEAD + verify the 8 RESTORE ports -> CODEX-AUDIT-2.md).
+- ON WAKE: collect both audits (pgrep + logs). Read CODEX-AUDIT.md + CODEX-AUDIT-2.md. RECONCILE: if they AGREE with my findings -> high confidence, note in SHIP-REPORT. If they DISAGREE or find NEW real issues -> investigate + fix (with discipline: typecheck0+production-WORKING). Re-run full suite. Update SHIP-REPORT/CONFIDENCE-AUDIT with final numbers + independent cross-check. Then ckpt-FINAL + comprehensive summary. Budget ~$6/$50.
+
+## CHECKPOINT 32 — 2 independent codex audits landed; found real issues (extra eye worked) — 2026-06-24
+AUDIT RESULTS (CODEX-AUDIT.md + CODEX-AUDIT-2.md):
+- CONFIRMED #1 fork-not-lost (179 deletions all upstream removals; markers 1316->2095; 0 dropped) + #3 nothing-broke (typecheck0/production/samples green). Cross-confirms my findings.
+- #2 "upstream fully merged" NARROWED: file-complete but 2 semantic gaps: (a) TaskTool doesn't call deriveSubagentSessionPermission (helper merged+tested, not wired) -> subtask permission inheritance half-merged; (b) compaction retained-tail (DEFAULT_TAIL_TURNS/preserve_recent_tokens/tail_start_id) unported (=COVER-46 W2).
+- NEW REAL ISSUES (both audits, branding — my "branding fixed" was too strong):
+  * 5 routed LLM-visible prompts still say lowercase opencode: prompt/{beast,gemini,trinity,copilot-gpt-5,qwen}.txt (system.ts routes GPT->beast, Gemini->gemini, Trinity->trinity, fallback->qwen). FIX.
+  * outbound provider headers send opencode brand to 3rd parties: core/plugin/provider/{llmgateway,nvidia,vercel,openrouter,kilo,zenmux}.ts (X-Title/HTTP-Referer/X-Source); core/tool/{websearch,webfetch}.ts User-Agent opencode. FIX identity headers (Referer/X-Title/X-Source -> altimate); User-Agent = judgment (webfetch Cloudflare-retry mimicry may be intentional).
+  * config/docs/UI: core/v1/config/config.ts:42,106; customize-opencode.md; provider/openai-auth.ts:255-257; opencode/src/temporary.ts:7. FIX shipped user-facing.
+- Audit panel-review: AGREES 8 RESTORE + 1 ACCEPT; DISAGREES that TaskTool-perm + retained-tail are TEST-ARCH (calls them real RESTORE/backlog) -> reclassify as COVER-46 items.
+ACTIONS NOW: launch (1) branding fixer (5 prompts + provider identity headers + config/docs/UI; packages/opencode + packages/core), (2) TaskTool wire deriveSubagentSessionPermission. Then COVER-46 (incl. compaction retained-tail). Verify typecheck0+production each; commit. Budget ~$6/$50.
