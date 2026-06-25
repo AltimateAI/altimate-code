@@ -1234,6 +1234,42 @@ export class Trace {
     const trace = this.buildTraceFile(error)
 
     // altimate_change start — trace: post-session summary (narrative, loops, topTools)
+    this.enrichSummary(trace, error)
+    // altimate_change end
+
+    // Wrap each exporter call with a timeout to prevent hanging exporters
+    // from blocking the entire endTrace call
+    const EXPORTER_TIMEOUT_MS = 5_000
+    const withTimeout = (p: Promise<string | undefined>, name: string) => {
+      let timer: ReturnType<typeof setTimeout>
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          Log.Default.warn(`[tracing] Exporter "${name}" timed out after ${EXPORTER_TIMEOUT_MS}ms`)
+          resolve(undefined)
+        }, EXPORTER_TIMEOUT_MS)
+      })
+      return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+    }
+
+    const results = await Promise.allSettled(
+      this.exporters.map((e) => {
+        try {
+          return withTimeout(Promise.resolve(e.export(trace)), e.name)
+        } catch {
+          return Promise.resolve(undefined)
+        }
+      }),
+    )
+
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) return r.value
+    }
+    return undefined
+  }
+
+  // altimate_change start — post-session summary enrichment shared by endTrace (async) and
+  // finalizeSync (sync). Extracted verbatim so both write byte-identical summaries.
+  private enrichSummary(trace: TraceFile, error?: string) {
     try {
       // Top tools by call count
       const toolCounts = new Map<string, { count: number; totalDuration: number }>()
@@ -1277,37 +1313,48 @@ export class Trace {
     } catch {
       // Narrative generation must never crash the trace
     }
-    // altimate_change end
-
-    // Wrap each exporter call with a timeout to prevent hanging exporters
-    // from blocking the entire endTrace call
-    const EXPORTER_TIMEOUT_MS = 5_000
-    const withTimeout = (p: Promise<string | undefined>, name: string) => {
-      let timer: ReturnType<typeof setTimeout>
-      const timeout = new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => {
-          Log.Default.warn(`[tracing] Exporter "${name}" timed out after ${EXPORTER_TIMEOUT_MS}ms`)
-          resolve(undefined)
-        }, EXPORTER_TIMEOUT_MS)
-      })
-      return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
-    }
-
-    const results = await Promise.allSettled(
-      this.exporters.map((e) => {
-        try {
-          return withTimeout(Promise.resolve(e.export(trace)), e.name)
-        } catch {
-          return Promise.resolve(undefined)
-        }
-      }),
-    )
-
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value) return r.value
-    }
-    return undefined
   }
+
+  /**
+   * Synchronous CLEAN finalize for clean shutdown paths (not a crash). Writes the complete trace
+   * — closed root span, full summary (status "completed"), narrative/topTools — to disk with
+   * `writeFileSync`, the same way `flushSync` does for crashes but WITHOUT the crashed marker.
+   *
+   * Why this exists: on a quiet/idle Bun **Worker thread** (the TUI worker after a turn finishes),
+   * pending async `fs` writes from `snapshot()`/`endTrace()` are not flushed before the worker is
+   * torn down — so an async finalize silently writes nothing. A synchronous write does not depend on
+   * the worker's event loop being pumped. See .github/meta/night-run/E2E-TUI-TRACING-REGRESSION.md.
+   */
+  finalizeSync(): string | undefined {
+    try {
+      if (!this.snapshotDir || !this.sessionId) return undefined
+      // If flushSync already wrote the canonical (crashed) file, don't clobber it.
+      if (this.crashed) return this.getTracePath()
+      // Claim the canonical write so any in-flight/queued async snapshot bails at its crashed check.
+      this.endTraceStarted = true
+      this.crashed = true
+      for (const exp of this.exporters) exp.markCrashed?.(this.sessionId)
+      this.currentGenerationSpanId = undefined
+      const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
+      if (rootSpan) {
+        rootSpan.endTime = Date.now()
+        rootSpan.status = "ok"
+        const costStr = Number.isFinite(this.totalCost) ? this.totalCost.toFixed(4) : "0.0000"
+        rootSpan.output = `${this.generationCount} generations, ${this.toolCallCount} tool calls, ${this.totalTokens} tokens, $${costStr}`
+      }
+      const trace = this.buildTraceFile() // no error → summary.status "completed" (or "running" if a gen is open)
+      this.enrichSummary(trace)
+      const safeId = (this.sessionId || "unknown").replace(/[/\\.:]/g, "_") || "unknown"
+      const filePath = path.join(this.snapshotDir, `${safeId}.json`)
+      fsSync.mkdirSync(this.snapshotDir, { recursive: true })
+      fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
+      return filePath
+    } catch {
+      // best-effort — shutdown finalize must never throw
+      return undefined
+    }
+  }
+  // altimate_change end
 
   /**
    * Best-effort synchronous flush for process exit handlers.

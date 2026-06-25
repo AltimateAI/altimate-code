@@ -1,5 +1,25 @@
 # E2E finding: interactive TUI sessions no longer write trace files (merge regression)
 
+## ✅ FIXED (2026-06-25)
+Root cause confirmed by instrumentation: any stderr/event-loop activity (`--print-logs`, `DEBUG`, or
+even a `console.error` probe) made the trace write land; on a fully quiet Bun **Worker thread** the
+consumer's pending async `fs` writes never flush before `worker.terminate()`. Fix, all behind
+`altimate_change` markers:
+1. `cli/tui/worker.ts` feeds the worker's `GlobalBus` stream into the shared `TraceConsumer`
+   (serialized; `loadConfig` gated on the project Instance so the real tracing config applies).
+2. `tracing.ts` adds `Trace.finalizeSync()` — a **synchronous** clean finalize (`writeFileSync`,
+   status `completed`, full narrative/topTools via the extracted `enrichSummary`) that does NOT depend
+   on the worker event loop being pumped. `trace-consumer.ts` adds `TraceConsumer.flushSync()`.
+3. The worker `shutdown()` drains pending events then calls `flushSync()` synchronously.
+Verified: 3 quiet-path TUI sessions (no logs) each wrote a complete trace (`status: completed`,
+narrative present). Guards: `test/altimate/tracing-finalize-sync.test.ts` (sync write + complete +
+not "crashed") and the now-enabled presence guard in `test/upstream/fork-feature-guards.test.ts`.
+The original investigation notes are kept below for history.
+
+---
+
+
+
 Found 2026-06-25 during a local-build E2E pass on `upstream/merge-v1.17.9` (PR #964). NOT fixed in
 the PR — documented here as a follow-up. My attempted fixes were reverted (see "Why not fixed yet").
 

@@ -329,6 +329,23 @@ export class TraceConsumer {
     this.sessionTraces.clear()
     this.sessionUserMsgIds.clear()
   }
+
+  // altimate_change start — synchronous clean finalize for shutdown paths where async fs writes do
+  // not flush (the quiet TUI Worker thread). Mirrors flush() but uses Trace.finalizeSync (writeFileSync)
+  // so every active session's trace lands on disk before the worker is torn down. See
+  // .github/meta/night-run/E2E-TUI-TRACING-REGRESSION.md.
+  flushSync() {
+    for (const trace of this.sessionTraces.values()) {
+      try {
+        trace.finalizeSync()
+      } catch {
+        // best-effort — never throw during shutdown
+      }
+    }
+    this.sessionTraces.clear()
+    this.sessionUserMsgIds.clear()
+  }
+  // altimate_change end
 }
 
 /**

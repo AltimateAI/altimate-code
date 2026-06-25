@@ -54,11 +54,13 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(src).not.toMatch(/\bopen\b.*\bcode\b/i) // not the literal opencode wordmark comment
   })
 
-  // OPEN: the interactive TUI worker must feed bus events to the TraceConsumer, or TUI sessions write
-  // no traces (the v1.17.9 regression). Enable this guard when the worker tracing fix lands — see
-  // .github/meta/night-run/E2E-TUI-TRACING-REGRESSION.md.
-  test.todo("TUI worker wires the trace consumer (enable with the worker tracing fix)", async () => {
+  // The interactive TUI worker must feed bus events to the TraceConsumer AND finalize synchronously on
+  // shutdown, or TUI sessions write no traces (the v1.17.9 regression — async fs writes don't flush on
+  // the quiet Bun Worker thread). See E2E-TUI-TRACING-REGRESSION.md.
+  test("TUI worker wires the trace consumer + sync shutdown finalize", async () => {
     const src = await read("src/cli/tui/worker.ts")
     expect(src).toContain("TraceConsumer")
+    expect(src).toContain("handleEvent")
+    expect(src).toContain("flushSync") // synchronous finalize on shutdown is the load-bearing part
   })
 })
