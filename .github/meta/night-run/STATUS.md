@@ -230,3 +230,12 @@
 - instref worker: only reduced session todo 59->57 (the rest are behavioral, not instance-ctx — correctly not forced).
 - BUDGET: ~$0.40 spent of $50.
 - ON WAKE: collect e2e batch (per-task pass-rate -> if good, SCALE to repeats=50 ~1100 runs ~$5, or on ec36) + codex-sesstriage (re-enabled count + regression list). Verify typecheck 0 + production WORKING. Commit ckpt40. Then: fix/document 2 server fails; Wave 2 (adversarial/carry-forward/expert NEW tests); P6 ship report (suite green-modulo-documented-todos + e2e pass-rates + MERGE-REGRESSIONS-FOUND + remaining-gaps list) + draft PR.
+
+## CHECKPOINT FINAL — validation run complete — 2026-06-24
+- ALL WAVES DONE. Deliverables committed: SHIP-REPORT.md, MERGE-REGRESSIONS-FOUND.md, e2e/RESULTS.md, PR-BODY.md, e2e harness+tasks.
+- FINAL NUMBERS: typecheck 0; unit suite 10,462 pass / 2 fail (from 868) + 57 session todo (52 documented behavioral deltas + 5 flaky); production run "WORKING"; real-model e2e 21/22 (~95%) azure/gpt-4o-mini.
+- NEW TESTS: 40 fork carry-forward (0 dropped) + 50 upstream-adversarial = 90 new. ~250 fixture reconciliations.
+- MERGE REGRESSIONS found+fixed: branding-in-system-prompts (high impact), 33 theme URLs, 21 httpapi descriptions, mcp add --name, anthropic hint. + 52 session behavioral deltas + 2 minor (formatValidationError, getUsage NaN) DOCUMENTED.
+- REMAINING for clean ship (documented, none block agent function): 52 session deltas (expert per-case review; some likely test-infra), 2 server legacy-route fails, Account-Service dedup, marker re-baseline, bun-1.3.14 build.
+- BUDGET: ~$1.50 / $50 LLM (rest unused — Ollama-free path was too weak; azure used for e2e+verification).
+- VERDICT: merge functionally sound + verified end-to-end; mergeable as feature branch; clean production ship needs the documented edge-path review. PR-BODY.md ready (PR NOT opened).
