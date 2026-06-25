@@ -4,6 +4,9 @@ import { ToolFailure } from "@opencode-ai/llm"
 import { Effect, Layer, Schema } from "effect"
 import path from "path"
 import { FileSystem } from "../filesystem"
+// altimate_change start — upstream_fix: FSUtil for Location containment (see execute)
+import { FSUtil } from "../fs-util"
+// altimate_change end
 import { Location } from "../location"
 import { Ripgrep } from "../ripgrep"
 import { RelativePath } from "../schema"
@@ -39,6 +42,9 @@ export const layer = Layer.effectDiscard(
     const ripgrep = yield* Ripgrep.Service
     const location = yield* Location.Service
     const permission = yield* PermissionV2.Service
+    // altimate_change start — upstream_fix: fs for the Location-containment realPath check (see execute)
+    const fs = yield* FSUtil.Service
+    // altimate_change end
 
     yield* tools
       .register({
@@ -71,6 +77,16 @@ export const layer = Layer.effectDiscard(
                 source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
               })
               const cwd = path.resolve(location.directory, input.path ?? ".")
+              // altimate_change start — upstream_fix: contain the glob root to the active Location.
+              // Twin of the grep.ts containment: a model-controlled input.path (absolute, ".."
+              // traversal, or a symlink to an external dir) would otherwise let ripgrep enumerate
+              // file NAMES outside the project. Lower severity than grep (names, not contents) but the
+              // same escape, so reject it the same way via the real, symlink-resolved path.
+              const rootReal = yield* fs.realPath(location.directory).pipe(Effect.orDie)
+              const cwdReal = yield* fs.realPath(cwd).pipe(Effect.catch(() => Effect.succeed(cwd)))
+              if (cwdReal !== rootReal && !FSUtil.contains(rootReal, cwdReal))
+                return yield* Effect.die(new Error("glob path escapes the active Location"))
+              // altimate_change end
               return yield* ripgrep
                 .glob({
                   cwd,

@@ -1378,10 +1378,14 @@ export class Trace {
       const filePath = path.join(this.snapshotDir, `${safeId}.json`)
       fsSync.mkdirSync(this.snapshotDir, { recursive: true })
       fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
-      // Prune synchronously — this path bypasses export()'s async pruneOldTraces, so without this the
-      // traces dir grows unbounded for a TUI-only user.
+      // FileExporter: prune synchronously (this path bypasses export()'s async pruneOldTraces, so
+      // without it the traces dir grows unbounded for a TUI-only user). Non-file exporters (HTTP):
+      // fire best-effort so configured `tracing.exporters` still receive interactive-session traces
+      // — fire-and-forget because async network can't be guaranteed on the stalling worker loop, but
+      // the local file above is already guaranteed.
       for (const exp of this.exporters) {
         if (exp instanceof FileExporter) exp.pruneSync()
+        else void Promise.resolve(exp.export(trace)).catch(() => {})
       }
       return filePath
     } catch {

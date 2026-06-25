@@ -61,29 +61,32 @@ export const currentSchemaTables = [
   "workspace",
 ] as const
 
+// COMPLETE per-table column set of the generated schema (NOT a curated subset). Completeness is
+// required for soundness: currentSchemaApplied adopts (marks missing migrations applied) when this
+// fingerprint matches, so if any column the schema declares were omitted here, an ADD COLUMN
+// migration that adds it could be marked applied without running — silently dropping the column. The
+// drift-guard test asserts BOTH directions (every listed column is live AND every live column is
+// listed), so a forgotten column on the next schema change fails CI loudly instead of being lost.
 export const currentSchemaColumns = {
-  credential: ["integration_id", "connector_id", "method_id", "active"],
-  event_sequence: ["owner_id"],
-  permission: ["action", "resource"],
-  project: ["commands", "icon_url_override", "sandboxes"],
-  project_directory: ["strategy", "time_created", "type"],
-  session: [
-    "agent",
-    "cost",
-    "metadata",
-    "model",
-    "path",
-    "tokens_cache_read",
-    "tokens_cache_write",
-    "tokens_input",
-    "tokens_output",
-    "tokens_reasoning",
-    "workspace_id",
-  ],
-  session_context_epoch: ["agent", "baseline_seq", "replacement_seq", "revision", "snapshot"],
-  session_input: ["admitted_seq", "delivery", "promoted_seq"],
-  session_message: ["data", "seq", "type"],
-  workspace: ["directory", "extra", "time_used", "type"],
+  account: ["id", "email", "url", "access_token", "refresh_token", "token_expiry", "time_created", "time_updated"],
+  account_state: ["id", "active_account_id", "active_org_id"],
+  control_account: ["email", "url", "access_token", "refresh_token", "token_expiry", "active", "time_created", "time_updated"],
+  credential: ["id", "integration_id", "label", "value", "connector_id", "method_id", "active", "time_created", "time_updated"],
+  data_migration: ["name", "time_completed"],
+  event: ["id", "aggregate_id", "seq", "type", "data"],
+  event_sequence: ["aggregate_id", "seq", "owner_id"],
+  message: ["id", "session_id", "time_created", "time_updated", "data"],
+  part: ["id", "message_id", "session_id", "time_created", "time_updated", "data"],
+  permission: ["id", "project_id", "action", "resource", "time_created", "time_updated"],
+  project: ["id", "worktree", "vcs", "name", "icon_url", "icon_url_override", "icon_color", "time_created", "time_updated", "time_initialized", "sandboxes", "commands"],
+  project_directory: ["project_id", "directory", "type", "strategy", "time_created"],
+  session: ["id", "project_id", "workspace_id", "parent_id", "slug", "directory", "path", "title", "version", "share_url", "summary_additions", "summary_deletions", "summary_files", "summary_diffs", "metadata", "cost", "tokens_input", "tokens_output", "tokens_reasoning", "tokens_cache_read", "tokens_cache_write", "revert", "permission", "agent", "model", "time_created", "time_updated", "time_compacting", "time_archived"],
+  session_context_epoch: ["session_id", "baseline", "agent", "snapshot", "baseline_seq", "replacement_seq", "revision"],
+  session_input: ["id", "session_id", "prompt", "delivery", "admitted_seq", "promoted_seq", "time_created"],
+  session_message: ["id", "session_id", "type", "seq", "time_created", "time_updated", "data"],
+  session_share: ["session_id", "id", "secret", "url", "time_created", "time_updated"],
+  todo: ["session_id", "content", "status", "priority", "position", "time_created", "time_updated"],
+  workspace: ["id", "type", "name", "branch", "directory", "extra", "project_id", "time_used"],
 } as const
 
 export const currentSchemaIndexes = [
@@ -136,25 +139,29 @@ export function apply(db: Database) {
       const tables = yield* userTables(db)
       if (tables.some((table) => table.name === "session")) return yield* applyOnly(db, migrations)
       if (tables.length > 0) return yield* Effect.die("Database is not empty and has no session table")
+      // altimate_change start — upstream_fix: create the generated schema under BEGIN IMMEDIATE,
+      // re-checking inside for a concurrent creator. If another process (possibly an OLDER binary that
+      // won the write lock) created the schema during the race, do NOT blindly mark our whole
+      // migration list applied — that would leave the DB at the other schema while recording newer
+      // migrations as done, a permanently-lost migration. Instead fall through to applyOnly(db), which
+      // only adopts when the schema actually matches (currentSchemaApplied) and otherwise runs the
+      // still-missing migrations.
+      let createdHere = false
       yield* db.transaction(
         (tx) =>
           Effect.gen(function* () {
-            // altimate_change start — upstream_fix: re-check under BEGIN IMMEDIATE.
             const current = yield* userTables(tx)
-            if (current.some((table) => table.name === "session")) {
-              yield* ensureMigrationTable(tx)
-              yield* markMigrationsApplied(tx, migrations)
-              return
-            }
+            if (current.some((table) => table.name === "session")) return // concurrent creator — applyOnly below
             if (current.length > 0) return yield* Effect.die("Database is not empty and has no session table")
-            // altimate_change end
-
             yield* schema.up(tx)
             yield* ensureMigrationTable(tx)
             yield* markMigrationsApplied(tx, migrations)
+            createdHere = true
           }),
         { behavior: "immediate" },
       )
+      if (!createdHere) return yield* applyOnly(db, migrations)
+      // altimate_change end
     }),
   )
 }

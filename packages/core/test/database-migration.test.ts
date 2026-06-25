@@ -654,22 +654,32 @@ describe("DatabaseMigration", () => {
       }
     })
 
-    test("currentSchemaColumns references live generated columns", () => {
-      // currentSchemaColumns is an intentionally curated subset (the columns that distinguish recent
-      // schema versions), so this validates only that every listed column still exists — it catches a
-      // renamed/dropped column. A brand-new column on an existing table is the narrow residual gap and
-      // must be added to the fingerprint by hand when its migration lands.
+    test("currentSchemaColumns is COMPLETE — set-equals the generated columns for every table", () => {
+      // Soundness guard (both directions): currentSchemaApplied adopts when this fingerprint matches,
+      // so it must be COMPLETE, not a subset. Subset-only would let an ADD COLUMN migration be marked
+      // applied without running (the new column omitted from the fingerprint → adoption still "matches"
+      // → column silently dropped). Assert: (1) the fingerprint covers every generated table, and
+      // (2) per table the fingerprint set-equals the live columns — so a forgotten column on the next
+      // schema change fails CI loudly instead of being lost at runtime.
       const sqlite = generatedSchemaSqlite()
       try {
+        const liveTables = (
+          sqlite
+            .query(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('migration', '__drizzle_migrations')",
+            )
+            .all() as { name: string }[]
+        )
+          .map((r) => r.name)
+          .sort()
+        // (1) every generated table is fingerprinted
+        expect(Object.keys(DatabaseMigration.currentSchemaColumns).sort()).toEqual(liveTables)
+        // (2) per-table set-equality (reverse-inclusion: no missing AND no stale columns)
         for (const [table, columns] of Object.entries(DatabaseMigration.currentSchemaColumns)) {
-          const present = new Set(
-            (sqlite.query(`SELECT name FROM pragma_table_info('${table}')`).all() as { name: string }[]).map(
-              (row) => row.name,
-            ),
-          )
-          const missing = columns.filter((column) => !present.has(column))
-          // Reported as a string so a failure names the exact stale table.column.
-          expect(`${table}: missing [${missing.join(", ")}]`).toBe(`${table}: missing []`)
+          const live = (sqlite.query(`SELECT name FROM pragma_table_info('${table}')`).all() as { name: string }[])
+            .map((r) => r.name)
+            .sort()
+          expect(`${table}: ${[...columns].sort().join(",")}`).toBe(`${table}: ${live.join(",")}`)
         }
       } finally {
         sqlite.close()
