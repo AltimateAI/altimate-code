@@ -59,6 +59,32 @@ consumer's `loadConfig` inside an instance context (e.g. `Instance.restore` over
   before `worker.terminate()`, so a `flush()` in `shutdown()` is sufficient once events are parsed.
 - Add a regression test asserting the worker wires the shared trace consumer (close the false-green).
 
+## UPDATE (2026-06-25, deeper diagnosis — supersedes the "approach 1/2" notes above)
+Re-homing the consumer correctly (feed the worker's `GlobalBus` stream into the shared `TraceConsumer`,
+serialized, with `loadConfig` run inside the project Instance context) gets ALL the way to: loadConfig
+succeeds, `getTraceDirectory()` is the real traces dir, `handleEvent` is called for every session
+event (verified the `GlobalBus` payload shape is exactly `{type, properties:{info|part, sessionID}}`
+— what the consumer expects), and `flush()` runs on shutdown. **Yet no trace file is written.**
+
+The deciding finding: the trace **only persists when the log event loop is active** — running the TUI
+with `OPENCODE_PRINT_LOGS=1` *or* `OPENCODE_LOG_LEVEL=DEBUG` writes the trace every time; the default
+(quiet) writes it never (reproduced across many trials). Both env vars share one effect: they make the
+log shim's `emit()` do real `process.stderr.write` work on the worker's event loop. So the trace's
+async snapshot write (`fs.writeFile`+rename, fire-and-forget in `Trace.snapshot()`) appears to depend
+on event-loop activity that, in the Bun **Worker thread**, doesn't occur on the quiet path before the
+worker is torn down. This is NOT: a shape mismatch (ruled out), a loadConfig race (gated, still fails),
+a handleEvent throw (logged none), or `getOrCreateTrace` returning null (dir present throughout).
+
+So the remaining work is a Bun-Worker async-write/lifecycle issue in the snapshot/flush path, not the
+event wiring. Likely fix direction: make the shutdown path **synchronously** finalize (the existing
+`flushSync` crash-write path) rather than rely on async `fs` settling, and/or ensure the worker's
+event loop drains pending trace writes before `worker.terminate()`. Tracked as a focused follow-up;
+the worker wiring change was reverted (not shipped) so we don't ship a fix that only works with logs on.
+
+Note: haider's tracing fixes (PR #867 + #895) live in `trace-consumer.ts` and are **fully preserved**
+in this branch (our copy == main except two import-path repoints). This regression is purely the
+worker→consumer delivery + the worker-thread write-timing, not his consumer logic.
+
 ## What WAS verified working in this E2E (compiled binary, darwin-arm64)
 - `--version` / `--help` (ALTIMATE branding, no opencode leaks in the command list)
 - `skill list` (InstanceRef root fix) — lists 21 skills, no "InstanceRef not provided"
