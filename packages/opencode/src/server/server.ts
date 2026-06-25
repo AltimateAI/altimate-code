@@ -127,7 +127,14 @@ export namespace Server {
         if (c.req.method === "OPTIONS") return next()
         const password = Flag.OPENCODE_SERVER_PASSWORD
         if (!password) return next()
-        const username = Flag.OPENCODE_SERVER_USERNAME ?? "altimate" // altimate_change — branded default username
+        // altimate_change start — upstream_fix: align the Hono guard's default username with the
+        // HttpApi /api/* auth (ServerAuth, auth.ts) and every client (ServerAuth.header, plugin,
+        // run, attach, trace-consumer), which all default to "opencode". A branded "altimate" here
+        // made the guard reject the TUI worker's `opencode:<password>` header (and "altimate:<pwd>"
+        // was then rejected by the HttpApi auth), breaking authenticated server/TUI API calls
+        // unless OPENCODE_SERVER_USERNAME was set explicitly.
+        const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
+        // altimate_change end
         return basicAuth({ username, password })(c, next)
       })
       .use(async (c, next) => {
