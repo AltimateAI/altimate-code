@@ -10,7 +10,7 @@
 // plugin tools in tool/registry.ts `fromPlugin` (Schema.declare + z.toJSONSchema +
 // EffectBridge to bridge the Effect-based `ask`/`metadata` back to Promises). Tool
 // logic stays byte-for-byte identical.
-import { Effect, Schema, SchemaGetter } from "effect"
+import { Effect, Option, Schema, SchemaGetter } from "effect"
 import z from "zod"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { EffectBridge } from "@/effect/bridge"
@@ -107,6 +107,28 @@ function normalizeZodJsonSchema(value: unknown): unknown {
   )
 }
 
+// altimate_change start — Effect SchemaError nests the rejected input under
+// issue.actual as an Option; legacy zod formatters need the raw original input.
+function schemaErrorActual(error: unknown): { found: true; value: unknown } | { found: false } {
+  const unwrapActual = (actual: unknown): { found: true; value: unknown } | { found: false } => {
+    if (actual === undefined) return { found: false }
+    return { found: true, value: Option.isOption(actual) ? Option.getOrUndefined(actual) : actual }
+  }
+
+  const direct = unwrapActual((error as { actual?: unknown })?.actual)
+  if (direct.found) return direct
+
+  let issue = (error as { issue?: unknown })?.issue
+  while (typeof issue === "object" && issue !== null) {
+    const nested = unwrapActual((issue as { actual?: unknown }).actual)
+    if (nested.found) return nested
+    issue = (issue as { issue?: unknown }).issue
+  }
+
+  return { found: false }
+}
+// altimate_change end
+
 function zodMetadataRegistry(schema: z.ZodType) {
   const registry = z.registry<Record<string, unknown>>()
   const seen = new WeakSet<object>()
@@ -150,8 +172,8 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
     // altimate_change start — decode THROUGH zod's `parse` so defaults, coercions and transforms
     // are applied to the value `execute` receives (and that callers see via decode). A plain
     // Schema.declare only validates and passes the raw input through, silently dropping zod
-    // `.default()`/`.transform()`. Validation failures still surface as Effect SchemaIssues whose
-    // `actual` carries the original input (used by formatValidationError above).
+    // `.default()`/`.transform()`. Validation failures still surface as Effect SchemaErrors whose
+    // nested issue.actual carries the original input (used by formatValidationError below).
     parameters: Schema.declare<unknown>((u): u is unknown => legacy.parameters.safeParse(u).success).pipe(
       Schema.decodeTo(Schema.Unknown, {
         decode: SchemaGetter.transform((u: unknown) => legacy.parameters.parse(u)),
@@ -164,13 +186,13 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
       ? {
           // altimate_change start — the new Tool API decodes via Schema.declare, so the
           // error reaching us is an Effect SchemaIssue (no zod `.issues`/`.path`), not a
-          // z.ZodError. Recover the original input from the issue's `actual` field and
+          // z.ZodError. Recover the original input from Effect SchemaError.issue.actual and
           // re-run the zod schema to produce the real z.ZodError the legacy formatter
-          // expects; fall back to a stringified error if recovery is impossible.
+          // expects; fall back to the original error if recovery is impossible.
           formatValidationError: (error: unknown) => {
-            const actual = (error as { actual?: unknown })?.actual
-            if (actual !== undefined) {
-              const parsed = legacy.parameters.safeParse(actual)
+            const actual = schemaErrorActual(error)
+            if (actual.found) {
+              const parsed = legacy.parameters.safeParse(actual.value)
               if (!parsed.success) return legacy.formatValidationError!(parsed.error)
             }
             return legacy.formatValidationError!(error as z.ZodError)

@@ -181,7 +181,10 @@ export namespace Account {
     readonly poll: (input: Login) => Effect.Effect<PollResult, AccountError>
   }
 
-  export class Service extends Context.Service<Service, Interface>()("@opencode/Account") {}
+  // altimate_change start — disambiguate the promise-facade service from the
+  // canonical LayerNode service in account/account.ts, which keeps "@opencode/Account".
+  export class Service extends Context.Service<Service, Interface>()("@opencode/Account.cli") {}
+  // altimate_change end
 
   export const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpClient> = Layer.effect(
     Service,

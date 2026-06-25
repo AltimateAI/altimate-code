@@ -15,6 +15,27 @@ function eventData(data: unknown): Sse.Event {
   }
 }
 
+// altimate_change start — /api/event declares Location.Info; resolve EventV2 refs before streaming.
+type EventLocation = Location.Ref & { readonly project?: Location.Info["project"] }
+
+function eventLocation(current: Location.Interface, ref: Location.Ref) {
+  const location = ref as EventLocation
+  return new Location.Info({
+    directory: location.directory,
+    workspaceID: location.workspaceID,
+    project: location.project ?? current.project,
+  })
+}
+
+function eventWithResolvedLocation(current: Location.Interface, event: EventV2.Payload) {
+  if (!event.location) return event
+  return {
+    ...event,
+    location: eventLocation(current, event.location),
+  }
+}
+// altimate_change end
+
 export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers) =>
   Effect.gen(function* () {
     const events = yield* EventV2.Service
@@ -42,6 +63,7 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
                       event.location?.directory === location.directory &&
                       event.location.workspaceID === location.workspaceID,
                   ),
+                  Stream.map((event) => eventWithResolvedLocation(location, event)),
                 ),
             ),
             Stream.map(eventData),

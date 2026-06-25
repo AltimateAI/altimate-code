@@ -599,11 +599,10 @@ describe("E2E: BatchTool kept with markers (cycle 6)", () => {
 // ---------------------------------------------------------------------------
 // 17. Effect Service identifier de-duplication (cycle 5)
 //
-// account/index.ts and account/service.ts both registered "@opencode/Account".
-// service.ts was orphaned (only consumer was effect/runtime.ts which had
-// zero importers). Both deleted. Auth has the same shape but both files are
-// live, so cycle 5 renamed auth/index.ts's identifier to "@opencode/Auth.cli"
-// to keep the two managed runtimes from colliding if anyone ever merges them.
+// account/account.ts is the canonical LayerNode service. account/index.ts is a
+// live promise facade for share/telemetry, so it uses "@opencode/Account.cli"
+// while account/account.ts keeps "@opencode/Account". Auth has the same shape:
+// both files are live, so auth/index.ts uses "@opencode/Auth.cli".
 // ---------------------------------------------------------------------------
 
 describe("E2E: Effect Service identifier collision fix (cycle 5)", () => {
@@ -613,6 +612,16 @@ describe("E2E: Effect Service identifier collision fix (cycle 5)", () => {
 
   test("effect/runtime.ts is deleted (was orphaned)", () => {
     expect(existsSync(path.join(srcDir, "effect", "runtime.ts"))).toBe(false)
+  })
+
+  test("account/index.ts uses '@opencode/Account.cli' identifier", async () => {
+    const content = readFileSync(path.join(srcDir, "account", "index.ts"), "utf-8")
+    expect(content).toMatch(/Context\.Service<Service,\s*Interface>\(\)\("@opencode\/Account\.cli"\)/)
+  })
+
+  test("account/account.ts keeps '@opencode/Account' identifier", async () => {
+    const content = readFileSync(path.join(srcDir, "account", "account.ts"), "utf-8")
+    expect(content).toMatch(/Context\.Service<Service,\s*Interface>\(\)\("@opencode\/Account"\)/)
   })
 
   // The v1.17.9 merge migrated effect beta.43 `ServiceMap.Service` to beta.74

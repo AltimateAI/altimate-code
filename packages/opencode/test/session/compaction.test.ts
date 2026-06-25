@@ -902,7 +902,7 @@ describe("session.compaction.process", () => {
   // Minimal src fix: packages/opencode/src/session/compaction.ts:171 should be exposed on SessionCompaction.Service
   // and route Processor/LLM/Plugin/Status through the provided Effect runtime instead of singleton facades at
   // packages/opencode/src/session/compaction.ts:223-306.
-  it.instance.todo(
+  it.instance(
     "throws when parent is not a user message",
     Effect.gen(function* () {
       const test = yield* TestInstance

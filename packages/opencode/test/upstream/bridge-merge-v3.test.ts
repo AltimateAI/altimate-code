@@ -797,6 +797,15 @@ describe("bridge merge cycle 5: Account/Auth Service identifier deduplication", 
     expect(exists).toBe(false)
   })
 
+  test("account/index.ts uses distinct Service identifier from account/account.ts", async () => {
+    // v1.17.9 reintroduced a live account/account.ts service while index.ts still
+    // serves the promise facade used by share/telemetry. Keep the identifiers distinct.
+    const indexContent = await readText(path.join(srcDir, "account", "index.ts"))
+    expect(indexContent).toMatch(/Context\.Service<Service, Interface>\(\)\("@opencode\/Account\.cli"\)/)
+    const accountContent = await readText(path.join(srcDir, "account", "account.ts"))
+    expect(accountContent).toMatch(/Context\.Service<Service, Interface>\(\)\("@opencode\/Account"\)/)
+  })
+
   test("effect/runtime.ts is deleted (was orphaned)", async () => {
     const exists = await Bun.file(path.join(srcDir, "effect", "runtime.ts")).exists()
     expect(exists).toBe(false)

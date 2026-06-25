@@ -53,10 +53,10 @@ function stripComments(src: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-module consistency: ServiceMap.Service identifier uniqueness
+// Cross-module consistency: Effect Service identifier uniqueness
 // ---------------------------------------------------------------------------
 
-describe("invariant: ServiceMap.Service identifier strings are globally unique", () => {
+describe("invariant: Effect Service identifier strings are globally unique", () => {
   // Cycle 5 surfaced a duplicate "@opencode/Account" identifier that allowed two
   // unrelated Service classes to silently share one Effect Layer slot. Any future
   // upstream merge that re-introduces this collision (by importing a duplicate
@@ -66,18 +66,10 @@ describe("invariant: ServiceMap.Service identifier strings are globally unique",
   // registration form with `Context.Service<…>()("id")` (beta.74). The regex below
   // tracks the current Context.Service form so the uniqueness invariant stays live.
   const SERVICE_RE = () => /Context\.Service<[^>]+>\(\)\(\s*"([^"]+)"\s*\)/g
-  // KNOWN REGRESSION (v1.17.9 merge): "@opencode/Account" is registered twice —
-  //   packages/opencode/src/account/account.ts  (LayerNode-based, re-exported as `Account`,
-  //     used by config/server/cli)
-  //   packages/opencode/src/account/index.ts     (older local-effect variant,
-  //     used by altimate/telemetry + share-next)
-  // Both extend `Context.Service<…>()("@opencode/Account")`, so they share one Effect
-  // Layer slot — exactly the cycle-5 split-brain bug this invariant guards. The merge
-  // re-introduced it by adding account/account.ts alongside the pre-existing index.ts.
-  // Resolving it (disambiguate the identifier, or delete the stale index.ts variant and
-  // repoint telemetry/share-next) is an architectural change in src/account/. Tracked as
-  // a real merge regression — flip this back to `test(...)` once the collision is fixed.
-  test.todo("no two ServiceMap.Service classes share the same identifier string", async () => {
+  // v1.17.9 merge note: account/account.ts is the canonical LayerNode service and
+  // keeps "@opencode/Account"; account/index.ts is a live promise facade for
+  // share/telemetry and uses "@opencode/Account.cli", mirroring auth/index.ts.
+  test("no two Effect Service classes share the same identifier string", async () => {
     const files = await walkSource(srcDir)
     const occurrences = new Map<string, string[]>()
     const re = SERVICE_RE()

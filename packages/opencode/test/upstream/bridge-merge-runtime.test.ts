@@ -222,9 +222,10 @@ describe("bridge-merge-runtime: cycle 5 ServiceMap.Service identifier uniqueness
 
   test("no two ServiceMap.Service classes across major namespaces share an Identifier", async () => {
     // Import the major Effect Services and walk their identifiers.
-    const [{ Auth }, { Account }, { Bus }, { Permission }, { SessionStatus }] = await Promise.all([
+    const [{ Auth }, { Account }, accountCore, { Bus }, { Permission }, { SessionStatus }] = await Promise.all([
       import("@/auth"),
       import("@/account"),
+      import("@/account/account"),
       import("@/bus"),
       import("@/permission"),
       import("@/session/status"),
@@ -233,6 +234,7 @@ describe("bridge-merge-runtime: cycle 5 ServiceMap.Service identifier uniqueness
     const services: Array<[string, any]> = [
       ["Auth.Service", Auth.Service],
       ["Account.Service", Account.Service],
+      ["AccountCore.Service", accountCore.Account.Service],
       ["Bus.Service", Bus.Service],
       ["Permission.Service", Permission.Service],
       ["SessionStatus.Service", SessionStatus.Service],

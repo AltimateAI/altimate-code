@@ -116,10 +116,7 @@ describe("UPI-11 legacy zod schemas through Effect declarations", () => {
     expect(serialized).not.toContain('"exclusiveMaximum":true')
   })
 
-  // BUG: legacy formatter recovery reads error.actual, but Effect SchemaError nests
-  // the original input under error.issue.actual. The wrapper dies with TypeError
-  // when a legacy formatter expects a z.ZodError.
-  test.todo("legacy zod formatValidationError receives recovered ZodError paths", async () => {
+  test("legacy zod formatValidationError receives recovered ZodError paths", async () => {
     let executed = false
     const info = await Effect.runPromise(
       provideToolServices(

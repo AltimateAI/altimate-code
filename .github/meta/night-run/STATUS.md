@@ -260,3 +260,13 @@ Per-case session review + 3x e2e batches (user-requested) DONE. FINAL STATE:
 VERDICT: merge functionally sound + thoroughly validated end-to-end; mergeable as feature branch. Clean prod ship
 needs: maintainer review of the genuine session semantic deltas, 2 server legacy-route fixes + SDK regen,
 Account-Service dedup, marker re-baseline, bun>=1.3.14. PR-BODY.md ready (PR NOT opened). RUN COMPLETE.
+
+## CHECKPOINT 27 — "FIX EVERYTHING" push — 2026-06-24
+User directive: fix all remaining gaps. SRC fixes now authorized (with production-verify discipline + tight scope + revert-if-broken; ckpt46 = clean fallback). 3 disjoint codex workers RUNNING:
+- codex-server /tmp/fix_server.log: 2 server fails (httpapi-v2-location event location.project shape; httpapi-sdk 200 / SDK regen). Scope test/server+src/server+packages/sdk.
+- codex-account /tmp/fix_account.log: @opencode/Account Service dedup (mirror auth dedup) + formatValidationError SchemaError-nesting bug. Scope src/account+src/altimate/tool-zod-compat.
+- codex-session /tmp/fix_session.log: 52 session deltas, FILE-BY-FILE, typecheck+production-verify after EACH file, revert-if-broken, minimal src / no rewrites (session2 lesson hard-coded). Includes getUsage NaN. Scope test/session+src/session.
+NON-CODE remaining items (cannot fully fix pre-merge):
+- Marker-guard re-baseline: it compares vs main(v1.4.0); proper fix = re-baseline at merge-time (after branch lands) or update analyze.ts baseline. POST-MERGE step, documented; not a code fix now.
+- bun>=1.3.14 build req: env (upstream bumped), not code. Document.
+ON WAKE: collect 3 workers (codex log byte-growth+tail). For EACH: verify its area tests pass + typecheck 0 + production WORKING + watch cross-worker collision (git status sane). The session worker is highest-risk — if it left production broken/typecheck!=0, REVERT its session changes to ckpt46. COMMIT each clean batch (ckpt47/48/49). Re-run full suite. Update SHIP-REPORT + PR-BODY with what's now fixed vs still-open. Then final. Budget ~$3.50/$50 (session worker does production smokes = small azure spend).

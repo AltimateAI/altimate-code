@@ -198,7 +198,12 @@ export namespace SessionCompaction {
       return
     }
     // altimate_change end
-    const userMessage = input.messages.findLast((m) => m.info.id === input.parentID)!.info as MessageV2.User
+    const parent = input.messages.findLast((m) => m.info.id === input.parentID)
+    if (!parent || parent.info.role !== "user") {
+      // altimate_change — fail compaction with the intended validation error before model lookup.
+      throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
+    }
+    const userMessage = parent.info
 
     let messages = input.messages
     let replay: MessageV2.WithParts | undefined
