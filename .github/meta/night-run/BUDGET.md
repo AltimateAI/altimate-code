@@ -14,3 +14,4 @@ STRATEGY: bulk e2e on FREE Ollama; sample quality runs on Azure gpt-4o-mini (che
 - 16:16 e2e battery validation: 22 tasks x2 = 44 azure runs (~$0.25 est)
 - 17:10 e2e batch 22 runs azure (~$0.15)
 - 17:36 e2e re-run isolated-DB 22 runs azure (~$0.15)
+- 17:37 e2e seq conc=1 OPENCODE_DB-isolated 22 runs azure (~$0.15)

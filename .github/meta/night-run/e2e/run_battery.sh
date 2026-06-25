@@ -10,7 +10,7 @@ RES="$OUT/res.d"; rm -rf "$RES"; mkdir -p "$RES"
 run_one() {
   local id="$1" prompt="$2" check="$3" n="$4"
   local wd; wd="$(mktemp -d /tmp/e2e_run.XXXXXX)"
-  ( cd "$wd" && git init -q 2>/dev/null; OPENCODE_DB="$wd/e2e.db" XDG_DATA_HOME="$wd/xdg" timeout 120 bun run --conditions=browser "$ENTRY" run "$prompt" --model "$MODEL" </dev/null >/dev/null 2>&1
+  ( cd "$wd" && git init -q 2>/dev/null; OPENCODE_DB="$wd/e2e.db" timeout 120 bun run --conditions=browser "$ENTRY" run "$prompt" --model "$MODEL" </dev/null >/dev/null 2>&1
     if eval "$check" >/dev/null 2>&1; then v=PASS; else v=FAIL; fi
     # each job writes its OWN file (no concurrent-append races)
     printf '%s\t%s\t%s\n' "$id" "$n" "$v" > "$RES/${id}_${n}.tsv" )
