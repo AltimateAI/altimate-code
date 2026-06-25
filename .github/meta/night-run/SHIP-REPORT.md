@@ -49,11 +49,17 @@ Per-case review completed. Refined picture (NOT flatly "52 production regression
 The conservative review left all 52 `.todo` with per-test source-fix notes (no src changes made — avoided
 the session-src-rewrite risk). Happy-path session flow is verified working via the production run + e2e.
 
-### P2 — 2 server failures (legacy Hono route cluster)
-- httpapi-v2-location: EventV2 payload missing `location.project` (event shape).
-- httpapi-sdk: "safe instance routes" returns non-200 (generated-SDK route / legacy mount).
-Both in the server worker's flagged legacy-route-mounting cluster (/api/reference, PTY lifecycle,
-workspace proxy). Need legacy-server-routing src work or SDK regen.
+### P2 — server failures: 1 FIXED, 1 open
+- httpapi-v2-location (EventV2 missing `location.project`): **FIXED** (packages/server/src/handlers/event.ts).
+- httpapi-sdk "safe instance routes" returns 400: **OPEN** — stale GENERATED SDK. Regen is blocked because
+  `packages/sdk/js/src/v2/client.ts` imports `FileSystemEntry`, a type the regenerated `types.gen` no longer
+  exports (renamed in the merge). This is SDK-package codegen maintenance (update v2/client.ts + complete the
+  regen via `bun script/generate.ts`), NOT a server/agent runtime defect — the route works; production is fine.
+
+### P-fixed — also resolved in the fix-everything pass
+- `@opencode/Account` duplicate Service identifier: FIXED (account.ts canonical; index.ts disambiguated).
+- `formatValidationError` Effect-SchemaError input recovery: FIXED.
+- 1 compaction session delta: FIXED via minimal src.
 
 ### P3 — architectural follow-ups
 - Duplicate `@opencode/Account` Effect Service identifier (account.ts + index.ts share a Layer slot).

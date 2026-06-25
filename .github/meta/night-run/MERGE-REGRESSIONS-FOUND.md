@@ -89,3 +89,16 @@ variant_list keybind, SyncEvent->BusEvent bridge.
   original input differently -> recovery path may miss the input on Effect-side validation errors.
 - `Session.getUsage` clamps non-finite component counts, but a non-Anthropic `usage.totalTokens` can
   still leak `NaN` into the total. Guard totalTokens too.
+
+## FIX-EVERYTHING pass — resolved (2026-06-24)
+- httpapi-v2-location EventV2 missing location.project: FIXED (packages/server/src/handlers/event.ts).
+- @opencode/Account duplicate Service identifier: FIXED (account.ts canonical; index.ts disambiguated).
+- formatValidationError Effect-SchemaError input recovery: FIXED (reads SchemaError.issue.actual + Option unwrap).
+- 1 compaction session delta: FIXED via minimal src.
+## Still open (documented, not runtime/agent defects)
+- httpapi-sdk "safe instance routes" 400: stale GENERATED SDK. Regen blocked by `src/v2/client.ts` importing
+  `FileSystemEntry` which the regenerated types no longer export (renamed in merge) -> SDK-package codegen
+  maintenance (update v2/client.ts to the new type + complete regen). NOT a server/agent runtime defect.
+- 51 session behavioral deltas: need structural Effect-facade/runtime-routing changes (test-fake injection
+  through facades + prompt-loop/cancel/status routing). Disciplined incremental fixing declined to force them
+  (kept typecheck 0 + production WORKING). Need a focused architectural pass.
