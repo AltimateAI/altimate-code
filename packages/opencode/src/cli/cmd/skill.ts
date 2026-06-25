@@ -7,10 +7,6 @@ import { Skill } from "../../skill"
 import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
 import { Instance } from "../../project/instance"
-// altimate_change start — upstream_fix: server client for instance-backed reads (see skill list)
-import { Server } from "../../server/server"
-import { createOpencodeClient } from "@opencode-ai/sdk/v2"
-// altimate_change end
 import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
 // altimate_change start — telemetry for skill operations
@@ -166,18 +162,8 @@ const SkillListCommand = cmd({
     }),
   async handler(args) {
     await bootstrap(process.cwd(), async () => {
-      // altimate_change start — upstream_fix: read skills via the in-process server client. The local
-      // Skill.all() facade resolves the instance through run-service's makeRuntime bridge, which cannot
-      // see the bootstrap instance in this CLI path (the instance ALS is duplicated across the module
-      // boundary — same root cause + fix as the run.ts tracer), so it threw "InstanceRef not provided"
-      // and `skill list` exited 1. The in-process server holds the resolved instance, so
-      // sdk.app.skills() returns reliably.
-      const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) =>
-        Server.Default().fetch(new Request(input, init))) as typeof globalThis.fetch
-      const sdk = createOpencodeClient({ baseUrl: "http://altimate-code.internal", fetch: fetchFn })
-      const skills = ((await sdk.app.skills()).data ?? []).slice()
-      const cwd = process.cwd()
-      // altimate_change end
+      const skills = await Skill.all()
+      const cwd = Instance.directory
 
       // Sort alphabetically for consistent output
       skills.sort((a, b) => a.name.localeCompare(b.name))
