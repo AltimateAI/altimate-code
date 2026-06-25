@@ -221,9 +221,14 @@ export const layerWith = (options?: LayerOptions) =>
           readonly strictOwner?: boolean
         },
         commit?: (seq: number) => Effect.Effect<void>,
+        // altimate_change start — upstream_fix: replay synchronized events against their stored schema version.
+        syncDefinition?: SyncDefinition,
+        // altimate_change end
       ) {
         return Effect.gen(function* () {
-          const definition = registry.get(event.type)
+          // altimate_change start — upstream_fix: replay uses the versioned definition decoded from storage.
+          const definition = syncDefinition ?? registry.get(event.type)
+          // altimate_change end
           const sync = definition?.sync
           if (sync) {
             if (event.version !== sync.version) {
@@ -468,12 +473,17 @@ export const layerWith = (options?: LayerOptions) =>
               data: definition.decode(event.data),
               replay: true,
             } as Payload
-            const committed = yield* commitSyncEvent(payload, {
-              seq: event.seq,
-              aggregateID: event.aggregateID,
-              ownerID: options?.ownerID,
-              strictOwner: options?.strictOwner,
-            })
+            const committed = yield* commitSyncEvent(
+              payload,
+              {
+                seq: event.seq,
+                aggregateID: event.aggregateID,
+                ownerID: options?.ownerID,
+                strictOwner: options?.strictOwner,
+              },
+              undefined,
+              definition,
+            )
             if (committed && options?.publish) {
               yield* notify({ ...payload, seq: committed.seq }, true)
             }

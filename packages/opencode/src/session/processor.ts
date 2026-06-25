@@ -626,14 +626,23 @@ export namespace SessionProcessor {
           const p = await MessageV2.parts(input.assistantMessage.id)
           for (const part of p) {
             if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
+              // altimate_change start — upstream_fix: mark aborted tools so partial output is replayed correctly.
+              const metadata =
+                part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true }
+              // altimate_change end
               await Session.updatePart({
                 ...part,
                 state: {
                   ...part.state,
                   status: "error",
                   error: "Tool execution aborted",
+                  // altimate_change start — upstream_fix: preserve running tool metadata, including shell partial output.
+                  metadata,
+                  // altimate_change end
                   time: {
-                    start: Date.now(),
+                    // altimate_change start — upstream_fix: keep the original running start time on abort.
+                    start: part.state.status === "running" ? part.state.time.start : Date.now(),
+                    // altimate_change end
                     end: Date.now(),
                   },
                 },

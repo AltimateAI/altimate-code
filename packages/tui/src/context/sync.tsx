@@ -414,7 +414,9 @@ export const {
             flushAllBuffersForMessage(event.properties.messageID)
           }
           // altimate_change end
-          const messages = store.message[event.properties.sessionID]
+          // altimate_change start — upstream_fix: removal events can arrive before message hydration.
+          const messages = store.message[event.properties.sessionID] ?? []
+          // altimate_change end
           const result = search(messages, event.properties.messageID, (m) => m.id)
           if (result.found) {
             setStore(
@@ -516,7 +518,9 @@ export const {
             }
           }
           // altimate_change end
-          const parts = store.part[event.properties.messageID]
+          // altimate_change start — upstream_fix: part removals can arrive before part hydration.
+          const parts = store.part[event.properties.messageID] ?? []
+          // altimate_change end
           const result = search(parts, event.properties.partID, (p) => p.id)
           if (result.found) {
             setStore(

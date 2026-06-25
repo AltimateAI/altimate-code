@@ -1965,69 +1965,70 @@ export namespace SessionPrompt {
                   },
                 ]
 
-                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; init() yields the executable def.
-                // ReadTool requires Scope.Scope — discharge it with Effect.scoped before running on AppRuntime.
-                await AppRuntime.runPromise(Effect.scoped(Effect.flatMap(ReadTool, (info) => info.init())))
+                // altimate_change start — upstream_fix: keep ReadTool init and execute inside the same Scope.
+                const model = await Provider.getModel(info.model.providerID, info.model.modelID)
+                const readCtx: Tool.Context = {
+                  sessionID: input.sessionID,
+                  abort: new AbortController().signal,
+                  agent: input.agent!,
+                  messageID: info.id,
+                  extra: { bypassCwdCheck: true, model },
+                  messages: [],
+                  // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+                  metadata: () => Effect.void,
+                  ask: () => Effect.void,
                   // altimate_change end
-                  .then(async (t) => {
-                    const model = await Provider.getModel(info.model.providerID, info.model.modelID)
-                    const readCtx: Tool.Context = {
-                      sessionID: input.sessionID,
-                      abort: new AbortController().signal,
-                      agent: input.agent!,
-                      messageID: info.id,
-                      extra: { bypassCwdCheck: true, model },
-                      messages: [],
-                      // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
-                      metadata: () => Effect.void,
-                      ask: () => Effect.void,
-                      // altimate_change end
-                    }
-                    // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
-                    const result = await AppRuntime.runPromise(t.execute(args, readCtx))
-                    // altimate_change end
-                    pieces.push({
-                      messageID: info.id,
-                      sessionID: input.sessionID,
-                      type: "text",
-                      synthetic: true,
-                      text: result.output,
-                    })
-                    if (result.attachments?.length) {
-                      pieces.push(
-                        ...result.attachments.map((attachment) => ({
-                          ...attachment,
-                          synthetic: true,
-                          filename: attachment.filename ?? part.filename,
-                          messageID: info.id,
-                          sessionID: input.sessionID,
-                        })),
-                      )
-                    } else {
-                      pieces.push({
-                        ...part,
+                }
+                try {
+                  const result = await AppRuntime.runPromise(
+                    Effect.scoped(
+                      Effect.flatMap(ReadTool, (info) => info.init()).pipe(
+                        Effect.flatMap((t) => t.execute(args, readCtx)),
+                      ),
+                    ),
+                  )
+                  pieces.push({
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: result.output,
+                  })
+                  if (result.attachments?.length) {
+                    pieces.push(
+                      ...result.attachments.map((attachment) => ({
+                        ...attachment,
+                        synthetic: true,
+                        filename: attachment.filename ?? part.filename,
                         messageID: info.id,
                         sessionID: input.sessionID,
-                      })
-                    }
-                  })
-                  .catch((error) => {
-                    log.error("failed to read file", { error })
-                    const message = error instanceof Error ? error.message : error.toString()
-                    Bus.publish(Session.Event.Error, {
-                      sessionID: input.sessionID,
-                      error: new NamedError.Unknown({
-                        message,
-                      }).toObject(),
-                    })
+                      })),
+                    )
+                  } else {
                     pieces.push({
+                      ...part,
                       messageID: info.id,
                       sessionID: input.sessionID,
-                      type: "text",
-                      synthetic: true,
-                      text: `Read tool failed to read ${filepath} with the following error: ${message}`,
                     })
+                  }
+                } catch (error) {
+                  log.error("failed to read file", { error })
+                  const message = error instanceof Error ? error.message : String(error)
+                  Bus.publish(Session.Event.Error, {
+                    sessionID: input.sessionID,
+                    error: new NamedError.Unknown({
+                      message,
+                    }).toObject(),
                   })
+                  pieces.push({
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: `Read tool failed to read ${filepath} with the following error: ${message}`,
+                  })
+                }
+                // altimate_change end
 
                 return pieces
               }
@@ -2851,6 +2852,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         shell.map(async ([, cmd]) => {
           try {
             const proc = Bun.spawn([sh, ...Shell.args(sh, cmd, Instance.directory)], {
+              // altimate_change start — upstream_fix: non-bash command-template shells need an explicit cwd.
+              cwd: Instance.directory,
+              // altimate_change end
               stdout: "pipe",
               stderr: "pipe",
             })

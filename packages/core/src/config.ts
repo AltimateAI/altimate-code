@@ -138,7 +138,9 @@ export const layer = Layer.effect(
     const global = yield* Global.Service
     const location = yield* Location.Service
     const policy = yield* Policy.Service
-    const names = ["config.json", "opencode.json", "opencode.jsonc"]
+    // altimate_change start — upstream_fix: discover the fork's primary config filename in v2 layers.
+    const names = ["config.json", "opencode.json", "opencode.jsonc", "altimate-code.json"]
+    // altimate_change end
     const decodeOptions = { errors: "all", onExcessProperty: "ignore", propertyOrder: "original" } as const
     const decodeInfo = Schema.decodeUnknownOption(Info, decodeOptions)
     const decodeV1Info = Schema.decodeUnknownOption(ConfigV1.Info, decodeOptions)
