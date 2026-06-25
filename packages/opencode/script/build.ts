@@ -381,7 +381,10 @@ for (const item of targets) {
 
   const opentuiCoreDir = path.dirname(fileURLToPath(import.meta.resolve("@opentui/core")))
   const parserWorker = fs.realpathSync(path.join(opentuiCoreDir, "parser.worker.js"))
-  const workerPath = "./src/cli/cmd/tui/worker.ts"
+  // altimate_change start — upstream_fix: TUI tree relocated cli/cmd/tui -> cli/tui in this merge;
+  // build entry path must follow (was ./src/cli/cmd/tui/worker.ts -> ModuleNotFound at build).
+  const workerPath = "./src/cli/tui/worker.ts"
+  // altimate_change end
 
   // Use platform-specific bunfs root path based on target OS
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
