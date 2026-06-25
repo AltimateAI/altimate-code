@@ -25,15 +25,24 @@ export namespace Log {
   }
 
   function shouldLog(input: Level): boolean {
-    return printEnabled && levelPriority[input] >= levelPriority[level]
+    return printEnabled() && levelPriority[input] >= levelPriority[level]
   }
 
-  // Upstream's util/log.ts had an async `init({ print, level })` used by entrypoints
-  // and tests (`Log.init({ print: false })` to silence output). The Effect-logging
-  // migration dropped it; reproduce a synchronous no-op-friendly surface here so the
-  // many importers/tests keep type-checking. File logging is intentionally not
-  // reproduced — this shim only writes to stderr.
-  let printEnabled = true
+  // Whether log lines are written to stderr. Default is OFF (quiet) and is read LAZILY from
+  // OPENCODE_PRINT_LOGS at emit time. This is deliberate: the TUI runs the server in-process
+  // (cli/tui/worker.ts -> Server.Default().fetch), so an always-on stderr writer floods and
+  // corrupts the TUI. The CLI's `--print-logs` middleware sets OPENCODE_PRINT_LOGS=1
+  // (index.ts) AFTER this module is imported, so we must read it lazily, not at module load.
+  //
+  // Reading the env directly (instead of an `init()` the entrypoints must remember to call)
+  // keeps this self-correcting: every v1.x upstream merge that rewrites the entrypoints has
+  // dropped the old `Log.init({ print })` calls, which is exactly what re-flooded the TUI.
+  // With a lazy env default there is nothing for a merge to drop. `init()` still exists for
+  // tests and can force a value via the override below.
+  function printEnabled(): boolean {
+    const env = process.env["ALTIMATE_PRINT_LOGS"] ?? process.env["OPENCODE_PRINT_LOGS"]
+    return env === "1" || env === "true"
+  }
   export interface InitOptions {
     print: boolean
     dev?: boolean
@@ -41,7 +50,10 @@ export namespace Log {
   }
   export function init(options: InitOptions): void {
     if (options.level) level = options.level
-    printEnabled = options.print
+    // Force printing on/off through the same env var the lazy reader checks — one source of
+    // truth, so there is no separate in-memory flag to get out of sync, and tests reset cleanly
+    // by clearing the env. (Only tests call init(); production relies on the lazy env default.)
+    process.env["OPENCODE_PRINT_LOGS"] = options.print ? "1" : "0"
   }
 
   export type Logger = {
