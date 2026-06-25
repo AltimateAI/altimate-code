@@ -281,6 +281,31 @@ export class FileExporter implements TraceExporter {
     const toDelete = jsonFiles.slice(0, jsonFiles.length - this.maxFiles)
     await Promise.allSettled(toDelete.map((name) => fs.unlink(path.join(this.dir, name))))
   }
+
+  // altimate_change start — synchronous prune for Trace.finalizeSync()'s shutdown write. That path
+  // uses writeFileSync (the quiet Bun Worker thread doesn't flush async writes before teardown) and so
+  // bypasses export()'s pruneOldTraces — without this, the traces dir would grow unbounded for a
+  // TUI-only user. Best-effort + sync so it completes before the worker exits.
+  pruneSync() {
+    if (this.maxFiles <= 0) return
+    try {
+      const jsonFiles = fsSync
+        .readdirSync(this.dir)
+        .filter((n) => n.endsWith(".json"))
+        .sort() // UUIDv7-based filenames are lexicographically time-sorted
+      if (jsonFiles.length <= this.maxFiles) return
+      for (const name of jsonFiles.slice(0, jsonFiles.length - this.maxFiles)) {
+        try {
+          fsSync.unlinkSync(path.join(this.dir, name))
+        } catch {
+          // best-effort
+        }
+      }
+    } catch {
+      // best-effort — prune must never break shutdown
+    }
+  }
+  // altimate_change end
 }
 
 /**
@@ -1324,6 +1349,11 @@ export class Trace {
    * pending async `fs` writes from `snapshot()`/`endTrace()` are not flushed before the worker is
    * torn down — so an async finalize silently writes nothing. A synchronous write does not depend on
    * the worker's event loop being pumped. See .github/meta/night-run/E2E-TUI-TRACING-REGRESSION.md.
+   *
+   * Limitation: writes only the local file (+ a sync maxFiles prune). It does NOT invoke async
+   * `TraceExporter.export()`, so HTTP exporters don't receive the trace on this shutdown path — async
+   * network can't complete on the stalling worker loop anyway. This is no worse than the prior state
+   * (the broken TUI worker emitted no traces at all); HTTP-on-TUI-shutdown is a future enhancement.
    */
   finalizeSync(): string | undefined {
     try {
@@ -1348,6 +1378,11 @@ export class Trace {
       const filePath = path.join(this.snapshotDir, `${safeId}.json`)
       fsSync.mkdirSync(this.snapshotDir, { recursive: true })
       fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
+      // Prune synchronously — this path bypasses export()'s async pruneOldTraces, so without this the
+      // traces dir grows unbounded for a TUI-only user.
+      for (const exp of this.exporters) {
+        if (exp instanceof FileExporter) exp.pruneSync()
+      }
       return filePath
     } catch {
       // best-effort — shutdown finalize must never throw

@@ -48,6 +48,22 @@ describe("Trace.finalizeSync", () => {
     expect(trace.spans.length).toBeGreaterThan(0)
   })
 
+  test("applies maxFiles pruning synchronously (the path bypasses export()'s async prune)", () => {
+    // Regression for the Kilo finding: the sync shutdown write skips FileExporter.export, so without
+    // an explicit sync prune the traces dir grows unbounded on the TUI path.
+    for (let i = 1; i <= 4; i++) {
+      const tracer = Recap.withExporters([new FileExporter(tmpDir, 2)]) // maxFiles = 2
+      tracer.startTrace(`ses-prune-${i}`, { prompt: "x" })
+      tracer.finalizeSync()
+    }
+    const files = require("node:fs")
+      .readdirSync(tmpDir)
+      .filter((n: string) => n.endsWith(".json"))
+      .sort()
+    expect(files.length).toBe(2) // pruned to maxFiles
+    expect(files).toEqual(["ses-prune-3.json", "ses-prune-4.json"]) // oldest deleted
+  })
+
   test("flushSync (crash path) still marks 'crashed' — finalizeSync must not regress into it", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("ses-crash", { prompt: "hi" })
