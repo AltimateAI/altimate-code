@@ -112,7 +112,9 @@ export const ExperimentalApi = HttpApi.make("experimental")
           OpenApi.annotations({
             identifier: "experimental.capabilities.get",
             summary: "Get experimental capabilities",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description: "Get experimental features enabled on the Altimate Code server.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.get("console", ExperimentalPaths.console, {
@@ -146,7 +148,9 @@ export const ExperimentalApi = HttpApi.make("experimental")
           OpenApi.annotations({
             identifier: "experimental.console.switchOrg",
             summary: "Switch active Console org",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description: "Persist a new active Console account/org selection for the current local Altimate Code state.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.get("tool", ExperimentalPaths.tool, {
@@ -228,8 +232,10 @@ export const ExperimentalApi = HttpApi.make("experimental")
           OpenApi.annotations({
             identifier: "experimental.session.list",
             summary: "List sessions",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description:
               "Get a list of all Altimate Code sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.post("sessionBackground", ExperimentalPaths.sessionBackground, {

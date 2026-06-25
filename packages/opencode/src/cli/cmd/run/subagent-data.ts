@@ -1,5 +1,7 @@
 import type { Event, Message, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
+// altimate_change start — upstream_fix: Locale is exported as a named facade
 import { Locale } from "@/util/locale"
+// altimate_change end
 import {
   bootstrapSessionData,
   createSessionData,

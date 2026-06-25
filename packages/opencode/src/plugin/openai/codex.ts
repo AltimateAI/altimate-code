@@ -137,6 +137,7 @@ async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promis
   return response.json()
 }
 
+// altimate_change start — Codex OAuth success copy uses Altimate Code brand
 const HTML_SUCCESS = `<!doctype html>
 <html>
   <head>
@@ -178,7 +179,9 @@ const HTML_SUCCESS = `<!doctype html>
     </script>
   </body>
 </html>`
+// altimate_change end
 
+// altimate_change start — Codex OAuth error copy uses Altimate Code brand
 export const renderOAuthError = (error: string) => `<!doctype html>
 <html>
   <head>
@@ -226,6 +229,7 @@ export const renderOAuthError = (error: string) => `<!doctype html>
     </div>
   </body>
 </html>`
+// altimate_change end
 
 interface PendingOAuth {
   pkce: PkceCodes

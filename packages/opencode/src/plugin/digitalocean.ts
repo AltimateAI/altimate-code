@@ -58,6 +58,7 @@ function buildAuthorizeUrl(state: string): string {
   return `${DO_AUTHORIZE_URL}?${params.toString()}`
 }
 
+// altimate_change start — DigitalOcean OAuth callback copy uses Altimate Code brand
 const HTML_CALLBACK = `<!doctype html>
 <html>
   <head>
@@ -116,6 +117,7 @@ const HTML_CALLBACK = `<!doctype html>
     </script>
   </body>
 </html>`
+// altimate_change end
 
 async function startOAuthServer(): Promise<void> {
   if (oauthServer) return
@@ -340,8 +342,10 @@ export async function DigitalOceanAuthPlugin(input: PluginInput): Promise<Hooks>
             await open(url).catch(() => undefined)
             return {
               url,
+              // altimate_change start — DigitalOcean OAuth instructions use Altimate Code brand
               instructions:
                 "Sign in to DigitalOcean in your browser. Altimate Code will use your DigitalOcean API token directly for inference and load your Inference Routers. Re-run /connect to refresh routers later.",
+              // altimate_change end
               method: "auto" as const,
               async callback() {
                 try {

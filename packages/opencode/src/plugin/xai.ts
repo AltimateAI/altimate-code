@@ -285,6 +285,7 @@ export async function pollDeviceCodeToken(
   throw new Error("xAI device authorization timed out")
 }
 
+// altimate_change start — xAI OAuth success copy uses Altimate Code brand
 const HTML_SUCCESS = `<!doctype html>
 <html>
   <head>
@@ -326,7 +327,9 @@ const HTML_SUCCESS = `<!doctype html>
     </script>
   </body>
 </html>`
+// altimate_change end
 
+// altimate_change start — xAI OAuth error copy uses Altimate Code brand
 const HTML_ERROR = (error: string) => `<!doctype html>
 <html>
   <head>
@@ -374,6 +377,7 @@ const HTML_ERROR = (error: string) => `<!doctype html>
     </div>
   </body>
 </html>`
+// altimate_change end
 
 // CORS allowlist for the loopback callback. The redirect_uri itself is
 // already bound to 127.0.0.1 and gated by PKCE+state, so we only accept

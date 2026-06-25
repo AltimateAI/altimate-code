@@ -87,7 +87,9 @@ function build(key: string, remote: SelectableItem, url: string, prev?: Model): 
 
   const isMsgApi = remote.supported_endpoints?.includes("/v1/messages")
   const prices = remote.billing?.token_prices
+  // altimate_change start — Copilot pricing comment uses Altimate Code brand
   // Copilot prices are AIC per billing batch; Altimate Code stores USD per million tokens.
+  // altimate_change end
   const usdPerMillion = prices ? 10_000 / prices.batch_size : 0
 
   const model: Model = {

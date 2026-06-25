@@ -22,9 +22,11 @@ export const AcpCommand = effectCmd({
     ACPProfile.mark("cli.acp.handler")
     process.env.OPENCODE_CLIENT = "acp"
     const opts = yield* resolveNetworkOptions(args)
+    // altimate_change start — upstream_fix: preserve async server listen inside ACP profiler measure
     const server = yield* Effect.promise(() =>
       ACPProfile.measure("cli.acp.server.listen", async () => Server.listen(opts)),
     )
+    // altimate_change end
 
     const sdk = createOpencodeClient({
       baseUrl: `http://${server.hostname}:${server.port}`,

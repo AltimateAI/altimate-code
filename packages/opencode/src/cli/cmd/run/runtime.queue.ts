@@ -8,7 +8,9 @@
 // and tracks per-turn wall-clock duration for the footer status line.
 //
 // Resolves when the footer closes and all in-flight work finishes.
+// altimate_change start — upstream_fix: Locale is exported as a named facade
 import { Locale } from "@/util/locale"
+// altimate_change end
 import { MessageID, PartID } from "@/session/schema"
 import { isExitCommand, isNewCommand } from "./prompt.shared"
 import type { FooterApi, FooterEvent, FooterQueuedPrompt, RunPrompt } from "./types"

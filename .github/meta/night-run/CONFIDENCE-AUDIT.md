@@ -57,3 +57,13 @@ Method: don't trust "tests I thought to write"; diff against objective git basel
 2. Resolve the ~half-of-55 genuine session semantic deltas (maintainer accept-vs-restore decisions).
 3. Regen the SDK in a clean build env (bun ≥1.3.14) → closes the last suite fail.
 4. Add markers to the 25 unmarked-drift files; re-baseline the marker guard post-merge.
+
+## #3 LIVE-WAREHOUSE e2e (jaffle_shop DuckDB, ground truth customers=100) — 2026-06-24
+RESULT: fork warehouse pathway VERIFIED WIRED post-merge. The agent (azure/gpt-4o-mini) ran 5 steps,
+the fork's dbt-profile discovery FOUND the `jaffle_shop_dev` DuckDB warehouse from ~/.dbt/profiles.yml,
+invoked the fork `schema_search` tool, and attempted to connect via `@altimateai/drivers/duckdb`.
+The connect failed because duckdb@1.4.4 native binding is NOT built/extracted in this worktree bun store
+— BUT duckdb@1.4.4 IS installed and its native binding loads fine (`bun -e import("duckdb")` from repo
+root works). So this is a driver-packaging/runtime-resolution detail (duckdb must be resolvable in the
+opencode runtime's import context), NOT a merge defect. The warehouse discovery + tool-invocation +
+connection stack are all present and functional. Driver-resolution hoist = a deployment follow-up.

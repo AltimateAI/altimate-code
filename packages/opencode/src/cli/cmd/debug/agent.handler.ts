@@ -5,9 +5,11 @@ import { basename } from "path"
 import { Cause, Effect } from "effect"
 import { Agent } from "../../../agent/agent"
 import { Provider } from "@/provider/provider"
+// altimate_change start — upstream_fix: re-brand provider/model ids for debug tool context
 import { ModelID, ProviderID } from "@/provider/schema"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+// altimate_change end
 import { Session } from "@/session/session"
 import type { MessageV2 } from "../../../session/message-v2"
 import { MessageID, PartID } from "../../../session/schema"
@@ -77,18 +79,22 @@ const getAvailableTools = Effect.fn("Cli.debug.agent.getAvailableTools")(functio
         onSuccess: Effect.succeed,
         onFailure: (cause) => {
           const error = Cause.squash(cause) as Provider.DefaultModelError
+          // altimate_change start — upstream_fix: default-model errors now carry ids on data
           if (error instanceof Provider.ModelNotFoundError) {
             return fail(`Model not found: ${error.data.providerID}/${error.data.modelID}`)
           }
           return fail(error instanceof Error ? error.message : "No providers found")
+          // altimate_change end
         },
       }),
     ))
+  // altimate_change start — upstream_fix: ToolRegistry expects fork-branded provider/model ids
   return yield* registry.tools({
     providerID: ProviderID.make(model.providerID),
     modelID: ModelID.make(model.modelID),
     agent,
   })
+  // altimate_change end
 })
 
 function resolveTools(agent: Agent.Info, availableTools: { id: string }[]) {
@@ -145,10 +151,12 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
             onSuccess: Effect.succeed,
             onFailure: (cause) => {
               const error = Cause.squash(cause) as Provider.DefaultModelError
+              // altimate_change start — upstream_fix: default-model errors now carry ids on data
               if (error instanceof Provider.ModelNotFoundError) {
                 return fail(`Model not found: ${error.data.providerID}/${error.data.modelID}`)
               }
               return fail(error instanceof Error ? error.message : "No providers found")
+              // altimate_change end
             },
           }),
         )
@@ -160,8 +168,10 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
     role: "assistant",
     time: { created: now },
     parentID: messageID,
+    // altimate_change start — upstream_fix: SessionV1 message stores core-branded model/provider ids
     modelID: ModelV2.ID.make(model.modelID),
     providerID: ProviderV2.ID.make(model.providerID),
+    // altimate_change end
     mode: "debug",
     agent: agent.name,
     path: {

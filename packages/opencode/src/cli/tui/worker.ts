@@ -32,7 +32,9 @@ export const rpc = {
       headers,
       body: input.body,
     })
+    // altimate_change start — upstream_fix: Server.Default exposes fetch directly
     const response = await Server.Default().fetch(request)
+    // altimate_change end
     const body = await response.text()
     return {
       status: response.status,

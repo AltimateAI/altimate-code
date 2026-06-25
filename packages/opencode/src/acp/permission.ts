@@ -1,7 +1,9 @@
 import type { AgentSideConnection, PermissionOption, RequestPermissionResponse } from "@agentclientprotocol/sdk"
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { applyPatch } from "diff"
+// altimate_change start — upstream_fix: use Filesystem facade after filesystem helper extraction
 import { Filesystem } from "@/util/filesystem"
+// altimate_change end
 import type { ACPSession } from "./session"
 import { toLocations, toToolKind, type ToolInput } from "./tool"
 import { Effect } from "effect"
@@ -97,7 +99,9 @@ export class Handler {
     const diff = stringValue(metadata.diff)
     if (!filepath || !diff || !this.input.connection.writeTextFile) return
 
+    // altimate_change start — upstream_fix: read proposed edit content through Filesystem facade
     const content = (await Filesystem.exists(filepath)) ? await Filesystem.readText(filepath) : ""
+    // altimate_change end
     const next = applyPatch(content, diff)
     if (next === false) {
       return

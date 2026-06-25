@@ -66,7 +66,9 @@ export const InstanceApi = HttpApi.make("instance")
           OpenApi.annotations({
             identifier: "instance.dispose",
             summary: "Dispose instance",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description: "Clean up and dispose the current Altimate Code instance, releasing all resources.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.get("path", InstancePaths.path, {
@@ -76,8 +78,10 @@ export const InstanceApi = HttpApi.make("instance")
           OpenApi.annotations({
             identifier: "path.get",
             summary: "Get paths",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description:
               "Retrieve the current working directory and related path information for the Altimate Code instance.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.get("vcs", InstancePaths.vcs, {
@@ -143,7 +147,9 @@ export const InstanceApi = HttpApi.make("instance")
           OpenApi.annotations({
             identifier: "command.list",
             summary: "List commands",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description: "Get a list of all available commands in the Altimate Code system.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.get("agent", InstancePaths.agent, {
@@ -153,7 +159,9 @@ export const InstanceApi = HttpApi.make("instance")
           OpenApi.annotations({
             identifier: "app.agents",
             summary: "List agents",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description: "Get a list of all available AI agents in the Altimate Code system.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.get("skill", InstancePaths.skill, {
@@ -163,7 +171,9 @@ export const InstanceApi = HttpApi.make("instance")
           OpenApi.annotations({
             identifier: "app.skills",
             summary: "List skills",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description: "Get a list of all available skills in the Altimate Code system.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.get("lsp", InstancePaths.lsp, {

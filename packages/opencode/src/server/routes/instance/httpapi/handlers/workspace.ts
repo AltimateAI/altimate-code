@@ -2,7 +2,9 @@ import { listAdapters } from "@/control-plane/adapters"
 import { Workspace } from "@/control-plane/workspace"
 import * as InstanceState from "@/effect/instance-state"
 import { Vcs } from "@/project/vcs"
+// altimate_change start — upstream_fix: workspace control-plane expects core ProjectV2 ids
 import { ProjectV2 } from "@opencode-ai/core/project"
+// altimate_change end
 import { Cause, Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
@@ -16,7 +18,9 @@ export const workspaceHandlers = HttpApiBuilder.group(InstanceHttpApi, "workspac
 
     const adapters = Effect.fn("WorkspaceHttpApi.adapters")(function* () {
       const instance = yield* InstanceState.context
+      // altimate_change start — upstream_fix: re-brand instance project id before adapter lookup
       return yield* Effect.sync(() => listAdapters(ProjectV2.ID.make(instance.project.id)))
+      // altimate_change end
     })
 
     const list = Effect.fn("WorkspaceHttpApi.list")(function* () {
@@ -29,7 +33,9 @@ export const workspaceHandlers = HttpApiBuilder.group(InstanceHttpApi, "workspac
         .create({
           ...ctx.payload,
           extra: ctx.payload.extra ?? null,
+          // altimate_change start — upstream_fix: re-brand instance project id before workspace create
           projectID: ProjectV2.ID.make(instance.project.id),
+          // altimate_change end
         })
         .pipe(
           Effect.catchCause((cause) => {

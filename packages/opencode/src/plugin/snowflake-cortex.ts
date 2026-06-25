@@ -156,6 +156,7 @@ async function refreshAccessToken(account: string, refreshToken: string) {
   return token
 }
 
+// altimate_change start — Snowflake OAuth success copy uses Altimate Code brand
 const HTML_SUCCESS = `<!doctype html>
 <html>
   <head><title>Altimate Code - Snowflake Authorization Successful</title></head>
@@ -167,7 +168,9 @@ const HTML_SUCCESS = `<!doctype html>
     <script>setTimeout(() => window.close(), 1500)</script>
   </body>
 </html>`
+// altimate_change end
 
+// altimate_change start — Snowflake OAuth error copy uses Altimate Code brand
 const htmlError = (message: string) => `<!doctype html>
 <html>
   <head><title>Altimate Code - Snowflake Authorization Failed</title></head>
@@ -178,6 +181,7 @@ const htmlError = (message: string) => `<!doctype html>
     </div>
   </body>
 </html>`
+// altimate_change end
 
 async function startOAuthServer() {
   if (oauthServer) return
@@ -496,8 +500,10 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
 
             return {
               url,
+              // altimate_change start — Snowflake OAuth instructions use Altimate Code brand
               instructions:
                 "Complete Snowflake sign-in in your browser. Altimate Code will capture the OAuth callback and store the bearer token automatically.",
+              // altimate_change end
               method: "auto" as const,
               async callback() {
                 try {

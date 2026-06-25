@@ -1,4 +1,6 @@
+// altimate_change start — upstream_fix: Locale is exported as a named facade
 import { Locale } from "@/util/locale"
+// altimate_change end
 import type { SessionMessages } from "./session.shared"
 import type { RunProvider, StreamCommit } from "./types"
 

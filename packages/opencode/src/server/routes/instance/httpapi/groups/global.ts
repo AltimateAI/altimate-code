@@ -81,7 +81,9 @@ export const GlobalApi = HttpApi.make("global").add(
         OpenApi.annotations({
           identifier: "global.health",
           summary: "Get health",
+          // altimate_change start — OpenAPI description uses Altimate Code brand
           description: "Get health information about the Altimate Code server.",
+          // altimate_change end
         }),
       ),
       HttpApiEndpoint.get("event", GlobalPaths.event, {
@@ -90,7 +92,9 @@ export const GlobalApi = HttpApi.make("global").add(
         OpenApi.annotations({
           identifier: "global.event",
           summary: "Get global events",
+          // altimate_change start — OpenAPI description uses Altimate Code brand
           description: "Subscribe to global events from the Altimate Code system using server-sent events.",
+          // altimate_change end
         }),
       ),
       HttpApiEndpoint.get("configGet", GlobalPaths.config, {
@@ -99,7 +103,9 @@ export const GlobalApi = HttpApi.make("global").add(
         OpenApi.annotations({
           identifier: "global.config.get",
           summary: "Get global configuration",
+          // altimate_change start — OpenAPI description uses Altimate Code brand
           description: "Retrieve the current global Altimate Code configuration settings and preferences.",
+          // altimate_change end
         }),
       ),
       HttpApiEndpoint.patch("configUpdate", GlobalPaths.config, {
@@ -110,7 +116,9 @@ export const GlobalApi = HttpApi.make("global").add(
         OpenApi.annotations({
           identifier: "global.config.update",
           summary: "Update global configuration",
+          // altimate_change start — OpenAPI description uses Altimate Code brand
           description: "Update global Altimate Code configuration settings and preferences.",
+          // altimate_change end
         }),
       ),
       HttpApiEndpoint.post("dispose", GlobalPaths.dispose, {
@@ -119,7 +127,9 @@ export const GlobalApi = HttpApi.make("global").add(
         OpenApi.annotations({
           identifier: "global.dispose",
           summary: "Dispose instance",
+          // altimate_change start — OpenAPI description uses Altimate Code brand
           description: "Clean up and dispose all Altimate Code instances, releasing all resources.",
+          // altimate_change end
         }),
       ),
       HttpApiEndpoint.post("upgrade", GlobalPaths.upgrade, {

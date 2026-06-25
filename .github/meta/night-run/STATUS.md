@@ -276,3 +276,37 @@ FIXED this pass: server httpapi-v2-location (src), @opencode/Account Service ded
 ATTEMPTED but reverted (not safely fixable in this worktree): httpapi-sdk regen (cascaded to 418 typecheck errors + made test worse; needs proper build env — generated-artifact, not runtime defect).
 DOCUMENTED remaining (not runtime defects, none block agent): httpapi-sdk(1, SDK-regen in build-env), 51 session structural deltas (Effect-facade test-injection + prompt-loop/cancel routing — focused architectural pass), marker-rebaseline(post-merge), bun>=1.3.14(env).
 VERDICT: merge ship-ready as feature branch — agent works end-to-end, suite 10560/1, 90 new guard tests, 0 fork features dropped, real regressions fixed. Last fail + 51 deltas are documented non-blocking follow-ups. Deliverables: SHIP-REPORT.md, SESSION-DELTA-REVIEW.md, MERGE-REGRESSIONS-FOUND.md, e2e/RESULTS.md, PR-BODY.md. Budget ~$4/$50. RUN COMPLETE.
+
+## CHECKPOINT 28 — autonomous accept-vs-restore panel + marker fix + live-warehouse e2e — 2026-06-24
+USER: fix 25 marker files + 25-cosmetic; resolve session accept-vs-restore via AGENT TEAM (no humans).
+RUNNING:
+- codex-markers /tmp/fix_markers.log: add altimate_change markers to the 25 unmarked-drift files (/tmp/unmarked_drift.txt), comment-only.
+- PANEL (read-only, autonomous): Agent A (a11a8115, upstream-fidelity) -> panel-A.md; Agent B (a710b0a6, fork-guardian) -> panel-B.md; Agent C (ae5a152b, user-impact tiebreaker) -> panel-C.md. Each gives per-delta TEST-ARCH/ACCEPT/RESTORE verdict for the ~51 non-flaky session deltas.
+- warehouse e2e /tmp/wh_e2e.log: agent queries jaffle_shop DuckDB (GROUND TRUTH: customers=100). Verifies fork data-tool stack live.
+RECONCILE (when panels land): per delta, MAJORITY of A/B/C wins; all-3-different -> C (tiebreaker) decides; safety/data-integrity ties -> RESTORE. Write consensus to DECISIONS.md.
+THEN IMPLEMENT (codex, scoped test/session+minimal src/session, file-by-file, production-verify each, revert-if-broken — session2 discipline): TEST-ARCH -> fix test to inject fake via Effect layer + re-enable; ACCEPT -> update test assertion to new behavior + re-enable; RESTORE -> minimal src fix to restore fork behavior + re-enable. Leave un-fixable as .todo w/ note. Target: drive the 55 todos down.
+ON WAKE: (1) check wh e2e (did agent return 100 via fork sql/warehouse tools?). (2) collect codex-markers -> verify typecheck 0 + production + fewer marker warnings -> commit. (3) collect 3 panels -> reconcile -> DECISIONS.md -> launch implementer. (4) after implement: verify session 0 fail + fewer todo + typecheck 0 + production WORKING -> commit -> re-run full suite -> update SHIP-REPORT/CONFIDENCE-AUDIT. Budget ~$5/$50.
+
+## CHECKPOINT 29 — panel verdicts (A+C in, B pending); refined reconciliation — 2026-06-24
+- Panel A (upstream-fidelity): TEST-ARCH 49 / ACCEPT 0 / RESTORE 7 (with file:line). Panel C (user-impact): RESTORE ~24 / ACCEPT ~10 / TEST-ARCH ~32. Panel B (fork-guardian): running.
+- KEY DECOMPOSITION (high confidence): the 56 session .todo split into:
+  * RESTORE (~7 high-conf, A+C agree): real dropped behaviors, minimal src fixes:
+    1. message-v2 partial bash output for aborted tools (msg-v2.ts ~337)
+    2. message-v2 server_error/overloaded -> retryable APIError (provider/error.ts nested decode)
+    3. message-v2 space-substitute between signed reasoning blocks
+    4. snapshot-tool-race: pre-capture snapshot before stream (vs at start-step)
+    5. prompt: respect compaction.auto:false (don't auto-compact on overflow)
+    6. prompt: command ! expansion use Shell.preferred(cfg.shell) (prompt.ts ~2491)
+    7. prompt: content-filter finish -> session Error
+  * TEST-ARCH (~49): (a) harness/injection mismatch — fork keeps imperative session singletons behind thin
+    Effect facades; v1.17.9 tests expect injectable Services so fakes don't reach code (behavior EXISTS, not broken);
+    (b) UNPORTED upstream features (preserve-token-budget tail, head/tail summary split, repeated-compaction
+    anchoring, subtask Permission.merge) = NOT regressions, fork never adopted them.
+  * 0 ACCEPT.
+- RECONCILE PLAN: implement the ~7 RESTORE (minimal src, file:line from panel-A.md, production-verify each, revert-if-broken).
+  For TEST-ARCH: fix tests to inject via Effect layer where feasible (re-enable); document unported-features as
+  enhancements (leave .todo, NOT regressions). This reframes "52 regressions" -> ~7 real dropped-behavior fixes
+  + ~49 test-harness/unported-feature items (mostly not runtime regressions).
+- ON WAKE (heartbeat 22:40): get panel B -> reconcile A/B/C into DECISIONS.md (RESTORE = union of high-conf; majority for rest)
+  -> implement RESTORE set (codex, scoped src/session+test/session, file-by-file, production-verify, revert-if-broken)
+  -> verify + commit + re-run suite. Collect + commit markers. Update SHIP-REPORT/CONFIDENCE-AUDIT/DECISIONS.

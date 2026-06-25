@@ -17,7 +17,9 @@ import {
   type ScrollbackSnapshot,
   type ScrollbackWriter,
 } from "@opentui/core"
+// altimate_change start — upstream_fix: Locale is exported as a named facade
 import { Locale } from "@/util/locale"
+// altimate_change end
 import { go } from "@/cli/logo"
 import type { RunSplashTheme } from "./theme"
 
@@ -194,7 +196,9 @@ function build(input: SplashWriterInput, kind: "entry" | "exit", ctx: Scrollback
       })
     }
 
+    // altimate_change start — splash title uses Altimate Code brand
     push(lines, body_left, top, "Altimate Code", right, undefined, TextAttributes.BOLD)
+    // altimate_change end
     if (input.detail) {
       push(
         lines,

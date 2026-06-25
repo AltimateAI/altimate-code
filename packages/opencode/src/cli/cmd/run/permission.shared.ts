@@ -124,6 +124,7 @@ export function permissionInfo(request: PermissionRequest): PermissionInfo {
 }
 
 export function permissionAlwaysLines(request: PermissionRequest): string[] {
+  // altimate_change start — permission prompt restart copy uses Altimate Code brand
   if (request.always.length === 1 && request.always[0] === "*") {
     return [`This will allow ${request.permission} until Altimate Code is restarted.`]
   }
@@ -132,6 +133,7 @@ export function permissionAlwaysLines(request: PermissionRequest): string[] {
     "This will allow the following patterns until Altimate Code is restarted.",
     ...request.always.map((item) => `- ${item}`),
   ]
+  // altimate_change end
 }
 
 export function permissionLabel(option: PermissionOption): string {

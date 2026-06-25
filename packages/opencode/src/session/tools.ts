@@ -18,7 +18,9 @@ import { Session } from "./session"
 import { SessionProcessor } from "./processor"
 import { PartID } from "./schema"
 import { EffectBridge } from "@/effect/bridge"
+// altimate_change start — upstream_fix: ToolRegistry expects fork-branded model ids here
 import { ModelID } from "@/provider/schema"
+// altimate_change end
 
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
@@ -71,7 +73,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   })
 
   for (const item of yield* registry.tools({
+    // altimate_change start — upstream_fix: re-brand API model id for ToolRegistry resolution
     modelID: ModelID.make(input.model.api.id),
+    // altimate_change end
     providerID: input.model.providerID,
     agent: input.agent,
   })) {

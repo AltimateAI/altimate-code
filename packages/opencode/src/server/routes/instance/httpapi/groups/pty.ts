@@ -58,7 +58,9 @@ export const PtyApi = HttpApi.make("pty")
           OpenApi.annotations({
             identifier: "pty.list",
             summary: "List PTY sessions",
+            // altimate_change start — OpenAPI description uses Altimate Code brand
             description: "Get a list of all active pseudo-terminal (PTY) sessions managed by Altimate Code.",
+            // altimate_change end
           }),
         ),
         HttpApiEndpoint.post("create", PtyPaths.create, {

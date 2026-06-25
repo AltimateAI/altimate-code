@@ -34,7 +34,9 @@ import type { WebFetchTool } from "@/tool/webfetch"
 import { webSearchProviderLabel, type WebSearchTool } from "@/tool/websearch"
 import type { WriteTool } from "@/tool/write"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
+// altimate_change start — upstream_fix: Locale is exported as a named facade
 import { Locale } from "@/util/locale"
+// altimate_change end
 import type { RunEntryBody, StreamCommit, ToolSnapshot } from "./types"
 
 export type ToolView = {
@@ -73,6 +75,7 @@ export type ToolPermissionInfo = {
   file?: string
 }
 
+// altimate_change start — upstream_fix: support legacy fork tools whose schemas infer to unknown
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
 // param schema erases to `unknown`), fall back to an open string-keyed dict so the
 // display helpers can still read fields like `input.command`.
@@ -90,6 +93,7 @@ type ToolPermissionProps<T = Tool.Info> = {
   metadata: ToolMeta<T>
   patterns: string[]
 }
+// altimate_change end
 
 type ToolPermissionCtx = {
   input: ToolDict
@@ -1249,10 +1253,12 @@ function rule(name?: string): AnyToolRule | undefined {
     return undefined
   }
 
+  // altimate_change start — upstream_fix: erase per-tool rule union after key narrowing
   // Per-tool rules are keyed by the matching tool name; the union of
   // `ToolRule<specificTool>` is contravariantly incompatible with the erased
   // `AnyToolRule`, but each rule only ever receives its own tool's frame.
   return TOOL_RULES[name] as AnyToolRule
+  // altimate_change end
 }
 
 function frame(part: ToolPart): ToolFrame {

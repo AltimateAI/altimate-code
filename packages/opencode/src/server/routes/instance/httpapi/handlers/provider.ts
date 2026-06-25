@@ -48,9 +48,11 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
       }
       const connected = yield* provider.list()
       const providers = Object.assign(
+        // altimate_change start — upstream_fix: widen readonly ModelsDev providers for Provider conversion
         // ModelsDev.Service yields a deeply-readonly Provider; fromModelsDevProvider only
         // reads it, so widen the readonly shape to the mutable signature it expects.
         mapValues(filtered, (item) => Provider.fromModelsDevProvider(item as Parameters<typeof Provider.fromModelsDevProvider>[0])),
+        // altimate_change end
         connected,
       )
       return {
