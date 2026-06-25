@@ -76,10 +76,18 @@ worker is torn down. This is NOT: a shape mismatch (ruled out), a loadConfig rac
 a handleEvent throw (logged none), or `getOrCreateTrace` returning null (dir present throughout).
 
 So the remaining work is a Bun-Worker async-write/lifecycle issue in the snapshot/flush path, not the
-event wiring. Likely fix direction: make the shutdown path **synchronously** finalize (the existing
-`flushSync` crash-write path) rather than rely on async `fs` settling, and/or ensure the worker's
-event loop drains pending trace writes before `worker.terminate()`. Tracked as a focused follow-up;
-the worker wiring change was reverted (not shipped) so we don't ship a fix that only works with logs on.
+event wiring. **Dead end ruled out:** `Trace.flushSync()` is NOT the fix — it hard-codes
+`summary.status = "crashed"` and marks the trace crashed, so using it for a clean TUI quit would
+mislabel every normal session as crashed.
+
+Most likely root: in the Bun **Worker thread** on the quiet path, async `fs` callbacks (the consumer's
+`rehydrateFromFile`'s `await fs.readFile`, and `snapshot()`'s `fs.writeFile`+rename) don't get their
+libuv callbacks processed — so `getOrCreateTrace` never settles and `sessionTraces` stays empty. Log
+I/O (PRINT_LOGS/DEBUG) keeps the loop active enough that they do. Next investigation should confirm
+this with a minimal repro (an `await fs.readFile` inside a worker `GlobalBus.on` handler on the quiet
+path) and fix at that layer — e.g. keep the worker loop ticking while trace work is pending, or run
+the consumer's file I/O on a path that isn't subject to the stall. The worker wiring change was
+reverted (not shipped) so we don't ship a fix that only works with logs on.
 
 Note: haider's tracing fixes (PR #867 + #895) live in `trace-consumer.ts` and are **fully preserved**
 in this branch (our copy == main except two import-path repoints). This regression is purely the
