@@ -22,9 +22,11 @@ import { Provider as ProviderSvc } from "@/provider/provider"
 import { Env } from "../../src/env"
 import { Git } from "../../src/git"
 import { Image } from "../../src/image/image"
+import { GlobalBus } from "../../src/bus/global"
 
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
+import { Session as LegacySession } from "../../src/session"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
@@ -517,10 +519,9 @@ it.instance("loop calls LLM and returns assistant message", () =>
 // processor facade. Active runs either fall through to real provider paths or time out before cancellation/busy-state
 // cleanup is observable. Minimal src fix: packages/opencode/src/session/prompt.ts must route loop, cancel, shell, and
 // child-task execution through the same Effect SessionProcessor/SessionStatus runtime instead of mixed singleton facades.
-it.instance.todo("loop surfaces content-filter finishes as session errors", () =>
+it.instance("loop surfaces content-filter finishes as session errors", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
-    const events = yield* EventV2Bridge.Service
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
     const chat = yield* sessions.create({ title: "Pinned" })
@@ -529,12 +530,13 @@ it.instance.todo("loop surfaces content-filter finishes as session errors", () =
       name: "ContentFilterError",
       data: { message: "The response was blocked by the provider's content filter" },
     } satisfies NonNullable<SessionV1.Assistant["error"]>
-    const off = yield* events.listen((event) => {
-      if (event.type !== Session.Event.Error.type) return Effect.void
-      const data = event.data as typeof Session.Event.Error.data.Type
+    const onError = (event: { payload: any }) => {
+      if (event.payload?.type !== LegacySession.Event.Error.type) return
+      const data = event.payload.properties
       if (data.sessionID === chat.id && data.error) errors.push(data.error)
-      return Effect.void
-    })
+    }
+    GlobalBus.on("event", onError)
+    const off = () => GlobalBus.off("event", onError)
 
     yield* prompt.prompt({
       sessionID: chat.id,
@@ -546,7 +548,7 @@ it.instance.todo("loop surfaces content-filter finishes as session errors", () =
 
     const result = yield* prompt.loop({ sessionID: chat.id })
     const stored = MessageV2.get({ sessionID: chat.id, messageID: result.info.id })
-    yield* off
+    off()
 
     expect(yield* llm.hits).toHaveLength(1)
     expect(result.info.role).toBe("assistant")
@@ -562,7 +564,7 @@ it.instance.todo("loop surfaces content-filter finishes as session errors", () =
     )
   }),
 )
-it.instance.todo("loop stops provider overflow instead of auto-compacting when disabled", () =>
+it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
       ...providerCfg(url),
@@ -772,7 +774,7 @@ it.instance("glob tool keeps instance context during prompt runs", () =>
     expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
   }),
 )
-it.instance.todo("loop continues when finish is stop but assistant has tool parts", () =>
+it.instance("loop continues when finish is stop but assistant has tool parts", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
     const prompt = yield* SessionPrompt.Service
@@ -1673,7 +1675,7 @@ it.instance.todo(
   { git: true },
   3_000,
 )
-it.instance.todo(
+it.instance(
   "command ! expansion uses configured shell over env shell",
   () =>
     withSh(() =>

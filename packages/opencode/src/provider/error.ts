@@ -165,12 +165,15 @@ export namespace ProviderError {
     | {
         type: "api_error"
         message: string
-        isRetryable: false
+        isRetryable: boolean
         responseBody: string
       }
 
   export function parseStreamError(input: unknown): ParsedStreamError | undefined {
-    const body = json(input)
+    const raw = json(input)
+    // altimate_change — upstream_fix: OpenAI Responses streams can wrap the
+    // real error JSON inside a top-level `message` string.
+    const body = typeof raw?.message === "string" ? (json(raw.message) ?? raw) : raw
     if (!body) return
 
     const responseBody = JSON.stringify(body)
@@ -204,10 +207,18 @@ export namespace ProviderError {
           isRetryable: false,
           responseBody,
         }
+      case "server_is_overloaded":
+      case "server_error":
+        return {
+          type: "api_error",
+          message: typeof body?.error?.message === "string" ? body?.error?.message : "Server error.",
+          isRetryable: true,
+          responseBody,
+        }
     }
 
     // altimate_change start — upstream_fix: extend extraction to non-OpenAI error
-    // codes. The switch above only handles 4 OpenAI shapes; everything else fell
+    // codes. The switch above only handles known OpenAI shapes; everything else fell
     // through to `JSON.stringify(e)` in the caller (session/message-v2.ts), which
     // showed users `Unknown: {"type":"error",...}`. Apply the same string-typeof
     // chain we use in parseAPICallError so any extractable provider message lands

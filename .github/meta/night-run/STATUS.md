@@ -310,3 +310,13 @@ ON WAKE: (1) check wh e2e (did agent return 100 via fork sql/warehouse tools?). 
 - ON WAKE (heartbeat 22:40): get panel B -> reconcile A/B/C into DECISIONS.md (RESTORE = union of high-conf; majority for rest)
   -> implement RESTORE set (codex, scoped src/session+test/session, file-by-file, production-verify, revert-if-broken)
   -> verify + commit + re-run suite. Collect + commit markers. Update SHIP-REPORT/CONFIDENCE-AUDIT/DECISIONS.
+
+## CHECKPOINT 30 — independent codex validation queued ("extra eye") — 2026-06-24
+USER: add more independent codex validation. PLAN: after the implementer (8 RESTORE) lands + commits on a STABLE tree,
+run TWO independent codex audit passes (read-only second opinion), then reconcile findings.
+- Audit task saved: .github/meta/night-run/codex-audit-task.txt (independently re-derives #1 carry-forward / #2 upstream-
+  complete / #3 nothing-broke from git+tree, reviews DECISIONS.md panel consensus + the 8 RESTORE diffs, and actively
+  hunts for issues the existing docs MISSED). Output -> CODEX-AUDIT.md.
+- Run AFTER implementer is done (mid-edit tree gives noisy test results). Launch pass 1; then a pass 2 from a different
+  angle (e.g. security/branding + behavioral-diff focus) for redundancy. Reconcile any disagreements into SHIP-REPORT.md.
+- Deferred (don't collide): implementer is editing src/session/{processor,prompt,message-v2,compaction}.ts now.

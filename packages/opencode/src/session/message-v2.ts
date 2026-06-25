@@ -69,6 +69,14 @@ export namespace MessageV2 {
       retries: z.number(),
     }),
   )
+  // altimate_change — upstream_fix: content-filter finishes are persisted as
+  // assistant errors so the session surfaces provider blocking clearly.
+  export const ContentFilterError = NamedError.create(
+    "ContentFilterError",
+    z.object({
+      message: z.string(),
+    }),
+  )
   export const AuthError = NamedError.create(
     "ProviderAuthError",
     z.object({
@@ -451,6 +459,7 @@ export namespace MessageV2 {
         OutputLengthError.Schema,
         AbortedError.Schema,
         StructuredOutputError.Schema,
+        ContentFilterError.Schema,
         ContextOverflowError.Schema,
         APIError.Schema,
       ])
@@ -748,13 +757,24 @@ export namespace MessageV2 {
           role: "assistant",
           parts: [],
         }
+        // altimate_change start — upstream_fix: preserve a non-empty separator
+        // between Anthropic signed reasoning blocks during replay.
+        const hasSignedReasoning = msg.parts.some((part) => {
+          if (part.type !== "reasoning") return false
+          return part.metadata?.anthropic?.signature != null
+        })
+        // altimate_change end
         for (const part of msg.parts) {
-          if (part.type === "text")
+          if (part.type === "text") {
+            // altimate_change — upstream_fix: AI SDK drops "", but Anthropic
+            // signed reasoning needs a surviving separator.
+            const text = part.text === "" && hasSignedReasoning ? " " : part.text
             assistantMessage.parts.push({
               type: "text",
-              text: part.text,
+              text,
               ...(differentModel ? {} : { providerMetadata: part.metadata }),
             })
+          }
           if (part.type === "step-start")
             assistantMessage.parts.push({
               type: "step-start",
@@ -802,15 +822,30 @@ export namespace MessageV2 {
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
               })
             }
-            if (part.state.status === "error")
-              assistantMessage.parts.push({
-                type: ("tool-" + part.tool) as `tool-${string}`,
-                state: "output-error",
-                toolCallId: part.callID,
-                input: part.state.input,
-                errorText: part.state.error,
-                ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
-              })
+            if (part.state.status === "error") {
+              // altimate_change start — upstream_fix: preserve partial output from aborted tools.
+              const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
+              if (typeof output === "string") {
+                assistantMessage.parts.push({
+                  type: ("tool-" + part.tool) as `tool-${string}`,
+                  state: "output-available",
+                  toolCallId: part.callID,
+                  input: part.state.input,
+                  output,
+                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                })
+              } else {
+                assistantMessage.parts.push({
+                  type: ("tool-" + part.tool) as `tool-${string}`,
+                  state: "output-error",
+                  toolCallId: part.callID,
+                  input: part.state.input,
+                  errorText: part.state.error,
+                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                })
+              }
+              // altimate_change end
+            }
             // Handle pending/running tool calls to prevent dangling tool_use blocks
             // Anthropic/Claude APIs require every tool_use to have a corresponding tool_result
             if (part.state.status === "pending" || part.state.status === "running")

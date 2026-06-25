@@ -126,7 +126,7 @@ const providerCfg = (url: string) => ({
 // BUG: REGRESSION: instant tool execution can still outrun snapshot capture; the tool completes and creates the file,
 // but SessionSummary.diff remains empty. Minimal src fix: packages/opencode/src/session/processor.ts:299-300 must
 // capture the pre-tool snapshot before provider/tool execution can mutate the worktree.
-it.live.todo("tool execution produces non-empty session diff (snapshot race)", () =>
+it.live("tool execution produces non-empty session diff (snapshot race)", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {
       const prompt = yield* SessionPrompt.Service

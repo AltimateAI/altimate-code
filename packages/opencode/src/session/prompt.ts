@@ -37,7 +37,6 @@ import { Flag } from "../flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
 import { Command } from "../command"
-import { $ } from "bun"
 import { pathToFileURL, fileURLToPath } from "url"
 import { ConfigMarkdown } from "../config/markdown"
 import { SessionSummary } from "./summary"
@@ -472,14 +471,26 @@ export namespace SessionPrompt {
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
       // altimate_change end
+      // altimate_change start — upstream_fix: a provider can finish with
+      // "stop" while still emitting tool parts; those tools must be replayed
+      // into the next loop instead of terminating the session.
+      const lastAssistantHasToolParts =
+        lastAssistant !== undefined &&
+        (msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts.some((part) => {
+          if (part.type !== "tool") return false
+          return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
+        }) ??
+          false)
       if (
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+        !lastAssistantHasToolParts &&
         lastUser.id < lastAssistant.id
       ) {
         log.info("exiting loop", { sessionID })
         break
       }
+      // altimate_change end
 
       step++
       if (step === 1)
@@ -2488,7 +2499,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       },
     }
     await Session.updatePart(part)
-    const shell = Shell.preferred()
+    // altimate_change — upstream_fix: command expansion must honor configured shell.
+    const shell = Shell.preferred((await Config.get()).shell)
     const shellName = (
       process.platform === "win32" ? path.win32.basename(shell, ".exe") : path.basename(shell)
     ).toLowerCase()
@@ -2832,15 +2844,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const shell = ConfigMarkdown.shell(template)
     if (shell.length > 0) {
+      // altimate_change start — upstream_fix: command template shell
+      // expansion must honor configured shell instead of Bun's default parser.
+      const sh = Shell.preferred((await Config.get()).shell)
       const results = await Promise.all(
         shell.map(async ([, cmd]) => {
           try {
-            return await $`${{ raw: cmd }}`.quiet().nothrow().text()
+            const proc = Bun.spawn([sh, ...Shell.args(sh, cmd, Instance.directory)], {
+              stdout: "pipe",
+              stderr: "pipe",
+            })
+            const [stdout, stderr, exitCode] = await Promise.all([
+              new Response(proc.stdout).text(),
+              new Response(proc.stderr).text(),
+              proc.exited,
+            ])
+            return exitCode === 0 ? stdout : stdout || stderr
           } catch (error) {
             return `Error executing command: ${error instanceof Error ? error.message : String(error)}`
           }
         }),
       )
+      // altimate_change end
       let index = 0
       template = template.replace(bashRegex, () => results[index++])
     }

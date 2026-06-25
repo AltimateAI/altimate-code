@@ -80,6 +80,11 @@ export namespace SessionProcessor {
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+            if (snapshot === undefined) {
+              // altimate_change — upstream_fix: capture the pre-tool snapshot
+              // before the LLM stream can execute provider-side tools.
+              snapshot = await Snapshot.track()
+            }
             const stream = await LLM.stream(streamInput)
 
             for await (const value of stream.fullStream) {
@@ -297,7 +302,7 @@ export namespace SessionProcessor {
                   throw value.error
 
                 case "start-step":
-                  snapshot = await Snapshot.track()
+                  if (snapshot === undefined) snapshot = await Snapshot.track()
                   // altimate_change start — record step start time for generation telemetry duration
                   stepStartTime = Date.now()
                   // altimate_change end
@@ -319,6 +324,18 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  if (value.finishReason === "content-filter") {
+                    // altimate_change start — upstream_fix: content-filter
+                    // finishes are session errors, not successful stops.
+                    input.assistantMessage.error = new MessageV2.ContentFilterError({
+                      message: "The response was blocked by the provider's content filter",
+                    }).toObject()
+                    await Bus.publish(Session.Event.Error, {
+                      sessionID: input.assistantMessage.sessionID,
+                      error: input.assistantMessage.error,
+                    })
+                    // altimate_change end
+                  }
                   // altimate_change start — emit per-generation telemetry with token breakdown
                   // Optional fields are only included when the provider actually returns them.
                   Telemetry.track({
@@ -524,11 +541,24 @@ export namespace SessionProcessor {
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
             if (MessageV2.ContextOverflowError.isInstance(error)) {
-              needsCompaction = true
-              Bus.publish(Session.Event.Error, {
-                sessionID: input.sessionID,
-                error,
-              })
+              if ((await Config.get()).compaction?.auto === false && !input.assistantMessage.summary) {
+                // altimate_change start — upstream_fix: honor
+                // compaction.auto=false on reactive provider overflow.
+                input.assistantMessage.error = error
+                input.assistantMessage.finish = "error"
+                await Bus.publish(Session.Event.Error, {
+                  sessionID: input.sessionID,
+                  error,
+                })
+                await SessionStatus.set(input.sessionID, { type: "idle" })
+                // altimate_change end
+              } else {
+                needsCompaction = true
+                Bus.publish(Session.Event.Error, {
+                  sessionID: input.sessionID,
+                  error,
+                })
+              }
             } else {
               const retry = SessionRetry.retryable(error)
               // altimate_change start — cap retries to avoid infinite loops, log on exhaustion
