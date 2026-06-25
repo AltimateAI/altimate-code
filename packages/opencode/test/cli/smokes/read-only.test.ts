@@ -87,6 +87,21 @@ describe("opencode read-only commands (smoke)", () => {
     60_000,
   )
 
+  // `skill list` enumerates skills through the in-process server. Regression guard:
+  // it previously exited 1 with "InstanceRef not provided" because the local
+  // Skill.all() facade could not see the bootstrap instance in this CLI path (the
+  // instance ALS is duplicated across the module-resolution boundary) — fixed by
+  // reading through the server client. Empty test home still exits 0.
+  cliIt.live(
+    "skill list: exits 0",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const r = yield* opencode.spawn(["skill", "list"])
+        opencode.expectExit(r, 0, "skill list")
+      }),
+    60_000,
+  )
+
   // `stats` aggregates token usage from the session DB. Empty DB → all zeros.
   cliIt.live(
     "stats: exits 0",
