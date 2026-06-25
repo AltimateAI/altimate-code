@@ -593,4 +593,122 @@ describe("DatabaseMigration", () => {
       }),
     )
   })
+
+  // The current-schema fingerprint (currentSchemaTables/Columns/Indexes) lets applyOnly adopt a
+  // DB that is already at the generated schema but missing the migration journal. It is hand-maintained,
+  // so it can silently drift from schema.gen — a new migration that adds a table/column/index without
+  // updating the fingerprint makes a DB at the previous schema falsely fingerprint as "current",
+  // marking the new migration applied without running it (the object never gets created). These guards
+  // fail loudly the moment the fingerprint diverges from the generated schema.
+  describe("schema fingerprint drift guard", () => {
+    // Build a throwaway DB containing ONLY the generated schema (the source of truth).
+    function generatedSchemaSqlite() {
+      const sqlite = new BunDatabase(":memory:")
+      const tx = {
+        run: (query: string) =>
+          Effect.sync(() => {
+            sqlite.run(query)
+          }),
+      }
+      Effect.runSync(freshSchema.up(tx as never))
+      return sqlite
+    }
+
+    test("currentSchemaTables lists exactly the generated user tables", () => {
+      const sqlite = generatedSchemaSqlite()
+      try {
+        const actual = (
+          sqlite
+            .query(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('migration', '__drizzle_migrations')",
+            )
+            .all() as { name: string }[]
+        )
+          .map((row) => row.name)
+          .sort()
+        // If this fails, a migration changed the generated table set without updating
+        // currentSchemaTables in migration.ts — add/remove the table in the fingerprint.
+        const fingerprint: string[] = [...DatabaseMigration.currentSchemaTables]
+        expect(fingerprint.sort()).toEqual(actual)
+      } finally {
+        sqlite.close()
+      }
+    })
+
+    test("currentSchemaIndexes lists exactly the generated indexes", () => {
+      const sqlite = generatedSchemaSqlite()
+      try {
+        const actual = (
+          sqlite
+            .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")
+            .all() as { name: string }[]
+        )
+          .map((row) => row.name)
+          .sort()
+        // Set-equality (not subset): catches both a stale fingerprint entry AND a new generated index
+        // that a migration added without updating currentSchemaIndexes in migration.ts.
+        const fingerprint: string[] = [...DatabaseMigration.currentSchemaIndexes]
+        expect(fingerprint.sort()).toEqual(actual)
+      } finally {
+        sqlite.close()
+      }
+    })
+
+    test("currentSchemaColumns references live generated columns", () => {
+      // currentSchemaColumns is an intentionally curated subset (the columns that distinguish recent
+      // schema versions), so this validates only that every listed column still exists — it catches a
+      // renamed/dropped column. A brand-new column on an existing table is the narrow residual gap and
+      // must be added to the fingerprint by hand when its migration lands.
+      const sqlite = generatedSchemaSqlite()
+      try {
+        for (const [table, columns] of Object.entries(DatabaseMigration.currentSchemaColumns)) {
+          const present = new Set(
+            (sqlite.query(`SELECT name FROM pragma_table_info('${table}')`).all() as { name: string }[]).map(
+              (row) => row.name,
+            ),
+          )
+          const missing = columns.filter((column) => !present.has(column))
+          // Reported as a string so a failure names the exact stale table.column.
+          expect(`${table}: missing [${missing.join(", ")}]`).toBe(`${table}: missing []`)
+        }
+      } finally {
+        sqlite.close()
+      }
+    })
+
+    test("apply() adopts a generated schema that has no migration journal", async () => {
+      // A DB already at the current generated schema but with NO migration journal must be adopted via
+      // the fingerprint: every migration marked applied, and no baseline CREATE replayed (replaying
+      // would throw "table session already exists"). If the fingerprint drifts so currentSchemaApplied
+      // returns false for the current schema, apply() falls through to replay and this test fails.
+      await using tmp = await tmpdir()
+      const filename = path.join(tmp.path, "generated-no-journal.sqlite")
+      const sqlite = new BunDatabase(filename, { create: true })
+      try {
+        sqlite.run("PRAGMA journal_mode = WAL")
+        const tx = {
+          run: (query: string) =>
+            Effect.sync(() => {
+              sqlite.run(query)
+            }),
+        }
+        sqlite.transaction(() => {
+          Effect.runSync(freshSchema.up(tx as never))
+        })()
+      } finally {
+        sqlite.close()
+      }
+
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const db = yield* makeDb
+          yield* DatabaseMigration.apply(db)
+          expect(yield* db.get(sql`SELECT count(*) as count FROM migration`)).toEqual({ count: migrations.length })
+          expect(yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session'`)).toEqual({
+            name: "session",
+          })
+        }).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped),
+      )
+    })
+  })
 })

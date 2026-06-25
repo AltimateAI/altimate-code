@@ -35,7 +35,11 @@ function markMigrationsApplied(db: Target, input: Migration[]) {
 }
 
 // altimate_change start — upstream_fix: seed the core journal for already-current schemas.
-const currentSchemaTables = [
+// EXPORTED for the drift-guard test (database-migration.test.ts): these hardcoded lists are a
+// fingerprint of the generated schema (schema.gen). If a migration adds/renames/removes a schema
+// object without updating this fingerprint, `currentSchemaApplied` silently misfires. The drift
+// guard fails loudly when the fingerprint diverges from the generated schema, forcing an update.
+export const currentSchemaTables = [
   "account",
   "account_state",
   "control_account",
@@ -57,7 +61,7 @@ const currentSchemaTables = [
   "workspace",
 ] as const
 
-const currentSchemaColumns = {
+export const currentSchemaColumns = {
   credential: ["integration_id", "connector_id", "method_id", "active"],
   event_sequence: ["owner_id"],
   permission: ["action", "resource"],
@@ -82,7 +86,7 @@ const currentSchemaColumns = {
   workspace: ["directory", "extra", "time_used", "type"],
 } as const
 
-const currentSchemaIndexes = [
+export const currentSchemaIndexes = [
   "event_aggregate_seq_idx",
   "event_aggregate_type_seq_idx",
   "message_session_time_created_id_idx",
@@ -162,11 +166,22 @@ export function applyOnly(db: Database, input: Migration[]) {
       (yield* db.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)).map((row) => row.id),
     )
     // altimate_change start — upstream_fix: do not replay baseline CREATE migrations
-    // when another migrator has already installed the current generated schema.
+    // when another migrator has already installed the current generated schema. The
+    // fingerprint check and the journal write run together under BEGIN IMMEDIATE so a
+    // concurrent migrator cannot slip a real migration between our check and our mark
+    // (closes the currentSchemaApplied TOCTOU).
     const missing = input.filter((migration) => !completed.has(migration.id))
-    if (missing.length > 0 && (yield* currentSchemaApplied(db))) {
-      yield* markMigrationsApplied(db, missing)
-      return
+    if (missing.length > 0) {
+      const adopted = yield* db.transaction(
+        (tx) =>
+          Effect.gen(function* () {
+            if (!(yield* currentSchemaApplied(tx))) return false
+            yield* markMigrationsApplied(tx, missing)
+            return true
+          }),
+        { behavior: "immediate" },
+      )
+      if (adopted) return
     }
     // altimate_change end
 
