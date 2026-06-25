@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import path from "path"
 import { Effect, FileSystem, Layer } from "effect"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { NodeFileSystem } from "@effect/platform-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -22,11 +22,16 @@ const it = testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, NodeFileSys
 
 const configLayer = TestConfig.layer()
 
-const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
+const instructionLayer = (
+  global: Partial<Global.Interface>,
+  flags: Partial<RuntimeFlags.Info> = {},
+  config = configLayer,
+  http: Layer.Layer<HttpClient.HttpClient> = FetchHttpClient.layer,
+) =>
   Instruction.layer.pipe(
-    Layer.provide(configLayer),
+    Layer.provide(config),
     Layer.provide(FSUtil.defaultLayer),
-    Layer.provide(FetchHttpClient.layer),
+    Layer.provide(http),
     Layer.provide(Global.layerWith(global)),
     Layer.provide(RuntimeFlags.layer(flags)),
   )
@@ -198,8 +203,45 @@ describe("Instruction.resolve", () => {
     ),
   )
 
-  // FIXTURE-DRIFT: remote config URL instruction loading still needs a real HttpClient fixture; this is not an InstanceRef context case.
-  test.todo("fetches remote instructions from config URLs via HttpClient", () => {})
+  it.live("fetches remote instructions from config URLs via HttpClient", () =>
+    Effect.gen(function* () {
+      const projectTmp = yield* tmpdirScoped()
+      const url = "https://instructions.example.test/AGENTS.md"
+      let seen: string | undefined
+      const http = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          seen = request.url
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response("# Remote Instructions\nUse remote rules.", {
+                status: 200,
+                headers: { "content-type": "text/plain" },
+              }),
+            ),
+          )
+        }),
+      )
+
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const rules = yield* svc.system()
+        expect(seen).toBe(url)
+        expect(rules).toEqual([`Instructions from: ${url}\n# Remote Instructions\nUse remote rules.`])
+      }).pipe(
+        provideInstance(projectTmp),
+        Effect.provide(
+          instructionLayer(
+            { home: projectTmp, config: projectTmp },
+            {},
+            TestConfig.layer({ get: () => Effect.succeed({ instructions: [url] }) }),
+            http,
+          ),
+        ),
+      )
+    }),
+  )
 })
 
 describe("Instruction.system", () => {

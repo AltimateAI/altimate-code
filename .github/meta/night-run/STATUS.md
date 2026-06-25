@@ -239,3 +239,9 @@
 - REMAINING for clean ship (documented, none block agent function): 52 session deltas (expert per-case review; some likely test-infra), 2 server legacy-route fails, Account-Service dedup, marker re-baseline, bun-1.3.14 build.
 - BUDGET: ~$1.50 / $50 LLM (rest unused — Ollama-free path was too weak; azure used for e2e+verification).
 - VERDICT: merge functionally sound + verified end-to-end; mergeable as feature branch; clean production ship needs the documented edge-path review. PR-BODY.md ready (PR NOT opened).
+
+## CHECKPOINT 26 — per-case session review + 3x50 e2e (user-requested) — 2026-06-24
+- RUNNING: (a) codex-sessreview /tmp/w_sessreview.log = per-case re-classify of 52 session deltas (cat1 test-harness-artifact FIX test-side / cat2 upstream-change UPDATE test / cat3 true-regression DOCUMENT, no src edits) -> SESSION-DELTA-REVIEW.md. (b) e2e 3-batch /tmp/e2e_3x50.log = 3 x ~44 runs (132 total) sequential conc=1 azure -> /tmp/e2e_batch_{1,2,3}.tsv + aggregate. ~2hr.
+- HYPOTHESIS being tested: ~20 compaction "regressions" are actually test-harness fake-injection artifacts (fake not threaded through Effect facade), fixable test-side -> would shrink the "52 regressions" to a smaller true-regression set.
+- ON WAKE: collect codex-sessreview (category counts + SESSION-DELTA-REVIEW.md + remaining todo) -> verify typecheck 0 + production WORKING + session 0 fail -> COMMIT ckpt45. Collect e2e 3-batch aggregate -> append to e2e/RESULTS.md. Update SHIP-REPORT.md with refined session-delta breakdown (true-regressions vs test-infra) + 132-run e2e pass-rate. Commit ckpt46. Then run truly complete.
+- BUDGET ~$2.50/$50 after e2e batches.

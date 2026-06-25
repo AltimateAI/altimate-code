@@ -392,8 +392,10 @@ it.live("session.processor effect tests preserve text start time", () =>
     { config: (url) => providerCfg(url) },
   ),
 )
-
-// BUG: REGRESSION: SessionProcessor.process returns continue instead of compact after token overflow in the merged processor path.
+// BUG: REGRESSION: SessionProcessor.process records the step-finish tokens but returns "continue" instead of
+// "compact" after SessionCompaction.isOverflow should trip for an over-context response.
+// Minimal src fix: packages/opencode/src/session/processor.ts:448 must set needsCompaction=true for this usage path
+// and preserve the "compact" return at packages/opencode/src/session/processor.ts:615.
 it.live.todo("session.processor effect tests stop after token overflow requests compaction", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -601,8 +603,9 @@ it.live("session.processor effect tests retry recognized structured json errors"
     { config: (url) => providerCfg(url) },
   ),
 )
-
-// BUG: REGRESSION: retry attempts no longer publish SessionStatus retry events from the processor loop.
+// BUG: REGRESSION: retry attempts no longer reach the EventV2 status listener used by the Effect processor path.
+// Minimal src fix: packages/opencode/src/session/processor.ts:540 should publish retry through the same
+// EventV2Bridge/SessionStatus service instance provided to the processor Effect runtime, not an isolated facade.
 it.live.todo("session.processor effect tests publish retry status updates", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -749,8 +752,9 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
     { config: (url) => providerCfg(url) },
   ),
 )
-
-// BUG: REGRESSION: interrupt cleanup leaves pending tool calls pending instead of persisting an aborted error state.
+// BUG: REGRESSION: interrupted processor cleanup can leave pending tool parts pending instead of settling them
+// through the abort cleanup loop. Minimal src fix: packages/opencode/src/session/processor.ts:596 must run and
+// persist pending/running tool abort states before the interrupted processor result is observable.
 it.live.todo("session.processor effect tests mark pending tools as aborted on cleanup", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -811,8 +815,9 @@ it.live.todo("session.processor effect tests mark pending tools as aborted on cl
     { config: (url) => providerCfg(url) },
   ),
 )
-
-// BUG: REGRESSION: interrupted processor runs no longer persist MessageAbortedError or idle status reliably.
+// BUG: REGRESSION: interrupted processor runs can publish idle without persisting MessageAbortedError on the
+// assistant turn. Minimal src fix: packages/opencode/src/session/processor.ts:520 catch/abort handling should map
+// AbortError to MessageAbortedError and update the assistant before returning/interruption is observed.
 it.live.todo("session.processor effect tests record aborted errors and idle state", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -879,8 +884,9 @@ it.live.todo("session.processor effect tests record aborted errors and idle stat
     { config: (url) => providerCfg(url) },
   ),
 )
-
-// BUG: REGRESSION: fiber interruption no longer marks the assistant as MessageAbortedError without manual abort.
+// BUG: REGRESSION: fiber interruption alone no longer marks the assistant with MessageAbortedError.
+// Minimal src fix: packages/opencode/src/session/processor.ts:520-580 should treat interrupted/aborted streams as
+// MessageAbortedError and persist the assistant error before idle cleanup.
 it.live.todo("session.processor effect tests mark interruptions aborted without manual abort", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -930,8 +936,9 @@ it.live.todo("session.processor effect tests mark interruptions aborted without 
     { config: (url) => providerCfg(url) },
   ),
 )
-
-// BUG: REGRESSION: provider-executed tool error settlement hangs under the merged processor event bridge.
+// BUG: REGRESSION: provider-executed tool error settlement still bypasses the injected Effect LLM stream and falls
+// through to the real provider. Minimal src fix: packages/opencode/src/session/processor.ts:75/83 should consume the
+// LLM.Service supplied by SessionProcessor.layer instead of the imperative LLM.stream singleton.
 itProviderError.live.todo("session.processor effect tests fail provider-executed error results", () =>
   provideTmpdirInstanceLegacy(
     (dir) =>
@@ -983,8 +990,9 @@ itProviderError.live.todo("session.processor effect tests fail provider-executed
     { config: cfg },
   ),
 )
-
-// BUG: REGRESSION: partial v2 fragments are not flushed before provider step failure in the merged processor path.
+// BUG: REGRESSION: partial text/reasoning fragments before provider step failure cannot be validated through the
+// Effect LLM fake because SessionProcessor.process uses the imperative LLM singleton. Minimal src fix:
+// packages/opencode/src/session/processor.ts:75/83 should route through the injected LLM.Service stream.
 itFragmentFailure.live.todo("session.processor effect tests flush partial v2 fragments before step failure", () =>
   provideTmpdirInstanceLegacy(
     (dir) =>

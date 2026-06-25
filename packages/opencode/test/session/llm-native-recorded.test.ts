@@ -215,7 +215,8 @@ const selectedScenarios = new Set(
     .filter(Boolean),
 )
 // FIXTURE-DRIFT: these replay cassettes/provider fixtures drifted in the v1.17.9 merge. OpenAI OAuth references
-// a missing gpt-5.5 fixture, and the proxy/Anthropic native routes fail before the recorded tool loop settles.
+// a missing gpt-5.5 fixture, and the proxy/Anthropic recorded HTTP requests no longer match, so replay falls through
+// to live provider URLs before the recorded tool loop can settle.
 const nativeRecordedTodos = new Set(["openai-oauth", "opencode-proxy", "anthropic-api-key"])
 
 function isSelected(scenario: RecordedScenario) {
