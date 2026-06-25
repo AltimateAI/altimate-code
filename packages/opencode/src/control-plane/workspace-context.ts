@@ -5,7 +5,10 @@ export interface WorkspaceContext {
   workspaceID: WorkspaceV2.ID | undefined
 }
 
-const context = LocalContext.create<WorkspaceContext>("instance")
+// altimate_change start — upstream_fix: name this ALS "workspace" (was "instance"), so a missing
+// WorkspaceContext reports `No context found for workspace` instead of misattributing to the instance.
+const context = LocalContext.create<WorkspaceContext>("workspace")
+// altimate_change end
 
 export const WorkspaceContext = {
   async provide<R>(input: { workspaceID?: WorkspaceV2.ID; fn: () => R }): Promise<R> {
