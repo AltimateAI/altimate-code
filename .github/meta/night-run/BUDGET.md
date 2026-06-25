@@ -11,3 +11,6 @@ STRATEGY: bulk e2e on FREE Ollama; sample quality runs on Azure gpt-4o-mini (che
 - 23:07:05 e2e-retry Azure gpt-4o-mini, ~$0.01 est (trivial write task)
 - 11:37 codex verify runs using azure/gpt-4o-mini (run "hi" repros, ~$0.01-0.05 total est)
 - 11:55 my verify: azure/gpt-4o-mini run repro (~$0.01)
+- 16:16 e2e battery validation: 22 tasks x2 = 44 azure runs (~$0.25 est)
+- 17:10 e2e batch 22 runs azure (~$0.15)
+- 17:36 e2e re-run isolated-DB 22 runs azure (~$0.15)

@@ -123,7 +123,7 @@ const providerCfg = (url: string) => ({
   },
 })
 
-// BUG: instant tool execution can still outrun snapshot capture and leave the session diff empty.
+// FLAKY: instant tool execution can outrun snapshot capture and leave the session diff empty.
 it.live.todo("tool execution produces non-empty session diff (snapshot race)", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {

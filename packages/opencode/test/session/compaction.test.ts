@@ -36,7 +36,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestConfig } from "../fixture/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { LLMEvent, Usage } from "@opencode-ai/llm"
-import { withLegacyInstanceRunner } from "./legacy-instance"
+import { provideTmpdirInstanceLegacy, withLegacyInstanceRunner } from "./legacy-instance"
 
 // SessionCompaction exposes imperative async namespace fns (only `create` is also on
 // the Effect Service). Wrap them as Effects so the existing Effect.gen test bodies can
@@ -647,10 +647,9 @@ describe("session.compaction.isOverflow", () => {
 })
 
 describe("session.compaction.create", () => {
-  // BUG: legacy Database.effect publishes outside the current InstanceRef during imperative compaction create.
-  it.live.todo(
+  it.live(
     "creates a compaction user message and part",
-    provideTmpdirInstance(() =>
+    provideTmpdirInstanceLegacy(() =>
       Effect.gen(function* () {
         const compact = compactionEffect
         const ssn = yield* SessionNs.Service
@@ -709,10 +708,9 @@ describe("session.compaction.create", () => {
 })
 
 describe("session.compaction.prune", () => {
-  // BUG: legacy Database.effect publishes outside the current InstanceRef during imperative compaction prune.
-  it.live.todo(
+  it.live(
     "compacts old completed tool output",
-    provideTmpdirInstance(
+    provideTmpdirInstanceLegacy(
       (dir) =>
         Effect.gen(function* () {
           const compact = compactionEffect
@@ -898,8 +896,8 @@ describe("session.compaction.prune", () => {
 })
 
 describe("session.compaction.process", () => {
-  // BUG: SessionCompaction.process still uses the imperative SessionProcessor/Provider path,
-  // bypassing Effect fakes and hitting real provider config in tests.
+  // BUG: REGRESSION: SessionCompaction.process still uses the imperative SessionProcessor/Provider path,
+  // bypassing Effect fakes and hitting the real localhost:1 provider config in tests.
   it.instance.todo(
     "throws when parent is not a user message",
     Effect.gen(function* () {
@@ -930,6 +928,7 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  // BUG: REGRESSION: process no longer publishes the compacted continue event through the injected compaction flow.
   it.instance.todo(
     "publishes compacted event on continue",
     Effect.gen(function* () {
@@ -960,6 +959,7 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  // BUG: REGRESSION: compact-result handling no longer marks the summary assistant with the compaction error.
   itCompaction.instance.todo(
     "marks summary message as errored on compact result",
     Effect.gen(function* () {
@@ -988,6 +988,7 @@ describe("session.compaction.process", () => {
     }).pipe(withCompaction({ result: "compact" })),
   )
 
+  // BUG: REGRESSION: auto compaction no longer creates the synthetic continue prompt after summary.
   it.instance.todo(
     "adds synthetic continue prompt when auto is enabled",
     Effect.gen(function* () {
@@ -1019,6 +1020,7 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  // BUG: REGRESSION: retained-tail compaction metadata no longer records tail_start_id.
   itCompaction.instance.todo(
     "persists tail_start_id for retained recent turns",
     Effect.gen(function* () {
@@ -1045,6 +1047,7 @@ describe("session.compaction.process", () => {
     }).pipe(withCompaction({ config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) })),
   )
 
+  // BUG: REGRESSION: retained-tail sizing no longer shrinks to fit the preserve token budget.
   itCompaction.instance.todo(
     "shrinks retained tail to fit preserve token budget",
     Effect.gen(function* () {
@@ -1071,6 +1074,7 @@ describe("session.compaction.process", () => {
     }).pipe(withCompaction({ config: cfg({ tail_turns: 2, preserve_recent_tokens: 100 }) })),
   )
 
+  // BUG: REGRESSION: preserve-token overflow no longer falls back to a full summary when the recent tail is too large.
   itCompaction.instance.todo(
     "falls back to full summary when even one recent turn exceeds preserve token budget",
     () => {
@@ -1098,6 +1102,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: media-heavy retained tails no longer fall back to full summary input when over budget.
   itCompaction.instance.todo(
     "falls back to full summary when retained tail media exceeds preserve token budget",
     () => {
@@ -1135,6 +1140,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: split-turn tail retention no longer keeps the later fitting suffix out of summary input.
   itCompaction.instance.todo(
     "retains a split turn suffix when a later message fits the preserve token budget",
     () => {
@@ -1186,6 +1192,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: plugin autocontinue=false no longer suppresses the synthetic continue prompt.
   itCompaction.instance.todo(
     "allows plugins to disable synthetic continue prompt",
     Effect.gen(function* () {
@@ -1218,6 +1225,7 @@ describe("session.compaction.process", () => {
     }).pipe(withCompaction({ plugin: autocontinue(false) })),
   )
 
+  // BUG: REGRESSION: overflow compaction no longer replays the prior replayable user turn without media.
   it.instance.todo(
     "replays the prior user turn on overflow when earlier context exists",
     Effect.gen(function* () {
@@ -1256,6 +1264,7 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  // BUG: REGRESSION: overflow compaction no longer falls back to provider-size guidance when no replayable turn exists.
   it.instance.todo(
     "falls back to overflow guidance when no replayable turn exists",
     Effect.gen(function* () {
@@ -1283,6 +1292,7 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  // BUG: REGRESSION: aborting during retry backoff no longer stops the compaction process promptly.
   itCompaction.instance.todo(
     "stops quickly when aborted during retry backoff",
     () => {
@@ -1346,6 +1356,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: interrupting before compaction processor setup can still leave summary assistant state behind.
   itCompaction.instance.todo(
     "does not leave a summary assistant when aborted before processor setup",
     () =>
@@ -1377,6 +1388,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: orphan reasoning deltas during summary generation are no longer tested against the compaction fake stream.
   itCompaction.instance.todo(
     "silently drops reasoning-delta arriving without prior reasoning-start",
     () => {
@@ -1417,6 +1429,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: summary generation no longer rejects tool calls through the injected compaction stream.
   itCompaction.instance.todo(
     "does not allow tool calls while generating the summary",
     () => {
@@ -1453,6 +1466,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: summary input no longer reliably excludes the retained recent tail.
   itCompaction.instance.todo(
     "summarizes only the head while keeping recent tail out of summary input",
     () => {
@@ -1490,6 +1504,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: repeated compaction no longer anchors new summaries with exactly one previous summary.
   itCompaction.instance.todo(
     "anchors repeated compactions with the previous summary",
     () => {
@@ -1532,6 +1547,7 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  // BUG: REGRESSION: repeated compaction no longer preserves the configured recent pre-compaction turns.
   itCompaction.instance.todo("keeps recent pre-compaction turns across repeated compactions", () => {
     const stub = llm()
     stub.push(reply("summary one"))
@@ -1572,6 +1588,7 @@ describe("session.compaction.process", () => {
     }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) }))
   })
 
+  // BUG: REGRESSION: retained-tail sizing no longer ignores previous summary messages.
   itCompaction.instance.todo(
     "ignores previous summaries when sizing the retained tail",
     Effect.gen(function* () {

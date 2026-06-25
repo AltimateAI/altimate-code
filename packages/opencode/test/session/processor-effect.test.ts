@@ -393,7 +393,7 @@ it.live("session.processor effect tests preserve text start time", () =>
   ),
 )
 
-// BUG: SessionProcessor.process returns continue instead of compact after token overflow in the merged processor path.
+// BUG: REGRESSION: SessionProcessor.process returns continue instead of compact after token overflow in the merged processor path.
 it.live.todo("session.processor effect tests stop after token overflow requests compaction", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -602,7 +602,7 @@ it.live("session.processor effect tests retry recognized structured json errors"
   ),
 )
 
-// BUG: retry attempts no longer publish SessionStatus retry events from the processor loop.
+// BUG: REGRESSION: retry attempts no longer publish SessionStatus retry events from the processor loop.
 it.live.todo("session.processor effect tests publish retry status updates", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -750,7 +750,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
   ),
 )
 
-// BUG: interrupt cleanup leaves pending tool calls pending instead of persisting an aborted error state.
+// BUG: REGRESSION: interrupt cleanup leaves pending tool calls pending instead of persisting an aborted error state.
 it.live.todo("session.processor effect tests mark pending tools as aborted on cleanup", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -812,7 +812,7 @@ it.live.todo("session.processor effect tests mark pending tools as aborted on cl
   ),
 )
 
-// BUG: interrupted processor runs no longer persist MessageAbortedError or idle status reliably.
+// BUG: REGRESSION: interrupted processor runs no longer persist MessageAbortedError or idle status reliably.
 it.live.todo("session.processor effect tests record aborted errors and idle state", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -880,6 +880,7 @@ it.live.todo("session.processor effect tests record aborted errors and idle stat
   ),
 )
 
+// BUG: REGRESSION: fiber interruption no longer marks the assistant as MessageAbortedError without manual abort.
 it.live.todo("session.processor effect tests mark interruptions aborted without manual abort", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -930,7 +931,7 @@ it.live.todo("session.processor effect tests mark interruptions aborted without 
   ),
 )
 
-// BUG: provider-executed tool error settlement hangs under the merged processor event bridge.
+// BUG: REGRESSION: provider-executed tool error settlement hangs under the merged processor event bridge.
 itProviderError.live.todo("session.processor effect tests fail provider-executed error results", () =>
   provideTmpdirInstanceLegacy(
     (dir) =>
@@ -983,7 +984,7 @@ itProviderError.live.todo("session.processor effect tests fail provider-executed
   ),
 )
 
-// BUG: partial v2 fragments are not flushed before provider step failure in the merged processor path.
+// BUG: REGRESSION: partial v2 fragments are not flushed before provider step failure in the merged processor path.
 itFragmentFailure.live.todo("session.processor effect tests flush partial v2 fragments before step failure", () =>
   provideTmpdirInstanceLegacy(
     (dir) =>

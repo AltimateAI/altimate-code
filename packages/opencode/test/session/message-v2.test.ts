@@ -891,7 +891,7 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  // BUG: aborted bash tool errors still drop partial stdout/stderr and only send the abort message.
+  // BUG: REGRESSION: aborted bash tool errors still drop partial stdout/stderr and only send the abort message.
   test.todo("forwards partial bash output for aborted tool calls", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"
@@ -1261,7 +1261,7 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  // BUG: signed Anthropic reasoning separated by empty text should preserve a non-empty separator.
+  // BUG: REGRESSION: signed Anthropic reasoning separated by empty text should preserve a non-empty separator.
   test.todo("substitutes space for empty text between signed reasoning blocks", async () => {
     // Reproduces the bug pattern: [reasoning(sig), text(""), reasoning(sig), text(full)]
     const assistantID = "m-assistant"
@@ -1422,7 +1422,7 @@ describe("session.message-v2.fromError", () => {
     })
   })
 
-  // BUG: OpenAI Responses API server_error stream chunks should become retryable APIError.
+  // BUG: REGRESSION: OpenAI Responses API server_error stream chunks should become retryable APIError.
   test.todo("serializes OpenAI response server_error stream chunks as retryable APIError", () => {
     const body = {
       type: "error",

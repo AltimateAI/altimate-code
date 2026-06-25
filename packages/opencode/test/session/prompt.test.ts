@@ -514,7 +514,7 @@ it.instance("loop calls LLM and returns assistant message", () =>
   }),
 )
 
-// BUG: prompt loop drops assistant finish/error metadata for provider terminal errors after the v1.17.9 processor merge.
+// BUG: REGRESSION: prompt loop drops assistant finish/error metadata for provider terminal errors after the v1.17.9 processor merge.
 it.instance.todo("loop surfaces content-filter finishes as session errors", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
@@ -561,6 +561,7 @@ it.instance.todo("loop surfaces content-filter finishes as session errors", () =
   }),
 )
 
+// BUG: REGRESSION: provider overflow no longer records ContextOverflowError when auto-compaction is disabled.
 it.instance.todo("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
@@ -772,7 +773,7 @@ it.instance("glob tool keeps instance context during prompt runs", () =>
   }),
 )
 
-// BUG: prompt loop no longer schedules the follow-up turn when a stop-finished assistant still contains tool parts.
+// BUG: REGRESSION: prompt loop no longer schedules the follow-up turn when a stop-finished assistant still contains tool parts.
 it.instance.todo("loop continues when finish is stop but assistant has tool parts", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
@@ -845,7 +846,7 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
   }),
 )
 
-// BUG: task sub-session creation no longer preserves parent external_directory allow rules.
+// BUG: REGRESSION: task sub-session creation no longer preserves parent external_directory allow rules.
 it.instance.todo("subtask child inherits parent session external_directory allow", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
@@ -935,7 +936,7 @@ it.instance(
   5_000,
 )
 
-// BUG: running task tool metadata is not published before cancellation under the merged processor.
+// BUG: REGRESSION: running task tool metadata is not published before cancellation under the merged processor.
 it.instance.todo(
   "running task tool preserves metadata after tool-call transition",
   () =>
@@ -980,7 +981,7 @@ it.instance.todo(
   10_000,
 )
 
-// BUG: SessionRunState no longer observes busy status for active prompt loops consistently.
+// BUG: REGRESSION: SessionRunState no longer observes busy status for active prompt loops consistently.
 it.instance.todo(
   "loop sets status to busy then idle",
   () =>
@@ -1007,7 +1008,7 @@ it.instance.todo(
 
 // Cancel semantics
 
-// BUG: prompt cancellation currently interrupts the loop fiber instead of finalizing a successful aborted assistant turn.
+// BUG: REGRESSION: prompt cancellation interrupts the loop fiber instead of finalizing a successful aborted assistant turn.
 it.instance.todo(
   "cancel interrupts loop and resolves with an assistant message",
   () =>
@@ -1034,6 +1035,7 @@ it.instance.todo(
   3_000,
 )
 
+// BUG: REGRESSION: cancelled prompt loops no longer persist MessageAbortedError on the interrupted assistant turn.
 it.instance.todo(
   "cancel records MessageAbortedError on interrupted process",
   () =>
@@ -1060,6 +1062,7 @@ it.instance.todo(
   3_000,
 )
 
+// BUG: REGRESSION: cancellation before processor creation leaves interrupted assistant finalization inconsistent.
 raceNoLLMServer.instance.todo(
   "finalizes assistant when cancelled before processor creation completes",
   () =>
@@ -1202,7 +1205,7 @@ noLLMServer.instance.skip(
 )
 // altimate_change end
 
-// BUG: cancellation does not propagate busy/idle cleanup to child task sessions.
+// BUG: REGRESSION: cancellation does not propagate busy/idle cleanup to child task sessions.
 it.instance.todo(
   "cancel propagates from slash command subtask to child session",
   () =>
@@ -1238,7 +1241,7 @@ it.instance.todo(
   10_000,
 )
 
-// BUG: queued prompt.loop callers are interrupted instead of sharing the cancelled assistant result.
+// BUG: REGRESSION: queued prompt.loop callers are interrupted instead of sharing the cancelled assistant result.
 it.instance.todo(
   "cancel with queued callers resolves all cleanly",
   () =>
@@ -1305,7 +1308,7 @@ it.instance(
   3_000,
 )
 
-// BUG: active-run queueing no longer includes prompts submitted while the first loop is in flight.
+// BUG: REGRESSION: active-run queueing no longer includes prompts submitted while the first loop is in flight.
 it.instance.todo(
   "prompt submitted during an active run is included in the next LLM input",
   () =>
@@ -1376,6 +1379,7 @@ it.instance.todo(
   3_000,
 )
 
+// BUG: REGRESSION: active prompt loops no longer make assertNotBusy fail with SessionBusyError.
 it.instance.todo(
   "assertNotBusy fails with BusyError when loop running",
   () =>
@@ -1418,6 +1422,7 @@ noLLMServer.instance("assertNotBusy succeeds when idle", () =>
 
 // Shell semantics
 
+// BUG: REGRESSION: shell commands no longer observe prompt-loop busy state consistently.
 it.instance.todo(
   "shell rejects with BusyError when loop running",
   () =>
@@ -1619,7 +1624,7 @@ unixNoLLMServer(
   30_000,
 )
 
-// BUG: loop callers queued behind shell commands do not observe shell busy state or resume correctly.
+// BUG: REGRESSION: loop callers queued behind shell commands do not observe shell busy state or resume correctly.
 it.instance.todo(
   "loop waits while shell runs and starts after shell exits",
   () =>
@@ -1657,6 +1662,7 @@ it.instance.todo(
   3_000,
 )
 
+// BUG: REGRESSION: queued prompt.loop callers do not resume cleanly after shell completion.
 it.instance.todo(
   "shell completion resumes queued loop callers",
   () =>
@@ -1696,7 +1702,7 @@ it.instance.todo(
   3_000,
 )
 
-// BUG: command expansion is still routed through the environment shell instead of the configured shell.
+// BUG: REGRESSION: command expansion is still routed through the environment shell instead of the configured shell.
 it.instance.todo(
   "command ! expansion uses configured shell over env shell",
   () =>
@@ -1730,7 +1736,7 @@ it.instance.todo(
   30_000,
 )
 
-// BUG: shell cancellation leaves the run state stuck/interrupted instead of finalizing an aborted shell result.
+// BUG: REGRESSION: shell cancellation leaves the run state stuck/interrupted instead of finalizing an aborted shell result.
 noLLMServer.instance.todo(
   "cancel interrupts shell and resolves cleanly",
   () =>
@@ -1809,6 +1815,7 @@ unixNoLLMServer(
   30_000,
 )
 
+// BUG: REGRESSION: interrupted bash tool output no longer finalizes through the normal truncation path.
 it.instance.todo(
   "cancel finalizes interrupted bash tool output through normal truncation",
   () =>
@@ -1866,6 +1873,7 @@ it.instance.todo(
   30_000,
 )
 
+// BUG: REGRESSION: cancelling a loop queued behind shell no longer resolves with the aborted shell result.
 noLLMServer.instance.todo(
   "cancel interrupts loop queued behind shell",
   () =>
@@ -1893,6 +1901,7 @@ noLLMServer.instance.todo(
   30_000,
 )
 
+// BUG: REGRESSION: concurrent shell calls no longer fail fast with SessionBusyError while a shell is running.
 noLLMServer.instance.todo(
   "shell rejects when another shell is already running",
   () =>
@@ -2158,7 +2167,7 @@ it.instance("does not loop empty assistant turns for a simple reply", () =>
   }),
 )
 
-// BUG: prompt.prompt cancellation mid-stream no longer persists MessageAbortedError on the assistant turn.
+// BUG: REGRESSION: prompt.prompt cancellation mid-stream no longer persists MessageAbortedError on the assistant turn.
 it.instance.todo(
   "records aborted errors when prompt is cancelled mid-stream",
   () =>

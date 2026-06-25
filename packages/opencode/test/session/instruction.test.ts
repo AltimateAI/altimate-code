@@ -198,6 +198,7 @@ describe("Instruction.resolve", () => {
     ),
   )
 
+  // FIXTURE-DRIFT: remote config URL instruction loading still needs a real HttpClient fixture; this is not an InstanceRef context case.
   test.todo("fetches remote instructions from config URLs via HttpClient", () => {})
 })
 
