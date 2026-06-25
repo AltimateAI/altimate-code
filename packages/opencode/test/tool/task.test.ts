@@ -1,5 +1,6 @@
 import { afterEach, describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Database } from "@opencode-ai/core/database/database"
 import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
@@ -65,9 +66,11 @@ function defer<T>() {
   return { promise, resolve }
 }
 
-const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
+const seed = Effect.fn("TaskToolTest.seed")(function* (
+  input: { title?: string; permission?: PermissionV1.Ruleset } = {},
+) {
   const session = yield* Session.Service
-  const chat = yield* session.create({ title })
+  const chat = yield* session.create({ title: input.title ?? "Pinned", permission: input.permission })
   const user = yield* session.updateMessage({
     id: MessageID.ascending(),
     role: "user",
@@ -401,13 +404,16 @@ describe("tool.task", () => {
     }),
   )
 
-  // BUG: blocked by the storage-layer DB split-brain (see note above).
-  it.instance.skip(
-    "execute shapes child permissions for task, todowrite, and primary tools",
+  it.instance(
+    "execute inherits parent external-directory rules and preserves child denies",
     () =>
       Effect.gen(function* () {
         const sessions = yield* Session.Service
-        const { chat, assistant } = yield* seed()
+        const parentPermission: PermissionV1.Ruleset = [
+          { permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" },
+          { permission: "edit", pattern: "*", action: "deny" },
+        ]
+        const { chat, assistant } = yield* seed({ permission: parentPermission })
         const tool = yield* TaskTool
         const def = yield* tool.init()
         let seen: SessionPrompt.PromptInput | undefined
@@ -433,10 +439,24 @@ describe("tool.task", () => {
 
         const child = yield* sessions.get(result.metadata.sessionId)
         expect(child.parentID).toBe(chat.id)
-        expect(child.agent).toBe("reviewer")
         expect(child.permission).toEqual([
           {
+            permission: "external_directory",
+            pattern: "/tmp/allowed/*",
+            action: "allow",
+          },
+          {
+            permission: "edit",
+            pattern: "*",
+            action: "deny",
+          },
+          {
             permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+          {
+            permission: "todoread",
             pattern: "*",
             action: "deny",
           },
@@ -451,6 +471,7 @@ describe("tool.task", () => {
             action: "deny",
           },
         ])
+        expect(child.permission).not.toContainEqual({ permission: "task", pattern: "*", action: "deny" })
         expect(seen?.tools).toBeUndefined()
       }),
     {

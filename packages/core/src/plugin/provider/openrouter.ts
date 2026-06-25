@@ -11,8 +11,10 @@ export const OpenRouterPlugin = PluginV2.define({
           if (item.provider.api.type !== "aisdk") continue
           if (item.provider.api.package !== "@openrouter/ai-sdk-provider") continue
           evt.provider.update(item.provider.id, (provider) => {
-            provider.request.headers["HTTP-Referer"] = "https://opencode.ai/"
-            provider.request.headers["X-Title"] = "opencode"
+            // altimate_change start — provider identity headers
+            provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
+            provider.request.headers["X-Title"] = "altimate-code"
+            // altimate_change end
           })
           for (const modelID of [ModelV2.ID.make("gpt-5-chat-latest"), ModelV2.ID.make("openai/gpt-5-chat")]) {
             if (!item.models.has(modelID)) continue

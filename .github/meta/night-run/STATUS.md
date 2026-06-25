@@ -337,3 +337,9 @@ AUDIT RESULTS (CODEX-AUDIT.md + CODEX-AUDIT-2.md):
   * config/docs/UI: core/v1/config/config.ts:42,106; customize-opencode.md; provider/openai-auth.ts:255-257; opencode/src/temporary.ts:7. FIX shipped user-facing.
 - Audit panel-review: AGREES 8 RESTORE + 1 ACCEPT; DISAGREES that TaskTool-perm + retained-tail are TEST-ARCH (calls them real RESTORE/backlog) -> reclassify as COVER-46 items.
 ACTIONS NOW: launch (1) branding fixer (5 prompts + provider identity headers + config/docs/UI; packages/opencode + packages/core), (2) TaskTool wire deriveSubagentSessionPermission. Then COVER-46 (incl. compaction retained-tail). Verify typecheck0+production each; commit. Budget ~$6/$50.
+
+## CHECKPOINT 33 — PR OPENED — 2026-06-24
+- PR #964 https://github.com/AltimateAI/altimate-code/pull/964 (repo AltimateAI/altimate-code, base main <- upstream/merge-v1.17.9), tracking issue #963. Template-compliant body (PR-BODY.md), Closes #963.
+- Branch pushed at bdb3cef235. In-flight work (branding fixer, tasktool fixer, then COVER-46) will land as follow-up commits pushed to the branch -> auto-updates PR #964.
+- Template-compliance NOTE (memory): anandgupta42 NOT in TEAM_MEMBERS -> bot checks apply; PR body uses exact headings (What/Type/Issue/How-verified/Checklist) + Closes #963. Monitor it isn't auto-closed.
+- REMAINING (lands as PR commits): branding (5 prompts + provider headers + config/UI), TaskTool deriveSubagentSessionPermission wiring, COVER-46 (session injectable-Service refactor + compaction retained-tail), sdk regen (build-env). Each: commit + push to update PR.

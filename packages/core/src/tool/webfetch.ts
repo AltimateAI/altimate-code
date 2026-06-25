@@ -6,6 +6,7 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstab
 import { Parser } from "htmlparser2"
 import TurndownService from "turndown"
 import { PermissionV2 } from "../permission"
+import { InstallationVersion } from "../installation/version"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 
@@ -59,6 +60,9 @@ const headers = (format: Format, userAgent: string) => ({
 
 const browserUserAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+// altimate_change start — keep the default browser User-Agent for Cloudflare compatibility; brand the explicit retry fallback.
+const productUserAgent = `altimate-code/${InstallationVersion}`
+// altimate_change end
 
 const isCloudflareChallenge = (error: unknown) => {
   if (!error || typeof error !== "object" || !("reason" in error)) return false
@@ -156,7 +160,7 @@ export const layer = Layer.effectDiscard(
 
               const { body, contentType } = yield* Effect.gen(function* () {
                 const response = yield* execute(http, input.url, input.format).pipe(
-                  Effect.catchIf(isCloudflareChallenge, () => execute(http, input.url, input.format, "opencode")),
+                  Effect.catchIf(isCloudflareChallenge, () => execute(http, input.url, input.format, productUserAgent)),
                 )
                 const contentType = response.headers["content-type"] || ""
                 const mime = mimeFrom(contentType)

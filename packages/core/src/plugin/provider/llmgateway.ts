@@ -15,9 +15,11 @@ export const LLMGatewayPlugin = PluginV2.define({
           if (item.provider.api.package !== "@ai-sdk/openai-compatible") continue
           if (item.provider.api.url !== "https://api.llmgateway.io/v1") continue
           evt.provider.update(item.provider.id, (provider) => {
-            provider.request.headers["HTTP-Referer"] = "https://opencode.ai/"
-            provider.request.headers["X-Title"] = "opencode"
-            provider.request.headers["X-Source"] = "opencode"
+            // altimate_change start — provider identity headers
+            provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
+            provider.request.headers["X-Title"] = "altimate-code"
+            provider.request.headers["X-Source"] = "altimate-code"
+            // altimate_change end
           })
         }
       }),

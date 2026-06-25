@@ -845,7 +845,7 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
     })
   }),
 )
-it.instance.todo("subtask child inherits parent session external_directory allow", () =>
+it.instance("subtask child inherits parent session external_directory allow", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
     const prompt = yield* SessionPrompt.Service

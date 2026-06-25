@@ -6,6 +6,7 @@ import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Identifier } from "../id/id"
 import { Agent } from "../agent/agent"
+import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { SessionPrompt } from "../session/prompt"
 import { iife } from "@/util/iife"
 import { defer } from "@/util/defer"
@@ -15,7 +16,7 @@ import { PermissionNext } from "@/permission/next"
 import { Log } from "@/util/log"
 // re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands SessionPrompt expects
 import { ModelID, ProviderID } from "@/provider/schema"
-import type { Effect } from "effect"
+import { Effect } from "effect"
 const log = Log.create({ service: "tool.task" })
 
 /**
@@ -41,6 +42,7 @@ const parameters = z.object({
     )
     .optional(),
   command: z.string().describe("The command that triggered this task").optional(),
+  background: z.boolean().optional(),
 })
 
 export const TaskTool = Tool.define("task", async (ctx) => {
@@ -63,6 +65,9 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     parameters,
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
+      if (params.background === true) {
+        throw new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true")
+      }
 
       // Skip permission check when user explicitly invoked via @ or command subtask
       if (!ctx.extra?.bypassAgentCheck) {
@@ -81,6 +86,39 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
 
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
+      const parent = await Session.get(ctx.sessionID)
+      // altimate_change start — upstream_fix: inherit parent session denies/external_directory rules for subtasks
+      const childPermission = deriveSubagentSessionPermission({
+        parentSessionPermission: parent.permission ?? [],
+        subagent: agent,
+      })
+      const childToolDenies = [
+        {
+          permission: "todowrite" as const,
+          pattern: "*" as const,
+          action: "deny" as const,
+        },
+        {
+          permission: "todoread" as const,
+          pattern: "*" as const,
+          action: "deny" as const,
+        },
+        ...(hasTaskPermission
+          ? []
+          : [
+              {
+                permission: "task" as const,
+                pattern: "*" as const,
+                action: "deny" as const,
+              },
+            ]),
+        ...(config.experimental?.primary_tools?.map((permission) => ({
+          pattern: "*" as const,
+          action: "deny" as const,
+          permission,
+        })) ?? []),
+      ]
+      // altimate_change end
 
       const session = await iife(async () => {
         if (params.task_id) {
@@ -92,30 +130,14 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           parentID: ctx.sessionID,
           title: params.description + ` (@${agent.name} subagent)`,
           permission: [
-            {
-              permission: "todowrite",
-              pattern: "*",
-              action: "deny",
-            },
-            {
-              permission: "todoread",
-              pattern: "*",
-              action: "deny",
-            },
-            ...(hasTaskPermission
-              ? []
-              : [
-                  {
-                    permission: "task" as const,
-                    pattern: "*" as const,
-                    action: "deny" as const,
-                  },
-                ]),
-            ...(config.experimental?.primary_tools?.map((t) => ({
-              pattern: "*",
-              action: "allow" as const,
-              permission: t,
-            })) ?? []),
+            ...childPermission,
+            ...childToolDenies.filter(
+              (deny) =>
+                !childPermission.some(
+                  (rule) =>
+                    rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+                ),
+            ),
           ],
         })
       })
@@ -136,20 +158,24 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
 
       const messageID = MessageID.ascending()
+      const promptOps = ctx.extra?.promptOps as TaskPromptOps | undefined
 
       function cancel() {
         // altimate_change start — SessionPrompt.cancel became async; fire-and-forget OK in abort handler
         // but log unhandled rejections so silent failures surface
-        SessionPrompt.cancel(session.id).catch((err) => {
+        const cancelled = promptOps ? Effect.runPromise(promptOps.cancel(session.id)) : SessionPrompt.cancel(session.id)
+        cancelled.catch((err) => {
           log.warn("cancel failed", { sessionID: session.id, err })
         })
         // altimate_change end
       }
       ctx.abort.addEventListener("abort", cancel)
       using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
-      const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
+      const promptParts = promptOps
+        ? await Effect.runPromise(promptOps.resolvePromptParts(params.prompt))
+        : await SessionPrompt.resolvePromptParts(params.prompt)
 
-      const result = await SessionPrompt.prompt({
+      const promptInput: SessionPrompt.PromptInput = {
         messageID,
         sessionID: session.id,
         model: {
@@ -160,14 +186,11 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           // altimate_change end
         },
         agent: agent.name,
-        tools: {
-          todowrite: false,
-          todoread: false,
-          ...(hasTaskPermission ? {} : { task: false }),
-          ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
-        },
         parts: promptParts,
-      })
+      }
+      const result = promptOps
+        ? await Effect.runPromise(promptOps.prompt(promptInput))
+        : await SessionPrompt.prompt(promptInput)
 
       const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
 

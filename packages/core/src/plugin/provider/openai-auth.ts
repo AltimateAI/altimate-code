@@ -146,7 +146,9 @@ export const headless = {
 } satisfies Integration.OAuthImplementation
 
 function headers(contentType: string) {
-  return { "Content-Type": contentType, "User-Agent": `opencode/${InstallationVersion}` }
+  // altimate_change start — User-Agent brand
+  return { "Content-Type": contentType, "User-Agent": `altimate-code/${InstallationVersion}` }
+  // altimate_change end
 }
 
 function exchange(code: string, redirect: string, pkce: Pkce) {
@@ -251,7 +253,9 @@ function claim(token: string) {
   }
 }
 
+// altimate_change start — OAuth callback page branding
 const successPage =
-  "<!doctype html><title>OpenCode</title><h1>Authorization successful</h1><p>You can close this window.</p>"
+  "<!doctype html><title>Altimate Code</title><h1>Authorization successful</h1><p>You can close this window.</p>"
 const errorPage = (message: string) =>
-  `<!doctype html><title>OpenCode</title><h1>Authorization failed</h1><p>${message.replace(/[&<>"']/g, "")}</p>`
+  `<!doctype html><title>Altimate Code</title><h1>Authorization failed</h1><p>${message.replace(/[&<>"']/g, "")}</p>`
+// altimate_change end

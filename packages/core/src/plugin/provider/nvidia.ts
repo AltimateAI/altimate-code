@@ -11,9 +11,11 @@ export const NvidiaPlugin = PluginV2.define({
           if (item.provider.api.package !== "@ai-sdk/openai-compatible") continue
           if (item.provider.api.url !== "https://integrate.api.nvidia.com/v1") continue
           evt.provider.update(item.provider.id, (provider) => {
-            provider.request.headers["HTTP-Referer"] = "https://opencode.ai/"
-            provider.request.headers["X-Title"] = "opencode"
-            provider.request.headers["X-BILLING-INVOKE-ORIGIN"] ??= "OpenCode"
+            // altimate_change start — provider identity headers
+            provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
+            provider.request.headers["X-Title"] = "altimate-code"
+            provider.request.headers["X-BILLING-INVOKE-ORIGIN"] ??= "AltimateAI"
+            // altimate_change end
           })
         }
       }),

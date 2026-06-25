@@ -229,7 +229,9 @@ export const layer = Layer.effectDiscard(
                         // V2 invocation context does not safely expose the model yet.
                       },
                       {
-                        "User-Agent": `opencode/${InstallationVersion}`,
+                        // altimate_change start — User-Agent brand
+                        "User-Agent": `altimate-code/${InstallationVersion}`,
+                        // altimate_change end
                         ...(config.parallelApiKey ? { Authorization: `Bearer ${config.parallelApiKey}` } : {}),
                       },
                     )

@@ -4,7 +4,9 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { hideBin } from "yargs/helpers"
 const cli = yargs(hideBin(process.argv))
   .parserConfiguration({ "populate--": true })
-  .scriptName("opencode")
+  // altimate_change start — CLI script name branding
+  .scriptName("altimate-code")
+  // altimate_change end
   .wrap(100)
   .help("help", "show help")
   .alias("help", "h")
