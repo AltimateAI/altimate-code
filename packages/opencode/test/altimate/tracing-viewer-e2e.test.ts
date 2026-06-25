@@ -6,7 +6,10 @@
  * and exercising adversarial edge cases (XSS, empty data, huge payloads, etc.).
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
-import { chromium, type Browser, type Page } from "playwright-core"
+// Type-only import so this browser-e2e file loads even where playwright-core is not
+// installed (CI). The runtime `chromium` is imported lazily in beforeAll, gated on
+// canRunBrowserTests (chromium binary present) — CI has no binary and skips the suite.
+import type { Browser, Page } from "playwright-core"
 import { renderTraceViewer } from "../../src/altimate/observability/viewer"
 import type { TraceFile } from "../../src/altimate/observability/tracing"
 import fs from "fs"
@@ -32,6 +35,9 @@ const canRunBrowserTests = chromiumPath && fs.existsSync(chromiumPath)
 
 beforeAll(async () => {
   if (!canRunBrowserTests) return
+  // Lazy import: only reached when a chromium binary exists (local dev), so CI never
+  // needs the playwright-core package resolvable.
+  const { chromium } = await import("playwright-core")
   browser = await chromium.launch({
     headless: true,
     executablePath: chromiumPath,
