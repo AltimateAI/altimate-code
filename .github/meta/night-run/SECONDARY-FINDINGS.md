@@ -3,7 +3,7 @@
 These are surfaced by the command/trace verification. They are **fork-feature** issues, separate
 from the merge-integration ship (which is green). Triaged by severity + regression-vs-pre-existing.
 
-## 1. Tracing produces no artifacts — MERGE REGRESSION (top follow-up)
+## 1. Tracing produces no artifacts — MERGE REGRESSION — ✅ FIXED (761a6601f8)
 - **Symptom** (WS5): `altimate run ... --trace` (tracing is on by default) executes the task fine
   but writes **0 trace files**; `trace view <id>` then can't find the trace.
 - **Root cause** (pinpointed): the tracer setup in `cli/cmd/run.ts` (~L597) calls `Config.get()`,
@@ -16,11 +16,23 @@ from the merge-integration ship (which is green). Triaged by severity + regressi
 - **Fix direction**: provide the instance to the tracer-setup `Config.get()` the same way the fork
   bridges Effect `InstanceRef` ↔ legacy ALS elsewhere (see `share-next.ts:319` `withInstance`,
   `tool-zod-compat.ts:257`), or move tracer creation to where the instance scope already exists.
-  Non-trivial (client/server + Effect/ALS); deliberately not rushed onto the green build.
+  Non-trivial (client/server + Effect/ALS).
+- **RESOLVED** (761a6601f8): the tracer setup now reads the effective tracing config via the
+  already-available server client (`sdk.config.get()`) instead of the broken local facade. The
+  in-process/attached server holds the resolved instance, so the read is reliable. Verified:
+  `run --trace` writes a well-formed trace JSON (5 spans + summary); `endTrace()` returns the path.
+  The underlying cause is an instance-AsyncLocalStorage **duplication** across the module boundary
+  (run-service's `Instance.current` reads an empty store while `bootstrap`/run.ts read SET) — see #2.
 
-## 2. `skill list` fails with the SAME root cause — MERGE REGRESSION
+## 2. `skill list` fails with the SAME root cause — MERGE REGRESSION — STILL OPEN
 - `altimate skill list` exits 1: `Error: Unexpected error` / `InstanceRef not provided`.
-- Same `InstanceRef`-not-bridged gap as tracing; a single CLI instance-context fix likely covers both.
+- Same instance-ALS duplication as #1: `Skill.all()` → `Config.get()` facade → run-service `attach()`
+  reads an empty instance store. Unlike the tracer, `skill list` has NO server client to read through,
+  so the `sdk.config.get()` workaround does not apply.
+- Needs the deeper fix: make run-service's `Instance` / `instance-context` resolve to the single
+  AsyncLocalStorage that `bootstrap()` populates (module-dedup), or have `tryLegacyInstance()` read the
+  instance from a resolution-independent location that `bootstrap` sets. This would also let the tracer
+  drop its sdk workaround.
 - Note: `mcp list`, `agent list`, etc. work (they run within a proper instance scope), so this is
   path-specific, not all CLI Effect commands.
 
