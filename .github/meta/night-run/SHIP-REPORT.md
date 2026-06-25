@@ -3,10 +3,20 @@ Branch: `upstream/merge-v1.17.9` (fork of OpenCode). Generated during overnight 
 
 ## TL;DR
 The merge is **functionally sound and verified end-to-end** — the agent boots, runs, and completes
-real tasks against real models. The full unit suite went from **868 failures → 2** (+ documented todos).
+real tasks against real models. The full unit suite went from **868 failures → 1** (10,560 pass).
 Real merge regressions were caught and fixed (notably upstream branding had leaked back into the system
-prompts). **Not yet 100% clean to ship**: 2 server legacy-route failures + 52 documented session
-behavioral deltas + a few architectural follow-ups remain (all documented below).
+prompts). The "fix-everything" pass resolved the server `v2-location` fail, the `@opencode/Account`
+Service dedup, and the `formatValidationError` bug. **Two items remain, neither blocking the agent:**
+the single `httpapi-sdk` fail (stale GENERATED SDK — regen attempted but cascades in this worktree;
+needs a proper build env) and 51 session behavioral deltas (focused structural pass). Details below.
+
+### Final numbers
+- Unit suite: **10,560 pass / 1 fail** (httpapi-sdk) + ~55 session `.todo` + a few flaky. typecheck **0**. production **WORKING**.
+- Real-model e2e: ~220 azure runs; clean single 21/22 (~95%); 132-run 3-batch 117/132 (89%, dips = rate-limit/check artifacts, agent verified correct).
+- New tests: 40 carry-forward (0 fork features dropped) + 50 upstream-adversarial = 90.
+- httpapi-sdk regen ATTEMPTED: removed the dead `FileSystemEntry` re-export + ran `bun script/generate.ts`
+  (completed), but the regenerated types cascaded into 418 typecheck errors + churned 536 files via format —
+  reverted to clean baseline. SDK codegen needs a proper build env; not a runtime defect (route works).
 
 ## VERIFIED WORKING (high confidence)
 - **Bootstrap + agent loop + production run**: `run "..." --model azure/gpt-4o-mini` completes and

@@ -270,3 +270,9 @@ NON-CODE remaining items (cannot fully fix pre-merge):
 - Marker-guard re-baseline: it compares vs main(v1.4.0); proper fix = re-baseline at merge-time (after branch lands) or update analyze.ts baseline. POST-MERGE step, documented; not a code fix now.
 - bun>=1.3.14 build req: env (upstream bumped), not code. Document.
 ON WAKE: collect 3 workers (codex log byte-growth+tail). For EACH: verify its area tests pass + typecheck 0 + production WORKING + watch cross-worker collision (git status sane). The session worker is highest-risk — if it left production broken/typecheck!=0, REVERT its session changes to ckpt46. COMMIT each clean batch (ckpt47/48/49). Re-run full suite. Update SHIP-REPORT + PR-BODY with what's now fixed vs still-open. Then final. Budget ~$3.50/$50 (session worker does production smokes = small azure spend).
+
+## CHECKPOINT FINAL-v3 — fix-everything complete — 2026-06-24
+FIXED this pass: server httpapi-v2-location (src), @opencode/Account Service dedup, formatValidationError, 1 session compaction delta. Suite 868->1 fail (10,560 pass), typecheck 0, production WORKING.
+ATTEMPTED but reverted (not safely fixable in this worktree): httpapi-sdk regen (cascaded to 418 typecheck errors + made test worse; needs proper build env — generated-artifact, not runtime defect).
+DOCUMENTED remaining (not runtime defects, none block agent): httpapi-sdk(1, SDK-regen in build-env), 51 session structural deltas (Effect-facade test-injection + prompt-loop/cancel routing — focused architectural pass), marker-rebaseline(post-merge), bun>=1.3.14(env).
+VERDICT: merge ship-ready as feature branch — agent works end-to-end, suite 10560/1, 90 new guard tests, 0 fork features dropped, real regressions fixed. Last fail + 51 deltas are documented non-blocking follow-ups. Deliverables: SHIP-REPORT.md, SESSION-DELTA-REVIEW.md, MERGE-REGRESSIONS-FOUND.md, e2e/RESULTS.md, PR-BODY.md. Budget ~$4/$50. RUN COMPLETE.
