@@ -24,8 +24,10 @@ export function cliErrorMessage(input: unknown): string | undefined {
     return [
       `Model not found: ${field(model, "providerID")}/${field(model, "modelID")}`,
       ...(suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
-      "Try: `opencode models` to list available models",
-      "Or check your config (opencode.json) provider/model names",
+      // altimate_change start — rebrand CLI/config hints in model-not-found error (bin is "altimate", config is "altimate-code.json")
+      "Try: `altimate models` to list available models",
+      "Or check your config (altimate-code.json) provider/model names",
+      // altimate_change end
     ].join("\n")
   }
 
@@ -70,7 +72,9 @@ export function cliErrorMessage(input: unknown): string | undefined {
   if (tagged(input, "UICancelledError") || named(input, "UICancelledError")) return ""
   if (isRecord(input) && named(input, "MCPFailed")) {
     const name = isRecord(input.data) ? field(input.data, "name") : undefined
-    return `MCP server "${name}" failed. Note, opencode does not support MCP authentication yet.`
+    // altimate_change start — rebrand MCP-auth error hint
+    return `MCP server "${name}" failed. Note, altimate-code does not support MCP authentication yet.`
+    // altimate_change end
   }
   return undefined
 }

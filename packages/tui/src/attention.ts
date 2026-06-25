@@ -40,7 +40,9 @@ type TuiAttentionHost = TuiAttention & {
   dispose(): void
 }
 
-const DEFAULT_TITLE = "opencode"
+// altimate_change start — rebrand default terminal-title fallback
+const DEFAULT_TITLE = "altimate"
+// altimate_change end
 const DEFAULT_PACK_ID = "opencode.default"
 const KV_SOUND_PACK = "attention_sound_pack"
 const TITLE_LIMIT = 80

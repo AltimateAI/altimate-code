@@ -69,10 +69,14 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
         <span style={{ fg: theme().text }}>{path().name}</span>
       </text>
       <text fg={theme().textMuted}>
-        <span style={{ fg: theme().success }}>•</span> <b>Open</b>
+        {/* altimate_change start — rebrand sidebar wordmark; upstream split "Open"+"Code" across spans, which evades the literal-"OpenCode" branding scanner */}
+        <span style={{ fg: theme().success }}>•</span> <b>altimate</b>
         <span style={{ fg: theme().text }}>
-          <b>Code</b>
-        </span>{" "}
+          {" "}
+          <b>code</b>
+        </span>
+        {/* altimate_change end */}
+        {" "}
         <span>{props.api.app.version}</span>
       </text>
     </box>
