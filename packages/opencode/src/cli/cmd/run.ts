@@ -28,7 +28,6 @@ import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
-import { Config } from "../../config/config"
 
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
 // param schema erases to `unknown`), fall back to a string-keyed record so the
@@ -599,8 +598,27 @@ You are speaking to a non-technical business executive. Follow these rules stric
         try {
           if (args.trace === false) return null
 
-          const cfg = await Config.get()
-          const tracingCfg = cfg.tracing
+          // altimate_change start — upstream_fix: read tracing config via the server client.
+          // The local Config.get() facade resolves the active instance from a legacy ALS that is
+          // not visible to run-service's makeRuntime bridge in this CLI path (the instance ALS is
+          // duplicated across the module-resolution boundary), so it threw "InstanceRef not
+          // provided" and the tracer was silently disabled — no trace artifacts were ever written.
+          // The (in-process or attached) server already holds the resolved instance, so reading
+          // config through the SDK returns the effective tracing config reliably.
+          const cfgResult = await sdk.config.get()
+          const tracingCfg = (
+            cfgResult.data as
+              | {
+                  tracing?: {
+                    enabled?: boolean
+                    dir?: string
+                    maxFiles?: number
+                    exporters?: Array<{ name: string; endpoint: string; headers?: Record<string, string> }>
+                  }
+                }
+              | undefined
+          )?.tracing
+          // altimate_change end
           if (tracingCfg?.enabled === false) return null
 
           const exporters: TraceExporter[] = [new FileExporter(tracingCfg?.dir)]
