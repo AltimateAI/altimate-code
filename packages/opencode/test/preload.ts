@@ -60,6 +60,18 @@ delete process.env["ANTHROPIC_API_KEY"]
 delete process.env["OPENAI_API_KEY"]
 delete process.env["GOOGLE_API_KEY"]
 delete process.env["GOOGLE_GENERATIVE_AI_API_KEY"]
+// altimate_change start — also clear Google Vertex creds and redirect gcloud ADC to an empty
+// dir so a developer's Application Default Credentials (~/.config/gcloud) don't make the
+// provider list non-deterministic. Without this, `config.providers()` returns a real
+// google-vertex-anthropic entry whose model `variants`/`release_date` fail the generated SDK's
+// response schema (httpapi-sdk 400). CI has no creds; this makes local runs match CI.
+delete process.env["GOOGLE_APPLICATION_CREDENTIALS"]
+delete process.env["GOOGLE_VERTEX_PROJECT"]
+delete process.env["GOOGLE_VERTEX_LOCATION"]
+delete process.env["GOOGLE_CLOUD_PROJECT"]
+delete process.env["GCLOUD_PROJECT"]
+process.env["CLOUDSDK_CONFIG"] = path.join(dir, "gcloud-empty")
+// altimate_change end
 delete process.env["AZURE_OPENAI_API_KEY"]
 delete process.env["AWS_ACCESS_KEY_ID"]
 delete process.env["AWS_PROFILE"]
