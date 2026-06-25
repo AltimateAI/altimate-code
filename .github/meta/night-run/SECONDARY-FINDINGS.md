@@ -24,15 +24,19 @@ from the merge-integration ship (which is green). Triaged by severity + regressi
   The underlying cause is an instance-AsyncLocalStorage **duplication** across the module boundary
   (run-service's `Instance.current` reads an empty store while `bootstrap`/run.ts read SET) — see #2.
 
-## 2. `skill list` fails with the SAME root cause — MERGE REGRESSION — STILL OPEN
-- `altimate skill list` exits 1: `Error: Unexpected error` / `InstanceRef not provided`.
+## 2. `skill list` fails with the SAME root cause — MERGE REGRESSION — ✅ FIXED (14143aba50)
+- `altimate skill list` exited 1: `Error: Unexpected error` / `InstanceRef not provided`.
 - Same instance-ALS duplication as #1: `Skill.all()` → `Config.get()` facade → run-service `attach()`
-  reads an empty instance store. Unlike the tracer, `skill list` has NO server client to read through,
-  so the `sdk.config.get()` workaround does not apply.
-- Needs the deeper fix: make run-service's `Instance` / `instance-context` resolve to the single
-  AsyncLocalStorage that `bootstrap()` populates (module-dedup), or have `tryLegacyInstance()` read the
-  instance from a resolution-independent location that `bootstrap` sets. This would also let the tracer
-  drop its sdk workaround.
+  reads an empty instance store.
+- **RESOLVED** (mirrors the tracer fix): read skills through the in-process server client
+  (`sdk.app.skills()` returns name/description/location/content) and use `process.cwd()` for the
+  tool-on-path check. Verified: `skill list` now exits 0 and renders the table. Regression guard added
+  (`test/cli/smokes/read-only.test.ts` → "skill list: exits 0").
+- Remaining cleanup (not blocking): `skill create`/`skill test` use the same direct facades and may hit
+  the same gap (mutating, not smoke-tested). The proper long-term fix is module-deduping the
+  instance-context ALS so the legacy bridge works for ALL CLI paths — that would let both the tracer and
+  `skill list` drop their server-read workarounds. (The globalThis-keyed-ALS approach was tried and did
+  NOT fix it — the duplication is in the module graph / `InstanceRef`, deeper than the ALS object.)
 - Note: `mcp list`, `agent list`, etc. work (they run within a proper instance scope), so this is
   path-specific, not all CLI Effect commands.
 
