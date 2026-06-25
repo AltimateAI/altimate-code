@@ -28,7 +28,9 @@ function writeOsc52(text: string) {
 
 export async function read() {
   if (platform() === "darwin") {
-    const file = path.join(tmpdir(), "opencode-clipboard.png")
+    // altimate_change start — rebrand temporary clipboard file
+    const file = path.join(tmpdir(), "altimate-code-clipboard.png")
+    // altimate_change end
     try {
       await exec("osascript", [
         "-e",

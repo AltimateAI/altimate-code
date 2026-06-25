@@ -64,6 +64,20 @@ export namespace Server {
   const log = Log.create({ service: "server" })
 
   export const Default = lazy(() => createApp({}))
+  // altimate_change start — upstream_fix: preserve upstream v1.17.9 /api HttpApi routes.
+  // The v2 SDK/TUI calls /api/provider and /api/model; without this bridge the legacy
+  // Hono catch-all proxies those requests to app.altimate.ai and floods the TUI on failure.
+  const httpApiBridge = lazy(async () => {
+    const { HttpApiApp } = await import("./routes/instance/httpapi/server")
+    return {
+      handler: HttpApiApp.webHandler().handler as (
+        request: Request,
+        context: unknown,
+      ) => Response | Promise<Response>,
+      context: HttpApiApp.context,
+    }
+  })
+  // altimate_change end
 
   // altimate_change start — legacy zod NamedError instances come from a different
   // package than the core Effect NamedError, so instanceof misses them.
@@ -159,6 +173,12 @@ export namespace Server {
           },
         }),
       )
+      // altimate_change start — upstream_fix: route v2 SDK/TUI /api requests before legacy instance/UI routes.
+      .all("/api/*", async (c) => {
+        const bridge = await httpApiBridge()
+        return bridge.handler(c.req.raw, bridge.context)
+      })
+      // altimate_change end
       .route("/global", GlobalRoutes())
       .put(
         "/auth/:providerID",

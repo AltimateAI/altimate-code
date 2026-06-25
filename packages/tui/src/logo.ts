@@ -1,6 +1,8 @@
 export const logo = {
-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
-  right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+  // altimate_change start — rebrand shared wordmark from opencode to Altimate Code
+  left: ["                                ", "▄▀█ █   ▀█▀ █ █▀▄▀█ ▄▀█ ▀█▀ █▀▀", "█▀█ █▄▄  █  █ █ ▀ █ █▀█  █  ██▄", "                                "],
+  right: ["                 ", "█▀▀ █▀█ █▀▄ █▀▀", "█▄▄ █▄█ █▄▀ ██▄", "                 "],
+  // altimate_change end
 }
 
 export const go = {

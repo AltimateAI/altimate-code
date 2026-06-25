@@ -6,8 +6,9 @@ import { ServerAuth } from "@/server/auth"
 
 export const AttachCommand = cmd({
   command: "attach <url>",
-  // altimate_change — rebrand --help text
+  // altimate_change start — rebrand --help text
   describe: "attach to a running altimate-code server",
+  // altimate_change end
   builder: (yargs) =>
     yargs
       .positional("url", {

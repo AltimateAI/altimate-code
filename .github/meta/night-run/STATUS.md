@@ -343,3 +343,11 @@ ACTIONS NOW: launch (1) branding fixer (5 prompts + provider identity headers + 
 - Branch pushed at bdb3cef235. In-flight work (branding fixer, tasktool fixer, then COVER-46) will land as follow-up commits pushed to the branch -> auto-updates PR #964.
 - Template-compliance NOTE (memory): anandgupta42 NOT in TEAM_MEMBERS -> bot checks apply; PR body uses exact headings (What/Type/Issue/How-verified/Checklist) + Closes #963. Monitor it isn't auto-closed.
 - REMAINING (lands as PR commits): branding (5 prompts + provider headers + config/UI), TaskTool deriveSubagentSessionPermission wiring, COVER-46 (session injectable-Service refactor + compaction retained-tail), sdk regen (build-env). Each: commit + push to update PR.
+
+## CHECKPOINT 34 — build verified + CI blockers identified — 2026-06-25
+- BUILD: co-worker hit ModuleNotFound ./src/cli/cmd/tui/worker.ts (build.ts:384 stale after TUI relocation cli/cmd/tui->cli/tui). FIXED build.ts:384 -> ./src/cli/tui/worker.ts. VERIFIED by actually building: bun build:local (gate temporarily relaxed, reverted) produced working binary dist/@altimateai/altimate-code-darwin-arm64/bin/altimate (237MB), `--version` runs. Committed 29993986f6 + pushed. (LESSON: build before claiming a build fix.)
+- CI (PR #964 Marker Guard) failing on 2 real blockers (the --markers non-strict step PASSES via bridge exemption):
+  1. `analyze.ts --branding` exit 1: 198 leaks (214 in shipped opencode/src incl. packages/tui/src/logo.ts ASCII --help banner; +tests/core). Need comprehensive rebrand + allowlist intentional (User-Agent compat, ai.opencode app-id, opencode-github-action infra, public OpenCode class) via config.ts skipFiles/line-allowlist.
+  2. `analyze.ts --require-markers --strict` exit 1: 11 of 38 requireMarkers files stale (10 TUI files moved cli/cmd/tui->packages/tui or cli/tui = "file not found"; github.ts "no blocks"). Update script/upstream/utils/config.ts requireMarkers list (repoint moved / remove obsolete / mark github.ts).
+- Build needs bun>=1.3.14 (env 1.3.13) — env, gate intact.
+- NEXT: comprehensive Marker-Guard CI fix (1 codex owns config.ts + rebrand). Then re-run CI on PR #964. Then COVER-46. Budget ~$6/$50.

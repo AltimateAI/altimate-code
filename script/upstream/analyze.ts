@@ -166,6 +166,11 @@ async function auditBranding(config: MergeConfig): Promise<BrandingReport> {
     // Skip keepOurs files — they contain our own branding
     if (config.keepOurs.some((p) => minimatch(relFile, p))) continue
 
+    // altimate_change start — branding audit should ignore files the upstream
+    // overlay discards or treats as non-shipped/generated surfaces.
+    if (config.skipFiles.some((p) => minimatch(relFile, p))) continue
+    // altimate_change end
+
     // Skip non-text files
     const ext = path.extname(relFile).toLowerCase()
     if (!config.transformableExtensions.includes(ext)) continue

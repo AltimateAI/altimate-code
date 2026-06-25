@@ -17,3 +17,4 @@ STRATEGY: bulk e2e on FREE Ollama; sample quality runs on Azure gpt-4o-mini (che
 - 17:37 e2e seq conc=1 OPENCODE_DB-isolated 22 runs azure (~$0.15)
 - 18:01 e2e seq conc=1 DEFAULT-env 22 runs azure (~$0.15)
 - 19:39 e2e 3 batches x ~44 (132 runs) azure (~$1)
+- 00:01 BINARY e2e gpt-5.5 --yolo extensive: 22 tasks x4 = 88 runs (~21s each; gpt-5.5 pricier, est ~$10-15, cap $45)

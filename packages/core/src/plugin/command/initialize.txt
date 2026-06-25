@@ -1,6 +1,8 @@
 Create or update `AGENTS.md` for this repository.
 
-The goal is a compact instruction file that helps future OpenCode sessions avoid mistakes and ramp up quickly. Every line should answer: "Would an agent likely miss this without help?" If not, leave it out.
+// altimate_change start — product branding in built-in command prompt
+The goal is a compact instruction file that helps future Altimate Code sessions avoid mistakes and ramp up quickly. Every line should answer: "Would an agent likely miss this without help?" If not, leave it out.
+// altimate_change end
 
 User-provided focus or constraints (honor these):
 $ARGUMENTS

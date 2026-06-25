@@ -330,21 +330,19 @@ export const defaultConfig: MergeConfig = {
     "packages/opencode/src/cli/cmd/uninstall.ts",
     "packages/opencode/src/cli/cmd/pr.ts",
     "packages/opencode/src/cli/cmd/mcp.ts",
-    "packages/opencode/src/cli/cmd/github.ts",
+    "packages/opencode/src/cli/cmd/github.handler.ts",
     "packages/opencode/src/cli/cmd/upgrade.ts",
-    "packages/opencode/src/cli/cmd/tui/attach.ts",
-    "packages/opencode/src/cli/cmd/tui/component/upgrade-indicator.tsx",
+    "packages/opencode/src/cli/cmd/attach.ts",
+    "packages/tui/src/component/upgrade-indicator.tsx",
     "packages/opencode/src/cli/error.ts",
     "packages/opencode/src/cli/ui.ts",
     "packages/opencode/src/cli/network.ts",
     // TUI components with brand strings or Log.Default usage
-    "packages/opencode/src/cli/cmd/tui/component/dialog-status.tsx",
-    "packages/opencode/src/cli/cmd/tui/component/dialog-mcp.tsx",
-    "packages/opencode/src/cli/cmd/tui/component/dialog-workspace-list.tsx",
-    "packages/opencode/src/cli/cmd/tui/component/error-component.tsx",
-    "packages/opencode/src/cli/cmd/tui/component/logo.tsx",
-    "packages/opencode/src/cli/cmd/tui/util/clipboard.ts",
-    "packages/opencode/src/cli/cmd/tui/context/route.tsx",
+    "packages/tui/src/component/dialog-status.tsx",
+    "packages/tui/src/component/error-component.tsx",
+    "packages/tui/src/logo.ts",
+    "packages/tui/src/clipboard.ts",
+    "packages/tui/src/context/route.tsx",
     // (Catppuccin a11y tweaks live in keepOurs — JSON can't carry markers.)
     // HTTP routes that must call PermissionNext (split-brain regression)
     "packages/opencode/src/server/routes/permission.ts",
@@ -354,7 +352,6 @@ export const defaultConfig: MergeConfig = {
     // OAuth client + TUI schema URLs (point at altimate.ai not opencode.ai)
     "packages/opencode/src/mcp/oauth-provider.ts",
     "packages/opencode/src/mcp/config.ts",
-    "packages/opencode/src/config/migrate-tui-config.ts",
     "packages/opencode/src/config/tui-migrate.ts",
     // Workspace router middleware uses target() not fetch() — drift breaks runtime
     "packages/opencode/src/control-plane/workspace-router-middleware.ts",
@@ -444,6 +441,27 @@ export const defaultConfig: MergeConfig = {
     ".zed/settings.json",
     // Upstream changelog command — we have our own bridge-merge / release process.
     ".opencode/command/changelog.md",
+    // Repo-local upstream opencode config/commands are development metadata, not
+    // shipped fork source; keep them out of the branding audit.
+    ".opencode/command/issues.md",
+    ".opencode/opencode.jsonc",
+    ".opencode/plugins/**",
+    ".opencode/tui.json",
+    "CONTEXT.md",
+    // Upstream preview/auxiliary packages and fixtures are not part of the
+    // shipped CLI branding surface guarded by this fork.
+    "packages/cli/**",
+    "packages/core/test/**",
+    "packages/http-recorder/**",
+    "packages/opencode/specs/**",
+    "packages/opencode/test/**",
+    "packages/sdk/**/gen/**",
+    "packages/sdk/openapi.json",
+    // Public SDK names remain createOpencodeClient/OpencodeClient for
+    // compatibility until the SDK API is intentionally renamed.
+    "packages/sdk/js/src/v2/client.ts",
+    "patches/**",
+    "script/github/**",
   ],
 
   brandingRules: [
@@ -459,6 +477,23 @@ export const defaultConfig: MergeConfig = {
   ],
 
   preservePatterns: [
+    // Provider and auth endpoints may key allowlists on the legacy
+    // opencode/${version} User-Agent, so outbound provider UA strings stay
+    // compatibility-branded even though UI copy is Altimate-branded.
+    "\"User-Agent\": `opencode/${InstallationVersion}",
+    // The native Effect embedding API intentionally exports OpenCode-named
+    // symbols/context ids for downstream compatibility.
+    "export { OpenCode } from",
+    "export * as OpenCode from",
+    "@opencode/public/OpenCode",
+    "OpenCode.sessions.",
+    "OpenCode.create",
+    "embedding OpenCode",
+    "OpenCode instance",
+    // Generated web UI asset module name consumed by build-node.ts/server UI.
+    "opencode-web-ui.gen.ts",
+    // Historical compatibility note in the shared LLM package, not product copy.
+    "OpenCode's historical Gemini rules",
     "@opencode-ai/",
     "packages/opencode",
     "OPENCODE_",

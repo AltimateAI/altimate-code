@@ -67,7 +67,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
 
 /**
  * Serialize file changes by canonical target. Conditional writes compare and
- * write under the same process-local lock so cooperating OpenCode mutations do
+ * altimate_change start — product branding in public docs.
+ * write under the same process-local lock so cooperating Altimate Code mutations do
+ * altimate_change end
  * not overwrite changes made from the same stale content.
  */
 export const layer = Layer.effect(

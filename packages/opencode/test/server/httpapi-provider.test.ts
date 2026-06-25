@@ -258,6 +258,36 @@ function setEnvScoped(key: string, value: string) {
 }
 
 describe("provider HttpApi", () => {
+  it.instance(
+    "serves v2 provider and model routes from Server.Default",
+    Effect.gen(function* () {
+      const directory = (yield* TestInstance).directory
+      const headers = { "x-opencode-directory": directory }
+      const providerResponse = yield* requestDefault("/api/provider", { headers })
+      const modelResponse = yield* requestDefault("/api/model", { headers })
+
+      if (providerResponse.status !== 200) {
+        return yield* Effect.fail(
+          new Error(
+            `provider response ${providerResponse.status}: ${yield* Effect.promise(() => providerResponse.text())}`,
+          ),
+        )
+      }
+      if (modelResponse.status !== 200) {
+        return yield* Effect.fail(
+          new Error(`model response ${modelResponse.status}: ${yield* Effect.promise(() => modelResponse.text())}`),
+        )
+      }
+
+      const providerBody = yield* responseJson(providerResponse)
+      const modelBody = yield* responseJson(modelResponse)
+      expect(isRecord(providerBody) && Array.isArray(providerBody.data)).toBe(true)
+      expect(isRecord(modelBody) && Array.isArray(modelBody.data)).toBe(true)
+    }),
+    projectOptions,
+    30000,
+  )
+
   it.instance.skip(
     "returns public v2 provider not found errors",
     Effect.gen(function* () {

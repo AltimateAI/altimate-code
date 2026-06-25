@@ -1,6 +1,8 @@
 const logo = {
-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
-  right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+  // altimate_change start — rebrand epilogue wordmark from opencode to Altimate Code
+  left: ["                                ", "▄▀█ █   ▀█▀ █ █▀▄▀█ ▄▀█ ▀█▀ █▀▀", "█▀█ █▄▄  █  █ █ ▀ █ █▀█  █  ██▄", "                                "],
+  right: ["                 ", "█▀▀ █▀█ █▀▄ █▀▀", "█▄▄ █▄█ █▄▀ ██▄", "                 "],
+  // altimate_change end
 }
 
 const reset = "\x1b[0m"
@@ -32,7 +34,8 @@ export function sessionEpilogue(input: { title: string; sessionID?: string }) {
     ...wordmark("  "),
     "",
     `  ${weak("Session")}${bold}${input.title}${reset}`,
-    `  ${weak("Continue")}${bold}opencode -s ${input.sessionID}${reset}`,
+    // altimate_change — rebrand resume command
+    `  ${weak("Continue")}${bold}altimate -s ${input.sessionID}${reset}`,
     "",
   ].join("\n")
 }
