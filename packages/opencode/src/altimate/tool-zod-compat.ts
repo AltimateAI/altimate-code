@@ -48,6 +48,10 @@ export interface LegacyResult<M extends Metadata = Metadata> {
 export interface LegacyToolDef<P extends z.ZodType = z.ZodType, M extends Metadata = Metadata> {
   description: string
   parameters: P
+  // altimate_change start — upstream_fix: allow legacy tools to publish a narrower
+  // JSON schema than their parser accepts for backward-compatible hidden arguments.
+  jsonSchema?: JSONSchema7
+  // altimate_change end
   execute(args: z.infer<P>, ctx: LegacyContext<M>): Promise<LegacyResult<M>>
   formatValidationError?(error: z.ZodError): string
 }
@@ -181,7 +185,10 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
       }),
     ),
     // altimate_change end
-    jsonSchema: zodToJsonSchema(legacy.parameters),
+    // altimate_change start — upstream_fix: use an explicit JSON schema when a legacy
+    // tool needs hidden compatibility arguments that should not be advertised.
+    jsonSchema: legacy.jsonSchema ?? zodToJsonSchema(legacy.parameters),
+    // altimate_change end
     ...(legacy.formatValidationError
       ? {
           // altimate_change start — the new Tool API decodes via Schema.declare, so the

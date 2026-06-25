@@ -105,7 +105,15 @@ export class LocationServiceMap extends LayerMap.Service<LocationServiceMap>()("
 
     // Kick off a background project copy refresh to update locations now that we
     // have a location
-    const projectCopyRefresh = Layer.effectDiscard(ProjectCopy.refreshAfterBoot).pipe(Layer.provide(services))
+    // altimate_change start — upstream_fix: let tests disable this background DB writer so
+    // reset-heavy parallel suites do not race unrelated instance boots.
+    const disableProjectCopyRefresh = ["1", "true"].includes(
+      process.env["OPENCODE_DISABLE_PROJECT_COPY_REFRESH"]?.toLowerCase() ?? "",
+    )
+    const projectCopyRefresh = disableProjectCopyRefresh
+      ? Layer.effectDiscard(Effect.void)
+      : Layer.effectDiscard(ProjectCopy.refreshAfterBoot).pipe(Layer.provide(services))
+    // altimate_change end
 
     return Layer.mergeAll(
       boot,

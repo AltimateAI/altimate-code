@@ -1,6 +1,9 @@
 import { Tool } from "./tool"
 import DESCRIPTION from "./task.txt"
 import z from "zod"
+// altimate_change start — upstream_fix: publish a task schema that hides disabled background mode.
+import { zodToJsonSchema } from "@/altimate/tool-zod-compat"
+// altimate_change end
 import { Session } from "../session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
@@ -42,8 +45,26 @@ const parameters = z.object({
     )
     .optional(),
   command: z.string().describe("The command that triggered this task").optional(),
+  // altimate_change start — upstream_fix: keep accepting legacy/manual background calls internally.
   background: z.boolean().optional(),
+  // altimate_change end
 })
+
+// altimate_change start — upstream_fix: keep accepting `background` internally so old/manual
+// callers get the explicit disabled-feature error, but do not advertise it to models.
+const taskJsonSchema = (() => {
+  const schema = zodToJsonSchema(parameters)
+  const properties = schema.properties
+  if (!properties || typeof properties !== "object" || !("background" in properties)) return schema
+  const nextProperties = { ...properties }
+  delete nextProperties.background
+  return {
+    ...schema,
+    properties: nextProperties,
+    ...(Array.isArray(schema.required) ? { required: schema.required.filter((field) => field !== "background") } : {}),
+  }
+})()
+// altimate_change end
 
 export const TaskTool = Tool.define("task", async (ctx) => {
   const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
@@ -63,6 +84,9 @@ export const TaskTool = Tool.define("task", async (ctx) => {
   return {
     description,
     parameters,
+    // altimate_change start — upstream_fix: hide disabled background mode from the tool contract.
+    jsonSchema: taskJsonSchema,
+    // altimate_change end
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
       if (params.background === true) {

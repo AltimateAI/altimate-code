@@ -581,11 +581,13 @@ describe("HttpExporter robustness", () => {
     const server = Bun.serve({
       port: 0,
       fetch() {
-        // Return headers but close body abruptly
+        // Return headers with a truncated JSON body. Using controller.error()
+        // makes Bun surface the server-side stream error as a test failure
+        // before HttpExporter can handle the client response.
         return new Response(new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode("{"))
-            controller.error(new Error("connection reset"))
+            controller.close()
           },
         }), { status: 200, headers: { "Content-Type": "application/json" } })
       },

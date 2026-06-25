@@ -259,26 +259,37 @@ export const layer = Layer.effect(
         Effect.map((sets) => new Map(sets.flat(2).map((item) => [item.directory, item] as const)).values().toArray()),
       )
       const removed = checked.filter((item) => !item.exists).map((item) => item.directory)
-      const result = yield* db
-        .transaction((tx) =>
-          Effect.all({
-            updated: Effect.forEach(discovered, (item) =>
-              directories.create(
-                {
-                  projectID: input.projectID,
-                  directory: item.directory,
-                  strategy: item.strategy,
-                  behavior: "replace",
-                },
-                tx,
-              ),
-            ),
-            removed: Effect.forEach(removed, (directory) =>
-              directories.remove({ projectID: input.projectID, directory }, tx),
-            ),
-          }),
-        )
-        .pipe(Effect.orDie)
+      // altimate_change start — upstream_fix: keep background refresh writes short so boot-time
+      // project discovery cannot hold SQLite's writer lock across hundreds of worktree rows.
+      const result = {
+        updated: yield* Effect.forEach(
+          discovered,
+          (item) =>
+            db
+              .transaction((tx) =>
+                directories.create(
+                  {
+                    projectID: input.projectID,
+                    directory: item.directory,
+                    strategy: item.strategy,
+                    behavior: "replace",
+                  },
+                  tx,
+                ),
+              )
+              .pipe(Effect.orDie),
+          { concurrency: 1 },
+        ),
+        removed: yield* Effect.forEach(
+          removed,
+          (directory) =>
+            db
+              .transaction((tx) => directories.remove({ projectID: input.projectID, directory }, tx))
+              .pipe(Effect.orDie),
+          { concurrency: 1 },
+        ),
+      }
+      // altimate_change end
       const changes = {
         updated: discovered.filter((_, index) => result.updated[index]).map((item) => item.directory),
         removed: removed.filter((_, index) => result.removed[index]),

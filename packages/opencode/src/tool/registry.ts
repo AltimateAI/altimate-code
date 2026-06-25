@@ -40,6 +40,9 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { legacyToInit, isZodType } from "../altimate/tool-zod-compat"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
+// altimate_change start — upstream_fix: task.background schema follows RuntimeFlags.
+import { RuntimeFlags } from "@/effect/runtime-flags"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
 // ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
 // compile. Delegates to the existing namespace functions; behavior preserved.
@@ -150,15 +153,21 @@ import { DbtPrReviewTool } from "../altimate/tools/dbt-pr-review"
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
 
-  export const state = Instance.state(async () => {
+  // altimate_change start — upstream_fix: allow the Effect Service facade to honor the
+  // injected Config.Service instead of falling back to the global Config facade. The legacy
+  // namespace functions still use the cached Instance.state path below.
+  type RegistryConfigInfo = Awaited<ReturnType<typeof Config.get>>
+  type RegistryConfigInput = { matches?: string[]; config?: RegistryConfigInfo }
+
+  function scanCustomTools(dirs: string[]) {
+    return dirs.flatMap((dir) =>
+      Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true }),
+    )
+  }
+
+  async function loadCustomTools(matches: string[]) {
     const custom = [] as Tool.Info[]
 
-    const matches = await Config.directories().then((dirs) =>
-      dirs.flatMap((dir) =>
-        Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true }),
-      ),
-    )
-    if (matches.length) await Config.waitForDependencies()
     for (const match of matches) {
       const namespace = path.basename(match, path.extname(match))
       const mod = await import(pathToFileURL(match).href)
@@ -178,7 +187,14 @@ export namespace ToolRegistry {
     // process-wide Plugin.list() facade.
     return { custom }
     // altimate_change end
+  }
+
+  export const state = Instance.state(async () => {
+    const matches = scanCustomTools(await Config.directories())
+    if (matches.length) await Config.waitForDependencies()
+    return loadCustomTools(matches)
   })
+  // altimate_change end
 
   // altimate_change start — v1.17.9 Tool API: init now returns an Effect of a legacy-shaped
   // def. We build the old plain-object def and bridge it to the new Effect API via
@@ -277,12 +293,54 @@ export namespace ToolRegistry {
   }
   // altimate_change end
 
-  async function all(plugins?: Awaited<ReturnType<typeof Plugin.list>>): Promise<Tool.Info[]> {
-    const custom = await state().then((x) => x.custom)
+  // altimate_change start — upstream_fix: hide task.background unless the runtime flag enables it.
+  type ToolRuntimeFlags = Pick<RuntimeFlags.Info, "experimentalBackgroundSubagents">
+
+  function backgroundSubagentsEnabled(flags?: ToolRuntimeFlags) {
+    if (flags) return flags.experimentalBackgroundSubagents
+    const value = process.env["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"]
+    if (value !== undefined) return ["1", "true", "yes"].includes(value.toLowerCase())
+    return Flag.OPENCODE_EXPERIMENTAL
+  }
+
+  function applyRuntimeToolSchemaFlags<T extends Tool.DefWithoutID>(id: string, tool: T, flags?: ToolRuntimeFlags): T {
+    if (id !== "task" || backgroundSubagentsEnabled(flags)) return tool
+    const schema = tool.jsonSchema
+    if (!schema || typeof schema !== "object" || !schema.properties || typeof schema.properties !== "object") {
+      return tool
+    }
+
+    const properties = { ...(schema.properties as Record<string, unknown>) }
+    if (!("background" in properties)) return tool
+    delete properties.background
+
+    return {
+      ...tool,
+      jsonSchema: {
+        ...schema,
+        properties,
+        ...(Array.isArray(schema.required)
+          ? { required: schema.required.filter((field) => field !== "background") }
+          : {}),
+      },
+    }
+  }
+  // altimate_change end
+
+  // altimate_change start — upstream_fix: let Effect Service callers pass injected Config results
+  // through to the registry instead of falling back to the global Config facade.
+  async function all(
+    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
+    configInput?: RegistryConfigInput,
+  ): Promise<Tool.Info[]> {
+    const custom = configInput?.matches
+      ? await loadCustomTools(configInput.matches).then((x) => x.custom)
+      : await state().then((x) => x.custom)
     // altimate_change start — append plugin tools (from the Effect Service or the facade)
     const pluginCustom = await pluginTools(plugins)
     // altimate_change end
-    const config = await Config.get()
+    const config = configInput?.config ?? (await Config.get())
+    // altimate_change end
     const question = ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
 
     // altimate_change start — v1.17.9: Tool.define returns an Effect<Tool.Info>; resolve the
@@ -424,14 +482,23 @@ export namespace ToolRegistry {
   }
 
   /** All tool infos without model/provider filtering. */
-  export async function allInfos(plugins?: Awaited<ReturnType<typeof Plugin.list>>): Promise<Tool.Info[]> {
-    return all(plugins)
+  // altimate_change start — upstream_fix: thread injected Config through helper entrypoints.
+  export async function allInfos(
+    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
+    configInput?: RegistryConfigInput,
+  ): Promise<Tool.Info[]> {
+    return all(plugins, configInput)
   }
 
-  export async function ids(plugins?: Awaited<ReturnType<typeof Plugin.list>>) {
-    return all(plugins).then((x) => x.map((t) => t.id))
+  export async function ids(
+    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
+    configInput?: RegistryConfigInput,
+  ) {
+    return all(plugins, configInput).then((x) => x.map((t) => t.id))
   }
+  // altimate_change end
 
+  // altimate_change start — upstream_fix: allow runtime flags and injected Config to shape tool definitions.
   export async function tools(
     model: {
       providerID: ProviderID
@@ -439,8 +506,11 @@ export namespace ToolRegistry {
     },
     agent?: Agent.Info,
     plugins?: Awaited<ReturnType<typeof Plugin.list>>,
+    runtimeFlags?: ToolRuntimeFlags,
+    configInput?: RegistryConfigInput,
   ) {
-    const tools = await all(plugins)
+    const tools = await all(plugins, configInput)
+    // altimate_change end
     const result = await Promise.all(
       tools
         .filter((t) => {
@@ -469,7 +539,9 @@ export namespace ToolRegistry {
           await Plugin.trigger("tool.definition", { toolID: t.id }, output)
           return {
             id: t.id,
-            ...tool,
+            // altimate_change start — upstream_fix: hide disabled runtime-gated tool schema fields.
+            ...applyRuntimeToolSchemaFlags(t.id, tool, runtimeFlags),
+            // altimate_change end
             description: output.description,
             parameters: output.parameters,
           }
@@ -513,22 +585,44 @@ export namespace ToolRegistry {
     // the async namespace functions instead of the process-wide Plugin.list() facade.
     Effect.gen(function* () {
       const pluginSvc = yield* Effect.serviceOption(Plugin.Service)
+      const runtimeFlags = yield* Effect.serviceOption(RuntimeFlags.Service)
+      const configSvc = yield* Effect.serviceOption(Config.Service)
       const resolvePlugins = (): Effect.Effect<Awaited<ReturnType<typeof Plugin.list>> | undefined> =>
         Option.isSome(pluginSvc) ? pluginSvc.value.list() : Effect.succeed(undefined)
+      const resolveConfigInput = (): Effect.Effect<RegistryConfigInput | undefined> =>
+        Option.isSome(configSvc)
+          ? Effect.gen(function* () {
+              const dirs = yield* configSvc.value.directories()
+              const matches = scanCustomTools(dirs)
+              if (matches.length) yield* configSvc.value.waitForDependencies()
+              const config = yield* configSvc.value.get()
+              return { matches, config }
+            })
+          : Effect.succeed(undefined)
       const bridgeWithPlugins = <T>(
-        fn: (plugins?: Awaited<ReturnType<typeof Plugin.list>>) => Promise<T>,
+        fn: (
+          plugins?: Awaited<ReturnType<typeof Plugin.list>>,
+          configInput?: RegistryConfigInput,
+        ) => Promise<T>,
       ): Effect.Effect<T> =>
         Effect.gen(function* () {
           const plugins = yield* resolvePlugins()
-          return yield* bridge(() => fn(plugins))
+          const configInput = yield* resolveConfigInput()
+          return yield* bridge(() => fn(plugins, configInput))
         })
       return Service.of({
-        ids: () => bridgeWithPlugins((plugins) => ids(plugins)),
-        allInfos: () => bridgeWithPlugins((plugins) => allInfos(plugins)),
+        ids: () => bridgeWithPlugins((plugins, configInput) => ids(plugins, configInput)),
+        allInfos: () => bridgeWithPlugins((plugins, configInput) => allInfos(plugins, configInput)),
         register: (tool) => bridge(() => register(tool)),
         tools: (model) =>
-          bridgeWithPlugins((plugins) =>
-            tools({ providerID: model.providerID, modelID: model.modelID }, model.agent, plugins),
+          bridgeWithPlugins((plugins, configInput) =>
+            tools(
+              { providerID: model.providerID, modelID: model.modelID },
+              model.agent,
+              plugins,
+              Option.getOrUndefined(runtimeFlags),
+              configInput,
+            ),
           ),
       })
     }),
@@ -538,7 +632,7 @@ export namespace ToolRegistry {
   export const defaultLayer = layer
 
   // altimate_change start — declare Plugin.node so swapped Plugin.Service layers reach this layer
-  export const node = LayerNode.make(layer, () => [Plugin.node])
+  export const node = LayerNode.make(layer, () => [Plugin.node, RuntimeFlags.node, Config.node])
   // altimate_change end
   // altimate_change end
 }

@@ -19,22 +19,89 @@ import { TestLLMServer } from "../lib/llm-server"
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
 export const testInstanceStoreLayer = InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap))
 
+type ReleaseLock = () => void
+const dbGate = {
+  readers: 0,
+  writer: false,
+  waiters: [] as Array<{ kind: "read" | "write"; resolve: (release: ReleaseLock) => void }>,
+}
+
+function pumpDbGate() {
+  if (dbGate.writer) return
+  const next = dbGate.waiters[0]
+  if (!next) return
+  if (next.kind === "write") {
+    if (dbGate.readers > 0) return
+    dbGate.writer = true
+    dbGate.waiters.shift()
+    next.resolve(() => {
+      dbGate.writer = false
+      pumpDbGate()
+    })
+    return
+  }
+
+  while (dbGate.waiters[0]?.kind === "read") {
+    const waiter = dbGate.waiters.shift()!
+    dbGate.readers += 1
+    waiter.resolve(() => {
+      dbGate.readers -= 1
+      pumpDbGate()
+    })
+  }
+}
+
+function acquireDbGate(kind: "read" | "write") {
+  return new Promise<ReleaseLock>((resolve) => {
+    dbGate.waiters.push({ kind, resolve })
+    pumpDbGate()
+  })
+}
+
+async function withDatabaseReadLock<T>(fn: () => T | Promise<T>) {
+  const release = await acquireDbGate("read")
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
+export async function withDatabaseWriteLock<T>(fn: () => T | Promise<T>) {
+  const release = await acquireDbGate("write")
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
+function withDatabaseReadLockEffect<A, E, R>(self: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.promise(() => acquireDbGate("read")),
+    () => self,
+    (release) => Effect.sync(release),
+  )
+}
+
 export async function provideTestInstance<R>(input: {
   directory: string
   init?: Effect.Effect<void>
   fn: (ctx: InstanceContext) => R
 }) {
-  const ctx = await InstanceRuntime.load({ directory: input.directory })
-  try {
-    if (input.init) await Effect.runPromise(input.init.pipe(Effect.provideService(InstanceRef, ctx)))
-    return await input.fn(ctx)
-  } finally {
-    await InstanceRuntime.disposeInstance(ctx)
-  }
+  return withDatabaseReadLock(async () => {
+    const ctx = await InstanceRuntime.load({ directory: input.directory })
+    try {
+      if (input.init) await Effect.runPromise(input.init.pipe(Effect.provideService(InstanceRef, ctx)))
+      return await input.fn(ctx)
+    } finally {
+      await InstanceRuntime.disposeInstance(ctx)
+    }
+  })
 }
 
 export async function withTestInstance<R>(input: { directory: string; fn: (ctx: InstanceContext) => R }) {
-  return input.fn(await InstanceRuntime.load({ directory: input.directory }))
+  return withDatabaseReadLock(async () => input.fn(await InstanceRuntime.load({ directory: input.directory })))
 }
 
 export async function reloadTestInstance(input: { directory: string }) {
@@ -164,12 +231,12 @@ export function tmpdirScoped<E = never, R = never>(options?: {
 export const provideInstance =
   (directory: string) =>
   <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A, E, R | InstanceStore.Service> =>
-    InstanceStore.Service.use((store) => store.provide({ directory }, self))
+    withDatabaseReadLockEffect(InstanceStore.Service.use((store) => store.provide({ directory }, self)))
 
 export const provideInstanceEffect =
   (directory: string) =>
   <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A, E, R | InstanceStore.Service> =>
-    InstanceStore.Service.use((store) => store.provide({ directory }, self))
+    withDatabaseReadLockEffect(InstanceStore.Service.use((store) => store.provide({ directory }, self)))
 
 export const reloadInstance = (input: InstanceStore.LoadInput) =>
   InstanceStore.Service.use((store) => store.reload(input))

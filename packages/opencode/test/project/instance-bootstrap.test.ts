@@ -57,6 +57,7 @@ const bootstrapFixture = Effect.gen(function* () {
 
 function waitDisposed(directory: string) {
   return waitGlobalBusEvent({
+    timeout: 60_000,
     message: "timed out waiting for CLI bootstrap instance disposal",
     predicate: (event) => event.payload.type === "server.instance.disposed" && event.directory === directory,
   })

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { $ } from "bun"
+import { Database as BunDatabase } from "bun:sqlite"
 import { fileURLToPath } from "url"
 import path from "path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -8,6 +9,7 @@ import { Effect, Layer } from "effect"
 import { eq, inArray, sql } from "drizzle-orm"
 import { DatabaseMigration } from "@opencode-ai/core/database/migration"
 import { migrations } from "@opencode-ai/core/database/migration.gen"
+import freshSchema from "@opencode-ai/core/database/schema.gen"
 import sessionUsageMigration from "@opencode-ai/core/database/migration/20260510033149_session_usage"
 import normalizeStoragePathsMigration from "@opencode-ai/core/database/migration/20260601010001_normalize_storage_paths"
 import sessionMessageProjectionOrderMigration from "@opencode-ai/core/database/migration/20260603040000_session_message_projection_order"
@@ -44,6 +46,49 @@ describe("DatabaseMigration", () => {
       ),
     )
   })
+
+  test("adopts current generated schema when only the legacy drizzle journal exists", async () => {
+    await using tmp = await tmpdir()
+    const filename = path.join(tmp.path, "legacy-current.sqlite")
+    const sqlite = new BunDatabase(filename, { create: true })
+    try {
+      sqlite.run("PRAGMA journal_mode = WAL")
+      const tx = {
+        run: (query: string) =>
+          Effect.sync(() => {
+            sqlite.run(query)
+          }),
+      }
+      sqlite
+        .transaction(() => {
+          Effect.runSync(freshSchema.up(tx as never))
+          sqlite.run(`
+            CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (
+              id INTEGER PRIMARY KEY,
+              hash text NOT NULL,
+              created_at numeric,
+              name text,
+              applied_at TEXT
+            )
+          `)
+          sqlite.run(`
+            INSERT INTO "__drizzle_migrations" (hash, created_at, name, applied_at)
+            VALUES ('', 1, '20260511173437_session-metadata', 'now')
+          `)
+        })()
+    } finally {
+      sqlite.close()
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* DatabaseMigration.apply(db)
+        expect(yield* db.get(sql`SELECT count(*) as count FROM migration`)).toEqual({ count: migrations.length })
+      }).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped),
+    )
+  })
+
   if (process.platform === "linux") {
     test("declared schema has no ungenerated migrations", async () => {
       const result = await $`bun ${fileURLToPath(new URL("../script/migration.ts", import.meta.url))} --check`

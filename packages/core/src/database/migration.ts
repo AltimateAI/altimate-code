@@ -34,6 +34,98 @@ function markMigrationsApplied(db: Target, input: Migration[]) {
   )
 }
 
+// altimate_change start — upstream_fix: seed the core journal for already-current schemas.
+const currentSchemaTables = [
+  "account",
+  "account_state",
+  "control_account",
+  "credential",
+  "data_migration",
+  "event",
+  "event_sequence",
+  "message",
+  "part",
+  "permission",
+  "project",
+  "project_directory",
+  "session",
+  "session_context_epoch",
+  "session_input",
+  "session_message",
+  "session_share",
+  "todo",
+  "workspace",
+] as const
+
+const currentSchemaColumns = {
+  credential: ["integration_id", "connector_id", "method_id", "active"],
+  event_sequence: ["owner_id"],
+  permission: ["action", "resource"],
+  project: ["commands", "icon_url_override", "sandboxes"],
+  project_directory: ["strategy", "time_created", "type"],
+  session: [
+    "agent",
+    "cost",
+    "metadata",
+    "model",
+    "path",
+    "tokens_cache_read",
+    "tokens_cache_write",
+    "tokens_input",
+    "tokens_output",
+    "tokens_reasoning",
+    "workspace_id",
+  ],
+  session_context_epoch: ["agent", "baseline_seq", "replacement_seq", "revision", "snapshot"],
+  session_input: ["admitted_seq", "delivery", "promoted_seq"],
+  session_message: ["data", "seq", "type"],
+  workspace: ["directory", "extra", "time_used", "type"],
+} as const
+
+const currentSchemaIndexes = [
+  "event_aggregate_seq_idx",
+  "event_aggregate_type_seq_idx",
+  "message_session_time_created_id_idx",
+  "part_message_id_id_idx",
+  "part_session_idx",
+  "permission_project_action_resource_idx",
+  "session_input_session_admitted_seq_idx",
+  "session_input_session_pending_delivery_seq_idx",
+  "session_input_session_promoted_seq_idx",
+  "session_message_session_seq_idx",
+  "session_message_session_time_created_id_idx",
+  "session_message_session_type_seq_idx",
+  "session_message_time_created_idx",
+  "session_parent_idx",
+  "session_project_idx",
+  "session_workspace_idx",
+  "todo_session_idx",
+] as const
+
+function currentSchemaApplied(db: Target) {
+  return Effect.gen(function* () {
+    const tableNames = new Set((yield* userTables(db)).map((table) => table.name))
+    if (currentSchemaTables.some((table) => !tableNames.has(table))) return false
+
+    for (const [table, required] of Object.entries(currentSchemaColumns)) {
+      const columns = new Set(
+        (yield* db.all<{ name: string }>(sql`SELECT name FROM pragma_table_info(${table})`)).map(
+          (column) => column.name,
+        ),
+      )
+      if (required.some((column) => !columns.has(column))) return false
+    }
+
+    const indexNames = new Set(
+      (yield* db.all<{ name: string }>(
+        sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'`,
+      )).map((index) => index.name),
+    )
+    return currentSchemaIndexes.every((index) => indexNames.has(index))
+  })
+}
+// altimate_change end
+
 export function apply(db: Database) {
   return lock.withPermit(
     Effect.gen(function* () {
@@ -43,8 +135,7 @@ export function apply(db: Database) {
       yield* db.transaction(
         (tx) =>
           Effect.gen(function* () {
-            // altimate_change upstream_fix — re-check under BEGIN IMMEDIATE so
-            // core cannot take the fresh CREATE path from a stale empty read.
+            // altimate_change start — upstream_fix: re-check under BEGIN IMMEDIATE.
             const current = yield* userTables(tx)
             if (current.some((table) => table.name === "session")) {
               yield* ensureMigrationTable(tx)
@@ -52,6 +143,7 @@ export function apply(db: Database) {
               return
             }
             if (current.length > 0) return yield* Effect.die("Database is not empty and has no session table")
+            // altimate_change end
 
             yield* schema.up(tx)
             yield* ensureMigrationTable(tx)
@@ -69,6 +161,15 @@ export function applyOnly(db: Database, input: Migration[]) {
     let completed = new Set(
       (yield* db.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)).map((row) => row.id),
     )
+    // altimate_change start — upstream_fix: do not replay baseline CREATE migrations
+    // when another migrator has already installed the current generated schema.
+    const missing = input.filter((migration) => !completed.has(migration.id))
+    if (missing.length > 0 && (yield* currentSchemaApplied(db))) {
+      yield* markMigrationsApplied(db, missing)
+      return
+    }
+    // altimate_change end
+
     if (completed.size === 0) {
       // Existing installs used Drizzle's migration journal. Seed the new
       // journal once so TypeScript migrations don't replay old SQL.
