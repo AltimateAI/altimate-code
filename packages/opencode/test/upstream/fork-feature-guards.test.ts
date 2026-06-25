@@ -47,11 +47,16 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(src).toContain('"opencode"')
   })
 
-  test("TUI wordmark is rebranded to Altimate (not the opencode logo)", async () => {
+  test("TUI wordmark is the lowercase Altimate brand (not opencode, not UPPERCASE)", async () => {
     const src = await read("src/logo.ts", MONO + "/tui")
     // The rebrand marker + Altimate letterforms must survive a merge that ships upstream's wordmark.
     expect(src).toContain("rebrand")
     expect(src).not.toMatch(/\bopen\b.*\bcode\b/i) // not the literal opencode wordmark comment
+    // Case guard: the brand is lowercase everywhere (package name, status bar, help). The old
+    // UPPERCASE "ALTIMATE" wordmark used the A glyph "▄▀█"; lowercase "a" is "▄▀▀▄". This catches a
+    // revert to the uppercase wordmark.
+    expect(src).toContain("lowercase")
+    expect(src).not.toContain("▄▀█ █")
   })
 
   // The interactive TUI worker must feed bus events to the TraceConsumer AND finalize synchronously on
