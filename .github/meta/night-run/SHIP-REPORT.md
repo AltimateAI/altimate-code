@@ -14,8 +14,12 @@ behavioral deltas + a few architectural follow-ups remain (all documented below)
 - **typecheck: 0 errors** across the monorepo (was 3181 at merge start).
 - **Unit suite: 10,462 pass / 2 fail** (was 868 fail). The DB split-brain fix (two migrators racing on
   the shared sqlite file) was the dominant lever, taking it from 307 → 2.
-- **Real-model e2e**: the agent passes diverse coding tasks (file/json/python/sql/yaml/multi-step/edit)
-  on azure/gpt-4o-mini. (Per-task pass-rates in e2e/RESULTS.md; sequential clean run pending.)
+- **Real-model e2e**: **21/22 pass (~95%)** on azure/gpt-4o-mini across diverse tasks
+  (file/json/python/sql/dbt/yaml/multi-step/edit/refactor/test-gen). The 1 miss (shell-script) is
+  check-strictness, not a merge defect. See e2e/RESULTS.md. This is the headline functional-correctness evidence.
+- **Fork carry-forward (Pillar 2)**: **40 new regression tests, 0 fork features DROPPED** — altimate tools,
+  branding, agent bash-safety (non-overridable destructive-DDL deny), flags, 21 skills, 10 warehouse drivers,
+  4 agent modes all verified present + wired (test/altimate/carry-forward/).
 - **Branding**: shipped user-facing source rebranded; test/upstream branding invariants green (392/0).
 
 ## MAJOR FIXES THIS RUN

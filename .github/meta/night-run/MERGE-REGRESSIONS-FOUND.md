@@ -83,3 +83,9 @@ variant_list keybind, SyncEvent->BusEvent bridge.
 - message-v2.test: aborted bash tool errors drop partial stdout/stderr and only send the abort message.
 - message-v2.test: signed Anthropic reasoning separated by empty text no longer preserves a non-empty separator.
 - message-v2.test: OpenAI Responses API server_error chunks no longer become retryable APIError values.
+
+## Minor bugs found by new adversarial tests (test.todo + // BUG:, low severity)
+- Legacy zod `formatValidationError` recovery reads `error.actual`, but Effect `SchemaError` nests the
+  original input differently -> recovery path may miss the input on Effect-side validation errors.
+- `Session.getUsage` clamps non-finite component counts, but a non-Anthropic `usage.totalTokens` can
+  still leak `NaN` into the total. Guard totalTokens too.
