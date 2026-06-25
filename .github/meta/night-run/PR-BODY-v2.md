@@ -9,6 +9,7 @@ Highlights:
 - **Test-suite DB migration race fixed**: parallel test files replayed baseline `CREATE TABLE` migrations against an already-current schema (`table \`project\` already exists`, ~324 cascading fails). `applyOnly()` now adopts the current schema when the journal diverges; test-DB reset preserves schema; boot-time project-copy refresh isolated. **Production is unaffected** (single-process boot migrates once — proven by 88/88 real-model e2e).
 - **Branding regressions fixed**: restored fork branding the merge re-leaked into system prompts/themes/httpapi, **plus** TUI leaks the regex scanner missed (sidebar wordmark split across JSX spans, home-screen tips pointing at the wrong binary/dirs/trigger, error hints, terminal title).
 - **8 dropped v1.17.9 session behaviors restored** (partial bash-output forwarding, `server_error` retryable, content-filter→error, snapshot pre-capture, `compaction.auto:false`, shell expansion, signed-reasoning spacing, stop-with-tools continuation).
+- **CLI instance-context regressions fixed**: session tracing (`run --trace`) wrote no artifacts and `skill list` exited 1 — both threw `InstanceRef not provided` because the instance ALS isn't bridged for plain-async CLI facade calls (the instance AsyncLocalStorage is duplicated across the module boundary). Both now read through the in-process server client (`sdk.config.get()` / `sdk.app.skills()`), which holds the resolved instance. Verified in the built binary; regression tests added.
 
 ### Type of change
 
