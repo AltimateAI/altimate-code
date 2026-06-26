@@ -37,7 +37,9 @@ const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 // these tests (they pass locally in ~3-10s). Set OPENCODE_TEST_CLI to a prebuilt single-file binary
 // (see script/prebuild-test-cli.ts / CI) to spawn it directly (~ms boot) and remove that variance.
 // Falls back to `bun run` so local `bun test` needs no build step.
-const prebuiltCli = process.env.OPENCODE_TEST_CLI
+// Resolve to ABSOLUTE: spawns run with cwd=<tmpdir>, so a relative OPENCODE_TEST_CLI (e.g. "dist/...")
+// would not resolve (PlatformError: NotFound). path.resolve() against the test runner's cwd (repo).
+const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPENCODE_TEST_CLI) : undefined
 function cliCommand(args: string[]): string[] {
   return prebuiltCli ? [prebuiltCli, ...args] : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
 }

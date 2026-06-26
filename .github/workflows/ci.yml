@@ -108,7 +108,8 @@ jobs:
         shell: bash
         run: |
           if bun run build:local; then
-            BIN="$(find dist -type f -name altimate-code | head -1)"
+            # Absolute path — the test harness spawns with cwd=<tmpdir>, so a relative path would not resolve.
+            BIN="$(find "$PWD/dist" -type f -name altimate-code | head -1)"
             if [ -n "$BIN" ] && [ -x "$BIN" ]; then
               echo "OPENCODE_TEST_CLI=$BIN" >> "$GITHUB_ENV"
               echo "Prebuilt test CLI: $BIN"

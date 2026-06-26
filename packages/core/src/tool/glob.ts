@@ -86,6 +86,14 @@ export const layer = Layer.effectDiscard(
               const cwdReal = yield* fs.realPath(cwd).pipe(Effect.catch(() => Effect.succeed(cwd)))
               if (cwdReal !== rootReal && !FSUtil.contains(rootReal, cwdReal))
                 return yield* Effect.die(new Error("glob path escapes the active Location"))
+              // KNOWN RESIDUALS (v2-core, not in the shipped binary; tracked for the hardening pass):
+              // (1) TOCTOU — a concurrent process could swap cwd for an external symlink after this
+              //     check (same class as grep / the shipped assertExternalDirectory); full fix needs
+              //     O_NOFOLLOW/in-process. (2) `rg --files` is newline-delimited, so a filename
+              //     containing a literal newline could split into a row that maps to an out-of-root
+              //     RELATIVE path in the returned Entry (output path spoofing only — does not discover
+              //     or read outside files). Fix when v2-core ships: NUL-delimited output + drop entries
+              //     whose resolved path escapes rootReal.
               // altimate_change end
               return yield* ripgrep
                 .glob({

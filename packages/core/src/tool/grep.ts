@@ -111,12 +111,19 @@ export const layer = Layer.effectDiscard(
               // When searching a single FILE, contain the file itself too: cwd (its parent dir) can be
               // safely in-project while the file is a symlink pointing outside (e.g. secret ->
               // /etc/passwd), and ripgrep would open the symlink target. realPath the file and require it
-              // inside the Location.
+              // inside the Location. Fail CLOSED: if realPath fails (dangling/just-swapped symlink), die
+              // rather than fall back to the lexical path (which a TOCTOU swap could exploit).
               if (info?.type === "File") {
-                const fileReal = yield* fs.realPath(target).pipe(Effect.catch(() => Effect.succeed(target)))
-                if (!FSUtil.contains(rootReal, fileReal))
+                const fileReal = yield* fs.realPath(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
+                if (fileReal === undefined || !FSUtil.contains(rootReal, fileReal))
                   return yield* Effect.die(new Error("grep path escapes the active Location"))
               }
+              // KNOWN RESIDUAL (not a static escape): a precheck like this is inherently TOCTOU — a
+              // concurrent process in the checkout could swap `cwd`/the file for an external symlink
+              // AFTER these checks and BEFORE ripgrep opens it. Closing that fully needs O_NOFOLLOW fd /
+              // in-process search rather than a path-based precheck (the shipped opencode grep's
+              // assertExternalDirectory has the same class). Tracked for the v2-core hardening pass; the
+              // model-controlled-path escapes (the actually-reachable threat) are closed above.
               // altimate_change end
               return yield* ripgrep
                 .grep({
