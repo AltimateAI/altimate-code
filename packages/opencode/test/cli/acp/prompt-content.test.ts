@@ -19,6 +19,8 @@ describe("opencode acp prompt content subprocess", () => {
         const acp = yield* createAcpClient(
           { opencode },
           { OPENCODE_CONFIG_CONTENT: JSON.stringify(promptContentConfig(llm.url)) },
+          // compiled binary hangs on this embedded-resource mock-LLM round-trip in the isolated env
+          { bunRun: true },
         )
         yield* initialize(acp)
         const session = yield* newSession(acp, home)

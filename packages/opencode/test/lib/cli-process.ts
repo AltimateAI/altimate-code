@@ -46,8 +46,12 @@ const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 // which retries forever against the sandbox network — and every prompt-running subprocess test times out.
 // Keep OPENCODE_PURE set in isolatedEnv below.
 const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPENCODE_TEST_CLI) : undefined
-function cliCommand(args: string[]): string[] {
-  return prebuiltCli ? [prebuiltCli, ...args] : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
+// `bunRun` forces `bun run src` even when a prebuilt binary is available. A few tests exercise mock-LLM
+// error/streaming edge paths (mid-stream stream errors, embedded ACP resources) that the COMPILED binary
+// does not complete in the isolated test env (it hangs without exiting), while `bun run src` handles them
+// in ~1s. Those tests opt in via `bunRun: true`; everything else uses the fast prebuilt binary.
+function cliCommand(args: string[], bunRun = false): string[] {
+  return prebuiltCli && !bunRun ? [prebuiltCli, ...args] : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
 }
 
 export const testModelID = "test/test-model"
@@ -101,7 +105,13 @@ export type RunResult = {
   readonly durationMs: number
 }
 
-export type SpawnOpts = { readonly timeoutMs?: number; readonly env?: Record<string, string> }
+export type SpawnOpts = {
+  readonly timeoutMs?: number
+  readonly env?: Record<string, string>
+  // Force `bun run src` instead of the prebuilt binary (see cliCommand). For mock-LLM error/streaming
+  // edge-path tests the compiled binary hangs in the isolated env; those opt in with bunRun: true.
+  readonly bunRun?: boolean
+}
 
 // Typed equivalent of constructing argv for `opencode run`. New flags should
 // land here so tests stay grep-able and refactor-safe.
@@ -221,7 +231,7 @@ export function withCliFixture<A, E>(
       // on `Bun.stdin.text()` (see src/cli/cmd/run.ts — non-TTY stdin is
       // consumed as the prompt). The old Process.run wrapper defaulted to
       // ignore; ChildProcess.make defaults to pipe, so we set it explicitly.
-      const argv = cliCommand(args)
+      const argv = cliCommand(args, opts?.bunRun)
       const command = ChildProcess.make(argv[0]!, argv.slice(1), {
         cwd: home,
         env: { ...env, ...opts?.env },
@@ -284,7 +294,7 @@ export function withCliFixture<A, E>(
       // as a finalizer error during test teardown.
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          Bun.spawn(cliCommand(argv), {
+          Bun.spawn(cliCommand(argv, opts?.bunRun), {
             cwd: home,
             env: { ...process.env, ...env, ...opts?.env },
             stdout: "pipe",
@@ -355,7 +365,7 @@ export function withCliFixture<A, E>(
       // Either way we await proc.exited so the test scope doesn't leak.
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          Bun.spawn(cliCommand(argv), {
+          Bun.spawn(cliCommand(argv, opts?.bunRun), {
             cwd: opts?.cwd ?? home,
             env: { ...process.env, ...env, ...opts?.env },
             stdin: "pipe",

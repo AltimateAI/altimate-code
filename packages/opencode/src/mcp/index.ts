@@ -184,6 +184,9 @@ export interface Interface {
   readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
   readonly connect: (name: string) => Effect.Effect<void, NotFoundError>
   readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError>
+  // altimate_change start — MCP.remove: full runtime teardown + ToolsChanged (merge dropped it)
+  readonly remove: (name: string) => Effect.Effect<void>
+  // altimate_change end
   readonly getPrompt: (
     clientName: string,
     name: string,
@@ -784,6 +787,20 @@ export const layer = Layer.effect(
       // altimate_change end
     })
 
+    // altimate_change start — restore MCP.remove dropped by the v1.17.9 merge. Fully removes a server
+    // from RUNTIME state: closes the client, DELETES the status entry (not just marks it "disabled"),
+    // and publishes ToolsChanged so the agent's live tool list and the /mcps view refresh. The datamate
+    // delete/remove flows use this; plain disconnect leaves a stale "disabled" entry and never publishes
+    // ToolsChanged, so the agent keeps offering tools from a removed server until the next restart.
+    const remove = Effect.fn("MCP.remove")(function* (name: string) {
+      const s = yield* InstanceState.get(state)
+      yield* closeClient(s, name)
+      delete s.clients[name]
+      delete s.status[name]
+      yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
+    })
+    // altimate_change end
+
     // altimate_change start — persist enabled/disabled to disk so it survives session restarts.
     // Serialize all writes: persistMcpEnabled is read-modify-write on a shared config file, so
     // concurrent callers (e.g. rapid /mcps enable then disable) could otherwise interleave and
@@ -1133,6 +1150,9 @@ export const layer = Layer.effect(
       add,
       connect,
       disconnect,
+      // altimate_change start — MCP.remove (merge dropped it)
+      remove,
+      // altimate_change end
       getPrompt,
       readResource,
       startAuth,
@@ -1183,6 +1203,11 @@ export async function connect(name: string) {
 export async function disconnect(name: string) {
   return runMcp((svc) => svc.disconnect(name))
 }
+// altimate_change start — MCP.remove namespace wrapper (full runtime teardown + ToolsChanged)
+export async function remove(name: string) {
+  return runMcp((svc) => svc.remove(name))
+}
+// altimate_change end
 export async function readResource(clientName: string, resourceUri: string) {
   return runMcp((svc) => svc.readResource(clientName, resourceUri))
 }

@@ -84,7 +84,9 @@ describe("opencode run (non-interactive subprocess)", () => {
     ({ llm, opencode }) =>
       Effect.gen(function* () {
         yield* llm.fail("upstream provider exploded mid-stream")
-        const result = yield* opencode.run("trigger midstream error", { timeoutMs: 30_000 })
+        // bunRun: the compiled binary hangs handling a mid-stream stream error in the isolated test env
+        // (never exits); `bun run src` exits 0 in ~1s. See cliCommand in test/lib/cli-process.ts.
+        const result = yield* opencode.run("trigger midstream error", { timeoutMs: 30_000, bunRun: true })
         expect(result.exitCode).toBe(0)
       }),
     60_000,

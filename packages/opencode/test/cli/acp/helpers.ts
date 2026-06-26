@@ -11,9 +11,15 @@ import {
   type AcpClient,
 } from "./acp-test-client"
 
-export function createAcpClient(input: Pick<CliFixture, "opencode">, env?: Record<string, string>) {
+export function createAcpClient(
+  input: Pick<CliFixture, "opencode">,
+  env?: Record<string, string>,
+  // bunRun: force `bun run src` for tests whose mock-LLM round-trip hangs under the compiled binary
+  // in the isolated env (see cliCommand in test/lib/cli-process.ts).
+  opts?: { bunRun?: boolean },
+) {
   return Effect.gen(function* () {
-    return createJsonRpcAcpClient(yield* input.opencode.acp(env ? { env } : undefined))
+    return createJsonRpcAcpClient(yield* input.opencode.acp({ ...(env ? { env } : {}), bunRun: opts?.bunRun }))
   })
 }
 
