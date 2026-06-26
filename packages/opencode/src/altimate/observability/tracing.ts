@@ -299,7 +299,10 @@ export class FileExporter implements TraceExporter {
   pruneSync() {
     if (this.maxFiles <= 0) return
     try {
-      const jsonFiles = fsSync.readdirSync(this.dir).filter((n) => n.endsWith(".json"))
+      const jsonFiles = fsSync
+        .readdirSync(this.dir, { withFileTypes: true })
+        .filter((e) => e.isFile() && e.name.endsWith(".json")) // skip a dir literally named "*.json"
+        .map((e) => e.name)
       if (jsonFiles.length <= this.maxFiles) return
       // Prune by MODIFICATION TIME, oldest first — NOT by filename. `ses_` ids are
       // Identifier.descending() (newest sorts lexically first), so a filename sort + slice-from-front

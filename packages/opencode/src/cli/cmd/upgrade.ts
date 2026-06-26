@@ -3,6 +3,10 @@ import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
 import { Installation } from "../../installation"
 import { extractChangelog } from "../changelog"
+// altimate_change start — upstream_fix: branch/dev-build upgrade guard (see handler)
+import { isPublishableChannel } from "../upgrade"
+import { InstallationChannel } from "@opencode-ai/core/installation/version"
+// altimate_change end
 
 export const UpgradeCommand = {
   command: "upgrade [target]",
@@ -27,6 +31,19 @@ export const UpgradeCommand = {
     UI.println(UI.logo("  "))
     UI.empty()
     prompts.intro("Upgrade")
+    // altimate_change start — upstream_fix: a branch/dev build has no published release, so an implicit
+    // Installation.latest() builds a non-existent npm dist-tag URL (channel = git branch name) and
+    // 404s — and latest() is Effect.orDie, so the command hard-crashes with an opaque error. Same
+    // class as the auto-check guard in cli/upgrade.ts. Require an explicit target instead of crashing.
+    if (!args.target && (Installation.isLocal() || !isPublishableChannel(InstallationChannel))) {
+      prompts.log.warn(
+        `This is a local/branch build (${Installation.VERSION}) with no published release to upgrade to. ` +
+          `Pass an explicit version, e.g. "altimate upgrade 0.8.10".`,
+      )
+      prompts.outro("Done")
+      return
+    }
+    // altimate_change end
     const detectedMethod = await Installation.method()
     const method = (args.method as Installation.Method) ?? detectedMethod
     if (method === "unknown") {

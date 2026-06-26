@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect } from "bun:test"
+import os from "os"
+import fsp from "fs/promises"
+import nodePath from "path"
 import { Effect, Exit, Layer } from "effect"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Location } from "@opencode-ai/core/location"
@@ -166,6 +169,75 @@ describe("GlobTool Location containment", () => {
       const exit = yield* glob("gl-traversal", { pattern: "*", path: "../../../../../../../../etc" })
       expect(Exit.isFailure(exit)).toBe(true)
       expect(globCalls.length).toBe(0)
+    }),
+  )
+})
+
+// Real-symlink containment (REAL realPath, no identity mock). The tests above mock realPath as
+// identity, so they cannot catch a symlink bypass. This builds an actual symlink INSIDE the Location
+// pointing OUTSIDE and asserts grep cannot read through it — the regression codex found: when
+// `input.path = "<symlink-to-outside>/<missing-leaf>"`, realPath(target) failed on the missing leaf
+// and fell back to the lexical in-project path, but ripgrep's cwd became dirname(target) = the
+// external symlink. The fix contains the ACTUAL cwd via its real path.
+describe("GrepTool real-symlink containment (real realPath)", () => {
+  let base = ""
+  let projectRoot = ""
+  beforeAll(async () => {
+    base = await fsp.mkdtemp(nodePath.join(os.tmpdir(), "grep-symlink-"))
+    projectRoot = nodePath.join(base, "project")
+    const outside = nodePath.join(base, "outside")
+    await fsp.mkdir(projectRoot)
+    await fsp.mkdir(outside)
+    await fsp.writeFile(nodePath.join(outside, "secret.txt"), "TOPSECRET-should-never-be-read")
+    await fsp.symlink(outside, nodePath.join(projectRoot, "extlink"), "dir") // in-project symlink → outside
+  })
+  afterAll(async () => {
+    await fsp.rm(base, { recursive: true, force: true }).catch(() => {})
+  })
+
+  // Same ripgrep/permission/registry as above, but REAL FSUtil (real realPath) + Location = the temp
+  // project. Location reads projectRoot lazily (Effect.sync) so it's set by beforeAll at run time.
+  const realInfra = Layer.mergeAll(
+    FSUtil.defaultLayer,
+    Layer.effect(
+      Location.Service,
+      Effect.sync(() => Location.Service.of(location({ directory: AbsolutePath.make(projectRoot) }))),
+    ),
+    Global.layerWith({ data: Global.Path.data }),
+  )
+  const realGrepLayer = GrepTool.layer.pipe(
+    Layer.provide(registry),
+    Layer.provide(permission),
+    Layer.provide(ripgrep),
+    Layer.provide(realInfra),
+  )
+  const realIt = testEffect(Layer.mergeAll(registry, permission, ripgrep, realInfra, realGrepLayer))
+
+  realIt.effect("dies on <symlink-to-outside>/<missing-leaf> and never invokes ripgrep", () =>
+    Effect.gen(function* () {
+      grepCalls.length = 0
+      const reg = yield* ToolRegistry.Service
+      const exit = yield* executeTool(reg, {
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call", id: "g-symlink", name: "grep", input: { pattern: "TOPSECRET", path: "extlink/missing" } },
+      }).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true) // contained → died
+      expect(grepCalls.length).toBe(0) // ripgrep never ran → nothing outside was read
+    }),
+  )
+
+  realIt.effect("dies when the search root IS an in-project symlink to outside", () =>
+    Effect.gen(function* () {
+      grepCalls.length = 0
+      const reg = yield* ToolRegistry.Service
+      const exit = yield* executeTool(reg, {
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call", id: "g-symlink-dir", name: "grep", input: { pattern: "TOPSECRET", path: "extlink" } },
+      }).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(grepCalls.length).toBe(0)
     }),
   )
 })

@@ -8,6 +8,9 @@ import { GlobalBus } from "@/bus/global"
 import { AsyncQueue } from "@/util/queue"
 import { Instance } from "../../project/instance"
 import { Installation } from "@/installation"
+// altimate_change start — upstream_fix: branch/dev-build upgrade guard (see upgrade route)
+import { InstallationChannel } from "@opencode-ai/core/installation/version"
+// altimate_change end
 import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
 import { Config } from "../../config/config"
@@ -296,7 +299,17 @@ export const GlobalRoutes = lazy(() =>
         if (method === "unknown") {
           return c.json({ success: false, error: "Unknown installation method" }, 400)
         }
-        const target = c.req.valid("json").target || (await Installation.latest(method))
+        // altimate_change start — upstream_fix: branch/dev builds have no published release, so an
+        // implicit Installation.latest() builds a non-existent npm dist-tag URL (channel = git branch
+        // name) and 404s — and latest() is Effect.orDie, so this handler throws → opaque 500. Return a
+        // clean 400 like the unknown-method branch. (Inline channel check mirrors cli/upgrade.ts's
+        // isPublishableChannel; a valid npm dist-tag is a simple identifier with no path separators.)
+        const explicitTarget = c.req.valid("json").target
+        if (!explicitTarget && (Installation.isLocal() || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(InstallationChannel))) {
+          return c.json({ success: false, error: "This build has no published release to upgrade to" }, 400)
+        }
+        const target = explicitTarget || (await Installation.latest(method))
+        // altimate_change end
         const result = await Installation.upgrade(method, target)
           .then(() => ({ success: true as const, version: target }))
           .catch((e) => ({ success: false as const, error: e instanceof Error ? e.message : String(e) }))

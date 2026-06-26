@@ -91,21 +91,27 @@ export const layer = Layer.effectDiscard(
                 source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
               })
               const target = path.resolve(location.directory, input.path ?? ".")
-              // altimate_change start — upstream_fix: contain the search root to the active Location.
-              // Without this, a model-controlled input.path (absolute like /etc, ".." traversal, or a
-              // symlink to an external dir) makes ripgrep return line previews of arbitrary file
-              // contents outside the project — a recursive content-read escape (the twin of read.ts's
-              // containment, more severe because grep returns contents). Reject escapes via the real,
-              // symlink-resolved path so the search can never read outside the Location.
+              const info = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
+              // altimate_change start — upstream_fix: contain the ACTUAL search root to the active
+              // Location. A model-controlled input.path (absolute like /etc, a ".." traversal, or a
+              // symlink to an external dir) would otherwise make ripgrep return line previews of file
+              // contents outside the project — a recursive content-read escape. We contain-check `cwd`
+              // (the dir ripgrep recurses from) via its real, symlink-resolved path. Checking `cwd`
+              // rather than `target` is deliberate: cwd is what actually gets searched, and it is the
+              // more robust thing to resolve — for input like "symlink-to-outside/missing-leaf",
+              // cwd = dirname(target) = the symlink dir, which exists and realPath-resolves to the
+              // external dir (→ contained), whereas `target` itself may not exist (a realPath that
+              // ENOENT-fell-back to the lexical path could slip through). A genuinely-nonexistent cwd
+              // can't be searched (ripgrep errors), so the catch fallback is safe.
+              const cwd = info?.type === "Directory" ? target : path.dirname(target)
               const rootReal = yield* fs.realPath(location.directory).pipe(Effect.orDie)
-              const targetReal = yield* fs.realPath(target).pipe(Effect.catch(() => Effect.succeed(target)))
-              if (targetReal !== rootReal && !FSUtil.contains(rootReal, targetReal))
+              const cwdReal = yield* fs.realPath(cwd).pipe(Effect.catch(() => Effect.succeed(cwd)))
+              if (cwdReal !== rootReal && !FSUtil.contains(rootReal, cwdReal))
                 return yield* Effect.die(new Error("grep path escapes the active Location"))
               // altimate_change end
-              const info = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
               return yield* ripgrep
                 .grep({
-                  cwd: info?.type === "Directory" ? target : path.dirname(target),
+                  cwd,
                   pattern: input.pattern,
                   file: info?.type === "File" ? path.basename(target) : undefined,
                   include: input.include,
