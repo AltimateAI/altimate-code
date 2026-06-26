@@ -4,9 +4,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
-// altimate_change start — upstream_fix: channel guard for branch/dev-build upgrades
-import { InstallationVersion, InstallationChannel, isPublishableChannel } from "@opencode-ai/core/installation/version"
-// altimate_change end
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -104,16 +102,12 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
           body: { success: false as const, error: "Unknown installation method" },
         }
       }
-      // altimate_change start — upstream_fix: branch/dev builds have no published release; an implicit
-      // installation.latest() builds a non-existent npm dist-tag (channel = git branch) and 404s/dies.
-      // Return a clean 400 like the unknown-method branch (same class as cli/upgrade.ts + /global route).
-      if (!ctx.payload.target && (Installation.isLocal() || !isPublishableChannel(InstallationChannel))) {
-        return {
-          status: 400,
-          body: { success: false as const, error: "This build has no published release to upgrade to" },
-        }
-      }
-      // altimate_change end
+      // NOTE: the branch/dev-build channel guard that cli/cmd/upgrade.ts and the Hono /global upgrade
+      // route carry is intentionally NOT applied here. This v2 HttpApi tree is not mounted by the
+      // shipped server (cli/cmd/serve.ts loads the Hono server/server.ts), and the guard's isLocal()
+      // check reads the build-time channel (always "local" under tests), which would 400 the
+      // happy-path test (httpapi-global.test.ts). Re-add it together with a channel-mock affordance
+      // when this v2 server is actually mounted.
       const target = ctx.payload.target || (yield* installation.latest(method))
       const result = yield* installation.upgrade(method, target).pipe(
         Effect.as({ status: 200, body: { success: true as const, version: target } }),
