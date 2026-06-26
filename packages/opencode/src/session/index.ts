@@ -76,6 +76,7 @@ export namespace Session {
       share,
       revert,
       permission: row.permission ?? undefined,
+      metadata: row.metadata ?? undefined,
       time: {
         created: row.time_created,
         updated: row.time_updated,
@@ -102,6 +103,7 @@ export namespace Session {
       summary_diffs: info.summary?.diffs,
       revert: info.revert ?? null,
       permission: info.permission,
+      metadata: info.metadata,
       time_created: info.time.created,
       time_updated: info.time.updated,
       time_compacting: info.time.compacting,
@@ -149,6 +151,7 @@ export namespace Session {
         archived: z.number().optional(),
       }),
       permission: PermissionNext.Ruleset.optional(),
+      metadata: z.record(z.string(), z.unknown()).optional(),
       revert: z
         .object({
           messageID: MessageID.zod,
@@ -223,6 +226,7 @@ export namespace Session {
         title: z.string().optional(),
         permission: Info.shape.permission,
         workspaceID: WorkspaceID.zod.optional(),
+        metadata: z.record(z.string(), z.unknown()).optional(),
       })
       .optional(),
     async (input) => {
@@ -232,6 +236,7 @@ export namespace Session {
         title: input?.title,
         permission: input?.permission,
         workspaceID: input?.workspaceID,
+        metadata: input?.metadata,
       })
     },
   )
@@ -301,6 +306,7 @@ export namespace Session {
     workspaceID?: WorkspaceID
     directory: string
     permission?: PermissionNext.Ruleset
+    metadata?: Record<string, unknown>
   }) {
     const result: Info = {
       id: SessionID.descending(input.id),
@@ -312,6 +318,7 @@ export namespace Session {
       parentID: input.parentID,
       title: input.title ?? createDefaultTitle(!!input.parentID),
       permission: input.permission,
+      metadata: input.metadata,
       time: {
         created: Date.now(),
         updated: Date.now(),

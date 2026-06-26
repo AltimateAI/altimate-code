@@ -923,6 +923,14 @@ export namespace SessionPrompt {
           os: process.platform,
           arch: process.arch,
           node_version: process.version,
+          // altimate_change start — per-session source override: VS Code extensions set
+          // metadata.source (e.g. "datamates", "poweruser") when creating the session via POST /session.
+          // This lets both extensions share the same altimate serve process while producing
+          // distinguishable session_start telemetry. Falls back to the process-level
+          // Flag.ALTIMATE_CLI_CLIENT (set by ALTIMATE_CLI_CLIENT env var, e.g. "vscode") if
+          // the session carries no metadata source.
+          source: (session.metadata?.source as string | undefined) ?? Flag.ALTIMATE_CLI_CLIENT,
+          // altimate_change end
         })
         // altimate_change start — task intent classification (keyword/regex, zero LLM cost)
         const userMsg = msgs.find((m) => m.info.id === lastUser!.id)
