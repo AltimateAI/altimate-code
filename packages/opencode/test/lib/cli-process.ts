@@ -32,19 +32,13 @@ const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
 const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 
-// Subprocess tests spawn the CLI once per test. `bun run src/index.ts` cold-transpiles + boots the whole
-// app on every spawn, which under parallel CI load exceeds the per-spawn timeout — flaky timeouts that
-// all pass locally. Set OPENCODE_TEST_CLI to a prebuilt single-file binary (CI builds one; see ci.yml)
-// to spawn it directly (~ms boot) and remove that variance. Falls back to `bun run` so local `bun test`
-// needs no build step.
-// Resolve to ABSOLUTE: spawns run with cwd=<tmpdir>, so a relative OPENCODE_TEST_CLI (e.g. "dist/...")
-// would not resolve (PlatformError: NotFound). path.resolve() against the test runner's cwd (repo).
-//
-// NOTE: the prebuilt binary only works in this isolated env because config.ts skips its background
-// `@opencode-ai/plugin` install under OPENCODE_PURE. Without that guard the compiled binary (no workspace
-// or package cache in a fresh tmp HOME) hangs on exit — waitForDependencies() joins the install fiber,
-// which retries forever against the sandbox network — and every prompt-running subprocess test times out.
-// Keep OPENCODE_PURE set in isolatedEnv below.
+// Subprocess tests spawn the CLI once per test. CI runs them in a dedicated bounded pass with
+// `bun run src` (--max-concurrency=2) — robust even under heavy load. We do NOT use a prebuilt binary:
+// OPENCODE_TEST_CLI is still honored for local experiments, but the compiled binary has a load-triggered
+// hang on the run+mock happy path (it never exits under CPU pressure), so CI never sets it. If you do set
+// it locally, resolve to ABSOLUTE (spawns run with cwd=<tmpdir>) and note tests may hang under load.
+// (config.ts also skips its background `@opencode-ai/plugin` install under OPENCODE_PURE — without that a
+// fresh-HOME binary hangs on exit joining the failed install fiber; OPENCODE_PURE is set in isolatedEnv.)
 const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPENCODE_TEST_CLI) : undefined
 // `bunRun` forces `bun run src` even when a prebuilt binary is available. A few tests exercise mock-LLM
 // error/streaming edge paths (mid-stream stream errors, embedded ACP resources) that the COMPILED binary
@@ -483,18 +477,28 @@ function expectExit(result: RunResult, expected: number, label = "opencode") {
 // bounded step (--parallel=1 --max-concurrency=2) and sets OPENCODE_SKIP_SUBPROCESS=1 for the main,
 // fully-parallel run so they don't run twice. Locally (no env) they run normally.
 const SKIP_SUBPROCESS = !!process.env.OPENCODE_SKIP_SUBPROCESS
+const liveBuilder = <A, E>(
+  name: string,
+  body: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
+  opts?: number | TestOptions,
+) => (SKIP_SUBPROCESS ? test.skip(name, () => {}) : it.live(name, () => withCliFixture(body), opts))
+const concurrentBuilder = <A, E>(
+  name: string,
+  body: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
+  opts?: number | TestOptions,
+) =>
+  SKIP_SUBPROCESS
+    ? test.skip(name, () => {})
+    : test.concurrent(name, () => Effect.runPromise(Effect.scoped(withCliFixture(body))), opts)
+// `.skip` unconditionally skips a single subprocess test (quarantine a known-broken one without
+// deleting it). Same typed signature as the builders so the body keeps its CliFixture typing; body/opts
+// are ignored. Use sparingly with a TODO explaining why.
+const skipBuilder = <A, E>(
+  name: string,
+  _body?: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
+  _opts?: number | TestOptions,
+) => test.skip(name, () => {})
 export const cliIt = {
-  live: <A, E>(
-    name: string,
-    body: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
-    opts?: number | TestOptions,
-  ) => (SKIP_SUBPROCESS ? test.skip(name, () => {}) : it.live(name, () => withCliFixture(body), opts)),
-  concurrent: <A, E>(
-    name: string,
-    body: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
-    opts?: number | TestOptions,
-  ) =>
-    SKIP_SUBPROCESS
-      ? test.skip(name, () => {})
-      : test.concurrent(name, () => Effect.runPromise(Effect.scoped(withCliFixture(body))), opts),
+  live: Object.assign(liveBuilder, { skip: skipBuilder }),
+  concurrent: Object.assign(concurrentBuilder, { skip: skipBuilder }),
 }

@@ -97,29 +97,12 @@ jobs:
         run: bun install
         working-directory: script/upstream
 
-      - name: Prebuild test CLI (fast subprocess spawns)
-        # Subprocess tests (test/cli/run, test/cli/acp, test/cli/smokes) spawn the CLI once per test.
-        # Spawning `bun run src/index.ts` cold-transpiles + boots the whole app every time, which under
-        # parallel CI load exceeds the per-spawn timeout — flaky timeouts that all pass locally. Build a
-        # single-file binary ONCE and point the harness at it via OPENCODE_TEST_CLI (~ms boots). Graceful:
-        # if the build fails, OPENCODE_TEST_CLI stays unset and the harness falls back to `bun run src`.
-        # The binary runs cleanly in the isolated test env because config.ts skips its background
-        # @opencode-ai/plugin install under OPENCODE_PURE (else it hangs on exit retrying the install).
-        working-directory: packages/opencode
-        shell: bash
-        run: |
-          if bun run build:local; then
-            # Absolute path — the test harness spawns with cwd=<tmpdir>, so a relative path would not resolve.
-            BIN="$(find "$PWD/dist" -type f -name altimate-code | head -1)"
-            if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-              echo "OPENCODE_TEST_CLI=$BIN" >> "$GITHUB_ENV"
-              echo "Prebuilt test CLI: $BIN"
-            else
-              echo "build:local succeeded but binary not found — falling back to 'bun run src'"
-            fi
-          else
-            echo "build:local failed — falling back to 'bun run src' (slower subprocess spawns)"
-          fi
+      # NOTE: there is no "prebuild test CLI" step. We tried pointing the subprocess harness at a
+      # prebuilt single-file binary (OPENCODE_TEST_CLI) to dodge `bun run src` cold-boot, but the
+      # compiled binary has a load-triggered hang on the run+mock happy path (it never exits under CPU
+      # pressure). The robust answer is the dedicated bounded subprocess pass below: `bun run src` (no
+      # such hang) at --max-concurrency=2, which stays green even under heavy load (~43s locally at
+      # load 21). Do not reintroduce OPENCODE_TEST_CLI for these tests without fixing that binary hang.
 
       - name: Run tests
         working-directory: packages/opencode
@@ -145,16 +128,18 @@ jobs:
           #  - MAIN: the full suite EXCEPT the subprocess tests (OPENCODE_SKIP_SUBPROCESS=1 makes cliIt
           #    skip them), at default parallelism — fast.
           #  - SUBPROCESS: test/cli/{acp,smokes,serve} + run-process/mcp-add/help-snapshots, run in a
-          #    DEDICATED bounded pass (--parallel=1 --max-concurrency=2 → at most 2 concurrent, regardless
-          #    of runner core count). These each spawn a real CLI + an in-process mock LLM server; at high
-          #    parallelism the runner is CPU-starved and the mock round-trips time out (the load-variance
-          #    flakes). Bounding total concurrency removes that without slowing the 11k mostly-serial tests.
+          #    DEDICATED pass with --max-concurrency=2 (default 20). These each spawn a real CLI + an
+          #    in-process mock LLM server; at 20-concurrent the runner is CPU-starved and the mock
+          #    round-trips time out (the load-variance flakes). NOTE: do NOT add --parallel=1 — a single
+          #    worker hosts the mock server AND runs the tests on one event loop, so the mock gets starved
+          #    and round-trips time out anyway. Default --parallel spreads the mocks across workers; the
+          #    pass is isolated from the 11k main-suite tests so 2-per-worker is plenty bounded.
           # (Bun 1.3.x can segfault during cleanup after all tests pass — we parse the summary, not the
           # exit code. --timeout 90000 gives headroom for slow fs/spawn tests.)
           SUBPROCESS_PATHS="test/cli/acp/ test/cli/smokes/ test/cli/serve/ test/cli/run/run-process.test.ts test/cli/mcp-add.test.ts test/cli/help/help-snapshots.test.ts"
 
           OPENCODE_SKIP_SUBPROCESS=1 bun test --timeout 90000 > /tmp/test-main.txt 2>&1 || true
-          bun test --timeout 90000 --parallel=1 --max-concurrency=2 $SUBPROCESS_PATHS > /tmp/test-sub.txt 2>&1 || true
+          bun test --timeout 90000 --max-concurrency=2 $SUBPROCESS_PATHS > /tmp/test-sub.txt 2>&1 || true
           echo "===== MAIN SUITE ====="; cat /tmp/test-main.txt
           echo "===== SUBPROCESS SUITE (bounded) ====="; cat /tmp/test-sub.txt
 

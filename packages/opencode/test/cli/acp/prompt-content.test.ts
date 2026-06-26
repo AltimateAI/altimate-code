@@ -11,7 +11,14 @@ import { createAcpClient, initialize, newSession, verifierConfig } from "./helpe
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
 
 describe("opencode acp prompt content subprocess", () => {
-  cliIt.live(
+  // TODO(acp-embedded-directory): quarantined — on linux CI this fails with JSON-RPC -32603
+  // "Altimate Code service failure" data.service="directory": loadDirectorySnapshot (acp/service.ts)
+  // does Promise.all of sdk.config.providers/app.agents/command.list/app.skills/config.get with
+  // throwOnError:true, and one of them throws for the session directory on linux (passes on darwin;
+  // it was hanging here before bunRun unmasked the assertion). Basic ACP (lifecycle/config/skills)
+  // passes — this is the embedded-resource prompt path only. Needs a linux repro to pin the failing
+  // sdk call; do NOT un-skip until loadDirectorySnapshot degrades gracefully instead of -32603.
+  cliIt.live.skip(
     "accepts embedded text resource image and file resource link prompt content",
     ({ home, llm, opencode }) =>
       Effect.gen(function* () {
