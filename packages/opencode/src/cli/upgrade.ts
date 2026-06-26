@@ -2,8 +2,12 @@ import { Config } from "@/config/config"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Installation } from "@/installation"
-import { InstallationVersion, InstallationChannel } from "@opencode-ai/core/installation/version"
+import { InstallationVersion, InstallationChannel, isPublishableChannel } from "@opencode-ai/core/installation/version"
 import { GlobalBus } from "@/bus/global"
+// altimate_change start — re-export the centralized channel guard so existing importers
+// (cli/cmd/upgrade.ts, installation/upgrade.test.ts) keep resolving it from here.
+export { isPublishableChannel }
+// altimate_change end
 
 // altimate_change start — robust upgrade notification with zero external dependencies
 /**
@@ -53,20 +57,6 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
  */
 export function isValidVersion(version: string): boolean {
   return /^\d+\.\d+\.\d+/.test(version.replace(/^v/, ""))
-}
-
-/**
- * Returns true if `channel` is a publishable release channel — i.e. a valid npm
- * dist-tag / GitHub release ref (simple identifier, no path separators).
- *
- * Branch builds set the channel to the git branch name (e.g.
- * "upstream/merge-v1.17.9"), which is NOT a real dist-tag. Using it as one makes
- * the version check fetch `registry.npmjs.org/<pkg>/upstream/merge-v1.17.9`,
- * which 404s and spams the TUI bottom bar. Such builds were never published, so
- * the upgrade check should be skipped entirely.
- */
-export function isPublishableChannel(channel: string): boolean {
-  return /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(channel)
 }
 // altimate_change end
 

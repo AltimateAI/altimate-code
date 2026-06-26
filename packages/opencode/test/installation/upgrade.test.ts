@@ -86,25 +86,24 @@ describe("upgrade version comparison", () => {
 // 2b. Branch/dev builds skip the upgrade check (no 404 spam in the TUI)
 // ---------------------------------------------------------------------------
 describe("isPublishableChannel — guards the upgrade check for branch/dev builds", () => {
-  test("real release channels are publishable", () => {
+  test("only the channels we actually publish are publishable (allowlist)", () => {
+    // The build script creates releases only for non-preview ("latest") and "beta".
     expect(isPublishableChannel("latest")).toBe(true)
     expect(isPublishableChannel("beta")).toBe(true)
-    expect(isPublishableChannel("nightly")).toBe(true)
-    expect(isPublishableChannel("v1.17.9")).toBe(true)
   })
 
-  test("branch-name channels (with '/') are NOT publishable", () => {
-    // This is the reported bug: a build off branch "upstream/merge-v1.17.9" set
-    // its channel to that branch name, producing a 404 npm dist-tag lookup.
-    expect(isPublishableChannel("upstream/merge-v1.17.9")).toBe(false)
-    expect(isPublishableChannel("feat/foo")).toBe(false)
-  })
-
-  test("empty / whitespace / leading-separator channels are NOT publishable", () => {
+  test("branch / dev / local channels are NOT publishable — incl. slash-FREE branch names", () => {
+    // The original bug: a build off branch "upstream/merge-v1.17.9" set its channel to the branch
+    // name → a 404 npm dist-tag lookup. A pure syntax check ("no slash") missed common branch names;
+    // this is an allowlist, so slash-free branches are caught too.
+    expect(isPublishableChannel("upstream/merge-v1.17.9")).toBe(false) // slash branch
+    expect(isPublishableChannel("upstream-merge-v1.17.9")).toBe(false) // slash-free branch
+    expect(isPublishableChannel("main")).toBe(false)
+    expect(isPublishableChannel("dev")).toBe(false)
+    expect(isPublishableChannel("feature-x")).toBe(false)
+    expect(isPublishableChannel("v1.17.9")).toBe(false) // npm rejects semver-like dist-tags
+    expect(isPublishableChannel("local")).toBe(false)
     expect(isPublishableChannel("")).toBe(false)
-    expect(isPublishableChannel(" ")).toBe(false)
-    expect(isPublishableChannel("-leading")).toBe(false)
-    expect(isPublishableChannel("a b")).toBe(false)
   })
 
   test("upgrade() guards on isLocal() OR a non-publishable channel before fetching", () => {

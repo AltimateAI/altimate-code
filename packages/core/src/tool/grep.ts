@@ -108,6 +108,15 @@ export const layer = Layer.effectDiscard(
               const cwdReal = yield* fs.realPath(cwd).pipe(Effect.catch(() => Effect.succeed(cwd)))
               if (cwdReal !== rootReal && !FSUtil.contains(rootReal, cwdReal))
                 return yield* Effect.die(new Error("grep path escapes the active Location"))
+              // When searching a single FILE, contain the file itself too: cwd (its parent dir) can be
+              // safely in-project while the file is a symlink pointing outside (e.g. secret ->
+              // /etc/passwd), and ripgrep would open the symlink target. realPath the file and require it
+              // inside the Location.
+              if (info?.type === "File") {
+                const fileReal = yield* fs.realPath(target).pipe(Effect.catch(() => Effect.succeed(target)))
+                if (!FSUtil.contains(rootReal, fileReal))
+                  return yield* Effect.die(new Error("grep path escapes the active Location"))
+              }
               // altimate_change end
               return yield* ripgrep
                 .grep({

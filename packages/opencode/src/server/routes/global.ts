@@ -9,7 +9,7 @@ import { AsyncQueue } from "@/util/queue"
 import { Instance } from "../../project/instance"
 import { Installation } from "@/installation"
 // altimate_change start — upstream_fix: branch/dev-build upgrade guard (see upgrade route)
-import { InstallationChannel } from "@opencode-ai/core/installation/version"
+import { InstallationChannel, isPublishableChannel } from "@opencode-ai/core/installation/version"
 // altimate_change end
 import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
@@ -302,10 +302,10 @@ export const GlobalRoutes = lazy(() =>
         // altimate_change start — upstream_fix: branch/dev builds have no published release, so an
         // implicit Installation.latest() builds a non-existent npm dist-tag URL (channel = git branch
         // name) and 404s — and latest() is Effect.orDie, so this handler throws → opaque 500. Return a
-        // clean 400 like the unknown-method branch. (Inline channel check mirrors cli/upgrade.ts's
-        // isPublishableChannel; a valid npm dist-tag is a simple identifier with no path separators.)
+        // clean 400 like the unknown-method branch. isPublishableChannel is an allowlist of channels we
+        // actually publish (latest/beta) — a slash-free branch name like "main" is still not publishable.
         const explicitTarget = c.req.valid("json").target
-        if (!explicitTarget && (Installation.isLocal() || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(InstallationChannel))) {
+        if (!explicitTarget && (Installation.isLocal() || !isPublishableChannel(InstallationChannel))) {
           return c.json({ success: false, error: "This build has no published release to upgrade to" }, 400)
         }
         const target = explicitTarget || (await Installation.latest(method))

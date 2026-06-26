@@ -4,8 +4,8 @@ import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
-// altimate_change start — upstream_fix: InstallationChannel for the branch/dev-build upgrade guard
-import { InstallationVersion, InstallationChannel } from "@opencode-ai/core/installation/version"
+// altimate_change start — upstream_fix: channel guard for branch/dev-build upgrades
+import { InstallationVersion, InstallationChannel, isPublishableChannel } from "@opencode-ai/core/installation/version"
 // altimate_change end
 import { Effect, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
@@ -107,7 +107,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       // altimate_change start — upstream_fix: branch/dev builds have no published release; an implicit
       // installation.latest() builds a non-existent npm dist-tag (channel = git branch) and 404s/dies.
       // Return a clean 400 like the unknown-method branch (same class as cli/upgrade.ts + /global route).
-      if (!ctx.payload.target && (Installation.isLocal() || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(InstallationChannel))) {
+      if (!ctx.payload.target && (Installation.isLocal() || !isPublishableChannel(InstallationChannel))) {
         return {
           status: 400,
           body: { success: false as const, error: "This build has no published release to upgrade to" },

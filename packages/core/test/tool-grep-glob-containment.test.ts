@@ -189,7 +189,8 @@ describe("GrepTool real-symlink containment (real realPath)", () => {
     await fsp.mkdir(projectRoot)
     await fsp.mkdir(outside)
     await fsp.writeFile(nodePath.join(outside, "secret.txt"), "TOPSECRET-should-never-be-read")
-    await fsp.symlink(outside, nodePath.join(projectRoot, "extlink"), "dir") // in-project symlink → outside
+    await fsp.symlink(outside, nodePath.join(projectRoot, "extlink"), "dir") // in-project dir symlink → outside
+    await fsp.symlink(nodePath.join(outside, "secret.txt"), nodePath.join(projectRoot, "secretlink"), "file") // file symlink → outside
   })
   afterAll(async () => {
     await fsp.rm(base, { recursive: true, force: true }).catch(() => {})
@@ -235,6 +236,23 @@ describe("GrepTool real-symlink containment (real realPath)", () => {
         sessionID,
         ...toolIdentity,
         call: { type: "tool-call", id: "g-symlink-dir", name: "grep", input: { pattern: "TOPSECRET", path: "extlink" } },
+      }).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(grepCalls.length).toBe(0)
+    }),
+  )
+
+  // Single-FILE search through an in-project symlink file pointing outside. stat() follows the symlink
+  // and reports "File", so cwd = the (in-project) parent dir and the cwd check passes — but ripgrep
+  // would open the symlink and read its external target. The file-level containment must catch it.
+  realIt.effect("dies on an in-project symlink FILE pointing outside (file-search bypass)", () =>
+    Effect.gen(function* () {
+      grepCalls.length = 0
+      const reg = yield* ToolRegistry.Service
+      const exit = yield* executeTool(reg, {
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call", id: "g-symlink-file", name: "grep", input: { pattern: "TOPSECRET", path: "secretlink" } },
       }).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
       expect(grepCalls.length).toBe(0)
