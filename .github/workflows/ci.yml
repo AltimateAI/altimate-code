@@ -139,32 +139,50 @@ jobs:
         # check for real failures vs Bun crashes to avoid false CI failures.
         shell: bash
         run: |
-          # Redirect bun output to file, then cat it for CI visibility.
-          # This avoids tee/pipe issues where SIGTERM kills tee before flush.
-          bun test --timeout 90000 > /tmp/test-output.txt 2>&1 || true
-          cat /tmp/test-output.txt
+          # Redirect bun output to files, then cat for CI visibility (avoids tee/SIGTERM-flush issues).
+          #
+          # Two passes:
+          #  - MAIN: the full suite EXCEPT the subprocess tests (OPENCODE_SKIP_SUBPROCESS=1 makes cliIt
+          #    skip them), at default parallelism — fast.
+          #  - SUBPROCESS: test/cli/{acp,smokes,serve} + run-process/mcp-add/help-snapshots, run in a
+          #    DEDICATED bounded pass (--parallel=1 --max-concurrency=2 → at most 2 concurrent, regardless
+          #    of runner core count). These each spawn a real CLI + an in-process mock LLM server; at high
+          #    parallelism the runner is CPU-starved and the mock round-trips time out (the load-variance
+          #    flakes). Bounding total concurrency removes that without slowing the 11k mostly-serial tests.
+          # (Bun 1.3.x can segfault during cleanup after all tests pass — we parse the summary, not the
+          # exit code. --timeout 90000 gives headroom for slow fs/spawn tests.)
+          SUBPROCESS_PATHS="test/cli/acp/ test/cli/smokes/ test/cli/serve/ test/cli/run/run-process.test.ts test/cli/mcp-add.test.ts test/cli/help/help-snapshots.test.ts"
 
-          # Extract pass/fail counts from Bun test summary (e.g., " 5362 pass")
-          PASS_COUNT=$(awk '/^ *[0-9]+ pass$/{print $1}' /tmp/test-output.txt || true)
-          FAIL_COUNT=$(awk '/^ *[0-9]+ fail$/{print $1}' /tmp/test-output.txt || true)
+          OPENCODE_SKIP_SUBPROCESS=1 bun test --timeout 90000 > /tmp/test-main.txt 2>&1 || true
+          bun test --timeout 90000 --parallel=1 --max-concurrency=2 $SUBPROCESS_PATHS > /tmp/test-sub.txt 2>&1 || true
+          echo "===== MAIN SUITE ====="; cat /tmp/test-main.txt
+          echo "===== SUBPROCESS SUITE (bounded) ====="; cat /tmp/test-sub.txt
+
+          # Sum pass/fail across both passes (one summary line each)
+          sum_field() { awk -v f="$1" '$0 ~ ("^ *[0-9]+ " f "$"){s+=$1} END{print s+0}' /tmp/test-main.txt /tmp/test-sub.txt; }
+          PASS_COUNT=$(sum_field pass)
+          FAIL_COUNT=$(sum_field fail)
 
           echo ""
-          echo "--- Test Summary ---"
-          echo "pass=${PASS_COUNT:-none} fail=${FAIL_COUNT:-none}"
+          echo "--- Test Summary (main + subprocess) ---"
+          echo "pass=$PASS_COUNT fail=$FAIL_COUNT"
 
           # Real test failures — always fail CI
-          if [ -n "$FAIL_COUNT" ] && [ "$FAIL_COUNT" != "0" ]; then
+          if [ "$FAIL_COUNT" != "0" ]; then
             echo "::error::$FAIL_COUNT test(s) failed"
             exit 1
           fi
 
-          # Tests passed (we have a pass count and zero/no failures)
-          if [ -n "$PASS_COUNT" ] && [ "$PASS_COUNT" -gt 0 ] 2>/dev/null; then
-            exit 0
+          # Each pass must have produced a summary, else Bun crashed before finishing
+          if ! grep -qE "^ *[0-9]+ pass$" /tmp/test-main.txt || ! grep -qE "^ *[0-9]+ pass$" /tmp/test-sub.txt; then
+            echo "::error::Missing test summary in a pass — Bun may have crashed before running tests"
+            exit 1
           fi
 
-          # No test summary at all — Bun crashed before running tests
-          echo "::error::No test results found in output — Bun may have crashed before running tests"
+          if [ "$PASS_COUNT" -gt 0 ] 2>/dev/null; then
+            exit 0
+          fi
+          echo "::error::No test results found"
           exit 1
 
   # ---------------------------------------------------------------------------

@@ -478,15 +478,23 @@ function expectExit(result: RunResult, expected: number, label = "opencode") {
 // Body's R is `Scope.Scope | never` so tests can yield* scope-requiring
 // resources (e.g. `opencode.serve`) without an extra `Effect.scoped` wrapper —
 // `withCliFixture`'s outer scope is the natural lifetime.
+// These spawn real subprocesses + an in-process mock LLM server; at high parallelism the runner is
+// CPU-starved and the mock round-trips time out (load-variance flakes). CI runs them in a dedicated
+// bounded step (--parallel=1 --max-concurrency=2) and sets OPENCODE_SKIP_SUBPROCESS=1 for the main,
+// fully-parallel run so they don't run twice. Locally (no env) they run normally.
+const SKIP_SUBPROCESS = !!process.env.OPENCODE_SKIP_SUBPROCESS
 export const cliIt = {
   live: <A, E>(
     name: string,
     body: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
     opts?: number | TestOptions,
-  ) => it.live(name, () => withCliFixture(body), opts),
+  ) => (SKIP_SUBPROCESS ? test.skip(name, () => {}) : it.live(name, () => withCliFixture(body), opts)),
   concurrent: <A, E>(
     name: string,
     body: (input: CliFixture) => Effect.Effect<A, E, Scope.Scope | HttpClient.HttpClient>,
     opts?: number | TestOptions,
-  ) => test.concurrent(name, () => Effect.runPromise(Effect.scoped(withCliFixture(body))), opts),
+  ) =>
+    SKIP_SUBPROCESS
+      ? test.skip(name, () => {})
+      : test.concurrent(name, () => Effect.runPromise(Effect.scoped(withCliFixture(body))), opts),
 }
