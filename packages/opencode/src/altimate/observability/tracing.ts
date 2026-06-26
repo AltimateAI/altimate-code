@@ -271,15 +271,25 @@ export class FileExporter implements TraceExporter {
       }),
     )
 
-    const jsonFiles = entries
-      .filter((e) => e.isFile() && e.name.endsWith(".json"))
-      .map((e) => e.name)
-      .sort() // UUIDv7-based filenames are lexicographically time-sorted
+    const jsonFiles = entries.filter((e) => e.isFile() && e.name.endsWith(".json")).map((e) => e.name)
 
     if (jsonFiles.length <= this.maxFiles) return
 
-    const toDelete = jsonFiles.slice(0, jsonFiles.length - this.maxFiles)
-    await Promise.allSettled(toDelete.map((name) => fs.unlink(path.join(this.dir, name))))
+    // altimate_change start — upstream_fix: prune by MODIFICATION TIME, oldest first. Do NOT sort by
+    // filename: session trace files are `ses_<id>` where the id is Identifier.descending()
+    // (session/schema.ts), so lexical order is NEWEST-first — a `.sort()` + slice-from-front prune
+    // deletes the NEWEST traces and keeps the oldest (verified: a fresh TUI session's trace was pruned
+    // on shutdown once the dir hit maxFiles). mtime is correct regardless of the id encoding.
+    const withMtime = await Promise.all(
+      jsonFiles.map(async (name) => ({
+        name,
+        mtime: (await fs.stat(path.join(this.dir, name)).catch(() => undefined))?.mtimeMs ?? 0,
+      })),
+    )
+    withMtime.sort((a, b) => a.mtime - b.mtime) // oldest first
+    const toDelete = withMtime.slice(0, withMtime.length - this.maxFiles)
+    await Promise.allSettled(toDelete.map((f) => fs.unlink(path.join(this.dir, f.name))))
+    // altimate_change end
   }
 
   // altimate_change start — synchronous prune for Trace.finalizeSync()'s shutdown write. That path
@@ -289,14 +299,25 @@ export class FileExporter implements TraceExporter {
   pruneSync() {
     if (this.maxFiles <= 0) return
     try {
-      const jsonFiles = fsSync
-        .readdirSync(this.dir)
-        .filter((n) => n.endsWith(".json"))
-        .sort() // UUIDv7-based filenames are lexicographically time-sorted
+      const jsonFiles = fsSync.readdirSync(this.dir).filter((n) => n.endsWith(".json"))
       if (jsonFiles.length <= this.maxFiles) return
-      for (const name of jsonFiles.slice(0, jsonFiles.length - this.maxFiles)) {
+      // Prune by MODIFICATION TIME, oldest first — NOT by filename. `ses_` ids are
+      // Identifier.descending() (newest sorts lexically first), so a filename sort + slice-from-front
+      // deletes the NEWEST traces (the just-finalized session) and keeps the oldest. mtime is correct
+      // regardless of id encoding. See pruneOldTraces for the full note.
+      const withMtime = jsonFiles.map((name) => {
+        let mtime = 0
         try {
-          fsSync.unlinkSync(path.join(this.dir, name))
+          mtime = fsSync.statSync(path.join(this.dir, name)).mtimeMs
+        } catch {
+          // unreadable → treat as oldest (mtime 0) so it's pruned first
+        }
+        return { name, mtime }
+      })
+      withMtime.sort((a, b) => a.mtime - b.mtime) // oldest first
+      for (const f of withMtime.slice(0, withMtime.length - this.maxFiles)) {
+        try {
+          fsSync.unlinkSync(path.join(this.dir, f.name))
         } catch {
           // best-effort
         }

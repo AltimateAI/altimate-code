@@ -64,6 +64,35 @@ describe("Trace.finalizeSync", () => {
     expect(files).toEqual(["ses-prune-3.json", "ses-prune-4.json"]) // oldest deleted
   })
 
+  test("prunes the OLDEST by mtime, not by filename (descending session-id regression)", () => {
+    // Session trace files are `ses_<id>.json` where the id is Identifier.descending() — so newer
+    // sessions sort lexically FIRST. A filename-based prune (.sort() + slice-from-front) deletes the
+    // NEWEST traces and keeps the oldest, silently breaking TUI tracing once the dir hits maxFiles.
+    // This builds files whose mtime order is the REVERSE of their filename order and asserts the prune
+    // keeps the newest-by-mtime. Fails against the old filename-sort prune.
+    const nodefs = require("node:fs") as typeof import("node:fs")
+    // Filename order: aaa < bbb < ccc.  mtime order (newest→oldest): aaa, bbb, ccc (reverse).
+    const now = Date.now()
+    const files: Array<[string, number]> = [
+      ["ses_aaa.json", now], // newest mtime, lexically FIRST (mimics a fresh descending id)
+      ["ses_bbb.json", now - 60_000],
+      ["ses_ccc.json", now - 120_000], // oldest mtime, lexically LAST
+    ]
+    for (const [name, mtimeMs] of files) {
+      const p = path.join(tmpDir, name)
+      nodefs.writeFileSync(p, "{}")
+      nodefs.utimesSync(p, new Date(mtimeMs), new Date(mtimeMs))
+    }
+
+    new FileExporter(tmpDir, 2).pruneSync() // maxFiles = 2
+
+    const remaining = nodefs.readdirSync(tmpDir).sort()
+    // Correct: keep the two NEWEST by mtime (aaa, bbb); drop the oldest (ccc).
+    expect(remaining).toEqual(["ses_aaa.json", "ses_bbb.json"])
+    expect(existsSync(path.join(tmpDir, "ses_aaa.json"))).toBe(true) // the fresh session survives
+    expect(existsSync(path.join(tmpDir, "ses_ccc.json"))).toBe(false) // the oldest is pruned
+  })
+
   test("flushSync (crash path) still marks 'crashed' — finalizeSync must not regress into it", () => {
     const tracer = Recap.withExporters([new FileExporter(tmpDir)])
     tracer.startTrace("ses-crash", { prompt: "hi" })
