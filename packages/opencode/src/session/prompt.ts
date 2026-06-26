@@ -922,6 +922,7 @@ export namespace SessionPrompt {
           os: process.platform,
           arch: process.arch,
           node_version: process.version,
+          source: Flag.ALTIMATE_CLI_CLIENT,
         })
         // altimate_change start — task intent classification (keyword/regex, zero LLM cost)
         const userMsg = msgs.find((m) => m.info.id === lastUser!.id)

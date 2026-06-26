@@ -62,6 +62,7 @@ export namespace Telemetry {
         os: string
         arch: string
         node_version: string
+        source: string
       }
     // altimate_change end
     | {
