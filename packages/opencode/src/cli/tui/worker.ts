@@ -1,3 +1,9 @@
+// altimate_change start — MUST be first: redirect this worker thread's stdout/stderr to the log file
+// before any other module can write to it, so in-process library logging (snowflake-sdk, Effect
+// Logging, future deps) can never corrupt the TUI render. See worker-console-guard.ts for the full
+// rationale (this is the systemic fix for the log-flood class that regresses on every upstream merge).
+import "./worker-console-guard"
+// altimate_change end
 import { Server } from "@/server/server"
 import { InstanceRuntime } from "@/project/instance-runtime"
 import { Rpc } from "@/util/rpc"

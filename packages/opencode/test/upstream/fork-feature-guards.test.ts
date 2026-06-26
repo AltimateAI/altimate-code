@@ -80,4 +80,18 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(src).toContain("enableHomeDirScanning: false")
     expect(src).not.toMatch(/enable(FsRoot|HomeDir)Scanning:\s*true/)
   })
+
+  // SYSTEMIC fix for the recurring "library logs corrupt the TUI after a merge" class: the worker
+  // redirects its stdout/stderr to the log file. A merge that re-extracts worker.ts could drop the
+  // first-import guard, which would silently re-flood the TUI. Assert both the wiring and the redirect.
+  test("TUI worker redirects stdout/stderr away from the terminal (console guard)", async () => {
+    const worker = await read("src/cli/tui/worker.ts")
+    // The guard must be imported FIRST (before any module that could log).
+    const firstImport = worker.split("\n").find((l) => l.trim().startsWith("import "))
+    expect(firstImport).toContain("worker-console-guard")
+
+    const guard = await read("src/cli/tui/worker-console-guard.ts")
+    expect(guard).toContain("process.stdout.write")
+    expect(guard).toContain("process.stderr.write")
+  })
 })

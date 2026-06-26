@@ -28,6 +28,14 @@ describe("CLI output hygiene (entrypoint regression guards)", () => {
         expect(combined).not.toContain("[INFO]")
         // The InstanceRef ALS regression surfaced exactly this string.
         expect(combined).not.toContain("InstanceRef not provided")
+        // Broader stray-output class that recurs on every upstream merge — any in-process library
+        // writing to the console corrupts the TUI. These patterns must never reach the terminal:
+        //   - third-party Winston/JSON logs (e.g. snowflake-sdk: {"level":"INFO","message":...})
+        //   - snowflake-sdk's own "Configuring logger with level: ..." line
+        //   - the branch-build upgrade 404 spam
+        expect(combined).not.toMatch(/\{"level":\s*"(INFO|DEBUG|WARN|ERROR)"/)
+        expect(combined).not.toContain("Configuring logger with level")
+        expect(combined).not.toContain("[upgrade] failed to fetch latest version")
       }),
     60_000,
   )
