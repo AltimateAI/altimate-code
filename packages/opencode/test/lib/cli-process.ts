@@ -32,6 +32,16 @@ const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
 const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 
+// Subprocess tests default to spawning `bun run src/index.ts`, which cold-transpiles + boots the whole
+// app on every spawn. Under parallel CI load that cold start can exceed the per-spawn timeout, flaking
+// these tests (they pass locally in ~3-10s). Set OPENCODE_TEST_CLI to a prebuilt single-file binary
+// (see script/prebuild-test-cli.ts / CI) to spawn it directly (~ms boot) and remove that variance.
+// Falls back to `bun run` so local `bun test` needs no build step.
+const prebuiltCli = process.env.OPENCODE_TEST_CLI
+function cliCommand(args: string[]): string[] {
+  return prebuiltCli ? [prebuiltCli, ...args] : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
+}
+
 export const testModelID = "test/test-model"
 
 // Wrap a Bun subprocess pipe (or any ReadableStream<Uint8Array>) as a Stream.
@@ -195,12 +205,16 @@ export function withCliFixture<A, E>(
 
     const spawn = Effect.fn("opencode.spawn")(function* (args: string[], opts?: SpawnOpts) {
       const start = Date.now()
-      const timeoutMs = opts?.timeoutMs ?? 30_000
+      // Default 60s (was 30s): when not using a prebuilt OPENCODE_TEST_CLI, each spawn cold-boots
+      // `bun run src`, which under parallel CI load can exceed 30s. Stays under bun's 90s per-test
+      // timeout so the catch path still yields a debuggable result.
+      const timeoutMs = opts?.timeoutMs ?? 60_000
       // stdin: "ignore" so the child doesn't see a piped stdin and block
       // on `Bun.stdin.text()` (see src/cli/cmd/run.ts — non-TTY stdin is
       // consumed as the prompt). The old Process.run wrapper defaulted to
       // ignore; ChildProcess.make defaults to pipe, so we set it explicitly.
-      const command = ChildProcess.make(bunExecutable, ["run", "--conditions=browser", cliEntry, ...args], {
+      const argv = cliCommand(args)
+      const command = ChildProcess.make(argv[0]!, argv.slice(1), {
         cwd: home,
         env: { ...env, ...opts?.env },
         extendEnv: true,
@@ -262,7 +276,7 @@ export function withCliFixture<A, E>(
       // as a finalizer error during test teardown.
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          Bun.spawn([bunExecutable, "run", "--conditions=browser", cliEntry, ...argv], {
+          Bun.spawn(cliCommand(argv), {
             cwd: home,
             env: { ...process.env, ...env, ...opts?.env },
             stdout: "pipe",
@@ -333,7 +347,7 @@ export function withCliFixture<A, E>(
       // Either way we await proc.exited so the test scope doesn't leak.
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          Bun.spawn([bunExecutable, "run", "--conditions=browser", cliEntry, ...argv], {
+          Bun.spawn(cliCommand(argv), {
             cwd: opts?.cwd ?? home,
             env: { ...process.env, ...env, ...opts?.env },
             stdin: "pipe",
