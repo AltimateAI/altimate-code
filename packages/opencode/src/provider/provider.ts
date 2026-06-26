@@ -1953,6 +1953,12 @@ export namespace Provider {
     const provider = s.providers[providerID]
     if (!provider) {
       const availableProviders = Object.keys(s.providers)
+      // altimate_change start — TEMP DIAGNOSTIC (revert): why is the config provider missing on ubuntu CI?
+      // eslint-disable-next-line no-console
+      console.error(
+        `[provider.getModel DBG] '${providerID}' NOT registered. available=[${availableProviders.join(",")}]`,
+      )
+      // altimate_change end
       const matches = fuzzysort.go(providerID, availableProviders, { limit: 3, threshold: -10000 })
       const suggestions = matches.map((m) => m.target)
       throw new ModelNotFoundError({ providerID, modelID, suggestions })
