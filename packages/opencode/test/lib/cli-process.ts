@@ -89,6 +89,12 @@ function isolatedEnv(home: string, configJson: string): Record<string, string> {
     OPENCODE_DISABLE_AUTOCOMPACT: "1",
     OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_AUTH_CONTENT: "{}",
+    // Skip the embedded-web-UI dynamic import (opencode-web-ui.gen.ts — never produced by our build).
+    // On darwin it rejects cleanly → null; under `bun run src` on LINUX it makes Bun's bundler fail the
+    // whole server init ("Failed to init file server"), so Bun serves its HTML fallback for EVERY route
+    // — `/agent`, `/config`, etc. then return HTML and sdk throwOnError surfaces -32603. That broke every
+    // acp test (directory snapshot) AND the run happy-path on linux CI. Skipping the import fixes both.
+    OPENCODE_DISABLE_EMBEDDED_WEB_UI: "1",
   }
 }
 

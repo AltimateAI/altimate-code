@@ -1026,23 +1026,8 @@ function fromUnknownError(error: unknown, service?: string): Error {
   if (isAuthRequired(error)) {
     return new ACPError.AuthRequiredError({ providerId: findProviderID(error) })
   }
-  // altimate_change start — TEMP DIAGNOSTIC (revert): surface the cause behind the opaque -32603 so the
-  // linux-CI repro of the acp "directory" failure shows WHICH sdk call failed and why.
-  let dbg: string
-  try {
-    dbg =
-      error instanceof Error
-        ? `${error.name}: ${error.message} | ${(error.stack ?? "").split("\n").slice(0, 4).join(" ⏎ ")}`
-        : JSON.stringify(error)
-  } catch {
-    dbg = String(error)
-  }
-  // eslint-disable-next-line no-console
-  console.error(`[ACP fromUnknownError] service=${service} CAUSE: ${dbg}`)
-  return new ACPError.ServiceFailureError({
-    safeMessage: `Altimate Code service failure [DBG ${service}: ${(dbg || "").slice(0, 400)}]`,
-    service,
-  })
+  // altimate_change start — user-facing ACP error branding
+  return new ACPError.ServiceFailureError({ safeMessage: "Altimate Code service failure", service })
   // altimate_change end
 }
 
