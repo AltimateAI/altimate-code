@@ -28,7 +28,9 @@ import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
-import { Config } from "../../config/config"
+// altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
+import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+// altimate_change end
 
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
 // param schema erases to `unknown`), fall back to a string-keyed record so the
@@ -599,8 +601,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
         try {
           if (args.trace === false) return null
 
-          const cfg = await Config.get()
-          const tracingCfg = cfg.tracing
+          // altimate_change start — upstream_fix: read tracing config via the server client. The local
+          // Config.get() facade cannot resolve the instance ALS across the CLI module boundary in the
+          // `run` path (InstanceRef not provided → swallowed by the catch below → tracer null → no trace
+          // file is ever written). The v1.17.9 merge reverted this to Config.get(); restore sdk.config.get().
+          // Guarded by test/cli/run/run-process.test.ts "--trace writes a session trace artifact".
+          // The sdk's generated Config type omits the fork-only `tracing` field; the server returns it
+          // at runtime, so assert just that field's shape from ConfigV1 (avoids the local Config.get()).
+          const cfg = (await sdk.config.get()).data as { tracing?: ConfigV1.Info["tracing"] } | undefined
+          const tracingCfg = cfg?.tracing
+          // altimate_change end
           if (tracingCfg?.enabled === false) return null
 
           const exporters: TraceExporter[] = [new FileExporter(tracingCfg?.dir)]

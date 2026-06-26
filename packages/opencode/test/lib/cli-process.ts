@@ -32,16 +32,19 @@ const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
 const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 
-// Subprocess tests default to spawning `bun run src/index.ts`, which cold-transpiles + boots the whole
-// app on every spawn. Under parallel CI load that cold start can exceed the per-spawn timeout, flaking
-// these tests (they pass locally in ~3-10s). Set OPENCODE_TEST_CLI to a prebuilt single-file binary
-// (see script/prebuild-test-cli.ts / CI) to spawn it directly (~ms boot) and remove that variance.
-// Falls back to `bun run` so local `bun test` needs no build step.
-// Resolve to ABSOLUTE: spawns run with cwd=<tmpdir>, so a relative OPENCODE_TEST_CLI (e.g. "dist/...")
-// would not resolve (PlatformError: NotFound). path.resolve() against the test runner's cwd (repo).
-const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPENCODE_TEST_CLI) : undefined
+// These subprocess tests spawn `bun run src/index.ts` (cold-transpiles + boots the app per spawn).
+// The per-spawn timeout is 60s (see spawn() below), which absorbs the cold start even under parallel
+// CI load (each spawn is ~1-10s locally).
+//
+// NOTE: a prior de-flake spawned a prebuilt single-file binary via OPENCODE_TEST_CLI for ~ms boot.
+// That was REVERTED — the compiled binary deterministically HANGS on the LLM round-trip to a localhost
+// openai-compatible endpoint (the in-process TestLLMServer, and any local OpenAI-SSE mock): the model
+// call never completes, so every test needing an LLM response times out. `bun run src` completes the
+// same calls in ~1s. The product binary is fine against real remote providers; the hang is specific to
+// the compiled binary's openai-compatible streaming against a localhost mock. Do not reintroduce the
+// prebuilt-binary spawn for the mock-LLM tests without first fixing that hang.
 function cliCommand(args: string[]): string[] {
-  return prebuiltCli ? [prebuiltCli, ...args] : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
+  return [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
 }
 
 export const testModelID = "test/test-model"
