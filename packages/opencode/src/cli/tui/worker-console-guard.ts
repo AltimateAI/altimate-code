@@ -24,6 +24,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { format } from "node:util"
 import { xdgData } from "xdg-basedir"
 
 // Compute the log dir inline (no heavy imports that might log before the redirect is up).
@@ -66,6 +67,26 @@ function install(): void {
 
   process.stdout.write = redirect as typeof process.stdout.write
   process.stderr.write = redirect as typeof process.stderr.write
+
+  // CRITICAL: in Bun, console.log/error/warn/info/debug/trace write to the fd DIRECTLY and do NOT
+  // go through process.stdout/stderr.write — so the overrides above do not catch them. Raw console.*
+  // on an in-worker code path (e.g. a Zod validation failure, a plugin error, a driver warning) would
+  // still corrupt the TUI. Funnel the console methods into the same sink so the whole class is closed.
+  const consoleLine =
+    (label: string) =>
+    (...args: unknown[]) => {
+      try {
+        sink?.(`${label}${format(...args)}\n`)
+      } catch {
+        // logging must never throw
+      }
+    }
+  console.log = consoleLine("")
+  console.info = consoleLine("")
+  console.debug = consoleLine("")
+  console.warn = consoleLine("[warn] ")
+  console.error = consoleLine("[error] ")
+  console.trace = consoleLine("[trace] ")
 }
 
 install()

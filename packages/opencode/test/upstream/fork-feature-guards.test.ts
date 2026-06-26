@@ -93,5 +93,10 @@ describe("fork feature presence guards (merge drop detection)", () => {
     const guard = await read("src/cli/tui/worker-console-guard.ts")
     expect(guard).toContain("process.stdout.write")
     expect(guard).toContain("process.stderr.write")
+    // In Bun, console.* bypasses process.stdout/stderr.write, so the guard MUST also override the
+    // console methods or raw console.* still corrupts the TUI. Guard against a regression that drops it.
+    expect(guard).toContain("console.log")
+    expect(guard).toContain("console.error")
+    expect(guard).toContain("console.warn")
   })
 })
