@@ -62,7 +62,6 @@ export namespace Telemetry {
         os: string
         arch: string
         node_version: string
-        source: string
       }
     // altimate_change end
     | {
@@ -1201,6 +1200,7 @@ export namespace Telemetry {
   let machineId = ""
   let sessionId = ""
   let projectId = ""
+  let clientSource = "cli"
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
@@ -1227,6 +1227,7 @@ export namespace Telemetry {
 
       const properties: Record<string, string> = {
         cli_version: Installation.VERSION,
+        source: clientSource,
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
       }
@@ -1347,6 +1348,10 @@ export namespace Telemetry {
   export function setContext(opts: { sessionId: string; projectId: string }) {
     sessionId = opts.sessionId
     projectId = opts.projectId
+  }
+
+  export function setSource(s: string): void {
+    clientSource = s
   }
 
   export function getContext() {

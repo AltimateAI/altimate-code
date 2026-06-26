@@ -362,6 +362,7 @@ export namespace SessionPrompt {
     // altimate_change end
     // altimate_change start — session telemetry tracking
     await Telemetry.init()
+    Telemetry.setSource(Flag.ALTIMATE_CLI_CLIENT)
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
     const sessionStartTime = Date.now()
     let sessionTotalCost = 0
@@ -922,7 +923,6 @@ export namespace SessionPrompt {
           os: process.platform,
           arch: process.arch,
           node_version: process.version,
-          source: Flag.ALTIMATE_CLI_CLIENT,
         })
         // altimate_change start — task intent classification (keyword/regex, zero LLM cost)
         const userMsg = msgs.find((m) => m.info.id === lastUser!.id)
