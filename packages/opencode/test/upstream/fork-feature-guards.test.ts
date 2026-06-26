@@ -115,4 +115,22 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(guard).toContain("console.error")
     expect(guard).toContain("console.warn")
   })
+
+  // MCP.remove: the v1.17.9 merge DELETED MCP.remove from mcp/index.ts (no marker) and rewired the
+  // datamate tool to MCP.disconnect — which leaves a stale "disabled" status entry and never publishes
+  // ToolsChanged, so a removed/deleted datamate MCP server keeps offering its tools until restart.
+  // Guard the restored function (impl + namespace wrapper + the ToolsChanged publish) AND its datamate
+  // call sites, so a future merge that drops it again goes red. See the differential audit.
+  test("MCP.remove is present (full teardown + ToolsChanged) and wired into datamate", async () => {
+    const mcp = await read("src/mcp/index.ts")
+    expect(mcp).toContain('Effect.fn("MCP.remove")') // the impl
+    expect(mcp).toContain("export async function remove") // the namespace wrapper
+    // remove must DELETE the status entry (not just mark "disabled") and publish ToolsChanged so the
+    // agent's live tool list / /mcps view refreshes — the behavior disconnect lacks.
+    expect(mcp).toMatch(/delete s\.status\[name\][\s\S]*events\.publish\(ToolsChanged/)
+    const datamate = await read("src/altimate/tools/datamate.ts")
+    expect(datamate, "datamate must use MCP.remove (not just disconnect) so removed servers stop offering tools").toContain(
+      "MCP.remove(",
+    )
+  })
 })
