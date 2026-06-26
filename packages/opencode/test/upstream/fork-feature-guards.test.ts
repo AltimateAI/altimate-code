@@ -73,6 +73,23 @@ describe("fork feature presence guards (merge drop detection)", () => {
   // checkout) into the @-attach suggestions of a project that doesn't contain them. A merge that
   // re-extracts search.ts would silently restore the upstream defaults. See the Altimate Code Issues
   // report (RCA 2).
+  // #209 sensitive-write guard: writes/edits/moves into credential/VCS/security locations (.git/,
+  // .ssh/, .env*, private keys, ...) must require a SEPARATE "sensitive_write" permission, even inside
+  // the project. The v1.17.9 merge dropped the wrapper + its 4 call sites (the function survived as
+  // dead code; a private test copy hid it). Guard the DEFINITION and every CALL SITE so a merge that
+  // drops the wiring goes red — a behavioral test alone missed it because the wiring, not the function,
+  // was lost.
+  test("sensitive-write guard is wired into write/edit/apply_patch (#209)", async () => {
+    const extDir = await read("src/tool/external-directory.ts")
+    expect(extDir).toContain("assertSensitiveWriteEffect")
+    expect(extDir).toContain("assertSensitiveWrite") // promise wrapper too
+    expect(extDir).toContain('"sensitive_write"') // separate permission key (not "edit")
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const src = await read(`src/tool/${tool}.ts`)
+      expect(src, `${tool}.ts must call the sensitive-write guard`).toContain("assertSensitiveWriteEffect(ctx,")
+    }
+  })
+
   test("fff file search is scoped to the project (no home/root scanning leak)", async () => {
     const src = await read("core/src/filesystem/search.ts", MONO)
     expect(src).toContain("enableFsRootScanning: false")

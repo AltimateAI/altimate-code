@@ -6,7 +6,7 @@ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { InstanceState } from "@/effect/instance-state"
 import { Patch } from "../patch"
 import { createTwoFilesPatch, diffLines } from "diff"
-import { assertExternalDirectoryEffect } from "./external-directory"
+import { assertExternalDirectoryEffect, assertSensitiveWriteEffect } from "./external-directory"
 import { trimDiff } from "./edit"
 import { LSP } from "@/lsp/lsp"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -72,6 +72,9 @@ export const ApplyPatchTool = Tool.define(
       for (const hunk of hunks) {
         const filePath = path.resolve(instance.directory, hunk.path)
         yield* assertExternalDirectoryEffect(ctx, filePath)
+        // altimate_change start — upstream_fix: restore #209 sensitive-write guard (separate permission)
+        yield* assertSensitiveWriteEffect(ctx, filePath)
+        // altimate_change end
 
         switch (hunk.type) {
           case "add": {
@@ -141,6 +144,9 @@ export const ApplyPatchTool = Tool.define(
 
             const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
             yield* assertExternalDirectoryEffect(ctx, movePath)
+            // altimate_change start — upstream_fix: restore #209 sensitive-write guard (move destination)
+            yield* assertSensitiveWriteEffect(ctx, movePath)
+            // altimate_change end
 
             fileChanges.push({
               filePath,

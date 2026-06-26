@@ -14,6 +14,9 @@ import { Filesystem } from "../../src/util/filesystem"
 import { File } from "../../src/file"
 import { Instance } from "../../src/project/instance"
 import { Protected } from "../../src/file/protected"
+// Import the PRODUCTION guard — a prior version inlined a private copy here, which made this suite
+// pass green while the production wiring was dropped by the v1.17.9 merge. Test the real thing.
+import { assertSensitiveWrite } from "../../src/tool/external-directory"
 import { PermissionNext } from "../../src/permission/next"
 import type { Tool } from "../../src/tool/tool"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -38,26 +41,7 @@ function mockContext() {
   return { ctx, requests }
 }
 
-async function assertSensitiveWrite(ctx: Tool.Context, target?: string) {
-  if (!target) return
-
-  const relativePath = path.relative(Instance.directory, target)
-  const matched = Protected.isSensitiveWrite(relativePath)
-  if (!matched) return
-
-  await Effect.runPromise(
-    ctx.ask({
-      permission: "sensitive_write",
-      patterns: [relativePath],
-      always: [relativePath],
-      metadata: {
-        filepath: target,
-        sensitive: matched,
-        reason: `This file is in a sensitive location (${matched}). Modifications could affect credentials, version control, or security configuration.`,
-      },
-    }),
-  )
-}
+// (assertSensitiveWrite is imported from the production module above — no local copy.)
 
 // ─────────────────────────────────────────────────────────────────────
 // SYMLINK ESCAPE ATTACKS
