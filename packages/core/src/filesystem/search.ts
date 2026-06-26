@@ -132,8 +132,16 @@ export const fffLayer = Layer.effect(
         Fff.create({
           basePath: location.directory,
           aiMode: true,
-          enableFsRootScanning: true,
-          enableHomeDirScanning: true,
+          // altimate_change start — confine the file picker to the active project.
+          // Upstream enables filesystem-root + home-dir scanning, which makes fff
+          // index the entire ~ tree and surface high-frecency files from OTHER repos
+          // (e.g. ~/code/altimateai/altimate-backend*/...py) as the default @-attach
+          // suggestion in a project that does not contain them. Scoping to basePath
+          // keeps suggestions to the current repo; users can still attach an external
+          // file by typing its path.
+          enableFsRootScanning: false,
+          enableHomeDirScanning: false,
+          // altimate_change end
         }),
       catch: (cause) => cause,
     }).pipe(Effect.orDie)

@@ -2,7 +2,7 @@ import { Config } from "@/config/config"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Installation } from "@/installation"
-import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { InstallationVersion, InstallationChannel } from "@opencode-ai/core/installation/version"
 import { GlobalBus } from "@/bus/global"
 
 // altimate_change start — robust upgrade notification with zero external dependencies
@@ -54,9 +54,31 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
 export function isValidVersion(version: string): boolean {
   return /^\d+\.\d+\.\d+/.test(version.replace(/^v/, ""))
 }
+
+/**
+ * Returns true if `channel` is a publishable release channel — i.e. a valid npm
+ * dist-tag / GitHub release ref (simple identifier, no path separators).
+ *
+ * Branch builds set the channel to the git branch name (e.g.
+ * "upstream/merge-v1.17.9"), which is NOT a real dist-tag. Using it as one makes
+ * the version check fetch `registry.npmjs.org/<pkg>/upstream/merge-v1.17.9`,
+ * which 404s and spams the TUI bottom bar. Such builds were never published, so
+ * the upgrade check should be skipped entirely.
+ */
+export function isPublishableChannel(channel: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(channel)
+}
 // altimate_change end
 
 export async function upgrade() {
+  // altimate_change start — skip the upgrade check for local / branch / dev builds.
+  // These are never published to npm or GitHub releases, so the version lookup
+  // 404s and spams the TUI bottom bar (e.g. a build off branch
+  // "upstream/merge-v1.17.9" whose channel becomes that branch name). isLocal()
+  // covers explicit local builds; the channel-shape check covers branch-name
+  // channels that aren't a valid npm dist-tag.
+  if (Installation.isLocal() || !isPublishableChannel(InstallationChannel)) return
+  // altimate_change end
   const config = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.getGlobal()))
   const method = await Installation.method()
   // altimate_change start — log fetch failures instead of swallowing them silently

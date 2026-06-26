@@ -68,4 +68,16 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(src).toContain("handleEvent")
     expect(src).toContain("flushSync") // synchronous finalize on shutdown is the load-bearing part
   })
+
+  // The fff file picker must stay scoped to the active project. Upstream enables filesystem-root +
+  // home-dir scanning, which leaks high-frecency files from OTHER repos (e.g. an altimate-backend
+  // checkout) into the @-attach suggestions of a project that doesn't contain them. A merge that
+  // re-extracts search.ts would silently restore the upstream defaults. See the Altimate Code Issues
+  // report (RCA 2).
+  test("fff file search is scoped to the project (no home/root scanning leak)", async () => {
+    const src = await read("core/src/filesystem/search.ts", MONO)
+    expect(src).toContain("enableFsRootScanning: false")
+    expect(src).toContain("enableHomeDirScanning: false")
+    expect(src).not.toMatch(/enable(FsRoot|HomeDir)Scanning:\s*true/)
+  })
 })

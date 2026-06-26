@@ -6,6 +6,7 @@ import { Effect, Layer } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { AppProcess } from "@opencode-ai/core/process"
 import { Installation } from "../../src/installation"
+import { isPublishableChannel } from "../../src/cli/upgrade"
 
 const srcDir = resolve(import.meta.dir, "..", "..", "src")
 const coreVersionSrc = resolve(import.meta.dir, "..", "..", "..", "core", "src", "installation", "version.ts")
@@ -78,6 +79,38 @@ describe("upgrade version comparison", () => {
     // The auto-upgrade in cli/upgrade.ts uses the same normalized shared InstallationVersion
     const content = readFileSync(join(srcDir, "cli", "upgrade.ts"), "utf-8")
     expect(content).toContain("InstallationVersion === latest")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2b. Branch/dev builds skip the upgrade check (no 404 spam in the TUI)
+// ---------------------------------------------------------------------------
+describe("isPublishableChannel — guards the upgrade check for branch/dev builds", () => {
+  test("real release channels are publishable", () => {
+    expect(isPublishableChannel("latest")).toBe(true)
+    expect(isPublishableChannel("beta")).toBe(true)
+    expect(isPublishableChannel("nightly")).toBe(true)
+    expect(isPublishableChannel("v1.17.9")).toBe(true)
+  })
+
+  test("branch-name channels (with '/') are NOT publishable", () => {
+    // This is the reported bug: a build off branch "upstream/merge-v1.17.9" set
+    // its channel to that branch name, producing a 404 npm dist-tag lookup.
+    expect(isPublishableChannel("upstream/merge-v1.17.9")).toBe(false)
+    expect(isPublishableChannel("feat/foo")).toBe(false)
+  })
+
+  test("empty / whitespace / leading-separator channels are NOT publishable", () => {
+    expect(isPublishableChannel("")).toBe(false)
+    expect(isPublishableChannel(" ")).toBe(false)
+    expect(isPublishableChannel("-leading")).toBe(false)
+    expect(isPublishableChannel("a b")).toBe(false)
+  })
+
+  test("upgrade() guards on isLocal() OR a non-publishable channel before fetching", () => {
+    const content = readFileSync(join(srcDir, "cli", "upgrade.ts"), "utf-8")
+    expect(content).toContain("isPublishableChannel(InstallationChannel)")
+    expect(content).toMatch(/if\s*\(\s*Installation\.isLocal\(\)\s*\|\|\s*!isPublishableChannel/)
   })
 })
 
