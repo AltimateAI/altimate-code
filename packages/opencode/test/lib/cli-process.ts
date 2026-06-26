@@ -90,11 +90,15 @@ function isolatedEnv(home: string, configJson: string): Record<string, string> {
     OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_AUTH_CONTENT: "{}",
     // Skip the embedded-web-UI dynamic import (opencode-web-ui.gen.ts — never produced by our build).
-    // On darwin it rejects cleanly → null; under `bun run src` on LINUX it makes Bun's bundler fail the
-    // whole server init ("Failed to init file server"), so Bun serves its HTML fallback for EVERY route
-    // — `/agent`, `/config`, etc. then return HTML and sdk throwOnError surfaces -32603. That broke every
-    // acp test (directory snapshot) AND the run happy-path on linux CI. Skipping the import fixes both.
+    // On darwin it rejects cleanly → null; under `bun run src` on LINUX Bun's bundler fails the server
+    // init and serves its HTML fallback for every route → sdk throwOnError → -32603 / run hangs.
     OPENCODE_DISABLE_EMBEDDED_WEB_UI: "1",
+    // Use ripgrep instead of fff for file search. The tests set HOME == the working/session directory,
+    // and fff refuses to init there ("Can not run certain FFF features in a file system root or home
+    // directory"), which on the linux CI runner aborts the server route that builds the directory
+    // snapshot → HTML fallback → acp -32603 + run "Model not found". ripgrep has no such guard, and the
+    // subprocess tests don't exercise fff specifically. (darwin's fff didn't enforce the guard.)
+    OPENCODE_DISABLE_FFF: "1",
   }
 }
 

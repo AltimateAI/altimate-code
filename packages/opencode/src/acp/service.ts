@@ -1026,20 +1026,8 @@ function fromUnknownError(error: unknown, service?: string): Error {
   if (isAuthRequired(error)) {
     return new ACPError.AuthRequiredError({ providerId: findProviderID(error) })
   }
-  // altimate_change start — TEMP DIAGNOSTIC (revert): surface the cause behind the opaque -32603
-  let dbg: string
-  try {
-    dbg =
-      error instanceof Error
-        ? `${error.name}: ${error.message} | ${(error.stack ?? "").split("\n").slice(0, 4).join(" ⏎ ")}`
-        : JSON.stringify(error)
-  } catch {
-    dbg = String(error)
-  }
-  return new ACPError.ServiceFailureError({
-    safeMessage: `Altimate Code service failure [DBG ${service}: ${(dbg || "").slice(0, 500)}]`,
-    service,
-  })
+  // altimate_change start — user-facing ACP error branding
+  return new ACPError.ServiceFailureError({ safeMessage: "Altimate Code service failure", service })
   // altimate_change end
 }
 
