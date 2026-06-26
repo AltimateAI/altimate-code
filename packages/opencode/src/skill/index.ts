@@ -20,6 +20,10 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Glob } from "@opencode-ai/core/util/glob"
 import { Discovery } from "./discovery"
 import { isRecord } from "@/util/record"
+// altimate_change start — upstream_fix: builtin DE-skill loading (dropped by the v1.17.9 rewrite; see make())
+import matter from "gray-matter"
+declare const OPENCODE_BUILTIN_SKILLS: { name: string; content: string }[] | undefined
+// altimate_change end
 
 const CLAUDE_EXTERNAL_DIR = ".claude"
 const AGENTS_EXTERNAL_DIR = ".agents"
@@ -301,6 +305,47 @@ export const layer = Layer.effect(
           location: "<built-in>",
           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
         }
+        // altimate_change start — upstream_fix: load the builtin DE skills (dbt/finops/etc.) into the
+        // LIVE registry. The v1.17.9 rewrite of this module dropped the builtin loader (it survives only
+        // in the now-orphaned skill.ts), so on installs without ~/.altimate/builtin/ (Homebrew, Docker,
+        // npm without postinstall) the ~11 builtin skills silently vanished from <available_skills>, the
+        // Skill tool, and auto-load. Restore both paths: prefer the postinstall FS copy (needed for
+        // @reference resolution), else the binary-embedded blob. Registered BEFORE loadSkills so a
+        // user-disk skill of the same name still overrides.
+        let loadedBuiltinFromFs = false
+        const builtinDir = path.join(global.home, ".altimate", "builtin")
+        if (yield* fsys.isDir(builtinDir)) {
+          const matches = yield* Effect.tryPromise(() =>
+            Glob.scan("**/SKILL.md", { cwd: builtinDir, absolute: true, include: "file", symlink: true }),
+          ).pipe(Effect.catch(() => Effect.succeed([] as string[])))
+          if (matches.length > 0) {
+            yield* Effect.forEach(matches, (m) => add(s, m, events), { discard: true })
+            loadedBuiltinFromFs = true
+          }
+        }
+        if (!loadedBuiltinFromFs && typeof OPENCODE_BUILTIN_SKILLS !== "undefined") {
+          for (const entry of OPENCODE_BUILTIN_SKILLS) {
+            try {
+              const md = matter(entry.content)
+              if (!isSkillFrontmatter(md.data)) continue
+              if (s.skills[md.data.name]) continue
+              s.skills[md.data.name] = {
+                name: md.data.name,
+                description: md.data.description,
+                location: `builtin:${entry.name}/SKILL.md`,
+                content: md.content,
+                alwaysApply: typeof md.data.alwaysApply === "boolean" ? md.data.alwaysApply : undefined,
+                applyPaths:
+                  typeof md.data.applyPaths === "string" || Array.isArray(md.data.applyPaths)
+                    ? md.data.applyPaths
+                    : undefined,
+              }
+            } catch (err) {
+              yield* Effect.logError("failed to parse embedded builtin skill", { skill: entry.name, error: err })
+            }
+          }
+        }
+        // altimate_change end
         yield* loadSkills(s, yield* InstanceState.get(discovered), events)
         return s
       }),
