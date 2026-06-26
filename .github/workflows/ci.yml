@@ -97,11 +97,29 @@ jobs:
         run: bun install
         working-directory: script/upstream
 
-      # NOTE: a "Prebuild test CLI" step (build a single-file binary, point the subprocess harness at it
-      # via OPENCODE_TEST_CLI for ~ms boots) was removed. The compiled binary deterministically hangs on
-      # the LLM round-trip to a localhost openai-compatible mock (see test/lib/cli-process.ts), so it
-      # timed out every subprocess test that needs an LLM response. The harness uses `bun run src` with a
-      # 60s per-spawn timeout, which absorbs the cold start under parallel CI load.
+      - name: Prebuild test CLI (fast subprocess spawns)
+        # Subprocess tests (test/cli/run, test/cli/acp, test/cli/smokes) spawn the CLI once per test.
+        # Spawning `bun run src/index.ts` cold-transpiles + boots the whole app every time, which under
+        # parallel CI load exceeds the per-spawn timeout — flaky timeouts that all pass locally. Build a
+        # single-file binary ONCE and point the harness at it via OPENCODE_TEST_CLI (~ms boots). Graceful:
+        # if the build fails, OPENCODE_TEST_CLI stays unset and the harness falls back to `bun run src`.
+        # The binary runs cleanly in the isolated test env because config.ts skips its background
+        # @opencode-ai/plugin install under OPENCODE_PURE (else it hangs on exit retrying the install).
+        working-directory: packages/opencode
+        shell: bash
+        run: |
+          if bun run build:local; then
+            # Absolute path — the test harness spawns with cwd=<tmpdir>, so a relative path would not resolve.
+            BIN="$(find "$PWD/dist" -type f -name altimate-code | head -1)"
+            if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+              echo "OPENCODE_TEST_CLI=$BIN" >> "$GITHUB_ENV"
+              echo "Prebuilt test CLI: $BIN"
+            else
+              echo "build:local succeeded but binary not found — falling back to 'bun run src'"
+            fi
+          else
+            echo "build:local failed — falling back to 'bun run src' (slower subprocess spawns)"
+          fi
 
       - name: Run tests
         working-directory: packages/opencode

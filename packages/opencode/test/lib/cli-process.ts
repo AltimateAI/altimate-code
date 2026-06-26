@@ -32,19 +32,22 @@ const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
 const bunExecutable = process.env.BUN_EXECUTABLE || process.execPath || "bun"
 
-// These subprocess tests spawn `bun run src/index.ts` (cold-transpiles + boots the app per spawn).
-// The per-spawn timeout is 60s (see spawn() below), which absorbs the cold start even under parallel
-// CI load (each spawn is ~1-10s locally).
+// Subprocess tests spawn the CLI once per test. `bun run src/index.ts` cold-transpiles + boots the whole
+// app on every spawn, which under parallel CI load exceeds the per-spawn timeout — flaky timeouts that
+// all pass locally. Set OPENCODE_TEST_CLI to a prebuilt single-file binary (CI builds one; see ci.yml)
+// to spawn it directly (~ms boot) and remove that variance. Falls back to `bun run` so local `bun test`
+// needs no build step.
+// Resolve to ABSOLUTE: spawns run with cwd=<tmpdir>, so a relative OPENCODE_TEST_CLI (e.g. "dist/...")
+// would not resolve (PlatformError: NotFound). path.resolve() against the test runner's cwd (repo).
 //
-// NOTE: a prior de-flake spawned a prebuilt single-file binary via OPENCODE_TEST_CLI for ~ms boot.
-// That was REVERTED — the compiled binary deterministically HANGS on the LLM round-trip to a localhost
-// openai-compatible endpoint (the in-process TestLLMServer, and any local OpenAI-SSE mock): the model
-// call never completes, so every test needing an LLM response times out. `bun run src` completes the
-// same calls in ~1s. The product binary is fine against real remote providers; the hang is specific to
-// the compiled binary's openai-compatible streaming against a localhost mock. Do not reintroduce the
-// prebuilt-binary spawn for the mock-LLM tests without first fixing that hang.
+// NOTE: the prebuilt binary only works in this isolated env because config.ts skips its background
+// `@opencode-ai/plugin` install under OPENCODE_PURE. Without that guard the compiled binary (no workspace
+// or package cache in a fresh tmp HOME) hangs on exit — waitForDependencies() joins the install fiber,
+// which retries forever against the sandbox network — and every prompt-running subprocess test times out.
+// Keep OPENCODE_PURE set in isolatedEnv below.
+const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPENCODE_TEST_CLI) : undefined
 function cliCommand(args: string[]): string[] {
-  return [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
+  return prebuiltCli ? [prebuiltCli, ...args] : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
 }
 
 export const testModelID = "test/test-model"
