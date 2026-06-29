@@ -644,11 +644,15 @@ const tui: TuiPlugin = async (api) => {
     ],
     // Pre-merge keybinds (the old DialogSelect `keybind` prop) ported to explicit bindings:
     //   ctrl+a -> actions · ctrl+n -> create · ctrl+i -> install.
+    // altimate_change start — restore a default key to OPEN the skills list (pre-merge skill_list
+    // was ctrl+i, which now collides with tab/agent-cycle; use a collision-free <leader>k instead).
     bindings: [
+      { key: "<leader>k", cmd: "altimate.skill.list" },
       { key: "ctrl+a", cmd: "altimate.skill.actions" },
       { key: "ctrl+n", cmd: "altimate.skill.create" },
       { key: "ctrl+i", cmd: "altimate.skill.install" },
     ],
+    // altimate_change end
   })
 }
 

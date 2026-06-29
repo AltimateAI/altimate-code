@@ -1,4 +1,7 @@
 import { SyntaxStyle, RGBA, type TerminalColors } from "@opentui/core"
+// altimate_change start — branded default theme (overlay merge orphaned it; restore registration)
+import altimateCode from "./assets/altimate-code.json" with { type: "json" }
+// altimate_change end
 import aura from "./assets/aura.json" with { type: "json" }
 import ayu from "./assets/ayu.json" with { type: "json" }
 import carbonfox from "./assets/carbonfox.json" with { type: "json" }
@@ -128,6 +131,9 @@ export type ThemeJson = {
 }
 
 export const DEFAULT_THEMES: Record<string, ThemeJson> = {
+  // altimate_change start — branded default theme registration
+  ["altimate-code"]: altimateCode,
+  // altimate_change end
   aura,
   ayu,
   catppuccin,

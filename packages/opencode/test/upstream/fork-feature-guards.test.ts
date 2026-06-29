@@ -133,4 +133,39 @@ describe("fork feature presence guards (merge drop detection)", () => {
       "MCP.remove(",
     )
   })
+
+  test("core Global uses the altimate-code data dir (unified with the fork global, not split to opencode)", async () => {
+    // The overlay reverted packages/core/src/global.ts to upstream's app="opencode", splitting auth/
+    // sessions/db across ~/.local/share/{opencode,altimate-code}. Both globals must agree on altimate-code.
+    const core = await read("core/src/global.ts", MONO)
+    expect(core).toContain('const app = "altimate-code"')
+    expect(core).not.toMatch(/const app = "opencode"/)
+    const fork = await read("src/global/index.ts")
+    expect(fork).toContain('const app = "altimate-code"')
+  })
+
+  test("branded altimate-code theme is registered and is the TUI default (not upstream opencode)", async () => {
+    const index = await read("src/theme/index.ts", MONO + "/tui")
+    expect(index).toContain("altimate-code.json") // asset imported
+    expect(index).toMatch(/\["altimate-code"\]\s*:\s*altimateCode/) // registered in DEFAULT_THEMES
+    const ctx = await read("src/context/theme.tsx", MONO + "/tui")
+    expect(ctx).toContain('const DEFAULT_THEME = "altimate-code"')
+    expect(ctx).not.toMatch(/active:\s*"opencode"/) // default must not revert to upstream
+  })
+
+  test("ACP permission handler honors ALTIMATE_CLI_YOLO (yolo over the acp entrypoint)", async () => {
+    const src = await read("src/acp/permission.ts")
+    expect(src).toContain("ALTIMATE_CLI_YOLO")
+    // must auto-reply "once" on yolo (short-circuit before requestPermission)
+    expect(src).toMatch(/ALTIMATE_CLI_YOLO[\s\S]*reply\([^)]*"once"/)
+  })
+
+  test("fork keybind defaults are present (prompt enhance + skill list, collision-free)", async () => {
+    const kb = await read("src/config/keybind.ts", MONO + "/tui")
+    // the re-homed prompt-enhance plugin gathers this name; without the definition the default key is dropped
+    expect(kb).toMatch(/\["altimate\.prompt\.enhance"\]\s*:\s*keybind\("<leader>i"/)
+    const skill = await read("src/plugin/tui/altimate/skill-ops.tsx")
+    // a default key must open the skills list — <leader>k (NOT ctrl+i, which collides with tab/agent-cycle)
+    expect(skill).toMatch(/key:\s*"<leader>k",\s*cmd:\s*"altimate\.skill\.list"/)
+  })
 })

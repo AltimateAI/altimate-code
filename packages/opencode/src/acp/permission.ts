@@ -4,6 +4,9 @@ import { applyPatch } from "diff"
 // altimate_change start — upstream_fix: use Filesystem facade after filesystem helper extraction
 import { Filesystem } from "@/util/filesystem"
 // altimate_change end
+// altimate_change start — yolo mode over ACP (restore dropped fork behavior)
+import { Flag } from "@/flag/flag"
+// altimate_change end
 import type { ACPSession } from "./session"
 import { toLocations, toToolKind, type ToolInput } from "./tool"
 import { Effect } from "effect"
@@ -47,6 +50,15 @@ export class Handler {
     const permission = event.properties
     const session = await Effect.runPromise(this.input.session.tryGet(permission.sessionID))
     if (!session) return
+
+    // altimate_change start — yolo mode: auto-approve without asking the ACP client (restores dropped fork
+    // behavior; ALTIMATE_CLI_YOLO is explicit opt-in. The interactive `run` path additionally honors
+    // deny rules — run.ts — which the ACP handler has no ruleset access to here.)
+    if (Flag.ALTIMATE_CLI_YOLO) {
+      await this.reply(permission.id, "once", session.cwd)
+      return
+    }
+    // altimate_change end
 
     if (!this.input.connection.requestPermission) {
       await this.reply(permission.id, "reject", session.cwd)

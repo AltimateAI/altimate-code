@@ -153,6 +153,10 @@ export const Definitions = {
   prompt_stash: keybind("none", "Stash prompt"),
   prompt_stash_pop: keybind("none", "Pop stashed prompt"),
   prompt_stash_list: keybind("none", "List stashed prompts"),
+  // altimate_change start — fork keybind default (overlay merge dropped it); the re-homed
+  // prompt-enhance plugin gathers this name. Restores the pre-merge <leader>i default.
+  ["altimate.prompt.enhance"]: keybind("<leader>i", "Enhance the current prompt"),
+  // altimate_change end
   workspace_set: keybind("none", "Set workspace"),
 
   input_clear: keybind("ctrl+c", "Clear input field"),
