@@ -23,8 +23,9 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
         ])
         opencode.expectExit(result, 0)
 
+        // altimate_change — fork global config dir is altimate-code (file name stays opencode.json).
         const config = yield* Effect.promise(() =>
-          Bun.file(path.join(home, ".config", "opencode", "opencode.json")).json(),
+          Bun.file(path.join(home, ".config", "altimate-code", "opencode.json")).json(),
         )
         expect(config.mcp.github).toEqual({
           type: "remote",
@@ -61,8 +62,9 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
         ])
         opencode.expectExit(result, 0)
 
+        // altimate_change — fork global config dir is altimate-code (file name stays opencode.json).
         const config = yield* Effect.promise(() =>
-          Bun.file(path.join(home, ".config", "opencode", "opencode.json")).json(),
+          Bun.file(path.join(home, ".config", "altimate-code", "opencode.json")).json(),
         )
         expect(config.mcp.local).toEqual({
           type: "local",
