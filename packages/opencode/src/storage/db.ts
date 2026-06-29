@@ -162,7 +162,18 @@ export namespace Database {
   }
 
   function adoptCoreOwnedDatabase(sqlite: BunDatabase, entries: Journal) {
-    if (process.env["OPENCODE_TEST_CORE_DB_OWNER"] !== "1") return false
+    // altimate_change start — upstream_fix: detect a core-owned schema in PRODUCTION, not only tests.
+    // The core database (packages/core) and this legacy storage layer share one sqlite file
+    // (Global.Path.data/opencode.db). On a FRESH install core runs first and creates its own
+    // `migration` journal table plus the `session` table (already including columns like
+    // `metadata`). Re-running the legacy storage migrations then duplicates those columns and
+    // crashes ("ALTER TABLE `session` ADD `metadata`"), which kills /provider so no model
+    // resolves. Adopt (mark the storage journal applied) instead. Previously this only fired
+    // under OPENCODE_TEST_CORE_DB_OWNER=1, so production fresh installs fell through to migrate()
+    // and were unusable — green tests masked it because tests set that flag.
+    const coreOwned = hasTable(sqlite, "migration") && hasTable(sqlite, "session")
+    if (process.env["OPENCODE_TEST_CORE_DB_OWNER"] !== "1" && !coreOwned) return false
+    // altimate_change end
     if (!hasTable(sqlite, "session")) return false
 
     log.info("adopting core-owned database schema")

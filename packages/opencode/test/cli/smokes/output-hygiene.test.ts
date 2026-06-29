@@ -53,4 +53,29 @@ describe("CLI output hygiene (entrypoint regression guards)", () => {
       }),
     60_000,
   )
+
+  // GUARD: fresh-install DB migration crash (the v1.17.9 ship-blocker surfaced by running ADE-bench
+  // on a truly fresh data dir). The legacy storage DB (storage/db.ts) adopted the core-owned schema
+  // ONLY when OPENCODE_TEST_CORE_DB_OWNER=1 — which preload.ts sets globally, so EVERY test passed —
+  // while a real fresh install fell through to migrate() and crashed on
+  // `ALTER TABLE session ADD metadata` (core already created that column), which killed /provider so
+  // NO model resolved (run/agent/serve unusable). The fix detects core-ownership in production (the
+  // shared-file `migration` table + `session` table). Unset the flag to exercise the production path
+  // on a fresh DB; the bug signature must never reappear, and adoption must fire.
+  cliIt.live(
+    "fresh-DB production path adopts the core schema (no session-metadata migration crash)",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        const r = yield* opencode.spawn(["run", "--model", "anthropic/claude-opus-4-8", "--print-logs", "hi"], {
+          env: { OPENCODE_TEST_CORE_DB_OWNER: "" },
+        })
+        const combined = r.stdout + r.stderr
+        // The exact failure signature — a fresh install hit this and could not resolve any model.
+        expect(combined).not.toContain("ALTER TABLE `session` ADD `metadata`")
+        expect(combined).not.toContain("DrizzleError")
+        // The production adoption path (the fix) must fire on a fresh core-owned DB.
+        expect(combined).toContain("adopting core-owned database schema")
+      }),
+    90_000,
+  )
 })
