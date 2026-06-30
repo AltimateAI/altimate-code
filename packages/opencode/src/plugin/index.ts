@@ -136,6 +136,10 @@ export namespace Plugin {
         .then(async (mod) => {
           const seen = new Set<PluginInstance>()
           for (const [_name, fn] of Object.entries<PluginInstance>(mod)) {
+            // altimate_change start — upstream_fix: skip non-function exports (e.g. `export const version`)
+            // so a plugin module with any non-callable export doesn't throw "fn is not a function" on load
+            if (typeof fn !== "function") continue
+            // altimate_change end
             if (seen.has(fn)) continue
             seen.add(fn)
             hooks.push(await fn(input, options))
