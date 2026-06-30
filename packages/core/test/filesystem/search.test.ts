@@ -1,8 +1,10 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
+import os from "os"
 import path from "path"
 import { Effect } from "effect"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
+import { isUnboundedScanRoot } from "@opencode-ai/core/filesystem/scan-root"
 import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { tmpdir } from "../fixture/tmpdir"
 import { testEffect } from "../lib/effect"
@@ -40,4 +42,22 @@ describe("Ripgrep", () => {
       }),
     ),
   )
+})
+
+// Regression: fff (the native file picker) aborts the process with SIGTRAP when basePath is an
+// unbounded root (home dir / filesystem root), crashing the TUI when launched from ~. defaultLayer
+// must route those roots to the bounded ripgrep layer. See packages/core/src/filesystem/search.ts.
+describe("isUnboundedScanRoot (fff SIGTRAP guard)", () => {
+  test("flags the home directory", () => {
+    expect(isUnboundedScanRoot(os.homedir())).toBe(true)
+  })
+  test("flags the filesystem root", () => {
+    expect(isUnboundedScanRoot(path.parse(process.cwd()).root)).toBe(true)
+  })
+  test("does not flag an ordinary project directory under home", () => {
+    expect(isUnboundedScanRoot(path.join(os.homedir(), "code", "my-project"))).toBe(false)
+  })
+  test("does not flag a nested temp project directory", () => {
+    expect(isUnboundedScanRoot(path.join(os.tmpdir(), "altimate-proj-xyz"))).toBe(false)
+  })
 })

@@ -10,6 +10,9 @@ import { Location } from "../location"
 import { Ripgrep } from "../ripgrep"
 import { RelativePath } from "../schema"
 import { Flag } from "../flag/flag"
+// altimate_change start — bounded-scan-root guard for the fff SIGTRAP fix (see ./scan-root.ts)
+import { isUnboundedScanRoot } from "./scan-root"
+// altimate_change end
 
 export interface Interface {
   readonly find: (input: FileSystem.FindInput) => Effect.Effect<FileSystem.Entry[]>
@@ -240,6 +243,19 @@ export const fffLayer = Layer.effect(
   }),
 )
 
+// altimate_change start — upstream_fix: fff (the native file picker) aborts the process with
+// SIGTRAP when basePath is an unbounded root like the home directory or the filesystem root —
+// there is no .gitignore to bound the walk, so it tries to index the entire tree. Launching the
+// TUI from ~ (a fresh terminal's default cwd) crashed before the TUI could restore the terminal,
+// leaving it stuck in mouse-reporting mode. Fall back to the bounded ripgrep layer for those
+// roots; ordinary project directories still use fff. (enableFsRootScanning/enableHomeDirScanning
+// only suppress cross-tree suggestions — they do NOT stop fff from indexing basePath itself.)
 export const defaultLayer = Layer.unwrap(
-  Effect.sync(() => (Flag.OPENCODE_DISABLE_FFF || !Fff.available() ? ripgrepLayer : fffLayer)),
+  Effect.gen(function* () {
+    if (Flag.OPENCODE_DISABLE_FFF || !Fff.available()) return ripgrepLayer
+    const location = yield* Location.Service
+    if (isUnboundedScanRoot(location.directory)) return ripgrepLayer
+    return fffLayer
+  }),
 )
+// altimate_change end
