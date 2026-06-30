@@ -1372,7 +1372,7 @@ export class Trace {
    * Why this exists: on a quiet/idle Bun **Worker thread** (the TUI worker after a turn finishes),
    * pending async `fs` writes from `snapshot()`/`endTrace()` are not flushed before the worker is
    * torn down — so an async finalize silently writes nothing. A synchronous write does not depend on
-   * the worker's event loop being pumped. See .github/meta/night-run/E2E-TUI-TRACING-REGRESSION.md.
+   * the worker's event loop being pumped.
    *
    * Limitation: writes only the local file (+ a sync maxFiles prune). It does NOT invoke async
    * `TraceExporter.export()`, so HTTP exporters don't receive the trace on this shutdown path — async

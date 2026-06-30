@@ -1,6 +1,6 @@
 // Artifact-level regression guards for the class of bugs that slipped past code review, unit tests,
 // and CI during the v1.17.9 merge — bugs that only surface when the REAL entrypoint runs, not in any
-// isolated module. See .github/meta/night-run/RETROSPECTIVE-missed-bugs.md.
+// isolated module.
 //
 // These spawn the actual CLI entrypoint (index.ts) and assert on its observable output, the way a
 // human running the binary would experience it.

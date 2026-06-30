@@ -7,7 +7,7 @@ import fs from "fs/promises"
 // fork hook — no compile error, no failing test, because the dropped code needs no markers and the
 // existing "absence" tests still pass. These assert each hook is PRESENT so a drop turns into a red
 // test on the next merge. The inverse of test/cli/tui/worker-trace-clearing.test.ts (which asserts
-// OLD logic is absent). See .github/meta/night-run/RETROSPECTIVE-missed-bugs.md.
+// OLD logic is absent).
 //
 // These are intentionally string-level source checks: cheap, no creds, CI-friendly, and aimed at one
 // failure mode only — a merge silently deleting the hook. If a hook is legitimately renamed/moved,
@@ -60,7 +60,7 @@ describe("fork feature presence guards (merge drop detection)", () => {
 
   // The interactive TUI worker must feed bus events to the TraceConsumer AND finalize synchronously on
   // shutdown, or TUI sessions write no traces (the v1.17.9 regression — async fs writes don't flush on
-  // the quiet Bun Worker thread). See E2E-TUI-TRACING-REGRESSION.md.
+  // the quiet Bun Worker thread).
   test("TUI worker wires the trace consumer + sync shutdown finalize", async () => {
     const src = await read("src/cli/tui/worker.ts")
     expect(src).toContain("TraceConsumer")

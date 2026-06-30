@@ -39,3 +39,5 @@ tsconfig.tsbuildinfo
 **/.github/meta/commit.txt
 **/.github/meta/diff.txt
 **/.github/meta/pr-body-*.md
+.bridge-merge-report.md
+/data/
