@@ -596,6 +596,40 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
     }
   })
 
+  test("launch_surface is stamped on every event when ALTIMATE_LAUNCH_SURFACE is set", async () => {
+    const origSurface = process.env.ALTIMATE_LAUNCH_SURFACE
+    process.env.ALTIMATE_LAUNCH_SURFACE = "ide"
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      Telemetry.track({ type: "session_start", timestamp: 1700000000000, session_id: "sess-ide" })
+      await Telemetry.flush()
+
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes[0].data.baseData.properties.launch_surface).toBe("ide")
+    } finally {
+      cleanup()
+      if (origSurface !== undefined) process.env.ALTIMATE_LAUNCH_SURFACE = origSurface
+      else delete process.env.ALTIMATE_LAUNCH_SURFACE
+    }
+  })
+
+  test("launch_surface is omitted when ALTIMATE_LAUNCH_SURFACE is unset (CLI/TUI)", async () => {
+    const origSurface = process.env.ALTIMATE_LAUNCH_SURFACE
+    delete process.env.ALTIMATE_LAUNCH_SURFACE
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      Telemetry.track({ type: "session_start", timestamp: 1700000000000, session_id: "sess-cli" })
+      await Telemetry.flush()
+
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes[0].data.baseData.properties.launch_surface).toBeUndefined()
+    } finally {
+      cleanup()
+      if (origSurface !== undefined) process.env.ALTIMATE_LAUNCH_SURFACE = origSurface
+      else delete process.env.ALTIMATE_LAUNCH_SURFACE
+    }
+  })
+
   test("numeric fields go to measurements, string fields go to properties", async () => {
     const { fetchCalls, cleanup } = await initWithMockedFetch()
     try {

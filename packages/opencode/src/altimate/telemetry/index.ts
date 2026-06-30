@@ -1198,6 +1198,10 @@ export namespace Telemetry {
   let flushTimer: ReturnType<typeof setInterval> | undefined
   let userEmail = ""
   let machineId = ""
+  // Where this serve process was launched from ("ide" when spawned by an
+  // editor extension, "" for CLI/TUI). Stamped onto every event so analytics
+  // can attribute sessions to IDE vs terminal usage.
+  let launchSurface = ""
   let sessionId = ""
   let projectId = ""
   let appInsights: AppInsightsConfig | undefined
@@ -1228,6 +1232,7 @@ export namespace Telemetry {
         cli_version: Installation.VERSION,
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
+        ...(launchSurface && { launch_surface: launchSurface }),
       }
       const measurements: Record<string, number> = {}
 
@@ -1319,6 +1324,9 @@ export namespace Telemetry {
       } catch {
         // Account unavailable — proceed without user ID
       }
+      // Set by the IDE extension when it spawns `altimate serve`; absent for
+      // direct CLI/TUI invocations.
+      launchSurface = process.env.ALTIMATE_LAUNCH_SURFACE ?? ""
       try {
         const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
         try {
@@ -1449,6 +1457,7 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
+    launchSurface = ""
     initPromise = undefined
     initDone = false
   }
