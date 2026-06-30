@@ -147,12 +147,18 @@ export namespace Pty {
     const prependDirs: string[] = []
     const binDir = process.env.ALTIMATE_BIN_DIR
     if (binDir && !pathEntries.has(binDir)) prependDirs.push(binDir)
-    const projectToolsDir = path.join(Instance.directory, ".opencode", "tools")
-    if (!pathEntries.has(projectToolsDir)) prependDirs.push(projectToolsDir)
-    if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
-      const worktreeToolsDir = path.join(Instance.worktree, ".opencode", "tools")
-      if (!pathEntries.has(worktreeToolsDir)) prependDirs.push(worktreeToolsDir)
+    // altimate_change start — load project tools from .altimate-code/tools (primary) + .opencode/tools (fallback)
+    for (const variant of [".altimate-code", ".opencode"]) {
+      const projectToolsDir = path.join(Instance.directory, variant, "tools")
+      if (!pathEntries.has(projectToolsDir)) prependDirs.push(projectToolsDir)
     }
+    if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
+      for (const variant of [".altimate-code", ".opencode"]) {
+        const worktreeToolsDir = path.join(Instance.worktree, variant, "tools")
+        if (!pathEntries.has(worktreeToolsDir)) prependDirs.push(worktreeToolsDir)
+      }
+    }
+    // altimate_change end
     const globalToolsDir = path.join(Global.Path.config, "tools")
     if (!pathEntries.has(globalToolsDir)) prependDirs.push(globalToolsDir)
     if (prependDirs.length > 0) {

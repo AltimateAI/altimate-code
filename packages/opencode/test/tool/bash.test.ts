@@ -429,6 +429,30 @@ describe("tool.bash PATH injection", () => {
       })
   })
 
+  test(".altimate-code/tools/ is prepended to PATH so user tools are executable", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const toolsDir = path.join(tmp.path, ".altimate-code", "tools")
+    await fs.mkdir(toolsDir, { recursive: true })
+    await fs.writeFile(
+      path.join(toolsDir, "my-altimate-tool"),
+      '#!/usr/bin/env bash\necho "altimate-tool-output"',
+      { mode: 0o755 },
+    )
+
+    await provideInstance(tmp.path, async () => {
+        const bash = await initTool(BashTool)
+        const result = await bash.execute(
+          {
+            command: "my-altimate-tool",
+            description: "Run custom tool from .altimate-code/tools/",
+          },
+          ctx,
+        )
+        expect(result.metadata.exit).toBe(0)
+        expect(result.metadata.output).toContain("altimate-tool-output")
+      })
+  })
+
   test("PATH does not contain duplicate .opencode/tools/ entries", async () => {
     await using tmp = await tmpdir({ git: true })
     const toolsDir = path.join(tmp.path, ".opencode", "tools")
