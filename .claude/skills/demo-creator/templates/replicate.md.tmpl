@@ -1,0 +1,36 @@
+# Replicate this demo yourself
+
+Everything here is real and reproducible. Estimated time: {{N}} minutes.
+
+## Prerequisites
+- altimate-code installed: `curl -fsSL {{INSTALL_URL}} | bash` (or `npm i -g altimate-code`)
+- {{Any topic-specific deps, e.g. a JDK + pyspark, or duckdb}}
+- An LLM provider configured: `altimate-code providers` (auth)
+
+## 1. Get the fixture
+```bash
+{{clone/copy the demos/<topic>/fixture, or the setup script}}
+bash {{setup_script}}
+```
+
+## 2. Reproduce the baseline (plain Claude Code)
+```bash
+{{the exact baseline command — e.g. claude -p --dangerously-skip-permissions --model <m> '<prompt>'}}
+```
+Expected: {{what claude-code does — the gap}}.
+
+## 3. Run altimate-code (capability on)
+```bash
+{{the exact altimate command}}
+```
+Expected: {{the value moment — what to look for}}.
+
+## 4. Verify it yourself
+```bash
+{{how to confirm the result is real — e.g. run the pipeline / query the output / altimate-code check}}
+altimate-code trace list        # your run is recorded; view it with `trace view <id>`
+```
+
+## Notes / gotchas
+- {{anything that commonly trips people up}}
+- Docker fallback (hermetic): {{command, if applicable}}

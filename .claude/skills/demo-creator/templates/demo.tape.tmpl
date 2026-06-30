@@ -1,0 +1,25 @@
+# vhs tape template (SCRIPTED FALLBACK only — primary recorder is asciinema+agg).
+# Replace {{PLACEHOLDERS}}. See references/recording.md.
+Require altimate-code
+
+Output {{OUT_GIF}}            # e.g. clips/schema-drift.gif
+Set Shell "bash"
+Set FontSize 22
+Set Width 1000
+Set Height 600
+Set Padding 16
+Set Theme "Dracula"
+
+# Establish the fixture state on screen (optional, keep short).
+Type "cd {{FIXTURE_DIR}}"  Enter
+Sleep 1s
+
+# The real run. --yolo so it completes unattended; --max-turns caps runaway.
+Type "altimate-code run --yolo --max-turns {{MAX_TURNS}} '{{PROMPT}}'"  Enter
+
+# Wait for a real completion marker rather than a fixed sleep.
+Wait@{{TIMEOUT}}s /{{DONE_REGEX}}/      # e.g. 240s  /VERIFIED|session ended|Done/
+
+# Freeze the value moment.
+Screenshot {{FRAMES_DIR}}/value-moment.png
+Sleep 3s

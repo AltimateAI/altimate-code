@@ -1,0 +1,52 @@
+# {{TITLE — state the surprising result, not the topic}}
+
+> {{One-line deck: the claim you proved, in plain words.}}
+
+{{HOOK: open on the real pain. Lead with a verbatim quote from research.md and its source.
+A data engineer on r/dataengineering put it bluntly:}}
+
+> "{{REAL_QUOTE}}"
+> — {{source, linked: URL}}
+
+{{2–4 sentences: why this pain is common and what it actually costs. No "in today's
+landscape". Get to the point.}}
+
+## The setup
+
+{{Describe the real fixture in 2–3 sentences. Link it. Make clear it's a genuine task with
+a real defect/decision, not a toy with the answer pre-written.}}
+
+## Baseline: plain Claude Code
+
+{{What happened when we ran the same prompt through claude-code (`claude -p`), same model.
+Embed the baseline clip. Be fair — show what it got right too.}}
+
+![baseline]({{clips/<angle>.baseline.gif}})
+
+{{The specific thing it missed / got wrong, stated concretely.}}
+
+## With altimate-code
+
+![altimate-code]({{clips/<angle>.gif}})
+
+{{The value moment, in prose. Name the EXACT capability — e.g. "altimate_core_rewrite with
+verify_equivalence proved the rewrite returns identical rows" — not "the AI figured it
+out". One quotable stat or coined phrase here.}}
+
+[Replayable terminal cast]({{clips/<angle>.cast}}) · [session trace id: {{TRACE_ID}}]
+
+## Why it worked (and where it wouldn't)
+
+{{The mechanism, briefly. Then the honest limits: where altimate-code wouldn't help, what
+the baseline got right, what you'd still check yourself.}}
+
+## Replicate it yourself
+
+{{Exact, copy-pasteable steps — must match REPLICATE.md and the fixture scripts. A reader
+should reach the same result.}}
+
+```bash
+{{commands}}
+```
+
+## {{Discussable ending — a tradeoff or a question, not a summary.}}
