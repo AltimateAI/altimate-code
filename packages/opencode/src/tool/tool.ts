@@ -7,6 +7,9 @@ import { Truncate } from "./truncation"
 // altimate_change start — telemetry instrumentation for tool execution
 import { Telemetry } from "../altimate/telemetry"
 // altimate_change end
+// altimate_change start — humanize tool-call titles at the source
+import { describeToolCall } from "../altimate/tool-label"
+// altimate_change end
 
 export namespace Tool {
   interface Metadata {
@@ -121,6 +124,10 @@ export namespace Tool {
             }
             throw error
           }
+          // altimate_change start — humanize the tool-call title at the source so any
+          // client (chat webview, TUI, ...) can render a readable label from state.title.
+          result = { ...result, title: describeToolCall(id, args, result.title) ?? result.title }
+          // altimate_change end
           // Telemetry runs after execute() succeeds — wrapped so it never breaks the tool
           try {
             const isSoftFailure = result.metadata?.success === false
