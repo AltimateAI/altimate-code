@@ -92,7 +92,11 @@ export const McpRoutes = lazy(() =>
           return c.json({ error: `MCP server ${name} does not support OAuth` }, 400)
         }
         const result = await MCP.startAuth(name)
-        return c.json(result)
+        // altimate_change start — upstream_fix: return only the documented `authorizationUrl`. startAuth
+        // also carries `oauthState` (and a live MCP client on the already-authenticated path); returning
+        // the raw result leaked OAuth state + a non-serializable client object (or 500'd on serialize).
+        return c.json({ authorizationUrl: result.authorizationUrl })
+        // altimate_change end
       },
     )
     .post(

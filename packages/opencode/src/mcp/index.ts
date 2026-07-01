@@ -42,9 +42,13 @@ import { McpCatalog } from "./catalog"
 import { findAllConfigPaths, listMcpInConfig, addMcpToConfig, readMcpEntryFromDisk } from "./config"
 import { Global } from "@opencode-ai/core/global"
 import { Telemetry } from "@/telemetry"
+import { Log } from "../util/log"
 // altimate_change end
 
 const DEFAULT_TIMEOUT = 30_000
+// altimate_change start — upstream_fix: logger to drain local MCP server stderr (see connectLocal)
+const log = Log.create({ service: "mcp" })
+// altimate_change end
 const CLIENT_OPTIONS = {
   capabilities: {
     // altimate_change start — upstream issue-tracker references (capabilities pending upstream); acknowledged, not a brand leak
@@ -421,6 +425,11 @@ export const layer = Layer.effect(
           // altimate_change end
         },
       })
+      // altimate_change start — upstream_fix: drain the local server's stderr. With `stderr: "pipe"`
+      // and no consumer, a chatty MCP server fills the OS pipe buffer (~64KiB) and blocks the child,
+      // hanging connect and every subsequent tool call. Consume (and log) it as main did.
+      transport.stderr?.on("data", (chunk: Buffer) => log.info(`mcp stderr: ${chunk.toString().trimEnd()}`, { key }))
+      // altimate_change end
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       // altimate_change start — telemetry: time the local startup
@@ -674,7 +683,11 @@ export const layer = Layer.effect(
                       } catch {}
                     }
                   }
-                  yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+                  // altimate_change — log close failures instead of silently ignoring, so a leaked
+                  // MCP child/socket is diagnosable (main logged "Failed to close MCP client").
+                  yield* Effect.tryPromise(() => client.close()).pipe(
+                    Effect.catch((e: unknown) => Effect.logWarning("failed to close MCP client", { error: String(e) })),
+                  )
                 }),
               { concurrency: "unbounded" },
             )
@@ -837,10 +850,17 @@ export const layer = Layer.effect(
           }
         }
         if (!found) {
-          // entry not found in any config file — enabled flag not persisted
+          // altimate_change — log instead of silently dropping, so a reverted-after-restart enabled
+          // flag is diagnosable (main logged "entry not found").
+          log.warn("mcp enabled flag not persisted: server not found in any config file", { name, enabled })
         }
-      } catch {
-        // Failed to persist MCP enabled flag — non-fatal
+      } catch (e) {
+        // altimate_change — log the write failure instead of silently swallowing it (main logged it).
+        log.warn("failed to persist mcp enabled flag", {
+          name,
+          enabled,
+          error: e instanceof Error ? e.message : String(e),
+        })
       }
     }
     // altimate_change end
