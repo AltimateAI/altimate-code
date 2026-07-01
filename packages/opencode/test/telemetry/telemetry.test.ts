@@ -604,7 +604,9 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
       Telemetry.track({ type: "session_start", timestamp: 1700000000000, session_id: "sess-ide" })
       await Telemetry.flush()
 
+      expect(fetchCalls.length).toBeGreaterThan(0)
       const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes.length).toBeGreaterThan(0)
       expect(envelopes[0].data.baseData.properties.launch_surface).toBe("ide")
     } finally {
       cleanup()
@@ -621,7 +623,47 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
       Telemetry.track({ type: "session_start", timestamp: 1700000000000, session_id: "sess-cli" })
       await Telemetry.flush()
 
+      expect(fetchCalls.length).toBeGreaterThan(0)
       const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes.length).toBeGreaterThan(0)
+      expect(envelopes[0].data.baseData.properties.launch_surface).toBeUndefined()
+    } finally {
+      cleanup()
+      if (origSurface !== undefined) process.env.ALTIMATE_LAUNCH_SURFACE = origSurface
+      else delete process.env.ALTIMATE_LAUNCH_SURFACE
+    }
+  })
+
+  test("launch_surface normalizes casing and surrounding whitespace", async () => {
+    const origSurface = process.env.ALTIMATE_LAUNCH_SURFACE
+    process.env.ALTIMATE_LAUNCH_SURFACE = "  IDE "
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      Telemetry.track({ type: "session_start", timestamp: 1700000000000, session_id: "sess-norm" })
+      await Telemetry.flush()
+
+      expect(fetchCalls.length).toBeGreaterThan(0)
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes.length).toBeGreaterThan(0)
+      expect(envelopes[0].data.baseData.properties.launch_surface).toBe("ide")
+    } finally {
+      cleanup()
+      if (origSurface !== undefined) process.env.ALTIMATE_LAUNCH_SURFACE = origSurface
+      else delete process.env.ALTIMATE_LAUNCH_SURFACE
+    }
+  })
+
+  test("launch_surface drops unrecognized values to keep the dimension low-cardinality", async () => {
+    const origSurface = process.env.ALTIMATE_LAUNCH_SURFACE
+    process.env.ALTIMATE_LAUNCH_SURFACE = "totally-bogus"
+    const { fetchCalls, cleanup } = await initWithMockedFetch()
+    try {
+      Telemetry.track({ type: "session_start", timestamp: 1700000000000, session_id: "sess-bogus" })
+      await Telemetry.flush()
+
+      expect(fetchCalls.length).toBeGreaterThan(0)
+      const envelopes = JSON.parse(fetchCalls[0].body)
+      expect(envelopes.length).toBeGreaterThan(0)
       expect(envelopes[0].data.baseData.properties.launch_surface).toBeUndefined()
     } finally {
       cleanup()

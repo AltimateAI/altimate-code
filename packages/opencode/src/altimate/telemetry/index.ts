@@ -1325,8 +1325,12 @@ export namespace Telemetry {
         // Account unavailable — proceed without user ID
       }
       // Set by the IDE extension when it spawns `altimate serve`; absent for
-      // direct CLI/TUI invocations.
-      launchSurface = process.env.ALTIMATE_LAUNCH_SURFACE ?? ""
+      // direct CLI/TUI invocations. Normalize casing/whitespace and restrict to
+      // a known set so a stray env value can't inflate the launch_surface
+      // dimension's cardinality. New surfaces must be added to KNOWN_LAUNCH_SURFACES.
+      const KNOWN_LAUNCH_SURFACES = new Set(["ide", "cli", "tui"])
+      const rawLaunchSurface = (process.env.ALTIMATE_LAUNCH_SURFACE ?? "").trim().toLowerCase()
+      launchSurface = KNOWN_LAUNCH_SURFACES.has(rawLaunchSurface) ? rawLaunchSurface : ""
       try {
         const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
         try {
