@@ -179,6 +179,30 @@ async function substitute(text: string, input: ParseSource, missing: "error" | "
     return match
   })
 
+  // altimate_change start — restore config env-interpolation telemetry dropped in the merge. The
+  // substitution stats were still computed here but never emitted (the only remaining reference was
+  // the telemetry schema). Dynamic import avoids a circular dep with @/altimate/telemetry (which
+  // imports @/config/config). Matches main's single emit site in substitute().
+  const { dollarRefs, dollarUnresolved, dollarDefaulted, dollarEscaped, legacyBraceRefs, legacyBraceUnresolved } = stats
+  if (dollarRefs > 0 || legacyBraceRefs > 0 || dollarEscaped > 0) {
+    import("@/altimate/telemetry")
+      .then(({ Telemetry }) => {
+        Telemetry.track({
+          type: "config_env_interpolation",
+          timestamp: Date.now(),
+          session_id: Telemetry.getContext().sessionId,
+          dollar_refs: dollarRefs,
+          dollar_unresolved: dollarUnresolved,
+          dollar_defaulted: dollarDefaulted,
+          dollar_escaped: dollarEscaped,
+          legacy_brace_refs: legacyBraceRefs,
+          legacy_brace_unresolved: legacyBraceUnresolved,
+        })
+      })
+      .catch(() => {})
+  }
+  // altimate_change end
+
   const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
   if (!fileMatches.length) return text
 
