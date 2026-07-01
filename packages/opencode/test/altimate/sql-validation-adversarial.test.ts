@@ -310,7 +310,7 @@ describe("Adversarial: sql-classify bypass attempts", () => {
 // idempotency is owned by the DB-layer worker — out of altimate scope. Re-enable
 // once legacy migrate() is made idempotent against a core-initialized DB.
 describe("User perspective: sql_execute permission flow", () => {
-  test.todo("read query executes without asking permission", async () => {
+  test("read query executes without asking permission", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -328,7 +328,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("write query asks for sql_execute_write permission", async () => {
+  test("write query asks for sql_execute_write permission", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -351,7 +351,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("write query permission request includes truncated query pattern", async () => {
+  test("write query permission request includes truncated query pattern", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -371,7 +371,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("DROP DATABASE throws immediately without asking permission", async () => {
+  test("DROP DATABASE throws immediately without asking permission", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -392,7 +392,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("TRUNCATE throws immediately without asking permission", async () => {
+  test("TRUNCATE throws immediately without asking permission", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -412,7 +412,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("DROP SCHEMA throws with clear user-facing message", async () => {
+  test("DROP SCHEMA throws with clear user-facing message", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -435,7 +435,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("multi-statement with DROP hidden after SELECT still throws", async () => {
+  test("multi-statement with DROP hidden after SELECT still throws", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -452,7 +452,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("DDL operations (CREATE TABLE) ask permission", async () => {
+  test("DDL operations (CREATE TABLE) ask permission", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -474,7 +474,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("CTE with only SELECT does NOT ask permission", async () => {
+  test("CTE with only SELECT does NOT ask permission", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -498,7 +498,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("CTE with INSERT DOES ask permission", async () => {
+  test("CTE with INSERT DOES ask permission", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -523,7 +523,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("successful query returns formatted output with row count", async () => {
+  test("successful query returns formatted output with row count", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -541,7 +541,7 @@ describe("User perspective: sql_execute permission flow", () => {
     })
   })
 
-  test.todo("title truncates long queries to 60 chars", async () => {
+  test("title truncates long queries to 60 chars", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,

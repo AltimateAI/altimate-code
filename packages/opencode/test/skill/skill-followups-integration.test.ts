@@ -14,7 +14,7 @@ import path from "path"
 // core/database / run-service) — out of skill scope. Re-enable once dual-writer
 // migration is serialized. Skill discovery + followups logic itself is covered by
 // followups.test.ts and skill.test.ts (both green).
-test.todo("skill with followups: format appears before skill_content", async () => {
+test("skill with followups: format appears before skill_content", async () => {
   await using tmp = await tmpdir({
     git: true,
     init: async (dir) => {
@@ -66,7 +66,7 @@ Instructions here.
 
 // BUG: same dual-DB migration race as above (table `project` already exists when a
 // skill test is the first to boot the DB in the process). DB-layer worker territory.
-test.todo("skill without followups: no extra content before skill_content", async () => {
+test("skill without followups: no extra content before skill_content", async () => {
   await using tmp = await tmpdir({
     git: true,
     init: async (dir) => {

@@ -44,7 +44,7 @@ const ctx = {
 // introspection logic under test is unchanged; re-enable once the two migration
 // systems are serialized.
 describe("ToolLookupTool: Zod schema introspection", () => {
-  test.todo("returns parameter info for tool with mixed types", async () => {
+  test("returns parameter info for tool with mixed types", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -91,7 +91,7 @@ describe("ToolLookupTool: Zod schema introspection", () => {
     })
   })
 
-  test.todo("returns 'Tool not found' with available tools list", async () => {
+  test("returns 'Tool not found' with available tools list", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -105,7 +105,7 @@ describe("ToolLookupTool: Zod schema introspection", () => {
     })
   })
 
-  test.todo("handles tool with empty parameters object", async () => {
+  test("handles tool with empty parameters object", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -125,7 +125,7 @@ describe("ToolLookupTool: Zod schema introspection", () => {
     })
   })
 
-  test.todo("unwraps nested optional/default wrappers correctly", async () => {
+  test("unwraps nested optional/default wrappers correctly", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,

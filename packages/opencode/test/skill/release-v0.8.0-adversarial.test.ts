@@ -16,16 +16,12 @@ function bashAction(agent: Agent.Info, command: string) {
   return PermissionNext.evaluate("bash", command, agent.permission).action
 }
 
-// BUG (all 4 reviewer-agent tests below): dual-DB migration race in the v1.17.9
-// transition. Instance.provide → Project.fromDirectory → legacy src/storage/db.ts
-// creates the `project` table on opencode-local.db; core's Effect-SQL migration
-// (packages/core/src/database/migration.ts apply()) then reads sqlite_master as
-// empty (separate WAL connection) and its schema.up dies with "table `project`
-// already exists". Deterministic. The bootstrap/run-service layer that orders the
-// two DB initializers owns this (src/effect/run-service.ts, src/storage/db.ts,
-// core/database) — out of skill scope. Re-enable once the two migration systems
-// are serialized; the reviewer-agent permission contract under test is unchanged.
-test.todo("reviewer agent: bash is denied (base)", async () => {
+// The reviewer agent advertises read-only; these pin that bash stays denied and
+// arbitrary read/write is refused. (Previously test.todo'd for a dual-DB migration
+// race in Instance.provide — legacy src/storage/db.ts vs core Effect-SQL migration
+// both creating `project` — now resolved by the fresh-install core-schema adoption
+// fix in src/storage/db.ts; re-enabled and passing.)
+test("reviewer agent: bash is denied (base)", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
@@ -37,7 +33,7 @@ test.todo("reviewer agent: bash is denied (base)", async () => {
   })
 })
 
-test.todo("reviewer agent: redirect-write and arbitrary-read bash commands are denied", async () => {
+test("reviewer agent: redirect-write and arbitrary-read bash commands are denied", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
@@ -56,7 +52,7 @@ test.todo("reviewer agent: redirect-write and arbitrary-read bash commands are d
   })
 })
 
-test.todo("reviewer agent: write/edit tools are denied, engine + read-only tools allowed", async () => {
+test("reviewer agent: write/edit tools are denied, engine + read-only tools allowed", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
@@ -76,7 +72,7 @@ test.todo("reviewer agent: write/edit tools are denied, engine + read-only tools
   })
 })
 
-test.todo("reviewer agent is a selectable primary agent (not the default)", async () => {
+test("reviewer agent is a selectable primary agent (not the default)", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,

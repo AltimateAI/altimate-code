@@ -47,7 +47,7 @@ afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 // migration systems are serialized. (These same assertions also run statically in
 // other suites where available.)
 describe("Tool name consistency in prompts", () => {
-  test.todo("builder prompt does NOT reference phantom sql_validate", async () => {
+  test("builder prompt does NOT reference phantom sql_validate", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -59,7 +59,7 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test.todo("analyst prompt does NOT reference phantom sql_validate", async () => {
+  test("analyst prompt does NOT reference phantom sql_validate", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -71,7 +71,7 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test.todo("builder prompt references altimate_core_validate (the real tool)", async () => {
+  test("builder prompt references altimate_core_validate (the real tool)", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -83,7 +83,7 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test.todo("analyst prompt references altimate_core_validate (the real tool)", async () => {
+  test("analyst prompt references altimate_core_validate (the real tool)", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -95,7 +95,7 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test.todo("builder prompt contains pre-execution protocol with correct tool names", async () => {
+  test("builder prompt contains pre-execution protocol with correct tool names", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -123,7 +123,7 @@ describe("Agent permissions reference real tools", () => {
     return PermissionNext.evaluate(permission, "*", agent.permission).action
   }
 
-  test.todo("analyst allows altimate_core_validate (not phantom sql_validate)", async () => {
+  test("analyst allows altimate_core_validate (not phantom sql_validate)", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -136,7 +136,7 @@ describe("Agent permissions reference real tools", () => {
     })
   })
 
-  test.todo("analyst allows all documented SQL validation tools", async () => {
+  test("analyst allows all documented SQL validation tools", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -169,7 +169,7 @@ describe("Agent permissions reference real tools", () => {
     })
   })
 
-  test.todo("analyst denies write operations", async () => {
+  test("analyst denies write operations", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -183,7 +183,7 @@ describe("Agent permissions reference real tools", () => {
     })
   })
 
-  test.todo("builder has sql_execute_write as ask (not allow or deny)", async () => {
+  test("builder has sql_execute_write as ask (not allow or deny)", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -195,7 +195,7 @@ describe("Agent permissions reference real tools", () => {
     })
   })
 
-  test.todo("no agent permissions reference sql_validate (phantom tool)", async () => {
+  test("no agent permissions reference sql_validate (phantom tool)", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -672,7 +672,7 @@ describe("Prompt skill references match actual skills", () => {
     "opencode", "sql", "dbt", "api", "v1", "v2",
   ])
 
-  test.todo("analyst 'Skills Available' section only lists skills that exist", async () => {
+  test("analyst 'Skills Available' section only lists skills that exist", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -702,7 +702,7 @@ describe("Prompt skill references match actual skills", () => {
     })
   })
 
-  test.todo("analyst prompt does NOT reference phantom /impact-analysis", async () => {
+  test("analyst prompt does NOT reference phantom /impact-analysis", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -716,7 +716,7 @@ describe("Prompt skill references match actual skills", () => {
     })
   })
 
-  test.todo("builder prompt skill references match actual skills", async () => {
+  test("builder prompt skill references match actual skills", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
