@@ -1,8 +1,8 @@
 import type { Argv } from "yargs"
 import { spawn } from "child_process"
 import { Database } from "@opencode-ai/core/database/database"
+import { Database as BunDatabase } from "bun:sqlite"
 import { Effect } from "effect"
-import { sql } from "drizzle-orm"
 import { effectCmd } from "../effect-cmd"
 
 const QueryCommand = effectCmd({
@@ -25,13 +25,23 @@ const QueryCommand = effectCmd({
   handler: Effect.fn("Cli.db.query")(function* (args: { query?: string; format: string }) {
     const query = args.query as string | undefined
     if (query) {
-      const { db } = yield* Database.Service
-      const result = yield* db.all<Record<string, unknown>>(sql.raw(query)).pipe(Effect.orDie)
-      if (args.format === "json") console.log(JSON.stringify(result, null, 2))
-      else if (result.length > 0) {
-        const keys = Object.keys(result[0])
-        console.log(keys.join("\t"))
-        for (const row of result) console.log(keys.map((key) => row[key]).join("\t"))
+      // altimate_change start — upstream_fix: run one-shot diagnostic queries on a READ-ONLY
+      // connection so `db "DELETE ..."` / DROP can't corrupt user session data. The merge routed
+      // this through the writable Database.Service; main used a readonly bun:sqlite connection.
+      const db = new BunDatabase(Database.path(), { readonly: true })
+      try {
+        const result = db.query(query).all() as Record<string, unknown>[]
+        if (args.format === "json") console.log(JSON.stringify(result, null, 2))
+        else if (result.length > 0) {
+          const keys = Object.keys(result[0])
+          console.log(keys.join("\t"))
+          for (const row of result) console.log(keys.map((key) => row[key]).join("\t"))
+        }
+      } catch (e) {
+        // Clean CLI error (e.g. "attempt to write a readonly database") instead of an orDie defect.
+        console.error(`Error: ${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        db.close()
       }
       return
     }
