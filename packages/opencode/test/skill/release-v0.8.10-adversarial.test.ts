@@ -85,11 +85,11 @@ function basePart(messageID: string, id: string) {
 }
 
 /**
- * Faithful replica of the prompt.ts append (the inline block at
- * session/prompt.ts:987-1003 is not exported). Mutates a copy and returns it so
- * tests can assert the observable contract via toModelMessages. The SHAPE here
- * must mirror the real code: a trailing `synthetic:true` text part whose text is
- * `\n\n${SystemPrompt.currentDate()}`, attached to the LAST user message only.
+ * Local test fixture that appends a `synthetic:true` date text part to the last
+ * user message. NOTE: this used to mirror live prompt.ts behavior, but as of the
+ * v1.17.9 merge the app no longer appends the date to the user turn (it moved to
+ * the system <env> block — see session/system.ts). This helper is retained only
+ * to exercise toModelMessages' handling of synthetic parts.
  */
 function appendDateToLastUserMessage(msgs: MessageV2.WithParts[]): MessageV2.WithParts[] {
   const copy = msgs.map((m) => ({ info: m.info, parts: [...m.parts] }))
@@ -143,10 +143,15 @@ describe("v0.8.10 #950: currentDate() generator", () => {
 })
 
 // ---------------------------------------------------------------------------
-// #950 (b) — the date reaches the model via the trailing user message
-// (the half that the pre-existing system.test.ts did NOT cover)
+// synthetic date-part survival through toModelMessages.
+// NOTE: as of the v1.17.9 merge the app NO LONGER appends the date to the last
+// user message — doing so made models treat the date as user input and echo it
+// back every turn. The date now lives in the ambient system <env> block (see
+// session/system.ts). These cases still exercise a real, valid property — that a
+// `synthetic:true` text part survives toModelMessages — using
+// appendDateToLastUserMessage() purely as a local fixture, not as live behavior.
 // ---------------------------------------------------------------------------
-describe("v0.8.10 #950: date carried to the model on the last user message", () => {
+describe("v0.8.10: synthetic date-part survives toModelMessages (fixture)", () => {
   test("appended synthetic date survives toModelMessages and reaches the model", async () => {
     setSystemTime(new Date("2026-06-22T12:00:00.000Z"))
     try {

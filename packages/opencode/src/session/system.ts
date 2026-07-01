@@ -79,14 +79,12 @@ export namespace SystemPrompt {
         `  Workspace root folder: ${Instance.worktree}`,
         `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
         `  Platform: ${process.platform}`,
-        // altimate_change start — upstream_fix: move volatile date out of cached system prefix
-        // The date changes daily but environment() is the first entry in the system[]
-        // array, which applyCaching() marks with cacheControl. A session crossing midnight
-        // within the cache TTL would otherwise invalidate the whole system prefix. The date
-        // is carried on the trailing user message instead (see session/prompt.ts) — i.e. off
-        // the long-lived system-prefix cache and onto the rolling last-user-turn breakpoint,
-        // which applyCaching() rewrites every turn regardless. Net: the expensive system
-        // cache stays date-invariant; the cheap per-turn breakpoint is unaffected.
+        // altimate_change start — keep the date in the ambient <env> block. Carrying it on the
+        // trailing user message (the prior approach) made models treat it as user-provided and
+        // echo it back every turn ("Today's date is …" on a bare "hi"). In <env> it reads as
+        // ambient context the model does not repeat. Only cost: a rare cache re-warm if a
+        // session crosses midnight within the prompt-cache TTL — negligible.
+        `  Today's date: ${new Date().toDateString()}`,
         // altimate_change end
         `</env>`,
         `<directories>`,
