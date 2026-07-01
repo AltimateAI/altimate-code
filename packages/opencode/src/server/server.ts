@@ -186,6 +186,20 @@ export namespace Server {
         return bridge.handler(c.req.raw, bridge.context)
       })
       // altimate_change end
+      // altimate_change start — upstream_fix: the workspace HttpApi group is declared at
+      // /experimental/workspace (NOT under /api/*), so the /api bridge above never reaches it and the
+      // v2 SDK/TUI `experimental.workspace.*` calls (list/status/adapter/create/warp) fell through to
+      // the legacy catch-all proxy → 500. Bridge the workspace paths to the HttpApi explicitly, before
+      // the legacy /experimental routes (whose /workspace sub-route was removed during the merge).
+      .all("/experimental/workspace", async (c) => {
+        const bridge = await httpApiBridge()
+        return bridge.handler(c.req.raw, bridge.context)
+      })
+      .all("/experimental/workspace/*", async (c) => {
+        const bridge = await httpApiBridge()
+        return bridge.handler(c.req.raw, bridge.context)
+      })
+      // altimate_change end
       .route("/global", GlobalRoutes())
       .put(
         "/auth/:providerID",
