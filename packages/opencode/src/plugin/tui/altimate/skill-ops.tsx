@@ -415,7 +415,11 @@ function DialogSkillInstall(props: { api: TuiPluginApi }) {
 // ── Action picker (per-skill: show / edit / test / remove) ───────────────────────────────────────
 
 function isRemovable(info: SkillInfo): boolean {
-  if (info.location.startsWith("builtin:")) return false
+  // altimate_change start — built-ins (e.g. `customize-opencode`, location "<built-in>") are not
+  // real filesystem paths; removing them would `path.dirname` to "." and rm -rf the cwd. Only
+  // skills with an absolute filesystem location are removable.
+  if (info.location.startsWith("builtin:") || !path.isAbsolute(info.location)) return false
+  // altimate_change end
   const gitCheck = Bun.spawnSync(["git", "ls-files", "--error-unmatch", info.location], {
     cwd: path.dirname(path.dirname(info.location)),
     stdout: "pipe",
@@ -425,7 +429,7 @@ function isRemovable(info: SkillInfo): boolean {
 }
 
 function openActionPicker(api: TuiPluginApi, info: SkillInfo | undefined, skillName: string, reopen: () => void) {
-  const isBuiltin = !info || info.location.startsWith("builtin:")
+  const isBuiltin = !info || info.location.startsWith("builtin:") || !path.isAbsolute(info.location)
   const removable = !!info && isRemovable(info)
 
   const actions: TuiDialogSelectOption<string>[] = (

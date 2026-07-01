@@ -670,10 +670,16 @@ const SkillRemoveCommand = cmd({
         process.exit(1)
       }
 
-      if (skill.location.startsWith("builtin:")) {
+      // altimate_change start — guard against removing non-filesystem (built-in) skills. The
+      // `customize-opencode` builtin registers location "<built-in>" (NOT the "builtin:" prefix),
+      // so a prefix-only check missed it and path.dirname("<built-in>") === "." — meaning
+      // `skill remove customize-opencode` then rm -rf'd the current working directory. Reject any
+      // location that is not a real absolute filesystem path (all built-ins are non-absolute).
+      if (skill.location.startsWith("builtin:") || !path.isAbsolute(skill.location)) {
         process.stderr.write(`Error: Cannot remove built-in skill "${name}".` + EOL)
         process.exit(1)
       }
+      // altimate_change end
 
       // Check if skill is tracked by git (part of the repo, not user-installed)
       const skillDir = path.dirname(skill.location)
