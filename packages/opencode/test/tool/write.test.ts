@@ -328,7 +328,7 @@ describe("tool.write", () => {
   })
 
   describe("title generation", () => {
-    test("returns relative path as title", async () => {
+    test("humanizes the title to a readable label", async () => {
       await using tmp = await tmpdir()
       const filepath = path.join(tmp.path, "src", "components", "Button.tsx")
       await fs.mkdir(path.dirname(filepath), { recursive: true })
@@ -345,7 +345,10 @@ describe("tool.write", () => {
             ctx,
           )
 
-          expect(result.title).toEndWith(path.join("src", "components", "Button.tsx"))
+          // The execute() wrapper humanizes file-tool titles at the source
+          // (see src/altimate/tool-label.ts) — a non-dbt path degrades to the
+          // filename, so the title is a readable "Writing <file>" label.
+          expect(result.title).toBe("Writing Button.tsx")
         },
       })
     })
