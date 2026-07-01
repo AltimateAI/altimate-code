@@ -127,12 +127,16 @@ export const layer = Layer.effect(
     })
 
     const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
-      if (!input.messageID) return []
-      const message = (yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
-        (item) => item.info.id === input.messageID,
-      )
-      if (!message || message.info.role !== "user") return []
-      const diffs = message.info.summary?.diffs ?? []
+      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+      let diffs: Snapshot.FileDiff[]
+      if (input.messageID) {
+        const message = all.find((item) => item.info.id === input.messageID)
+        if (!message || message.info.role !== "user") return []
+        diffs = message.info.summary?.diffs ?? []
+      } else {
+        // altimate_change — session-level diff on read (restores modified-files sidebar; see exported diff)
+        diffs = yield* computeDiff({ messages: all })
+      }
       return diffs.map((item) => {
         if (item.file === undefined) return item
         const file = unquoteGitPath(item.file)
@@ -215,11 +219,22 @@ export async function summarize(input: { sessionID: SessionID; messageID: Messag
   await sessions.updateMessage(target.info)
 }
 export async function diff(input: { sessionID: SessionID; messageID?: MessageID }) {
-  if (!input.messageID) return []
   const sessions = await legacySession()
-  const message = (await sessions.messages({ sessionID: input.sessionID })).find((item) => item.info.id === input.messageID)
-  if (!message || message.info.role !== "user") return []
-  const diffs = message.info.summary?.diffs ?? []
+  const all = await sessions.messages({ sessionID: input.sessionID })
+  let diffs: Snapshot.FileDiff[]
+  if (input.messageID) {
+    const message = all.find((item) => item.info.id === input.messageID)
+    if (!message || message.info.role !== "user") return []
+    diffs = message.info.summary?.diffs ?? []
+  } else {
+    // altimate_change start — restore the session-level diff. The merge left this returning [] for
+    // the no-messageID case, so the TUI modified-files sidebar (which hydrates via
+    // session.diff({sessionID})) and the session summary counts went empty. Compute the full-session
+    // file diff on demand from snapshots (matches main's summarizeSession content) — no new
+    // storage/event wiring, and per-message diffs are unaffected.
+    diffs = await computeLegacyDiff(all)
+    // altimate_change end
+  }
   return diffs.map((item) => {
     if (item.file === undefined) return item
     const file = unquoteGitPath(item.file)
