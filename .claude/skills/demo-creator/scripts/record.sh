@@ -28,6 +28,10 @@ done
 
 need asciinema asciinema; need agg agg
 
+# asciinema (Rust) rejects args that aren't valid UTF-8 under a non-UTF-8 locale. Force one
+# so prompts/banners with non-ASCII (em dashes, arrows, accents) don't error out.
+export LC_ALL="${LC_ALL:-en_US.UTF-8}" LANG="${LANG:-en_US.UTF-8}"
+
 DD="$(demo_dir "$TOPIC")"; CLIPS="$DD/clips"; mkdir -p "$CLIPS"
 CAST="$CLIPS/$PREFIX.cast"; GIF="$CLIPS/$PREFIX.gif"
 
@@ -45,12 +49,20 @@ if [ -n "$BANNER" ]; then
 fi
 
 # Record. asciinema (v3) runs the command in a real pty and stops when it exits.
-( cd "$CWD" && asciinema rec --overwrite --window-size "${COLS}x${ROWS}" \
-    --command "bash -lc $(printf '%q' "$INNER")" "$CAST" )
+# --return makes asciinema exit with the recorded command's status (default is always 0),
+# so a failed `altimate-code run` doesn't get rendered and passed off as a good demo.
+rec_rc=0
+( cd "$CWD" && asciinema rec --overwrite --return --window-size "${COLS}x${ROWS}" \
+    --command "bash -lc $(printf '%q' "$INNER")" "$CAST" ) || rec_rc=$?
 
 log "rendering -> $GIF"
 agg --cols "$COLS" --rows "$ROWS" --font-size "$FONT" --idle-time-limit "$IDLE" \
     "$CAST" "$GIF"
 
+if [ "$rec_rc" -ne 0 ]; then
+  echo "ERROR: the recorded command exited $rec_rc — this clip captured a FAILED run." >&2
+  echo "       Cast+GIF kept for debugging ($CAST), but do NOT ship this clip. Fix and re-record." >&2
+  exit "$rec_rc"
+fi
 log "done: $CAST  +  $GIF"
 echo "$GIF"

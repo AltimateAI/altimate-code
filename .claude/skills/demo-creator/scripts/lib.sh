@@ -6,7 +6,13 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$SKILL_DIR/../../.." && pwd)"
 
-demo_dir() {   # demo_dir <topic-slug>
+demo_dir() {   # demo_dir <topic-slug> — reject anything that isn't a plain slug so the
+               # path can't escape demos/ (a `..` or `/` in the slug would).
+  case "${1:-}" in
+    ''|*[!a-zA-Z0-9._-]*|*..*)
+      echo "demo_dir: invalid topic slug '${1:-}' (use letters, digits, '.', '_', '-')" >&2
+      return 1;;
+  esac
   echo "$REPO_ROOT/demos/$1"
 }
 

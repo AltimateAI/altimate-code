@@ -89,7 +89,7 @@ software behind it. Those don't need a recorded real run.
 
 Create `demos/<topic-slug>/` at the repo root:
 
-```
+```text
 demos/<topic-slug>/
   research.md          # phase 1: real pains + verbatim quotes + sources
   demo-spec.md         # phase 3: angles, fixtures, prompts, baseline controls
@@ -152,14 +152,19 @@ advance until it passes.
 ### Phase 5 — Record (real runs)
 - **Showcase mode:** `scripts/record.sh <topic> <angle> --cwd <fixture> --banner '<prompt>'
   -- altimate-code run --yolo --trace '<prompt>'` records the real run with **asciinema** →
-  `.cast`, then renders to `.gif` with **agg**. Capture the json too:
-  `altimate-code run --format json … > runs/<angle>.json` (authenticity proof). `vhs` is the
-  optional scripted-polish fallback (see `references/recording.md`).
+  `.cast`, then renders to `.gif` with **agg**. `vhs` is the optional scripted-polish
+  fallback (see `references/recording.md`).
+- **Authenticity comes from the SAME recorded run, not a re-run.** The clip's proof is that
+  `.cast` PLUS the `--trace` written by *that* invocation (grab its trace id from the cast /
+  `altimate-code trace list`). Do NOT run `altimate-code run --format json` a second time to
+  "get the json" — a fresh agent run is nondeterministic and would authenticate a different
+  session than the one on screen. (In comparison mode, `baseline_vs_altimate.sh` captures
+  `--format json` from the very run it records, which is fine — one run, one artifact.)
 - **Comparison mode (optional):** also run `scripts/baseline_vs_altimate.sh <topic> <angle>
   --cwd <fixture> --prompt '...' --reset-from <pristine>` to capture the `claude -p` control
   on the same prompt/model, and record its clip too.
-- **Gate:** `.cast` + `.gif` + `runs/<angle>.json` exist for the altimate run (plus the
-  baseline variant in comparison mode).
+- **Gate:** `.cast` + `.gif` (+ the recorded run's trace id) exist for the altimate run (plus
+  the baseline variant in comparison mode).
 
 ### Phase 6 — Visual inspection (use your eyes)
 - `scripts/inspect.sh <topic> <angle>` extracts key PNG frames. **Read them** and confirm:

@@ -16,6 +16,8 @@ landscape". Get to the point.}}
 {{Describe the real fixture in 2–3 sentences. Link it. Make clear it's a genuine task with
 a real defect/decision, not a toy with the answer pre-written.}}
 
+<!-- COMPARISON MODE ONLY — delete this whole section in showcase mode (the default), which
+     produces no baseline clip. Keep it only if you ran baseline_vs_altimate.sh. -->
 ## Baseline: plain Claude Code
 
 {{What happened when we ran the same prompt through claude-code (`claude -p`), same model.
@@ -24,8 +26,9 @@ Embed the baseline clip. Be fair — show what it got right too.}}
 ![baseline]({{clips/<angle>.baseline.gif}})
 
 {{The specific thing it missed / got wrong, stated concretely.}}
+<!-- END comparison-only section -->
 
-## With altimate-code
+## {{Showcase: "What altimate-code did" · Comparison: "With altimate-code"}}
 
 ![altimate-code]({{clips/<angle>.gif}})
 

@@ -31,9 +31,12 @@ tpl, base, out = sys.argv[1:4]
 html = open(tpl, encoding="utf-8").read()
 mimetypes.add_type("image/svg+xml", ".svg")
 inlined = [0]; missing = []
+base_real = os.path.realpath(base)
 def datauri(rel):
-    p = os.path.normpath(os.path.join(base, rel))
-    if not (p.startswith(os.path.abspath(base)) and os.path.isfile(p)):
+    # realpath resolves symlinks; commonpath confines to base (a plain startswith prefix
+    # would let a sibling dir sharing base's name — e.g. base/../base-secret — escape).
+    p = os.path.realpath(os.path.join(base, rel))
+    if not (os.path.isfile(p) and os.path.commonpath([p, base_real]) == base_real):
         missing.append(rel); return None
     mime = mimetypes.guess_type(p)[0] or "application/octet-stream"
     inlined[0] += 1
@@ -52,16 +55,27 @@ if missing: print("WARNING: could not inline (will break under CSP): %s" % ", ".
 PY
 
 if [ "$RENDER" = "1" ]; then
-  CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  # Discover a Chromium-family browser on PATH or in the usual macOS bundle locations.
+  CHROME=""
+  for c in "${CHROME_BIN:-}" google-chrome google-chrome-stable chromium chromium-browser chrome \
+           "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+           "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+           "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"; do
+    [ -n "$c" ] || continue
+    if command -v "$c" >/dev/null 2>&1; then CHROME="$(command -v "$c")"; break; fi
+    [ -x "$c" ] && { CHROME="$c"; break; }
+  done
   SHOT="$DD/clips/frames/_artifact_render.png"; mkdir -p "$(dirname "$SHOT")"
-  if [ -x "$CHROME" ]; then
-    "$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
-      --window-size="$W,$H" --screenshot="$SHOT" "file://$OUTPATH" 2>/dev/null
-    log "rendered for inspection -> $SHOT  (Read it; check empty grid cells, mostly-empty GIFs, no h-scroll)"
-    echo "$SHOT"
-  else
-    log "Chrome not found; render skipped. Open $OUTPATH manually to inspect before publishing."
+  if [ -z "$CHROME" ]; then
+    # Render-inspection is mandatory before publishing, so a missing browser is a hard error.
+    echo "ERROR: --render requested but no Chrome/Chromium found. Install one or set CHROME_BIN." >&2
+    echo "       (Do NOT publish an artifact you haven't visually inspected.)" >&2
+    exit 1
   fi
+  "$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+    --window-size="$W,$H" --screenshot="$SHOT" "file://$OUTPATH" 2>/dev/null
+  log "rendered for inspection -> $SHOT  (Read it; check empty grid cells, mostly-empty GIFs, no h-scroll)"
+  echo "$SHOT"
 fi
 log "artifact ready: $OUTPATH  (publish with the Artifact tool; redeploy to the same path on edits)"
 echo "$OUTPATH"

@@ -25,11 +25,17 @@ mkdir -p "$FRAMES"; rm -f "$FRAMES"/f_*.png
 
 log "extracting frames @ ${FPS}fps -> $FRAMES"
 ffmpeg -y -loglevel error -i "$GIF" -vf "fps=$FPS" "$FRAMES/f_%03d.png"
-COUNT=$(ls "$FRAMES"/f_*.png 2>/dev/null | wc -l | tr -d ' ')
+# Count without letting a no-match ls abort us under `set -e`/pipefail (lib.sh sets both).
+COUNT=$(find "$FRAMES" -name 'f_*.png' 2>/dev/null | wc -l | tr -d ' ')
 log "wrote $COUNT frames. Read them to verify legibility + the value moment."
 
 # --- Authenticity cross-check pointers ---
-JSON="$DD/runs/$ANGLE.json"
+# Reconcile against the run that produced THIS clip: a baseline prefix (<angle>.baseline)
+# must be checked against the baseline json, not the altimate one.
+case "$PREFIX" in
+  *.baseline) JSON="$DD/runs/$ANGLE.baseline.json";;
+  *)          JSON="$DD/runs/$ANGLE.json";;
+esac
 if [ -f "$JSON" ]; then
   log "json event stream present: $JSON"
   echo "----- tool calls observed in the run (cross-check against the clip) -----"

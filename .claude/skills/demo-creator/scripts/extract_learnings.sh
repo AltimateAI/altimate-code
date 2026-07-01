@@ -22,13 +22,18 @@ LOG="$DD/runs/$ANGLE.log"; [ -f "$LOG" ] || LOG="$DD/runs/altimate.log"
 OUT="$DD/learnings.md"
 
 # Pull the source the run actually produced. Prefer json; fall back to the captured log.
+CAST="$DD/clips/$ANGLE.cast"
 SRC=""
 [ -f "$JSON" ] && SRC="$JSON"
 [ -z "$SRC" ] && [ -f "$LOG" ] && SRC="$LOG"
-[ -n "$SRC" ] || { echo "ERROR: no run json/log for $TOPIC/$ANGLE (runs/$ANGLE.json or runs/altimate.log)" >&2; exit 1; }
+# Fall back to the recorded asciinema cast — it IS the run record (JSONL; output text is greppable).
+[ -z "$SRC" ] && [ -f "$CAST" ] && SRC="$CAST"
+[ -n "$SRC" ] || { echo "ERROR: no run source for $TOPIC/$ANGLE (runs/$ANGLE.json, runs/altimate.log, or clips/$ANGLE.cast)" >&2; exit 1; }
 log "mining $SRC -> $OUT"
 
-# Strip ANSI escape codes so the mined evidence is clean (formatted logs are full of them).
+# Remember the real source for display; mine from an ANSI-stripped copy (formatted logs are
+# full of escape codes). SRC below points at the temp copy, SRC_NAME at the real file.
+SRC_NAME="$(basename "$SRC")"
 CLEAN="$(mktemp)"; trap 'rm -f "$CLEAN"' EXIT
 perl -pe 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$SRC" > "$CLEAN" 2>/dev/null || cp "$SRC" "$CLEAN"
 SRC="$CLEAN"
@@ -54,7 +59,7 @@ TRACE_ID="$(grep -oE 'ses_[A-Za-z0-9]+' "$SRC" 2>/dev/null | head -1)"
 {
   echo "# Learnings — $TOPIC / $ANGLE"
   echo
-  echo "_Mined from \`$(basename "$SRC")\`$( [ -n "$TRACE_ID" ] && echo " · trace \`$TRACE_ID\`")._"
+  echo "_Mined from \`$SRC_NAME\`$( [ -n "$TRACE_ID" ] && echo " · trace \`$TRACE_ID\`")._"
   echo "_All items below are extracted from the REAL run. The 'why it matters' and reusable"
   echo "lessons are filled in by the author after reading this — do not invent value the run"
   echo "did not show (law #2)._"
