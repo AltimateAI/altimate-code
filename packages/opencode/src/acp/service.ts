@@ -745,7 +745,11 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
       Provider.Info
     >
     const defaultModelStarted = performance.now()
-    const defaultModel = defaultModelFromConfig(configResponse?.data?.model, providers)
+    const defaultModel = defaultModelFromConfig(
+      configResponse?.data?.model,
+      providers,
+      configResponse?.data?.provider as Record<string, unknown> | undefined,
+    )
     ACPProfile.duration("acp.directory.defaultModel.resolve", defaultModelStarted, { configured: !!defaultModel })
     const modes = agents
       .filter((agent) => agent.mode !== "subagent" && agent.hidden !== true)
@@ -778,9 +782,11 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
   })
 }
 
-function defaultModelFromConfig(
+// altimate_change — exported for the default-model regression test (guards the altimate-backend preference below)
+export function defaultModelFromConfig(
   configuredModel: string | undefined,
   providers: Record<ProviderV2.ID, Provider.Info>,
+  providerFilter?: Record<string, unknown>,
 ): Directory.DefaultModel | undefined {
   // altimate_change start — fork Provider ids are branded ProviderID/ModelID; re-brand to core ProviderV2.ID/ModelV2.ID (identity at runtime)
   const configured = configuredModel
@@ -790,6 +796,19 @@ function defaultModelFromConfig(
       })()
     : undefined
   if (configured && providers[configured.providerID]?.models[configured.modelID]) return configured
+
+  // Prefer altimate-backend/altimate-default when the fork's backend is available and the user
+  // hasn't pinned a model — restores dropped fork behavior (the merge fell straight through to the
+  // opencode provider, routing ACP clients away from altimate's backend). Honors an explicit
+  // provider allowlist: skip only if the user configured `provider` and left altimate-backend out.
+  const altimateProvider = providers[ProviderV2.ID.make("altimate-backend")]
+  if (
+    altimateProvider &&
+    altimateProvider.models[ModelV2.ID.make("altimate-default")] &&
+    (!providerFilter || Object.keys(providerFilter).includes("altimate-backend"))
+  ) {
+    return { providerID: ProviderV2.ID.make("altimate-backend"), modelID: ModelV2.ID.make("altimate-default") }
+  }
 
   // First-session ACP startup must not scan historical sessions just to infer
   // a default. Configured model, opencode provider, then sorted best model keep
