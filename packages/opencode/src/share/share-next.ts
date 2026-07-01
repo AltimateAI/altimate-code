@@ -4,6 +4,9 @@ import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { ProviderID, ModelID } from "@/provider/schema"
 import { Session } from "@/session"
+// altimate_change — SessionSummary.diff computes the full-session diff on read; the facade
+// Session.diff reads the persisted `session_diff` key, which the merge left unwritten after turns.
+import { SessionSummary } from "@/session/summary"
 import type { SessionID } from "@/session/schema"
 import { MessageV2 } from "@/session/message-v2"
 import { Database, eq } from "@/storage/db"
@@ -261,7 +264,7 @@ export namespace ShareNext {
   async function fullSync(sessionID: SessionID) {
     log.info("full sync", { sessionID })
     const session = await Session.get(sessionID)
-    const diffs = await Session.diff(sessionID)
+    const diffs = await SessionSummary.diff({ sessionID })
     const messages = await Array.fromAsync(MessageV2.stream(sessionID))
     const models = await Promise.all(
       Array.from(
