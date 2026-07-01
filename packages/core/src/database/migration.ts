@@ -1,7 +1,7 @@
 export * as DatabaseMigration from "./migration"
 
 import { sql } from "drizzle-orm"
-import { Effect, Semaphore } from "effect"
+import { Cause, Effect, Exit, Semaphore } from "effect"
 import type { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
 import { migrations } from "./migration.gen"
 import schema from "./schema.gen"
@@ -212,14 +212,40 @@ export function applyOnly(db: Database, input: Migration[]) {
 
     for (const migration of input) {
       if (completed.has(migration.id)) continue
-      yield* db.transaction((tx) =>
-        Effect.gen(function* () {
-          yield* migration.up(tx)
-          yield* tx.run(
-            sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
-          )
-        }),
-      )
+      // altimate_change start — upstream_fix: idempotent adopt for schema objects a prior layer
+      // already created. On mixed old/new-binary databases the legacy storage layer
+      // (packages/opencode storage/db.ts, e.g. its guarded `addColumn(project, icon_url_override)`)
+      // may have already ADDed a column that a core migration also ADDs, WITHOUT recording that
+      // migration in this journal. Re-running the unguarded `ALTER TABLE ... ADD COLUMN` then throws
+      // "duplicate column name" and crashes startup. SQLite has no `ADD COLUMN IF NOT EXISTS`, so
+      // treat a "schema object already exists" failure as the migration already being effectively
+      // applied: record its id and continue. Any other failure re-raises faithfully (failure OR
+      // defect — SQL errors here surface as defects), so real migration breakage still crashes loudly.
+      const exit = yield* db
+        .transaction((tx) =>
+          Effect.gen(function* () {
+            yield* migration.up(tx)
+            yield* tx.run(
+              sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
+            )
+          }),
+        )
+        .pipe(Effect.exit)
+      if (Exit.isFailure(exit)) {
+        if (!isSchemaObjectExistsError(Cause.pretty(exit.cause))) return yield* Effect.failCause(exit.cause)
+        yield* Effect.logWarning("adopting migration whose schema object already exists", { id: migration.id })
+        yield* db.run(
+          sql`INSERT OR IGNORE INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
+        )
+      }
+      // altimate_change end
     }
   })
 }
+
+// altimate_change start — upstream_fix: recognize SQLite "schema object already exists" errors so
+// additive migrations can be adopted idempotently on mixed old/new-binary databases (see applyOnly).
+function isSchemaObjectExistsError(message: string): boolean {
+  return /duplicate column name|already exists/i.test(message)
+}
+// altimate_change end

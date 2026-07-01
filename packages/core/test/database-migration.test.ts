@@ -22,6 +22,7 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import sessionMetadataMigration from "@opencode-ai/core/database/migration/20260511173437_session-metadata"
+import iconUrlOverrideMigration from "@opencode-ai/core/database/migration/20260423070820_add_icon_url_override"
 import type { SqlClient as SqlClientService } from "effect/unstable/sql/SqlClient"
 import { Database } from "@opencode-ai/core/database/database"
 import { tmpdir } from "./fixture/tmpdir"
@@ -137,6 +138,53 @@ describe("DatabaseMigration", () => {
       }),
     )
   })
+
+  // altimate_change start — regression: additive column migrations must adopt idempotently when a
+  // prior layer already created the column. On mixed old/new-binary databases the legacy storage
+  // layer (packages/opencode storage/db.ts) adds e.g. project.icon_url_override via a guarded
+  // addColumn WITHOUT recording the corresponding core migration, so the unguarded `ALTER TABLE
+  // ADD COLUMN` in that migration re-runs and used to crash startup with "duplicate column name".
+  test("adopts an additive column migration when the column already exists (mixed old/new binary db)", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        // Legacy layer already added icon_url_override; core migration journal doesn't know.
+        yield* db.run(sql`CREATE TABLE project (id text PRIMARY KEY, icon_url text, icon_url_override text)`)
+        yield* db.run(sql`INSERT INTO project (id, icon_url) VALUES ('prj_1', 'https://example.com/i.png')`)
+
+        // Before the fix this threw "duplicate column name: icon_url_override" and aborted.
+        yield* DatabaseMigration.applyOnly(db, [iconUrlOverrideMigration])
+
+        // Migration is recorded as applied (adopted), column + pre-existing data survive.
+        expect(yield* db.get(sql`SELECT id FROM migration WHERE id = ${iconUrlOverrideMigration.id}`)).toEqual({
+          id: iconUrlOverrideMigration.id,
+        })
+        expect(
+          yield* db.get(
+            sql`SELECT count(*) as count FROM pragma_table_info('project') WHERE name = 'icon_url_override'`,
+          ),
+        ).toEqual({ count: 1 })
+        expect(yield* db.get(sql`SELECT id FROM project WHERE id = 'prj_1'`)).toEqual({ id: "prj_1" })
+      }),
+    )
+  })
+
+  // A migration failing for any OTHER reason must still crash loudly (fix must not swallow real errors).
+  test("still fails loudly on a non-'already exists' migration error", async () => {
+    await expect(
+      run(
+        Effect.gen(function* () {
+          const db = yield* makeDb
+          const broken = {
+            id: "99999999999999_broken_test_migration",
+            up: (tx: Parameters<typeof iconUrlOverrideMigration.up>[0]) => tx.run(sql`ALTER TABLE nonexistent ADD col text`),
+          }
+          yield* DatabaseMigration.applyOnly(db, [broken])
+        }),
+      ),
+    ).rejects.toThrow()
+  })
+  // altimate_change end
 
   test("rejects a non-empty database without a session table", async () => {
     await expect(
