@@ -310,7 +310,7 @@ export const layer = Layer.effect(
           reviewer: {
             name: "reviewer",
             description:
-              "dbt PR reviewer. Runs the dbt_pr_review verdict engine (lineage, equivalence, PII, grade) plus read-only analysis tools and posts findings. Edit/write tools are denied; bash is denied.",
+              "dbt PR reviewer. Runs the dbt_pr_review verdict engine (lineage, equivalence, PII, grade) plus read-only analysis tools and posts findings. Edit/write tools are denied; bash prompts for approval.",
             prompt: PROMPT_REVIEWER,
             options: {},
             permission: Permission.merge(
@@ -335,14 +335,22 @@ export const layer = Layer.effect(
                 read: "allow",
                 grep: "allow",
                 glob: "allow",
+                list: "allow",
                 tool_lookup: "allow",
-                // Bash is DENIED. A string-prefix bash allowlist (e.g. `git log *`)
-                // cannot safely bound argv: shell redirects ride inside the matched
-                // command (`git log -p > ~/.ssh/authorized_keys`) and `cat *` reads
-                // any file — both bypass the "read-only" intent and enable
-                // write/exfil. The reviewer uses the structured read/grep/glob tools
-                // and the verdict engine (which does its own diffing) instead.
-                bash: "deny",
+                // Reviews routinely span sibling repos and skill dirs; without this
+                // the "*" deny above hard-fails read/grep/glob outside the project
+                // (#978). "ask" keeps the user in the loop; whitelisted dirs stay
+                // frictionless.
+                external_directory: readonlyExternalDirectory,
+                // Read-only web access so the reviewer can pull PR/issue URLs.
+                webfetch: "allow",
+                websearch: "allow",
+                // Bash PROMPTS instead of hard-denying (#978: `gh pr view` is the
+                // primary way to review a PR URL). A string-prefix allowlist can't
+                // safely bound argv (redirects ride inside the matched command), so
+                // every bash command requires explicit user approval here — the
+                // reviewer still never runs shell commands silently.
+                bash: "ask",
               }),
               userWithSafety,
             ),

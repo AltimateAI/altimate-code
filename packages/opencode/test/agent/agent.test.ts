@@ -78,6 +78,31 @@ it.instance("build agent has correct default properties", () =>
   }),
 )
 
+it.instance("reviewer agent is read-only but usable outside the project (#978)", () =>
+  Effect.gen(function* () {
+    const reviewer = yield* load((svc) => svc.get("reviewer"))
+    expect(reviewer).toBeDefined()
+    // Structured read tools allowed
+    expect(evalPerm(reviewer, "read")).toBe("allow")
+    expect(evalPerm(reviewer, "grep")).toBe("allow")
+    expect(evalPerm(reviewer, "glob")).toBe("allow")
+    expect(evalPerm(reviewer, "list")).toBe("allow")
+    // #978: paths outside the project prompt instead of hard-failing on the "*" deny
+    expect(Permission.evaluate("external_directory", "/some/sibling/repo", reviewer!.permission).action).toBe("ask")
+    // #978: PR/issue URLs are reviewable
+    expect(evalPerm(reviewer, "webfetch")).toBe("allow")
+    // #978: bash prompts (e.g. `gh pr view`) instead of hard-denying
+    expect(Permission.evaluate("bash", "gh pr view 66 --repo AltimateAI/.claude", reviewer!.permission).action).toBe(
+      "ask",
+    )
+    // Safety denials still hold even though bash asks
+    expect(Permission.evaluate("bash", "DROP DATABASE prod", reviewer!.permission).action).toBe("deny")
+    // Review never mutates
+    expect(evalPerm(reviewer, "edit")).toBe("deny")
+    expect(evalPerm(reviewer, "sql_execute_write")).toBe("deny")
+  }),
+)
+
 it.instance("plan agent denies edits except .opencode/plans/*", () =>
   Effect.gen(function* () {
     const plan = yield* load((svc) => svc.get("plan"))
