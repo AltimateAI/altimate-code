@@ -56,6 +56,14 @@ import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
+// altimate_change start — prompt input line navigation commands
+import {
+  isPromptCursorOnFirstLine,
+  isPromptCursorOnLastLine,
+  movePromptCursorToLineEnd,
+  movePromptCursorToLineHome,
+} from "../../prompt/navigation"
+// altimate_change end
 
 export type PromptProps = {
   sessionID?: string
@@ -292,6 +300,16 @@ export function Prompt(props: PromptProps) {
     extmarkToPartIndex: new Map(),
     interrupt: 0,
   })
+
+  // altimate_change start — snapshot live prompt before entering history
+  function currentHistoryPrompt(): PromptInfo {
+    return {
+      input: input.plainText,
+      parts: structuredClone(unwrap(store.prompt.parts)),
+      mode: store.mode,
+    }
+  }
+  // altimate_change end
 
   createEffect(
     on(
@@ -853,6 +871,34 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  // altimate_change start — restore prompt-local Ctrl+A/Ctrl+E editor commands
+  useBindings(() => {
+    return {
+      target: inputTarget,
+      enabled: inputTarget() !== undefined && !props.disabled && input !== undefined,
+      commands: [
+        {
+          name: "input.line.home",
+          title: "Move to start of input line",
+          category: "Prompt",
+          run() {
+            return movePromptCursorToLineHome(input)
+          },
+        },
+        {
+          name: "input.line.end",
+          title: "Move to end of input line",
+          category: "Prompt",
+          run() {
+            return movePromptCursorToLineEnd(input)
+          },
+        },
+      ],
+      bindings: tuiConfig.keybinds.gather("prompt.input.line", ["input.line.home", "input.line.end"]),
+    }
+  })
+  // altimate_change end
+
   useBindings(() => {
     return {
       target: inputTarget,
@@ -866,18 +912,19 @@ export function Prompt(props: PromptProps) {
           title: "Previous prompt history",
           category: "Prompt",
           run() {
-            if (input.cursorOffset !== 0) {
-              if (input.scrollY + input.visualCursor.visualRow === 0) input.cursorOffset = 0
+            // altimate_change start — let Up browse history from the first input line with a draft
+            if (!isPromptCursorOnFirstLine(input)) {
               return false
             }
 
-            const item = history.move(-1, input.plainText)
+            const item = history.move(-1, currentHistoryPrompt())
             if (!item) return false
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
             restoreExtmarksFromParts(item.parts)
             input.cursorOffset = 0
+            // altimate_change end
           },
         },
       ],
@@ -898,22 +945,19 @@ export function Prompt(props: PromptProps) {
           title: "Next prompt history",
           category: "Prompt",
           run() {
-            if (input.cursorOffset !== input.plainText.length) {
-              if (
-                input.scrollY + input.visualCursor.visualRow ===
-                Math.max(0, input.editorView.getTotalVirtualLineCount() - 1)
-              )
-                input.cursorOffset = input.plainText.length
+            // altimate_change start — let Down browse history from the last input line with a draft
+            if (!isPromptCursorOnLastLine(input)) {
               return false
             }
 
-            const item = history.move(1, input.plainText)
+            const item = history.move(1, currentHistoryPrompt())
             if (!item) return false
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
             restoreExtmarksFromParts(item.parts)
             input.cursorOffset = input.plainText.length
+            // altimate_change end
           },
         },
       ],

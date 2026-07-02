@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import { isDuplicateEntry, MAX_HISTORY_ENTRIES, parsePromptHistory, type PromptInfo } from "../../src/prompt/history"
+import {
+  isDuplicateEntry,
+  MAX_HISTORY_ENTRIES,
+  // altimate_change start — prompt history draft navigation tests
+  movePromptHistory,
+  // altimate_change end
+  parsePromptHistory,
+  type PromptInfo,
+} from "../../src/prompt/history"
 
 const entry = (input: string, parts: PromptInfo["parts"] = []): PromptInfo => ({ input, parts })
 
@@ -36,4 +44,34 @@ describe("prompt history", () => {
     ])
     expect(isDuplicateEntry(a, b)).toBe(false)
   })
+
+  // altimate_change start — prompt history draft navigation tests
+  test("preserves a draft while navigating into and back out of history", () => {
+    const history = [entry("older"), entry("newer")]
+    const draft = entry("draft in progress", [
+      { type: "file", mime: "text/plain", filename: "notes.txt", url: "file:///notes.txt" },
+    ])
+
+    const previous = movePromptHistory({ index: 0 }, history, -1, { ...draft, mode: "shell" })
+
+    expect(previous?.item).toEqual(entry("newer"))
+    expect(previous?.state).toEqual({
+      index: -1,
+      draft: { ...draft, mode: "shell" },
+    })
+
+    const next = movePromptHistory(previous!.state, history, 1, entry("newer"))
+
+    expect(next?.item).toEqual({ ...draft, mode: "shell" })
+    expect(next?.state).toEqual({ index: 0 })
+  })
+
+  test("does not discard edits made while viewing a history item", () => {
+    const history = [entry("older"), entry("newer")]
+    const state = { index: -1, draft: entry("draft") }
+
+    expect(movePromptHistory(state, history, -1, entry("edited newer"))).toBeUndefined()
+    expect(movePromptHistory(state, history, 1, entry("edited newer"))).toBeUndefined()
+  })
+  // altimate_change end
 })

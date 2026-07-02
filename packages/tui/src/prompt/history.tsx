@@ -46,6 +46,47 @@ export function isDuplicateEntry(previous: PromptInfo | undefined, next: PromptI
   return JSON.stringify(previous) === JSON.stringify(next)
 }
 
+// altimate_change start — preserve in-progress prompt while browsing history
+export type PromptHistoryNavigationState = {
+  index: number
+  draft?: PromptInfo
+}
+
+export function movePromptHistory(
+  state: PromptHistoryNavigationState,
+  history: readonly PromptInfo[],
+  direction: 1 | -1,
+  prompt: PromptInfo,
+): { state: PromptHistoryNavigationState; item: PromptInfo } | undefined {
+  if (!history.length) return undefined
+
+  const current = state.index === 0 ? undefined : history.at(state.index)
+  if (current && current.input !== prompt.input && prompt.input.length) return undefined
+
+  const next = state.index + direction
+  if (Math.abs(next) > history.length) return undefined
+  if (next > 0) return undefined
+
+  const draft = state.index === 0 && next < 0 ? structuredClone(prompt) : state.draft
+  if (next === 0) {
+    return {
+      state: { index: 0 },
+      item: draft ?? { input: "", parts: [] },
+    }
+  }
+
+  const item = history.at(next)
+  if (!item) return undefined
+  return {
+    state: {
+      index: next,
+      draft,
+    },
+    item,
+  }
+}
+// altimate_change end
+
 export const { use: usePromptHistory, provider: PromptHistoryProvider } = createSimpleContext({
   name: "PromptHistory",
   init: () => {
@@ -62,30 +103,29 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
 
     const [store, setStore] = createStore({
       index: 0,
+      // altimate_change start — preserve in-progress prompt while browsing history
+      draft: undefined as PromptInfo | undefined,
+      // altimate_change end
       history: [] as PromptInfo[],
     })
 
     return {
-      move(direction: 1 | -1, input: string) {
-        if (!store.history.length) return undefined
-        const current = store.history.at(store.index)
-        if (!current) return undefined
-        if (current.input !== input && input.length) return
-        setStore(
-          produce((draft) => {
-            const next = store.index + direction
-            if (Math.abs(next) > store.history.length) return
-            if (next > 0) return
-            draft.index = next
-          }),
-        )
-        if (store.index === 0) return { input: "", parts: [] }
-        return store.history.at(store.index)
+      move(direction: 1 | -1, prompt: PromptInfo) {
+        // altimate_change start — preserve in-progress prompt while browsing history
+        const result = movePromptHistory({ index: store.index, draft: store.draft }, store.history, direction, prompt)
+        if (!result) return undefined
+        setStore("index", result.state.index)
+        setStore("draft", result.state.draft)
+        return result.item
+        // altimate_change end
       },
       append(item: PromptInfo) {
         const entry = structuredClone(unwrap(item))
         if (isDuplicateEntry(store.history.at(-1), entry)) {
           setStore("index", 0)
+          // altimate_change start — clear transient draft after successful history append
+          setStore("draft", undefined)
+          // altimate_change end
           return
         }
         let trimmed = false
@@ -97,6 +137,9 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
               trimmed = true
             }
             draft.index = 0
+            // altimate_change start — clear transient draft after successful history append
+            draft.draft = undefined
+            // altimate_change end
           }),
         )
 
