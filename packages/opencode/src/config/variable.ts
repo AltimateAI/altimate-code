@@ -47,7 +47,13 @@ export async function substitute(input: SubstituteInput) {
     if (dollarVar !== undefined) {
       const envValue = input.env?.[dollarVar] ?? process.env[dollarVar]
       const resolved = envValue !== undefined && envValue !== ""
-      return encode(resolved ? envValue : (dollarDefault ?? ""))
+      if (resolved) return encode(envValue)
+      if (dollarDefault !== undefined) return encode(dollarDefault)
+      // Unresolved bare ${VAR} (unset/empty, no default): leave the placeholder LITERAL rather than
+      // blanking it. Some values are resolved by a later runtime layer — e.g. the bedrock provider
+      // fills ${AWS_REGION} from the effective (config-precedence) region after config load. Blanking
+      // here would pre-empt that and yield an empty region (bedrock-mantle..api.aws).
+      return match
     }
     if (braceVar !== undefined) {
       return (input.env?.[braceVar] ?? process.env[braceVar]) || ""
