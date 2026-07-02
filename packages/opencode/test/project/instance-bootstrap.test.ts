@@ -1,4 +1,5 @@
 import { afterEach, expect } from "bun:test"
+import { $ } from "bun"
 import { existsSync } from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -7,6 +8,7 @@ import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { bootstrap as cliBootstrap } from "../../src/cli/bootstrap"
 import { InstanceLayer } from "../../src/project/instance-layer"
 import { InstanceStore } from "../../src/project/instance-store"
+import { Vcs } from "../../src/project/vcs"
 import { disposeAllInstances, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { waitGlobalBusEvent } from "../server/global-bus"
@@ -108,4 +110,29 @@ it.live("InstanceStore.reload runs InstanceBootstrap", () =>
 
     expect(existsSync(tmp.marker)).toBe(true)
   }),
+)
+it.live(
+  "InstanceBootstrap starts watcher for VCS branch updates",
+  () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const branch = `watcher-${Math.random().toString(36).slice(2)}`
+      const store = yield* InstanceStore.Service
+
+      yield* store.provide({ directory: dir }, Effect.void)
+      yield* Effect.sleep("500 millis")
+      const pending = yield* waitGlobalBusEvent({
+        timeout: 15_000,
+        message: "timed out waiting for branch watcher update",
+        predicate: (event) =>
+          event.directory === dir &&
+          event.payload.type === Vcs.Event.BranchUpdated.type &&
+          (event.payload.properties as { branch?: string }).branch === branch,
+      }).pipe(Effect.forkScoped({ startImmediately: true }))
+
+      yield* Effect.promise(() => $`git checkout -b ${branch}`.cwd(dir).quiet())
+      const event = yield* Fiber.join(pending)
+      expect((event.payload.properties as { branch?: string }).branch).toBe(branch)
+    }),
+  20_000,
 )

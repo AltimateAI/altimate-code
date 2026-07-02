@@ -66,7 +66,9 @@ export const layer: Layer.Layer<
     ]
     const instructionFiles = [
       "AGENTS.md",
-      ...(!flags.disableClaudeCodePrompt ? ["CLAUDE.md"] : []),
+      // altimate_change start — upstream_fix: keep project CLAUDE.md discovery when home Claude prompt disabled
+      "CLAUDE.md",
+      // altimate_change end
       "CONTEXT.md", // deprecated
     ]
 

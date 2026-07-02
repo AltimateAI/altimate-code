@@ -157,6 +157,25 @@ export namespace Project {
   }
   // altimate_change end
 
+  // altimate_change start — upstream_fix: honor legacy .git/altimate-code cache
+  // on the Effect Project.fromDirectory path. The core resolver only reads
+  // .git/opencode, so preserve the fork's old cache before falling back to a
+  // root-commit id; when a remote id is available, pass the legacy id through as
+  // `previous` so the DB migration below can move sessions/workspaces forward.
+  function readLegacyCachedId(dir: string) {
+    return Filesystem.readText(path.join(dir, "altimate-code"))
+      .then((x) => x.trim())
+      .then(ProjectID.make)
+      .catch(() => undefined)
+  }
+
+  const hasOriginRemote = Effect.fnUntraced(function* (directory: string) {
+    return yield* Effect.promise(() =>
+      git(["remote", "get-url", "origin"], { cwd: directory }).then((result) => result.exitCode === 0),
+    )
+  })
+  // altimate_change end
+
   export async function fromDirectory(directory: string) {
     log.info("fromDirectory", { directory })
 
@@ -667,8 +686,18 @@ export namespace Project {
 
       const fromDirectoryEffect = Effect.fn("Project.fromDirectory")(function* (directory: string) {
         const resolved = yield* resolver.resolve(AbsolutePath.make(path.resolve(directory)))
-        const id = ProjectID.make(resolved.id)
-        const previous = resolved.previous ? ProjectID.make(resolved.previous) : undefined
+        let id = ProjectID.make(resolved.id)
+        let previous = resolved.previous ? ProjectID.make(resolved.previous) : undefined
+        // altimate_change start — upstream_fix: carry legacy .git/altimate-code through Effect resolver
+        const vcs = resolved.vcs
+        if (vcs && !previous) {
+          const legacy = yield* Effect.promise(() => readLegacyCachedId(vcs.store))
+          if (legacy) {
+            if (id === ProjectID.global || !(yield* hasOriginRemote(resolved.directory))) id = legacy
+            else previous = legacy
+          }
+        }
+        // altimate_change end
         const previousCore = previous ? ProjectV2.ID.make(previous) : undefined
         const projectCore = ProjectV2.ID.make(id)
         const activeDirectory = AbsolutePath.make(resolved.directory)
@@ -770,7 +799,7 @@ export namespace Project {
           )
           .pipe(Effect.orDie)
 
-        if (resolved.vcs && id !== ProjectID.global) yield* resolver.commit({ store: resolved.vcs.store, id: resolved.id })
+        if (resolved.vcs && id !== ProjectID.global) yield* resolver.commit({ store: resolved.vcs.store, id: ProjectV2.ID.make(id) })
         yield* emitUpdated(result)
         if (flags.experimentalIconDiscovery) yield* discoverEffect(result)
         return { project: result, sandbox: activeDirectory }

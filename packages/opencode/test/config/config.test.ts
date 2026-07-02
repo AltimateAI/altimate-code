@@ -1880,18 +1880,17 @@ describe("OPENCODE_DISABLE_PROJECT_CONFIG", () => {
   )
 })
 
-// Regression for #28206: malformed OPENCODE_PERMISSION JSON used to crash
-// the app on startup with an unhandled SyntaxError. Loading the config with
-// an invalid JSON value in this env var should not throw.
+// Malformed OPENCODE_PERMISSION must fail closed. Dropping an invalid policy
+// would silently discard permission/deny rules.
 describe("OPENCODE_PERMISSION env var", () => {
-  it.instance("does not crash when OPENCODE_PERMISSION contains invalid JSON", () =>
+  it.instance("fails closed when OPENCODE_PERMISSION contains invalid JSON", () =>
     withProcessEnv(
       "OPENCODE_PERMISSION",
       "{invalid",
       Effect.gen(function* () {
-        const config = yield* Config.use.get()
-        // Regression: load() used to throw before returning anything.
-        expect(config).toBeDefined()
+        const exit = yield* Config.use.get().pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(SyntaxError)
       }),
     ),
   )

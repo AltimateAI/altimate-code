@@ -21,6 +21,7 @@ import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, provideTmpdirInstance, requireInstance, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { registerAdapter } from "../../src/control-plane/adapters"
+import { WorkspaceID } from "../../src/control-plane/schema"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 import type { Target, WorkspaceAdapter, WorkspaceInfo } from "../../src/control-plane/types"
@@ -375,6 +376,11 @@ describe("workspace schemas and exports", () => {
     expect(decode(input)).toEqual(input)
     expect(() => decode({ ...input, id: 1 })).toThrow()
     expect(() => decode({ ...input, branch: 1 })).toThrow()
+  })
+
+  test("WorkspaceID.zod rejects non-workspace prefixes", () => {
+    expect(WorkspaceID.zod.parse("wrk_schema_route")).toBe(WorkspaceID.make("wrk_schema_route"))
+    expect(() => WorkspaceID.zod.parse("ses_schema_route")).toThrow()
   })
 })
 

@@ -146,6 +146,9 @@ async function substituteWellKnownRemoteConfig(input: {
     dir: input.dir,
     source: input.source,
     env: input.env,
+    // altimate_change start — upstream_fix: restore raw remote-config string interpolation
+    format: "raw",
+    // altimate_change end
   })
   const headers = isRecord(input.value.headers)
     ? Object.fromEntries(
@@ -160,6 +163,9 @@ async function substituteWellKnownRemoteConfig(input: {
                 dir: input.dir,
                 source: input.source,
                 env: input.env,
+                // altimate_change start — upstream_fix: restore raw remote-config string interpolation
+                format: "raw",
+                // altimate_change end
               }),
             ]),
         ),
@@ -640,11 +646,9 @@ export const layer = Layer.effect(
         }
 
         if (Flag.OPENCODE_PERMISSION) {
-          try {
-            result.permission = mergeDeep(result.permission ?? {}, JSON.parse(Flag.OPENCODE_PERMISSION))
-          } catch (err) {
-            yield* Effect.logWarning("OPENCODE_PERMISSION contains invalid JSON, skipping", { err })
-          }
+          // altimate_change start — upstream_fix: fail closed on malformed OPENCODE_PERMISSION
+          result.permission = mergeDeep(result.permission ?? {}, JSON.parse(Flag.OPENCODE_PERMISSION))
+          // altimate_change end
         }
 
         if (result.tools) {

@@ -270,15 +270,14 @@ function withAlsInstanceRef<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Eff
 
 /**
  * Convert an old-style deferred tool factory into a new init Effect. The factory
- * runs once per init; the new Tool API does not thread the calling agent into
- * `init()`, so the factory receives an empty init context (agent undefined) and
- * any per-agent description filtering degrades to "show all" — execute-time
- * permission checks still enforce access.
+ * runs once per init and receives the caller context restored through Tool.Info.init().
  */
-export function legacyInitFnToInit(fn: LegacyInitFn): Effect.Effect<DefWithoutID> {
+// altimate_change start — upstream_fix: restore caller context for legacy deferred tool init.
+export function legacyInitFnToInit(fn: LegacyInitFn): (ctx?: LegacyInitContext) => Effect.Effect<DefWithoutID> {
   // altimate_change start — see withAlsInstanceRef: keep the instance context available to the
   // factory's async facade calls (Skill.available/Agent.list) which resolve via makeRuntime.
-  return withAlsInstanceRef(Effect.promise(() => fn({}))).pipe(Effect.map(legacyDefToDef))
+  return (ctx) => withAlsInstanceRef(Effect.promise(() => fn(ctx ?? {}))).pipe(Effect.map(legacyDefToDef))
   // altimate_change end
 }
+// altimate_change end
 // altimate_change end

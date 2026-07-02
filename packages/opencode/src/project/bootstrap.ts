@@ -1,5 +1,13 @@
+import { unwatchFile, watchFile } from "node:fs"
+import { stat, readFile } from "node:fs/promises"
+import path from "node:path"
 import { Effect, Layer, Stream } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { EventV2 } from "@opencode-ai/core/event"
+import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+import { Location } from "@opencode-ai/core/location"
+import { Project as CoreProject } from "@opencode-ai/core/project"
+import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Plugin } from "../plugin"
 import { Format } from "../format"
 import { LSP } from "../lsp/lsp"
@@ -8,9 +16,11 @@ import { Snapshot } from "../snapshot"
 import { Project } from "./project"
 import { Vcs } from "./vcs"
 import { Command } from "../command"
+import { GlobalBus, type GlobalEvent } from "@/bus/global"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { InstanceRef } from "@/effect/instance-ref"
+import type { InstanceContext } from "@/project/instance-context"
 import { ShareNext } from "@/share/share-next"
 import { Service as BootstrapService } from "./bootstrap-service"
 import { Instance } from "./instance"
@@ -19,6 +29,73 @@ import { Instance } from "./instance"
 // (Global.Path.data/tool-output/tool_*) never registers, so the directory grows
 // unboundedly. Restore main's call site.
 import { Truncate } from "../tool/truncation"
+// altimate_change end
+
+// altimate_change start — upstream_fix: restore branch HEAD watcher in shipped bootstrap
+async function gitHeadPath(directory: string) {
+  const dotgit = path.join(directory, ".git")
+  const dotgitStat = await stat(dotgit).catch(() => undefined)
+  if (dotgitStat?.isDirectory()) return path.join(dotgit, "HEAD")
+  if (dotgitStat?.isFile()) {
+    const content = await readFile(dotgit, "utf8").catch(() => "")
+    const match = /^gitdir:\s*(.+)\s*$/m.exec(content)
+    if (match) {
+      const gitdir = path.isAbsolute(match[1]) ? match[1] : path.resolve(directory, match[1])
+      return path.join(gitdir, "HEAD")
+    }
+  }
+  return path.join(dotgit, "HEAD")
+}
+
+async function headStamp(file: string) {
+  const [info, content] = await Promise.all([
+    stat(file).then(
+      (value) => value.mtimeMs,
+      () => 0,
+    ),
+    readFile(file, "utf8").catch(() => ""),
+  ])
+  return `${info}:${content}`
+}
+
+const startBranchHeadWatcher = Effect.fn("InstanceBootstrap.startBranchHeadWatcher")(function* (
+  ctx: InstanceContext,
+  events: EventV2.Interface,
+) {
+  if (ctx.project.vcs !== "git") return
+  const head = yield* Effect.promise(() => gitHeadPath(ctx.worktree))
+  let last = yield* Effect.promise(() => headStamp(head))
+  const location = new Location.Info({
+    directory: AbsolutePath.make(ctx.directory),
+    project: { id: CoreProject.ID.make(ctx.project.id), directory: AbsolutePath.make(ctx.worktree) },
+  })
+  const context = yield* Effect.context()
+  const runFork = Effect.runForkWith(context)
+
+  yield* Effect.sync(() => {
+    let stopped = false
+    const publish = () => {
+      void headStamp(head).then((next) => {
+        if (stopped || next === last) return
+        last = next
+        runFork(
+          events.publish(Watcher.Event.Updated, { file: head, event: "change" }, { location }).pipe(Effect.ignore),
+        )
+      })
+    }
+    const stop = () => {
+      if (stopped) return
+      stopped = true
+      unwatchFile(head, publish)
+      GlobalBus.off("event", onEvent)
+    }
+    const onEvent = (event: GlobalEvent) => {
+      if (event.directory === ctx.directory && event.payload?.type === "server.instance.disposed") stop()
+    }
+    watchFile(head, { persistent: false, interval: 500 }, publish)
+    GlobalBus.on("event", onEvent)
+  })
+})
 // altimate_change end
 
 // Per-instance bootstrap logic. Requires the individual services (provided by the
@@ -36,6 +113,9 @@ const runBootstrap = Effect.gen(function* () {
 
   const ctx = yield* InstanceState.context
   yield* Effect.logInfo("bootstrapping", { directory: ctx.directory })
+  // altimate_change start — upstream_fix: bootstrap branch watcher for Vcs.init()
+  yield* startBranchHeadWatcher(ctx, events)
+  // altimate_change end
 
   yield* plugin.init()
   yield* share.init()

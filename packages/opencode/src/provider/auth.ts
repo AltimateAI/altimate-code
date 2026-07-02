@@ -90,6 +90,57 @@ export type Error = Auth.AuthError | OauthMissing | OauthCodeMissing | OauthCall
 
 type Hook = NonNullable<Hooks["auth"]>
 
+// altimate_change start — upstream_fix: honor deprecated prompt condition on auth methods
+type WhenRule = typeof When.Type
+type MethodPrompt = NonNullable<Hook["methods"][number]["prompts"]>[number]
+
+function whenMatches(when: WhenRule | undefined, inputs: Record<string, string>) {
+  if (!when) return true
+  const value = inputs[when.key]
+  if (value === undefined) return false
+  return when.op === "eq" ? value === when.value : value !== when.value
+}
+
+function promptApplies(prompt: MethodPrompt, inputs: Record<string, string>) {
+  if (!whenMatches(prompt.when, inputs)) return false
+  return prompt.condition ? prompt.condition(inputs) : true
+}
+
+function inferConditionWhen(prompts: readonly MethodPrompt[], prompt: MethodPrompt): WhenRule | undefined {
+  if (prompt.when || !prompt.condition) return prompt.when
+
+  for (const candidate of prompts) {
+    if (candidate === prompt || candidate.type !== "select") continue
+
+    const results = candidate.options.map((option) => {
+      try {
+        return {
+          value: option.value,
+          applies: prompt.condition!({ [candidate.key]: option.value }),
+        }
+      } catch {
+        return {
+          value: option.value,
+          applies: false,
+        }
+      }
+    })
+
+    const matching = results.filter((result) => result.applies)
+    if (matching.length === 1) {
+      return { key: candidate.key, op: "eq", value: matching[0].value }
+    }
+
+    const hidden = results.filter((result) => !result.applies)
+    if (hidden.length === 1 && matching.length > 0) {
+      return { key: candidate.key, op: "neq", value: hidden[0].value }
+    }
+  }
+
+  return undefined
+}
+// altimate_change end
+
 export interface Interface {
   readonly methods: () => Effect.Effect<Methods>
   readonly authorize: (
@@ -140,13 +191,18 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
             label: method.label,
             ...(method.prompts && {
               prompts: method.prompts.map((prompt) => {
+                // altimate_change start — upstream_fix: map serializable auth condition to when
+                const when = inferConditionWhen(method.prompts ?? [], prompt)
+                // altimate_change end
                 if (prompt.type === "select") {
                   return {
                     type: "select" as const,
                     key: prompt.key,
                     message: prompt.message,
                     options: prompt.options,
-                    ...(prompt.when && { when: prompt.when }),
+                    // altimate_change start — upstream_fix: carry inferred `when` onto select prompts
+                    ...(when && { when }),
+                    // altimate_change end
                   }
                 }
                 return {
@@ -154,7 +210,9 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
                   key: prompt.key,
                   message: prompt.message,
                   ...(prompt.placeholder && { placeholder: prompt.placeholder }),
-                  ...(prompt.when && { when: prompt.when }),
+                  // altimate_change start — upstream_fix: carry inferred `when` onto text prompts
+                  ...(when && { when }),
+                  // altimate_change end
                 }
               }),
             }),
@@ -172,6 +230,9 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
 
       if (method.prompts && input.inputs) {
         for (const prompt of method.prompts) {
+          // altimate_change start — upstream_fix: skip validation for inactive conditional auth prompts
+          if (!promptApplies(prompt, input.inputs)) continue
+          // altimate_change end
           if (prompt.type === "text" && prompt.validate && input.inputs[prompt.key] !== undefined) {
             const error = prompt.validate(input.inputs[prompt.key])
             if (error) return yield* new ValidationFailed({ field: prompt.key, message: error })

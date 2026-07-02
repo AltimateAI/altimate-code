@@ -60,9 +60,15 @@ export const GrepTool = Tool.define(
           const search = FSUtil.resolve(requested)
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
           const cwd = info?.type === "Directory" ? search : path.dirname(search)
+          // altimate_change start — upstream_fix: keep grep path scoped to exact file arguments.
+          const file = info?.type === "Directory" ? undefined : path.basename(search)
+          // altimate_change end
           const result = yield* ripgrep.grep({
             cwd,
             pattern: params.pattern,
+            // altimate_change start — upstream_fix: pass file paths through to ripgrep.
+            file,
+            // altimate_change end
             include: params.include,
             limit: 100,
           })

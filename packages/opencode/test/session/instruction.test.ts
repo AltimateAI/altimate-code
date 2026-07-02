@@ -264,7 +264,7 @@ describe("Instruction.system", () => {
     }),
   )
 
-  it.live("skips project and global CLAUDE.md when Claude Code prompt is disabled", () =>
+  it.live("keeps project CLAUDE.md but skips global Claude prompt when Claude Code prompt is disabled", () =>
     Effect.gen(function* () {
       const globalTmp = yield* tmpWithFiles({ ".claude/CLAUDE.md": "# Global Claude" })
       const projectTmp = yield* tmpWithFiles({ "CLAUDE.md": "# Project Claude" })
@@ -273,8 +273,10 @@ describe("Instruction.system", () => {
         const svc = yield* Instruction.Service
         const paths = yield* svc.systemPaths()
         expect(paths.has(path.join(globalTmp, ".claude", "CLAUDE.md"))).toBe(false)
-        expect(paths.has(path.join(projectTmp, "CLAUDE.md"))).toBe(false)
-        expect(yield* svc.system()).toEqual([])
+        expect(paths.has(path.join(projectTmp, "CLAUDE.md"))).toBe(true)
+        expect(yield* svc.system()).toEqual([
+          `Instructions from: ${path.join(projectTmp, "CLAUDE.md")}\n# Project Claude`,
+        ])
       }).pipe(
         provideInstance(projectTmp),
         provideInstruction({ home: globalTmp, config: globalTmp }, { disableClaudeCodePrompt: true }),

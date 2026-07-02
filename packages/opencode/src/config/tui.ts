@@ -24,6 +24,9 @@ import { ConfigVariable } from "@/config/variable"
 import { Npm } from "@opencode-ai/core/npm"
 import { FormatError, FormatUnknownError } from "@/cli/error"
 import { TuiConfig } from "@opencode-ai/tui/config"
+// altimate_change start — upstream_fix: restore worktree-bounded TUI config discovery
+import { Project } from "@/project/project"
+// altimate_change end
 
 export const Info = TuiConfig.Info
 export type Info = TuiConfig.Info
@@ -81,7 +84,9 @@ function dropUnknownKeybinds(input: Record<string, unknown>) {
   }
 }
 
-const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: string }) {
+// altimate_change start — upstream_fix: thread worktree through loadState for bounded discovery
+const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: string; worktree: string }) {
+  // altimate_change end
   const afs = yield* FSUtil.Service
   let appliedOrder = 0
 
@@ -171,13 +176,28 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
 
   // Every config dir we may read from: global config dir, any `.opencode`
   // folders between cwd and home, and OPENCODE_CONFIG_DIR.
-  const directories = yield* ConfigPaths.directories(ctx.directory)
+  // altimate_change start — upstream_fix: restore worktree-bounded TUI config discovery
+  const directories = yield* ConfigPaths.directories(ctx.directory, ctx.worktree)
+  // altimate_change end
   // altimate_change start — upstream_fix: restore managed TUI config loading and migration
   const managed = ConfigManaged.managedConfigDir()
-  yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory, managed }))
+  yield* Effect.promise(() =>
+    migrateTuiConfig({
+      directories,
+      cwd: ctx.directory,
+      managed,
+      // altimate_change start — upstream_fix: restore worktree-bounded TUI migration
+      worktree: ctx.worktree,
+      // altimate_change end
+    }),
+  )
   // altimate_change end
 
-  const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", ctx.directory)
+  // altimate_change start — upstream_fix: restore worktree-bounded TUI project file discovery
+  const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG
+    ? []
+    : yield* ConfigPaths.files("tui", ctx.directory, ctx.worktree)
+  // altimate_change end
 
   const acc: Acc = {
     result: {},
@@ -242,7 +262,11 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const directory = yield* CurrentWorkingDirectory
     const npm = yield* Npm.Service
-    const data = yield* loadState({ directory })
+    // altimate_change start — upstream_fix: restore worktree-bounded TUI config discovery
+    const project = yield* Project.Service
+    const { sandbox: worktree } = yield* project.fromDirectory(directory)
+    const data = yield* loadState({ directory, worktree })
+    // altimate_change end
     const deps = yield* Effect.forEach(
       data.dirs,
       (dir) =>
@@ -272,7 +296,9 @@ export const layer = Layer.effect(
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(Npm.defaultLayer), Layer.provide(FSUtil.defaultLayer)))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(Project.defaultLayer), Layer.provide(Npm.defaultLayer), Layer.provide(FSUtil.defaultLayer)),
+)
 // altimate_change end
 
 const { runPromise } = makeRuntime(Service, defaultLayer)

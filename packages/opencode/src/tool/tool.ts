@@ -81,17 +81,27 @@ export type DefWithoutID<
   M extends Metadata = Metadata,
 > = Omit<Def<Parameters, M>, "id">
 
+// altimate_change start — upstream_fix: restore caller context for deferred tool init.
+export interface InitContext {
+  agent?: Agent.Info
+}
+// altimate_change end
+
 export interface Info<
   Parameters extends Schema.Decoder<unknown> = Schema.Decoder<unknown>,
   M extends Metadata = Metadata,
 > {
   id: string
-  init: () => Effect.Effect<DefWithoutID<Parameters, M>>
+  // altimate_change start — upstream_fix: restore caller context for deferred tool init.
+  init: (ctx?: InitContext) => Effect.Effect<DefWithoutID<Parameters, M>>
+  // altimate_change end
 }
 
 type Init<Parameters extends Schema.Decoder<unknown>, M extends Metadata> =
   | DefWithoutID<Parameters, M>
-  | (() => Effect.Effect<DefWithoutID<Parameters, M>>)
+  // altimate_change start — upstream_fix: restore caller context for deferred tool init.
+  | ((ctx?: InitContext) => Effect.Effect<DefWithoutID<Parameters, M>>)
+// altimate_change end
 
 export type InferParameters<T> =
   T extends Info<infer P, any>
@@ -238,9 +248,11 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
   truncate: Truncate.Interface,
   agents: Agent.Interface,
 ) {
-  return () =>
+  // altimate_change start — upstream_fix: pass caller init context through wrappers.
+  return (ctx?: InitContext) =>
     Effect.gen(function* () {
-      const toolInfo = typeof init === "function" ? { ...(yield* init()) } : { ...init }
+      const toolInfo = typeof init === "function" ? { ...(yield* init(ctx)) } : { ...init }
+      // altimate_change end
       // Compile the parser closure once per tool init; `decodeUnknownEffect`
       // allocates a new closure per call, so hoisting avoids re-closing it.
       const decode = Schema.decodeUnknownEffect(toolInfo.parameters)
@@ -319,7 +331,7 @@ export function define(id: string, init: any): any {
   const resolvedInit: Effect.Effect<any, never, any> = isLegacyToolDef(init)
     ? legacyToInit(init)
     : isLegacyInitFn(init)
-      ? legacyInitFnToInit(init)
+      ? Effect.sync(() => legacyInitFnToInit(init))
       : init
   // altimate_change end
   return Object.assign(
@@ -335,9 +347,14 @@ export function define(id: string, init: any): any {
 
 export function init<P extends Schema.Decoder<unknown>, M extends Metadata>(
   info: Info<P, M>,
+  // altimate_change start — upstream_fix: allow callers to initialize with agent context.
+  ctx?: InitContext,
+  // altimate_change end
 ): Effect.Effect<Def<P, M>> {
   return Effect.gen(function* () {
-    const init = yield* info.init()
+    // altimate_change start — upstream_fix: pass caller init context through Tool.init.
+    const init = yield* info.init(ctx)
+    // altimate_change end
     return {
       ...init,
       id: info.id,

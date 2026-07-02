@@ -4,18 +4,19 @@ import os from "os"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Database } from "@opencode-ai/core/database/database"
+import { Database as CoreDatabase } from "@opencode-ai/core/database/database"
+import { Database as LegacyDatabase, sql } from "../../src/storage/db"
 import { Permission } from "../../src/permission"
 import { InstanceBootstrap } from "../../src/project/bootstrap-service"
 import { InstanceStore } from "../../src/project/instance-store"
-import { TestInstance, tmpdirScoped } from "../fixture/fixture"
+import { requireInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
 
 const events = EventV2Bridge.defaultLayer
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
 const env = Layer.mergeAll(
-  Permission.layer.pipe(Layer.provide(Database.defaultLayer), Layer.provide(events)),
+  Permission.layer.pipe(Layer.provide(CoreDatabase.defaultLayer), Layer.provide(events)),
   events,
   CrossSpawnSpawner.defaultLayer,
   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
@@ -570,6 +571,34 @@ it.instance(
         ruleset: [{ permission: "bash", pattern: "*", action: "allow" }],
       })
       expect(result).toBeUndefined()
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - resolves immediately from persisted approval",
+  () =>
+    Effect.gen(function* () {
+      const ctx = yield* requireInstance
+      const now = Date.now()
+      const stored: PermissionV1.Rule[] = [{ permission: "bash", pattern: "echo *", action: "allow" }]
+      LegacyDatabase.use((db) =>
+        db.run(sql`
+          INSERT INTO permission (id, project_id, action, resource, time_created, time_updated, data)
+          VALUES (${`persisted-${ctx.project.id}`}, ${ctx.project.id}, ${"allow"}, ${"echo *"}, ${now}, ${now}, ${JSON.stringify(stored)})
+        `),
+      )
+
+      const result = yield* ask({
+        sessionID: SessionID.make("session_persisted"),
+        permission: "bash",
+        patterns: ["echo hello"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      })
+      expect(result).toBeUndefined()
+      expect(yield* list()).toHaveLength(0)
     }),
   { git: true },
 )

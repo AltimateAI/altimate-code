@@ -12,7 +12,9 @@ export const PtyID = CorePtyID.pipe(
   withStatics((s) => ({
     make: (id: string) => s.make(id),
     ascending: (id?: string) => s.make(Identifier.ascending("pty", id)),
-    zod: z.string().pipe(z.custom<Schema.Schema.Type<typeof s>>()),
+    // altimate_change start — upstream_fix: restore pty-prefix validation for zod callers
+    zod: z.string().startsWith("pty").pipe(z.custom<Schema.Schema.Type<typeof s>>()),
+    // altimate_change end
   })),
 )
 

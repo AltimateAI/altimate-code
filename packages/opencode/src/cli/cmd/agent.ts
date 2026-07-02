@@ -20,10 +20,13 @@ type AgentMode = "all" | "primary" | "subagent"
 // Permission keys (not raw tool names). Multiple tools can map to a single
 // permission — e.g. write/edit/apply_patch all gate on `edit` — so we configure
 // agents at the permission level to match how the runtime actually enforces it.
-const AVAILABLE_PERMISSIONS = [
+export const AVAILABLE_PERMISSIONS = [
   "bash",
   "read",
   "edit",
+  // altimate_change start — upstream_fix: keep legacy list permission denyable
+  "list",
+  // altimate_change end
   "glob",
   "grep",
   "webfetch",
@@ -33,6 +36,36 @@ const AVAILABLE_PERMISSIONS = [
   "lsp",
   "skill",
 ]
+
+// altimate_change start — upstream_fix: map legacy --tools names onto permission keys
+const LEGACY_TOOL_PERMISSION: Record<string, string> = {
+  write: "edit",
+  apply_patch: "edit",
+}
+
+export function parseAgentPermissionSelection(input: string | undefined) {
+  if (input === undefined) return undefined
+  if (!input) return [...AVAILABLE_PERMISSIONS]
+  return [
+    ...new Set(
+      input
+        .split(",")
+        .map((permission) => permission.trim())
+        .filter(Boolean)
+        .map((permission) => LEGACY_TOOL_PERMISSION[permission] ?? permission),
+    ),
+  ]
+}
+
+export function buildAgentDeniedPermissions(selected: readonly string[]) {
+  const allowed = new Set(selected)
+  const permissions: Record<string, "deny"> = {}
+  for (const permission of AVAILABLE_PERMISSIONS) {
+    if (!allowed.has(permission)) permissions[permission] = "deny"
+  }
+  return permissions
+}
+// altimate_change end
 
 const AgentCreateCommand = effectCmd({
   command: "create",
@@ -148,7 +181,9 @@ const AgentCreateCommand = effectCmd({
       // Select permissions to allow
       let selected: string[]
       if (perms !== undefined) {
-        selected = perms ? perms.split(",").map((t) => t.trim()) : AVAILABLE_PERMISSIONS
+        // altimate_change start — upstream_fix: normalize legacy --tools values before deny-listing
+        selected = parseAgentPermissionSelection(perms) ?? AVAILABLE_PERMISSIONS
+        // altimate_change end
       } else {
         const result = await prompts.multiselect({
           message: "Select permissions to allow (Space to toggle)",
@@ -193,12 +228,9 @@ const AgentCreateCommand = effectCmd({
       }
 
       // Build permissions config — deny anything not explicitly selected.
-      const permissions: Record<string, "deny"> = {}
-      for (const permission of AVAILABLE_PERMISSIONS) {
-        if (!selected.includes(permission)) {
-          permissions[permission] = "deny"
-        }
-      }
+      // altimate_change start — upstream_fix: list is included and legacy write/apply_patch select edit
+      const permissions = buildAgentDeniedPermissions(selected)
+      // altimate_change end
 
       // Build frontmatter
       const frontmatter: {

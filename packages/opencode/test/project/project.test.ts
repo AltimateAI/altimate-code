@@ -169,6 +169,22 @@ describe("Project.fromDirectory", () => {
     }),
   )
 
+  it.live("honors legacy .git/altimate-code project ID cache", () =>
+    Effect.gen(function* () {
+      const project = yield* Project.Service
+      const tmp = yield* tmpdirScoped({ git: true })
+      const legacyID = ProjectID.make("legacy-altimate-project")
+      const legacyFile = path.join(tmp, ".git", "altimate-code")
+      const opencodeFile = path.join(tmp, ".git", "opencode")
+      yield* Effect.promise(() => Bun.write(legacyFile, `${legacyID}\n`))
+
+      const result = yield* project.fromDirectory(tmp)
+
+      expect(result.project.id).toBe(legacyID)
+      expect(yield* Effect.promise(() => Bun.file(opencodeFile).text())).toBe(legacyID)
+    }),
+  )
+
   it.live("prefers normalized origin remote over root commit", () =>
     Effect.gen(function* () {
       const project = yield* Project.Service

@@ -294,7 +294,7 @@ export namespace ToolRegistry {
   // altimate_change end
 
   // altimate_change start — upstream_fix: hide task.background unless the runtime flag enables it.
-  type ToolRuntimeFlags = Pick<RuntimeFlags.Info, "experimentalBackgroundSubagents">
+  type ToolRuntimeFlags = Pick<RuntimeFlags.Info, "experimentalBackgroundSubagents" | "enableExa" | "enableParallel">
 
   function backgroundSubagentsEnabled(flags?: ToolRuntimeFlags) {
     if (flags) return flags.experimentalBackgroundSubagents
@@ -302,6 +302,18 @@ export namespace ToolRegistry {
     if (value !== undefined) return ["1", "true", "yes"].includes(value.toLowerCase())
     return Flag.OPENCODE_EXPERIMENTAL
   }
+
+  // altimate_change start — upstream_fix: allow Parallel-enabled websearch for non-opencode providers.
+  function providerWebSearchEnabled(flags?: ToolRuntimeFlags) {
+    if (flags) return flags.enableExa || flags.enableParallel
+    const parallel =
+      process.env["OPENCODE_ENABLE_PARALLEL"]?.toLowerCase() === "true" ||
+      process.env["OPENCODE_ENABLE_PARALLEL"] === "1" ||
+      process.env["OPENCODE_EXPERIMENTAL_PARALLEL"]?.toLowerCase() === "true" ||
+      process.env["OPENCODE_EXPERIMENTAL_PARALLEL"] === "1"
+    return Flag.OPENCODE_ENABLE_EXA || parallel
+  }
+  // altimate_change end
 
   function applyRuntimeToolSchemaFlags<T extends Tool.DefWithoutID>(id: string, tool: T, flags?: ToolRuntimeFlags): T {
     if (id !== "task" || backgroundSubagentsEnabled(flags)) return tool
@@ -516,7 +528,9 @@ export namespace ToolRegistry {
         .filter((t) => {
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {
-            return model.providerID === ProviderID.opencode || Flag.OPENCODE_ENABLE_EXA
+            // altimate_change start — upstream_fix: gate on Exa OR Parallel runtime flags.
+            return model.providerID === ProviderID.opencode || providerWebSearchEnabled(runtimeFlags)
+            // altimate_change end
           }
 
           // use apply tool in same format as codex
@@ -530,7 +544,9 @@ export namespace ToolRegistry {
         .map(async (t) => {
           using _ = log.time(t.id)
           // altimate_change start — v1.17.9: Tool.Info.init() returns an Effect of DefWithoutID
-          const tool = await Effect.runPromise(t.init())
+          // altimate_change start — upstream_fix: pass caller agent through deferred tool init.
+          const tool = await Effect.runPromise(t.init({ agent }))
+          // altimate_change end
           // altimate_change end
           const output = {
             description: tool.description,

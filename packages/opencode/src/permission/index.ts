@@ -7,6 +7,10 @@ import os from "os"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+// altimate_change start — upstream_fix: load persisted permission approvals
+import { Database, eq } from "@/storage/db"
+import { PermissionTable } from "./permission.sql"
+// altimate_change end
 
 export const Event = {
   Asked: EventV2.define({ type: "permission.asked", schema: PermissionV1.Request.fields }),
@@ -56,10 +60,16 @@ export const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const state = yield* InstanceState.make<State>(
       Effect.fn("Permission.state")(function* (ctx) {
-        void ctx
+        // altimate_change start — upstream_fix: load persisted permission approvals
+        const row = Database.use((db) =>
+          db.select().from(PermissionTable).where(eq(PermissionTable.project_id, ctx.project.id)).get(),
+        )
+        // altimate_change end
         const state = {
           pending: new Map<PermissionV1.ID, PendingEntry>(),
-          approved: [],
+          // altimate_change start — upstream_fix: load persisted permission approvals
+          approved: [...(row?.data ?? [])],
+          // altimate_change end
         }
 
         yield* Effect.addFinalizer(() =>

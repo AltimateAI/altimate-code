@@ -1,4 +1,5 @@
 import { expect } from "bun:test"
+import { $ } from "bun"
 import path from "path"
 import { pathToFileURL } from "url"
 import { Effect, Layer } from "effect"
@@ -148,6 +149,32 @@ it.instance("loads tui config with the same precedence order as server config pa
   ),
 )
 
+it.instance("does not load tui config above the git worktree", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      const repo = path.join(test.directory, "repo")
+      const nested = path.join(repo, "packages", "app")
+      yield* fs.makeDirectory(nested, { recursive: true })
+      yield* Effect.promise(() => $`git init`.cwd(repo).quiet())
+
+      yield* fs.writeJson(path.join(test.directory, "tui.json"), { theme: "above-file" })
+      yield* fs.writeWithDirs(
+        path.join(test.directory, ".opencode", "tui.json"),
+        JSON.stringify({ theme: "above-dotdir", plugin: ["above-plugin@1.0.0"] }),
+      )
+      yield* fs.writeJson(path.join(repo, "tui.json"), { theme: "inside", plugin: ["inside-plugin@1.0.0"] })
+
+      const config = yield* getTuiConfig(nested)
+      const origins = yield* getTuiPluginOrigins(nested)
+      expect(config.theme).toBe("inside")
+      expect(config.plugin).toEqual(["inside-plugin@1.0.0"])
+      expect(origins.map((item) => ConfigPlugin.pluginSpecifier(item.spec))).toEqual(["inside-plugin@1.0.0"])
+    }),
+  ),
+)
+
 it.instance("loads managed tui config after regular tui config layers", () =>
   withCleanState(
     Effect.gen(function* () {
@@ -194,6 +221,35 @@ it.instance("migrates legacy managed tui keys from managed opencode config", () 
         scroll_speed: 4,
       })
       expect(yield* fs.existsSafe(source + ".tui-migration.bak")).toBe(true)
+    }),
+  ),
+)
+
+it.instance("does not migrate opencode.json above the git worktree", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      const repo = path.join(test.directory, "repo-migrate")
+      const nested = path.join(repo, "packages", "app")
+      yield* fs.makeDirectory(nested, { recursive: true })
+      yield* Effect.promise(() => $`git init`.cwd(repo).quiet())
+
+      const source = path.join(test.directory, "opencode.json")
+      yield* fs.writeJson(source, {
+        theme: "above-legacy",
+        tui: { scroll_speed: 4 },
+      })
+
+      const config = yield* getTuiConfig(nested)
+      expect(config.theme).toBeUndefined()
+      expect(config.scroll_speed).toBeUndefined()
+      expect(yield* fs.existsSafe(path.join(test.directory, "tui.json"))).toBe(false)
+      expect(yield* fs.existsSafe(source + ".tui-migration.bak")).toBe(false)
+
+      const server = JSON.parse(yield* fs.readFileString(source))
+      expect(server.theme).toBe("above-legacy")
+      expect(server.tui).toEqual({ scroll_speed: 4 })
     }),
   ),
 )
@@ -745,14 +801,21 @@ it.instance("applies env and file substitutions in tui.json", () =>
         const fs = yield* FSUtil.Service
         const test = yield* TestInstance
         yield* fs.writeFileString(path.join(test.directory, "keybind.txt"), "ctrl+q")
-        yield* fs.writeJson(path.join(test.directory, "tui.json"), {
-          theme: "{env:TUI_THEME_TEST}",
-          keybinds: { app_exit: "{file:keybind.txt}" },
-        })
+        yield* fs.writeFileString(
+          path.join(test.directory, "tui.json"),
+          `{
+            "theme": "\${TUI_THEME_TEST}",
+            "keybinds": { "app_exit": "{file:keybind.txt}" },
+            "attention": { "sound_pack": "$\${TUI_SOUND_PACK_TEST:-literal-pack}" },
+            "prompt": { "max_width": \${TUI_PROMPT_WIDTH_TEST:-88} }
+          }`,
+        )
 
         const config = yield* getTuiConfig(test.directory)
         expect(config.theme).toBe("env-theme")
         expect(config.keybinds.get("app.exit")?.[0]?.key).toBe("ctrl+q")
+        expect(config.attention.sound_pack).toBe("${TUI_SOUND_PACK_TEST:-literal-pack}")
+        expect(config.prompt?.max_width).toBe(88)
       }),
     ),
   ),

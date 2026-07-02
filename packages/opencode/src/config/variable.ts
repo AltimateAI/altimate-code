@@ -4,6 +4,9 @@ import path from "path"
 import os from "os"
 import { Filesystem } from "@/util/filesystem"
 import { InvalidError } from "@opencode-ai/core/v1/config/error"
+// altimate_change start — upstream_fix: restore ${VAR}/${VAR:-default}/$${VAR} config interpolation
+import { ConfigPaths } from "@/config/paths"
+// altimate_change end
 
 type ParseSource =
   | {
@@ -20,6 +23,9 @@ type SubstituteInput = ParseSource & {
   text: string
   missing?: "error" | "empty"
   env?: Record<string, string>
+  // altimate_change start — upstream_fix: restore ${VAR}/${VAR:-default}/$${VAR} config interpolation
+  format?: "json" | "raw"
+  // altimate_change end
 }
 
 function source(input: ParseSource) {
@@ -33,9 +39,22 @@ function dir(input: ParseSource) {
 /** Apply {env:VAR} and {file:path} substitutions to config text. */
 export async function substitute(input: SubstituteInput) {
   const missing = input.missing ?? "error"
-  let text = input.text.replace(/\{env:([^}]+)\}/g, (_, varName) => {
-    return (input.env?.[varName] ?? process.env[varName]) || ""
+  // altimate_change start — upstream_fix: restore ${VAR}/${VAR:-default}/$${VAR} config interpolation
+  const format = input.format ?? "json"
+  const encode = (value: string) => (format === "raw" ? value : JSON.stringify(value).slice(1, -1))
+  let text = input.text.replace(ConfigPaths.ENV_VAR_PATTERN, (match, escaped, dollarVar, dollarDefault, braceVar) => {
+    if (escaped !== undefined) return "$" + escaped
+    if (dollarVar !== undefined) {
+      const envValue = input.env?.[dollarVar] ?? process.env[dollarVar]
+      const resolved = envValue !== undefined && envValue !== ""
+      return encode(resolved ? envValue : (dollarDefault ?? ""))
+    }
+    if (braceVar !== undefined) {
+      return (input.env?.[braceVar] ?? process.env[braceVar]) || ""
+    }
+    return match
   })
+  // altimate_change end
 
   const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
   if (!fileMatches.length) return text
@@ -82,7 +101,9 @@ export async function substitute(input: SubstituteInput) {
       })
     ).trim()
 
-    out += JSON.stringify(fileContent).slice(1, -1)
+    // altimate_change start — upstream_fix: keep raw-string substitution callers unescaped
+    out += format === "raw" ? fileContent : JSON.stringify(fileContent).slice(1, -1)
+    // altimate_change end
     cursor = index + token.length
   }
 

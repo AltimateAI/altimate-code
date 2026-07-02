@@ -59,6 +59,16 @@ const withBrokenPlugin = testEffect(
     replacements: [...replacements, LayerNode.replace(Plugin.node, brokenPluginLayer)],
   }),
 )
+// altimate_change start — upstream_fix: cover Parallel websearch exposure for non-opencode providers.
+const withParallel = testEffect(
+  LayerNode.buildLayer(root, {
+    replacements: [
+      LayerNode.replace(Config.node, configLayer),
+      LayerNode.replace(RuntimeFlags.node, RuntimeFlags.layer({ enableParallel: true })),
+    ],
+  }),
+)
+// altimate_change end
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -88,6 +98,20 @@ describe("tool.registry", () => {
 
       expect(task?.jsonSchema).toBeDefined()
       expect((task?.jsonSchema?.properties as Record<string, unknown> | undefined)?.background).toBeUndefined()
+    }),
+  )
+
+  withParallel.instance("exposes websearch for non-opencode providers when Parallel is enabled", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const tools = yield* registry.tools({
+        providerID: ProviderID.anthropic,
+        modelID: ModelID.make("test"),
+        agent: yield* agent.defaultInfo(),
+      })
+
+      expect(tools.map((tool) => tool.id)).toContain("websearch")
     }),
   )
 

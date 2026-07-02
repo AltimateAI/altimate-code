@@ -1186,6 +1186,19 @@ export namespace ProviderTransform {
     ) {
       return mergeDeep({ store: false }, small)
     }
+    // altimate_change start — upstream_fix: restore Google minimal thinking for small calls
+    if (
+      model.providerID === "google" ||
+      model.api.npm === "@ai-sdk/google" ||
+      model.api.npm === "@ai-sdk/google-vertex"
+    ) {
+      const id = model.api.id.toLowerCase()
+      if (id.includes("gemini-3")) {
+        return { thinkingConfig: { thinkingLevel: "minimal" } }
+      }
+      return { thinkingConfig: { thinkingBudget: 0 } }
+    }
+    // altimate_change end
     if (model.providerID === "openrouter" || model.providerID === "llmgateway") {
       if (model.providerID === "openrouter" && (small as any).reasoning?.effort === "low") {
         return { reasoning: { effort: "none" } }

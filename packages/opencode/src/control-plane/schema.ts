@@ -12,7 +12,9 @@ export const WorkspaceID = WorkspaceV2.ID.pipe(
   withStatics((schema: typeof WorkspaceV2.ID) => ({
     make: (id: string) => schema.make(id),
     ascending: (id?: string) => schema.ascending(id),
-    zod: z.string().pipe(z.custom<WorkspaceID>()),
+    // altimate_change start — upstream_fix: restore wrk-prefix validation for zod callers
+    zod: z.string().startsWith("wrk").pipe(z.custom<WorkspaceID>()),
+    // altimate_change end
   })),
 )
 // altimate_change end

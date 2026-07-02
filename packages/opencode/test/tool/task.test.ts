@@ -183,12 +183,8 @@ describe("tool.task", () => {
     },
   )
 
-  // BUG: per-agent task-permission filtering of the description is lost in the v1.17.9 Tool API.
-  // The new Tool.Info.init() takes no caller agent, so the legacy task initFn receives an empty
-  // ctx (legacyInitFnToInit passes fn({})) and cannot filter denied subagents — it degrades to
-  // "show all". Re-enabling this needs the Tool API (or ToolRegistry.tools) to thread the caller
-  // agent into init(), which is upstream-shared and out of scope for the test/tool fix pass.
-  it.instance.skip(
+  // altimate_change start — upstream_fix: ToolRegistry.tools threads caller agent into init().
+  it.instance(
     "description hides denied subagents for the caller",
     () =>
       Effect.gen(function* () {
@@ -222,6 +218,7 @@ describe("tool.task", () => {
       },
     },
   )
+  // altimate_change end
 
   // BUG: the following execute/background tests create real sessions, which migrate the SQLite DB
   // via TWO Database modules that both open the same file — `@opencode-ai/core/database/database`

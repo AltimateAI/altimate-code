@@ -274,6 +274,70 @@ describe("ProviderTransform.options - google thinkingConfig gating", () => {
   })
 })
 
+describe("ProviderTransform.smallOptions - google thinking", () => {
+  const createGoogleModel = (
+    apiId: string,
+    overrides: {
+      providerID?: string
+      npm?: "@ai-sdk/google" | "@ai-sdk/google-vertex"
+      variants?: Record<string, Record<string, any>>
+    } = {},
+  ) =>
+    ({
+      id: `${overrides.providerID ?? "google"}/${apiId}`,
+      providerID: overrides.providerID ?? "google",
+      api: {
+        id: apiId,
+        url: "https://generativelanguage.googleapis.com",
+        npm: overrides.npm ?? "@ai-sdk/google",
+      },
+      capabilities: {
+        reasoning: true,
+      },
+      variants: overrides.variants ?? {},
+    }) as any
+
+  test("disables Gemini 2.5 thinking budget for small calls even when high is the first variant", () => {
+    const result = ProviderTransform.smallOptions(
+      createGoogleModel("gemini-2.5-pro", {
+        variants: {
+          high: { thinkingConfig: { includeThoughts: true, thinkingBudget: 16000 } },
+          max: { thinkingConfig: { includeThoughts: true, thinkingBudget: 24576 } },
+        },
+      }),
+    )
+
+    expect(result).toEqual({ thinkingConfig: { thinkingBudget: 0 } })
+  })
+
+  test("uses minimal Gemini 3 thinking level for small calls", () => {
+    const result = ProviderTransform.smallOptions(
+      createGoogleModel("gemini-3-pro", {
+        variants: {
+          low: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
+          high: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
+        },
+      }),
+    )
+
+    expect(result).toEqual({ thinkingConfig: { thinkingLevel: "minimal" } })
+  })
+
+  test("applies the same small-call default to Google Vertex SDK models", () => {
+    const result = ProviderTransform.smallOptions(
+      createGoogleModel("gemini-2.5-flash", {
+        providerID: "google-vertex",
+        npm: "@ai-sdk/google-vertex",
+        variants: {
+          high: { thinkingConfig: { includeThoughts: true, thinkingBudget: 16000 } },
+        },
+      }),
+    )
+
+    expect(result).toEqual({ thinkingConfig: { thinkingBudget: 0 } })
+  })
+})
+
 describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
   const sessionID = "test-session-123"
 
