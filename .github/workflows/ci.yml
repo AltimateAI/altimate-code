@@ -32,7 +32,18 @@ jobs:
         with:
           filters: |
             typescript:
+              # altimate_change start — upstream_fix: typecheck every declared TypeScript workspace
+              - 'packages/cli/**'
+              - 'packages/core/**'
+              - 'packages/dbt-tools/**'
+              - 'packages/effect-drizzle-sqlite/**'
+              - 'packages/effect-sqlite-node/**'
+              - 'packages/http-recorder/**'
+              - 'packages/llm/**'
               - 'packages/opencode/**'
+              - 'packages/server/**'
+              - 'packages/tui/**'
+              # altimate_change end
               - 'packages/drivers/**'
               - 'packages/plugin/**'
               - 'packages/sdk/**'

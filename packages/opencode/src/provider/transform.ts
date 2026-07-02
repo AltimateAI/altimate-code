@@ -1186,11 +1186,12 @@ export namespace ProviderTransform {
     ) {
       return mergeDeep({ store: false }, small)
     }
-    // altimate_change start — upstream_fix: restore Google minimal thinking for small calls
+    // altimate_change start — upstream_fix: restore Google minimal thinking for small calls only on reasoning models
     if (
-      model.providerID === "google" ||
-      model.api.npm === "@ai-sdk/google" ||
-      model.api.npm === "@ai-sdk/google-vertex"
+      (model.providerID === "google" ||
+        model.api.npm === "@ai-sdk/google" ||
+        model.api.npm === "@ai-sdk/google-vertex") &&
+      model.capabilities.reasoning
     ) {
       const id = model.api.id.toLowerCase()
       if (id.includes("gemini-3")) {

@@ -385,6 +385,26 @@ it.instance("updates config and preserves empty shell sentinel", () =>
   }),
 )
 
+it.instance("update invalidates cached project config", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* writeConfigEffect(test.directory, {
+      $schema: "https://opencode.ai/config.json",
+      username: "before-update",
+    })
+
+    expect((yield* Config.use.get()).username).toBe("before-update")
+
+    yield* writeConfigEffect(test.directory, {
+      $schema: "https://opencode.ai/config.json",
+      username: "after-update",
+    })
+    yield* Config.use.update({})
+
+    expect((yield* Config.use.get()).username).toBe("after-update")
+  }),
+)
+
 it.effect("updates global config and omits empty shell key in json", () =>
   withGlobalConfig({ config: { shell: "bash" } }, ({ dir }) =>
     Effect.gen(function* () {
@@ -394,6 +414,44 @@ it.effect("updates global config and omits empty shell key in json", () =>
       expect(writtenConfig).not.toHaveProperty("shell")
     }),
   ),
+)
+
+it.effect("updateGlobal invalidates cached merged config", () =>
+  Effect.gen(function* () {
+    const firstProject = yield* tmpdirScoped()
+    const secondProject = yield* tmpdirScoped()
+    return yield* withGlobalConfig({ config: { username: "before-global-update" } }, () =>
+      Effect.gen(function* () {
+        yield* withInstanceDir(
+          firstProject,
+          Effect.gen(function* () {
+            expect((yield* Config.use.get()).username).toBe("before-global-update")
+          }),
+        )
+        yield* withInstanceDir(
+          secondProject,
+          Effect.gen(function* () {
+            expect((yield* Config.use.get()).username).toBe("before-global-update")
+          }),
+        )
+
+        yield* Config.use.updateGlobal({ username: "after-global-update" })
+
+        yield* withInstanceDir(
+          firstProject,
+          Effect.gen(function* () {
+            expect((yield* Config.use.get()).username).toBe("after-global-update")
+          }),
+        )
+        yield* withInstanceDir(
+          secondProject,
+          Effect.gen(function* () {
+            expect((yield* Config.use.get()).username).toBe("after-global-update")
+          }),
+        )
+      }),
+    )
+  }),
 )
 
 it.effect("updates global config and omits empty shell key in jsonc", () =>
@@ -478,6 +536,25 @@ it.instance("loads JSONC config file", () =>
     const config = yield* Config.use.get()
     expect(config.model).toBe("test/model")
     expect(config.username).toBe("testuser")
+  }),
+)
+
+it.instance("loads JSONC config from .altimate-code directory", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* FSUtil.use.writeWithDirs(
+      path.join(test.directory, ".altimate-code", "altimate-code.jsonc"),
+      `{
+        // Plugin-created branded config should be loaded.
+        "$schema": "https://altimate.ai/config.json",
+        "model": "test/altimate-jsonc",
+        "username": "jsonc-user"
+      }`,
+    )
+
+    const config = yield* Config.use.get()
+    expect(config.model).toBe("test/altimate-jsonc")
+    expect(config.username).toBe("jsonc-user")
   }),
 )
 
@@ -1212,6 +1289,17 @@ it.instance("managed jsonc settings override managed json settings", () =>
     const config = yield* Config.use.get()
     expect(config.model).toBe("managed/jsonc")
   }),
+)
+
+it.instance(
+  "managed altimate-code jsonc settings override user settings",
+  Effect.gen(function* () {
+    yield* writeManagedSettingsEffect({ model: "managed/altimate-jsonc" }, "altimate-code.jsonc")
+
+    const config = yield* Config.use.get()
+    expect(config.model).toBe("managed/altimate-jsonc")
+  }),
+  { config: { model: "user/model" } },
 )
 
 it.instance(

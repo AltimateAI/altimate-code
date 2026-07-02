@@ -548,6 +548,34 @@ describe("invariant: build infrastructure pinning (cycle 2)", () => {
     const coreDeps = { ...(corePkg.dependencies ?? {}), ...(corePkg.devDependencies ?? {}) }
     expect(coreDeps["@npmcli/arborist"]).toBeDefined()
   })
+
+  // altimate_change start — upstream_fix: CI TypeScript filter tracks workspace typecheck packages
+  test("CI TypeScript path filter includes every workspace with a typecheck script", async () => {
+    const rootPkg = JSON.parse(await readText(path.join(repoRoot, "package.json")))
+    const workspaces: string[] = rootPkg.workspaces?.packages ?? []
+    const ci = await readText(path.join(repoRoot, ".github", "workflows", "ci.yml"))
+    const missing: string[] = []
+
+    for (const ws of workspaces) {
+      const pkgPath = path.join(repoRoot, ws, "package.json")
+      let workspacePkg: any
+      try {
+        workspacePkg = JSON.parse(await readText(pkgPath))
+      } catch {
+        continue
+      }
+      if (!workspacePkg.scripts?.typecheck) continue
+
+      const exact = `- '${ws}/**'`
+      const sdkUmbrella = ws === "packages/sdk/js" ? "- 'packages/sdk/**'" : undefined
+      if (!ci.includes(exact) && (!sdkUmbrella || !ci.includes(sdkUmbrella))) {
+        missing.push(ws)
+      }
+    }
+
+    expect(missing).toEqual([])
+  })
+  // altimate_change end
 })
 
 // ---------------------------------------------------------------------------

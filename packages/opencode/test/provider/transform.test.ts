@@ -336,6 +336,13 @@ describe("ProviderTransform.smallOptions - google thinking", () => {
 
     expect(result).toEqual({ thinkingConfig: { thinkingBudget: 0 } })
   })
+
+  test("does not synthesize thinkingConfig for Google models without reasoning capability", () => {
+    const model = createGoogleModel("gemini-2.5-flash")
+    model.capabilities.reasoning = false
+
+    expect(ProviderTransform.smallOptions(model)).toEqual({})
+  })
 })
 
 describe("ProviderTransform.options - gpt-5 textVerbosity", () => {

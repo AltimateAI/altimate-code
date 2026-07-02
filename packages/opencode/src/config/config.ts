@@ -20,6 +20,9 @@ import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
 import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+// altimate_change start — upstream_fix: invalidate Config's per-instance cache after writes
+import { ScopedCache } from "effect"
+// altimate_change end
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
@@ -515,7 +518,14 @@ export const layer = Layer.effect(
           if (dir.endsWith(".altimate-code") || dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
             // altimate_change end
             // altimate_change start - support altimate-code.json config filename
-            for (const file of ["altimate-code.json", "opencode.json", "opencode.jsonc"]) {
+            for (const file of [
+              "altimate-code.json",
+              // altimate_change start — upstream_fix: load plugin-created altimate-code.jsonc config files
+              "altimate-code.jsonc",
+              // altimate_change end
+              "opencode.json",
+              "opencode.jsonc",
+            ]) {
               // altimate_change end
               const source = path.join(dir, file)
               yield* Effect.logDebug(`loading config from ${source}`)
@@ -617,7 +627,14 @@ export const layer = Layer.effect(
         const managedDir = ConfigManaged.managedConfigDir()
         if (existsSync(managedDir)) {
           // altimate_change start - support altimate-code.json config filename
-          for (const file of ["altimate-code.json", "opencode.json", "opencode.jsonc"]) {
+          for (const file of [
+            "altimate-code.json",
+            // altimate_change start — upstream_fix: load managed altimate-code.jsonc config files
+            "altimate-code.jsonc",
+            // altimate_change end
+            "opencode.json",
+            "opencode.jsonc",
+          ]) {
             // altimate_change end
             const source = path.join(managedDir, file)
             yield* merge(source, yield* loadFile(source), "global")
@@ -744,6 +761,16 @@ export const layer = Layer.effect(
       )
     })
 
+    // altimate_change start — upstream_fix: invalidate Config's per-instance cache after writes
+    const invalidateCurrent = Effect.fn("Config.invalidateCurrent")(function* () {
+      yield* InstanceState.invalidate(state)
+    })
+
+    const invalidateAllInstances = Effect.fn("Config.invalidateAllInstances")(function* () {
+      yield* ScopedCache.invalidateAll(state.cache)
+    })
+    // altimate_change end
+
     const update = Effect.fn("Config.update")(function* (config: Info) {
       const dir = yield* InstanceState.directory
       const file = path.join(dir, "config.json")
@@ -751,10 +778,16 @@ export const layer = Layer.effect(
       yield* fs
         .writeFileString(file, JSON.stringify(mergeDeep(writable(existing), writable(config)), null, 2))
         .pipe(Effect.orDie)
+      // altimate_change start — upstream_fix: make subsequent Config.get() reload after local config writes
+      yield* invalidateCurrent()
+      // altimate_change end
     })
 
     const invalidate = Effect.fn("Config.invalidate")(function* () {
       yield* invalidateGlobal
+      // altimate_change start — upstream_fix: clear merged Config.get() caches too
+      yield* invalidateAllInstances()
+      // altimate_change end
     })
 
     const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
