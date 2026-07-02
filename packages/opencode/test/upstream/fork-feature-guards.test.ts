@@ -188,4 +188,19 @@ describe("fork feature presence guards (merge drop detection)", () => {
     const skill = await read("src/plugin/tui/altimate/skill-ops.tsx")
     expect(skill).toMatch(/url:\s*"\/skill"[\s\S]*query:\s*\{\s*reload:\s*"true"\s*\}/)
   })
+
+  test("re-homed TUI upstream fixes keep prompt/update/child-session behavior", async () => {
+    const promptEnhance = await read("src/plugin/tui/altimate/prompt-enhance.tsx")
+    expect(promptEnhance).toMatch(
+      /const original = ref\.current\.input[\s\S]*const enhanced = await enhance\(api, original\)[\s\S]*if \(ref\.current\.input !== original\) return/,
+    )
+
+    const app = await read("src/app.tsx", MONO + "/tui")
+    expect(app).toContain("UPGRADE_KV_KEY")
+    expect(app).toMatch(/installation\.update-available[\s\S]*kv\.set\(UPGRADE_KV_KEY, version\)/)
+
+    const session = await read("src/routes/session/index.tsx", MONO + "/tui")
+    expect(session).toMatch(/findIndex\(\(x\) => x\.id === session\(\)\?\.id\) \+ direction/)
+    expect(session).not.toMatch(/findIndex\(\(x\) => x\.id === session\(\)\?\.id\) - direction/)
+  })
 })

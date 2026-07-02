@@ -94,6 +94,12 @@ export namespace Server {
 
   export const createApp = (opts: { cors?: string[] }): Hono => {
     const app = new Hono()
+    // altimate_change start — upstream_fix: forward shipped non-/api HttpApi routes used by the TUI
+    const forwardHttpApiBridge = async (c: { req: { raw: Request } }) => {
+      const bridge = await httpApiBridge()
+      return bridge.handler(c.req.raw, bridge.context)
+    }
+    // altimate_change end
     return app
       .onError((err, c) => {
         log.error("failed", {
@@ -182,24 +188,20 @@ export namespace Server {
         }),
       )
       // altimate_change start — upstream_fix: route v2 SDK/TUI /api requests before legacy instance/UI routes.
-      .all("/api/*", async (c) => {
-        const bridge = await httpApiBridge()
-        return bridge.handler(c.req.raw, bridge.context)
-      })
+      .all("/api/*", forwardHttpApiBridge)
       // altimate_change end
-      // altimate_change start — upstream_fix: the workspace HttpApi group is declared at
-      // /experimental/workspace (NOT under /api/*), so the /api bridge above never reaches it and the
-      // v2 SDK/TUI `experimental.workspace.*` calls (list/status/adapter/create/warp) fell through to
-      // the legacy catch-all proxy → 500. Bridge the workspace paths to the HttpApi explicitly, before
-      // the legacy /experimental routes (whose /workspace sub-route was removed during the merge).
-      .all("/experimental/workspace", async (c) => {
-        const bridge = await httpApiBridge()
-        return bridge.handler(c.req.raw, bridge.context)
-      })
-      .all("/experimental/workspace/*", async (c) => {
-        const bridge = await httpApiBridge()
-        return bridge.handler(c.req.raw, bridge.context)
-      })
+      // altimate_change start — upstream_fix: bridge non-/api HttpApi routes declared outside /api/*.
+      // The TUI calls these generated SDK groups directly: workspace sync/list/status/adapter/warp,
+      // sync.start, control-plane move-session, project copy management/name generation, and project
+      // directories. Mount them before the legacy Hono route trees so they do not fall through to the
+      // app.altimate.ai catch-all proxy or a partial legacy route.
+      .all("/experimental/workspace", forwardHttpApiBridge)
+      .all("/experimental/workspace/*", forwardHttpApiBridge)
+      .all("/sync/*", forwardHttpApiBridge)
+      .all("/experimental/control-plane/move-session", forwardHttpApiBridge)
+      .all("/experimental/project/:projectID/copy", forwardHttpApiBridge)
+      .all("/experimental/project/:projectID/copy/*", forwardHttpApiBridge)
+      .all("/project/:projectID/directories", forwardHttpApiBridge)
       // altimate_change end
       .route("/global", GlobalRoutes())
       .put(

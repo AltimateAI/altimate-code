@@ -45,7 +45,6 @@ async function enhance(api: TuiPluginApi, original: string): Promise<string | un
       api.ui.toast({ message: "Prompt already looks good", variant: "info", duration: 2000 })
       return undefined
     }
-    api.ui.toast({ message: "Prompt enhanced", variant: "success", duration: 2000 })
     return enhanced
   } catch {
     api.ui.toast({ message: "Failed to enhance prompt", variant: "error", duration: 3000 })
@@ -68,8 +67,15 @@ const tui: TuiPlugin = async (api) => {
             api.ui.toast({ variant: "warning", message: "No active prompt to enhance", duration: 2000 })
             return
           }
-          const enhanced = await enhance(api, ref.current.input)
-          if (enhanced !== undefined) ref.set({ ...ref.current, input: enhanced })
+          // altimate_change start — upstream_fix: discard stale prompt enhancement results
+          const original = ref.current.input
+          const enhanced = await enhance(api, original)
+          if (ref.current.input !== original) return
+          if (enhanced !== undefined) {
+            ref.set({ ...ref.current, input: enhanced })
+            api.ui.toast({ message: "Prompt enhanced", variant: "success", duration: 2000 })
+          }
+          // altimate_change end
         },
       },
     ],

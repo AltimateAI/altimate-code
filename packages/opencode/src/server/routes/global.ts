@@ -225,6 +225,19 @@ export const GlobalRoutes = lazy(() =>
       async (c) => {
         const config = c.req.valid("json") as ConfigV1.Info
         const next = await Config.updateGlobal(config)
+        // altimate_change start — upstream_fix: dispose all instances after global config write
+        void Instance.disposeAll()
+          .catch(() => undefined)
+          .finally(() => {
+            GlobalBus.emit("event", {
+              directory: "global",
+              payload: {
+                type: GlobalDisposedEvent.type,
+                properties: {},
+              },
+            })
+          })
+        // altimate_change end
         return c.json(next.info)
       },
     )

@@ -53,7 +53,9 @@ export const QuestionRoutes = lazy(() =>
       validator(
         "param",
         z.object({
-          requestID: zod(QuestionID),
+          // altimate_change start — upstream_fix: use QuestionID.zod so invalid prefixes reject at the Hono edge
+          requestID: QuestionID.zod,
+          // altimate_change end
         }),
       ),
       validator("json", zod(Question.Reply)),
@@ -88,7 +90,9 @@ export const QuestionRoutes = lazy(() =>
       validator(
         "param",
         z.object({
-          requestID: zod(QuestionID),
+          // altimate_change start — upstream_fix: use QuestionID.zod so invalid prefixes reject at the Hono edge
+          requestID: QuestionID.zod,
+          // altimate_change end
         }),
       ),
       async (c) => {

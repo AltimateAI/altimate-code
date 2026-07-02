@@ -9,6 +9,9 @@ import { errors } from "../error"
 import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
 import { zod } from "@/util/effect-zod"
+// altimate_change start — upstream_fix: legacy config PATCH must reload the active instance
+import { Instance } from "../../project/instance"
+// altimate_change end
 
 const log = Log.create({ service: "server" })
 
@@ -57,6 +60,9 @@ export const ConfigRoutes = lazy(() =>
       async (c) => {
         const config = c.req.valid("json") as ConfigV1.Info
         await Config.update(config)
+        // altimate_change start — upstream_fix: dispose active instance after project config write
+        await Instance.dispose()
+        // altimate_change end
         return c.json(config)
       },
     )

@@ -4,6 +4,9 @@ import { Deferred, Effect } from "effect"
 import { Global } from "@opencode-ai/core/global"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
+// altimate_change start — upstream_fix: persist update availability for footer indicator
+import { UPGRADE_KV_KEY } from "./component/upgrade-indicator-utils"
+// altimate_change end
 import { ClipboardProvider, useClipboard } from "./context/clipboard"
 import { ExitProvider, useExit } from "./context/exit"
 import { EpilogueProvider } from "./context/epilogue"
@@ -1009,6 +1012,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   event.on("installation.update-available", async (evt) => {
     console.log("installation.update-available", evt)
     const version = evt.properties.version
+    // altimate_change start — upstream_fix: persist update availability for footer indicator
+    kv.set(UPGRADE_KV_KEY, version)
+    // altimate_change end
 
     const skipped = kv.get("skipped_version")
     if (skipped && !isVersionGreater(version, skipped)) return

@@ -98,6 +98,16 @@ test("brackets navigate diff hunks", async () => {
   }
 })
 
+test("diff fetch failures are checked before the empty state", async () => {
+  const source = await Bun.file(new URL("../../../src/feature-plugins/system/diff-viewer.tsx", import.meta.url)).text()
+  const errorBranch = source.indexOf("when={!diff.loading && diff.error}")
+  const emptyBranch = source.indexOf("when={!diff.loading && files().length === 0}")
+
+  expect(errorBranch).toBeGreaterThan(-1)
+  expect(emptyBranch).toBeGreaterThan(-1)
+  expect(errorBranch).toBeLessThan(emptyBranch)
+})
+
 async function renderDiffViewer(vcsDiff: unknown[], height = 20) {
   const commands = new Map<
     string,

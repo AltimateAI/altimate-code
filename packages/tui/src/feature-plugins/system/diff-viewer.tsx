@@ -751,18 +751,20 @@ function DiffViewer(props: { api: TuiPluginApi }) {
                 <text fg={theme().textMuted}>Loading diff...</text>
               </box>
             </Match>
-            <Match when={!diff.loading && files().length === 0}>
-              <Separator axis="x" />
-              <box flexGrow={1} paddingLeft={1}>
-                <text fg={theme().textMuted}>No diff!</text>
-              </box>
-            </Match>
+            {/* altimate_change start — upstream_fix: show diff load errors before empty state */}
             <Match when={!diff.loading && diff.error}>
               <Separator axis="x" />
               <box flexGrow={1} paddingLeft={1}>
                 <text fg={theme().error}>Failed to load diff</text>
               </box>
             </Match>
+            <Match when={!diff.loading && files().length === 0}>
+              <Separator axis="x" />
+              <box flexGrow={1} paddingLeft={1}>
+                <text fg={theme().textMuted}>No diff!</text>
+              </box>
+            </Match>
+            {/* altimate_change end */}
             <Match when={!diff.loading}>
               <PanelGroup axis="x">
                 <Show when={showFileTree()}>

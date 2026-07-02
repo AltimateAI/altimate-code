@@ -453,7 +453,9 @@ export function Session() {
     if (children().length === 1) return
 
     const sessions = children().filter((x) => !!x.parentID)
-    let next = sessions.findIndex((x) => x.id === session()?.id) - direction
+    // altimate_change start — upstream_fix: restore child-session next/previous direction
+    let next = sessions.findIndex((x) => x.id === session()?.id) + direction
+    // altimate_change end
 
     if (next >= sessions.length) next = 0
     if (next < 0) next = sessions.length - 1
