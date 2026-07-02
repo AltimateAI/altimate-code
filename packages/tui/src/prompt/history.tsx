@@ -110,8 +110,8 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
     })
 
     return {
+      // altimate_change start — preserve in-progress prompt while browsing history
       move(direction: 1 | -1, prompt: PromptInfo) {
-        // altimate_change start — preserve in-progress prompt while browsing history
         const result = movePromptHistory({ index: store.index, draft: store.draft }, store.history, direction, prompt)
         if (!result) return undefined
         setStore("index", result.state.index)
