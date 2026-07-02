@@ -37,7 +37,14 @@ export function DialogMcp() {
       map(([name, status]) => ({
         value: name,
         title: name,
-        description: status.status === "failed" ? "failed" : status.status,
+        // altimate_change start — show MCP auth command in MCP dialog (#972)
+        description:
+          status.status === "failed"
+            ? "failed"
+            : status.status === "needs_auth"
+              ? `Needs authentication (run: altimate mcp auth ${name})`
+              : status.status,
+        // altimate_change end
         footer: <Status enabled={local.mcp.isEnabled(name)} loading={loadingMcp === name} />,
         category: undefined,
       })),

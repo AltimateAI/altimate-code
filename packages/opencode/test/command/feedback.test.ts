@@ -88,11 +88,23 @@ describe("/feedback command", () => {
       })
     })
 
-    test("template includes confirmation step", async () => {
+    test("template proceeds directly when enough detail is available", async () => {
       await withInstance(async () => {
         const cmd = (await Command.get("feedback"))!
         const template = await cmd.template
-        expect(template).toContain("confirm")
+        expect(template).toContain("proceed directly to filing")
+        expect(template).toContain("submit directly")
+        expect(template).not.toContain("Ask the user to confirm")
+      })
+    })
+
+    test("template limits clarifying questions but preserves label follow-up", async () => {
+      await withInstance(async () => {
+        const cmd = (await Command.get("feedback"))!
+        const template = await cmd.template
+        expect(template).toContain("Ask at most one round of clarifying questions")
+        expect(template).toContain("Keep the category/label follow-up behavior")
+        expect(template).toContain("ask the user to pick one if unclear")
       })
     })
   })

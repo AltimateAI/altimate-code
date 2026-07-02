@@ -2664,6 +2664,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
    * Does not match when preceded by word characters or backticks (to avoid email addresses and quoted references)
    */
 
+  // altimate_change start — shared text formatter for /mcps runtime status (#972)
+  /** @internal Exported for tests. */
+  export function formatMcpStatusForDisplay(name: string, status: MCP.Status) {
+    const icon = status.status === "connected" ? "\u2713" : "\u25cb"
+    if (status.status === "failed") return icon + " " + status.status + " (" + status.error + ")"
+    if (status.status === "needs_auth") return icon + " Needs authentication (run: altimate mcp auth " + name + ")"
+    return icon + " " + status.status
+  }
+  // altimate_change end
+
   export async function command(input: CommandInput): Promise<MessageV2.WithParts> {
     log.info("command", input)
 
@@ -2715,14 +2725,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const model = await lastModel(input.sessionID)
         const statusMap = await MCP.status()
         const rows = Object.entries(statusMap)
-          .map(([srv, s]) => {
-            const icon = s.status === "connected" ? "\u2713" : "\u25cb"
-            const label =
-              s.status === "failed"
-                ? icon + " " + s.status + " (" + s.error + ")"
-                : icon + " " + s.status
-            return "| `" + srv + "` | " + label + " |"
-          })
+          .map(([srv, s]) => "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s) + " |")
           .join("\n")
         const responseText = rows
           ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows

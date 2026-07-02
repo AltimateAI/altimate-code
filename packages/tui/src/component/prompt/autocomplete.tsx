@@ -436,9 +436,23 @@ export function Autocomplete(props: {
 
   const commands = createMemo((): AutocompleteOption[] => {
     const results: AutocompleteOption[] = [...slashes()]
+    // altimate_change start — keep TUI slash actions on autocomplete collisions
+    // If a local slashName matches a server command name, autocomplete should show
+    // the local palette action because selecting it can open TUI-only UI (for
+    // example /mcps -> DialogMcp). Submitting typed text like `/mcps` or
+    // `/mcps enable foo` still reaches the server command handler.
+    const localSlashNames = new Set(
+      results
+        .filter((option) => option.display.startsWith("/"))
+        .map((option) => option.display.slice(1)),
+    )
+    // altimate_change end
 
     for (const serverCommand of sync.data.command) {
       if (serverCommand.source === "skill") continue
+      // altimate_change start — keep one autocomplete row per slash command name
+      if (localSlashNames.has(serverCommand.name)) continue
+      // altimate_change end
       const label = serverCommand.source === "mcp" ? ":mcp" : ""
       results.push({
         display: "/" + serverCommand.name + label,
