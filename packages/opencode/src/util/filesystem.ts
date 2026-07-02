@@ -3,6 +3,9 @@ import { createWriteStream, existsSync, statSync } from "fs"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
+// altimate_change start — upstream_fix: convert Git Bash/Cygwin/WSL paths before Windows realpath
+import { win32 } from "path"
+// altimate_change end
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 // altimate_change start — used by resolveFilePath for "~" expansion and file:// URLs
@@ -130,11 +133,14 @@ export namespace Filesystem {
    */
   export function normalizePath(p: string): string {
     if (process.platform !== "win32") return p
+    // altimate_change start — upstream_fix: convert Git Bash/Cygwin/WSL paths before Windows realpath
+    const resolved = win32.normalize(win32.resolve(windowsPath(p)))
     try {
-      return realpathSync.native(p)
+      return realpathSync.native(resolved)
     } catch {
-      return p
+      return resolved
     }
+    // altimate_change end
   }
 
   export function normalizePathPattern(p: string): string {

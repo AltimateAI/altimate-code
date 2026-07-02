@@ -14,7 +14,9 @@ Read the highest-value sources first:
 - build, test, lint, formatter, typecheck, and codegen config
 - CI workflows and pre-commit / task runner config
 - existing instruction files (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules/`, `.cursorrules`, `.github/copilot-instructions.md`)
-- repo-local OpenCode config such as `opencode.json`
+// altimate_change start — upstream_fix: product branding in repo-local config prompt
+- repo-local Altimate Code config such as `opencode.json`
+// altimate_change end
 
 If architecture is still unclear after reading config and docs, inspect a small number of representative code files to find the real entrypoints, package boundaries, and execution flow. Prefer reading the files that explain how the system is wired together over random leaf files.
 

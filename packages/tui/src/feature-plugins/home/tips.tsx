@@ -6,7 +6,9 @@ import { useBindings } from "../../keymap"
 
 const id = "internal:home-tips"
 
-function View(props: { api: TuiPluginApi; hidden: boolean; show: boolean; connected: boolean }) {
+// altimate_change start — upstream_fix: thread first-run flag through home tips slot
+function View(props: { api: TuiPluginApi; hidden: boolean; show: boolean; connected: boolean; isFirstTime: boolean }) {
+  // altimate_change end
   useBindings(() => ({
     commands: [
       {
@@ -26,7 +28,9 @@ function View(props: { api: TuiPluginApi; hidden: boolean; show: boolean; connec
   return (
     <box width="100%" maxWidth={75} alignItems="center" paddingTop={3} flexShrink={1}>
       <Show when={props.show}>
-        <Tips api={props.api} connected={props.connected} />
+        {/* altimate_change start — upstream_fix: render beginner tips for first-run users */}
+        <Tips api={props.api} connected={props.connected} isFirstTime={props.isFirstTime} />
+        {/* altimate_change end */}
       </Show>
     </box>
   )
@@ -38,14 +42,29 @@ const tui: TuiPlugin = async (api) => {
     slots: {
       home_bottom() {
         const hidden = createMemo(() => api.kv.get("tips_hidden", false))
-        const first = createMemo(() => api.state.session.count() === 0)
+        // altimate_change start — upstream_fix: wait for synced session count before first-run onboarding
+        const first = createMemo(() => api.state.ready && api.state.session.count() === 0)
+        // altimate_change end
         const connected = createMemo(() =>
           api.state.provider.some(
             (item) => item.id !== "opencode" || Object.values(item.models).some((model) => model.cost?.input !== 0),
           ),
         )
+        // altimate_change start — upstream_fix: restore first-run onboarding state
+        const isFirstTime = createMemo(() => first() && !connected())
+        // altimate_change end
         const show = createMemo(() => (!first() || !connected()) && !hidden())
-        return <View api={api} hidden={hidden()} show={show()} connected={connected()} />
+        // altimate_change start — upstream_fix: pass first-run flag to the tips View
+        return (
+          <View
+            api={api}
+            hidden={hidden()}
+            show={show()}
+            connected={connected()}
+            isFirstTime={isFirstTime()}
+          />
+        )
+        // altimate_change end
       },
     },
   })

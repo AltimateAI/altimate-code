@@ -71,6 +71,23 @@ function parse(tip: string): TipPart[] {
 const NO_MODELS_TIP = "Run {highlight}/connect{/highlight} to add an AI provider and start coding"
 const NO_MODELS_PARTS = parse(NO_MODELS_TIP)
 
+// altimate_change start — upstream_fix: restore first-run beginner tip pool
+const BEGINNER_TIPS: Tip[] = [
+  "Run {highlight}/connect{/highlight} to add your API key and get started",
+  "Run {highlight}/discover{/highlight} to auto-detect your dbt project and warehouse connections",
+  "Press {highlight}Ctrl+P{/highlight} to see all available commands",
+  "Press {highlight}Tab{/highlight} to cycle between Build and Plan agents",
+  "Use {highlight}/cost-report{/highlight} to analyze warehouse spending",
+  "Use {highlight}/dbt-docs{/highlight} to generate dbt model documentation",
+  "Use {highlight}/generate-tests{/highlight} to auto-generate dbt tests for your models",
+  "Use {highlight}/sql-review{/highlight} to review SQL for correctness and performance",
+  "Use {highlight}/migrate-sql{/highlight} to translate SQL between warehouse dialects",
+  "Use {highlight}/ci-check{/highlight} to run pre-merge SQL validation on changed files",
+  "Ask me to analyze a SQL query for anti-patterns — I'll detect 19+ issue types with zero false positives",
+  "Ask me to trace column-level lineage for any SQL query across dialects",
+]
+// altimate_change end
+
 function shortcutText(value: string) {
   return `{highlight}${value}{/highlight}`
 }
@@ -94,7 +111,11 @@ function configShortcut(api: TuiPluginApi, command: string): TipShortcut {
       .join(", ")
 }
 
-export function Tips(props: { api: TuiPluginApi; connected?: boolean }) {
+// altimate_change start — upstream_fix: accept first-run flag for beginner tips
+type TipsProps = { api: TuiPluginApi; connected?: boolean; isFirstTime?: boolean }
+// altimate_change end
+
+export function Tips(props: TipsProps) {
   const theme = useTheme().theme
   const tipOffset = Math.random()
   const shortcuts: Shortcuts = {
@@ -133,6 +154,15 @@ export function Tips(props: { api: TuiPluginApi; connected?: boolean }) {
     themeList: useCommandShortcut("theme.switch"),
   }
   const tip = createMemo(() => {
+    // altimate_change start — upstream_fix: use beginner tips for first-run onboarding
+    if (props.isFirstTime) {
+      const tips = BEGINNER_TIPS.flatMap((item) => {
+        const value = typeof item === "string" ? item : item(shortcuts)
+        return value ? [value] : []
+      })
+      return tips[Math.floor(tipOffset * tips.length)] ?? NO_MODELS_TIP
+    }
+    // altimate_change end
     if (props.connected === false) return NO_MODELS_TIP
     const tips = [...TIPS, process.platform !== "win32" ? TERMINAL_SUSPEND_TIP : INPUT_UNDO_TIP].flatMap((item) => {
       const value = typeof item === "string" ? item : item(shortcuts)

@@ -1,8 +1,22 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
+import { realpathSync } from "fs"
 import { Filesystem } from "@/util/filesystem"
 import { tmpdir } from "../fixture/fixture"
+
+function withPlatform<T>(platform: typeof process.platform, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, "platform")
+  Object.defineProperty(process, "platform", {
+    ...original,
+    value: platform,
+  })
+  try {
+    return fn()
+  } finally {
+    if (original) Object.defineProperty(process, "platform", original)
+  }
+}
 
 describe("filesystem", () => {
   describe("exists()", () => {
@@ -344,6 +358,22 @@ describe("filesystem", () => {
   })
 
   describe("windowsPath()", () => {
+    test("normalizePath resolves Git Bash paths before realpath fallback on Windows", () => {
+      const expected = path.win32.normalize(path.win32.resolve("C:/Users/test/project"))
+      const realpath = spyOn(realpathSync, "native").mockImplementation(() => {
+        throw Object.assign(new Error("missing"), { code: "ENOENT" })
+      })
+
+      try {
+        const result = withPlatform("win32", () => Filesystem.normalizePath("/c/Users/test/project"))
+
+        expect(result).toBe(expected)
+        expect(realpath).toHaveBeenCalledWith(expected)
+      } finally {
+        realpath.mockRestore()
+      }
+    })
+
     test("converts Git Bash paths", () => {
       if (process.platform === "win32") {
         expect(Filesystem.windowsPath("/c/Users/test")).toBe("C:/Users/test")

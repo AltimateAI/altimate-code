@@ -413,14 +413,13 @@ export const McpLogoutCommand = effectCmd({
 })
 
 async function resolveConfigPath(baseDir: string, global = false) {
-  // altimate_change start — upstream_fix: bridge merge wrote new MCP entries to
-  // the wrong default path. Mirror main's behavior for new files while accepting
-  // existing altimate-code.json installs.
-  const CONFIG_FILENAMES = ["opencode.json", "opencode.jsonc", "altimate-code.json"]
+  // altimate_change start — upstream_fix: prefer the fork's primary config filename
+  // for new MCP entries while still discovering existing upstream config files.
+  const CONFIG_FILENAMES = ["altimate-code.json", "opencode.json", "opencode.jsonc"]
   const candidates: string[] = []
 
   if (!global) {
-    // Subdirectory configs first — that's where existing project configs typically live
+    // Subdirectory configs first — .altimate-code is primary, .opencode remains supported.
     candidates.push(
       ...CONFIG_FILENAMES.map((f) => path.join(baseDir, ".altimate-code", f)),
       ...CONFIG_FILENAMES.map((f) => path.join(baseDir, ".opencode", f)),
@@ -435,7 +434,7 @@ async function resolveConfigPath(baseDir: string, global = false) {
     }
   }
 
-  // Default to opencode.json when nothing exists yet; existing altimate-code.json files are still discovered above.
+  // Default to altimate-code.json when nothing exists yet; existing opencode.json/jsonc files are still discovered above.
   return candidates[0]
   // altimate_change end
 }

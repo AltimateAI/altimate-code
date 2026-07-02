@@ -86,6 +86,12 @@ describe("CLI Branding", () => {
     expect(content).toContain("altimate-code")
     expect(content).not.toMatch(/\bopencode\b(?!\.)/i)
   })
+
+  test("initialize command prompt says Altimate Code config, not OpenCode config", () => {
+    const content = readText(join(repoRoot, "packages", "core", "src", "plugin", "command", "initialize.txt"))
+    expect(content).toContain("repo-local Altimate Code config")
+    expect(content).not.toContain("repo-local OpenCode config")
+  })
 })
 
 // ---------------------------------------------------------------------------

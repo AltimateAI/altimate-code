@@ -12,12 +12,39 @@ import { useEditorContext } from "../context/editor"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTuiConfig } from "../config"
 import { HomeSessionDestinationProvider } from "./home/session-destination"
+// altimate_change start — upstream_fix: restore first-run home onboarding hint
+import { useTheme } from "../context/theme"
+// altimate_change end
 
 let once = false
 const placeholder = {
   normal: ["Fix a TODO in the codebase", "What is the tech stack of this project?", "Fix broken tests"],
   shell: ["ls -la", "git status", "pwd"],
 }
+
+// altimate_change start — upstream_fix: restore first-run home onboarding hint
+export function HomeFirstTimeOnboardingHint(props: { isFirstTime: boolean; maxWidth?: number }) {
+  const { theme } = useTheme()
+
+  if (!props.isFirstTime) return null
+
+  return (
+    <box width="100%" maxWidth={props.maxWidth ?? 75} paddingTop={1} flexShrink={0}>
+      <text>
+        <span style={{ fg: theme.textMuted }}>Get started: </span>
+        <span style={{ fg: theme.text }}>/connect</span>
+        <span style={{ fg: theme.textMuted }}> to add your API key</span>
+        <span style={{ fg: theme.textMuted }}> · </span>
+        <span style={{ fg: theme.text }}>/discover</span>
+        <span style={{ fg: theme.textMuted }}> to detect your data stack</span>
+        <span style={{ fg: theme.textMuted }}> · </span>
+        <span style={{ fg: theme.text }}>Ctrl+P</span>
+        <span style={{ fg: theme.textMuted }}> for all commands</span>
+      </text>
+    </box>
+  )
+}
+// altimate_change end
 
 export function Home() {
   const pluginRuntime = usePluginRuntime()
@@ -35,6 +62,14 @@ export function Home() {
     if (configured === "auto") return Math.max(75, Math.floor(dimensions().width * 0.7))
     return configured ?? 75
   })
+  // altimate_change start — upstream_fix: restore first-run home onboarding state
+  const connected = createMemo(() =>
+    sync.data.provider.some(
+      (item) => item.id !== "opencode" || Object.values(item.models).some((model) => model.cost?.input !== 0),
+    ),
+  )
+  const isFirstTimeUser = createMemo(() => sync.ready && sync.data.session.length === 0 && !connected())
+  // altimate_change end
   let sent = false
 
   onMount(() => {
@@ -83,6 +118,9 @@ export function Home() {
             <Prompt ref={bind} right={<pluginRuntime.Slot name="home_prompt_right" />} placeholders={placeholder} />
           </pluginRuntime.Slot>
         </box>
+        {/* altimate_change start — upstream_fix: restore first-run home onboarding hint */}
+        <HomeFirstTimeOnboardingHint isFirstTime={isFirstTimeUser()} maxWidth={promptMaxWidth()} />
+        {/* altimate_change end */}
         <pluginRuntime.Slot name="home_bottom" />
         <box flexGrow={1} minHeight={0} />
         <Toast />
