@@ -181,7 +181,14 @@ export namespace SessionProcessor {
                           start: Date.now(),
                         },
                       },
-                      metadata: value.providerMetadata,
+                      // altimate_change start — upstream_fix: preserve the provider-executed flag on the
+                      // tool part's metadata. native-runtime already SKIPS local execution for
+                      // provider-executed tools (they run server-side); tagging the part lets rendering/
+                      // serialization distinguish them from client-executed tool calls, matching upstream.
+                      metadata: value.providerExecuted
+                        ? { ...value.providerMetadata, providerExecuted: true }
+                        : value.providerMetadata,
+                      // altimate_change end
                     })
                     toolcalls[value.toolCallId] = part as MessageV2.ToolPart
                     // altimate_change start — session has now tool-called; suppresses plan refusal warning

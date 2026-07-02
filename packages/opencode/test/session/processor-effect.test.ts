@@ -976,6 +976,9 @@ itProviderError.live.todo("session.processor effect tests fail provider-executed
         const parts = MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
         expect(call?.state.status).toBe("error")
+        // altimate_change start — upstream_fix: provider-executed tool parts carry the flag in metadata
+        expect(call?.metadata?.providerExecuted).toBe(true)
+        // altimate_change end
         if (call?.state.status === "error") expect(call.state.error).toBe("provider boom")
         expect(settlements).toHaveLength(1)
         expect(settlements[0]?.data).toMatchObject({
