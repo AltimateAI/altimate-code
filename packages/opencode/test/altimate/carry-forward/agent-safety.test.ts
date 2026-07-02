@@ -9,7 +9,9 @@
  *  - destructive DDL is DENIED and cannot be overridden by a user wildcard
  *    allow (the non-overridable safetyDenials merged last, last-match-wins);
  *  - destructive shell ops default to "ask";
- *  - the reviewer agent denies bash/edit/write but allows dbt_pr_review.
+ *  - the reviewer agent never mutates (edit/write denied, bash asks — #978
+ *    relaxed bash from deny to ask so `gh pr view` works with user approval)
+ *    but allows dbt_pr_review.
  */
 import { afterEach, expect } from "bun:test"
 import { Cause, Effect, Exit, Layer } from "effect"
@@ -124,12 +126,14 @@ it.instance("sql_execute_write DDL is denied (write safety)", () =>
   }),
 )
 
-it.instance("reviewer agent denies bash/edit/write but allows the verdict engine", () =>
+it.instance("reviewer agent never mutates (edit/write deny, bash asks) but allows the verdict engine", () =>
   Effect.gen(function* () {
     const reviewer = yield* load((svc) => svc.get("reviewer"))
     expect(reviewer).toBeDefined()
     expect(reviewer?.mode).toBe("primary")
-    expect(evalPerm(reviewer, "bash")).toBe("deny")
+    // #978: bash asks (user approves each command, e.g. `gh pr view`) — never runs silently
+    expect(evalPerm(reviewer, "bash")).toBe("ask")
+    expect(Permission.evaluate("bash", "DROP DATABASE prod", reviewer!.permission).action).toBe("deny")
     expect(evalPerm(reviewer, "edit")).toBe("deny")
     expect(evalPerm(reviewer, "write")).toBe("deny")
     // The dbt PR review verdict engine + read-only analysis tools are allowed

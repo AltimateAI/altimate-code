@@ -4,8 +4,11 @@
 // found a P0 — the agent advertised "read-only / cannot modify files" but its
 // bash allowlist (`git log *`, `cat *`, `ls *`) was bypassable to arbitrary
 // file READ (exfil) and WRITE (shell redirects ride inside the matched
-// command). The fix denies bash entirely for the reviewer; these tests pin that
-// it stays denied and that the read-only intent holds.
+// command). The v0.8.0 fix denied bash entirely; #978 relaxed that to "ask"
+// (every command requires explicit user approval — nothing auto-runs) so the
+// reviewer can `gh pr view` a PR URL. These tests pin the security intent:
+// NO bash pattern auto-runs (nothing evaluates to "allow"), and destructive
+// DDL stays hard-denied.
 import { test, expect } from "bun:test"
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
@@ -16,38 +19,46 @@ function bashAction(agent: Agent.Info, command: string) {
   return PermissionNext.evaluate("bash", command, agent.permission).action
 }
 
-// The reviewer agent advertises read-only; these pin that bash stays denied and
-// arbitrary read/write is refused. (Previously test.todo'd for a dual-DB migration
-// race in Instance.provide — legacy src/storage/db.ts vs core Effect-SQL migration
-// both creating `project` — now resolved by the fresh-install core-schema adoption
-// fix in src/storage/db.ts; re-enabled and passing.)
-test("reviewer agent: bash is denied (base)", async () => {
+// The reviewer agent advertises read-only; these pin that NO bash command is
+// auto-approved and arbitrary read/write cannot run silently. (Previously
+// test.todo'd for a dual-DB migration race in Instance.provide — legacy
+// src/storage/db.ts vs core Effect-SQL migration both creating `project` —
+// now resolved by the fresh-install core-schema adoption fix in
+// src/storage/db.ts; re-enabled and passing.)
+test("reviewer agent: bash requires approval (base) — never auto-allowed", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
       const reviewer = await Agent.get("reviewer")
       expect(reviewer).toBeDefined()
-      expect(PermissionNext.evaluate("bash", "*", reviewer!.permission).action).toBe("deny")
+      // #978: "ask" instead of "deny" so `gh pr view <url>` is possible with
+      // explicit user approval. The P0 was auto-run via a bypassable allowlist;
+      // "ask" never auto-runs.
+      expect(PermissionNext.evaluate("bash", "*", reviewer!.permission).action).toBe("ask")
     },
   })
 })
 
-test("reviewer agent: redirect-write and arbitrary-read bash commands are denied", async () => {
+test("reviewer agent: redirect-write and arbitrary-read bash commands never auto-run", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
       const reviewer = (await Agent.get("reviewer"))!
       // Write via redirect riding inside a once-allowed `git log *` pattern.
-      expect(bashAction(reviewer, "git log -p HEAD > ~/.ssh/authorized_keys")).toBe("deny")
-      expect(bashAction(reviewer, "git diff HEAD >> ~/.bashrc")).toBe("deny")
-      expect(bashAction(reviewer, "ls > /etc/cron.d/pwn")).toBe("deny")
-      // Arbitrary file read (credential exfil) that `cat *` used to allow.
-      expect(bashAction(reviewer, "cat ~/.altimate/altimate.json")).toBe("deny")
-      expect(bashAction(reviewer, "cat .env")).toBe("deny")
-      // Even the previously-allowed read-only git inspection is now denied.
-      expect(bashAction(reviewer, "git log --oneline")).toBe("deny")
+      // These surfaced the v0.8.0 P0 as silent auto-runs; they must never be "allow".
+      expect(bashAction(reviewer, "git log -p HEAD > ~/.ssh/authorized_keys")).toBe("ask")
+      expect(bashAction(reviewer, "git diff HEAD >> ~/.bashrc")).toBe("ask")
+      expect(bashAction(reviewer, "ls > /etc/cron.d/pwn")).toBe("ask")
+      // Arbitrary file read (credential exfil) that `cat *` used to auto-allow.
+      expect(bashAction(reviewer, "cat ~/.altimate/altimate.json")).toBe("ask")
+      expect(bashAction(reviewer, "cat .env")).toBe("ask")
+      // Read-only git inspection also prompts (no allowlist at all).
+      expect(bashAction(reviewer, "git log --oneline")).toBe("ask")
+      // Destructive DDL stays hard-denied regardless of the ask default.
+      expect(bashAction(reviewer, "DROP DATABASE prod")).toBe("deny")
+      expect(bashAction(reviewer, "truncate users")).toBe("deny")
     },
   })
 })

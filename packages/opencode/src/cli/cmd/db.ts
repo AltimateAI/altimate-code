@@ -44,6 +44,7 @@ const QueryCommand = effectCmd({
         db.close()
       }
       return
+      // altimate_change end
     }
     const child = spawn("sqlite3", [Database.path()], {
       stdio: "inherit",
