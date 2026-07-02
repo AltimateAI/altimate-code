@@ -135,6 +135,15 @@ export const layer = Layer.effect(
           question: "deny",
           plan_enter: "deny",
           plan_exit: "deny",
+          // altimate_change start — make the #209 sensitive-write guard actually fire.
+          // The guard calls ctx.ask({ permission: "sensitive_write" }) before writing a
+          // sensitive target (.env/.ssh/.git/...), but with no explicit rule it fell through
+          // to the "*": "allow" catch-all above and auto-approved — silently neutralizing the
+          // guard. Default it to "ask" so sensitive writes prompt (users can still override to
+          // "allow" in config). Restrictive agents (analyst/reviewer/plan) keep their later
+          // "*": "deny", so this only affects write-capable agents.
+          sensitive_write: "ask",
+          // altimate_change end
           // mirrors github.com/github/gitignore Node.gitignore pattern for .env files
           read: {
             "*": "allow",

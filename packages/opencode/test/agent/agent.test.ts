@@ -103,6 +103,20 @@ it.instance("reviewer agent is read-only but usable outside the project (#978)",
   }),
 )
 
+it.instance("sensitive_write guard actually fires (not neutralized by *: allow)", () =>
+  Effect.gen(function* () {
+    // The #209 sensitive-write guard asks for the "sensitive_write" permission. It must NOT
+    // fall through to the builder's "*": "allow" default (which silently auto-approved writes
+    // to .env/.ssh/.git). Builder must prompt; write-restricted agents keep deny.
+    const builder = yield* load((svc) => svc.get("builder"))
+    expect(evalPerm(builder, "sensitive_write")).toBe("ask")
+    const analyst = yield* load((svc) => svc.get("analyst"))
+    expect(evalPerm(analyst, "sensitive_write")).toBe("deny")
+    const reviewer = yield* load((svc) => svc.get("reviewer"))
+    expect(evalPerm(reviewer, "sensitive_write")).toBe("deny")
+  }),
+)
+
 it.instance("plan agent denies edits except .opencode/plans/*", () =>
   Effect.gen(function* () {
     const plan = yield* load((svc) => svc.get("plan"))

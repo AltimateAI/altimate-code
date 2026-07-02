@@ -117,7 +117,9 @@ async function backupAndStripLegacy(file: string, source: string) {
     .catch(() => false)
 }
 
+// altimate_change start — upstream_fix: accept managed config dir for TUI migration
 async function opencodeFiles(input: { directories: string[]; cwd: string; managed?: string }) {
+  // altimate_change end
   // altimate_change start — upstream Filesystem.findUp(array, …, {rootFirst}) collapsed to Filesystem.up();
   // collect the generator and reverse to preserve the original root-first ordering.
   const walkedUp = (
