@@ -410,6 +410,10 @@ export const layer = Layer.effect(
                 "*": "deny",
                 grep: "allow",
                 glob: "allow",
+                // altimate_change start — restore codesearch for explore (dropped by the v1.17.9 merge;
+                // the tool gates on this permission and silently degrades to local grep without it)
+                codesearch: "allow",
+                // altimate_change end
                 list: "allow",
                 bash: "allow",
                 webfetch: "allow",

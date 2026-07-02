@@ -582,6 +582,9 @@ export function Prompt(props: PromptProps) {
       "prompt.submit",
       "prompt.editor",
       "prompt.editor_context.clear",
+      // altimate_change start — gather prompt.skills so a configured prompt_skills keybind works
+      "prompt.skills",
+      // altimate_change end
       "prompt.stash",
       "prompt.stash.pop",
       "prompt.stash.list",
