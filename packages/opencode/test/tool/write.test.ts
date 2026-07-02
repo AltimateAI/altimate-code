@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import path from "path"
 import fs from "fs/promises"
 import { WriteTool } from "../../src/tool/write"
@@ -12,8 +12,10 @@ import { Tool } from "@/tool/tool"
 import { Agent } from "../../src/agent/agent"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { disposeAllInstances, TestInstance } from "../fixture/fixture"
+import { disposeAllInstances, requireInstance, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { FileTime } from "../../src/file/time"
+import { Instance } from "../../src/project/instance"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-write-session"),
@@ -54,6 +56,27 @@ const run = Effect.fn("WriteToolTest.run")(function* (
   const tool = yield* init()
   return yield* tool.execute(args, next)
 })
+
+const putRead = Effect.fn("WriteToolTest.putRead")(function* (filepath: string, content: string) {
+  yield* Effect.promise(() => fs.writeFile(filepath, content, "utf-8"))
+  yield* recordRead(filepath)
+})
+
+const recordRead = Effect.fn("WriteToolTest.recordRead")(function* (filepath: string) {
+  const instance = yield* requireInstance
+  Instance.restore(instance, () => FileTime.read(ctx.sessionID, filepath))
+})
+
+const getReadTime = Effect.fn("WriteToolTest.getReadTime")(function* (filepath: string) {
+  const instance = yield* requireInstance
+  return Instance.restore(instance, () => FileTime.get(ctx.sessionID, filepath))
+})
+
+const failureMessage = (exit: Exit.Exit<unknown, unknown>) => {
+  if (!Exit.isFailure(exit)) throw new Error("expected write to fail")
+  const err = Cause.squash(exit.cause)
+  return err instanceof Error ? err.message : String(err)
+}
 
 describe("tool.write", () => {
   describe("new file creation", () => {
@@ -98,7 +121,7 @@ describe("tool.write", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "existing.txt")
-        yield* Effect.promise(() => fs.writeFile(filepath, "old content", "utf-8"))
+        yield* putRead(filepath, "old content")
         const result = yield* run({ filePath: filepath, content: "new content" })
 
         expect(result.output).toContain("Wrote file successfully")
@@ -114,7 +137,7 @@ describe("tool.write", () => {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "existing.cs")
         const bom = String.fromCharCode(0xfeff)
-        yield* Effect.promise(() => fs.writeFile(filepath, `${bom}using System;\n`, "utf-8"))
+        yield* putRead(filepath, `${bom}using System;\n`)
 
         yield* run({ filePath: filepath, content: "using Up;\n" })
 
@@ -131,7 +154,7 @@ describe("tool.write", () => {
           const test = yield* TestInstance
           const filepath = path.join(test.directory, "formatted.cs")
           const bom = String.fromCharCode(0xfeff)
-          yield* Effect.promise(() => fs.writeFile(filepath, `${bom}using System;\n`, "utf-8"))
+          yield* putRead(filepath, `${bom}using System;\n`)
 
           yield* run({ filePath: filepath, content: "using Up;\n" })
 
@@ -160,11 +183,31 @@ describe("tool.write", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "file.txt")
-        yield* Effect.promise(() => fs.writeFile(filepath, "old", "utf-8"))
+        yield* putRead(filepath, "old")
         const result = yield* run({ filePath: filepath, content: "new" })
 
         expect(result.metadata).toHaveProperty("filepath", filepath)
         expect(result.metadata).toHaveProperty("exists", true)
+      }),
+    )
+
+    it.instance("rejects overwriting an existing file modified after it was read", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "stale.txt")
+        yield* putRead(filepath, "model saw this")
+        const readTime = yield* getReadTime(filepath)
+        if (!readTime) throw new Error("expected file read time to be recorded")
+
+        yield* Effect.promise(() => fs.writeFile(filepath, "external change", "utf-8"))
+        const externalTime = new Date(readTime.getTime() + 1000)
+        yield* Effect.promise(() => fs.utimes(filepath, externalTime, externalTime))
+
+        const exit = yield* run({ filePath: filepath, content: "model overwrite" }).pipe(Effect.exit)
+        expect(failureMessage(exit)).toContain("File was modified since it was read")
+
+        const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
+        expect(content).toBe("external change")
       }),
     )
   })
@@ -255,6 +298,7 @@ describe("tool.write", () => {
         const readonlyPath = path.join(test.directory, "readonly.txt")
         yield* Effect.promise(() => fs.writeFile(readonlyPath, "test", "utf-8"))
         yield* Effect.promise(() => fs.chmod(readonlyPath, 0o444))
+        yield* recordRead(readonlyPath)
         const exit = yield* run({ filePath: readonlyPath, content: "new content" }).pipe(Effect.exit)
         expect(exit._tag).toBe("Failure")
       }),

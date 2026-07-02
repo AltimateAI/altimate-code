@@ -18,6 +18,10 @@ import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect, assertSensitiveWriteEffect } from "./external-directory"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import * as Bom from "@/util/bom"
+// altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+import { FileTime } from "../file/time"
+import { Instance, type InstanceContext } from "../project/instance"
+// altimate_change end
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -33,6 +37,26 @@ function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
 }
 
 const locks = new Map<string, Semaphore.Semaphore>()
+// altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+const STALE_FILE_MESSAGE = "File was modified since it was read — read it again before modifying it."
+
+const assertFreshFile = Effect.fn("EditTool.assertFreshFile")(function* (
+  instance: InstanceContext,
+  ctx: Tool.Context,
+  filepath: string,
+) {
+  yield* Effect.tryPromise({
+    try: () => Instance.restore(instance, () => FileTime.assert(ctx.sessionID, filepath)),
+    catch: (error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.includes("has been modified since it was last read")) {
+        return new Error(`${STALE_FILE_MESSAGE}\n\n${message}`)
+      }
+      return error instanceof Error ? error : new Error(message)
+    },
+  })
+})
+// altimate_change end
 
 function lock(filePath: string) {
   const resolvedFilePath = FSUtil.resolve(filePath)
@@ -120,12 +144,18 @@ export const EditTool = Tool.define(
                   file: filePath,
                   event: "add",
                 })
+                // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+                Instance.restore(instance, () => FileTime.read(ctx.sessionID, filePath))
+                // altimate_change end
                 return
               }
 
               const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
               if (!info) throw new Error(`File ${filePath} not found`)
               if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+              // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+              yield* assertFreshFile(instance, ctx, filePath)
+              // altimate_change end
               const source = yield* Bom.readFile(afs, filePath)
               contentOld = source.text
 
@@ -172,6 +202,9 @@ export const EditTool = Tool.define(
                   normalizeLineEndings(contentNew),
                 ),
               )
+              // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+              Instance.restore(instance, () => FileTime.read(ctx.sessionID, filePath))
+              // altimate_change end
             }).pipe(Effect.orDie),
           )
 

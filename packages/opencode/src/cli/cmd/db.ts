@@ -40,6 +40,9 @@ const QueryCommand = effectCmd({
       } catch (e) {
         // Clean CLI error (e.g. "attempt to write a readonly database") instead of an orDie defect.
         console.error(`Error: ${e instanceof Error ? e.message : String(e)}`)
+        // altimate_change start — upstream_fix: failed db one-shot queries must exit non-zero
+        process.exitCode = 1
+        // altimate_change end
       } finally {
         db.close()
       }

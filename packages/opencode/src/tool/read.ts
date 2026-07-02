@@ -9,6 +9,10 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+// altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+import { FileTime } from "../file/time"
+import { Instance } from "../project/instance"
+// altimate_change end
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -306,6 +310,9 @@ export const ReadTool = Tool.define<
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
+        // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+        Instance.restore(instance, () => FileTime.read(ctx.sessionID, filepath))
+        // altimate_change end
         return {
           title,
           output: msg,
@@ -351,6 +358,9 @@ export const ReadTool = Tool.define<
       output += "\n</content>"
 
       yield* warm(filepath)
+      // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+      Instance.restore(instance, () => FileTime.read(ctx.sessionID, filepath))
+      // altimate_change end
 
       if (loaded.length > 0) {
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`

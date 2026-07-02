@@ -426,6 +426,17 @@ export namespace Database {
       // altimate_change start — upstream_fix: remove any duplicate manual journal marks before migrate
       dedupeDrizzleJournal(sqlite)
       // altimate_change end
+      // altimate_change start — upstream_fix: the fork's PermissionNext reads a single JSON `data`
+      // column from `permission` (packages/opencode/src/permission/permission.sql.ts), but a fresh or
+      // core-owned database creates core's permission(action, resource) shape with NO `data` column.
+      // The first permission read then throws "no such column: data" on every fresh install, blocking
+      // all tool approvals. Ensure the fork-compatible column exists (idempotent; reads default null→[]).
+      try {
+        if (hasTable(sqlite, "permission")) addColumn(sqlite, "permission", "data", "text")
+      } catch (e) {
+        log.info("ensure permission.data column skipped", { error: e instanceof Error ? e.message : String(e) })
+      }
+      // altimate_change end
       if (!adopted && !initialized && !repaired) migrate(db, entries)
     }
 

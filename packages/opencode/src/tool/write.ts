@@ -14,8 +14,32 @@ import { InstanceState } from "@/effect/instance-state"
 import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect, assertSensitiveWriteEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
+// altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+import { FileTime } from "../file/time"
+import { Instance, type InstanceContext } from "../project/instance"
+// altimate_change end
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
+// altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+const STALE_FILE_MESSAGE = "File was modified since it was read — read it again before modifying it."
+
+const assertFreshFile = Effect.fn("WriteTool.assertFreshFile")(function* (
+  instance: InstanceContext,
+  ctx: Tool.Context,
+  filepath: string,
+) {
+  yield* Effect.tryPromise({
+    try: () => Instance.restore(instance, () => FileTime.assert(ctx.sessionID, filepath)),
+    catch: (error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.includes("has been modified since it was last read")) {
+        return new Error(`${STALE_FILE_MESSAGE}\n\n${message}`)
+      }
+      return error instanceof Error ? error : new Error(message)
+    },
+  })
+})
+// altimate_change end
 
 export const Parameters = Schema.Struct({
   content: Schema.String.annotate({ description: "The content to write to the file" }),
@@ -47,6 +71,9 @@ export const WriteTool = Tool.define(
           // altimate_change end
 
           const exists = yield* fs.existsSafe(filepath)
+          // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+          if (exists) yield* assertFreshFile(instance, ctx, filepath)
+          // altimate_change end
           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
           const next = Bom.split(params.content)
           const desiredBom = source.bom || next.bom
@@ -73,6 +100,9 @@ export const WriteTool = Tool.define(
             file: filepath,
             event: exists ? "change" : "add",
           })
+          // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
+          Instance.restore(instance, () => FileTime.read(ctx.sessionID, filepath))
+          // altimate_change end
 
           let output = "Wrote file successfully."
           yield* lsp.touchFile(filepath, "document")

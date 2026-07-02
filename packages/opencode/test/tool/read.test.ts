@@ -17,14 +17,17 @@ import { ReadTool } from "../../src/tool/read"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { Filesystem } from "@/util/filesystem"
+import { FileTime } from "../../src/file/time"
 import {
   disposeAllInstances,
   provideInstance,
+  requireInstance,
   testInstanceStoreLayer,
   TestInstance,
   tmpdirScoped,
 } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { Instance } from "../../src/project/instance"
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
 
@@ -144,6 +147,26 @@ const asks = () => {
     },
   }
 }
+
+describe("tool.read stale-file guard", () => {
+  it.live("records read time for successfully read files", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filepath = path.join(dir, "test.txt")
+      yield* put(filepath, "hello world")
+
+      const recorded = yield* provideInstance(dir)(
+        Effect.gen(function* () {
+          const instance = yield* requireInstance
+          yield* run({ filePath: filepath })
+          return Instance.restore(instance, () => FileTime.get(ctx.sessionID, filepath))
+        }),
+      )
+
+      expect(recorded).toBeInstanceOf(Date)
+    }),
+  )
+})
 
 describe("tool.read external_directory permission", () => {
   it.live("allows reading absolute path inside project directory", () =>

@@ -6,6 +6,10 @@ import { Snapshot } from "@/snapshot"
 import { Session } from "./session"
 import { SessionID, MessageID } from "./schema"
 import { Config } from "@/config/config"
+// altimate_change start — upstream_fix: persist real session diff totals (Storage + Bus)
+import { Storage } from "@/storage/storage"
+import { Bus } from "@/bus"
+// altimate_change end
 
 function unquoteGitPath(input: string) {
   if (!input.startsWith('"')) return input
@@ -78,6 +82,9 @@ export const layer = Layer.effect(
     const snapshot = yield* Snapshot.Service
     const events = yield* EventV2Bridge.Service
     const config = yield* Config.Service
+    // altimate_change start — upstream_fix: storage for session diff persistence
+    const storage = yield* Storage.Service
+    // altimate_change end
 
     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: SessionV1.WithParts[] }) {
       let from: string | undefined
@@ -122,6 +129,19 @@ export const layer = Layer.effect(
       const target = messages.find((m) => m.info.id === input.messageID)
       if (!target || target.info.role !== "user") return
       const msgDiffs = yield* computeDiff({ messages })
+      // altimate_change start — upstream_fix: persist real session diff totals after snapshot summarize
+      const sessionDiffs = yield* computeDiff({ messages: all })
+      yield* sessions.setSummary({
+        sessionID: input.sessionID,
+        summary: {
+          additions: sessionDiffs.reduce((sum, x) => sum + x.additions, 0),
+          deletions: sessionDiffs.reduce((sum, x) => sum + x.deletions, 0),
+          files: sessionDiffs.length,
+        },
+      })
+      yield* storage.write(["session_diff", input.sessionID], sessionDiffs).pipe(Effect.orDie)
+      yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: sessionDiffs })
+      // altimate_change end
       target.info.summary = { ...target.info.summary, diffs: msgDiffs }
       yield* sessions.updateMessage(target.info)
     })
@@ -155,6 +175,9 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Snapshot.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
     Layer.provide(Config.defaultLayer),
+    // altimate_change start — upstream_fix: provide Storage for session diff persistence
+    Layer.provide(Storage.defaultLayer),
+    // altimate_change end
   ),
 )
 
@@ -165,7 +188,15 @@ export const DiffInput = Schema.Struct({
 export type DiffInput = Schema.Schema.Type<typeof DiffInput>
 
 // altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Session.node, Snapshot.node, EventV2Bridge.node, Config.node])
+export const node = LayerNode.make(layer, () => [
+  Session.node,
+  Snapshot.node,
+  EventV2Bridge.node,
+  Config.node,
+  // altimate_change start — upstream_fix: Storage node for session diff persistence
+  Storage.node,
+  // altimate_change end
+])
 // altimate_change end
 
 // altimate_change start — the imperative facade is called from the legacy session
@@ -215,6 +246,25 @@ export async function summarize(input: { sessionID: SessionID; messageID: Messag
   const target = messages.find((m) => m.info.id === input.messageID)
   if (!target || target.info.role !== "user") return
   const msgDiffs = await computeLegacyDiff(messages)
+  // altimate_change start — upstream_fix: persist real session diff totals after snapshot summarize
+  const sessionDiffs = await computeLegacyDiff(all)
+  await sessions.setSummary({
+    sessionID: input.sessionID,
+    summary: {
+      additions: sessionDiffs.reduce((sum, x) => sum + x.additions, 0),
+      deletions: sessionDiffs.reduce((sum, x) => sum + x.deletions, 0),
+      files: sessionDiffs.length,
+    },
+  })
+  const { AppRuntime } = await import("@/effect/app-runtime")
+  await AppRuntime.runPromise(
+    Storage.Service.use((storage) => storage.write(["session_diff", input.sessionID], sessionDiffs)),
+  )
+  await Bus.publish(sessions.Event.Diff, {
+    sessionID: input.sessionID,
+    diff: sessionDiffs,
+  })
+  // altimate_change end
   target.info.summary = { ...target.info.summary, diffs: msgDiffs }
   await sessions.updateMessage(target.info)
 }

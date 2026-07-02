@@ -3,7 +3,7 @@ import path from "path"
 import fs from "fs/promises"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EditTool } from "../../src/tool/edit"
-import { disposeAllInstances, TestInstance } from "../fixture/fixture"
+import { disposeAllInstances, requireInstance, TestInstance } from "../fixture/fixture"
 import { LSP } from "@/lsp/lsp"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Format } from "../../src/format"
@@ -14,6 +14,8 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import * as Tool from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+import { FileTime } from "../../src/file/time"
+import { Instance } from "../../src/project/instance"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-edit-session"),
@@ -66,6 +68,17 @@ const fail = Effect.fn("EditToolTest.fail")(function* (args: Tool.InferParameter
 const put = Effect.fn("EditToolTest.put")(function* (p: string, content: string) {
   const fs = yield* FSUtil.Service
   yield* fs.writeWithDirs(p, content)
+  yield* recordRead(p)
+})
+
+const recordRead = Effect.fn("EditToolTest.recordRead")(function* (p: string) {
+  const instance = yield* requireInstance
+  Instance.restore(instance, () => FileTime.read(ctx.sessionID, p))
+})
+
+const getReadTime = Effect.fn("EditToolTest.getReadTime")(function* (p: string) {
+  const instance = yield* requireInstance
+  return Instance.restore(instance, () => FileTime.get(ctx.sessionID, p))
 })
 
 const load = Effect.fn("EditToolTest.load")(function* (p: string) {
@@ -156,6 +169,24 @@ describe("tool.edit", () => {
 
         expect(result.output).toContain("Edit applied successfully")
         expect(yield* load(filepath)).toBe("new content here")
+      }),
+    )
+
+    it.instance("rejects editing an existing file modified after it was read", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "stale.txt")
+        yield* put(filepath, "original content")
+        const readTime = yield* getReadTime(filepath)
+        if (!readTime) throw new Error("expected file read time to be recorded")
+
+        yield* Effect.promise(() => fs.writeFile(filepath, "external change", "utf-8"))
+        const externalTime = new Date(readTime.getTime() + 1000)
+        yield* Effect.promise(() => fs.utimes(filepath, externalTime, externalTime))
+
+        const error = yield* fail({ filePath: filepath, oldString: "original", newString: "model" })
+        expect(error.message).toContain("File was modified since it was read")
+        expect(yield* load(filepath)).toBe("external change")
       }),
     )
 
