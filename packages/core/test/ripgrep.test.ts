@@ -61,4 +61,31 @@ describe("Ripgrep", () => {
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
+
+  // altimate_change start — upstream_fix: preserve all debug rg search --glob entries
+  it.live("grep accepts multiple include globs", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "one.ts"), "needle\n"))
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "two.sql"), "needle\n"))
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "three.md"), "needle\n"))
+
+          const matches = yield* (yield* Ripgrep.Service).grep({
+            cwd: tmp.path,
+            pattern: "needle",
+            include: ["*.ts", "*.sql"],
+            limit: 10,
+          })
+
+          expect(matches.map((item) => item.entry.path).sort()).toEqual([
+            RelativePath.make("one.ts"),
+            RelativePath.make("two.sql"),
+          ])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+  // altimate_change end
 })

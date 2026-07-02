@@ -89,7 +89,11 @@ export const rpc = {
   },
   async checkUpgrade(input: { directory: string }) {
     await InstanceRuntime.load({ directory: input.directory })
-    await upgrade().catch(() => {})
+    // altimate_change start — upstream_fix: log upgrade-check failures without failing TUI startup
+    await upgrade().catch((err) => {
+      console.error("[upgrade] check failed:", String(err))
+    })
+    // altimate_change end
   },
   async reload() {
     await AppRuntime.runPromise(

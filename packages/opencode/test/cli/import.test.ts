@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
 import {
+  aggregateImportedUsage,
   parseShareUrl,
   shouldAttachShareAuthHeaders,
   transformShareData,
@@ -52,3 +53,50 @@ test("returns null for invalid share data", () => {
   expect(transformShareData([{ type: "message", data: {} as any }])).toBeNull()
   expect(transformShareData([{ type: "session", data: { id: "s" } as any }])).toBeNull() // no messages
 })
+
+// altimate_change start — upstream_fix: imported sessions must persist usage aggregates
+test("aggregates imported usage from step-finish parts", () => {
+  const result = aggregateImportedUsage([
+    {
+      info: { role: "assistant", cost: 99, tokens: zeroTokens() } as any,
+      parts: [
+        {
+          type: "step-finish",
+          cost: 0.01,
+          tokens: { input: 10, output: 20, reasoning: 3, cache: { read: 4, write: 5 } },
+        } as any,
+        {
+          type: "step-finish",
+          cost: 0.02,
+          tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 1 } },
+        } as any,
+      ],
+    },
+  ])
+
+  expect(result.cost).toBeCloseTo(0.03)
+  expect(result.tokens).toEqual({ input: 11, output: 22, reasoning: 3, cache: { read: 4, write: 6 } })
+})
+
+test("falls back to assistant message usage when imported parts have no usage", () => {
+  const result = aggregateImportedUsage([
+    {
+      info: {
+        role: "assistant",
+        cost: 0.04,
+        tokens: { input: 40, output: 50, reasoning: 6, cache: { read: 7, write: 8 } },
+      } as any,
+      parts: [{ type: "text" } as any],
+    },
+  ])
+
+  expect(result).toEqual({
+    cost: 0.04,
+    tokens: { input: 40, output: 50, reasoning: 6, cache: { read: 7, write: 8 } },
+  })
+})
+
+function zeroTokens() {
+  return { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+}
+// altimate_change end

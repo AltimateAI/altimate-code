@@ -6,6 +6,10 @@ import { Location } from "@opencode-ai/core/location"
 import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { effectCmd } from "../../effect-cmd"
 import { cmd } from "../cmd"
+// altimate_change start — upstream_fix: restore debug file status/tree commands
+import { File } from "@/file"
+import { Ripgrep as AppRipgrep } from "@/file/ripgrep"
+// altimate_change end
 
 const filesystem = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
@@ -49,6 +53,18 @@ const FileReadCommand = effectCmd({
   }),
 })
 
+// altimate_change start — upstream_fix: restore debug file status/tree commands
+const FileStatusCommand = effectCmd({
+  command: "status",
+  describe: "show file status information",
+  builder: (yargs) => yargs,
+  handler: Effect.fn("Cli.debug.file.status")(function* () {
+    const status = yield* Effect.promise(() => File.status())
+    process.stdout.write(JSON.stringify(status, null, 2) + EOL)
+  }),
+})
+// altimate_change end
+
 const FileListCommand = effectCmd({
   command: "list <path>",
   describe: "list files in a directory",
@@ -64,10 +80,35 @@ const FileListCommand = effectCmd({
   }),
 })
 
+// altimate_change start — upstream_fix: restore debug file status/tree commands
+const FileTreeCommand = effectCmd({
+  command: "tree [dir]",
+  describe: "show directory tree",
+  builder: (yargs) =>
+    yargs.positional("dir", {
+      type: "string",
+      description: "Directory to tree",
+      default: process.cwd(),
+    }),
+  handler: Effect.fn("Cli.debug.file.tree")(function* (args) {
+    const files = yield* Effect.promise(() => AppRipgrep.tree({ cwd: args.dir ?? process.cwd(), limit: 200 }))
+    process.stdout.write(JSON.stringify(files, null, 2) + EOL)
+  }),
+})
+// altimate_change end
+
 export const FileCommand = cmd({
   command: "file",
   describe: "file system debugging utilities",
+  // altimate_change start — upstream_fix: restore debug file status/tree commands
   builder: (yargs) =>
-    yargs.command(FileReadCommand).command(FileListCommand).command(FileSearchCommand).demandCommand(),
+    yargs
+      .command(FileReadCommand)
+      .command(FileStatusCommand)
+      .command(FileListCommand)
+      .command(FileSearchCommand)
+      .command(FileTreeCommand)
+      .demandCommand(),
+  // altimate_change end
   async handler() {},
 })

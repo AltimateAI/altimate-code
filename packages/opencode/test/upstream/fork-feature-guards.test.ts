@@ -68,6 +68,14 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(src).toContain("flushSync") // synchronous finalize on shutdown is the load-bearing part
   })
 
+  // altimate_change start — upstream_fix: guard non-fatal logging for TUI startup upgrade failures
+  test("TUI worker logs upgrade-check failures without making startup fatal", async () => {
+    const src = await read("src/cli/tui/worker.ts")
+    expect(src).toContain("await upgrade().catch((err) => {")
+    expect(src).toContain('console.error("[upgrade] check failed:", String(err))')
+  })
+  // altimate_change end
+
   // The fff file picker must stay scoped to the active project. Upstream enables filesystem-root +
   // home-dir scanning, which leaks high-frecency files from OTHER repos (e.g. an altimate-backend
   // checkout) into the @-attach suggestions of a project that doesn't contain them. A merge that

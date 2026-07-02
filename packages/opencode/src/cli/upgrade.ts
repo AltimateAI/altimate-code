@@ -84,6 +84,17 @@ export function isValidVersion(version: string): boolean {
 }
 // altimate_change end
 
+// altimate_change start — upstream_fix: honor both fork and upstream autoupdate-disable env vars
+function truthyEnv(name: string) {
+  const value = process.env[name]?.toLowerCase()
+  return value === "true" || value === "1"
+}
+
+export function isAutoupdateDisabledByEnv() {
+  return truthyEnv("ALTIMATE_CLI_DISABLE_AUTOUPDATE") || truthyEnv("OPENCODE_DISABLE_AUTOUPDATE")
+}
+// altimate_change end
+
 export async function upgrade() {
   // altimate_change start — skip the upgrade check for local / branch / dev builds.
   // These are never published to npm or GitHub releases, so the version lookup
@@ -127,7 +138,7 @@ export async function upgrade() {
   // altimate_change start — always notify when an update is available, regardless of autoupdate setting
   // Upstream returns early on `autoupdate === false`; we surface the available update instead so
   // users on pinned/disabled-autoupdate installs still learn a newer version exists.
-  if (config.autoupdate === false || Flag.OPENCODE_DISABLE_AUTOUPDATE || Flag.OPENCODE_ALWAYS_NOTIFY_UPDATE) {
+  if (config.autoupdate === false || isAutoupdateDisabledByEnv() || Flag.OPENCODE_ALWAYS_NOTIFY_UPDATE) {
     notify()
     return
   }

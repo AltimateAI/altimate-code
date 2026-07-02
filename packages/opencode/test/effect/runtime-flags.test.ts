@@ -146,6 +146,24 @@ describe("RuntimeFlags", () => {
     }),
   )
 
+  // altimate_change start — upstream_fix: Claude-Code skill flags disable external skill scanning
+  it.effect("disableExternalSkills inherits OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", () =>
+    Effect.gen(function* () {
+      const flags = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "true" })))
+
+      expect(flags.disableExternalSkills).toBe(true)
+    }),
+  )
+
+  it.effect("disableExternalSkills inherits OPENCODE_DISABLE_CLAUDE_CODE", () =>
+    Effect.gen(function* () {
+      const flags = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_DISABLE_CLAUDE_CODE: "true" })))
+
+      expect(flags.disableExternalSkills).toBe(true)
+    }),
+  )
+  // altimate_change end
+
   it.effect("disableLspDownload defaults to false", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(Effect.provide(fromConfig({})))

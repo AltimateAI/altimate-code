@@ -4,13 +4,40 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { effectCmd } from "../../effect-cmd"
 import { cmd } from "../cmd"
 import { InstanceRef } from "@/effect/instance-ref"
+// altimate_change start — upstream_fix: restore debug rg tree command
+import { Ripgrep as AppRipgrep } from "@/file/ripgrep"
+// altimate_change end
 
 export const RipgrepCommand = cmd({
   command: "rg",
   describe: "ripgrep debugging utilities",
-  builder: (yargs) => yargs.command(FilesCommand).command(SearchCommand).demandCommand(),
+  // altimate_change start — upstream_fix: restore debug rg tree command
+  builder: (yargs) =>
+    yargs
+      .command(TreeCommand)
+      .command(FilesCommand)
+      .command(SearchCommand)
+      .demandCommand(),
+  // altimate_change end
   async handler() {},
 })
+
+// altimate_change start — upstream_fix: restore debug rg tree command
+const TreeCommand = effectCmd({
+  command: "tree",
+  describe: "show file tree using ripgrep",
+  builder: (yargs) =>
+    yargs.option("limit", {
+      type: "number",
+    }),
+  handler: Effect.fn("Cli.debug.rg.tree")(function* (args) {
+    const ctx = yield* InstanceRef
+    if (!ctx) return
+    const tree = yield* Effect.promise(() => AppRipgrep.tree({ cwd: ctx.directory, limit: args.limit }))
+    process.stdout.write(tree + EOL)
+  }),
+})
+// altimate_change end
 
 const FilesCommand = effectCmd({
   command: "files",
@@ -66,11 +93,16 @@ const SearchCommand = effectCmd({
     const ctx = yield* InstanceRef
     if (!ctx) return
     const ripgrep = yield* Ripgrep.Service
+    // altimate_change start — upstream_fix: preserve all debug rg search --glob entries
+    const include = args.glob?.map(String).filter(Boolean)
+    // altimate_change end
     const results = yield* ripgrep
       .grep({
         cwd: ctx.directory,
         pattern: args.pattern,
-        include: args.glob?.[0],
+        // altimate_change start — upstream_fix: preserve all debug rg search --glob entries
+        include: include && include.length > 0 ? include : undefined,
+        // altimate_change end
         limit: args.limit ?? 10_000,
       })
       .pipe(Effect.orDie)

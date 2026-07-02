@@ -73,7 +73,9 @@ export interface GrepInput {
   readonly cwd: string
   readonly pattern: string
   readonly file?: string
-  readonly include?: string
+  // altimate_change start — upstream_fix: preserve all debug rg search --glob entries
+  readonly include?: string | readonly string[]
+  // altimate_change end
   readonly limit: number
   readonly signal?: AbortSignal
 }
@@ -228,7 +230,11 @@ export const layer = Layer.effect(
             "--json",
             "--hidden",
             "--no-messages",
-            ...(input.include ? [`--glob=${input.include}`] : []),
+            // altimate_change start — upstream_fix: preserve all debug rg search --glob entries
+            ...(typeof input.include === "string"
+              ? [`--glob=${input.include}`]
+              : (input.include ?? []).map((pattern) => `--glob=${pattern}`)),
+            // altimate_change end
             "--glob=!**/.git/**",
             "--",
             input.pattern,

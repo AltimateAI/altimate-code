@@ -12,6 +12,9 @@ import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
+// altimate_change start — upstream_fix: imported sessions must persist usage aggregates
+import { eq } from "drizzle-orm"
+// altimate_change end
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
@@ -81,6 +84,95 @@ export function transformShareData(shareData: ShareData[]): {
 }
 
 type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+
+// altimate_change start — upstream_fix: imported sessions must persist usage aggregates
+export type ImportedUsage = {
+  cost: number
+  tokens: {
+    input: number
+    output: number
+    reasoning: number
+    cache: { read: number; write: number }
+  }
+}
+
+function emptyImportedUsage(): ImportedUsage {
+  return { cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }
+}
+
+function addUsage(target: ImportedUsage, usage: ImportedUsage) {
+  target.cost += usage.cost
+  target.tokens.input += usage.tokens.input
+  target.tokens.output += usage.tokens.output
+  target.tokens.reasoning += usage.tokens.reasoning
+  target.tokens.cache.read += usage.tokens.cache.read
+  target.tokens.cache.write += usage.tokens.cache.write
+}
+
+export function aggregateImportedUsage(
+  messages: Iterable<{ info: SessionV1.Info; parts: Iterable<SessionV1.Part> }>,
+): ImportedUsage {
+  const aggregate = emptyImportedUsage()
+  for (const message of messages) {
+    const partUsage = emptyImportedUsage()
+    let hasPartUsage = false
+    for (const part of message.parts) {
+      if (part.type !== "step-finish") continue
+      hasPartUsage = true
+      addUsage(partUsage, {
+        cost: part.cost,
+        tokens: {
+          input: part.tokens.input,
+          output: part.tokens.output,
+          reasoning: part.tokens.reasoning,
+          cache: {
+            read: part.tokens.cache.read,
+            write: part.tokens.cache.write,
+          },
+        },
+      })
+    }
+    if (hasPartUsage) {
+      addUsage(aggregate, partUsage)
+      continue
+    }
+    if (message.info.role === "assistant") {
+      addUsage(aggregate, {
+        cost: message.info.cost,
+        tokens: {
+          input: message.info.tokens.input,
+          output: message.info.tokens.output,
+          reasoning: message.info.tokens.reasoning,
+          cache: {
+            read: message.info.tokens.cache.read,
+            write: message.info.tokens.cache.write,
+          },
+        },
+      })
+    }
+  }
+  return aggregate
+}
+
+function aggregateStoredUsage(
+  sessionID: SessionV1.Info["sessionID"],
+  messages: Array<typeof MessageTable.$inferSelect>,
+  parts: Array<typeof PartTable.$inferSelect>,
+): ImportedUsage {
+  const partsByMessage = new Map<string, SessionV1.Part[]>()
+  for (const part of parts) {
+    const items = partsByMessage.get(part.message_id) ?? []
+    items.push({ ...part.data, id: part.id, sessionID: part.session_id, messageID: part.message_id } as SessionV1.Part)
+    partsByMessage.set(part.message_id, items)
+  }
+  return aggregateImportedUsage(
+    messages.map((message) => ({
+      info: { ...message.data, id: message.id, sessionID } as SessionV1.Info,
+      parts: partsByMessage.get(message.id) ?? [],
+    })),
+  )
+}
+// altimate_change end
 
 export const ImportCommand = effectCmd({
   command: "import <file>",
@@ -220,6 +312,35 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
         .pipe(Effect.orDie)
     }
   }
+
+  // altimate_change start — upstream_fix: imported sessions must persist usage aggregates
+  const storedMessages = yield* db
+    .select()
+    .from(MessageTable)
+    .where(eq(MessageTable.session_id, row.id))
+    .all()
+    .pipe(Effect.orDie)
+  const storedParts = yield* db
+    .select()
+    .from(PartTable)
+    .where(eq(PartTable.session_id, row.id))
+    .all()
+    .pipe(Effect.orDie)
+  const usage = aggregateStoredUsage(row.id, storedMessages, storedParts)
+  yield* db
+    .update(SessionTable)
+    .set({
+      cost: usage.cost,
+      tokens_input: usage.tokens.input,
+      tokens_output: usage.tokens.output,
+      tokens_reasoning: usage.tokens.reasoning,
+      tokens_cache_read: usage.tokens.cache.read,
+      tokens_cache_write: usage.tokens.cache.write,
+    })
+    .where(eq(SessionTable.id, row.id))
+    .run()
+    .pipe(Effect.orDie)
+  // altimate_change end
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)

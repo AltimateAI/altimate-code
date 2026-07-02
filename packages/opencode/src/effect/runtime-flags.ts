@@ -18,7 +18,13 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   pure: bool("OPENCODE_PURE"),
   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),
   disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
-  disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
+  // altimate_change start — upstream_fix: Claude-Code skill disables also block external skill scanning
+  disableExternalSkills: Config.all({
+    broad: bool("OPENCODE_DISABLE_CLAUDE_CODE"),
+    claudeCodeSkills: bool("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"),
+    direct: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
+  }).pipe(Config.map((flags) => flags.broad || flags.claudeCodeSkills || flags.direct)),
+  // altimate_change end
   disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
   disableClaudeCodePrompt: Config.all({
     broad: bool("OPENCODE_DISABLE_CLAUDE_CODE"),
