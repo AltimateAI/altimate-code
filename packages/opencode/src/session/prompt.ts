@@ -1632,12 +1632,18 @@ export namespace SessionPrompt {
           },
         )
 
-        await ctx.ask({
-          permission: key,
-          metadata: {},
-          patterns: ["*"],
-          always: ["*"],
-        })
+        // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
+        // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
+        // check. Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
+        await AppRuntime.runPromise(
+          ctx.ask({
+            permission: key,
+            metadata: {},
+            patterns: ["*"],
+            always: ["*"],
+          }),
+        )
+        // altimate_change end
 
         const result = await execute(args, opts)
 
