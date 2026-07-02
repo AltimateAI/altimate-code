@@ -50,9 +50,21 @@ describe("compareVersions", () => {
       expect(compareVersions("1.0.0-beta.1", "1.0.0")).toBe(-1)
     })
 
-    test("both prerelease, same core → equal (simplified)", () => {
-      expect(compareVersions("1.0.0-alpha", "1.0.0-beta")).toBe(0)
+    // altimate_change start — prerelease identifiers are now ordered so beta channels auto-upgrade
+    test("both prerelease, same core → ordered by prerelease identifiers", () => {
+      // numeric identifiers compare as numbers (not strings) so beta.10 > beta.2
+      expect(compareVersions("1.0.0-beta.1", "1.0.0-beta.2")).toBe(-1)
+      expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.1")).toBe(1)
+      expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.10")).toBe(-1)
+      // lexical for non-numeric identifiers
+      expect(compareVersions("1.0.0-alpha", "1.0.0-beta")).toBe(-1)
+      expect(compareVersions("1.0.0-beta", "1.0.0-rc")).toBe(-1)
+      // a shorter identifier set is lower (beta < beta.1)
+      expect(compareVersions("1.0.0-beta", "1.0.0-beta.1")).toBe(-1)
+      // identical prerelease → equal
+      expect(compareVersions("1.0.0-beta.1", "1.0.0-beta.1")).toBe(0)
     })
+    // altimate_change end
 
     test("prerelease of higher version > release of lower", () => {
       expect(compareVersions("2.0.0-beta.1", "1.0.0")).toBe(1)

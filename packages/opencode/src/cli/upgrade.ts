@@ -48,6 +48,30 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
   if (!preA && preB) return 1
   if (preA && !preB) return -1
 
+  // altimate_change start — order prerelease identifiers so beta channels auto-upgrade
+  // (e.g. 0.9.0-beta.1 < 0.9.0-beta.2 < 0.9.0-beta.10). Without this a beta tester would
+  // be stuck on the first beta forever. Semver rule: compare dot-separated identifiers;
+  // numeric identifiers compare as numbers, otherwise lexically; a shorter set is lower.
+  if (preA && preB && preA !== preB) {
+    const idsA = preA.split(".")
+    const idsB = preB.split(".")
+    for (let i = 0; i < Math.max(idsA.length, idsB.length); i++) {
+      const x = idsA[i]
+      const y = idsB[i]
+      if (x === undefined) return -1
+      if (y === undefined) return 1
+      const nx = Number(x)
+      const ny = Number(y)
+      const bothNum = !isNaN(nx) && !isNaN(ny)
+      if (bothNum) {
+        if (nx > ny) return 1
+        if (nx < ny) return -1
+      } else if (x > y) return 1
+      else if (x < y) return -1
+    }
+  }
+  // altimate_change end
+
   return 0
 }
 
