@@ -264,21 +264,29 @@ async function testSkillDirect(
   return { ok: true, message: `${skillName}: PASS` }
 }
 
+type RawSdkClient = {
+  get(options: { url: string; query?: Record<string, unknown> }): Promise<{ data?: unknown; error?: unknown }>
+}
+
 /**
- * Re-fetch the skill list to verify newly-written skills are visible.
+ * Re-fetch the skill list with server-side cache invalidation.
  *
- * NOTE: the pre-merge implementation hit `GET /skill?reload=true` to force the server-side skill
- * cache (`Skill.invalidate()`) to drop before re-listing. That `reload` query is not reachable
- * through the typed SDK (`api.client.app.skills()` exposes only `directory`/`workspace`; the
- * underlying request client is `protected`), and `Skill.invalidate()` requires request-scoped
- * `Instance` context that plugin code does not hold. See the DEFERRED note at the bottom. Here we
- * best-effort re-list; if the server cache has not yet refreshed, verification simply reports
- * fewer matches and the toast falls back to the "reopen /skills" message.
+ * The generated SDK method does not expose `/skill?reload=true`, but the generated client is still
+ * present at runtime. Use it narrowly here instead of regenerating the SDK during the bridge merge.
  */
+async function reloadSkills(api: TuiPluginApi): Promise<SkillInfo[]> {
+  const raw = (api.client as unknown as { client?: RawSdkClient }).client
+  if (raw) {
+    const result = await raw.get({ url: "/skill", query: { reload: "true" } })
+    return (result.data ?? []) as SkillInfo[]
+  }
+  const result = await api.client.app.skills()
+  return (result.data ?? []) as SkillInfo[]
+}
+
 async function reloadAndVerify(api: TuiPluginApi, expectedNames: string[]): Promise<string[]> {
   try {
-    const result = await api.client.app.skills()
-    const skills = (result.data ?? []) as SkillInfo[]
+    const skills = await reloadSkills(api)
     return expectedNames.filter((n) => skills.some((s) => s.name === n))
   } catch {
     return []
@@ -324,9 +332,9 @@ function DialogSkillCreate(props: { api: TuiPluginApi }) {
             })
           } else {
             api.ui.toast({
-              message: `Created "${name}" files.\nReopen /skills to see it.`,
-              variant: "success",
-              duration: 6000,
+              message: `Created "${name}" files, but failed to refresh the skill list.`,
+              variant: "error",
+              duration: 8000,
             })
           }
         } catch (err) {
@@ -390,7 +398,16 @@ function DialogSkillInstall(props: { api: TuiPluginApi }) {
           const names = result.installedNames ?? []
           progress("Verifying skills loaded...")
           const verified = await reloadAndVerify(api, names)
-          const shown = verified.length > 0 ? verified : names
+          if (verified.length !== names.length) {
+            const missing = names.filter((name) => !verified.includes(name))
+            api.ui.toast({
+              message: `Installed files, but failed to refresh ${missing.length} skill(s): ${missing.join(", ")}`,
+              variant: "error",
+              duration: 8000,
+            })
+            return
+          }
+          const shown = verified
           const lines = [
             `Installed ${shown.length} skill(s)`,
             "",
@@ -668,17 +685,7 @@ const plugin: BuiltinTuiPlugin = {
 export default plugin
 
 // DEFERRED (cannot map to the plugin api without fabricating methods / unsafe context):
-//   1. Server-side skill-cache reload (`GET /skill?reload=true` → `Skill.invalidate()`).
-//      The pre-merge code force-invalidated the server's cached skill list so freshly-written
-//      skills appeared immediately. That `reload` query is not reachable via the typed SDK
-//      (`api.client.app.skills()` exposes only `directory`/`workspace`; the underlying request
-//      client on `OpencodeClient` is `protected`, so no raw `/skill?reload=true` GET), and
-//      `Skill.invalidate()` (packages/opencode/src/skill/skill.ts) needs request-scoped
-//      `Instance.directory` context that this plugin does not hold. `reloadAndVerify` therefore
-//      best-effort re-lists via the typed SDK; if the cache has not refreshed, the success toast
-//      falls back to "reopen /skills". To restore exact behavior, expose a typed `reload` flag on
-//      the `/skill` route's SDK method (regenerate the SDK) and call it here.
-//   2. Pre-merge `keybind` prop scoping. The old keybinds were attached to the DialogSelect
+//   1. Pre-merge `keybind` prop scoping. The old keybinds were attached to the DialogSelect
 //      instance, so they were active only while the list was visible. The plugin-api DialogSelect
 //      has no per-instance keybind prop, so ctrl+a/n/i are registered as a keymap layer at plugin
 //      init and are globally active. `altimate.skill.actions` no-ops when no skill is highlighted

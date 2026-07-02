@@ -9,10 +9,8 @@
 // TuiPluginApi (api.ui.DialogPrompt / api.ui.dialog / api.theme / api.client / api.keymap)
 // so upstream packages/tui stays untouched.
 //
-// Trigger: a "Connect altimate-backend" command in the palette. The pre-merge trigger was
-// provider-selection inside dialog-provider.tsx's onConfirm; that selection point is upstream
-// tui-internal and not reachable from the plugin api, so we expose the credential dialog as a
-// standalone command instead (see DEFERRED note at the bottom of this file).
+// Trigger: a "Connect altimate-backend" command in the palette, also dispatched by the provider
+// selection list in packages/tui/src/component/dialog-provider.tsx for the pre-merge /connect path.
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, Show } from "solid-js"
@@ -65,11 +63,9 @@ function CredentialDialog(props: { api: TuiPluginApi }) {
             return
           }
           await AltimateApi.saveCredentials(parsed)
-          // Disposing the server instance triggers a `server.instance.disposed` event that the
-          // TUI's sync layer handles (re-bootstrap), so the new credentials/providers reload.
           await props.api.client.instance.dispose()
+          await props.api.ui.dialog.openModel(PROVIDER_ID)
           props.api.ui.toast({ variant: "success", message: "Altimate credentials saved" })
-          props.api.ui.dialog.clear()
         } catch (err) {
           setValidationError(err instanceof Error ? err.message : "Failed to save credentials")
         } finally {
@@ -109,14 +105,10 @@ const plugin: BuiltinTuiPlugin = {
 
 export default plugin
 
-// DEFERRED (cannot map to the plugin api without fabricating methods):
-//   1. Provider-selection trigger — pre-merge, this dialog opened when the user picked the
-//      "altimate-backend" entry inside upstream dialog-provider.tsx. That selection list lives in
-//      upstream packages/tui and is not surfaced by TuiPluginApi, so the flow is exposed as the
-//      "Connect altimate-backend" palette command instead.
-//   2. `sync.bootstrap()` + `dialog.replace(<DialogModel ... />)` follow-on — `sync` and
-//      `DialogModel` are tui-internal (no plugin-api equivalent). Instead we dispose the server
-//      instance via `api.client.instance.dispose()`, which emits `server.instance.disposed`; the
-//      TUI's own sync layer re-bootstraps from that event, so providers/models reload without a
-//      direct bootstrap call. The explicit jump into the model picker is left out.
+// Restored handoffs:
+//   1. Provider selection dispatches this command from packages/tui/src/component/dialog-provider.tsx
+//      when the selected provider is "altimate-backend".
+//   2. `sync.bootstrap()` + `dialog.replace(<DialogModel ... />)` follow-on is exposed via
+//      `api.ui.dialog.openModel(PROVIDER_ID)`, a small host-owned plugin API seam that keeps
+//      DialogModel inside packages/tui while this plugin keeps the fork credential logic.
 // altimate_change end

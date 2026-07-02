@@ -128,6 +128,9 @@ export type TuiDialogProps = {
 export type TuiDialogStack = {
   replace: (render: () => JSX.Element, onClose?: () => void) => void
   clear: () => void
+  // altimate_change start — let fork provider plugins hand off to the built-in model picker
+  openModel: (providerID: string) => Promise<void>
+  // altimate_change end
   setSize: (size: "medium" | "large" | "xlarge") => void
   readonly size: "medium" | "large" | "xlarge"
   readonly depth: number

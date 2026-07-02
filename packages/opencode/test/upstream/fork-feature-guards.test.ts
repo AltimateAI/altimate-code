@@ -168,4 +168,24 @@ describe("fork feature presence guards (merge drop detection)", () => {
     // a default key must open the skills list — <leader>k (NOT ctrl+i, which collides with tab/agent-cycle)
     expect(skill).toMatch(/key:\s*"<leader>k",\s*cmd:\s*"altimate\.skill\.list"/)
   })
+
+  test("re-homed TUI fork features keep their submit/provider/cache handoffs", async () => {
+    const prompt = await read("src/component/prompt/index.tsx", MONO + "/tui")
+    expect(prompt).toContain("/altimate/prompt/enhance")
+    expect(prompt).toMatch(/auto_enhance_prompt[\s\S]*requestAutoEnhancedPrompt/)
+
+    const server = await read("src/server/server.ts")
+    expect(server).toContain("/altimate/prompt/enhance")
+    expect(server).toContain("isAutoEnhanceEnabled")
+
+    const dialogProvider = await read("src/component/dialog-provider.tsx", MONO + "/tui")
+    expect(dialogProvider).toMatch(/providerID === "altimate-backend"[\s\S]*dispatchCommand\("altimate\.provider\.connect"\)/)
+
+    const providerPlugin = await read("src/plugin/tui/altimate/provider-credentials.tsx")
+    expect(providerPlugin).toContain("AltimateApi.validateCredentials")
+    expect(providerPlugin).toContain("api.ui.dialog.openModel(PROVIDER_ID)")
+
+    const skill = await read("src/plugin/tui/altimate/skill-ops.tsx")
+    expect(skill).toMatch(/url:\s*"\/skill"[\s\S]*query:\s*\{\s*reload:\s*"true"\s*\}/)
+  })
 })

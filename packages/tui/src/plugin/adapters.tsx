@@ -14,6 +14,9 @@ import { DialogConfirm } from "../ui/dialog-confirm"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { DialogSelect, type DialogSelectOption as SelectOption } from "../ui/dialog-select"
 import { Prompt } from "../component/prompt"
+// altimate_change start — model picker handoff for fork provider credential plugin
+import { DialogModel } from "../component/dialog-model"
+// altimate_change end
 import type { useToast } from "../ui/toast"
 import * as Keymap from "../keymap"
 import { createCommandShim } from "./command-shim"
@@ -279,6 +282,12 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
         clear() {
           input.dialog.clear()
         },
+        // altimate_change start — model picker handoff for fork provider credential plugin
+        async openModel(providerID) {
+          await input.sync.bootstrap()
+          input.dialog.replace(() => <DialogModel providerID={providerID} />)
+        },
+        // altimate_change end
         setSize(size) {
           input.dialog.setSize(size)
         },

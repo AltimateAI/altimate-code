@@ -279,6 +279,11 @@ export function createTuiPluginApi(opts: Opts = {}): HostPluginApi {
           depth = 0
           size = "medium"
         },
+        // altimate_change start — model picker handoff mock
+        openModel: async () => {
+          depth = 1
+        },
+        // altimate_change end
         setSize: (next) => {
           size = next
         },

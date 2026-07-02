@@ -117,6 +117,36 @@ function fadeColor(color: RGBA, alpha: number) {
   return RGBA.fromValues(color.r, color.g, color.b, color.a * alpha)
 }
 
+// altimate_change start — auto-enhance prompt before submit via fork server endpoint
+type RawSdkClient = {
+  post(options: {
+    url: string
+    body?: unknown
+    headers?: Record<string, string>
+  }): Promise<{ data?: unknown; error?: unknown }>
+}
+
+type PromptEnhanceResponse = {
+  text?: unknown
+}
+
+async function requestAutoEnhancedPrompt(sdk: ReturnType<typeof useSDK>, text: string): Promise<string> {
+  try {
+    const raw = (sdk.client as unknown as { client?: RawSdkClient }).client
+    if (!raw) return text
+    const result = await raw.post({
+      url: "/altimate/prompt/enhance",
+      body: { text },
+      headers: { "Content-Type": "application/json" },
+    })
+    const data = result.data as PromptEnhanceResponse | undefined
+    return typeof data?.text === "string" ? data.text : text
+  } catch {
+    return text
+  }
+}
+// altimate_change end
+
 function hasEditorRangeSelection(selection: EditorSelection["ranges"][number]) {
   return (
     selection.selection.start.line !== selection.selection.end.line ||
@@ -1064,8 +1094,29 @@ export function Prompt(props: PromptProps) {
       sessionID = res.data.id
     }
 
-    const inputText = expandTrackedPastedText(
-      store.prompt.input,
+    // altimate_change start — restore auto-enhance-before-submit for normal prompts
+    let inputText = store.prompt.input
+
+    // Keep this in the TUI submit path so internal SessionPrompt.prompt callers (tools, CLI
+    // automation, background tasks) are not rewritten when the user opts into interactive prompt
+    // enhancement. The server endpoint owns the fork LLM/config code and returns the original text
+    // on failure, so sending remains best-effort.
+    const experimental = sync.data.config.experimental as { auto_enhance_prompt?: boolean } | undefined
+    if (experimental?.auto_enhance_prompt === true && store.mode === "normal" && !inputText.startsWith("/")) {
+      const original = inputText
+      toast.show({ message: "Enhancing prompt...", variant: "info", duration: 2000 })
+      const enhanced = await requestAutoEnhancedPrompt(sdk, original)
+      if (store.prompt.input !== original) {
+        inputText = store.prompt.input
+      } else if (enhanced !== original) {
+        inputText = enhanced
+        setStore("prompt", "input", enhanced)
+      }
+    }
+
+    inputText = expandTrackedPastedText(
+      inputText,
+      // altimate_change end
       input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
         const partIndex = store.extmarkToPartIndex.get(extmark.id)
         const part = partIndex === undefined ? undefined : store.prompt.parts[partIndex]

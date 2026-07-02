@@ -25,6 +25,12 @@ function createCommandShimDialog(dialog: CommandShimDialog): LegacyDialog {
     clear() {
       dialog.clear()
     },
+    // altimate_change start — preserve extended dialog API shape for fork provider handoff
+    async openModel(providerID) {
+      const maybeDialog = dialog as Partial<LegacyDialog>
+      await maybeDialog.openModel?.(providerID)
+    },
+    // altimate_change end
     setSize(size) {
       dialog.setSize(size)
     },

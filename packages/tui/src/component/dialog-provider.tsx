@@ -13,7 +13,7 @@ import { DialogModel } from "./dialog-model"
 import { useToast } from "../ui/toast"
 import { isConsoleManagedProvider } from "../util/provider-origin"
 import { useConnected } from "./use-connected"
-import { useBindings } from "../keymap"
+import { useBindings, useOpencodeKeymap } from "../keymap"
 import { useClipboard } from "../context/clipboard"
 
 const PROVIDER_PRIORITY: Record<string, number> = {
@@ -90,6 +90,9 @@ export function createDialogProviderOptions() {
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
+  // altimate_change start — delegate altimate-backend provider selection to fork credential plugin
+  const keymap = useOpencodeKeymap()
+  // altimate_change end
 
   async function promptCustomProviderID(): Promise<string | undefined> {
     const value = await DialogPrompt.show(dialog, "Other", {
@@ -144,6 +147,12 @@ export function createDialogProviderOptions() {
           gutter: connected && onboarded() ? () => <text fg={theme.success}>✓</text> : undefined,
           async onSelect() {
             if (consoleManaged) return
+            // altimate_change start — restore Altimate credential validation/save/model-picker flow
+            if (providerID === "altimate-backend") {
+              keymap.dispatchCommand("altimate.provider.connect")
+              return
+            }
+            // altimate_change end
 
             const methods = sync.data.provider_auth[providerID] ?? [
               {

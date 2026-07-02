@@ -29,13 +29,14 @@ import { ProjectRoutes } from "./routes/project"
 import { SessionRoutes } from "./routes/session"
 import { PtyRoutes } from "./routes/pty"
 import { McpRoutes } from "./routes/mcp"
-// altimate_change start — reload-datamate endpoint
+// altimate_change start — Altimate-only server endpoints
 import { MCP } from "../mcp"
 // Import sync + fresh-read helpers directly from the shared transport module.
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
 import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
+import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -636,6 +637,29 @@ export namespace Server {
           })
         },
       )
+      // altimate_change start — POST /altimate/prompt/enhance
+      // Keep the fork-owned LLM/config prompt enhancement on the opencode side while letting the
+      // extracted upstream TUI call it from the submit path. The endpoint is intentionally a no-op
+      // unless experimental.auto_enhance_prompt is true, and failures return the original prompt so
+      // submit is never blocked by the rewrite path.
+      .post(
+        "/altimate/prompt/enhance",
+        validator("json", z.object({ text: z.string() })),
+        async (c) => {
+          const { text } = c.req.valid("json")
+          try {
+            if (!(await isAutoEnhanceEnabled())) {
+              return c.json({ text, enabled: false, enhanced: false })
+            }
+            const enhanced = await enhancePrompt(text)
+            return c.json({ text: enhanced, enabled: true, enhanced: enhanced !== text })
+          } catch (err) {
+            log.error("prompt enhance failed; using original prompt", { error: err })
+            return c.json({ text, enabled: true, enhanced: false })
+          }
+        },
+      )
+      // altimate_change end
       // altimate_change start — POST /altimate/mcp/reload-datamate
       // Updates the datamate MCP server config from IDE MCP config files and reconnects
       // the live MCP client so the new transport takes effect without a server restart.

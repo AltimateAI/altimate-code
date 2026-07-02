@@ -11,11 +11,12 @@
 //
 // Trigger: an "Enhance prompt" command registered on the keymap, bound to the `prompt_enhance`
 // keybind. On trigger it reads the active prompt input via `api.prompt.active()` (the fork
-// plugin-api extension), awaits enhancePrompt(it), and writes the result back via ref.set(). The
-// auto-enhance-before-submit path remains deferred — the api has no pre-submit interceptor.
+// plugin-api extension), awaits enhancePrompt(it), and writes the result back via ref.set().
+// Auto-enhance-before-submit is restored in packages/tui/src/component/prompt/index.tsx by calling
+// the fork server endpoint `/altimate/prompt/enhance` before pasted-text expansion.
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
-import { enhancePrompt, isAutoEnhanceEnabled } from "@/altimate/enhance-prompt"
+import { enhancePrompt } from "@/altimate/enhance-prompt"
 
 const id = "altimate:prompt-enhance"
 
@@ -30,8 +31,7 @@ let enhancingInProgress = false
  * already in flight, or the model returned the original text unchanged). Toast feedback mirrors
  * the pre-merge "prompt.enhance" command.
  *
- * The caller is responsible for reading the current prompt input and writing the result back —
- * the plugin api does not expose the active prompt ref (see DEFERRED note).
+ * The caller is responsible for reading the current prompt input and writing the result back.
  */
 async function enhance(api: TuiPluginApi, original: string): Promise<string | undefined> {
   if (!original.trim()) return undefined
@@ -85,13 +85,7 @@ const plugin: BuiltinTuiPlugin = {
 
 export default plugin
 
-// PARTIALLY DEFERRED — auto-enhance-before-submit:
-//
-// The manual "Enhance prompt" command is now fully wired via the `api.prompt.active()` extension
-// (added to TuiPluginApi in packages/plugin/src/tui.ts + adapters.tsx, backed by the host's
-// usePromptRef context). The remaining unported piece is the auto-enhance-before-submit path: the
-// pre-merge source ran `isAutoEnhanceEnabled()` + rewrite *inside* the prompt component's submit
-// handler. The plugin api has no pre-submit interceptor, so this can't be hooked yet. `isAutoEnhanceEnabled`
-// is kept imported and ready; wiring it needs a `before-submit` hook on the prompt api (future).
-void isAutoEnhanceEnabled
+// Auto-enhance-before-submit is intentionally handled at the TUI submit/server endpoint seam rather
+// than as a plugin hook: packages/tui remains generic, and fork-owned config/LLM code stays in
+// packages/opencode.
 // altimate_change end
