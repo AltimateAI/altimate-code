@@ -361,7 +361,18 @@ export const layer = Layer.effect(
                 // reviewer still never runs shell commands silently.
                 bash: "ask",
               }),
-              userWithSafety,
+              // altimate_change start — reviewer safety must not be overridable by a permissive user
+              // config (e.g. global `permission: {"*":"allow"}` or `bash:"allow"`). Merge user config,
+              // THEN re-apply the reviewer read-only invariants, THEN safetyDenials LAST so DDL denies
+              // still win over the reviewer's bash:"ask". (edit covers write/edit/apply_patch.)
+              user,
+              Permission.fromConfig({
+                bash: "ask",
+                edit: "deny",
+                sql_execute_write: "deny",
+              }),
+              safetyDenials,
+              // altimate_change end
             ),
             mode: "primary",
             native: true,

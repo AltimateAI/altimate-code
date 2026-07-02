@@ -415,7 +415,7 @@ export const McpLogoutCommand = effectCmd({
 async function resolveConfigPath(baseDir: string, global = false) {
   // altimate_change start — upstream_fix: prefer the fork's primary config filename
   // for new MCP entries while still discovering existing upstream config files.
-  const CONFIG_FILENAMES = ["altimate-code.json", "opencode.json", "opencode.jsonc"]
+  const CONFIG_FILENAMES = ["altimate-code.jsonc", "altimate-code.json", "opencode.json", "opencode.jsonc"]
   const candidates: string[] = []
 
   if (!global) {

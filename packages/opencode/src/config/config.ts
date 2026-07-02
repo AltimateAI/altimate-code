@@ -217,8 +217,11 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Co
 export const use = serviceUse(Service)
 
 function globalConfigFile() {
-  // altimate_change start - support altimate-code.json config filename
-  const candidates = ["altimate-code.json", "opencode.jsonc", "opencode.json", "config.json"].map((file) =>
+  // altimate_change start - support altimate-code.json/.jsonc config filenames
+  // altimate-code.json stays first so it remains the default target when no config exists yet;
+  // altimate-code.jsonc is still discovered when it already exists.
+  const candidates = ["altimate-code.json", "altimate-code.jsonc", "opencode.jsonc", "opencode.json", "config.json"].map(
+    (file) =>
     path.join(Global.Path.config, file),
   )
   // altimate_change end
@@ -344,8 +347,9 @@ export const layer = Layer.effect(
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc"), env))
-      // altimate_change start - support altimate-code.json config filename
+      // altimate_change start - support altimate-code.json/.jsonc config filenames
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "altimate-code.json"), env))
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "altimate-code.jsonc"), env))
       // altimate_change end
 
       const legacy = path.join(Global.Path.config, "config")
