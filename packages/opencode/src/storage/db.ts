@@ -131,12 +131,20 @@ export namespace Database {
   function markDrizzleEntriesApplied(sqlite: BunDatabase, entries: Journal) {
     ensureDrizzleJournal(sqlite)
     const appliedAt = new Date().toISOString()
+    // altimate_change start — upstream_fix: make manual migration journal marks idempotent
     const insert = sqlite.prepare(
-      `INSERT OR IGNORE INTO "__drizzle_migrations" ("hash", "created_at", "name", "applied_at") VALUES (?, ?, ?, ?)`,
+      `
+        INSERT INTO "__drizzle_migrations" ("hash", "created_at", "name", "applied_at")
+        SELECT ?, ?, ?, ?
+        WHERE NOT EXISTS (
+          SELECT 1 FROM "__drizzle_migrations" WHERE "name" = ?
+        )
+      `,
     )
     for (const entry of entries) {
-      insert.run("", entry.timestamp, entry.name, appliedAt)
+      insert.run("", entry.timestamp, entry.name, appliedAt, entry.name)
     }
+    // altimate_change end
   }
 
   function runFreshSchema(sqlite: BunDatabase) {
@@ -343,6 +351,42 @@ export namespace Database {
   }
   // altimate_change end
 
+  // altimate_change start — upstream_fix: collapse duplicate manual migration journal marks
+  function dedupeDrizzleJournal(sqlite: BunDatabase) {
+    try {
+      const tableInfo = sqlite.prepare("SELECT name FROM pragma_table_info('__drizzle_migrations')").all() as {
+        name: string
+      }[]
+      const hasName = tableInfo.some((c) => c.name === "name")
+      const hasID = tableInfo.some((c) => c.name === "id")
+      if (!tableInfo.length || !hasName || !hasID) return
+
+      const result = sqlite
+        .prepare(
+          `
+            DELETE FROM "__drizzle_migrations"
+            WHERE "name" IS NOT NULL
+              AND "name" != ''
+              AND "id" NOT IN (
+                SELECT MIN("id")
+                FROM "__drizzle_migrations"
+                WHERE "name" IS NOT NULL AND "name" != ''
+                GROUP BY "name"
+              )
+          `,
+        )
+        .run() as { changes: number }
+      if (result.changes > 0) {
+        log.info("deduplicated migration journal entries", { count: result.changes })
+      }
+    } catch (e) {
+      log.info("migration journal dedupe skipped", {
+        error: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+  // altimate_change end
+
   export const Client = lazy(() => {
     log.info("opening database", { path: Path })
 
@@ -378,6 +422,9 @@ export namespace Database {
       const repaired = adopted || initialized ? false : repairLegacyDatabase(sqlite, entries)
       // altimate_change start — backfill migration names before migrate
       backfillMigrationNames(sqlite, entries)
+      // altimate_change end
+      // altimate_change start — upstream_fix: remove any duplicate manual journal marks before migrate
+      dedupeDrizzleJournal(sqlite)
       // altimate_change end
       if (!adopted && !initialized && !repaired) migrate(db, entries)
     }
