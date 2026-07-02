@@ -677,6 +677,50 @@ describe("session.compaction.create", () => {
     ),
   )
 
+  it.live(
+    "sets tail_start_id to the retained recent-turn boundary",
+    provideTmpdirInstanceLegacy(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = compactionEffect
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const users: Array<{ id: MessageID }> = []
+
+          for (let i = 1; i <= 5; i++) {
+            const user = yield* createUserMessage(info.id, `turn ${i} ${"x".repeat(200)}`)
+            users.push(user)
+            const assistant = yield* createAssistantMessage(info.id, user.id, dir)
+            yield* ssn.updatePart({
+              id: PartID.ascending(),
+              messageID: assistant.id,
+              sessionID: info.id,
+              type: "text",
+              text: `reply ${i}`,
+            })
+          }
+
+          yield* compact.create({
+            sessionID: info.id,
+            agent: "build",
+            model: ref,
+            auto: true,
+          })
+
+          const msgs = yield* ssn.messages({ sessionID: info.id })
+          const part = msgs.at(-1)?.parts.find((item): item is SessionV1.CompactionPart => item.type === "compaction")
+          expect(part?.type).toBe("compaction")
+          expect(part?.tail_start_id).toBe(users[3].id)
+        }),
+      {
+        config: {
+          ...testProviderConfig,
+          compaction: { tail_turns: 2, preserve_recent_tokens: 10_000 },
+        },
+      },
+    ),
+  )
+
   it.live.skip(
     "projects a compaction message to v2 (v2 projector disabled)",
     provideTmpdirInstance(() =>

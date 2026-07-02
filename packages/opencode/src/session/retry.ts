@@ -69,7 +69,12 @@ export namespace SessionRetry {
       return `Authentication failed — retrying. If this persists, run: altimate-code auth login ${error.data.providerID}`
     }
     if (MessageV2.APIError.isInstance(error)) {
-      if (!error.data.isRetryable) return undefined
+      // altimate_change start — upstream_fix: retry transient 5xx API errors
+      if (!error.data.isRetryable) {
+        const status = error.data.statusCode
+        if (!(status !== undefined && status >= 500)) return undefined
+      }
+      // altimate_change end
       if (error.data.responseBody?.includes("FreeUsageLimitError"))
         return `Free usage exceeded, add credits https://altimate.ai/zen`
       return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message

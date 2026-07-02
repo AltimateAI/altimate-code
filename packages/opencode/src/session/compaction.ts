@@ -102,6 +102,176 @@ export namespace SessionCompaction {
 
   const PRUNE_PROTECTED_TOOLS = ["skill"]
 
+  // altimate_change start — upstream_fix: restore tail-preserving compaction selection
+  const DEFAULT_TAIL_TURNS = 2
+  const MIN_PRESERVE_RECENT_TOKENS = 2_000
+  const MAX_PRESERVE_RECENT_TOKENS = 8_000
+
+  type ConfigInfo = Awaited<ReturnType<typeof Config.get>>
+
+  type Turn = {
+    start: number
+    end: number
+    id: MessageID
+  }
+
+  type Tail = {
+    start: number
+    id: MessageID
+  }
+
+  type CompletedCompaction = {
+    userIndex: number
+    assistantIndex: number
+  }
+
+  function completedCompactions(messages: MessageV2.WithParts[]) {
+    const users = new Map<MessageID, number>()
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]
+      if (msg.info.role !== "user") continue
+      if (!msg.parts.some((part) => part.type === "compaction")) continue
+      users.set(msg.info.id, i)
+    }
+
+    return messages.flatMap((msg, assistantIndex): CompletedCompaction[] => {
+      if (msg.info.role !== "assistant") return []
+      if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
+      const userIndex = users.get(msg.info.parentID)
+      if (userIndex === undefined) return []
+      return [{ userIndex, assistantIndex }]
+    })
+  }
+
+  function preserveRecentBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
+    const context = input.model.limit.context
+    if (context === 0) return 0
+
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const reserved = input.cfg.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, maxOutput)
+    const usable = input.model.limit.input
+      ? Math.max(0, input.model.limit.input - reserved)
+      : Math.max(0, context - maxOutput)
+    return (
+      input.cfg.compaction?.preserve_recent_tokens ??
+      Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable * 0.25)))
+    )
+  }
+
+  function turns(messages: MessageV2.WithParts[]) {
+    const result: Turn[] = []
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]
+      if (msg.info.role !== "user") continue
+      if (msg.parts.some((part) => part.type === "compaction")) continue
+      result.push({
+        start: i,
+        end: messages.length,
+        id: msg.info.id,
+      })
+    }
+    for (let i = 0; i < result.length - 1; i++) {
+      result[i].end = result[i + 1].start
+    }
+    return result
+  }
+
+  async function estimate(input: { messages: MessageV2.WithParts[]; model: Provider.Model }) {
+    const msgs = await MessageV2.toModelMessages(input.messages, input.model, { stripMedia: true })
+    return Token.estimate(JSON.stringify(msgs))
+  }
+
+  async function splitTurn(input: {
+    messages: MessageV2.WithParts[]
+    turn: Turn
+    model: Provider.Model
+    budget: number
+  }) {
+    if (input.budget <= 0) return undefined
+    if (input.turn.end - input.turn.start <= 1) return undefined
+    for (let start = input.turn.start + 1; start < input.turn.end; start++) {
+      const size = await estimate({
+        messages: input.messages.slice(start, input.turn.end),
+        model: input.model,
+      })
+      if (size > input.budget) continue
+      return {
+        start,
+        id: input.messages[start]!.info.id,
+      } satisfies Tail
+    }
+    return undefined
+  }
+
+  async function select(input: { messages: MessageV2.WithParts[]; cfg: ConfigInfo; model: Provider.Model }) {
+    const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+    if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
+    const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
+    const all = turns(input.messages)
+    if (!all.length) return { head: input.messages, tail_start_id: undefined }
+    const recent = all.slice(-limit)
+    const sizes = []
+    for (const turn of recent) {
+      sizes.push(
+        await estimate({
+          messages: input.messages.slice(turn.start, turn.end),
+          model: input.model,
+        }),
+      )
+    }
+
+    let total = 0
+    let keep: Tail | undefined
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const turn = recent[i]!
+      const size = sizes[i]!
+      if (total + size <= budget) {
+        total += size
+        keep = { start: turn.start, id: turn.id }
+        continue
+      }
+      const remaining = budget - total
+      const split = await splitTurn({
+        messages: input.messages,
+        turn,
+        model: input.model,
+        budget: remaining,
+      })
+      if (split) keep = split
+      else if (!keep) log.info("tail fallback", { budget, size, total })
+      break
+    }
+
+    if (!keep || keep.start === 0) return { head: input.messages, tail_start_id: undefined }
+    return {
+      head: input.messages.slice(0, keep.start),
+      tail_start_id: keep.id,
+    }
+  }
+
+  async function selectCurrentTailStart(input: {
+    sessionID: SessionID
+    model: { providerID: ProviderID; modelID: ModelID }
+  }) {
+    try {
+      const cfg = await Config.get()
+      const model = await Provider.getModel(input.model.providerID, input.model.modelID)
+      const messages = MessageV2.filterCompacted(MessageV2.stream(input.sessionID))
+      const prior = completedCompactions(messages)
+      const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
+      const selected = await select({
+        messages: messages.filter((_, index) => !hidden.has(index)),
+        cfg,
+        model,
+      })
+      return selected.tail_start_id
+    } catch (e) {
+      log.warn("tail selection failed", { error: e instanceof Error ? e.message : String(e) })
+      return undefined
+    }
+  }
+  // altimate_change end
+
   // goes backwards through parts until there are 40_000 tokens worth of tool
   // calls. then erases output of previous tool calls. idea is to throw away old
   // tool calls that are no longer relevant.
@@ -204,6 +374,9 @@ export namespace SessionCompaction {
       throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
     }
     const userMessage = parent.info
+    // altimate_change start — upstream_fix: restore tail-preserving compaction selection
+    const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")
+    // altimate_change end
 
     let messages = input.messages
     let replay: MessageV2.WithParts | undefined
@@ -231,6 +404,17 @@ export namespace SessionCompaction {
         await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
       : // altimate_change end
         await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+    // altimate_change start — upstream_fix: restore tail-preserving compaction selection
+    const cfg = await Config.get()
+    const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+    const prior = completedCompactions(history)
+    const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
+    const selected = await select({
+      messages: history.filter((_, index) => !hidden.has(index)),
+      cfg,
+      model,
+    })
+    // altimate_change end
     const msg = (await Session.updateMessage({
       id: MessageID.ascending(),
       role: "assistant",
@@ -316,7 +500,9 @@ When constructing the summary, try to stick to this template:
       tools: {},
       system: [],
       messages: [
-        ...(await MessageV2.toModelMessages(messages, model, { stripMedia: true })),
+        // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail
+        ...(await MessageV2.toModelMessages(selected.head, model, { stripMedia: true })),
+        // altimate_change end
         {
           role: "user",
           content: [
@@ -340,6 +526,15 @@ When constructing the summary, try to stick to this template:
       await Session.updateMessage(processor.message)
       return "stop"
     }
+
+    // altimate_change start — upstream_fix: stamp retained tail boundary on compaction marker
+    if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
+      await Session.updatePart({
+        ...compactionPart,
+        tail_start_id: selected.tail_start_id,
+      })
+    }
+    // altimate_change end
 
     if (result === "continue" && input.auto) {
       if (replay) {
@@ -418,6 +613,9 @@ When constructing the summary, try to stick to this template:
       overflow: z.boolean().optional(),
     }),
     async (input) => {
+      // altimate_change start — upstream_fix: stamp retained tail boundary when creating compaction marker
+      const tailStartID = await selectCurrentTailStart(input)
+      // altimate_change end
       const msg = await Session.updateMessage({
         id: MessageID.ascending(),
         role: "user",
@@ -435,6 +633,9 @@ When constructing the summary, try to stick to this template:
         type: "compaction",
         auto: input.auto,
         overflow: input.overflow,
+        // altimate_change start — upstream_fix: persist first retained tail message
+        tail_start_id: tailStartID,
+        // altimate_change end
       })
     },
   )

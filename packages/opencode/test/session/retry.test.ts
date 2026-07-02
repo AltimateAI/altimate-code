@@ -173,6 +173,16 @@ describe("session.retry.retryable", () => {
     expect(result).toBeDefined()
     expect(result).toContain("altimate-code auth login openai")
   })
+
+  test("retries 5xx API errors even when provider marks them non-retryable", () => {
+    const error = new MessageV2.APIError({
+      message: "Bad Gateway",
+      statusCode: 502,
+      isRetryable: false,
+    }).toObject() as ReturnType<NamedError["toObject"]>
+
+    expect(SessionRetry.retryable(error)).toBe("Bad Gateway")
+  })
 })
 
 describe("session.message-v2.fromError", () => {

@@ -217,6 +217,10 @@ export namespace LLM {
           error,
         })
       },
+      // altimate_change start — upstream_fix: Copilot raw billing chunks
+      // Copilot exposes totalNanoAiu only through provider raw chunks.
+      includeRawChunks: input.model.providerID.includes("github-copilot"),
+      // altimate_change end
       async experimental_repairToolCall(failed) {
         const lower = failed.toolCall.toolName.toLowerCase()
         if (lower !== failed.toolCall.toolName && tools[lower]) {

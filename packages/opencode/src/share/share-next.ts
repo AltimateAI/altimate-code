@@ -149,7 +149,11 @@ export namespace ShareNext {
         })
         .run(),
     )
-    fullSync(sessionID)
+    // altimate_change start — upstream_fix: catch background full share sync failures
+    void fullSync(sessionID).catch((error) => {
+      log.error("share full sync failed", { sessionID, error })
+    })
+    // altimate_change end
     return result
   }
 
@@ -215,25 +219,31 @@ export namespace ShareNext {
     }
 
     const timeout = setTimeout(async () => {
-      const queued = queue.get(sessionID)
-      if (!queued) return
-      queue.delete(sessionID)
-      const share = get(sessionID)
-      if (!share) return
+      // altimate_change start — upstream_fix: catch background share flush failures
+      try {
+        const queued = queue.get(sessionID)
+        if (!queued) return
+        queue.delete(sessionID)
+        const share = get(sessionID)
+        if (!share) return
 
-      const req = await request()
-      const response = await fetch(`${req.baseUrl}${req.api.sync(share.id)}`, {
-        method: "POST",
-        headers: { ...req.headers, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          secret: share.secret,
-          data: Array.from(queued.data.values()),
-        }),
-      })
+        const req = await request()
+        const response = await fetch(`${req.baseUrl}${req.api.sync(share.id)}`, {
+          method: "POST",
+          headers: { ...req.headers, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            secret: share.secret,
+            data: Array.from(queued.data.values()),
+          }),
+        })
 
-      if (!response.ok) {
-        log.warn("failed to sync share", { sessionID, shareID: share.id, status: response.status })
+        if (!response.ok) {
+          log.warn("failed to sync share", { sessionID, shareID: share.id, status: response.status })
+        }
+      } catch (error) {
+        log.error("share flush failed", { sessionID, error })
       }
+      // altimate_change end
     }, 1000)
     queue.set(sessionID, { timeout, data: dataMap })
   }
