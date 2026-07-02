@@ -27,3 +27,19 @@ GOAL: dual preservation — don't lose FORK work, don't lose UPSTREAM work.
 ## Dual-preservation verdict
 - FORK preservation: CLEAN (D + F pass; nothing we built is lost or weakened).
 - UPSTREAM preservation: the gaps were HERE — 5 dropped fixes + 3 unwired auth plugins + managed-config, now restored. This is the class my earlier fork-focused passes missed; the board's upstream-adoption + seam lenses caught them.
+
+## Addendum — E (integration seams) full report
+Enumerated the seam surface: 587 `@opencode-ai/*` import sites across 216 files in packages/opencode/src + 37 in packages/tui/src; 6 subsystem scopes audited.
+- **Azure/DigitalOcean/xAI auth plugins unwired** (MED-HIGH) — FIXED (board commit b0ade919c7).
+- **`openai/codex.ts` orphaned** (MED) — DOCUMENTED, not fixed. 0 consumers; fork deliberately uses its own `./codex` (BUILTIN). Harmless dead code; deleting an upstream file risks future-merge friction. Adopting its WebSocket/allowlist/dispose capabilities is a product decision, not a merge fix.
+- **Dual-`Session`-module `getUsage` divergence** (MED-latent / LOW-active) — DOCUMENTED, not fixed. Live path is `processor.ts:326 → session/index.ts:830` (carries the OpenRouter cost fix); `session.ts:387` is the caller-less V2-migration copy. Not a live bug; session.ts is the not-shipped V2 surface.
+- **OVERTURNED false-positive HIGH**: an earlier subagent claimed `fromPlugin` permission-gate bypass (ctx.ask became Effect → `await` no-ops). E traced the `legacyToInit`→bridged-`legacyCtx` layer (tool-zod-compat.ts:221) that makes ask Promise-based before the plugin runs — the gate runs correctly. Safety surface confirmed clean.
+- Server / cli / effect / config / storage seam scopes: clean. Signature-skew class (`Adaptor.target()`) already fixed; 192 tracked `upstream_fix` markers + green typecheck catch compile-level skew.
+
+## Final board disposition
+- Ship-blocker: 1 (release.yml) — FIXED.
+- Real dropped-upstream fixes/features: 6 + 3 auth plugins + run-auth — FIXED.
+- Security (pre-existing): sensitive-write guard neutralization — FIXED.
+- provider-executed metadata — FIXED (execution was already correct); settlement-telemetry field = scoped follow-up.
+- Latent/dead-code in the not-shipped V2 surface (codex orphan, getUsage copy) — DOCUMENTED, deliberately not chased.
+- Fork preservation + safety surface: PASS (nothing lost or weakened).
