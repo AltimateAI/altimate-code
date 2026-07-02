@@ -21,8 +21,9 @@ function legacySessionID() {
   return crypto.randomUUID() as SessionID
 }
 
-function seed(opts: { id: SessionID; dir: string; project: ProjectV2.ID }) {
+function seed(opts: { id: SessionID; dir: string; project: ProjectV2.ID; timeUpdated?: number }) {
   const now = Date.now()
+  const timeUpdated = opts.timeUpdated ?? now
   return Database.Service.use(({ db }) =>
     db
       .insert(SessionTable)
@@ -34,7 +35,7 @@ function seed(opts: { id: SessionID; dir: string; project: ProjectV2.ID }) {
         title: "test",
         version: "0.0.0-test",
         time_created: now,
-        time_updated: now,
+        time_updated: timeUpdated,
       })
       .run()
       .pipe(Effect.orDie),
@@ -73,7 +74,8 @@ describe("migrateFromGlobal", () => {
 
       // 2. Seed a session under "global" with matching directory
       const id = legacySessionID()
-      yield* seed({ id, dir: tmp, project: ProjectV2.ID.global })
+      const timeUpdated = 1_234_567_890
+      yield* seed({ id, dir: tmp, project: ProjectV2.ID.global, timeUpdated })
 
       // 3. Make a commit so the project gets a real ID
       yield* Effect.promise(() => $`git commit --allow-empty -m "root"`.cwd(tmp).quiet())
@@ -87,6 +89,7 @@ describe("migrateFromGlobal", () => {
       )
       expect(row).toBeDefined()
       expect(row!.project_id).toBe(ProjectV2.ID.make(real.id))
+      expect(row!.time_updated).toBe(timeUpdated)
     }),
   )
 
@@ -105,7 +108,8 @@ describe("migrateFromGlobal", () => {
       //    This simulates a session created before git init that wasn't
       //    present when the real project row was first created.
       const id = legacySessionID()
-      yield* seed({ id, dir: tmp, project: ProjectV2.ID.global })
+      const timeUpdated = 1_234_567_891
+      yield* seed({ id, dir: tmp, project: ProjectV2.ID.global, timeUpdated })
 
       // 4. Call fromDirectory again — project row already exists,
       //    so the current code skips migration entirely. This is the bug.
@@ -116,6 +120,7 @@ describe("migrateFromGlobal", () => {
       )
       expect(row).toBeDefined()
       expect(row!.project_id).toBe(ProjectV2.ID.make(project.id))
+      expect(row!.time_updated).toBe(timeUpdated)
     }),
   )
 

@@ -181,7 +181,9 @@ export namespace ProviderTransform {
     if (
       model.providerID === "mistral" ||
       model.api.id.toLowerCase().includes("mistral") ||
-      model.api.id.toLocaleLowerCase().includes("devstral")
+      // altimate_change start — upstream_fix: use locale-safe Devstral model detection
+      model.api.id.toLowerCase().includes("devstral")
+      // altimate_change end
     ) {
       const scrub = (id: string) => {
         return id

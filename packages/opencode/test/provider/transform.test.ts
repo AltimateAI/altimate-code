@@ -1623,6 +1623,72 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
   })
 })
 
+// altimate_change start — upstream_fix: Devstral detection uses locale-safe lowercasing
+describe("ProviderTransform.message - Devstral detection", () => {
+  test("uses toLowerCase for Devstral model IDs", () => {
+    const apiId = {
+      includes: () => false,
+      toLowerCase: () => "devstral-small",
+      toLocaleLowerCase: () => {
+        throw new Error("locale-sensitive lowercasing should not be used")
+      },
+    }
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-id!!", toolName: "bash", input: { command: "pwd" } }],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-id!!",
+            toolName: "bash",
+            output: { type: "text", value: "ok" },
+          },
+        ],
+      },
+      { role: "user", content: "next" },
+    ] as any[]
+
+    const result = ProviderTransform.message(
+      msgs,
+      {
+        id: ModelID.make("custom/devstral-small"),
+        providerID: ProviderID.make("custom"),
+        api: {
+          id: apiId,
+          url: "https://api.example.com",
+          npm: "@ai-sdk/openai-compatible",
+        },
+        name: "Devstral Small",
+        capabilities: {
+          temperature: true,
+          reasoning: false,
+          attachment: false,
+          toolcall: true,
+          input: { text: true, audio: false, image: false, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: 128000, output: 4096 },
+        status: "active",
+        options: {},
+        headers: {},
+        release_date: "2024-01-01",
+      } as any,
+      {},
+    ) as any[]
+
+    expect(result[0].content[0].toolCallId).toBe("callid000")
+    expect(result[1].content[0].toolCallId).toBe("callid000")
+    expect(result[2]).toEqual({ role: "assistant", content: [{ type: "text", text: "Done." }] })
+  })
+})
+// altimate_change end
+
 describe("ProviderTransform.message - surrogate sanitization", () => {
   const model = {
     id: "test/test-model",

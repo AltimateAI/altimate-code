@@ -945,6 +945,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
     await bootstrap(process.cwd(), async () => {
       const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init)
+        // altimate_change start — upstream_fix: attach basic-auth header to in-process run requests
+        // so local `run` still reaches the embedded server when OPENCODE_SERVER_PASSWORD is set
+        // (the server enforces basicAuth on all routes; without this the in-process fetch 401s).
+        const { ServerAuth } = await import("@/server/auth")
+        const auth = ServerAuth.header()
+        if (auth) {
+          const headers = new Headers(request.headers)
+          headers.set("Authorization", auth)
+          return Server.Default().fetch(new Request(request, { headers }))
+        }
+        // altimate_change end
         return Server.Default().fetch(request)
       }) as typeof globalThis.fetch
       const sdk = createOpencodeClient({ baseUrl: "http://altimate-code.internal", fetch: fetchFn })

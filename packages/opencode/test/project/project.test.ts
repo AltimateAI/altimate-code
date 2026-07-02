@@ -206,6 +206,7 @@ describe("Project.fromDirectory", () => {
       const rootProject = rootResult.project
       const remoteID = remoteProjectID("github.com/acme/app")
       const sessionID = crypto.randomUUID() as SessionID
+      const sessionTimeUpdated = 1_234_567_892
       const workspaceID = WorkspaceV2.ID.ascending()
 
       yield* db
@@ -218,7 +219,7 @@ describe("Project.fromDirectory", () => {
           title: "test",
           version: "0.0.0-test",
           time_created: Date.now(),
-          time_updated: Date.now(),
+          time_updated: sessionTimeUpdated,
         })
         .run()
         .pipe(Effect.orDie)
@@ -240,10 +241,14 @@ describe("Project.fromDirectory", () => {
           .get()
           .pipe(Effect.orDie),
       ).toBeUndefined()
-      expect(
-        (yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie))
-          ?.project_id,
-      ).toBe(ProjectV2.ID.make(remoteID))
+      const migratedSession = yield* db
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      expect(migratedSession?.project_id).toBe(ProjectV2.ID.make(remoteID))
+      expect(migratedSession?.time_updated).toBe(sessionTimeUpdated)
       expect(
         (yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get().pipe(Effect.orDie))
           ?.project_id,

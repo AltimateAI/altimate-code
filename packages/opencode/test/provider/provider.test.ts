@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
+import { generateText } from "ai"
 
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
@@ -2279,6 +2280,92 @@ test("cloudflare-ai-gateway loads with env variables", async () => {
     },
   })
 })
+
+// altimate_change start — upstream_fix: Cloudflare unified provider receives authenticated API token
+test("cloudflare-ai-gateway passes api token to unified provider requests", async () => {
+  let captured: unknown
+  const realFetch = globalThis.fetch
+  const aiGatewayProviderEntry = new URL("../../node_modules/ai-gateway-provider/dist/index.mjs", import.meta.url).href
+
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://altimate.ai/config.json",
+          provider: {
+            "cloudflare-ai-gateway": {
+              npm: aiGatewayProviderEntry,
+              api: "https://gateway.ai.cloudflare.com/v1/compat",
+              models: {
+                "openai/gpt-4o": {
+                  name: "GPT-4o",
+                  tool_call: true,
+                  limit: { context: 128000, output: 4096 },
+                },
+              },
+            },
+          },
+        }),
+      )
+    },
+  })
+
+  const previousEnv = {
+    CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_GATEWAY_ID: process.env.CLOUDFLARE_GATEWAY_ID,
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+  }
+  process.env.CLOUDFLARE_ACCOUNT_ID = "test-account"
+  process.env.CLOUDFLARE_GATEWAY_ID = "test-gateway"
+  process.env.CLOUDFLARE_API_TOKEN = "test-token"
+
+  try {
+    await provideProviderTestInstance({
+      directory: tmp.path,
+      fn: async () => {
+        const handle = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+          if (url.startsWith("https://gateway.ai.cloudflare.com/")) {
+            captured = typeof init?.body === "string" ? JSON.parse(init.body) : null
+            return new Response(
+              JSON.stringify({
+                id: "chatcmpl-test",
+                object: "chat.completion",
+                created: 0,
+                model: "openai/gpt-4o",
+                choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            )
+          }
+          return realFetch(input, init)
+        }
+        const stubFetch: typeof fetch = Object.assign(handle, { preconnect: realFetch.preconnect.bind(realFetch) })
+        globalThis.fetch = stubFetch
+        try {
+          const model = await Provider.getModel(ProviderID.make("cloudflare-ai-gateway"), ModelID.make("openai/gpt-4o"))
+          const language = await Provider.getLanguage(model)
+          await generateText({ model: language as any, prompt: "hi" })
+        } finally {
+          globalThis.fetch = realFetch
+        }
+
+        expect((captured as any)?.[0]?.headers?.authorization).toBe("Bearer test-token")
+      },
+    })
+  } finally {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  }
+})
+// altimate_change end
 
 test("cloudflare-ai-gateway forwards config metadata options", async () => {
   await using tmp = await tmpdir({

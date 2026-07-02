@@ -2,6 +2,9 @@ import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import path from "path"
 import { and, Database, eq } from "../storage/db"
+// altimate_change start — upstream_fix: preserve session recency during project migration.
+import { sql } from "../storage/db"
+// altimate_change end
 import { ProjectDirectoryTable, ProjectTable } from "@opencode-ai/core/project/sql"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
@@ -339,7 +342,12 @@ export namespace Project {
       Database.use((db) =>
         db
           .update(SessionTable)
-          .set({ project_id: ProjectV2.ID.make(data.id) })
+          // altimate_change start — upstream_fix: preserve session recency during project migration.
+          .set({
+            project_id: ProjectV2.ID.make(data.id),
+            time_updated: sql`${SessionTable.time_updated}`,
+          })
+          // altimate_change end
           .where(
             and(
               eq(SessionTable.project_id, ProjectV2.ID.make(ProjectID.global)),
@@ -718,7 +726,16 @@ export namespace Project {
                 .onConflictDoUpdate({ target: ProjectTable.id, set: updateSet })
                 .run()
               if (previousCore && previous !== id && previous !== ProjectID.global) {
-                yield* tx.update(SessionTable).set({ project_id: projectCore }).where(eq(SessionTable.project_id, previousCore)).run()
+                yield* tx
+                  .update(SessionTable)
+                  // altimate_change start — upstream_fix: preserve session recency during project migration.
+                  .set({
+                    project_id: projectCore,
+                    time_updated: sql`${SessionTable.time_updated}`,
+                  })
+                  // altimate_change end
+                  .where(eq(SessionTable.project_id, previousCore))
+                  .run()
                 yield* tx
                   .update(WorkspaceTable)
                   .set({ project_id: projectCore })
@@ -730,7 +747,12 @@ export namespace Project {
               if (id !== ProjectID.global) {
                 yield* tx
                   .update(SessionTable)
-                  .set({ project_id: projectCore })
+                  // altimate_change start — upstream_fix: preserve session recency during project migration.
+                  .set({
+                    project_id: projectCore,
+                    time_updated: sql`${SessionTable.time_updated}`,
+                  })
+                  // altimate_change end
                   .where(
                     and(
                       eq(SessionTable.project_id, ProjectV2.ID.make(ProjectID.global)),

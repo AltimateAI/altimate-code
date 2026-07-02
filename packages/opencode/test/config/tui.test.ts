@@ -23,6 +23,7 @@ const globalConfigFiles = [
   // altimate_change — also clean the server's global config dir (ServerGlobal) used by the alignment test.
   path.join(ServerGlobal.Path.config, "opencode.json"),
 ]
+const managedConfigDir = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR
 
 const cleanState = Effect.gen(function* () {
   const fs = yield* FSUtil.Service
@@ -31,6 +32,7 @@ const cleanState = Effect.gen(function* () {
   yield* Effect.forEach(globalConfigFiles, (file) => fs.remove(file, { force: true }).pipe(Effect.ignore), {
     discard: true,
   })
+  if (managedConfigDir) yield* fs.remove(managedConfigDir, { force: true, recursive: true }).pipe(Effect.ignore)
 })
 
 const withCleanState = <A, E, R>(self: Effect.Effect<A, E, R>) =>
@@ -142,6 +144,56 @@ it.instance("loads tui config with the same precedence order as server config pa
       const config = yield* getTuiConfig(test.directory)
       expect(config.theme).toBe("local")
       expect(config.diff_style).toBe("stacked")
+    }),
+  ),
+)
+
+it.instance("loads managed tui config after regular tui config layers", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      expect(managedConfigDir).toBeDefined()
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      yield* fs.writeJson(path.join(Global.Path.config, "tui.json"), { theme: "global" })
+      yield* fs.writeJson(path.join(test.directory, "tui.json"), { theme: "project" })
+      yield* fs.writeWithDirs(path.join(test.directory, ".opencode", "tui.json"), JSON.stringify({ theme: "local" }))
+      yield* fs.writeWithDirs(
+        path.join(managedConfigDir!, "tui.json"),
+        JSON.stringify({ theme: "managed", diff_style: "stacked" }),
+      )
+
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.theme).toBe("managed")
+      expect(config.diff_style).toBe("stacked")
+    }),
+  ),
+)
+
+it.instance("migrates legacy managed tui keys from managed opencode config", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      expect(managedConfigDir).toBeDefined()
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      const source = path.join(managedConfigDir!, "opencode.json")
+      yield* fs.writeWithDirs(
+        source,
+        JSON.stringify({
+          theme: "managed-migrated",
+          keybinds: { app_exit: "ctrl+x" },
+          tui: { scroll_speed: 4 },
+        }),
+      )
+
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.theme).toBe("managed-migrated")
+      expect(config.scroll_speed).toBe(4)
+      expect(config.keybinds.get("app.exit")?.[0]?.key).toBe("ctrl+x")
+      expect(JSON.parse(yield* fs.readFileString(path.join(managedConfigDir!, "tui.json")))).toMatchObject({
+        theme: "managed-migrated",
+        scroll_speed: 4,
+      })
+      expect(yield* fs.existsSafe(source + ".tui-migration.bak")).toBe(true)
     }),
   ),
 )

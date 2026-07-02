@@ -21,6 +21,9 @@ const decodeDiffStyle = Schema.decodeUnknownOption(TuiConfig.DiffStyle)
 interface MigrateInput {
   cwd: string
   directories: string[]
+  // altimate_change start — upstream_fix: include managed config dir in TUI migration
+  managed?: string
+  // altimate_change end
 }
 
 /**
@@ -114,7 +117,7 @@ async function backupAndStripLegacy(file: string, source: string) {
     .catch(() => false)
 }
 
-async function opencodeFiles(input: { directories: string[]; cwd: string }) {
+async function opencodeFiles(input: { directories: string[]; cwd: string; managed?: string }) {
   // altimate_change start — upstream Filesystem.findUp(array, …, {rootFirst}) collapsed to Filesystem.up();
   // collect the generator and reverse to preserve the original root-first ordering.
   const walkedUp = (
@@ -126,6 +129,9 @@ async function opencodeFiles(input: { directories: string[]; cwd: string }) {
     files.push(...ConfigPaths.fileInDirectory(dir, "opencode"))
   }
   if (Flag.OPENCODE_CONFIG) files.push(Flag.OPENCODE_CONFIG)
+  // altimate_change start — upstream_fix: include managed config dir in TUI migration
+  if (input.managed) files.push(...ConfigPaths.fileInDirectory(input.managed, "opencode"))
+  // altimate_change end
 
   const existing = await Promise.all(
     unique(files).map(async (file) => {

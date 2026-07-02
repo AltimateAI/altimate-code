@@ -50,9 +50,11 @@ export const directories = Effect.fn("ConfigPaths.directories")(function* (direc
   ])
 })
 
+// altimate_change start — upstream_fix: restore jsonc-before-json same-directory ordering
 export function fileInDirectory(dir: string, name: string) {
-  return [path.join(dir, `${name}.json`), path.join(dir, `${name}.jsonc`)]
+  return [path.join(dir, `${name}.jsonc`), path.join(dir, `${name}.json`)]
 }
+// altimate_change end
 
 // altimate_change start — env-var interpolation grammar shared with mcp/discover (PR #666, #635, #656)
 // Restored after the v1.17.9 upstream rewrite of paths.ts dropped these fork helpers.

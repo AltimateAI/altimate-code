@@ -16,6 +16,11 @@ import { Session } from "../session"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { CopilotAuthPlugin } from "./copilot"
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
+// altimate_change start — upstream_fix: restore provider auth plugin imports
+import { AzureAuthPlugin } from "./azure"
+import { DigitalOceanAuthPlugin } from "./digitalocean"
+import { XaiAuthPlugin } from "./xai"
+// altimate_change end
 // altimate_change start — snowflake cortex plugin import
 import { SnowflakeCortexAuthPlugin } from "../altimate/plugin/snowflake"
 // altimate_change end
@@ -47,6 +52,11 @@ export namespace Plugin {
     CodexAuthPlugin,
     CopilotAuthPlugin,
     GitlabAuthPlugin as unknown as PluginInstance,
+    // altimate_change start — upstream_fix: restore provider auth internal plugins
+    AzureAuthPlugin,
+    DigitalOceanAuthPlugin,
+    XaiAuthPlugin,
+    // altimate_change end
     SnowflakeCortexAuthPlugin,
     DatabricksAuthPlugin,
     AltimateAuthPlugin,

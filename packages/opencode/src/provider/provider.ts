@@ -847,7 +847,9 @@ export namespace Provider {
         apiKey: apiToken,
         ...(Object.values(opts).some((v) => v !== undefined) ? { options: opts } : {}),
       })
-      const unified = createUnified()
+      // altimate_change start — upstream_fix: pass Cloudflare API token through to unified provider calls
+      const unified = createUnified({ apiKey: apiToken })
+      // altimate_change end
 
       return {
         autoload: true,

@@ -13,6 +13,9 @@ import { Global } from "@opencode-ai/core/global"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CurrentWorkingDirectory } from "./tui-cwd"
 import { ConfigPlugin } from "@/config/plugin"
+// altimate_change start — upstream_fix: restore managed TUI config loading and migration
+import { ConfigManaged } from "./managed"
+// altimate_change end
 import { TuiKeybind } from "@opencode-ai/tui/config/keybind"
 import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
@@ -169,7 +172,10 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   // Every config dir we may read from: global config dir, any `.opencode`
   // folders between cwd and home, and OPENCODE_CONFIG_DIR.
   const directories = yield* ConfigPaths.directories(ctx.directory)
-  yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
+  // altimate_change start — upstream_fix: restore managed TUI config loading and migration
+  const managed = ConfigManaged.managedConfigDir()
+  yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory, managed }))
+  // altimate_change end
 
   const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", ctx.directory)
 
@@ -206,6 +212,14 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
       yield* mergeFile(acc, file)
     }
   }
+
+  // altimate_change start — upstream_fix: restore managed TUI config loading and migration
+  if (yield* afs.existsSafe(managed)) {
+    for (const file of ConfigPaths.fileInDirectory(managed, "tui")) {
+      yield* mergeFile(acc, file)
+    }
+  }
+  // altimate_change end
 
   const result = TuiConfig.resolve(
     {
