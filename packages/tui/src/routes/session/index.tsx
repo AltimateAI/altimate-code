@@ -76,6 +76,9 @@ import { useClipboard } from "../../context/clipboard"
 import { nextThinkingMode, reasoningSummary, useThinkingMode, type ThinkingMode } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
+// altimate_change start — preserve full URL hyperlink targets in session output
+import { linkTerminalChunks, TerminalLinkText, terminalLinkMarkdownRenderNode } from "../../util/terminal-link"
+// altimate_change end
 import { usePluginRuntime } from "../../plugin/runtime"
 import { DialogRetryAction } from "../../component/dialog-retry-action"
 import { getRevertDiffFiles } from "../../util/revert-diff"
@@ -1611,6 +1614,10 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   })
   const summary = createMemo(() => reasoningSummary(content()))
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
+  // altimate_change start — preserve full URL hyperlink targets in reasoning markdown
+  const maxUrlDisplayWidth = createMemo(() => Math.max(12, Math.min(80, ctx.width - 6)))
+  const onChunks = linkTerminalChunks(maxUrlDisplayWidth)
+  // altimate_change end
 
   const toggle = () => {
     if (!inMinimal()) return
@@ -1644,6 +1651,9 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
               syntaxStyle={syntax()}
               content={summary().body}
               conceal={ctx.conceal()}
+              // altimate_change start — preserve full URL hyperlink targets in reasoning markdown
+              onChunks={onChunks}
+              // altimate_change end
               fg={theme.textMuted}
             />
           </box>
@@ -1711,6 +1721,10 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
     return available <= desired ? undefined : desired
   })
   // altimate_change end
+  // altimate_change start — preserve full URL hyperlink targets in assistant markdown
+  const maxUrlDisplayWidth = createMemo(() => Math.max(12, Math.min(80, (cappedWidth() ?? ctx.width) - 6)))
+  const renderNode = terminalLinkMarkdownRenderNode(maxUrlDisplayWidth)
+  // altimate_change end
   return (
     <Show when={props.part.text.trim()}>
       <box
@@ -1729,6 +1743,9 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
           content={props.part.text.trim()}
           tableOptions={{ style: "grid" }}
           conceal={ctx.conceal()}
+          // altimate_change start — preserve full URL hyperlink targets in assistant markdown
+          renderNode={renderNode}
+          // altimate_change end
           fg={theme.markdownText}
           bg={theme.background}
         />
@@ -1837,6 +1854,9 @@ function GenericTool(props: ToolProps) {
     if (expanded() || !collapsed().overflow) return output()
     return collapsed().output
   })
+  // altimate_change start — preserve full URL hyperlink targets in generic tool output
+  const maxUrlDisplayWidth = createMemo(() => Math.max(12, Math.min(80, ctx.width - 6)))
+  // altimate_change end
 
   return (
     <Show
@@ -1853,7 +1873,11 @@ function GenericTool(props: ToolProps) {
         onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
       >
         <box gap={1}>
-          <text fg={theme.text}>{limited()}</text>
+          {/* altimate_change start — preserve full URL hyperlink targets in generic tool output */}
+          <text fg={theme.text}>
+            <TerminalLinkText text={limited()} sourceText={output()} maxUrlDisplayWidth={maxUrlDisplayWidth()} />
+          </text>
+          {/* altimate_change end */}
           <Show when={collapsed().overflow}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
@@ -2083,6 +2107,9 @@ function Shell(props: ToolProps) {
     if (expanded() || !collapsed().overflow) return output()
     return collapsed().output
   })
+  // altimate_change start — preserve full URL hyperlink targets in shell output
+  const maxUrlDisplayWidth = createMemo(() => Math.max(12, Math.min(80, ctx.width - 6)))
+  // altimate_change end
 
   const workdirDisplay = createMemo(() => {
     const workdir = stringValue(props.input.workdir)
@@ -2110,7 +2137,11 @@ function Shell(props: ToolProps) {
           <box gap={1}>
             <text fg={theme.text}>$ {stringValue(props.input.command)}</text>
             <Show when={output()}>
-              <text fg={theme.text}>{limited()}</text>
+              {/* altimate_change start — preserve full URL hyperlink targets in shell output */}
+              <text fg={theme.text}>
+                <TerminalLinkText text={limited()} sourceText={output()} maxUrlDisplayWidth={maxUrlDisplayWidth()} />
+              </text>
+              {/* altimate_change end */}
             </Show>
             <Show when={collapsed().overflow}>
               <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
