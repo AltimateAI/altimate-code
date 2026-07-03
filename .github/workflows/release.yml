@@ -266,7 +266,7 @@ jobs:
       - name: Pre-publish smoke test
         run: |
           # Resolve to an absolute path before we cd away from the workspace.
-          BINARY=$(find "$(pwd)/packages/opencode/dist" -path '*altimate-code-linux-x64/bin/altimate' -type f | head -1)
+          BINARY=$(find "$(pwd)/packages/opencode/dist" -path '*altimate-code-linux-x64/bin/altimate-code' -type f | head -1)
           if [ -z "$BINARY" ]; then
             echo "::error::No linux-x64 binary found in artifacts — cannot verify release"
             exit 1
