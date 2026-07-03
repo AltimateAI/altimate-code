@@ -65,20 +65,42 @@ git log HEAD..origin/$(git branch --show-current) --oneline   # must be up to da
 ```
 Stop if dirty, behind, or on an unexpected branch.
 
-## Step 3 — Pre-tag gates (lighter than /release, but non-negotiable)
+## Step 3 — Pre-tag gates (run the SAME local gates as /release — non-negotiable)
 
-Betas soak in production, so they must at least build and pass CI. Do NOT skip:
+The npm publish + Verdaccio + size checks only run in the release workflow AFTER
+the tag, and the tag→publish is irreversible. So you MUST reproduce those gates
+LOCALLY before tagging. A green PR check is NOT sufficient — `ci.yml` uses
+`dorny/paths-filter` and only typechecks CHANGED packages, so it misses whole-repo
+issues the release workflow (full `bun turbo typecheck` + Verdaccio + npm publish)
+will hit. Do NOT skip any of these:
 
 ```bash
-# both packages typecheck
-(cd packages/opencode && bun run typecheck)
-(cd packages/tui && bun run typecheck)
-# marker guard
+# 1. FULL monorepo typecheck (what the release workflow runs — clean install to match CI)
+rm -rf node_modules && bun install --frozen-lockfile
+bun turbo typecheck --force            # all packages, not just changed ones
+
+# 2. Mandatory pre-release sanity (restored gate; builds a binary that starts)
+(cd packages/opencode && bun run pre-release)
+
+# 3. Package SIZE check — npm rejects platform tarballs over ~200MB compressed (E413).
+#    Build one platform, measure the packed size BEFORE tagging.
+(cd packages/opencode && bun run build:local)
+DIST=$(find packages/opencode/dist -type d -name '*'"$(uname -m | sed s/arm64/arm64/)"'*' | head -1)
+(cd "$DIST" && npm pack --dry-run --json | python3 -c "import sys,json;d=json.load(sys.stdin)[0];mb=d['size']/1048576;print(f'compressed {mb:.0f}MB', 'OK' if mb<190 else 'TOO BIG — will 413')")
+
+# 4. marker guard
 bun run script/upstream/analyze.ts --markers --base main --strict
-# PR/branch functional CI is green
-gh pr checks <PR> --repo AltimateAI/altimate-code | grep -viE 'kilo|coderabbit|skipping'
+
+# 5. Local Verdaccio sanity IF docker + a native-platform build are available
+#    (the docker image is linux; on a mac you cannot cross-build the linux NAPI dist,
+#     so this validates the current platform only — CI covers the rest):
+# (cd packages/dbt-tools && bun run build) && docker compose \
+#   -f test/sanity/docker-compose.verdaccio.yml up --build --abort-on-container-exit --exit-code-from sanity
 ```
-If any functional gate is red, stop and fix first.
+
+If ANY gate is red, stop and fix BEFORE tagging. The whole point of these local
+gates is that a release-workflow failure after the tag is irreversible-adjacent
+(partial npm publishes, orphan sub-packages that block a same-version retry).
 
 ## Step 4 — Tag and push the beta
 
