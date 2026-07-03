@@ -65,6 +65,8 @@ import { registerAltimateValidators } from "../altimate/validators"
 registerAltimateValidators()
 import { Config } from "../config/config"
 import { Tracer } from "../altimate/observability/tracing"
+// altimate_change — stamp an authoritative tool source + humanized MCP title
+import { registryToolSource, mcpToolSource, humanizeMcpTitle } from "../altimate/tool-source"
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 
@@ -1564,6 +1566,8 @@ export namespace SessionPrompt {
               messageID: input.processor.message.id,
             })),
           }
+          // altimate_change — stamp authoritative tool source so clients render the right badge
+          output.metadata = { ...(output.metadata ?? {}), source: registryToolSource(item.id) }
           await Plugin.trigger(
             "tool.execute.after",
             {
@@ -1655,10 +1659,13 @@ export namespace SessionPrompt {
           ...(result.metadata ?? {}),
           truncated: truncated.truncated,
           ...(truncated.truncated && { outputPath: truncated.outputPath }),
+          // altimate_change — authoritative source so the chat can badge Datamates MCP tools
+          source: mcpToolSource(key),
         }
 
         return {
-          title: "",
+          // altimate_change — MCP tools have no native title; give a readable label
+          title: humanizeMcpTitle(key),
           metadata,
           output: truncated.content,
           attachments: attachments.map((attachment) => ({
