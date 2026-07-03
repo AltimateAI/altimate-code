@@ -108,7 +108,10 @@ jobs:
         if: matrix.name == 'linux-x64'
         run: |
           # Resolve to an absolute path before we cd away from the workspace.
-          BINARY=$(find "$(pwd)/packages/opencode/dist" -name altimate -type f | head -1)
+          # Test `altimate-code` — the binary the platform package actually ships
+          # (the redundant `altimate` copy is dropped from the npm package after the
+          # release archive is built, to stay under npm's tarball size limit).
+          BINARY=$(find "$(pwd)/packages/opencode/dist" -name altimate-code -type f | head -1)
           if [ -z "$BINARY" ]; then
             echo "::error::No binary found in dist/"
             exit 1
