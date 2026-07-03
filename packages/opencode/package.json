@@ -14,7 +14,8 @@
     "build": "bun run script/build.ts",
     "build:local": "bun run script/build.ts --single --skip-install",
     "dev": "bun run --conditions=browser ./src/index.ts",
-    "dev:temporary": "bun run --conditions=browser ./src/temporary.ts"
+    "dev:temporary": "bun run --conditions=browser ./src/temporary.ts",
+    "pre-release": "bun run script/pre-release-check.ts"
   },
   "bin": {
     "altimate": "./bin/altimate",

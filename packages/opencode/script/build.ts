@@ -575,6 +575,19 @@ if (Script.release) {
       await $`zip ${archivePath}.zip ${binaryName}`.cwd(`dist/${key}/bin`)
     }
   }
+
+  // altimate_change start — de-dupe the platform npm package. The compiled binary is written
+  // as both `altimate` and `altimate-code` (a hard copy, ~230MB each). The standalone `altimate`
+  // is only needed for the release ARCHIVE above (curl-install unpacks `altimate`); the npm
+  // platform package is resolved by the wrapper via `altimate-code` only. Shipping both doubled
+  // the package and pushed linux platform packages past npm's tarball limit (E413 Payload Too
+  // Large). Now that each archive is created, drop the redundant `altimate` from what npm ships.
+  for (const key of Object.keys(binaries)) {
+    const binDir = `dist/${key}/bin`
+    if (key.includes("windows")) await $`rm -f ${binDir}/altimate.exe`.nothrow()
+    else await $`rm -f ${binDir}/altimate`.nothrow()
+  }
+  // altimate_change end
 }
 
 export { binaries }
