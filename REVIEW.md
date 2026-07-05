@@ -9,7 +9,7 @@ CI here enforces type-safety and marker presence, not runtime correctness of asy
 ## Don't duplicate CI — never flag
 
 - **`bun turbo typecheck` / `tsc`** — pure type errors, unused type imports. If it compiles, don't relitigate types.
-- **Marker Guard** — presence/format of `altimate_change` marker comments is CI-enforced at compile time (see #872, #904). Don't flag a *missing* marker as a guess; CI will fail the PR. Do still flag *misuse* (see Focus Areas below) since Marker Guard checks presence, not correctness.
+- **Marker Guard** — presence/format of `altimate_change` marker comments is enforced by a dedicated CI job (`marker-guard` in `ci.yml`, see #872, #904), not at compile time. Don't flag a *missing* marker as a guess; CI will fail the PR. Do still flag *misuse* (see Focus Areas below) since Marker Guard checks presence, not correctness.
 - **`anti-slop.yml`** — advisory only (made non-blocking after #741 auto-closed legitimate PRs); don't treat its output as a merge gate.
 - **PR title/standards (`pr-standards.yml`)** — conventional-commit-style title checks are automated; don't nitpick title format.
 - Pre-existing issues in code the diff doesn't touch.
