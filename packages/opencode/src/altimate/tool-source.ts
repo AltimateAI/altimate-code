@@ -10,7 +10,10 @@
  *  - "mcp"      — third-party MCP tools
  *
  * Registry tools and MCP tools are resolved in separate loops (see
- * `session/prompt.ts` resolveTools), so each has its own classifier.
+ * `session/prompt.ts` resolveTools), so each has its own classifier. The native
+ * `skill` tool is a further special case: it loads skills of varying origin, so
+ * its badge is classified per-call from the loaded skill's origin (see
+ * `skillToolSource`) rather than from the tool id.
  */
 export type ToolSource = "builtin" | "altimate" | "mcp"
 
@@ -56,6 +59,18 @@ export function registryToolSource(id: string): ToolSource {
 export function mcpToolSource(key: string): ToolSource {
   const lower = key.toLowerCase()
   return ALTIMATE_MCP_PREFIXES.some((p) => lower.startsWith(p)) ? "altimate" : "mcp"
+}
+
+/**
+ * Classify a skill-load (the native `skill` tool) by the loaded skill's origin,
+ * which the skill tool reports on its metadata (see `tool/skill.ts`). Altimate
+ * ships its skills bundled with the CLI ("builtin" origin) — those wear the
+ * Altimate mark. User-authored global/project skills stay neutral so the badge
+ * doesn't over-claim third-party or personal skills. Origin arrives as `unknown`
+ * (client metadata), so anything other than "builtin" is treated as neutral.
+ */
+export function skillToolSource(origin: unknown): ToolSource {
+  return origin === "builtin" ? "altimate" : "builtin"
 }
 
 /**

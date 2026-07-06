@@ -17,10 +17,15 @@ import os from "os"
 
 const MAX_DISPLAY_SKILLS = 50
 
-// altimate_change start — classifySkillSource helper for skill telemetry
-function classifySkillSource(location: string): "builtin" | "global" | "project" {
-  if (location.includes("node_modules") || location.includes(".altimate/builtin")) return "builtin"
-  if (location.startsWith(os.homedir())) return "global"
+// altimate_change start — classifySkillSource helper for skill telemetry + source badge
+export function classifySkillSource(location: string): "builtin" | "global" | "project" {
+  // Normalize separators so `.altimate/builtin` / homedir prefix match on Windows too.
+  const normalized = location.replace(/\\/g, "/")
+  // Embedded skills load with a `builtin:<name>/SKILL.md` location and Altimate's
+  // bundled skills land under `~/.altimate/builtin/` — both are Altimate-shipped.
+  if (normalized.startsWith("builtin:") || normalized.includes("node_modules") || normalized.includes(".altimate/builtin"))
+    return "builtin"
+  if (normalized.startsWith(os.homedir().replace(/\\/g, "/"))) return "global"
   return "project"
 }
 // altimate_change end
@@ -147,6 +152,10 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       const followups = SkillFollowups.format(skill.name)
       // altimate_change end
 
+      // altimate_change start — classify origin once, reused for telemetry and the source badge
+      const skillOrigin = classifySkillSource(skill.location)
+      // altimate_change end
+
       // altimate_change start — telemetry instrumentation for skill loading with trigger classification
       try {
         Telemetry.track({
@@ -155,7 +164,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           session_id: ctx.sessionID,
           message_id: ctx.messageID,
           skill_name: skill.name,
-          skill_source: classifySkillSource(skill.location),
+          skill_source: skillOrigin,
           duration_ms: Date.now() - startTime,
           trigger: Telemetry.classifySkillTrigger(ctx.extra),
           has_followups: followups.length > 0,
@@ -188,6 +197,8 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         metadata: {
           name: skill.name,
           dir,
+          // altimate_change — origin drives the source badge (see altimate/tool-source.ts skillToolSource)
+          skillOrigin,
         },
       }
       // altimate_change end

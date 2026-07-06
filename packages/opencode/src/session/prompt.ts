@@ -66,7 +66,7 @@ registerAltimateValidators()
 import { Config } from "../config/config"
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change — stamp an authoritative tool source + humanized MCP title
-import { registryToolSource, mcpToolSource, humanizeMcpTitle } from "../altimate/tool-source"
+import { registryToolSource, mcpToolSource, humanizeMcpTitle, skillToolSource } from "../altimate/tool-source"
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 
@@ -1566,8 +1566,14 @@ export namespace SessionPrompt {
               messageID: input.processor.message.id,
             })),
           }
-          // altimate_change — stamp authoritative tool source so clients render the right badge
-          output.metadata = { ...(output.metadata ?? {}), source: registryToolSource(item.id) }
+          // altimate_change — stamp authoritative tool source so clients render the right badge.
+          // The `skill` tool loads skills of varying origin, so classify it per-call from the
+          // origin it reports (Altimate-shipped → altimate mark, user global/project → neutral).
+          const metadata = output.metadata ?? {}
+          output.metadata = {
+            ...metadata,
+            source: item.id === "skill" ? skillToolSource(metadata.skillOrigin) : registryToolSource(item.id),
+          }
           await Plugin.trigger(
             "tool.execute.after",
             {

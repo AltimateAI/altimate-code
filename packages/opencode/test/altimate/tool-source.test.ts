@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { registryToolSource, mcpToolSource, humanizeMcpTitle } from "../../src/altimate/tool-source"
+import { registryToolSource, mcpToolSource, humanizeMcpTitle, skillToolSource } from "../../src/altimate/tool-source"
 
 describe("registryToolSource", () => {
   test("native opencode tools → builtin", () => {
@@ -12,6 +12,24 @@ describe("registryToolSource", () => {
     for (const id of ["sql_analyze", "schema_inspect", "finops_query_history", "altimate_core_check", "data_diff", "some_new_altimate_tool"]) {
       expect(registryToolSource(id)).toBe("altimate")
     }
+  })
+})
+
+describe("skillToolSource", () => {
+  test("Altimate-shipped (builtin origin) skills → altimate", () => {
+    expect(skillToolSource("builtin")).toBe("altimate")
+  })
+
+  test("user-authored global/project skills → builtin (neutral)", () => {
+    expect(skillToolSource("global")).toBe("builtin")
+    expect(skillToolSource("project")).toBe("builtin")
+  })
+
+  test("missing or unexpected origin → builtin (neutral, never over-claims)", () => {
+    expect(skillToolSource(undefined)).toBe("builtin")
+    expect(skillToolSource(null)).toBe("builtin")
+    expect(skillToolSource("")).toBe("builtin")
+    expect(skillToolSource(42)).toBe("builtin")
   })
 })
 
