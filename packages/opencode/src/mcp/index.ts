@@ -175,27 +175,54 @@ export namespace MCP {
     return (name === "ZodError" || name === "$ZodError") && Array.isArray((err as { issues?: unknown }).issues)
   }
 
+  // Upper bound on tools/list pages we will follow, guarding against a server
+  // that returns a repeating or never-terminating `nextCursor`.
+  const MAX_TOOL_LIST_PAGES = 100
+
   /**
-   * Calls the SDK's strict `listTools()` first; on a Zod schema-validation
-   * failure (e.g. server emits non-spec values like `null` annotation hints),
-   * retries via `client.request()` with a permissive schema. This keeps the
-   * fast path unchanged for compliant servers while letting non-compliant
-   * ones (Microsoft Fabric, etc.) still register their tools.
+   * Fetches a server's complete tool list, following `nextCursor` pagination so
+   * tools beyond the first page are not dropped. Calls the SDK's strict
+   * `listTools()` first; on a Zod schema-validation failure (e.g. server emits
+   * non-spec values like `null` annotation hints), switches to `client.request()`
+   * with a permissive schema for the remaining pages. This keeps the fast path
+   * unchanged for compliant servers while letting non-compliant ones (Microsoft
+   * Fabric, etc.) still register all of their tools. See #986.
    */
   async function listToolsLenient(client: MCPClient): Promise<{ tools: MCPToolDef[] }> {
-    try {
-      return await client.listTools()
-    } catch (err) {
-      if (!isSchemaError(err)) throw err
-      log.info("listTools strict schema rejected response, retrying with lenient schema", {
-        error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
-      })
-      const result = await client.request(
-        { method: "tools/list", params: {} },
-        LenientListToolsResultSchema as any,
-      )
-      return result as { tools: MCPToolDef[] }
+    const tools: MCPToolDef[] = []
+    let cursor: string | undefined = undefined
+    let lenient = false
+    for (let page = 0; page < MAX_TOOL_LIST_PAGES; page++) {
+      let result: { tools: MCPToolDef[]; nextCursor?: string }
+      if (!lenient) {
+        try {
+          result = await client.listTools(cursor ? { cursor } : {})
+        } catch (err) {
+          if (!isSchemaError(err)) throw err
+          log.info("listTools strict schema rejected response, retrying with lenient schema", {
+            error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+          })
+          // Re-fetch the same cursor via the permissive schema, and stay lenient
+          // for any remaining pages (a non-compliant server rarely complies later).
+          lenient = true
+          page--
+          continue
+        }
+      } else {
+        result = (await client.request(
+          { method: "tools/list", params: cursor ? { cursor } : {} },
+          LenientListToolsResultSchema as any,
+        )) as { tools: MCPToolDef[]; nextCursor?: string }
+      }
+      tools.push(...result.tools)
+      if (!result.nextCursor) return { tools }
+      cursor = result.nextCursor
     }
+    log.warn("listTools pagination exceeded page cap, returning partial tool list", {
+      pages: MAX_TOOL_LIST_PAGES,
+      tools: tools.length,
+    })
+    return { tools }
   }
 
   /** @internal — exported only for unit tests. Prefer using `tools()` in production code. */
@@ -203,7 +230,7 @@ export namespace MCP {
     LenientListToolsResultSchema,
     isSchemaError,
     listToolsLenient: (client: {
-      listTools: () => Promise<{ tools: MCPToolDef[] }>
+      listTools: (params?: any) => Promise<{ tools: any[]; nextCursor?: string }>
       request: (...args: any[]) => Promise<unknown>
     }) => listToolsLenient(client as unknown as MCPClient),
     resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") =>

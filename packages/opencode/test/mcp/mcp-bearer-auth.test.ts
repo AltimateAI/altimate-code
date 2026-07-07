@@ -141,6 +141,76 @@ describe("listToolsLenient retry against SDK $ZodError (#792)", () => {
 })
 
 // ---------------------------------------------------------------------------
+// 1c. listToolsLenient follows `nextCursor` pagination (#986) so tools beyond
+// the first page are not silently dropped. Covers both the strict path and the
+// case where the schema-error fallback engages mid-pagination.
+// ---------------------------------------------------------------------------
+describe("listToolsLenient pagination (#986)", () => {
+  test("follows nextCursor and concatenates tools across strict pages", async () => {
+    const cursors: (string | undefined)[] = []
+    const pages: Record<string, { tools: { name: string }[]; nextCursor?: string }> = {
+      "": { tools: [{ name: "a" }, { name: "b" }], nextCursor: "p2" },
+      p2: { tools: [{ name: "c" }], nextCursor: "p3" },
+      p3: { tools: [{ name: "d" }] },
+    }
+    const fakeClient = {
+      listTools: async (params?: { cursor?: string }) => {
+        cursors.push(params?.cursor)
+        return pages[params?.cursor ?? ""]
+      },
+      request: async () => {
+        throw new Error("strict path should not fall back here")
+      },
+    }
+    const result = await MCP._testing.listToolsLenient(fakeClient)
+    expect(result.tools.map((t) => t.name)).toEqual(["a", "b", "c", "d"])
+    expect(cursors).toEqual([undefined, "p2", "p3"])
+  })
+
+  test("keeps paginating via the lenient path after a schema error, passing the cursor", async () => {
+    const { ListToolsResultSchema } = await import("@modelcontextprotocol/sdk/types.js")
+    const { safeParse } = await import("@modelcontextprotocol/sdk/server/zod-compat.js")
+    // Page 1 is Fabric-style (null hints) and trips strict validation; the retry
+    // and every later page must go through the lenient request path.
+    const page1 = {
+      tools: [
+        {
+          name: "list_workspaces",
+          inputSchema: { type: "object" },
+          annotations: { readOnlyHint: true, destructiveHint: null, idempotentHint: null, openWorldHint: null },
+        },
+      ],
+      nextCursor: "p2",
+    }
+    const strict: any = safeParse(ListToolsResultSchema as any, page1)
+    expect(strict.success).toBe(false)
+
+    const requestCursors: (string | undefined)[] = []
+    const lenientPages: Record<string, { tools: { name: string }[]; nextCursor?: string }> = {
+      "": page1,
+      p2: { tools: [{ name: "second_page_tool" }] },
+    }
+    const fakeClient = {
+      listTools: async (params?: { cursor?: string }) => {
+        // Strict path only rejects the first (cursorless) page; it is never
+        // retried on the strict path once we go lenient.
+        if (!params?.cursor) throw strict.error
+        throw new Error("strict path should not be reused after fallback")
+      },
+      request: async (req: { params?: { cursor?: string } }) => {
+        const cursor = req.params?.cursor
+        requestCursors.push(cursor)
+        return lenientPages[cursor ?? ""]
+      },
+    }
+    const result = await MCP._testing.listToolsLenient(fakeClient)
+    expect(result.tools.map((t) => t.name)).toEqual(["list_workspaces", "second_page_tool"])
+    // Lenient path re-fetches page 1 (cursorless) then follows nextCursor to p2.
+    expect(requestCursors).toEqual([undefined, "p2"])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 2. McpRemote schema accepts new headersCommand field (issue #791).
 // ---------------------------------------------------------------------------
 describe("McpRemote.headersCommand schema (#791)", () => {
