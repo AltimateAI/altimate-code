@@ -227,6 +227,45 @@ describe("discoverExternalMcp", () => {
       oauth: false,
     })
   })
+
+  test("remote: foreign oauth/headersCommand dialects are dropped, server kept", async () => {
+    // Discovered configs are foreign files: shapes our schema rejects (e.g.
+    // Gemini CLI's `oauth: { enabled: true }`) must be dropped, not passed
+    // through — `mcp-discover add` persists entries to opencode.json without
+    // re-validation, and an invalid shape there fails every config load.
+    await mkdir(path.join(tempDir, ".gemini"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, ".gemini/settings.json"),
+      JSON.stringify({
+        mcpServers: {
+          "gemini-oauth": {
+            url: "https://example.com/mcp",
+            oauth: { enabled: true },
+          },
+          "bool-oauth": {
+            url: "https://example.com/mcp",
+            oauth: true,
+          },
+          "bad-headers-command": {
+            url: "https://example.com/mcp",
+            headersCommand: { Authorization: "not-an-argv-array" },
+          },
+          "valid-oauth": {
+            url: "https://example.com/mcp",
+            oauth: { clientId: "client-xyz" },
+          },
+        },
+      }),
+    )
+
+    const { servers: result } = await discoverExternalMcp(tempDir)
+    expect(result["gemini-oauth"]).toMatchObject({ type: "remote", url: "https://example.com/mcp" })
+    expect(result["gemini-oauth"]).not.toHaveProperty("oauth")
+    expect(result["bool-oauth"]).not.toHaveProperty("oauth")
+    expect(result["bad-headers-command"]).toMatchObject({ type: "remote", url: "https://example.com/mcp" })
+    expect(result["bad-headers-command"]).not.toHaveProperty("headersCommand")
+    expect(result["valid-oauth"]).toMatchObject({ oauth: { clientId: "client-xyz" } })
+  })
   // altimate_change end
 
   test("env → environment rename", async () => {

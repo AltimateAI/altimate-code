@@ -89,8 +89,29 @@ describe("lenient tools/list schema", () => {
 // ---------------------------------------------------------------------------
 describe("listToolsLenient retry against SDK $ZodError (#792)", () => {
   test("retries with lenient schema when strict listTools() rejects Fabric-style nulls", async () => {
-    const { ListToolsResultSchema } = await import("@modelcontextprotocol/sdk/types.js")
-    const { safeParse } = await import("@modelcontextprotocol/sdk/server/zod-compat.js")
+    // Deliberately NOT imported from @modelcontextprotocol/sdk: mcp.test.ts
+    // replaces sdk/types.js via mock.module (process-global in bun), so a
+    // full-suite run would hand this test a mock without ListToolsResultSchema.
+    // Instead, replicate the SDK's strict annotation typing (boolean, null
+    // rejected — SDK 1.26.0/1.29.0 ToolAnnotationsSchema) with zod/v4-mini,
+    // the same zod build the SDK validates with, so safeParse produces the
+    // identical `$ZodError` the real listTools() rejects with.
+    const zm = await import("zod/v4-mini")
+    const strictAnnotations = zm.object({
+      readOnlyHint: zm.optional(zm.boolean()),
+      destructiveHint: zm.optional(zm.boolean()),
+      idempotentHint: zm.optional(zm.boolean()),
+      openWorldHint: zm.optional(zm.boolean()),
+    })
+    const strictListToolsResult = zm.object({
+      tools: zm.array(
+        zm.object({
+          name: zm.string(),
+          inputSchema: zm.any(),
+          annotations: zm.optional(strictAnnotations),
+        }),
+      ),
+    })
     // Real payload shape from Microsoft Fabric Core MCP: null annotation hints.
     const fabricPayload = {
       tools: [
@@ -102,7 +123,7 @@ describe("listToolsLenient retry against SDK $ZodError (#792)", () => {
       ],
     }
     // Produce the exact error the SDK would reject with (a `$ZodError`).
-    const strict: any = safeParse(ListToolsResultSchema as any, fabricPayload)
+    const strict: any = strictListToolsResult.safeParse(fabricPayload)
     expect(strict.success).toBe(false)
     expect(strict.error?.name).toBe("$ZodError")
 
