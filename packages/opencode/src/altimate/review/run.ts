@@ -8,6 +8,7 @@ import { buildCatalogSchemaContext } from "./schema-context"
 import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
 import { runAiReview } from "./ai-review"
+import { runSpecTestGen } from "./spec-test-gen"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
 
@@ -133,6 +134,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     modelVersion: opts.modelVersion,
     coreVersion: opts.coreVersion,
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
+    generateSpecTests: opts.noAi || config.ai === false ? undefined : runSpecTestGen,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
   })

@@ -60,8 +60,14 @@ export function computeIdealVerdict(findings: Finding[], rubric: Rubric = DEFAUL
   // Advisory LLM findings (layer 3) are EXCLUDED: the lane is advisory-only and must
   // never influence the verdict, so its warnings cannot accumulate into a block
   // (otherwise a chatty or prompt-injected AI review could force REQUEST_CHANGES).
+  // P0 spec-test proposals are also advisory-only and unexecuted; exclude their
+  // evidence tool so a future warning cannot leak into the blocking path.
   const warningCount = findings.filter(
-    (f) => f.severity === "warning" && f.confidence !== "unknown" && f.evidence?.tool !== "ai-review",
+    (f) =>
+      f.severity === "warning" &&
+      f.confidence !== "unknown" &&
+      f.evidence?.tool !== "ai-review" &&
+      f.evidence?.tool !== "altimate.spec_test.proposed",
   ).length
   if (warningCount >= rubric.warningPatternThreshold) return "REQUEST_CHANGES"
   return "COMMENT"

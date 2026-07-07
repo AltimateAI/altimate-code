@@ -42,6 +42,12 @@ export const ReviewConfig = z.object({
       warehouse: z.string().default(""),
     })
     .default({ enabled: false, warehouse: "" }),
+  /** Spec-test synthesis. P0 proposes only; execution is reserved for P1. */
+  specTests: z
+    .object({
+      execute: z.boolean().default(false),
+    })
+    .default({ execute: false }),
   /** Rubric overrides, deep-merged onto DEFAULT_RUBRIC. */
   rubric: Rubric.partial().default({}),
   /** Extra path suffixes to exclude from review. */

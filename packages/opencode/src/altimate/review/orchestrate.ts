@@ -1,4 +1,5 @@
 import path from "node:path"
+import YAML from "yaml"
 import {
   type Finding,
   type ReviewCategory,
@@ -15,6 +16,7 @@ import { type ReviewConfig } from "./config"
 import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { type AiReviewInput } from "./ai-review"
+import { filterToSpecDerived, type GeneratedTest, type SpecSource, type SpecTestGenInput } from "./spec-test-gen"
 
 /**
  * The deterministic review recipe.
@@ -187,6 +189,11 @@ export interface OrchestrateInput {
    * deterministic findings as grounding and returns ADVISORY findings only.
    */
   aiReview?: (input: AiReviewInput) => Promise<Finding[]>
+  /**
+   * Optional spec-test proposal lane. Injected like aiReview so the orchestrator
+   * stays pure; production wires harness LLM transport, tests pass a fake.
+   */
+  generateSpecTests?: (input: SpecTestGenInput) => Promise<GeneratedTest[]>
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -754,6 +761,270 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
   ]
 }
 
+const DECLARED_SPEC_SOURCE_KINDS = new Set(["not_null", "unique", "accepted_values", "relationships"])
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+function array(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function text(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+
+function bool(value: unknown): boolean {
+  return value === true || value === "true"
+}
+
+function dedupeSpecSources(sources: SpecSource[]): SpecSource[] {
+  const seen = new Set<string>()
+  const out: SpecSource[] = []
+  for (const source of sources) {
+    if (seen.has(source.ref)) continue
+    seen.add(source.ref)
+    out.push(source)
+  }
+  return out
+}
+
+function parseDbtTestSpec(value: unknown): { kind: SpecSource["kind"]; args?: Record<string, unknown> } | undefined {
+  if (typeof value === "string") {
+    const kind = value.trim()
+    if (DECLARED_SPEC_SOURCE_KINDS.has(kind)) return { kind: kind as SpecSource["kind"] }
+    return undefined
+  }
+  const obj = record(value)
+  if (!obj) return undefined
+
+  const named = text(obj.test_name) ?? text(obj.test)
+  if (named && DECLARED_SPEC_SOURCE_KINDS.has(named)) {
+    return {
+      kind: named as SpecSource["kind"],
+      args: record(obj.arguments) ?? record(obj.args),
+    }
+  }
+
+  for (const [key, rawArgs] of Object.entries(obj)) {
+    if (!DECLARED_SPEC_SOURCE_KINDS.has(key)) continue
+    return { kind: key as SpecSource["kind"], args: record(rawArgs) }
+  }
+  return undefined
+}
+
+function schemaModelSources(model: string, schemaDoc: unknown): SpecSource[] {
+  const root = record(schemaDoc)
+  const models = array(root?.models)
+  const node = models.map(record).find((m) => text(m?.name) === model)
+  if (!node) return []
+
+  const out: SpecSource[] = []
+  const modelDescription = text(node.description)
+  if (modelDescription) {
+    out.push({
+      origin: "inferred_context",
+      kind: "pr_intent",
+      ref: `schema.yml:${model}:description`,
+      text: modelDescription,
+    })
+  }
+
+  const contractEnforced = bool(record(node.contract)?.enforced)
+  for (const rawColumn of array(node.columns)) {
+    const column = record(rawColumn)
+    const name = text(column?.name)
+    if (!column || !name) continue
+
+    const description = text(column.description)
+    if (description) {
+      out.push({
+        origin: "inferred_context",
+        kind: "schema_desc",
+        ref: `schema.yml:${model}.${name}:description`,
+        text: description,
+      })
+    }
+
+    const dataType = text(column.data_type)
+    if (contractEnforced && dataType) {
+      out.push({
+        origin: "declared_constraint",
+        kind: "column_type",
+        ref: `schema.yml:${model}.${name}:data_type`,
+        text: dataType,
+      })
+    }
+
+    for (const rawTest of [...array(column.tests), ...array(column.data_tests)]) {
+      const parsed = parseDbtTestSpec(rawTest)
+      if (!parsed) continue
+      out.push({
+        origin: "declared_constraint",
+        kind: parsed.kind,
+        ref: `schema.yml:${model}.${name}:${parsed.kind}`,
+        text: parsed.kind,
+        args: parsed.args,
+      })
+    }
+
+    for (const rawConstraint of array(column.constraints)) {
+      const constraint = record(rawConstraint)
+      const type = text(constraint?.type)
+      if (!type || !DECLARED_SPEC_SOURCE_KINDS.has(type)) continue
+      out.push({
+        origin: "declared_constraint",
+        kind: type as SpecSource["kind"],
+        ref: `schema.yml:${model}.${name}:${type}`,
+        text: type,
+        args: constraint,
+      })
+    }
+  }
+  return out
+}
+
+async function changedSchemaSources(model: string, input: OrchestrateInput): Promise<SpecSource[]> {
+  if (!input.getContent) return []
+  const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs)
+  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml" && f.status !== "deleted")
+  const sources: SpecSource[] = []
+  for (const file of schemaFiles) {
+    try {
+      const raw = await input.getContent(file.path, "new")
+      if (!raw) continue
+      sources.push(...schemaModelSources(model, YAML.parse(raw)))
+    } catch {
+      // Broken or unavailable schema.yml should not crash an advisory lane.
+    }
+  }
+  return sources
+}
+
+function quotedArgs(text: string): string[] {
+  return [...text.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1]).filter(Boolean)
+}
+
+function sqlIntentSources(sql: string | undefined): SpecSource[] {
+  if (!sql) return []
+  const out: SpecSource[] = []
+  for (const match of sql.matchAll(/\bref\s*\(([^)]*)\)/g)) {
+    const args = quotedArgs(match[1])
+    if (!args.length) continue
+    const name = args.length >= 2 ? `${args[0]}.${args[1]}` : args[0]
+    out.push({
+      origin: "inferred_context",
+      kind: "ref_edge",
+      ref: `ref:${name}`,
+      text: name,
+    })
+  }
+  for (const match of sql.matchAll(/\bsource\s*\(([^)]*)\)/g)) {
+    const args = quotedArgs(match[1])
+    if (args.length < 2) continue
+    const name = `${args[0]}.${args[1]}`
+    out.push({
+      origin: "inferred_context",
+      kind: "ref_edge",
+      ref: `source:${name}`,
+      text: name,
+    })
+  }
+  return out
+}
+
+function prIntentSources(model: string, input: OrchestrateInput): SpecSource[] {
+  const body = [input.prTitle, input.prBody].map(text).filter(Boolean).join("\n\n")
+  if (!body) return []
+  return [{ origin: "inferred_context", kind: "pr_intent", ref: `pr:${model}:intent`, text: body }]
+}
+
+function dbtTestEntry(test: GeneratedTest): unknown {
+  const spec = test.dbtTest
+  if (!spec?.args || Object.keys(spec.args).length === 0) return spec?.test ?? test.kind
+  return { [spec.test]: spec.args }
+}
+
+function proposedTestYaml(model: string, test: GeneratedTest): string {
+  if (!test.dbtTest) return (test.assertionSql ?? "").trim()
+  const entry = dbtTestEntry(test)
+  const doc = test.dbtTest.column
+    ? { version: 2, models: [{ name: model, columns: [{ name: test.dbtTest.column, tests: [entry] }] }] }
+    : { version: 2, models: [{ name: model, tests: [entry] }] }
+  return YAML.stringify(doc).trim()
+}
+
+function proposedTestBody(test: GeneratedTest, yaml: string): string {
+  return [
+    "Candidate dbt test to consider adding. This review did not execute it and it cannot block the PR.",
+    "",
+    `Derived from \`${test.derivedFrom.ref}\`.`,
+    "",
+    "```yaml",
+    yaml,
+    "```",
+    "",
+    test.rationale ? `Rationale: ${test.rationale}` : "",
+  ]
+    .filter((line) => line !== "")
+    .join("\n")
+}
+
+async function specTestSynthesisLane(
+  ctx: ModelContext,
+  input: OrchestrateInput,
+  dialect: string,
+): Promise<Finding[]> {
+  if (ctx.file.status !== "added" || !input.generateSpecTests) return []
+  const model = modelNameFromPath(ctx.file.path)
+  const sql = ctx.engineNewSql ?? ctx.newSql ?? ""
+  const specSources = dedupeSpecSources([
+    ...(await changedSchemaSources(model, input)),
+    ...sqlIntentSources(ctx.newSql),
+    ...sqlIntentSources(ctx.engineNewSql),
+    ...prIntentSources(model, input),
+  ])
+  if (!specSources.length) return []
+
+  let proposed: GeneratedTest[] = []
+  try {
+    proposed = await input.generateSpecTests({
+      model,
+      file: ctx.file.path,
+      dialect,
+      compiledSql: sql,
+      specSources,
+      upstream: specSources
+        .filter((s) => s.kind === "ref_edge")
+        .map((s) => ({ model: s.text ?? s.ref.replace(/^(ref|source):/, ""), columns: [] })),
+      prTitle: input.prTitle,
+      prBody: input.prBody,
+    })
+  } catch {
+    return []
+  }
+
+  const { kept } = filterToSpecDerived(proposed, specSources)
+  return kept.map((test) => {
+    const yaml = proposedTestYaml(model, test)
+    const column = test.dbtTest?.column
+    return makeFinding({
+      severity: "suggestion",
+      category: "test_coverage",
+      title: `${model}: proposed ${test.kind} test${column ? ` for ${column}` : ""}`,
+      body: proposedTestBody(test, yaml),
+      file: ctx.file.path,
+      model,
+      column,
+      confidence: "unknown",
+      evidence: { tool: "altimate.spec_test.proposed", result: { proposal: test, yaml } },
+      ruleKey: "spec_test:" + test.derivedFrom.ref,
+    })
+  })
+}
+
 /**
  * dbt CONFIG lint — runs the core dbt-config parser (minijinja) over the RAW model
  * (the `{{ config() }}` block + body) and emits the config/Jinja findings: incremental
@@ -1132,6 +1403,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
     }
     if (lanes.has("test_coverage")) tasks.push(missingGrainTestLane(ctx, input.runner))
+    if (lanes.has("spec_tests") && input.generateSpecTests) tasks.push(specTestSynthesisLane(ctx, input, dialect))
     // PII classification always runs (cheap name-pattern check, diff-scoped to
     // newly-introduced columns) — exposing PII is a hard-floor concern that
     // shouldn't depend on the cost tier enabling the pii_exposure lane. If core
