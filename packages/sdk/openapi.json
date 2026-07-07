@@ -1941,6 +1941,13 @@
                   "workspaceID": {
                     "type": "string",
                     "pattern": "^wrk.*"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
                   }
                 }
               }
@@ -9352,6 +9359,13 @@
           "permission": {
             "$ref": "#/components/schemas/PermissionRuleset"
           },
+          "metadata": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
           "revert": {
             "type": "object",
             "properties": {
@@ -11637,6 +11651,13 @@
           },
           "permission": {
             "$ref": "#/components/schemas/PermissionRuleset"
+          },
+          "metadata": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
           },
           "revert": {
             "type": "object",

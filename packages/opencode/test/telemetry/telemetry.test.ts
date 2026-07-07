@@ -715,6 +715,145 @@ describe("telemetry.toAppInsightsEnvelopes (indirect)", () => {
       cleanup()
     }
   })
+
+  // --- source field (ALTIMATE_CLI_CLIENT injection + per-event override) ---
+
+  function withClientEnv(value: string | undefined, fn: () => Promise<void>): Promise<void> {
+    const origAcc = process.env.ALTIMATE_CLI_CLIENT
+    const origOc = process.env.OPENCODE_CLIENT
+    delete process.env.OPENCODE_CLIENT
+    if (value === undefined) delete process.env.ALTIMATE_CLI_CLIENT
+    else process.env.ALTIMATE_CLI_CLIENT = value
+    return fn().finally(() => {
+      if (origAcc !== undefined) process.env.ALTIMATE_CLI_CLIENT = origAcc
+      else delete process.env.ALTIMATE_CLI_CLIENT
+      if (origOc !== undefined) process.env.OPENCODE_CLIENT = origOc
+      else delete process.env.OPENCODE_CLIENT
+    })
+  }
+
+  test("source on a generic event reflects the ALTIMATE_CLI_CLIENT env flag", async () => {
+    await withClientEnv("vscode", async () => {
+      const { fetchCalls, cleanup } = await initWithMockedFetch()
+      try {
+        Telemetry.track({
+          type: "session_end",
+          timestamp: 1700000000000,
+          session_id: "sess-1",
+          total_cost: 0.05,
+          total_tokens: 1500,
+          tool_call_count: 10,
+          duration_ms: 30000,
+        })
+        await Telemetry.flush()
+        expect(JSON.parse(fetchCalls[0].body)[0].data.baseData.properties.source).toBe("vscode")
+      } finally {
+        cleanup()
+      }
+    })
+  })
+
+  test('source defaults to "cli" when no client env is set', async () => {
+    await withClientEnv(undefined, async () => {
+      const { fetchCalls, cleanup } = await initWithMockedFetch()
+      try {
+        Telemetry.track({
+          type: "session_end",
+          timestamp: 1700000000000,
+          session_id: "sess-1",
+          total_cost: 0.01,
+          total_tokens: 10,
+          tool_call_count: 1,
+          duration_ms: 100,
+        })
+        await Telemetry.flush()
+        expect(JSON.parse(fetchCalls[0].body)[0].data.baseData.properties.source).toBe("cli")
+      } finally {
+        cleanup()
+      }
+    })
+  })
+
+  test("per-event source (session_start) overrides the process-level flag", async () => {
+    await withClientEnv("vscode", async () => {
+      const { fetchCalls, cleanup } = await initWithMockedFetch()
+      try {
+        Telemetry.track({
+          type: "session_start",
+          timestamp: 1700000000000,
+          session_id: "sess-1",
+          model_id: "m",
+          provider_id: "p",
+          agent: "a",
+          project_id: "proj",
+          os: "linux",
+          arch: "x64",
+          node_version: "v22.0.0",
+          source: "datamates",
+        })
+        await Telemetry.flush()
+        // Event-level source wins over the global "vscode" flag.
+        expect(JSON.parse(fetchCalls[0].body)[0].data.baseData.properties.source).toBe("datamates")
+      } finally {
+        cleanup()
+      }
+    })
+  })
+
+  test("session_start without a source falls back to the process-level flag", async () => {
+    await withClientEnv("vscode", async () => {
+      const { fetchCalls, cleanup } = await initWithMockedFetch()
+      try {
+        Telemetry.track({
+          type: "session_start",
+          timestamp: 1700000000000,
+          session_id: "sess-1",
+          model_id: "m",
+          provider_id: "p",
+          agent: "a",
+          project_id: "proj",
+          os: "linux",
+          arch: "x64",
+          node_version: "v22.0.0",
+        })
+        await Telemetry.flush()
+        expect(JSON.parse(fetchCalls[0].body)[0].data.baseData.properties.source).toBe("vscode")
+      } finally {
+        cleanup()
+      }
+    })
+  })
+
+  test("a non-string source is routed to measurements, not properties (why session_start type-guards it)", async () => {
+    await withClientEnv("vscode", async () => {
+      const { fetchCalls, cleanup } = await initWithMockedFetch()
+      try {
+        // Simulates a malformed per-event source reaching the envelope (e.g. if the prompt
+        // guard were removed and a client passed metadata.source as a number). The field loop
+        // routes numbers to measurements, so `properties.source` would silently retain the
+        // injected process-level flag rather than the intended value — hence the guard.
+        Telemetry.track({
+          type: "session_start",
+          timestamp: 1700000000000,
+          session_id: "sess-1",
+          model_id: "m",
+          provider_id: "p",
+          agent: "a",
+          project_id: "proj",
+          os: "linux",
+          arch: "x64",
+          node_version: "v22.0.0",
+          source: 42 as unknown as string,
+        })
+        await Telemetry.flush()
+        const baseData = JSON.parse(fetchCalls[0].body)[0].data.baseData
+        expect(baseData.measurements.source).toBe(42)
+        expect(baseData.properties.source).toBe("vscode")
+      } finally {
+        cleanup()
+      }
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
