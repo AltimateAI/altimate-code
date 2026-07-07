@@ -1,5 +1,6 @@
 import { Account } from "@/account"
 import { Config } from "@/config/config"
+import { Flag } from "@/flag/flag"
 import { Installation } from "@/installation"
 import { Log } from "@/util/log"
 import { createHash, randomUUID } from "crypto"
@@ -1201,7 +1202,6 @@ export namespace Telemetry {
   let machineId = ""
   let sessionId = ""
   let projectId = ""
-  let clientSource = "cli"
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
@@ -1222,6 +1222,14 @@ export namespace Telemetry {
   }
 
   function toAppInsightsEnvelopes(events: Event[], cfg: AppInsightsConfig): object[] {
+    // Process-level client, read live from the env flag (defaults to "cli") so events
+    // emitted before any prompt runs — startup, connection setup, standalone CLI
+    // subcommands — are labelled correctly instead of stuck at a hardcoded default.
+    // Any event that already carries its own `source` field overrides this via the field
+    // loop below — session_start (the per-session client, from session.metadata.source) and
+    // a few pre-existing events (skill_*, connections) whose `source` means something else
+    // (cli/tui, connection origin). Events without their own `source` report this value.
+    const clientSource = Flag.ALTIMATE_CLI_CLIENT
     return events.map((event) => {
       const { type, timestamp, ...fields } = event as any
       const sid: string = fields.session_id ?? sessionId
@@ -1349,10 +1357,6 @@ export namespace Telemetry {
   export function setContext(opts: { sessionId: string; projectId: string }) {
     sessionId = opts.sessionId
     projectId = opts.projectId
-  }
-
-  export function setSource(s: string): void {
-    clientSource = s
   }
 
   export function getContext() {

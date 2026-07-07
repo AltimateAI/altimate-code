@@ -140,3 +140,35 @@ describe("step-finish token propagation via Bus event", () => {
     { timeout: 30000 },
   )
 })
+
+describe("session metadata", () => {
+  test("persists and reads back metadata.source through create -> get", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const session = await Session.create({ metadata: { source: "datamates" } })
+        expect(session.metadata).toEqual({ source: "datamates" })
+
+        const loaded = await Session.get(session.id)
+        expect(loaded.metadata).toEqual({ source: "datamates" })
+
+        await Session.remove(session.id)
+      },
+    })
+  })
+
+  test("metadata is undefined when not provided", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const session = await Session.create({})
+        expect(session.metadata).toBeUndefined()
+
+        const loaded = await Session.get(session.id)
+        expect(loaded.metadata).toBeUndefined()
+
+        await Session.remove(session.id)
+      },
+    })
+  })
+})

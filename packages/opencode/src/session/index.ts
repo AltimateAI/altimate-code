@@ -151,6 +151,9 @@ export namespace Session {
         archived: z.number().optional(),
       }),
       permission: PermissionNext.Ruleset.optional(),
+      // Open extension point for clients (e.g. VS Code extensions) to tag a session via
+      // POST /session. Only `source` is consumed today (session_start telemetry); kept as an
+      // open record so new keys need no schema change.
       metadata: z.record(z.string(), z.unknown()).optional(),
       revert: z
         .object({

@@ -362,7 +362,6 @@ export namespace SessionPrompt {
     // altimate_change end
     // altimate_change start — session telemetry tracking
     await Telemetry.init()
-    Telemetry.setSource(Flag.ALTIMATE_CLI_CLIENT)
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
     const sessionStartTime = Date.now()
     let sessionTotalCost = 0
@@ -926,10 +925,15 @@ export namespace SessionPrompt {
           // altimate_change start — per-session source override: VS Code extensions set
           // metadata.source (e.g. "datamates", "poweruser") when creating the session via POST /session.
           // This lets both extensions share the same altimate serve process while producing
-          // distinguishable session_start telemetry. Falls back to the process-level
-          // Flag.ALTIMATE_CLI_CLIENT (set by ALTIMATE_CLI_CLIENT env var, e.g. "vscode") if
-          // the session carries no metadata source.
-          source: (session.metadata?.source as string | undefined) ?? Flag.ALTIMATE_CLI_CLIENT,
+          // distinguishable session_start telemetry. session_start carries this per-session value;
+          // events without their own `source` fall back to the process-level Flag.ALTIMATE_CLI_CLIENT
+          // injected in telemetry, so per-extension attribution of those events requires a join on
+          // session_id. metadata is arbitrary client JSON, so type-guard source and fall back to the
+          // flag if it is absent or not a string (a non-string would otherwise be routed to
+          // measurements downstream instead of appearing as the source property).
+          source:
+            (typeof session.metadata?.source === "string" ? session.metadata.source : undefined) ??
+            Flag.ALTIMATE_CLI_CLIENT,
           // altimate_change end
         })
         // altimate_change start — task intent classification (keyword/regex, zero LLM cost)
