@@ -178,6 +178,101 @@ test("OAuth still attaches when Authorization header is present but oauth is exp
     },
   })
 })
+test("headersCommand overrides a static header that differs only in casing", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      transportCalls.length = 0
+      await MCP.add("case-merge-server", {
+        type: "remote",
+        url: "https://example.com/mcp",
+        headers: { authorization: "Bearer stale-static", "X-Other": "keep" },
+        headersCommand: {
+          Authorization: ["printf", "Bearer fresh-dynamic"],
+        },
+      }).catch(() => {})
+
+      expect(transportCalls.length).toBeGreaterThanOrEqual(1)
+      for (const call of transportCalls) {
+        // HTTP header names are case-insensitive: only the dynamic value may
+        // survive, or two Authorization headers would be sent on the wire.
+        expect(call.options.requestInit?.headers).toEqual({
+          Authorization: "Bearer fresh-dynamic",
+          "X-Other": "keep",
+        })
+        expect(call.options.authProvider).toBeUndefined()
+      }
+    },
+  })
+})
+
+test("mergeHeaders: dynamic value wins over static key differing only in casing", () => {
+  expect(
+    MCP._testing.mergeHeaders({ authorization: "Bearer stale", "X-Other": "keep" }, { Authorization: "Bearer fresh" }),
+  ).toEqual({
+    Authorization: "Bearer fresh",
+    "X-Other": "keep",
+  })
+})
+
+// Covers the auth API surface: `supportsOAuth()` must agree with `create()`'s
+// auto-disable, or `POST /:name/auth` would start an OAuth flow whose tokens
+// the bearer connection never uses.
+test("supportsOAuth mirrors the OAuth auto-disable for bearer-auth servers", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        `${dir}/opencode.json`,
+        JSON.stringify({
+          $schema: "https://altimate.ai/config.json",
+          mcp: {
+            "bearer-static": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              headers: { Authorization: "Bearer static-token" },
+            },
+            "bearer-cmd": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              headersCommand: { authorization: ["printf", "Bearer dynamic-token"] },
+            },
+            "explicit-oauth": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              headers: { Authorization: "Bearer fallback" },
+              oauth: { clientId: "client-xyz" },
+            },
+            "plain-remote": {
+              type: "remote",
+              url: "https://example.com/mcp",
+            },
+            "oauth-off": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              oauth: false,
+            },
+          },
+        }),
+      )
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      // Bearer present (statically or via headersCommand), oauth unspecified —
+      // connect-time auto-disables OAuth, so the API must not advertise it.
+      expect(await MCP.supportsOAuth("bearer-static")).toBe(false)
+      expect(await MCP.supportsOAuth("bearer-cmd")).toBe(false)
+      // Explicit opt-in wins even with a bearer header present.
+      expect(await MCP.supportsOAuth("explicit-oauth")).toBe(true)
+      // Defaults unchanged.
+      expect(await MCP.supportsOAuth("plain-remote")).toBe(true)
+      expect(await MCP.supportsOAuth("oauth-off")).toBe(false)
+    },
+  })
+})
 // altimate_change end
 
 test("headers are passed to transports when oauth is explicitly disabled", async () => {

@@ -209,6 +209,7 @@ export namespace MCP {
     resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") =>
       resolveHeadersCommand(spec, key),
     hasAuthorizationHeader,
+    mergeHeaders,
   }
   // altimate_change end
 
@@ -242,10 +243,14 @@ export namespace MCP {
         // command (ENOENT, timeout, non-zero exit) rather than a bare error.
         // On a non-zero exit the actionable reason lives on `err.stderr` (e.g.
         // `az`'s "run 'az login'"), which `err.message` omits — append it.
+        // The composed message is masked before it escapes: execFile's message
+        // echoes the full argv and an auth CLI run with --verbose can print the
+        // token to stderr, and this string reaches logs and the status API.
+        // Over-masking (quoted spans become `?`) is the correct failure mode.
         const e = err as { message?: string; stderr?: string }
         const stderr = typeof e.stderr === "string" ? e.stderr.trim().slice(0, 500) : ""
         const base = err instanceof Error ? err.message : String(err)
-        const message = stderr ? `${base}: ${stderr}` : base
+        const message = Telemetry.maskString(stderr ? `${base}: ${stderr}` : base)
         throw new Error(`headersCommand[${name}] failed: ${message}`)
       }
       const value = stdout.trim()
@@ -258,8 +263,29 @@ export namespace MCP {
     return out
   }
 
-  function hasAuthorizationHeader(headers: Record<string, string>): boolean {
+  // Accepts any header-shaped record (static `headers` values are strings,
+  // `headersCommand` values are argv arrays) — only key names are inspected.
+  function hasAuthorizationHeader(headers: Record<string, unknown>): boolean {
     return Object.keys(headers).some((k) => k.toLowerCase() === "authorization")
+  }
+
+  // HTTP header names are case-insensitive, so a dynamic header must replace a
+  // static one that differs only in casing (`headers.Authorization` +
+  // `headersCommand.authorization` would otherwise both be sent — duplicate
+  // credentials some servers reject). Dynamic values win under the documented
+  // contract: "Values from headersCommand override matching keys in `headers`."
+  function mergeHeaders(
+    staticHeaders: Record<string, string>,
+    dynamicHeaders: Record<string, string>,
+  ): Record<string, string> {
+    const merged: Record<string, string> = { ...staticHeaders }
+    for (const [name, value] of Object.entries(dynamicHeaders)) {
+      for (const existing of Object.keys(merged)) {
+        if (existing.toLowerCase() === name.toLowerCase()) delete merged[existing]
+      }
+      merged[name] = value
+    }
+    return merged
   }
   // altimate_change end
 
@@ -522,7 +548,7 @@ export namespace MCP {
           status: { status: "failed" as const, error: message },
         }
       }
-      const mergedHeaders: Record<string, string> = { ...(mcp.headers ?? {}), ...dynamicHeaders }
+      const mergedHeaders: Record<string, string> = mergeHeaders(mcp.headers ?? {}, dynamicHeaders)
       // altimate_change end
 
       // altimate_change start — OAuth is enabled by default for remote servers,
@@ -1348,7 +1374,19 @@ export namespace MCP {
     const mcpConfig = cfg.mcp?.[mcpName]
     if (!mcpConfig) return false
     if (!isMcpConfigured(mcpConfig)) return false
-    return mcpConfig.type === "remote" && mcpConfig.oauth !== false
+    if (mcpConfig.type !== "remote") return false
+    if (mcpConfig.oauth === false) return false
+    if (typeof mcpConfig.oauth === "object") return true
+    // altimate_change start — mirror `create()`'s auto-disable: when the user
+    // provided an Authorization header (statically or via `headersCommand`) and
+    // didn't explicitly configure OAuth, connect-time skips OAuth — so the auth
+    // API surface must not advertise it, or `POST /:name/auth` would start an
+    // OAuth flow whose tokens the connection never uses. `headersCommand` is
+    // not resolved here (that would execute the command); the presence of an
+    // Authorization key in its spec is enough to know connect-time disables
+    // OAuth. See #792.
+    return !hasAuthorizationHeader({ ...(mcpConfig.headers ?? {}), ...(mcpConfig.headersCommand ?? {}) })
+    // altimate_change end
   }
 
   /**

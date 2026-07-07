@@ -191,6 +191,44 @@ describe("discoverExternalMcp", () => {
     })
   })
 
+  // altimate_change start — discovery must preserve bearer-auth fields
+  // (headersCommand / oauth) the same way config.ts `normalizeMcpConfig` does,
+  // or auto-discovered servers silently connect with no auth. See #791 / #792.
+  test("remote: headersCommand and oauth are preserved", async () => {
+    await writeFile(
+      path.join(tempDir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          fabric: {
+            url: "https://api.fabric.microsoft.com/v1/mcp/core",
+            headersCommand: {
+              Authorization: ["az", "account", "get-access-token"],
+            },
+          },
+          "no-oauth": {
+            url: "https://example.com/mcp",
+            headers: { Authorization: "Bearer token" },
+            oauth: false,
+          },
+        },
+      }),
+    )
+
+    const { servers: result } = await discoverExternalMcp(tempDir)
+    expect(result["fabric"]).toMatchObject({
+      type: "remote",
+      url: "https://api.fabric.microsoft.com/v1/mcp/core",
+      headersCommand: { Authorization: ["az", "account", "get-access-token"] },
+    })
+    expect(result["no-oauth"]).toMatchObject({
+      type: "remote",
+      url: "https://example.com/mcp",
+      headers: { Authorization: "Bearer token" },
+      oauth: false,
+    })
+  })
+  // altimate_change end
+
   test("env → environment rename", async () => {
     await writeFile(
       path.join(tempDir, ".mcp.json"),

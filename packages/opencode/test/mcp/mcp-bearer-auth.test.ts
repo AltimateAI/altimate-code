@@ -242,6 +242,26 @@ describe("resolveHeadersCommand helper", () => {
     })
     expect(result.X).toBe("$(whoami); rm -rf /")
   })
+
+  test("masks bearer tokens leaked to stderr in the failure message", async () => {
+    // An auth CLI run with --verbose/--debug can print the token to stderr,
+    // and the failure message reaches logs and the status API. The composed
+    // message must redact token-shaped values (via Telemetry.maskString).
+    const { MCP } = await import("../../src/mcp")
+    const token = "sTLeakedTokenValue0123456789abcdef"
+    let message = ""
+    try {
+      await MCP._testing.resolveHeadersCommand({
+        Authorization: ["sh", "-c", `echo DEBUG: authorization: Bearer ${token} >&2; exit 1`],
+      })
+      throw new Error("expected resolveHeadersCommand to reject")
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toMatch(/headersCommand\[Authorization\] failed:/)
+    expect(message).toContain("Bearer ***")
+    expect(message).not.toContain(token)
+  })
 })
 
 // ---------------------------------------------------------------------------

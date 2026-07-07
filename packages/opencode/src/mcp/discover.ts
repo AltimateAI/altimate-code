@@ -89,6 +89,17 @@ function transform(
       })
       // altimate_change end
     }
+    // altimate_change start — preserve bearer-auth fields, mirroring config.ts
+    // `normalizeMcpConfig`. Without these passes a discovered server's
+    // `headersCommand` / `oauth` would be dropped before reaching the runtime,
+    // silently connecting with no auth (and the loss could be persisted back to
+    // disk via mcp-discover). Copied as-is — argv values are executed via
+    // execFile at connect time, so no env-var resolution applies here, and
+    // malformed shapes are rejected downstream by the McpRemote schema with an
+    // actionable error. See #791 / #792.
+    if (entry.headersCommand && typeof entry.headersCommand === "object") result.headersCommand = entry.headersCommand
+    if (entry.oauth !== undefined) result.oauth = entry.oauth
+    // altimate_change end
     if (typeof entry.timeout === "number") result.timeout = entry.timeout
     if (typeof entry.enabled === "boolean") result.enabled = entry.enabled
     return result as Config.Mcp
