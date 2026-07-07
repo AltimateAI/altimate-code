@@ -229,7 +229,7 @@ export namespace Session {
         title: z.string().optional(),
         permission: Info.shape.permission,
         workspaceID: WorkspaceID.zod.optional(),
-        metadata: z.record(z.string(), z.unknown()).optional(),
+        metadata: Info.shape.metadata,
       })
       .optional(),
     async (input) => {
@@ -257,6 +257,10 @@ export namespace Session {
         directory: Instance.directory,
         workspaceID: original.workspaceID,
         title,
+        // Inherit the source label so a forked session keeps the origin of the session
+        // it was forked from (e.g. "datamates"/"poweruser") instead of falling back to
+        // the process-level Flag.ALTIMATE_CLI_CLIENT in its session_start telemetry.
+        metadata: original.metadata,
       })
       const msgs = await messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()

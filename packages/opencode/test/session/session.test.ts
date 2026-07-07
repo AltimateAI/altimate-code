@@ -171,4 +171,18 @@ describe("session metadata", () => {
       },
     })
   })
+
+  test("fork inherits metadata (source) from the original session", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const original = await Session.create({ metadata: { source: "datamates" } })
+        const forked = await Session.fork({ sessionID: original.id })
+        expect(forked.metadata).toEqual({ source: "datamates" })
+
+        await Session.remove(forked.id)
+        await Session.remove(original.id)
+      },
+    })
+  })
 })
