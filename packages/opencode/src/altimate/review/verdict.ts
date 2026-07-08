@@ -49,10 +49,27 @@ export const VCS_EVENT: Record<Verdict, "COMMENT" | "REQUEST_CHANGES"> = {
  *  - any finding at all                          → COMMENT
  *  - nothing                                     → APPROVE
  */
+/**
+ * Defense in depth for the spec-test synthesis lane: a spec-test finding may
+ * only reach a blocking verdict when it was actually EXECUTED against a
+ * constraint the author DECLARED (track A). An advisory/unexecuted proposal
+ * (track B, or any P0 output) can never block, regardless of the severity or
+ * category the lane assigned it — the verdict does not trust the lane. Findings
+ * from every other tool are unaffected (return true).
+ */
+function specTestMayBlock(f: Finding): boolean {
+  const tool = f.evidence?.tool ?? ""
+  if (!tool.startsWith("altimate.spec_test")) return true
+  const result = (f.evidence?.result ?? {}) as Record<string, unknown>
+  return result["executed"] === true && result["origin"] === "declared_constraint"
+}
+
 export function computeIdealVerdict(findings: Finding[], rubric: Rubric = DEFAULT_RUBRIC): Verdict {
   if (findings.length === 0) return "APPROVE"
   const blockers = blockingCategories(rubric)
-  const hasBlockingCritical = findings.some((f) => f.severity === "critical" && blockers.has(f.category))
+  const hasBlockingCritical = findings.some(
+    (f) => f.severity === "critical" && blockers.has(f.category) && specTestMayBlock(f),
+  )
   if (hasBlockingCritical) return "REQUEST_CHANGES"
   // Count only confidently-warned findings toward the risk pattern. Undecidable
   // ("unknown") warnings — e.g. equivalence that couldn't be proven — must not
