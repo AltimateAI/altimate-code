@@ -1,0 +1,9 @@
+{
+  "name": "altimate-onboarding-stub",
+  "private": true,
+  "type": "module",
+  "description": "Local stub server for the Altimate Code Part 1 onboarding prototype",
+  "scripts": {
+    "start": "bun run server.ts"
+  }
+}
