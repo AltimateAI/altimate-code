@@ -210,6 +210,19 @@ export function registerAll(): void {
       return fail(e)
     }
   })
+  // Greenfield spec-test generation prompt — same IP-in-binary pattern as the AI
+  // reviewer. Defensive access: the napi binding only gains this method once the
+  // core addon is rebuilt (see specs/core-spec-test-prompt.md); until then the
+  // handler fails and the TS lane falls back to its inline prompt.
+  register("altimate_core.review_spec_test_prompt", async () => {
+    try {
+      const fn = (core as unknown as { reviewSpecTestSystemPrompt?: () => string }).reviewSpecTestSystemPrompt
+      if (typeof fn !== "function") return fail(new Error("review_spec_test_system_prompt unavailable in this core build"))
+      return ok(true, { prompt: fn() })
+    } catch (e) {
+      return fail(e)
+    }
+  })
   // Lexical scan (reserved-word aliases + dialect operators) — curated lists +
   // detection embedded in the binary; TS passes the raw added diff lines.
   register("altimate_core.review_lexical_scan", async (params) => {

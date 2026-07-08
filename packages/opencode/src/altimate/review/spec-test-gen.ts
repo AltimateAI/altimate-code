@@ -6,6 +6,7 @@ import { Agent } from "@/agent/agent"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/util/log"
+import { Dispatcher } from "../native"
 
 /**
  * Auxiliary spec-test synthesis for GREENFIELD (git-added) dbt models.
@@ -251,6 +252,23 @@ function buildSystemPrompt(): string {
   ].join("\n")
 }
 
+/**
+ * Resolve the generation system prompt. The canonical prompt lives in the
+ * compiled core (`altimate_core.review_spec_test_prompt`, IP-in-binary — same as
+ * the AI reviewer). Falls back to the inline {@link buildSystemPrompt} when the
+ * core build predates the method, so the lane never breaks before the addon ships.
+ */
+async function resolveSystemPrompt(): Promise<string> {
+  try {
+    const res = await Dispatcher.call("altimate_core.review_spec_test_prompt", {})
+    const prompt = ((res.data ?? {}) as Record<string, unknown>).prompt
+    if (typeof prompt === "string" && prompt.trim()) return prompt
+  } catch {
+    // Core method absent in this build — fall back to the inline prompt.
+  }
+  return buildSystemPrompt()
+}
+
 function buildUserMessage(input: SpecTestGenInput): string {
   return JSON.stringify(
     {
@@ -322,7 +340,7 @@ export async function runSpecTestGen(input: SpecTestGenInput): Promise<Generated
   try {
     const defaultModel = await Provider.defaultModel()
     const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
-    const system = buildSystemPrompt()
+    const system = await resolveSystemPrompt()
     const agent: Agent.Info = {
       name: "dbt-spec-test-generator",
       mode: "primary",

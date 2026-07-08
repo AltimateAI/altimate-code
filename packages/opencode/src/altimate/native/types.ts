@@ -836,6 +836,7 @@ export interface AltimateCoreResult {
 
 // altimate_change start — dbt-pr-review IP params (prompt + parse live in core)
 export interface AltimateCoreReviewAiPromptParams {}
+export interface AltimateCoreReviewSpecTestPromptParams {}
 export interface AltimateCoreReviewAiParseParams {
   /** Raw LLM response text. */
   text: string
@@ -1219,6 +1220,10 @@ export const BridgeMethods = {
   "altimate_core.check": {} as { params: AltimateCoreCheckParams; result: AltimateCoreResult },
   // altimate_change start — dbt-pr-review IP (prompt + parse) lives in core
   "altimate_core.review_ai_prompt": {} as { params: AltimateCoreReviewAiPromptParams; result: AltimateCoreResult },
+  "altimate_core.review_spec_test_prompt": {} as {
+    params: AltimateCoreReviewSpecTestPromptParams
+    result: AltimateCoreResult
+  },
   "altimate_core.review_ai_parse": {} as { params: AltimateCoreReviewAiParseParams; result: AltimateCoreResult },
   "altimate_core.review_lexical_scan": {} as {
     params: AltimateCoreReviewLexicalScanParams
