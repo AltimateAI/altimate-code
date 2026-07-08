@@ -5,7 +5,6 @@ import path from "path"
 import { Filesystem } from "@/util/filesystem"
 import { useLocal } from "@tui/context/local"
 import { useTheme } from "@tui/context/theme"
-import { EmptyBorder } from "@tui/component/border"
 import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
@@ -925,27 +924,19 @@ export function Prompt(props: PromptProps) {
         promptPartTypeId={() => promptPartTypeId}
       />
       <box ref={(r) => (anchor = r)} visible={props.visible !== false}>
-        <box
-          border={["left"]}
-          borderColor={highlight()}
-          customBorderChars={{
-            ...EmptyBorder,
-            vertical: "┃",
-            bottomLeft: "╹",
-          }}
-        >
-          <box
-            paddingLeft={2}
-            paddingRight={2}
-            paddingTop={1}
-            flexShrink={0}
-            backgroundColor={theme.backgroundElement}
-            flexGrow={1}
-          >
+        {/* altimate_change start — Claude-Code-style input bar: thin rule above and
+            below, "›" prompt char, no filled background; agent/model hints move to a
+            line under the bottom rule */}
+        <box border={["top"]} borderColor={theme.border}>
+          <box paddingLeft={1} paddingRight={2} flexShrink={0} flexGrow={1} flexDirection="row" gap={1}>
+            <text fg={highlight()} flexShrink={0}>
+              ›
+            </text>
             <textarea
               placeholder={placeholderText()}
               textColor={keybind.leader ? theme.textMuted : theme.text}
               focusedTextColor={keybind.leader ? theme.textMuted : theme.text}
+              flexGrow={1}
               minHeight={1}
               maxHeight={6}
               onContentChange={() => {
@@ -1116,57 +1107,33 @@ export function Prompt(props: PromptProps) {
                 }, 0)
               }}
               onMouseDown={(r: MouseEvent) => r.target?.focus()}
-              focusedBackgroundColor={theme.backgroundElement}
+              focusedBackgroundColor={theme.background}
               cursorColor={theme.text}
               syntaxStyle={syntax()}
             />
-            <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1}>
-              <text fg={highlight()}>
-                {store.mode === "shell" ? "Shell" : Locale.titlecase(local.agent.current().name)}{" "}
-              </text>
-              <Show when={store.mode === "normal"}>
-                <box flexDirection="row" gap={1}>
-                  <text flexShrink={0} fg={keybind.leader ? theme.textMuted : theme.text}>
-                    {local.model.parsed().model}
-                  </text>
-                  <text fg={theme.textMuted}>{local.model.parsed().provider}</text>
-                  <Show when={showVariant()}>
-                    <text fg={theme.textMuted}>·</text>
-                    <text>
-                      <span style={{ fg: theme.warning, bold: true }}>{local.model.variant.current()}</span>
-                    </text>
-                  </Show>
-                </box>
-              </Show>
-            </box>
           </box>
         </box>
-        <box
-          height={1}
-          border={["left"]}
-          borderColor={highlight()}
-          customBorderChars={{
-            ...EmptyBorder,
-            vertical: theme.backgroundElement.a !== 0 ? "╹" : " ",
-          }}
-        >
-          <box
-            height={1}
-            border={["bottom"]}
-            borderColor={theme.backgroundElement}
-            customBorderChars={
-              theme.backgroundElement.a !== 0
-                ? {
-                    ...EmptyBorder,
-                    horizontal: "▀",
-                  }
-                : {
-                    ...EmptyBorder,
-                    horizontal: " ",
-                  }
-            }
-          />
+        <box height={1} border={["top"]} borderColor={theme.border} />
+        <box flexDirection="row" flexShrink={0} paddingLeft={1} gap={1}>
+          <text fg={highlight()}>
+            {store.mode === "shell" ? "Shell" : Locale.titlecase(local.agent.current().name)}{" "}
+          </text>
+          <Show when={store.mode === "normal"}>
+            <box flexDirection="row" gap={1}>
+              <text flexShrink={0} fg={keybind.leader ? theme.textMuted : theme.text}>
+                {local.model.parsed().model}
+              </text>
+              <text fg={theme.textMuted}>{local.model.parsed().provider}</text>
+              <Show when={showVariant()}>
+                <text fg={theme.textMuted}>·</text>
+                <text>
+                  <span style={{ fg: theme.warning, bold: true }}>{local.model.variant.current()}</span>
+                </text>
+              </Show>
+            </box>
+          </Show>
         </box>
+        {/* altimate_change end */}
         <box flexDirection="row" justifyContent="space-between">
           <Show when={status().type !== "idle"} fallback={<text />}>
             <box

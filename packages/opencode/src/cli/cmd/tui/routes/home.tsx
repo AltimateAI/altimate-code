@@ -221,7 +221,8 @@ export function Home() {
           <box flexGrow={1} minHeight={0} />
         </Show>
         {/* altimate_change end */}
-        <box width="100%" maxWidth={75} zIndex={1000} paddingTop={1} flexShrink={0}>
+        {/* altimate_change — full-width input bar, Claude Code style */}
+        <box width="100%" zIndex={1000} paddingTop={1} flexShrink={0}>
           <Prompt
             ref={(r) => {
               prompt = r
