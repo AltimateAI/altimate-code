@@ -108,7 +108,20 @@ function normalizeMcpConfig(data: Record<string, unknown>, source: string): Reco
         servers[name] = transformed
       } else if (entry.url && typeof entry.url === "string") {
         const transformed: Record<string, any> = { type: "remote", url: entry.url }
+        // Copy `headers` / `headersCommand` through as-is — including malformed
+        // array shapes. The downstream schema validation rejects an array with an
+        // actionable error; stripping arrays here would instead drop the field
+        // silently and connect a header-less server with no feedback. See #791 / #792.
         if (entry.headers && typeof entry.headers === "object") transformed.headers = entry.headers
+        // altimate_change start — preserve bearer-auth fields the original normalizer
+        // dropped silently. Without these passes, a user-supplied `oauth: false` or
+        // `headersCommand` would be reconstructed-away, leaving the runtime believing
+        // the config was bare. See #791 / #792.
+        if (entry.headersCommand && typeof entry.headersCommand === "object") {
+          transformed.headersCommand = entry.headersCommand
+        }
+        if (entry.oauth !== undefined) transformed.oauth = entry.oauth
+        // altimate_change end
         if (typeof entry.timeout === "number") transformed.timeout = entry.timeout
         if (typeof entry.enabled === "boolean") transformed.enabled = entry.enabled
         if (typeof entry.updatedAt === "string") transformed.updatedAt = entry.updatedAt

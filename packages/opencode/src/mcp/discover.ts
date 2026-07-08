@@ -89,6 +89,48 @@ function transform(
       })
       // altimate_change end
     }
+    // altimate_change start — preserve bearer-auth fields so a discovered
+    // server's `headersCommand` / `oauth` isn't dropped before reaching the
+    // runtime, silently connecting with no auth. Unlike config.ts
+    // `normalizeMcpConfig` (which passes malformed shapes through so the user's
+    // own file fails `Info.safeParse` with an actionable error), discovery
+    // ingests FOREIGN config files: only shapes our McpRemote schema accepts
+    // are preserved, and foreign dialects (e.g. Gemini CLI's
+    // `oauth: { enabled: true }`) are dropped as before. Discovered entries are
+    // merged into the runtime config after validation and can be persisted to
+    // opencode.json via `mcp-discover add`, so an unvalidated pass-through
+    // would poison the config file and fail every subsequent load.
+    // Validators mirror the McpRemote schema: `headersCommand` is a record of
+    // non-empty string argv arrays; `oauth` is `false` or a strict object of
+    // optional string fields clientId/clientSecret/scope. (Schemas can't be
+    // imported as values here — config.ts dynamically imports this module, and
+    // the Config import above is type-only to avoid a static cycle.)
+    // See #791 / #792.
+    const headersCommand = entry.headersCommand
+    if (headersCommand !== undefined) {
+      const valid =
+        headersCommand !== null &&
+        typeof headersCommand === "object" &&
+        !Array.isArray(headersCommand) &&
+        Object.values(headersCommand).every(
+          (argv) => Array.isArray(argv) && argv.length > 0 && argv.every((part: unknown) => typeof part === "string"),
+        )
+      if (valid) result.headersCommand = headersCommand
+      else log.debug("dropping unrecognized headersCommand from discovered server", context)
+    }
+    const oauth = entry.oauth
+    if (oauth !== undefined) {
+      const oauthStringFields = ["clientId", "clientSecret", "scope"]
+      const valid =
+        oauth === false ||
+        (oauth !== null &&
+          typeof oauth === "object" &&
+          !Array.isArray(oauth) &&
+          Object.entries(oauth).every(([k, v]) => oauthStringFields.includes(k) && typeof v === "string"))
+      if (valid) result.oauth = oauth
+      else log.debug("dropping unrecognized oauth config from discovered server", context)
+    }
+    // altimate_change end
     if (typeof entry.timeout === "number") result.timeout = entry.timeout
     if (typeof entry.enabled === "boolean") result.enabled = entry.enabled
     return result as ConfigMCPV1.Info

@@ -50,8 +50,22 @@ export const Remote = Schema.Struct({
   headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
     description: "Headers to send with the request",
   }),
+  // altimate_change start — dynamic header resolution for short-TTL bearer tokens
+  // (e.g. `az account get-access-token`). Each value is an argv array re-run on
+  // every connect; values here override matching `headers` keys (case-insensitive).
+  // See https://github.com/AltimateAI/altimate-code/issues/791.
+  headersCommand: Schema.optional(
+    Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String)).check(Schema.isNonEmpty())),
+  ).annotate({
+    description:
+      "Commands to run to resolve dynamic header values (e.g. short-lived bearer tokens). Each value is an argv array run without a shell, re-resolved on every connect. Overrides matching keys in `headers`.",
+  }),
+  // altimate_change end
   oauth: Schema.optional(Schema.Union([OAuth, Schema.Literal(false)])).annotate({
-    description: "OAuth authentication configuration for the MCP server. Set to false to disable OAuth auto-detection.",
+    description:
+      // altimate_change start — document the auto-disable behavior added for #792
+      "OAuth authentication configuration for the MCP server. Set to false to disable OAuth auto-detection. OAuth is also automatically skipped when an explicit Authorization header is provided (via `headers` or `headersCommand`) and this field is not explicitly configured.",
+    // altimate_change end
   }),
   timeout: Schema.optional(PositiveInt).annotate({
     description: "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.",

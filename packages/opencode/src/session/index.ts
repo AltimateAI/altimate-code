@@ -89,6 +89,7 @@ export namespace Session {
       // structurally-identical mutable form. Cast to drop readonly.
       permission: (row.permission as PermissionNext.Ruleset | null) ?? undefined,
       // altimate_change end
+      metadata: row.metadata ?? undefined,
       time: {
         created: row.time_created,
         updated: row.time_updated,
@@ -117,6 +118,7 @@ export namespace Session {
       summary_diffs: info.summary?.diffs,
       revert: info.revert ?? null,
       permission: info.permission,
+      metadata: info.metadata,
       time_created: info.time.created,
       time_updated: info.time.updated,
       time_compacting: info.time.compacting,
@@ -175,6 +177,10 @@ export namespace Session {
         archived: z.number().optional(),
       }),
       permission: PermissionNext.Ruleset.optional(),
+      // Open extension point for clients (e.g. VS Code extensions) to tag a session via
+      // POST /session. Only `source` is consumed today (session_start telemetry); kept as an
+      // open record so new keys need no schema change.
+      metadata: z.record(z.string(), z.unknown()).optional(),
       revert: z
         .object({
           messageID: MessageID.zod,
@@ -249,6 +255,7 @@ export namespace Session {
         title: z.string().optional(),
         permission: Info.shape.permission,
         workspaceID: WorkspaceID.zod.optional(),
+        metadata: Info.shape.metadata,
       })
       .optional(),
     async (input) => {
@@ -258,6 +265,7 @@ export namespace Session {
         title: input?.title,
         permission: input?.permission,
         workspaceID: input?.workspaceID,
+        metadata: input?.metadata,
       })
     },
   )
@@ -275,6 +283,10 @@ export namespace Session {
         directory: Instance.directory,
         workspaceID: original.workspaceID,
         title,
+        // Inherit the source label so a forked session keeps the origin of the session
+        // it was forked from (e.g. "datamates"/"poweruser") instead of falling back to
+        // the process-level Flag.ALTIMATE_CLI_CLIENT in its session_start telemetry.
+        metadata: original.metadata,
       })
       const msgs = await messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
@@ -327,6 +339,7 @@ export namespace Session {
     workspaceID?: WorkspaceID
     directory: string
     permission?: PermissionNext.Ruleset
+    metadata?: Record<string, unknown>
   }) {
     const result: Info = {
       id: SessionID.descending(input.id),
@@ -338,6 +351,7 @@ export namespace Session {
       parentID: input.parentID,
       title: input.title ?? createDefaultTitle(!!input.parentID),
       permission: input.permission,
+      metadata: input.metadata,
       time: {
         created: Date.now(),
         updated: Date.now(),
