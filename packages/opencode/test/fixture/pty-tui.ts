@@ -25,7 +25,12 @@
  */
 
 import path from "path"
-import { spawn as ptySpawn } from "bun-pty"
+// altimate_change start — upstream v1.17.9 dropped bun-pty from packages/opencode;
+// the fork's runtime PTY layer now imports from @opencode-ai/core/pty/pty.bun. Follow
+// the same rewire here so the harness compiles on v0.9.0-beta.2 without adding
+// bun-pty back as a devDependency.
+import { spawn as ptySpawn } from "@opencode-ai/core/pty/pty.bun"
+// altimate_change end
 import stripAnsi from "strip-ansi"
 
 const INDEX_TS = path.resolve(__dirname, "../../src/index.ts")
