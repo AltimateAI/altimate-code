@@ -65,10 +65,31 @@ Connect to a remote MCP server over HTTP:
 |-------|------|-------------|
 | `type` | `"remote"` | Remote HTTP server |
 | `url` | `string` | Server URL |
-| `headers` | `object` | Custom HTTP headers |
+| `headers` | `object` | Static custom HTTP headers |
+| `headersCommand` | `object` | Headers whose values are produced by running a command (see below) |
 | `enabled` | `boolean` | Enable/disable (default: `true`) |
 | `oauth` | `object \| false` | OAuth configuration |
 | `timeout` | `number` | Timeout in ms (default: `5000`) |
+
+## Dynamic / Bearer-Token Headers (`headersCommand`)
+
+For servers gated by short-lived bearer tokens (e.g. **Microsoft Fabric Core MCP**, Azure Entra ID), use `headersCommand` to compute a header value by running a command. Each value is an **argv array** run directly via `execFile` (no shell — values are not subject to shell injection unless you explicitly invoke one like `sh -c`). It is **re-resolved on every connect**, so expiring tokens refresh automatically without editing config:
+
+```json
+{
+  "mcp": {
+    "fabric": {
+      "type": "remote",
+      "url": "https://api.fabric.microsoft.com/v1/mcp/core",
+      "headersCommand": {
+        "Authorization": ["sh", "-c", "printf 'Bearer %s' \"$(az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv)\""]
+      }
+    }
+  }
+}
+```
+
+Values from `headersCommand` override matching keys in `headers` (case-insensitively). When an `Authorization` header is supplied (via `headers` or `headersCommand`) and `oauth` is not explicitly configured, **OAuth auto-detection is disabled** so the static/dynamic bearer token is not overridden by a competing OAuth flow.
 
 ## OAuth Authentication
 

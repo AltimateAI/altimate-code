@@ -319,8 +319,17 @@ jobs:
             exit 1
           fi
 
-          # Get the previous tag
-          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | head -2 | tail -1)
+          # Get the previous tag.
+          # altimate_change — pick the newest STABLE tag that is an ANCESTOR of this
+          # commit, excluding the current tag and any prerelease (-beta etc). Plain
+          # `--sort=-version:refname | head -2 | tail -1` picked the 2nd-highest tag by
+          # name, which for a stable release lands on a prerelease or a stray/divergent
+          # tag (e.g. a dangling v0.9.0), producing a bogus compare range. Restricting to
+          # `--merged HEAD` non-prerelease tags yields the real previous release.
+          PREV_TAG=$(git tag --merged HEAD --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vx "$CURRENT_TAG" \
+            | head -1)
 
           # Generate changelog from commits between tags
           echo "## What's Changed" > notes.md
