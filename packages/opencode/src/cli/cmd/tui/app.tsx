@@ -14,7 +14,7 @@ import { DialogProvider as DialogProviderList } from "@tui/component/dialog-prov
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
-import { DialogModel, useConnected, useReady } from "@tui/component/dialog-model"
+import { DialogModel, DialogModelWelcome, useConnected, useReady } from "@tui/component/dialog-model"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -482,7 +482,7 @@ function App() {
       (notReady, wasNotReady) => {
         // only trigger on the transition into a not-ready state
         if (!notReady || wasNotReady) return
-        dialog.replace(() => <DialogModel />)
+        dialog.replace(() => <DialogModelWelcome />)
       },
     ),
   )

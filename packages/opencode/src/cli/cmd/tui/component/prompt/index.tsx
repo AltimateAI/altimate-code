@@ -30,8 +30,8 @@ import { formatDuration } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
-// altimate_change — open the unified picker from the locked chat input
-import { DialogModel } from "../dialog-model"
+// altimate_change — open the first-run welcome picker from the locked chat input
+import { DialogModelWelcome } from "../dialog-model"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -945,7 +945,7 @@ export function Prompt(props: PromptProps) {
               onKeyDown={async (e) => {
                 // altimate_change start — locked: block input; enter opens the picker
                 if (props.locked) {
-                  if (e.name === "return") dialog.replace(() => <DialogModel />)
+                  if (e.name === "return") dialog.replace(() => <DialogModelWelcome />)
                   e.preventDefault()
                   return
                 }

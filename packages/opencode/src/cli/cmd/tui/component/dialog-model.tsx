@@ -1,4 +1,4 @@
-import { createMemo, createSignal } from "solid-js"
+import { createMemo, createSignal, For, Show, onMount } from "solid-js"
 import { useLocal } from "@tui/context/local"
 import { useSync } from "@tui/context/sync"
 import { map, pipe, flatMap, entries, filter, sortBy } from "remeda"
@@ -6,6 +6,9 @@ import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
 import { createDialogProviderOptions, DialogProvider, WARNLIST } from "./dialog-provider"
 import { useKeybind } from "../context/keybind"
+import { useTheme, selectedForeground } from "@tui/context/theme"
+import { TextAttributes, RGBA } from "@opentui/core"
+import { useKeyboard } from "@opentui/solid"
 import * as fuzzysort from "fuzzysort"
 
 export function useConnected() {
@@ -166,3 +169,144 @@ export function DialogModel(props: { providerID?: string }) {
     />
   )
 }
+
+// altimate_change start — first-run welcome picker (presentation only; reuses the
+// same action handlers as DialogModel/createDialogProviderOptions). A curated six:
+// five recommended providers + a "Search all providers…" row that hands off to the
+// full DialogModel picker. The long tail stays behind search.
+const NAME_W = 24
+type WelcomeTone = "success" | "warning" | "muted"
+
+interface WelcomeRow {
+  name: string
+  note: string
+  tone: WelcomeTone
+  activate: () => void
+}
+
+export function DialogModelWelcome() {
+  const { theme } = useTheme()
+  const dialog = useDialog()
+  const local = useLocal()
+  const providers = createDialogProviderOptions()
+  const [selected, setSelected] = createSignal(0)
+
+  onMount(() => dialog.setSize("large"))
+
+  function connectProvider(id: string) {
+    // Reuse the exact provider onSelect (gateway flow for altimate-backend,
+    // auth-method screens for the BYOK providers).
+    providers()
+      .find((o) => o.value === id)
+      ?.onSelect?.()
+  }
+
+  function chooseBigPickle() {
+    dialog.clear()
+    // Stage 4 adds the confirm interstitial ahead of this switch.
+    local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
+    markSetupComplete()
+  }
+
+  function openFullCatalog() {
+    dialog.replace(() => <DialogModel />)
+  }
+
+  const rows = createMemo<WelcomeRow[]>(() => [
+    {
+      name: "Altimate LLM Gateway",
+      note: "Recommended · best tool-calling · 10M free tokens",
+      tone: "success",
+      activate: () => connectProvider("altimate-backend"),
+    },
+    { name: "Anthropic (Claude)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("anthropic") },
+    { name: "OpenAI (GPT)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("openai") },
+    { name: "Google (Gemini)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("google") },
+    {
+      name: "Big Pickle",
+      note: "free, no signup — slower, unreliable tool-calling",
+      tone: "warning",
+      activate: chooseBigPickle,
+    },
+    { name: "Search all providers…", note: "/", tone: "muted", activate: openFullCatalog },
+  ])
+
+  // Indices 0-4 are providers, 5 is the search row (rendered below a divider).
+  const COUNT = 6
+  function move(direction: number) {
+    setSelected((prev) => (prev + direction + COUNT) % COUNT)
+  }
+
+  useKeyboard((evt) => {
+    if (evt.name === "up" || (evt.ctrl && evt.name === "p")) return move(-1)
+    if (evt.name === "down" || (evt.ctrl && evt.name === "n")) return move(1)
+    if (evt.name === "return") {
+      evt.preventDefault()
+      evt.stopPropagation()
+      rows()[selected()].activate()
+      return
+    }
+    // "/", ctrl+a, or any letter/number reveals the full searchable catalog.
+    if (evt.name === "/" || (evt.ctrl && evt.name === "a") || /^[a-z0-9]$/i.test(evt.name ?? "")) {
+      evt.preventDefault()
+      openFullCatalog()
+    }
+  })
+
+  const selFg = selectedForeground(theme)
+  const transparent = RGBA.fromInts(0, 0, 0, 0)
+  const noteColor = (tone: WelcomeTone) =>
+    tone === "success" ? theme.success : tone === "warning" ? theme.warning : theme.textMuted
+
+  const Row = (props: { row: WelcomeRow; index: number }) => {
+    const active = createMemo(() => selected() === props.index)
+    return (
+      <box flexDirection="row" gap={1} onMouseMove={() => setSelected(props.index)} onMouseUp={() => props.row.activate()}>
+        <text flexShrink={0} fg={theme.primary}>
+          {active() ? "›" : " "}
+        </text>
+        <box width={NAME_W} flexShrink={0} paddingLeft={1} paddingRight={1} backgroundColor={active() ? theme.primary : transparent}>
+          <text fg={active() ? selFg : theme.text} attributes={active() ? TextAttributes.BOLD : undefined} wrapMode="none">
+            {props.row.name}
+          </text>
+        </box>
+        <text flexGrow={1} fg={noteColor(props.row.tone)} wrapMode="none">
+          {props.row.note}
+        </text>
+      </box>
+    )
+  }
+
+  return (
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <box
+        border
+        borderStyle="rounded"
+        borderColor={theme.border}
+        title=" Altimate Code "
+        titleAlignment="left"
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        gap={1}
+      >
+        <text wrapMode="none">
+          <span style={{ fg: theme.text }}>
+            <b>Select a provider</b>
+          </span>
+          <span style={{ fg: theme.textMuted }}> — you can change this anytime with /model</span>
+        </text>
+        <box gap={0}>
+          <For each={rows().slice(0, 5)}>{(row, i) => <Row row={row} index={i()} />}</For>
+        </box>
+        <box border={["top"]} borderColor={theme.border} />
+        <Row row={rows()[5]} index={5} />
+      </box>
+      <box paddingTop={1} paddingLeft={2}>
+        <text fg={theme.textMuted}>🔒 Chat unlocks after setup</text>
+      </box>
+    </box>
+  )
+}
+// altimate_change end
