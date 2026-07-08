@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y aireceipts-cli@latest hook pre-push",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
