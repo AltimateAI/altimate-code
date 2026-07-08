@@ -11,7 +11,7 @@ import { Spinner } from "./spinner"
 import { useTheme } from "../context/theme"
 import { TextAttributes } from "@opentui/core"
 import type { ProviderAuthAuthorization } from "@opencode-ai/sdk/v2"
-import { DialogModel } from "./dialog-model"
+import { DialogModel, markSetupComplete } from "./dialog-model"
 import { useKeyboard } from "@opentui/solid"
 import { Clipboard } from "@tui/util/clipboard"
 import { useToast } from "../ui/toast"
@@ -20,14 +20,25 @@ import open from "open"
 import { AltimateApi } from "../../../../altimate/api/client"
 // altimate_change end
 
+// altimate_change start — Part 1 onboarding: Altimate LLM Gateway is the
+// recommended default; OpenCode Zen loses its "Recommended" tag and drops below.
+// Big Pickle (priority 4) is injected by dialog-model between Google and Zen.
 const PROVIDER_PRIORITY: Record<string, number> = {
-  opencode: 0,
-  "opencode-go": 1,
+  "altimate-backend": 0,
+  anthropic: 1,
   openai: 2,
-  "github-copilot": 3,
-  anthropic: 4,
-  google: 5,
+  google: 3,
+  // 4 reserved for Big Pickle (see dialog-model)
+  opencode: 5,
+  "opencode-go": 6,
+  "github-copilot": 7,
 }
+
+// Known-bad tool-callers, surfaced inline in the picker.
+export const WARNLIST: Record<string, string> = {
+  "qwen-plus": "⚠ known tool-calling issues",
+}
+// altimate_change end
 
 export function createDialogProviderOptions() {
   const sync = useSync()
@@ -38,14 +49,18 @@ export function createDialogProviderOptions() {
       sync.data.provider_next.all,
       sortBy((x) => PROVIDER_PRIORITY[x.id] ?? 99),
       map((provider) => ({
-        title: provider.name,
+        // altimate_change start — brand the gateway entry + relabel priorities
+        title: provider.id === "altimate-backend" ? "Altimate LLM Gateway" : provider.name,
         value: provider.id,
         description: {
-          opencode: "(Recommended)",
+          "altimate-backend": "Recommended · best tool-calling · 10M free tokens",
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
+          google: "(API key)",
+          opencode: "Bring your own Zen key",
           "opencode-go": "Low cost subscription for everyone",
         }[provider.id],
+        // altimate_change end
         category: provider.id in PROVIDER_PRIORITY ? "Popular" : "Other",
         async onSelect() {
           // altimate_change start — Altimate LLM Gateway: browser device sign-in
@@ -440,6 +455,7 @@ function GatewayFlow() {
     await sync.bootstrap()
     if (cancelled) return
     local.model.set({ providerID: "altimate-backend", modelID: "altimate-default" }, { recent: true })
+    markSetupComplete()
     toast.show({ message: "✓ Instance ready · 10M free tokens active", variant: "success" })
     dialog.clear()
   }

@@ -1,4 +1,5 @@
 import path from "path"
+import os from "os"
 import { Effect, Layer, Record, Result, Schema, ServiceMap } from "effect"
 import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
@@ -33,7 +34,12 @@ export class AuthServiceError extends Schema.TaggedErrorClass<AuthServiceError>(
   cause: Schema.optional(Schema.Defect),
 }) {}
 
-const file = path.join(Global.Path.data, "auth.json")
+// altimate_change start — PROTO_FRESH sandbox (see auth/index.ts; cleared there)
+const file =
+  process.env.PROTO_FRESH === "1"
+    ? path.join(os.tmpdir(), "altimate-proto-fresh", "auth.json")
+    : path.join(Global.Path.data, "auth.json")
+// altimate_change end
 
 const fail = (message: string) => (cause: unknown) => new AuthServiceError({ message, cause })
 

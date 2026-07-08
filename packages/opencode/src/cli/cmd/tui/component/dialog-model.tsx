@@ -1,10 +1,10 @@
 import { createMemo, createSignal } from "solid-js"
 import { useLocal } from "@tui/context/local"
 import { useSync } from "@tui/context/sync"
-import { map, pipe, flatMap, entries, filter, sortBy, take } from "remeda"
+import { map, pipe, flatMap, entries, filter, sortBy } from "remeda"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
-import { createDialogProviderOptions, DialogProvider } from "./dialog-provider"
+import { createDialogProviderOptions, DialogProvider, WARNLIST } from "./dialog-provider"
 import { useKeybind } from "../context/keybind"
 import * as fuzzysort from "fuzzysort"
 
@@ -14,6 +14,21 @@ export function useConnected() {
     sync.data.provider.some((x) => x.id !== "opencode" || Object.values(x.models).some((y) => y.cost?.input !== 0)),
   )
 }
+
+// altimate_change start — session-scoped "setup complete" flag. Set when the user
+// picks a ready model, chooses the free Big Pickle option, or finishes the gateway
+// flow. Combined with useConnected() (real credentials) via useReady(), it gates the
+// first-run chat lock. Module-global so it is shared across the app and resets on every
+// process launch (so PROTO_FRESH relaunch is a clean fresh-user state).
+const [setupComplete, setSetupComplete] = createSignal(false)
+export function markSetupComplete() {
+  setSetupComplete(true)
+}
+export function useReady() {
+  const connected = useConnected()
+  return createMemo(() => connected() || setupComplete())
+}
+// altimate_change end
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
@@ -25,108 +40,96 @@ export function DialogModel(props: { providerID?: string }) {
   const connected = useConnected()
   const providers = createDialogProviderOptions()
 
-  const showExtra = createMemo(() => connected() && !props.providerID)
+  // A provider is "ready" (usable now) when it has valid credentials: it is present
+  // in the live provider list with at least one model — and, for the free OpenCode
+  // provider, with at least one paid model (a Zen key entered).
+  function providerReady(id: string) {
+    const p = sync.data.provider.find((x) => x.id === id)
+    if (!p) return false
+    if (id === "opencode") return Object.values(p.models).some((m) => m.cost?.input !== 0)
+    return Object.keys(p.models).length > 0
+  }
 
   const options = createMemo(() => {
     const needle = query().trim()
-    const showSections = showExtra() && needle.length === 0
-    const favorites = connected() ? local.model.favorite() : []
-    const recents = local.model.recent()
+    const favorites = local.model.favorite()
 
-    function toOptions(items: typeof favorites, category: string) {
-      if (!showSections) return []
-      return items.flatMap((item) => {
-        const provider = sync.data.provider.find((x) => x.id === item.providerID)
-        if (!provider) return []
-        const model = provider.models[item.modelID]
-        if (!model) return []
-        return [
-          {
-            key: item,
-            value: { providerID: provider.id, modelID: model.id },
-            title: model.name ?? item.modelID,
-            description: provider.name,
-            category,
-            disabled: provider.id === "opencode" && model.id.includes("-nano"),
-            footer: model.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
-            onSelect: () => {
-              dialog.clear()
-              local.model.set({ providerID: provider.id, modelID: model.id }, { recent: true })
-            },
-          },
-        ]
-      })
-    }
-
-    const favoriteOptions = toOptions(favorites, "Favorites")
-    const recentOptions = toOptions(
-      recents.filter(
-        (item) => !favorites.some((fav) => fav.providerID === item.providerID && fav.modelID === item.modelID),
-      ),
-      "Recent",
-    )
-
-    const providerOptions = pipe(
+    // READY — models from providers that already have valid credentials. Selecting
+    // one switches instantly.
+    const readyOptions = pipe(
       sync.data.provider,
-      sortBy(
-        (provider) => provider.id !== "opencode",
-        (provider) => provider.name,
-      ),
+      filter((provider) => providerReady(provider.id)),
       flatMap((provider) =>
         pipe(
           provider.models,
           entries(),
           filter(([_, info]) => info.status !== "deprecated"),
           filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
-          map(([model, info]) => ({
-            value: { providerID: provider.id, modelID: model },
-            title: info.name ?? model,
-            description: favorites.some((item) => item.providerID === provider.id && item.modelID === model)
-              ? "(Favorite)"
-              : undefined,
-            category: connected() ? provider.name : undefined,
-            disabled: provider.id === "opencode" && model.includes("-nano"),
-            footer: info.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
-            onSelect() {
-              dialog.clear()
-              local.model.set({ providerID: provider.id, modelID: model }, { recent: true })
-            },
-          })),
-          filter((x) => {
-            if (!showSections) return true
-            if (favorites.some((item) => item.providerID === x.value.providerID && item.modelID === x.value.modelID))
-              return false
-            if (recents.some((item) => item.providerID === x.value.providerID && item.modelID === x.value.modelID))
-              return false
-            return true
+          map(([modelID, info]) => {
+            const warn = WARNLIST[modelID]
+            const isFav = favorites.some((f) => f.providerID === provider.id && f.modelID === modelID)
+            return {
+              value: { providerID: provider.id, modelID } as { providerID: string; modelID: string } | string,
+              title: info.name ?? modelID,
+              description: warn ? `${provider.name} · ${warn}` : provider.name,
+              category: "READY",
+              footer: isFav ? "★" : undefined,
+              onSelect() {
+                dialog.clear()
+                local.model.set({ providerID: provider.id, modelID }, { recent: true })
+                markSetupComplete()
+              },
+            }
           }),
-          sortBy(
-            (x) => x.footer !== "Free",
-            (x) => x.title,
-          ),
+          sortBy((x) => x.title),
         ),
       ),
     )
 
-    const popularProviders = !connected()
-      ? pipe(
-          providers(),
-          map((option) => ({
-            ...option,
-            category: "Popular providers",
-          })),
-          take(6),
-        )
-      : []
+    // NEEDS SETUP — providers without valid credentials (selecting routes into their
+    // auth flow first), plus the free Big Pickle option. Hidden when scoped to one
+    // provider (post-connect model list).
+    const setupOptions = props.providerID
+      ? []
+      : (() => {
+          const list = providers()
+            .filter((o) => !providerReady(o.value))
+            .map((o) => ({
+              value: o.value as { providerID: string; modelID: string } | string,
+              title: o.title,
+              description: o.description,
+              category: "NEEDS SETUP",
+              footer: undefined as string | undefined,
+              onSelect: o.onSelect,
+            }))
+          const bigPickle = {
+            value: "big-pickle" as { providerID: string; modelID: string } | string,
+            title: "Big Pickle",
+            description: "free, no signup — slower, unreliable tool-calling",
+            category: "NEEDS SETUP",
+            footer: undefined as string | undefined,
+            async onSelect() {
+              dialog.clear()
+              // Stage 4 adds the confirm interstitial ahead of this switch.
+              local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
+              markSetupComplete()
+            },
+          }
+          // Big Pickle sits at priority 4 — just above OpenCode Zen (priority 5).
+          const zenIdx = list.findIndex((o) => o.value === "opencode")
+          if (zenIdx === -1) list.push(bigPickle)
+          else list.splice(zenIdx, 0, bigPickle)
+          return list
+        })()
 
     if (needle) {
       return [
-        ...fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
-        ...fuzzysort.go(needle, popularProviders, { keys: ["title"] }).map((x) => x.obj),
+        ...fuzzysort.go(needle, readyOptions, { keys: ["title", "description"] }).map((x) => x.obj),
+        ...fuzzysort.go(needle, setupOptions, { keys: ["title", "description"] }).map((x) => x.obj),
       ]
     }
 
-    return [...favoriteOptions, ...recentOptions, ...providerOptions, ...popularProviders]
+    return [...readyOptions, ...setupOptions]
   })
 
   const provider = createMemo(() =>

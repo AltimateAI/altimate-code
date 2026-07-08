@@ -1,4 +1,6 @@
 import path from "path"
+import os from "os"
+import fs from "fs"
 import { Effect, Layer, Record, Result, Schema, ServiceMap } from "effect"
 import { makeRuntime } from "@/effect/run-service"
 import { zod } from "@/util/effect-zod"
@@ -7,7 +9,21 @@ import { AppFileSystem } from "../filesystem"
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
-const file = path.join(Global.Path.data, "auth.json")
+// altimate_change start — PROTO_FRESH: sandbox auth.json to a throwaway temp dir,
+// cleared once at startup, so demos start with no stored provider auth and the
+// user's real auth.json is never read or written. No effect unless PROTO_FRESH=1.
+const file =
+  process.env.PROTO_FRESH === "1"
+    ? path.join(os.tmpdir(), "altimate-proto-fresh", "auth.json")
+    : path.join(Global.Path.data, "auth.json")
+if (process.env.PROTO_FRESH === "1") {
+  try {
+    fs.rmSync(file, { force: true })
+  } catch {
+    /* best-effort */
+  }
+}
+// altimate_change end
 
 const fail = (message: string) => (cause: unknown) => new Auth.AuthError({ message, cause })
 

@@ -14,7 +14,7 @@ import { DialogProvider as DialogProviderList } from "@tui/component/dialog-prov
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
-import { DialogModel, useConnected } from "@tui/component/dialog-model"
+import { DialogModel, useConnected, useReady } from "@tui/component/dialog-model"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -470,16 +470,23 @@ function App() {
     })
   })
 
+  // altimate_change start — first-run gate: open the picker as the welcome moment
+  // when NO provider has valid credentials. Previously gated on
+  // `sync.data.provider.length === 0`, which never fired because the free OpenCode
+  // provider is always present — so fresh users never got the welcome. useReady()
+  // is credential-aware (real creds OR a model chosen this session).
+  const ready = useReady()
   createEffect(
     on(
-      () => sync.status === "complete" && sync.data.provider.length === 0,
-      (isEmpty, wasEmpty) => {
-        // only trigger when we transition into an empty-provider state
-        if (!isEmpty || wasEmpty) return
-        dialog.replace(() => <DialogProviderList />)
+      () => sync.status === "complete" && !ready(),
+      (notReady, wasNotReady) => {
+        // only trigger on the transition into a not-ready state
+        if (!notReady || wasNotReady) return
+        dialog.replace(() => <DialogModel />)
       },
     ),
   )
+  // altimate_change end
 
   const connected = useConnected()
   command.register(() => [

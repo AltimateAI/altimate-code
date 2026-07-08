@@ -1,7 +1,22 @@
 import z from "zod"
 import path from "path"
+import os from "os"
+import fs from "fs"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
+
+// altimate_change start — PROTO_FRESH: sandbox all credential I/O to a throwaway
+// temp dir, cleared once at startup, so demos start credential-free and never
+// read or write the user's real ~/.altimate files. No effect unless PROTO_FRESH=1.
+const PROTO_FRESH_SANDBOX = process.env.PROTO_FRESH === "1" ? path.join(os.tmpdir(), "altimate-proto-fresh") : null
+if (PROTO_FRESH_SANDBOX) {
+  try {
+    fs.rmSync(path.join(PROTO_FRESH_SANDBOX, "altimate"), { recursive: true, force: true })
+  } catch {
+    /* best-effort */
+  }
+}
+// altimate_change end
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
 // altimate_change start — default Altimate API URL when user omits it from the TUI credential entry
@@ -50,6 +65,9 @@ const IntegrationSummary = z.object({
 
 export namespace AltimateApi {
   export function credentialsPath(): string {
+    // altimate_change start — PROTO_FRESH sandbox
+    if (PROTO_FRESH_SANDBOX) return path.join(PROTO_FRESH_SANDBOX, "altimate", "altimate.json")
+    // altimate_change end
     return path.join(Global.Path.home, ".altimate", "altimate.json")
   }
 

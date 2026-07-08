@@ -30,6 +30,8 @@ import { formatDuration } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+// altimate_change — open the unified picker from the locked chat input
+import { DialogModel } from "../dialog-model"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -45,6 +47,8 @@ export type PromptProps = {
   workspaceID?: string
   visible?: boolean
   disabled?: boolean
+  // altimate_change — first-run lock: blocks input and shows an unlock affordance
+  locked?: boolean
   onSubmit?: () => void
   ref?: (ref: PromptRef) => void
   hint?: JSX.Element
@@ -115,8 +119,9 @@ export function Prompt(props: PromptProps) {
   })
 
   createEffect(() => {
-    if (props.disabled) input.cursorColor = theme.backgroundElement
-    if (!props.disabled) input.cursorColor = theme.text
+    const blocked = props.disabled || props.locked
+    if (blocked) input.cursorColor = theme.backgroundElement
+    if (!blocked) input.cursorColor = theme.text
   })
 
   const lastUserMessage = createMemo(() => {
@@ -586,7 +591,7 @@ export function Prompt(props: PromptProps) {
   ])
 
   async function submit() {
-    if (props.disabled) return
+    if (props.disabled || props.locked) return
     if (autocomplete?.visible) return
     if (!store.prompt.input) return
     const trimmed = store.prompt.input.trim()
@@ -854,6 +859,8 @@ export function Prompt(props: PromptProps) {
   })
 
   const placeholderText = createMemo(() => {
+    // altimate_change — locked state messaging
+    if (props.locked) return "🔒 Chat unlocks after setup — press enter to choose a model"
     if (props.sessionID) return undefined
     if (store.mode === "shell") {
       const example = SHELL_PLACEHOLDERS[store.placeholder % SHELL_PLACEHOLDERS.length]
@@ -936,6 +943,13 @@ export function Prompt(props: PromptProps) {
               }}
               keyBindings={textareaKeybindings()}
               onKeyDown={async (e) => {
+                // altimate_change start — locked: block input; enter opens the picker
+                if (props.locked) {
+                  if (e.name === "return") dialog.replace(() => <DialogModel />)
+                  e.preventDefault()
+                  return
+                }
+                // altimate_change end
                 if (props.disabled) {
                   e.preventDefault()
                   return
@@ -1016,7 +1030,7 @@ export function Prompt(props: PromptProps) {
               }}
               onSubmit={submit}
               onPaste={async (event: PasteEvent) => {
-                if (props.disabled) {
+                if (props.disabled || props.locked) {
                   event.preventDefault()
                   return
                 }

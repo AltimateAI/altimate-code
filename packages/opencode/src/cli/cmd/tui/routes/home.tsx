@@ -15,6 +15,9 @@ import { Installation } from "@/installation"
 import { useKV } from "../context/kv"
 import { useCommandDialog } from "../component/dialog-command"
 import { useLocal } from "../context/local"
+// altimate_change start — first-run chat lock
+import { useReady } from "../component/dialog-model"
+// altimate_change end
 // altimate_change start — upgrade indicator import
 import { UpgradeIndicator } from "../component/upgrade-indicator"
 // altimate_change end
@@ -87,6 +90,9 @@ export function Home() {
   let prompt: PromptRef
   const args = useArgs()
   const local = useLocal()
+  // altimate_change start — chat is locked until a model is ready (first-run gate)
+  const ready = useReady()
+  // altimate_change end
   onMount(() => {
     if (once) return
     if (route.initialPrompt) {
@@ -131,6 +137,8 @@ export function Home() {
             }}
             hint={Hint}
             workspaceID={route.workspaceID}
+            // altimate_change — lock chat until a model is ready
+            locked={!ready()}
           />
         </box>
         {/* altimate_change start — first-time onboarding hint */}
