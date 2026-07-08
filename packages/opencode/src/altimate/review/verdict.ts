@@ -60,6 +60,7 @@ export const VCS_EVENT: Record<Verdict, "COMMENT" | "REQUEST_CHANGES"> = {
 function specTestMayBlock(f: Finding): boolean {
   const tool = f.evidence?.tool ?? ""
   if (!tool.startsWith("altimate.spec_test")) return true
+  if (tool !== "altimate.spec_test.executed") return false
   const result = (f.evidence?.result ?? {}) as Record<string, unknown>
   return result["executed"] === true && result["origin"] === "declared_constraint"
 }

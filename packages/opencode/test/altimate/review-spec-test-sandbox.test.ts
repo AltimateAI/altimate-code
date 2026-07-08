@@ -20,6 +20,36 @@ describe("sanitizeAssertionSql", () => {
     })
   })
 
+  test("rejects qualified references that only match an allowlisted basename", () => {
+    expect(sanitizeAssertionSql("select * from other_schema.fct_orders", ["fct_orders"])).toEqual({
+      ok: false,
+      reason: "unknown_relation",
+    })
+  })
+
+  test("allows unqualified references to match an allowlisted qualified relation", () => {
+    expect(sanitizeAssertionSql("select * from fct_orders", ["analytics.fct_orders"]).ok).toBe(true)
+  })
+
+  test("checks comma-separated FROM factors against the allowlist", () => {
+    expect(sanitizeAssertionSql("select * from fct_orders, secret_orders", ["fct_orders"])).toEqual({
+      ok: false,
+      reason: "unknown_relation",
+    })
+  })
+
+  test("allows trailing semicolon followed only by a comment", () => {
+    expect(sanitizeAssertionSql("select order_id from fct_orders; -- bounded assertion", ["fct_orders"]).ok).toBe(true)
+  })
+
+  test("recognizes a CTE after a leading comment", () => {
+    const sanitized = sanitizeAssertionSql(
+      "-- generated candidate\nwith scoped as (select order_id from fct_orders) select order_id from scoped",
+      ["fct_orders"],
+    )
+    expect(sanitized.ok).toBe(true)
+  })
+
   test("accepts and bounds a select on allowlisted relations", () => {
     const sanitized = sanitizeAssertionSql("select order_id from fct_orders where order_id is null;", ["fct_orders"])
     expect(sanitized.ok).toBe(true)

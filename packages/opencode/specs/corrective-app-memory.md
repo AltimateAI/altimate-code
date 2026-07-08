@@ -133,7 +133,8 @@ governance tier *could* allow human-ratified escalation, but P0 does not.
   swappable. No embeddings needed (structured attribute match, not semantic
   search — the article's specific critique of the KG/embedding approach).
 - **Reviewable & exportable:** entries are inspectable; `.altimate/review.yml`
-  can pin (force-keep) or forbid (never-learn) scopes. Memory is a config surface,
+  P0 exposes only `memory.entries`. FUTURE governance can add `pin`
+  (force-keep) or `forbid` (never-learn) scopes. Memory is a config surface,
   not a black box.
 - **Decay:** entries below support threshold expire; the store self-prunes.
 
@@ -155,7 +156,7 @@ governance tier *could* allow human-ratified escalation, but P0 does not.
 | `corrective-memory.ts` (new, shared) | `MemoryScope`, `MemoryEntry`, `get()`, `record()` with merge/decay |
 | `spec-test-gen.ts` | `SpecTestGenInput.priors`; generator prompt consumes them |
 | `orchestrate.ts` | post-filter consults learned `suppress` entries |
-| `config.ts` | `memory: { pin, forbid }` scopes |
+| `config.ts` | P0 `memory.entries`; FUTURE `pin` / `forbid` scopes |
 
 ## 9. Non-goals
 

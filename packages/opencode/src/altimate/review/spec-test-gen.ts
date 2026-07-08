@@ -7,6 +7,7 @@ import { MessageV2 } from "@/session/message-v2"
 import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/util/log"
 import { Dispatcher } from "../native"
+import { stableJson } from "./stable-json"
 
 /**
  * Auxiliary spec-test synthesis for GREENFIELD (git-added) dbt models.
@@ -196,6 +197,10 @@ export function filterToSpecDerived(
       dropped.push({ test: t, reason: "ref_not_provided" })
       continue
     }
+    if (trustedSource.origin === "declared_constraint" && trustedSource.kind !== t.kind) {
+      dropped.push({ test: t, reason: "test_mismatch" })
+      continue
+    }
     if (t.dbtTest && t.dbtTest.test !== t.kind) {
       dropped.push({ test: t, reason: "test_mismatch" })
       continue
@@ -213,20 +218,6 @@ export function filterToSpecDerived(
  */
 export function isBlockEligible(test: GeneratedTest): boolean {
   return test.derivedFrom.origin === "declared_constraint" && DECLARED_CONSTRAINT_KINDS.has(test.kind)
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null"
-  if (Array.isArray(value)) return "[" + value.map(stableJson).join(",") + "]"
-  const obj = value as Record<string, unknown>
-  return (
-    "{" +
-    Object.keys(obj)
-      .sort()
-      .map((k) => JSON.stringify(k) + ":" + stableJson(obj[k]))
-      .join(",") +
-    "}"
-  )
 }
 
 function generatedTestId(test: GeneratedTest): string {

@@ -58,6 +58,12 @@ describe("verdict enforcement — a spec-test finding may only block when execut
     expect(computeIdealVerdict([crit("altimate.spec_test.proposed", { proposal: {} })])).toBe("COMMENT")
   })
 
+  test("spoofed proposed/candidate results with executed+declared still do not block", () => {
+    const spoofed = { executed: true, origin: "declared_constraint" }
+    expect(computeIdealVerdict([crit("altimate.spec_test.proposed", spoofed)])).toBe("COMMENT")
+    expect(computeIdealVerdict([crit("altimate.spec_test.candidate", spoofed)])).toBe("COMMENT")
+  })
+
   test("candidate spec-test warnings do not accumulate into a blocking verdict", () => {
     expect(
       computeIdealVerdict([

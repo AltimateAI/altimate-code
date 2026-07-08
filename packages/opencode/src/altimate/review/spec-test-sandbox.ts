@@ -68,7 +68,9 @@ function stripTrailingStatementSemicolon(sql: string): SanitizedAssertionSql {
 
   if (semicolons.length === 0) return { ok: true, sql: sql.trim() }
   if (semicolons.length > 1) return { ok: false, reason: "multi_statement" }
-  if (sql.slice(semicolons[0]! + 1).trim()) return { ok: false, reason: "multi_statement" }
+  if (withoutStringsAndComments(sql.slice(semicolons[0]! + 1)).trim()) {
+    return { ok: false, reason: "multi_statement" }
+  }
   return { ok: true, sql: sql.slice(0, semicolons[0]).trim() }
 }
 
@@ -164,7 +166,7 @@ function normalizeRelation(value: string): string {
 function relationAliases(name: string): string[] {
   const normalized = normalizeRelation(name)
   const parts = normalized.split(".").filter(Boolean)
-  return [...new Set([normalized, parts.at(-1) ?? ""].filter(Boolean))]
+  return [...new Set([normalized, parts.length >= 2 ? parts.slice(-2).join(".") : "", parts.at(-1) ?? ""].filter(Boolean))]
 }
 
 function allowedRelationSet(allowedRelations: Iterable<string>): Set<string> {
@@ -189,7 +191,20 @@ function referencedRelations(sql: string): string[] {
   const relation = `${ident}(?:\\s*\\.\\s*${ident}){0,2}`
   const re = new RegExp(`\\b(?:from|join)\\s+(${relation})`, "gi")
   for (const match of sql.matchAll(re)) refs.push(normalizeRelation(match[1] ?? ""))
+  const factor = `${relation}(?:\\s+(?:as\\s+)?${ident})?`
+  const commaList = new RegExp(`\\bfrom\\s+(${factor}(?:\\s*,\\s*${factor})+)`, "gi")
+  for (const match of sql.matchAll(commaList)) {
+    const group = match[1] ?? ""
+    const factorRe = new RegExp(`(?:^|,)\\s*(${relation})`, "gi")
+    for (const factorMatch of group.matchAll(factorRe)) refs.push(normalizeRelation(factorMatch[1] ?? ""))
+  }
   return refs
+}
+
+function relationAllowed(relation: string, allowed: Set<string>): boolean {
+  const parts = normalizeRelation(relation).split(".").filter(Boolean)
+  if (parts.length > 1) return allowed.has(parts.join("."))
+  return relationAliases(relation).some((alias) => allowed.has(alias))
 }
 
 export function sanitizeAssertionSql(sql: string, allowedRelations: Iterable<string>): SanitizedAssertionSql {
@@ -205,11 +220,10 @@ export function sanitizeAssertionSql(sql: string, allowedRelations: Iterable<str
   }
 
   const allowed = allowedRelationSet(allowedRelations)
-  const ctes = cteNames(trimmed)
+  const ctes = cteNames(scanned)
   for (const relation of referencedRelations(trimmed)) {
     if (ctes.has(relation)) continue
-    const aliases = relationAliases(relation)
-    if (!aliases.some((alias) => allowed.has(alias))) return { ok: false, reason: "unknown_relation" }
+    if (!relationAllowed(relation, allowed)) return { ok: false, reason: "unknown_relation" }
   }
 
   return { ok: true, sql: `select count(*) as n from ( ${trimmed} ) _s` }

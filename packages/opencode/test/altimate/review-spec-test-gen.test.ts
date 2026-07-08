@@ -95,6 +95,21 @@ describe("filterToSpecDerived (advisory-track anti-fabrication guard)", () => {
     expect(kept.length).toBe(0)
     expect(dropped[0]?.reason).toBe("test_mismatch")
   })
+
+  test("drops a proposal whose kind does not match a declared source kind", () => {
+    const { kept, dropped } = filterToSpecDerived(
+      [
+        mkTest({
+          kind: "unique",
+          dbtTest: { column: "email", test: "unique" },
+          derivedFrom: declared,
+        }),
+      ],
+      providedSources,
+    )
+    expect(kept.length).toBe(0)
+    expect(dropped[0]?.reason).toBe("test_mismatch")
+  })
 })
 
 describe("isBlockEligible (only track-A declared constraints can block)", () => {

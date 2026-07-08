@@ -91,11 +91,21 @@ function materializedTarget(entry: MemoryEntry, query: Partial<MemoryScope> & { 
   }).join("|")
 }
 
+function lastSeenTime(entry: MemoryEntry): number {
+  const value = entry.provenance.lastSeen
+  if (!value) return 0
+  const time = Date.parse(value)
+  return Number.isFinite(time) ? time : 0
+}
+
 function outranks(a: RankedMemoryEntry, b: RankedMemoryEntry): boolean {
   if (a.score !== b.score) return a.score > b.score
   const aSupport = a.entry.provenance.supportCount
   const bSupport = b.entry.provenance.supportCount
   if (aSupport !== bSupport) return aSupport > bSupport
+  const aLastSeen = lastSeenTime(a.entry)
+  const bLastSeen = lastSeenTime(b.entry)
+  if (aLastSeen !== bLastSeen) return aLastSeen > bLastSeen
   return a.entry.id < b.entry.id
 }
 
@@ -121,6 +131,8 @@ export function getMemory(entries: MemoryEntry[], query: Partial<MemoryScope> & 
       if (a.score !== b.score) return b.score - a.score
       const supportDelta = b.entry.provenance.supportCount - a.entry.provenance.supportCount
       if (supportDelta !== 0) return supportDelta
+      const lastSeenDelta = lastSeenTime(b.entry) - lastSeenTime(a.entry)
+      if (lastSeenDelta !== 0) return lastSeenDelta
       return a.entry.id.localeCompare(b.entry.id)
     })
     .map((ranked) => ranked.entry)

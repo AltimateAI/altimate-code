@@ -228,4 +228,30 @@ describe("spec test synthesis lane (P1 declared-constraint execution)", () => {
     expect(calls).toBe(0)
     expect(env.findings.some((f) => f.evidence?.tool?.startsWith("altimate.spec_test"))).toBe(false)
   })
+
+  test("declared column_type is kept out of generated tests", async () => {
+    let calls = 0
+    const env = await reviewWith(
+      baseRunner({
+        async declaredConstraints() {
+          return [
+            declared({
+              kind: "column_type",
+              column: "order_id",
+              args: { data_type: "integer" },
+              sourceRef: "schema.yml:fct_orders.order_id:column_type",
+            }),
+          ]
+        },
+        async runGeneratedTests() {
+          calls++
+          return {}
+        },
+      }),
+      true,
+    )
+
+    expect(calls).toBe(0)
+    expect(env.findings.some((f) => f.evidence?.tool?.startsWith("altimate.spec_test"))).toBe(false)
+  })
 })

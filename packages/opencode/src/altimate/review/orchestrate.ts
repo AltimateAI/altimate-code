@@ -27,6 +27,7 @@ import {
 } from "./spec-test-gen"
 import { sanitizeAssertionSql } from "./spec-test-sandbox"
 import { getMemory, type MemoryEntry } from "./corrective-memory"
+import { stableJson } from "./stable-json"
 
 /**
  * The deterministic review recipe.
@@ -247,8 +248,8 @@ function configuredMemoryEntries(input: OrchestrateInput): MemoryEntry[] {
 }
 
 function memoryProjectForInput(input: OrchestrateInput): string | undefined {
+  if (input.project) return input.project
   const entries = configuredMemoryEntries(input)
-  if (input.project && entries.some((entry) => entry.scope.project === input.project)) return input.project
   const projects = new Set(entries.map((entry) => entry.scope.project))
   return projects.size === 1 ? [...projects][0] : undefined
 }
@@ -1085,20 +1086,6 @@ interface EnforcedConstraintMetrics {
   failed: number
 }
 
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null"
-  if (Array.isArray(value)) return "[" + value.map(stableJson).join(",") + "]"
-  const obj = value as Record<string, unknown>
-  return (
-    "{" +
-    Object.keys(obj)
-      .sort()
-      .map((k) => JSON.stringify(k) + ":" + stableJson(obj[k]))
-      .join(",") +
-    "}"
-  )
-}
-
 function declaredGeneratedTestId(test: Omit<GeneratedTest, "id">): string {
   return "gst_declared_" + createHash("sha256").update(stableJson(test)).digest("hex").slice(0, 16)
 }
@@ -1107,6 +1094,9 @@ function materializeDeclaredConstraints(model: string, constraints: DeclaredCons
   const tests: GeneratedTest[] = []
   for (const c of constraints) {
     if (c.hasEnforcingTest) continue
+    // TODO: column-type checks need INFORMATION_SCHEMA support before they can
+    // be materialized into executable/proposed GeneratedTests.
+    if (c.kind === "column_type") continue
     const args = c.args && Object.keys(c.args).length ? c.args : undefined
     const draft: Omit<GeneratedTest, "id"> = {
       kind: c.kind,
@@ -1126,7 +1116,10 @@ function materializeDeclaredConstraints(model: string, constraints: DeclaredCons
 }
 
 function specTestRuleKey(test: GeneratedTest): string {
-  return `spec_test:${test.derivedFrom.ref}:${test.kind}:${test.dbtTest?.column ?? ""}`
+  const args = test.dbtTest?.args ?? {}
+  const columns = args["columns"] ?? args["combination_of_columns"] ?? args["column_names"] ?? args["fields"]
+  const columnKey = Array.isArray(columns) ? columns.map(String).sort().join(",") : (test.dbtTest?.column ?? "")
+  return `spec_test:${test.derivedFrom.ref}:${test.kind}:${columnKey}`
 }
 
 function proposedSpecTestFinding(model: string, file: string, test: GeneratedTest): Finding {

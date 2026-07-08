@@ -46,6 +46,7 @@ interface CachedManifest {
 }
 
 const SPEC_TEST_SQL_TIMEOUT_MS = 30_000
+const TRACK_B_ACCEPTED_VALUES_LIMIT = 100
 
 function asArray<T = any>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : []
@@ -125,8 +126,21 @@ function testArgs(node: any): Record<string, unknown> | undefined {
   return Object.keys(out).length ? out : undefined
 }
 
-function constraintKey(kind: DeclaredConstraint["kind"], column?: string): string {
-  return `${kind}:${(column ?? "").toLowerCase()}`
+function constraintColumns(args?: Record<string, unknown>): string[] {
+  const cols = args?.["columns"] ?? args?.["combination_of_columns"] ?? args?.["column_names"] ?? args?.["fields"]
+  return Array.isArray(cols) ? cols.map(String).filter(Boolean) : []
+}
+
+function constraintKey(kind: DeclaredConstraint["kind"], column?: string, args?: Record<string, unknown>): string {
+  const columns = constraintColumns(args)
+    .map((c) => c.toLowerCase())
+    .sort()
+    .join(",")
+  return `${kind}:${(column ?? "").toLowerCase()}:${columns}`
+}
+
+function declaredConstraintKey(c: DeclaredConstraint): string {
+  return `${constraintKey(c.kind, c.column, c.args)}:${c.uniqueId ?? c.sourceRef}`
 }
 
 function sourceRef(model: string, kind: DeclaredConstraint["kind"], column?: string): string {
@@ -237,10 +251,16 @@ function buildGeneratedTestSql(
   if (!model) return { detail: `model not found for ${test.derivedFrom.ref}` }
   const relation = relationForModel(model)
   const column = test.dbtTest?.column
+  const trackB = test.derivedFrom.origin === "inferred_context"
+  const sandboxAssertionSql = (sql: string): { sql?: string; detail?: string } => {
+    const sanitized = sanitizeAssertionSql(sql, expandedAllowedRelations(manifest, options))
+    return sanitized.ok ? { sql: sanitized.sql } : { detail: `dbtTest rejected by sandbox: ${sanitized.reason}` }
+  }
 
   if (test.kind === "not_null") {
     if (!column) return { detail: "not_null test is missing column" }
-    return { sql: `select count(*) as violating_rows from ${relation} where ${sqlIdent(column)} is null` }
+    const assertionSql = `select ${sqlIdent(column)} from ${relation} where ${sqlIdent(column)} is null`
+    return trackB ? sandboxAssertionSql(assertionSql) : { sql: `select count(*) as violating_rows from (${assertionSql}) _nn` }
   }
 
   if (test.kind === "unique") {
@@ -248,23 +268,25 @@ function buildGeneratedTestSql(
     if (!columns.length) return { detail: "unique test is missing columns" }
     const selectCols = columns.map(sqlIdent).join(", ")
     const nonNull = columns.map((c) => `${sqlIdent(c)} is not null`).join(" and ")
-    return {
-      sql:
-        `select count(*) as violating_rows from (` +
-        `select ${selectCols} from ${relation} where ${nonNull} group by ${selectCols} having count(*) > 1` +
-        `) as altimate_unique_violations`,
-    }
+    const assertionSql = `select ${selectCols} from ${relation} where ${nonNull} group by ${selectCols} having count(*) > 1`
+    return trackB
+      ? sandboxAssertionSql(assertionSql)
+      : { sql: `select count(*) as violating_rows from (${assertionSql}) as altimate_unique_violations` }
   }
 
   if (test.kind === "accepted_values") {
     if (!column) return { detail: "accepted_values test is missing column" }
     const values = test.dbtTest?.args?.["values"]
     if (!Array.isArray(values) || values.length === 0) return { detail: "accepted_values test is missing values" }
-    return {
-      sql:
-        `select count(*) as violating_rows from ${relation} ` +
-        `where ${sqlIdent(column)} is not null and ${sqlIdent(column)} not in (${values.map(sqlLiteral).join(", ")})`,
+    if (trackB && values.length > TRACK_B_ACCEPTED_VALUES_LIMIT) {
+      return { detail: `accepted_values test has too many values (${values.length})` }
     }
+    const assertionSql =
+      `select ${sqlIdent(column)} from ${relation} ` +
+      `where ${sqlIdent(column)} is not null and ${sqlIdent(column)} not in (${values.map(sqlLiteral).join(", ")})`
+    return trackB
+      ? sandboxAssertionSql(assertionSql)
+      : { sql: `select count(*) as violating_rows from (${assertionSql}) as altimate_accepted_value_violations` }
   }
 
   if (test.kind === "relationships") {
@@ -273,12 +295,17 @@ function buildGeneratedTestSql(
     const target = relationshipTarget(args["to"], manifest)
     const field = typeof args["field"] === "string" && args["field"].trim() ? args["field"].trim() : undefined
     if (!target || !field) return { detail: "relationships test is missing target relation or field" }
-    return {
-      sql:
-        `select count(*) as violating_rows from ${relation} as child ` +
-        `left join ${target} as parent on child.${sqlIdent(column)} = parent.${sqlIdent(field)} ` +
-        `where child.${sqlIdent(column)} is not null and parent.${sqlIdent(field)} is null`,
+    if (trackB) {
+      const targetCheck = sanitizeAssertionSql(`select 1 from ${target}`, expandedAllowedRelations(manifest, options))
+      if (!targetCheck.ok) return { detail: `relationships target rejected by sandbox: ${targetCheck.reason}` }
     }
+    const assertionSql =
+      `select child.${sqlIdent(column)} from ${relation} as child ` +
+      `left join ${target} as parent on child.${sqlIdent(column)} = parent.${sqlIdent(field)} ` +
+      `where child.${sqlIdent(column)} is not null and parent.${sqlIdent(field)} is null`
+    return trackB
+      ? sandboxAssertionSql(assertionSql)
+      : { sql: `select count(*) as violating_rows from (${assertionSql}) as altimate_relationship_violations` }
   }
 
   return { detail: `${test.kind} execution is not supported by a row-count assertion` }
@@ -303,10 +330,15 @@ function isNoWarehouseError(message: string): boolean {
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
   return Promise.race([
     promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`spec-test SQL timed out after ${ms}ms`)), ms)),
-  ])
+    new Promise<T>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error(`spec-test SQL timed out after ${ms}ms`)), ms)
+    }),
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout)
+  })
 }
 
 /**
@@ -631,11 +663,12 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           const kind = testKind(test)
           if (!kind) continue
           const column = testColumn(test)
-          enforcing.add(constraintKey(kind, column))
+          const args = testArgs(test)
+          enforcing.add(constraintKey(kind, column, args))
           testConstraints.push({
             kind,
             column,
-            args: testArgs(test),
+            args,
             hasEnforcingTest: true,
             uniqueId: test.unique_id,
             sourceRef: sourceRef(target.name, kind, column),
@@ -643,9 +676,9 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         }
 
         const out: DeclaredConstraint[] = [...testConstraints]
-        const seen = new Set(out.map((c) => `${c.kind}:${c.column ?? ""}:${c.uniqueId ?? c.sourceRef}`))
+        const seen = new Set(out.map(declaredConstraintKey))
         const add = (c: DeclaredConstraint) => {
-          const key = `${c.kind}:${c.column ?? ""}:${c.uniqueId ?? c.sourceRef}`
+          const key = declaredConstraintKey(c)
           if (seen.has(key)) return
           seen.add(key)
           out.push(c)
@@ -690,7 +723,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
                   kind,
                   column,
                   args,
-                  hasEnforcingTest: enforcing.has(constraintKey(kind, column)),
+                  hasEnforcingTest: enforcing.has(constraintKey(kind, column, args)),
                   uniqueId: target.unique_id,
                   sourceRef: sourceRef(target.name, kind, column),
                 })
@@ -707,13 +740,25 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
             const columns = asArray(rawConstraint?.columns).map(String).filter(Boolean)
             if (!columns.length) continue
             const kind: DeclaredConstraint["kind"] = "unique"
+            const args = { columns }
             add({
               kind,
-              args: { columns },
-              hasEnforcingTest: enforcing.has(constraintKey(kind)),
+              args,
+              hasEnforcingTest: enforcing.has(constraintKey(kind, undefined, args)),
               uniqueId: target.unique_id,
               sourceRef: sourceRef(target.name, kind),
             })
+            if (normalized === "primary_key") {
+              for (const column of columns) {
+                add({
+                  kind: "not_null",
+                  column,
+                  hasEnforcingTest: enforcing.has(constraintKey("not_null", column)),
+                  uniqueId: target.unique_id,
+                  sourceRef: sourceRef(target.name, "not_null", column),
+                })
+              }
+            }
           }
         }
 

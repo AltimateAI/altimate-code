@@ -19,13 +19,14 @@ function memoryEntry(
   scope: MemoryEntry["scope"],
   polarity: MemoryEntry["polarity"] = "suppress",
   supportCount = 1,
+  lastSeen?: string,
 ): MemoryEntry {
   return {
     id,
     scope,
     directive: `${polarity} ${id}`,
     polarity,
-    provenance: { source: "human_rule", committed: true, supportCount },
+    provenance: { source: "human_rule", committed: true, supportCount, lastSeen },
   }
 }
 
@@ -95,6 +96,15 @@ describe("getMemory", () => {
     const entries = [memoryEntry("other", { project: "other", derivedFromKind: "range" })]
 
     expect(getMemory(entries, { project: PROJECT, derivedFromKind: "range" })).toEqual([])
+  })
+
+  test("ties after specificity and supportCount prefer most recent lastSeen before id", () => {
+    const entries = [
+      memoryEntry("a-old", { project: PROJECT, derivedFromKind: "range" }, "suppress", 2, "2026-01-01T00:00:00Z"),
+      memoryEntry("z-new", { project: PROJECT, derivedFromKind: "range" }, "prefer", 2, "2026-02-01T00:00:00Z"),
+    ]
+
+    expect(getMemory(entries, { project: PROJECT, derivedFromKind: "range" }).map((e) => e.id)).toEqual(["z-new"])
   })
 })
 
@@ -195,6 +205,39 @@ models:
     })
 
     expect(env.findings).toEqual([])
+  })
+
+  test("explicit input project never falls back to another configured project", async () => {
+    const suppressOtherProject = memoryEntry("suppress-other", {
+      project: "other",
+      category: "test_coverage",
+      table: "fct_orders",
+    })
+
+    const env = await runReview({
+      project: PROJECT,
+      changedFiles: [modelFile],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["ai_review"], memory: { entries: [suppressOtherProject] } },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: fakeRunner(),
+      getContent: content({ "models/marts/fct_orders.sql": modelSql }),
+      aiReview: async () => [
+        makeFinding({
+          severity: "suggestion",
+          category: "test_coverage",
+          title: "fct_orders: keep this project-scoped finding",
+          body: "advisory",
+          file: "models/marts/fct_orders.sql",
+          model: "fct_orders",
+          confidence: "unknown",
+          evidence: { tool: "ai-review", result: {} },
+          ruleKey: "ai:test-coverage",
+        }),
+      ],
+    })
+
+    expect(env.findings.map((f) => f.title)).toEqual(["fct_orders: keep this project-scoped finding"])
   })
 
   test("suppress entries do not drop critical/executed findings or soften blocking verdicts", async () => {
