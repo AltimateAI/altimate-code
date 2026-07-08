@@ -72,10 +72,11 @@ export interface SpecSource {
   args?: Record<string, unknown>
 }
 
-/** Test classes. `not_null`/`unique`/`accepted_values`/`relationships` map to
- *  track-A declared constraints; `range` is an inferred-context proposal. No
- *  golden/snapshot class exists — current output is never an expected value. */
-export type GeneratedTestKind = "not_null" | "unique" | "accepted_values" | "relationships" | "range"
+/** Test classes. `not_null`/`unique`/`accepted_values`/`relationships`/
+ *  `column_type` map to track-A declared constraints; `range` is an
+ *  inferred-context proposal. No golden/snapshot class exists — current output
+ *  is never an expected value. */
+export type GeneratedTestKind = "not_null" | "unique" | "accepted_values" | "relationships" | "column_type" | "range"
 
 /** Kinds that can derive from a declared constraint (track A, block-eligible when
  *  executed). `range` and any description-derived test are advisory only. */
@@ -84,12 +85,16 @@ export const DECLARED_CONSTRAINT_KINDS: ReadonlySet<GeneratedTestKind> = new Set
   "unique",
   "accepted_values",
   "relationships",
+  "column_type",
 ])
 
 /** All kinds a proposal may carry; a test whose `kind` is outside this set is
  *  dropped by the advisory-track guard. */
 export const ALLOWED_TEST_KINDS: ReadonlySet<GeneratedTestKind> = new Set<GeneratedTestKind>([
-  ...DECLARED_CONSTRAINT_KINDS,
+  "not_null",
+  "unique",
+  "accepted_values",
+  "relationships",
   "range",
 ])
 

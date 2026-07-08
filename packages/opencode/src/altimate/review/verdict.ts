@@ -122,6 +122,13 @@ export const VerdictEnvelope = z.object({
     suggestion: z.number().int().nonnegative(),
     /** True when the review ran without a manifest/warehouse (lint-only). */
     degraded: z.boolean(),
+    enforcedConstraints: z
+      .object({
+        executed: z.number().int().nonnegative(),
+        passed: z.number().int().nonnegative(),
+        failed: z.number().int().nonnegative(),
+      })
+      .optional(),
   }),
   engine: EngineVersions,
   /** Hash of the dbt manifest the verdict was computed against, when present. */
@@ -150,12 +157,23 @@ export interface BuildEnvelopeInput {
   manifestHash?: string
   generatedAt?: string
   degraded?: boolean
+  enforcedConstraints?: { executed: number; passed: number; failed: number }
 }
 
-function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
+function summarize(
+  findings: Finding[],
+  degraded: boolean,
+  enforcedConstraints?: BuildEnvelopeInput["enforcedConstraints"],
+): VerdictEnvelope["summary"] {
   const tally: Record<Severity, number> = { critical: 0, warning: 0, suggestion: 0 }
   for (const f of findings) tally[f.severity]++
-  return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
+  return {
+    critical: tally.critical,
+    warning: tally.warning,
+    suggestion: tally.suggestion,
+    degraded,
+    enforcedConstraints,
+  }
 }
 
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
@@ -171,7 +189,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     mode: input.mode,
     tier: input.tier,
     findings: input.findings,
-    summary: summarize(input.findings, degraded),
+    summary: summarize(input.findings, degraded, input.enforcedConstraints),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     generatedAt: input.generatedAt,

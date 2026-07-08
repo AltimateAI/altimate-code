@@ -1,5 +1,7 @@
 import path from "node:path"
+import { createHash } from "node:crypto"
 import YAML from "yaml"
+import { Log } from "@/util/log"
 import {
   type Finding,
   type ReviewCategory,
@@ -16,7 +18,13 @@ import { type ReviewConfig } from "./config"
 import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { type AiReviewInput } from "./ai-review"
-import { filterToSpecDerived, type GeneratedTest, type SpecSource, type SpecTestGenInput } from "./spec-test-gen"
+import {
+  filterToSpecDerived,
+  type GeneratedTest,
+  type GeneratedTestResult,
+  type SpecSource,
+  type SpecTestGenInput,
+} from "./spec-test-gen"
 
 /**
  * The deterministic review recipe.
@@ -61,6 +69,8 @@ const CORE_AST_COVERED: Record<string, RegExp> = {
   "sum-of-ratio": /sum.?of.?ratio|l054/,
   "timezone-naive-now": /clock.?in.?filter|l049/,
 }
+
+const log = Log.create({ service: "review-orchestrate" })
 
 /**
  * Extract function names a finding references in call form `NAME(` or backticked
@@ -112,6 +122,17 @@ export interface CheckResult {
   ran?: boolean
 }
 
+export type DeclaredConstraintKind = "not_null" | "unique" | "accepted_values" | "relationships" | "column_type"
+
+export interface DeclaredConstraint {
+  kind: DeclaredConstraintKind
+  column?: string
+  args?: Record<string, unknown>
+  hasEnforcingTest: boolean
+  uniqueId?: string
+  sourceRef: string
+}
+
 /** High-level engine surface the orchestrator depends on. */
 export interface ReviewRunner {
   /** True when the configured dbt manifest loaded, independent of model lookup. */
@@ -141,6 +162,13 @@ export interface ReviewRunner {
   grain?(sql: string): Promise<{ group_by: string[]; dedup_partition: string[] }>
   /** Declared primary/unique key of a model, from contract or unique test (manifest). */
   declaredPrimaryKey?(model: string): Promise<string[] | undefined>
+  /** Parsed author-declared constraints and whether a dbt test already enforces each one. */
+  declaredConstraints?(model: string): Promise<DeclaredConstraint[]>
+  /** Execute generated declared-constraint tests; null when no warehouse/driver is available. */
+  runGeneratedTests?(
+    tests: GeneratedTest[],
+    warehouse?: string,
+  ): Promise<Record<string, GeneratedTestResult> | null>
   /** Per-upstream WHERE-filter columns of a model's SQL (cross-model consistency). */
   sourceFilters?(sql: string): Promise<Record<string, string[]>>
   /** dbt config/Jinja lint over RAW model SQL (parses `{{ config() }}` in core). */
@@ -972,21 +1000,149 @@ function proposedTestBody(test: GeneratedTest, yaml: string): string {
     .join("\n")
 }
 
+interface EnforcedConstraintMetrics {
+  executed: number
+  passed: number
+  failed: number
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null"
+  if (Array.isArray(value)) return "[" + value.map(stableJson).join(",") + "]"
+  const obj = value as Record<string, unknown>
+  return (
+    "{" +
+    Object.keys(obj)
+      .sort()
+      .map((k) => JSON.stringify(k) + ":" + stableJson(obj[k]))
+      .join(",") +
+    "}"
+  )
+}
+
+function declaredGeneratedTestId(test: Omit<GeneratedTest, "id">): string {
+  return "gst_declared_" + createHash("sha256").update(stableJson(test)).digest("hex").slice(0, 16)
+}
+
+function materializeDeclaredConstraints(model: string, constraints: DeclaredConstraint[]): GeneratedTest[] {
+  const tests: GeneratedTest[] = []
+  for (const c of constraints) {
+    if (c.hasEnforcingTest) continue
+    const args = c.args && Object.keys(c.args).length ? c.args : undefined
+    const draft: Omit<GeneratedTest, "id"> = {
+      kind: c.kind,
+      dbtTest: { column: c.column, test: c.kind, args },
+      rationale: `The model declares an unenforced ${c.kind} constraint${c.column ? ` on ${c.column}` : ""}.`,
+      derivedFrom: {
+        origin: "declared_constraint",
+        kind: c.kind,
+        ref: c.sourceRef,
+        text: c.kind,
+        args,
+      },
+    }
+    tests.push({ ...draft, id: declaredGeneratedTestId(draft) })
+  }
+  return tests
+}
+
+function proposedSpecTestFinding(model: string, file: string, test: GeneratedTest): Finding {
+  const yaml = proposedTestYaml(model, test)
+  const column = test.dbtTest?.column
+  return makeFinding({
+    severity: "suggestion",
+    category: "test_coverage",
+    title: `${model}: proposed ${test.kind} test${column ? ` for ${column}` : ""}`,
+    body: proposedTestBody(test, yaml),
+    file,
+    model,
+    column,
+    confidence: "unknown",
+    evidence: { tool: "altimate.spec_test.proposed", result: { proposal: test, yaml } },
+    ruleKey: "spec_test:" + test.derivedFrom.ref,
+  })
+}
+
+function executedSpecTestFinding(model: string, file: string, test: GeneratedTest, violatingRows: number): Finding {
+  const column = test.dbtTest?.column
+  return makeFinding({
+    severity: "critical",
+    category: "contract_violation",
+    title: `${model}: declared ${test.kind} constraint failed${column ? ` for ${column}` : ""}`,
+    body:
+      `This generated check was built from declared constraint \`${test.derivedFrom.ref}\` and executed against the warehouse. ` +
+      `It found ${violatingRows} violating row${violatingRows === 1 ? "" : "s"}. Enforce the constraint in dbt or amend the declaration.`,
+    file,
+    model,
+    column,
+    confidence: "high",
+    evidence: {
+      tool: "altimate.spec_test.executed",
+      result: { executed: true, origin: "declared_constraint", test, violatingRows },
+    },
+    ruleKey: "spec_test:" + test.derivedFrom.ref,
+  })
+}
+
 async function specTestSynthesisLane(
   ctx: ModelContext,
   input: OrchestrateInput,
   dialect: string,
+  enforcedConstraints?: EnforcedConstraintMetrics,
 ): Promise<Finding[]> {
-  if (ctx.file.status !== "added" || !input.generateSpecTests) return []
+  if (ctx.file.status !== "added") return []
   const model = modelNameFromPath(ctx.file.path)
   const sql = ctx.engineNewSql ?? ctx.newSql ?? ""
+  const findings: Finding[] = []
+
+  let trackATests: GeneratedTest[] = []
+  if (input.runner.declaredConstraints) {
+    try {
+      trackATests = materializeDeclaredConstraints(model, await input.runner.declaredConstraints(model))
+    } catch {
+      trackATests = []
+    }
+  }
+
+  if (trackATests.length) {
+    const shouldExecute = input.config.specTests?.execute === true && !!input.runner.runGeneratedTests
+    let results: Record<string, GeneratedTestResult> | null = null
+    if (shouldExecute) {
+      try {
+        results = await input.runner.runGeneratedTests!(trackATests, input.config.dataDiff?.warehouse || undefined)
+      } catch {
+        results = null
+      }
+    }
+
+    if (shouldExecute && results) {
+      for (const test of trackATests) {
+        const result = results[test.id]
+        if (!result || result.status === "error") {
+          log.warn("dropping spec-test execution error", { test: test.id, detail: result?.detail })
+          continue
+        }
+        enforcedConstraints && enforcedConstraints.executed++
+        if (result.status === "pass") {
+          enforcedConstraints && enforcedConstraints.passed++
+          continue
+        }
+        enforcedConstraints && enforcedConstraints.failed++
+        findings.push(executedSpecTestFinding(model, ctx.file.path, test, result.violatingRows ?? 1))
+      }
+    } else {
+      findings.push(...trackATests.map((test) => proposedSpecTestFinding(model, ctx.file.path, test)))
+    }
+  }
+
+  if (!input.generateSpecTests) return findings
   const specSources = dedupeSpecSources([
     ...(await changedSchemaSources(model, input)),
     ...sqlIntentSources(ctx.newSql),
     ...sqlIntentSources(ctx.engineNewSql),
     ...prIntentSources(model, input),
   ])
-  if (!specSources.length) return []
+  if (!specSources.length) return findings
 
   let proposed: GeneratedTest[] = []
   try {
@@ -1003,26 +1159,12 @@ async function specTestSynthesisLane(
       prBody: input.prBody,
     })
   } catch {
-    return []
+    return findings
   }
 
   const { kept } = filterToSpecDerived(proposed, specSources)
-  return kept.map((test) => {
-    const yaml = proposedTestYaml(model, test)
-    const column = test.dbtTest?.column
-    return makeFinding({
-      severity: "suggestion",
-      category: "test_coverage",
-      title: `${model}: proposed ${test.kind} test${column ? ` for ${column}` : ""}`,
-      body: proposedTestBody(test, yaml),
-      file: ctx.file.path,
-      model,
-      column,
-      confidence: "unknown",
-      evidence: { tool: "altimate.spec_test.proposed", result: { proposal: test, yaml } },
-      ruleKey: "spec_test:" + test.derivedFrom.ref,
-    })
-  })
+  findings.push(...kept.map((test) => proposedSpecTestFinding(model, ctx.file.path, test)))
+  return findings
 }
 
 /**
@@ -1371,6 +1513,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
 
   const all: Finding[][] = []
+  const enforcedConstraints: EnforcedConstraintMetrics = { executed: 0, passed: 0, failed: 0 }
   // Files where the diff-scoped PII classifier completed (looked at the change),
   // those where it actually emitted a finding, and — per file — the lowercased
   // columns it classified. These drive column-aware dedup of the coarse regex
@@ -1403,7 +1546,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
     }
     if (lanes.has("test_coverage")) tasks.push(missingGrainTestLane(ctx, input.runner))
-    if (lanes.has("spec_tests") && input.generateSpecTests) tasks.push(specTestSynthesisLane(ctx, input, dialect))
+    if (lanes.has("spec_tests")) tasks.push(specTestSynthesisLane(ctx, input, dialect, enforcedConstraints))
     // PII classification always runs (cheap name-pattern check, diff-scoped to
     // newly-introduced columns) — exposing PII is a hard-floor concern that
     // shouldn't depend on the cost tier enabling the pii_exposure lane. If core
@@ -1621,6 +1764,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     manifestHash: input.manifestHash,
     generatedAt: input.generatedAt,
     degraded,
+    enforcedConstraints: enforcedConstraints.executed > 0 ? enforcedConstraints : undefined,
   })
   return signEnvelope(envelope)
 }

@@ -45,6 +45,10 @@ export function renderSummary(env: VerdictEnvelope): string {
       "",
     )
   }
+  if (env.summary.enforcedConstraints) {
+    const c = env.summary.enforcedConstraints
+    lines.push(`**Spec coverage:** ${c.executed} executed / ${c.passed} passed / ${c.failed} failed.`, "")
+  }
 
   if (!env.findings.length) {
     lines.push("No issues found in the changed dbt models. 🎉", "")

@@ -42,7 +42,7 @@ export const ReviewConfig = z.object({
       warehouse: z.string().default(""),
     })
     .default({ enabled: false, warehouse: "" }),
-  /** Spec-test synthesis. P0 proposes only; execution is reserved for P1. */
+  /** Spec-test synthesis. Declared-constraint execution is opt-in and off by default. */
   specTests: z
     .object({
       execute: z.boolean().default(false),
