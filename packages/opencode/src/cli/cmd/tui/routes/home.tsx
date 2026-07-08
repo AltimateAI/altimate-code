@@ -93,40 +93,79 @@ export function Home() {
   const local = useLocal()
   // altimate_change start — first-run welcome panel (shown until a provider is ready)
   const ready = useReady()
-  // Rounded boot panel. zIndex keeps it above transient top toasts (update/MCP) that
-  // would otherwise blank its top rows during first-run onboarding.
+  // Claude-Code-style full-width boot box: big block wordmark on the left, a
+  // "Tips for getting started" section and a "What is Altimate Code" section on
+  // the right. zIndex keeps it above transient top toasts (update/MCP) that would
+  // otherwise blank its top rows during first-run onboarding.
   const WelcomePanel = () => (
     <box
       border
       borderStyle="rounded"
       borderColor={theme.border}
+      title={Installation.VERSION === "local" ? " Altimate Code " : ` Altimate Code v${Installation.VERSION} `}
+      titleAlignment="left"
       flexShrink={0}
-      width={75}
+      width="100%"
       zIndex={2000}
       backgroundColor={theme.background}
-      paddingLeft={2}
-      paddingRight={2}
-      paddingTop={1}
-      paddingBottom={1}
-      gap={1}
+      flexDirection="row"
     >
-      <text fg={theme.text} attributes={TextAttributes.BOLD}>
-        Welcome to Altimate Code
-      </text>
-      <box gap={0}>
-        <text fg={theme.textMuted}>The intelligence layer for data engineering AI — 100+ deterministic</text>
-        <text fg={theme.textMuted}>tools for SQL, column-level lineage, dbt, FinOps, and warehouses.</text>
-        <text fg={theme.textMuted}>Run it standalone, under Claude Code or Codex, or in CI pipelines.</text>
+      {/* left column — the block-letter wordmark (59 cols wide) */}
+      <box
+        width={65}
+        flexShrink={0}
+        alignItems="center"
+        justifyContent="center"
+        gap={1}
+        paddingTop={1}
+        paddingBottom={1}
+        paddingLeft={1}
+      >
+        <text fg={theme.text} attributes={TextAttributes.BOLD}>
+          Welcome to Altimate Code
+        </text>
+        <Logo />
       </box>
-      <box gap={0}>
-        <text fg={theme.textMuted}>Connect your AI model provider to get started —</text>
-        <text fg={theme.textMuted}>75+ providers · Altimate LLM Gateway recommended (10M free tokens).</text>
+      {/* right column — tips + what-is sections */}
+      <box
+        flexGrow={1}
+        border={["left"]}
+        borderColor={theme.border}
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        gap={1}
+      >
+        <box gap={0}>
+          <text fg={theme.accent} attributes={TextAttributes.BOLD}>
+            Tips for getting started
+          </text>
+          <text wrapMode="word" width="100%">
+            <span style={{ fg: theme.textMuted }}>Run </span>
+            <span style={{ fg: theme.primary }}>/connect</span>
+            <span style={{ fg: theme.textMuted }}>
+              {" "}
+              to pick your AI model provider — 75+ providers supported · Altimate LLM Gateway recommended (10M free
+              tokens)
+            </span>
+          </text>
+        </box>
+        <box border={["top"]} borderColor={theme.border} />
+        <box gap={0}>
+          <text fg={theme.accent} attributes={TextAttributes.BOLD}>
+            What is Altimate Code
+          </text>
+          <text fg={theme.textMuted} wrapMode="word" width="100%">
+            The intelligence layer for data engineering AI — 100+ deterministic tools for SQL analysis, column-level
+            lineage, dbt, FinOps, and warehouse connectivity across every major cloud platform.
+          </text>
+          <text fg={theme.textMuted} wrapMode="word" width="100%">
+            Run standalone in your terminal, embed underneath Claude Code or Codex, or integrate into CI pipelines and
+            orchestration DAGs. Precision data tooling for any LLM.
+          </text>
+        </box>
       </box>
-      <text>
-        <span style={{ fg: theme.textMuted }}>Get started   </span>
-        <span style={{ fg: theme.primary }}>/connect</span>
-        <span style={{ fg: theme.textMuted }}> — connect your AI model provider</span>
-      </text>
     </box>
   )
   // altimate_change end
@@ -168,17 +207,7 @@ export function Home() {
         </Show>
         <Show
           when={ready()}
-          fallback={
-            <>
-              {/* the big block-letter wordmark, same as the ready home screen;
-                  zIndex + bg keep it above transient top toasts like the panel */}
-              <box flexShrink={0} zIndex={2000} backgroundColor={theme.background}>
-                <Logo />
-              </box>
-              <box height={1} flexShrink={0} />
-              <WelcomePanel />
-            </>
-          }
+          fallback={<WelcomePanel />}
         >
           <>
             <box height={4} minHeight={0} flexShrink={1} />
