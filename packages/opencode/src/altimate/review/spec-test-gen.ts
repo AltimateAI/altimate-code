@@ -141,7 +141,12 @@ export interface GeneratedTestResult {
 }
 
 /** Reason a proposal was rejected by the advisory-track guard. */
-export type GuardDropReason = "no_derived_from" | "kind_not_allowed" | "empty_ref" | "ref_not_provided"
+export type GuardDropReason =
+  | "no_derived_from"
+  | "kind_not_allowed"
+  | "empty_ref"
+  | "ref_not_provided"
+  | "test_mismatch"
 
 /**
  * ADVISORY-TRACK anti-fabrication guard (deterministic; no LLM trust).
@@ -168,7 +173,7 @@ export function filterToSpecDerived(
   tests: GeneratedTest[],
   providedSources: SpecSource[],
 ): { kept: GeneratedTest[]; dropped: Array<{ test: GeneratedTest; reason: GuardDropReason }> } {
-  const providedRefs = new Set(providedSources.map((s) => s.ref))
+  const providedByRef = new Map(providedSources.map((s) => [s.ref, s] as const))
   const kept: GeneratedTest[] = []
   const dropped: Array<{ test: GeneratedTest; reason: GuardDropReason }> = []
   for (const t of tests) {
@@ -185,11 +190,16 @@ export function filterToSpecDerived(
       dropped.push({ test: t, reason: "empty_ref" })
       continue
     }
-    if (!providedRefs.has(df.ref)) {
+    const trustedSource = providedByRef.get(df.ref)
+    if (!trustedSource) {
       dropped.push({ test: t, reason: "ref_not_provided" })
       continue
     }
-    kept.push(t)
+    if (t.dbtTest && t.dbtTest.test !== t.kind) {
+      dropped.push({ test: t, reason: "test_mismatch" })
+      continue
+    }
+    kept.push({ ...t, derivedFrom: trustedSource })
   }
   return { kept, dropped }
 }

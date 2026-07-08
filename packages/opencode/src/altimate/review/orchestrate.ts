@@ -25,6 +25,7 @@ import {
   type SpecSource,
   type SpecTestGenInput,
 } from "./spec-test-gen"
+import { sanitizeAssertionSql } from "./spec-test-sandbox"
 
 /**
  * The deterministic review recipe.
@@ -133,6 +134,11 @@ export interface DeclaredConstraint {
   sourceRef: string
 }
 
+export interface GeneratedTestExecutionOptions {
+  model?: string
+  allowedRelations?: string[]
+}
+
 /** High-level engine surface the orchestrator depends on. */
 export interface ReviewRunner {
   /** True when the configured dbt manifest loaded, independent of model lookup. */
@@ -168,6 +174,7 @@ export interface ReviewRunner {
   runGeneratedTests?(
     tests: GeneratedTest[],
     warehouse?: string,
+    options?: GeneratedTestExecutionOptions,
   ): Promise<Record<string, GeneratedTestResult> | null>
   /** Per-upstream WHERE-filter columns of a model's SQL (cross-model consistency). */
   sourceFilters?(sql: string): Promise<Record<string, string[]>>
@@ -866,8 +873,22 @@ function schemaModelSources(model: string, schemaDoc: unknown): SpecSource[] {
     const name = text(column?.name)
     if (!column || !name) continue
 
+    const parsedTests = [...array(column.tests), ...array(column.data_tests)]
+      .map(parseDbtTestSpec)
+      .filter((parsed): parsed is { kind: SpecSource["kind"]; args?: Record<string, unknown> } => !!parsed)
+    const rawConstraints = array(column.constraints)
+    const parsedConstraints = rawConstraints
+      .map((rawConstraint) => {
+        const constraint = record(rawConstraint)
+        const type = text(constraint?.type)
+        return type && DECLARED_SPEC_SOURCE_KINDS.has(type) ? { type, constraint } : undefined
+      })
+      .filter((parsed): parsed is { type: string; constraint: Record<string, unknown> | undefined } => !!parsed)
+    const dataType = text(column.data_type)
+    const alreadyEnforced = parsedTests.length > 0 || parsedConstraints.length > 0 || (contractEnforced && !!dataType)
+
     const description = text(column.description)
-    if (description) {
+    if (description && !alreadyEnforced) {
       out.push({
         origin: "inferred_context",
         kind: "schema_desc",
@@ -876,7 +897,6 @@ function schemaModelSources(model: string, schemaDoc: unknown): SpecSource[] {
       })
     }
 
-    const dataType = text(column.data_type)
     if (contractEnforced && dataType) {
       out.push({
         origin: "declared_constraint",
@@ -886,9 +906,7 @@ function schemaModelSources(model: string, schemaDoc: unknown): SpecSource[] {
       })
     }
 
-    for (const rawTest of [...array(column.tests), ...array(column.data_tests)]) {
-      const parsed = parseDbtTestSpec(rawTest)
-      if (!parsed) continue
+    for (const parsed of parsedTests) {
       out.push({
         origin: "declared_constraint",
         kind: parsed.kind,
@@ -898,10 +916,7 @@ function schemaModelSources(model: string, schemaDoc: unknown): SpecSource[] {
       })
     }
 
-    for (const rawConstraint of array(column.constraints)) {
-      const constraint = record(rawConstraint)
-      const type = text(constraint?.type)
-      if (!type || !DECLARED_SPEC_SOURCE_KINDS.has(type)) continue
+    for (const { type, constraint } of parsedConstraints) {
       out.push({
         origin: "declared_constraint",
         kind: type as SpecSource["kind"],
@@ -1000,6 +1015,10 @@ function proposedTestBody(test: GeneratedTest, yaml: string): string {
     .join("\n")
 }
 
+function candidateTestBody(test: GeneratedTest): string {
+  return `candidate test derived from \`${test.derivedFrom.ref}\` fails on current data — confirm whether this is an intended property.`
+}
+
 interface EnforcedConstraintMetrics {
   executed: number
   passed: number
@@ -1046,6 +1065,10 @@ function materializeDeclaredConstraints(model: string, constraints: DeclaredCons
   return tests
 }
 
+function specTestRuleKey(test: GeneratedTest): string {
+  return `spec_test:${test.derivedFrom.ref}:${test.kind}:${test.dbtTest?.column ?? ""}`
+}
+
 function proposedSpecTestFinding(model: string, file: string, test: GeneratedTest): Finding {
   const yaml = proposedTestYaml(model, test)
   const column = test.dbtTest?.column
@@ -1059,7 +1082,7 @@ function proposedSpecTestFinding(model: string, file: string, test: GeneratedTes
     column,
     confidence: "unknown",
     evidence: { tool: "altimate.spec_test.proposed", result: { proposal: test, yaml } },
-    ruleKey: "spec_test:" + test.derivedFrom.ref,
+    ruleKey: specTestRuleKey(test),
   })
 }
 
@@ -1080,8 +1103,55 @@ function executedSpecTestFinding(model: string, file: string, test: GeneratedTes
       tool: "altimate.spec_test.executed",
       result: { executed: true, origin: "declared_constraint", test, violatingRows },
     },
-    ruleKey: "spec_test:" + test.derivedFrom.ref,
+    ruleKey: specTestRuleKey(test),
   })
+}
+
+function candidateSpecTestFinding(model: string, file: string, test: GeneratedTest, violatingRows: number): Finding {
+  const column = test.dbtTest?.column
+  return makeFinding({
+    severity: "warning",
+    category: "test_coverage",
+    title: `${model}: candidate ${test.kind} test fails${column ? ` for ${column}` : ""}`,
+    body: candidateTestBody(test),
+    file,
+    model,
+    column,
+    confidence: "unknown",
+    evidence: {
+      tool: "altimate.spec_test.candidate",
+      result: { executed: true, origin: "inferred_context", test, violatingRows },
+    },
+    ruleKey: specTestRuleKey(test),
+  })
+}
+
+function allowedRelationsForSpecTests(model: string, specSources: SpecSource[]): string[] {
+  const out = new Set<string>([model])
+  for (const source of specSources) {
+    if (source.kind !== "ref_edge") continue
+    const name = source.text ?? source.ref.replace(/^(ref|source):/, "")
+    if (name) out.add(name)
+  }
+  return [...out]
+}
+
+function executableTrackBTests(tests: GeneratedTest[], allowedRelations: string[]): GeneratedTest[] {
+  const out: GeneratedTest[] = []
+  for (const test of tests) {
+    if (test.dbtTest) {
+      out.push(test)
+      continue
+    }
+    if (!test.assertionSql) continue
+    const sanitized = sanitizeAssertionSql(test.assertionSql, allowedRelations)
+    if (!sanitized.ok) {
+      log.warn("dropping spec-test assertionSql rejected by sandbox", { test: test.id, reason: sanitized.reason })
+      continue
+    }
+    out.push(test)
+  }
+  return out
 }
 
 async function specTestSynthesisLane(
@@ -1094,6 +1164,7 @@ async function specTestSynthesisLane(
   const model = modelNameFromPath(ctx.file.path)
   const sql = ctx.engineNewSql ?? ctx.newSql ?? ""
   const findings: Finding[] = []
+  const trackAAllowedRelations = [model]
 
   let trackATests: GeneratedTest[] = []
   if (input.runner.declaredConstraints) {
@@ -1109,7 +1180,10 @@ async function specTestSynthesisLane(
     let results: Record<string, GeneratedTestResult> | null = null
     if (shouldExecute) {
       try {
-        results = await input.runner.runGeneratedTests!(trackATests, input.config.dataDiff?.warehouse || undefined)
+        results = await input.runner.runGeneratedTests!(trackATests, input.config.dataDiff?.warehouse || undefined, {
+          model,
+          allowedRelations: trackAAllowedRelations,
+        })
       } catch {
         results = null
       }
@@ -1163,7 +1237,42 @@ async function specTestSynthesisLane(
   }
 
   const { kept } = filterToSpecDerived(proposed, specSources)
-  findings.push(...kept.map((test) => proposedSpecTestFinding(model, ctx.file.path, test)))
+  if (!kept.length) return findings
+
+  const shouldExecuteTrackB = input.config.specTests?.execute === true && !!input.runner.runGeneratedTests
+  if (!shouldExecuteTrackB) {
+    findings.push(...kept.map((test) => proposedSpecTestFinding(model, ctx.file.path, test)))
+    return findings
+  }
+
+  const allowedRelations = allowedRelationsForSpecTests(model, specSources)
+  const executable = executableTrackBTests(kept, allowedRelations)
+  if (!executable.length) return findings
+
+  let results: Record<string, GeneratedTestResult> | null = null
+  try {
+    results = await input.runner.runGeneratedTests!(executable, input.config.dataDiff?.warehouse || undefined, {
+      model,
+      allowedRelations,
+    })
+  } catch {
+    return findings
+  }
+
+  if (!results) {
+    findings.push(...executable.map((test) => proposedSpecTestFinding(model, ctx.file.path, test)))
+    return findings
+  }
+
+  for (const test of executable) {
+    const result = results[test.id]
+    if (!result || result.status === "error") {
+      log.warn("dropping candidate spec-test execution error", { test: test.id, detail: result?.detail })
+      continue
+    }
+    if (result.status === "pass") continue
+    findings.push(candidateSpecTestFinding(model, ctx.file.path, test, result.violatingRows ?? 1))
+  }
   return findings
 }
 
@@ -1546,7 +1655,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
     }
     if (lanes.has("test_coverage")) tasks.push(missingGrainTestLane(ctx, input.runner))
-    if (lanes.has("spec_tests")) tasks.push(specTestSynthesisLane(ctx, input, dialect, enforcedConstraints))
+    if (lanes.has("spec_tests") && (input.generateSpecTests || input.runner.declaredConstraints)) {
+      tasks.push(specTestSynthesisLane(ctx, input, dialect, enforcedConstraints))
+    }
     // PII classification always runs (cheap name-pattern check, diff-scoped to
     // newly-introduced columns) — exposing PII is a hard-floor concern that
     // shouldn't depend on the cost tier enabling the pii_exposure lane. If core

@@ -145,28 +145,24 @@ function stripYamlFence(body: string): string {
   return body.replace(/```yaml[\s\S]*?```/g, "").trim()
 }
 
-function yamlFences(body: string): string[] {
-  return [...body.matchAll(/```yaml\s*([\s\S]*?)```/g)].map((m) => m[1].trim()).filter(Boolean)
-}
-
 function proposedTestsPatch(findings: Finding[]): string {
   const merged = new Map<string, any>()
   for (const f of findings) {
-    for (const yaml of yamlFences(f.body)) {
-      try {
-        const doc = YAML.parse(yaml)
-        for (const rawModel of Array.isArray(doc?.models) ? doc.models : []) {
-          const modelName = typeof rawModel?.name === "string" ? rawModel.name : ""
-          if (!modelName) continue
-          const target = merged.get(modelName) ?? { name: modelName }
-          mergeTests(target, rawModel)
-          mergeColumns(target, rawModel)
-          merged.set(modelName, target)
-        }
-      } catch {
-        // Bodies are generated locally; if one is malformed, omit it from the
-        // aggregate patch instead of breaking PR summary rendering.
+    const yaml = (f.evidence?.result as any)?.yaml
+    if (typeof yaml !== "string" || !yaml.trim()) continue
+    try {
+      const doc = YAML.parse(yaml)
+      for (const rawModel of Array.isArray(doc?.models) ? doc.models : []) {
+        const modelName = typeof rawModel?.name === "string" ? rawModel.name : ""
+        if (!modelName) continue
+        const target = merged.get(modelName) ?? { name: modelName }
+        mergeTests(target, rawModel)
+        mergeColumns(target, rawModel)
+        merged.set(modelName, target)
       }
+    } catch {
+      // The aggregate patch is built only from locally generated evidence YAML.
+      // If one snippet is malformed, omit it instead of breaking summary rendering.
     }
   }
   if (!merged.size) return ""

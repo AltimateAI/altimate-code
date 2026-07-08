@@ -17,6 +17,20 @@ function crit(tool: string, result?: Record<string, unknown>): Finding {
   })
 }
 
+function warning(tool: string, n: number): Finding {
+  return makeFinding({
+    severity: "warning",
+    category: "test_coverage",
+    title: "x",
+    body: "y",
+    file: "models/marts/fct_orders.sql",
+    model: "fct_orders",
+    confidence: "high",
+    evidence: { tool, result: { n } },
+    ruleKey: `t:${tool}:${n}`,
+  })
+}
+
 describe("verdict enforcement — a spec-test finding may only block when executed+declared", () => {
   test("normal contract_violation critical still blocks (regression guard)", () => {
     expect(computeIdealVerdict([crit("altimate_core.dbt_config")])).toBe("REQUEST_CHANGES")
@@ -42,5 +56,15 @@ describe("verdict enforcement — a spec-test finding may only block when execut
 
   test("a P0 proposed spec-test critical (advisory) can never block", () => {
     expect(computeIdealVerdict([crit("altimate.spec_test.proposed", { proposal: {} })])).toBe("COMMENT")
+  })
+
+  test("candidate spec-test warnings do not accumulate into a blocking verdict", () => {
+    expect(
+      computeIdealVerdict([
+        warning("altimate.spec_test.candidate", 1),
+        warning("altimate.spec_test.candidate", 2),
+        warning("altimate.spec_test.candidate", 3),
+      ]),
+    ).toBe("COMMENT")
   })
 })

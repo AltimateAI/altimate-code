@@ -1,8 +1,17 @@
 import { Dispatcher } from "../native"
 import { parseManifest } from "../native/dbt/manifest"
 import { loadRawManifest } from "../native/dbt/helpers"
-import type { CheckResult, DeclaredConstraint, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
+import type {
+  CheckResult,
+  DeclaredConstraint,
+  EquivalenceResult,
+  GeneratedTestExecutionOptions,
+  GradeResult,
+  ImpactResult,
+  ReviewRunner,
+} from "./orchestrate"
 import type { GeneratedTest, GeneratedTestResult } from "./spec-test-gen"
+import { sanitizeAssertionSql } from "./spec-test-sandbox"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
 
 /**
@@ -35,6 +44,8 @@ interface CachedManifest {
   schemaContext?: SchemaContext // model/source columns for equivalence resolution
   ok: boolean
 }
+
+const SPEC_TEST_SQL_TIMEOUT_MS = 30_000
 
 function asArray<T = any>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : []
@@ -149,6 +160,40 @@ function relationForModel(model: ManifestModel): string {
   return sqlTableRef(parts.join("."))
 }
 
+function findModel(manifest: CachedManifest, model: string | undefined): ManifestModel | undefined {
+  if (!model) return undefined
+  return manifest.byName.get(model) ?? [...manifest.models.values()].find((m) => m.name.endsWith(`.${model}`))
+}
+
+function addRelationVariants(out: Set<string>, relation: string | undefined): void {
+  if (!relation) return
+  const trimmed = relation.trim()
+  if (!trimmed) return
+  out.add(trimmed)
+  const parts = trimmed
+    .replace(/[`"\[\]]/g, "")
+    .split(".")
+    .map((p) => p.trim())
+    .filter(Boolean)
+  if (parts.length) out.add(parts[parts.length - 1]!)
+  if (parts.length >= 2) out.add(parts.slice(-2).join("."))
+}
+
+function expandedAllowedRelations(manifest: CachedManifest, options?: GeneratedTestExecutionOptions): string[] {
+  const out = new Set<string>()
+  const seed = [...(options?.allowedRelations ?? []), options?.model].filter((v): v is string => !!v)
+  for (const relation of seed) {
+    addRelationVariants(out, relation)
+    const model = findModel(manifest, relation)
+    if (model) {
+      addRelationVariants(out, model.name)
+      addRelationVariants(out, model.alias)
+      addRelationVariants(out, relationForModel(model))
+    }
+  }
+  return [...out]
+}
+
 function modelNameFromSourceRef(ref: string): string | undefined {
   const match = /^schema\.yml:([^.:]+)(?:[.:]|$)/.exec(ref)
   return match?.[1]
@@ -177,9 +222,18 @@ function relationshipTarget(raw: unknown, manifest: CachedManifest): string | un
   return sqlTableRef(raw)
 }
 
-function buildGeneratedTestSql(test: GeneratedTest, manifest: CachedManifest): { sql?: string; detail?: string } {
-  const modelName = modelNameFromSourceRef(test.derivedFrom.ref)
-  const model = modelName ? manifest.byName.get(modelName) : undefined
+function buildGeneratedTestSql(
+  test: GeneratedTest,
+  manifest: CachedManifest,
+  options?: GeneratedTestExecutionOptions,
+): { sql?: string; detail?: string } {
+  if (!test.dbtTest && test.assertionSql) {
+    const sanitized = sanitizeAssertionSql(test.assertionSql, expandedAllowedRelations(manifest, options))
+    return sanitized.ok ? { sql: sanitized.sql } : { detail: `assertionSql rejected by sandbox: ${sanitized.reason}` }
+  }
+
+  const modelName = modelNameFromSourceRef(test.derivedFrom.ref) ?? options?.model
+  const model = findModel(manifest, modelName)
   if (!model) return { detail: `model not found for ${test.derivedFrom.ref}` }
   const relation = relationForModel(model)
   const column = test.dbtTest?.column
@@ -246,6 +300,13 @@ function resultCount(res: any): number | undefined {
 
 function isNoWarehouseError(message: string): boolean {
   return /no warehouse configured|connection .*not found|warehouse .*not found|driver .*not found|not configured/i.test(message)
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`spec-test SQL timed out after ${ms}ms`)), ms)),
+  ])
 }
 
 /**
@@ -736,18 +797,25 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       }
     },
 
-    async runGeneratedTests(tests: GeneratedTest[], warehouse?: string): Promise<Record<string, GeneratedTestResult> | null> {
+    async runGeneratedTests(
+      tests: GeneratedTest[],
+      warehouse?: string,
+      options?: GeneratedTestExecutionOptions,
+    ): Promise<Record<string, GeneratedTestResult> | null> {
       if (!tests.length) return {}
       const mf = await loadManifest()
       const out: Record<string, GeneratedTestResult> = {}
       for (const test of tests) {
-        const built = buildGeneratedTestSql(test, mf)
+        const built = buildGeneratedTestSql(test, mf, options)
         if (!built.sql) {
           out[test.id] = { status: "error", detail: built.detail }
           continue
         }
         try {
-          const res = await Dispatcher.call("sql.execute", { sql: built.sql, warehouse: warehouse || undefined, limit: 1 })
+          const res = await withTimeout(
+            Dispatcher.call("sql.execute", { sql: built.sql, warehouse: warehouse || undefined, limit: 1 }),
+            SPEC_TEST_SQL_TIMEOUT_MS,
+          )
           const error = String((res as any)?.error ?? "")
           if (error) {
             if (isNoWarehouseError(error)) return null

@@ -141,16 +141,16 @@ describe("spec test synthesis lane (P1 declared-constraint execution)", () => {
     expect(env.findings.some((f) => f.evidence?.tool === "altimate.spec_test.proposed")).toBe(true)
   })
 
-  test("track-B proposal is never executed and never critical", async () => {
+  test("track-B executed failure emits non-blocking candidate warning", async () => {
     let calls = 0
     const env = await reviewWith(
       baseRunner({
         async declaredConstraints() {
           return []
         },
-        async runGeneratedTests() {
+        async runGeneratedTests(tests) {
           calls++
-          return {}
+          return { [tests[0]!.id]: { status: "fail", violatingRows: 4 } }
         },
       }),
       true,
@@ -170,10 +170,44 @@ describe("spec test synthesis lane (P1 declared-constraint execution)", () => {
       ],
     )
 
-    expect(calls).toBe(0)
-    const proposed = env.findings.find((f) => f.evidence?.tool === "altimate.spec_test.proposed")
-    expect(proposed?.severity).toBe("suggestion")
+    expect(calls).toBe(1)
+    const candidate = env.findings.find((f) => f.evidence?.tool === "altimate.spec_test.candidate")
+    expect(candidate).toMatchObject({
+      severity: "warning",
+      confidence: "unknown",
+      category: "test_coverage",
+    })
+    expect(candidate?.body).toContain("candidate test derived from `ref:stg_orders` fails on current data")
+    expect(candidate?.evidence?.result).toMatchObject({
+      executed: true,
+      origin: "inferred_context",
+      violatingRows: 4,
+    })
     expect(env.findings.some((f) => f.severity === "critical")).toBe(false)
+    expect(env.idealVerdict).not.toBe("REQUEST_CHANGES")
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
+  })
+
+  test("track A runs with generateSpecTests undefined when declaredConstraints is available", async () => {
+    let calls = 0
+    let declaredCalls = 0
+    const env = await reviewWith(
+      baseRunner({
+        async declaredConstraints() {
+          declaredCalls++
+          return [declared()]
+        },
+        async runGeneratedTests() {
+          calls++
+          return {}
+        },
+      }),
+      false,
+    )
+
+    expect(declaredCalls).toBe(1)
+    expect(calls).toBe(0)
+    expect(env.findings.some((f) => f.evidence?.tool === "altimate.spec_test.proposed")).toBe(true)
   })
 
   test("already-enforced declared constraint is not materialized", async () => {
