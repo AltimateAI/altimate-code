@@ -34,6 +34,27 @@ describe("describeToolCall", () => {
     expect(describeToolCall("list", { path: "models" }, "models/")).toBe("Listing models")
   })
 
+  test("list on a nested dbt subdirectory keeps the dir name (not a false '<x> model')", () => {
+    // A directory listing under models/ is a folder of many models, not one model.
+    expect(describeToolCall("list", { path: "models/staging" }, "models/staging/")).toBe("Listing staging")
+  })
+
+  test("matches the nearest dbt ancestor, not a coincidental outer directory", () => {
+    // `models` appears higher in the path but the file lives under `macros`.
+    expect(
+      describeToolCall("read", { filePath: "models/project/macros/util.sql" }, "models/project/macros/util.sql"),
+    ).toBe("Reading util macro")
+  })
+
+  test("humanizes python and markdown dbt files", () => {
+    expect(describeToolCall("read", { filePath: "models/py_model.py" }, "models/py_model.py")).toBe(
+      "Reading py_model model",
+    )
+    expect(describeToolCall("read", { filePath: "models/customers.md" }, "models/customers.md")).toBe(
+      "Reading customers model",
+    )
+  })
+
   test("keeps the tool's own title for non-file / rich-title tools", () => {
     expect(
       describeToolCall("sql_analyze", { filePath: "models/customers.sql" }, "Analyze: 2 issues [high]"),

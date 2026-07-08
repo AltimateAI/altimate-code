@@ -38,19 +38,28 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined
 }
 
+/** dbt file extensions that mark a target as a single dbt node (model/seed/...). */
+const DBT_FILE_EXT = /\.(sql|ya?ml|csv|py|md)$/i
+
 /**
  * Turn a file path into a friendly target:
- *  - under a known dbt dir → "<name> <kind>" with the sql/yaml/csv extension stripped
- *  - otherwise → the basename, extension kept (e.g. "dbt_project.yml", "index.ts")
+ *  - a dbt *file* under a known dbt dir → "<name> <kind>" with the extension stripped
+ *  - otherwise → the basename (e.g. "dbt_project.yml", "index.ts", or a directory name)
+ *
+ * The dbt-kind rewrite is gated on a recognized dbt file extension so directory
+ * targets (e.g. `list models/staging`) aren't mislabeled as a single model, and
+ * the nearest dbt ancestor is matched by scanning right-to-left so a coincidental
+ * outer directory name (e.g. a repo called `models/`) doesn't win over the real one.
  */
 function friendlyTarget(rawPath: string): string {
   const segments = rawPath.replace(/\\/g, "/").replace(/^\.\//, "").split("/").filter(Boolean)
   const base = segments[segments.length - 1] ?? rawPath
-  for (const segment of segments.slice(0, -1)) {
-    const kind = DBT_DIR_KIND[segment.toLowerCase()]
-    if (kind) {
-      const name = base.replace(/\.(sql|ya?ml|csv)$/i, "")
-      return `${name} ${kind}`
+  if (DBT_FILE_EXT.test(base)) {
+    for (let i = segments.length - 2; i >= 0; i--) {
+      const kind = DBT_DIR_KIND[segments[i].toLowerCase()]
+      if (kind) {
+        return `${base.replace(DBT_FILE_EXT, "")} ${kind}`
+      }
     }
   }
   return base

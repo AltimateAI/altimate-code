@@ -23,7 +23,13 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
   const normalized = location.replace(/\\/g, "/")
   // Embedded skills load with a `builtin:<name>/SKILL.md` location and Altimate's
   // bundled skills land under `~/.altimate/builtin/` — both are Altimate-shipped.
-  if (normalized.startsWith("builtin:") || normalized.includes("node_modules") || normalized.includes(".altimate/builtin"))
+  // The node_modules match is scoped to the altimate-code package so a third-party
+  // skill installed under some other `node_modules/<pkg>` isn't tagged as Altimate.
+  if (
+    normalized.startsWith("builtin:") ||
+    /\/node_modules\/(@altimateai\/|altimate-code\/)/.test(normalized) ||
+    normalized.includes(".altimate/builtin")
+  )
     return "builtin"
   if (normalized.startsWith(os.homedir().replace(/\\/g, "/"))) return "global"
   return "project"

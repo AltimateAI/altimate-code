@@ -26,6 +26,7 @@ const NATIVE_TOOL_IDS = new Set<string>([
   "invalid",
   "question",
   "bash",
+  "batch",
   "read",
   "glob",
   "grep",
