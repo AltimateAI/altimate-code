@@ -13,6 +13,8 @@ import {
 } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import { useKeybind } from "@tui/context/keybind"
+// altimate_change — first-run command filtering
+import { useReady } from "./dialog-model"
 
 type Context = ReturnType<typeof init>
 const ctx = createContext<Context>()
@@ -48,7 +50,14 @@ function init() {
   const isEnabled = (option: CommandOption) => option.enabled !== false
   const isVisible = (option: CommandOption) => isEnabled(option) && !option.hidden
 
-  const visibleOptions = createMemo(() => entries().filter((option) => isVisible(option)))
+  // altimate_change — first run: until a model is ready, the command/slash menu
+  // surfaces only /connect. Full menu returns once a provider is set up.
+  const ready = useReady()
+  const visibleOptions = createMemo(() => {
+    const visible = entries().filter((option) => isVisible(option))
+    if (!ready()) return visible.filter((option) => option.value === "provider.connect")
+    return visible
+  })
   const suggestedOptions = createMemo(() =>
     visibleOptions()
       .filter((option) => option.suggested)

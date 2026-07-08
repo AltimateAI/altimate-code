@@ -10,7 +10,6 @@ import { UPGRADE_KV_KEY } from "./component/upgrade-indicator-utils"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
-import { DialogProvider as DialogProviderList } from "@tui/component/dialog-provider"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
@@ -470,25 +469,12 @@ function App() {
     })
   })
 
-  // altimate_change start — first-run gate: open the picker as the welcome moment
-  // when NO provider has valid credentials. Previously gated on
-  // `sync.data.provider.length === 0`, which never fired because the free OpenCode
-  // provider is always present — so fresh users never got the welcome. useReady()
-  // is credential-aware (real creds OR a model chosen this session).
-  const ready = useReady()
-  createEffect(
-    on(
-      () => sync.status === "complete" && !ready(),
-      (notReady, wasNotReady) => {
-        // only trigger on the transition into a not-ready state
-        if (!notReady || wasNotReady) return
-        dialog.replace(() => <DialogModelWelcome />)
-      },
-    ),
-  )
-  // altimate_change end
+  // altimate_change — first run is now a welcoming home-screen panel (see routes/home.tsx),
+  // not an auto-opened modal. The no-dead-chat invariant is enforced at submit time
+  // (prompt/index.tsx) and the command menu is filtered to /connect until ready.
 
   const connected = useConnected()
+  const ready = useReady()
   command.register(() => [
     {
       title: "Switch session",
@@ -666,14 +652,14 @@ function App() {
       },
     },
     {
-      title: "Connect provider",
+      title: "Connect to your AI model provider",
       value: "provider.connect",
       suggested: !connected(),
       slash: {
         name: "connect",
       },
       onSelect: () => {
-        dialog.replace(() => <DialogProviderList />)
+        dialog.replace(() => <DialogModelWelcome />)
       },
       category: "Provider",
     },
@@ -898,6 +884,9 @@ function App() {
   // altimate_change start — branding: altimate upgrade
   sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
     kv.set(UPGRADE_KV_KEY, evt.properties.version)
+    // altimate_change — don't cover the first-run welcome panel with the update toast;
+    // the upgrade indicator in the footer still surfaces it. Show once a model is ready.
+    if (!ready()) return
     toast.show({
       variant: "info",
       title: "Update Available",

@@ -1,5 +1,6 @@
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import { createEffect, createMemo, Match, on, onMount, Show, Switch } from "solid-js"
+import { TextAttributes } from "@opentui/core"
 import { useTheme } from "@tui/context/theme"
 import { useKeybind } from "@tui/context/keybind"
 import { Logo } from "../component/logo"
@@ -90,8 +91,42 @@ export function Home() {
   let prompt: PromptRef
   const args = useArgs()
   const local = useLocal()
-  // altimate_change start — chat is locked until a model is ready (first-run gate)
+  // altimate_change start — first-run welcome panel (shown until a provider is ready)
   const ready = useReady()
+  // Rounded boot panel. zIndex keeps it above transient top toasts (update/MCP) that
+  // would otherwise blank its top rows during first-run onboarding.
+  const WelcomePanel = () => (
+    <box
+      border
+      borderStyle="rounded"
+      borderColor={theme.border}
+      title=" Altimate Code "
+      titleAlignment="left"
+      flexShrink={0}
+      width={75}
+      zIndex={2000}
+      backgroundColor={theme.background}
+      paddingLeft={2}
+      paddingRight={2}
+      paddingTop={1}
+      paddingBottom={1}
+      gap={1}
+    >
+      <text fg={theme.text} attributes={TextAttributes.BOLD}>
+        Welcome to Altimate Code
+      </text>
+      <box gap={0}>
+        <text fg={theme.textMuted}>Your AI agent for data-engineering workflows on dbt.</text>
+        <text fg={theme.textMuted}>Connect your AI model provider to get started —</text>
+        <text fg={theme.textMuted}>75+ providers supported · Altimate LLM Gateway recommended (10M free tokens).</text>
+      </box>
+      <text>
+        <span style={{ fg: theme.textMuted }}>Get started   </span>
+        <span style={{ fg: theme.primary }}>/connect</span>
+        <span style={{ fg: theme.textMuted }}> — connect your AI model provider</span>
+      </text>
+    </box>
+  )
   // altimate_change end
   onMount(() => {
     if (once) return
@@ -123,12 +158,25 @@ export function Home() {
   return (
     <>
       <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
-        <box flexGrow={1} minHeight={0} />
-        <box height={4} minHeight={0} flexShrink={1} />
-        <box flexShrink={0}>
-          <Logo />
-        </box>
-        <box height={1} minHeight={0} flexShrink={1} />
+        {/* altimate_change start — first run: fixed top offset keeps the welcome panel
+            clear of the top toast/chrome region (rows ~1-5) which otherwise blanks its
+            top; ready users keep the centered logo via a growing spacer */}
+        <Show when={ready()} fallback={<box height={5} flexShrink={0} />}>
+          <box flexGrow={1} minHeight={0} />
+        </Show>
+        <Show
+          when={ready()}
+          fallback={<WelcomePanel />}
+        >
+          <>
+            <box height={4} minHeight={0} flexShrink={1} />
+            <box flexShrink={0}>
+              <Logo />
+            </box>
+            <box height={1} minHeight={0} flexShrink={1} />
+          </>
+        </Show>
+        {/* altimate_change end */}
         <box width="100%" maxWidth={75} zIndex={1000} paddingTop={1} flexShrink={0}>
           <Prompt
             ref={(r) => {
@@ -137,12 +185,10 @@ export function Home() {
             }}
             hint={Hint}
             workspaceID={route.workspaceID}
-            // altimate_change — lock chat until a model is ready
-            locked={!ready()}
           />
         </box>
-        {/* altimate_change start — first-time onboarding hint */}
-        <Show when={isFirstTimeUser() === true}>
+        {/* altimate_change start — first-time onboarding hint (ready users only) */}
+        <Show when={ready() && isFirstTimeUser() === true}>
           <box width="100%" maxWidth={75} paddingTop={1} flexShrink={0}>
             <text>
               <span style={{ fg: theme.textMuted }}>Get started: </span>
@@ -159,7 +205,7 @@ export function Home() {
         </Show>
         {/* altimate_change end */}
         <box height={4} minHeight={0} width="100%" maxWidth={75} alignItems="center" paddingTop={3} flexShrink={1}>
-          <Show when={showTips()}>
+          <Show when={ready() && showTips()}>
             {/* altimate_change start — pass first-time flag for beginner tips */}
             <Tips isFirstTime={isFirstTimeUser() === true} />
             {/* altimate_change end */}

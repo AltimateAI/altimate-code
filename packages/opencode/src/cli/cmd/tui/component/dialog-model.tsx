@@ -184,7 +184,7 @@ interface WelcomeRow {
   activate: () => void
 }
 
-export function DialogModelWelcome() {
+export function DialogModelWelcome(props: { intro?: string }) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
@@ -279,6 +279,11 @@ export function DialogModelWelcome() {
 
   return (
     <box paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <Show when={props.intro}>
+        <box paddingBottom={1} paddingLeft={1}>
+          <text fg={theme.textMuted}>{props.intro}</text>
+        </box>
+      </Show>
       <box
         border
         borderStyle="rounded"
@@ -302,9 +307,6 @@ export function DialogModelWelcome() {
         </box>
         <box border={["top"]} borderColor={theme.border} />
         <Row row={rows()[5]} index={5} />
-      </box>
-      <box paddingTop={1} paddingLeft={2}>
-        <text fg={theme.textMuted}>🔒 Chat unlocks after setup</text>
       </box>
     </box>
   )
