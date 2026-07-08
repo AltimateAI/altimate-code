@@ -186,13 +186,15 @@ function isOutputSchemaValidationError(error: Error) {
 // JSON array of issues with `"path": [..., "annotations", "<hint>"]`), never
 // off transport or pagination-guard error text.
 function isAnnotationHintValidationError(error: Error) {
-  return (
-    // Require the Zod issue-payload shape (a JSON array of issues carrying a
-    // `"path"`) so arbitrary transport/server text that merely mentions these
-    // words can't trip the tolerant retry — only a real validation error does.
-    /"path"/.test(error.message) &&
-    /annotations/i.test(error.message) &&
-    /readOnlyHint|destructiveHint|idempotentHint|openWorldHint/.test(error.message)
+  // Require the hint to appear as a path segment *immediately after* `annotations`
+  // INSIDE a serialized Zod issue `"path"` array (e.g.
+  // `"path":[...,"annotations","destructiveHint"]`). Matching the tokens
+  // independently anywhere in the message would let an unrelated validation error
+  // (a different field) whose text merely happens to mention these words trip the
+  // tolerant retry; scoping the adjacency to the `"path"` array pins it to a genuine
+  // annotation-hint error while still matching the real SDK/Fabric payload.
+  return /"path"\s*:\s*\[[^\]]*"annotations"\s*,\s*"(readOnlyHint|destructiveHint|idempotentHint|openWorldHint)"/.test(
+    error.message,
   )
 }
 
