@@ -116,9 +116,13 @@ export function Home() {
         Welcome to Altimate Code
       </text>
       <box gap={0}>
-        <text fg={theme.textMuted}>Your AI agent for data-engineering workflows on dbt.</text>
+        <text fg={theme.textMuted}>The intelligence layer for data engineering AI — 100+ deterministic</text>
+        <text fg={theme.textMuted}>tools for SQL, column-level lineage, dbt, FinOps, and warehouses.</text>
+        <text fg={theme.textMuted}>Run it standalone, under Claude Code or Codex, or in CI pipelines.</text>
+      </box>
+      <box gap={0}>
         <text fg={theme.textMuted}>Connect your AI model provider to get started —</text>
-        <text fg={theme.textMuted}>75+ providers supported · Altimate LLM Gateway recommended (10M free tokens).</text>
+        <text fg={theme.textMuted}>75+ providers · Altimate LLM Gateway recommended (10M free tokens).</text>
       </box>
       <text>
         <span style={{ fg: theme.textMuted }}>Get started   </span>
