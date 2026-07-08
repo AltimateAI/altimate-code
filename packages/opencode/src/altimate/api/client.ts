@@ -185,6 +185,128 @@ export namespace AltimateApi {
     }
   }
 
+  // altimate_change start — prototype gateway device flow (Part 1 onboarding).
+  // Talks to the stub server (or the real backend) using the SAME wire contract
+  // as packages/opencode/src/account/index.ts: a standard OAuth device grant,
+  // then bearer-authenticated follow-ups for the account + instance. Everything
+  // here is real CLI code; only the endpoints it targets are stubbed locally.
+
+  const GATEWAY_CLIENT_ID = "opencode-cli"
+
+  /** Resolved gateway base URL. `ALTIMATE_BASE_URL` overrides the default so the
+   *  CLI can point at the local stub; default behavior is unchanged. */
+  export function gatewayBaseUrl(): string {
+    return (process.env.ALTIMATE_BASE_URL ?? DEFAULT_ALTIMATE_URL).replace(/\/+$/, "")
+  }
+
+  export interface GatewayDeviceAuth {
+    deviceCode: string
+    userCode: string
+    verificationUrl: string
+    intervalMs: number
+    expiresInMs: number
+  }
+
+  export async function gatewayStartDevice(): Promise<GatewayDeviceAuth> {
+    const base = gatewayBaseUrl()
+    const res = await fetch(`${base}/auth/device/code`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ client_id: GATEWAY_CLIENT_ID }),
+    })
+    if (!res.ok) throw new Error(`Could not start sign-in (${res.status} ${res.statusText})`)
+    const d = (await res.json()) as {
+      device_code: string
+      user_code: string
+      verification_uri_complete: string
+      interval?: number
+      expires_in?: number
+    }
+    return {
+      deviceCode: d.device_code,
+      userCode: d.user_code,
+      verificationUrl: `${base}${d.verification_uri_complete}`,
+      intervalMs: (d.interval ?? 2) * 1000,
+      expiresInMs: (d.expires_in ?? 900) * 1000,
+    }
+  }
+
+  export type GatewayPoll =
+    | { status: "pending" }
+    | { status: "slow_down" }
+    | { status: "expired" }
+    | { status: "denied" }
+    | { status: "authorized"; accessToken: string; refreshToken: string }
+
+  export async function gatewayPollToken(deviceCode: string): Promise<GatewayPoll> {
+    const res = await fetch(`${gatewayBaseUrl()}/auth/device/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceCode,
+        client_id: GATEWAY_CLIENT_ID,
+      }),
+    })
+    const d = (await res.json()) as {
+      access_token?: string
+      refresh_token?: string
+      error?: string
+    }
+    if (d.access_token) return { status: "authorized", accessToken: d.access_token, refreshToken: d.refresh_token ?? "" }
+    switch (d.error) {
+      case "authorization_pending":
+        return { status: "pending" }
+      case "slow_down":
+        return { status: "slow_down" }
+      case "access_denied":
+        return { status: "denied" }
+      default:
+        return { status: "expired" }
+    }
+  }
+
+  export interface GatewayUser {
+    email: string
+    suggestedInstance: string
+  }
+
+  export async function gatewayGetUser(accessToken: string): Promise<GatewayUser> {
+    const res = await fetch(`${gatewayBaseUrl()}/api/user`, {
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    })
+    if (!res.ok) throw new Error(`Could not load your account (${res.status})`)
+    const d = (await res.json()) as { email?: string; suggested_instance?: string }
+    return { email: d.email ?? "", suggestedInstance: d.suggested_instance ?? "" }
+  }
+
+  export type GatewayInstanceCreate = "provisioning" | "name_taken" | "invalid_name"
+
+  export async function gatewayCreateInstance(accessToken: string, name: string): Promise<GatewayInstanceCreate> {
+    const res = await fetch(`${gatewayBaseUrl()}/api/instance`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    })
+    if (res.status === 201) return "provisioning"
+    if (res.status === 409) return "name_taken"
+    return "invalid_name"
+  }
+
+  export type GatewayInstancePoll =
+    | { status: "provisioning" }
+    | { status: "ready"; instance: string; apiKey: string }
+
+  export async function gatewayPollInstance(accessToken: string): Promise<GatewayInstancePoll> {
+    const res = await fetch(`${gatewayBaseUrl()}/api/instance`, {
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    })
+    const d = (await res.json()) as { status?: string; instance?: string; api_key?: string }
+    if (d.status === "ready" && d.api_key) return { status: "ready", instance: d.instance ?? "", apiKey: d.api_key }
+    return { status: "provisioning" }
+  }
+  // altimate_change end
+
   async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {
     const url = `${creds.altimateUrl}${endpoint}`
     const res = await fetch(url, {

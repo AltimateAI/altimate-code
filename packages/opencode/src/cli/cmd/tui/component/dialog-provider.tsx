@@ -1,11 +1,13 @@
-import { createMemo, createSignal, onMount, Show } from "solid-js"
+import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js"
 import { useSync } from "@tui/context/sync"
+import { useLocal } from "@tui/context/local"
 import { map, pipe, sortBy } from "remeda"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
 import { useSDK } from "../context/sdk"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { Link } from "../ui/link"
+import { Spinner } from "./spinner"
 import { useTheme } from "../context/theme"
 import { TextAttributes } from "@opentui/core"
 import type { ProviderAuthAuthorization } from "@opencode-ai/sdk/v2"
@@ -13,7 +15,8 @@ import { DialogModel } from "./dialog-model"
 import { useKeyboard } from "@opentui/solid"
 import { Clipboard } from "@tui/util/clipboard"
 import { useToast } from "../ui/toast"
-// altimate_change start — import AltimateApi for direct credential file write
+import open from "open"
+// altimate_change start — import AltimateApi for direct credential file write + gateway flow
 import { AltimateApi } from "../../../../altimate/api/client"
 // altimate_change end
 
@@ -45,6 +48,12 @@ export function createDialogProviderOptions() {
         }[provider.id],
         category: provider.id in PROVIDER_PRIORITY ? "Popular" : "Other",
         async onSelect() {
+          // altimate_change start — Altimate LLM Gateway: browser device sign-in
+          // (no key is ever displayed or pasted), instead of manual key entry.
+          if (provider.id === "altimate-backend") {
+            return dialog.replace(() => <GatewayFlow />)
+          }
+          // altimate_change end
           const methods = sync.data.provider_auth[provider.id] ?? [
             {
               type: "api",
@@ -315,3 +324,178 @@ function ApiMethod(props: ApiMethodProps) {
     />
   )
 }
+
+// altimate_change start — Altimate LLM Gateway sign-in (Part 1 onboarding).
+// Standard OAuth device flow (mirrors account.ts) → GET /api/user → instance
+// name prompt (pre-filled from suggested_instance) → POST /api/instance (409 →
+// suggest "<name>-2") → poll GET /api/instance → save 3-part creds. The API key
+// is never displayed or pasted anywhere on this path.
+function GatewayFlow() {
+  const { theme } = useTheme()
+  const dialog = useDialog()
+  const sdk = useSDK()
+  const sync = useSync()
+  const local = useLocal()
+  const toast = useToast()
+
+  const [authUrl, setAuthUrl] = createSignal("")
+  const [userCode, setUserCode] = createSignal("")
+  const [authError, setAuthError] = createSignal<string | null>(null)
+  const [accessToken, setAccessToken] = createSignal("")
+  // promptKey: 0 = auth phase; >0 = instance phase. Bumping it remounts the
+  // DialogPrompt so a server-suggested name (e.g. "acme-2") shows in the field.
+  const [promptKey, setPromptKey] = createSignal(0)
+  const [instanceName, setInstanceName] = createSignal("")
+  const [instanceError, setInstanceError] = createSignal<string | null>(null)
+  const [provisioning, setProvisioning] = createSignal(false)
+
+  let cancelled = false
+  onCleanup(() => {
+    cancelled = true
+  })
+
+  onMount(async () => {
+    try {
+      const device = await AltimateApi.gatewayStartDevice()
+      if (cancelled) return
+      setAuthUrl(device.verificationUrl)
+      setUserCode(device.userCode)
+      open(device.verificationUrl).catch(() => {})
+
+      const deadline = Date.now() + device.expiresInMs
+      let interval = device.intervalMs
+
+      const tick = async () => {
+        if (cancelled) return
+        if (Date.now() > deadline) {
+          setAuthError("Sign-in timed out. Press esc and try again.")
+          return
+        }
+        const result = await AltimateApi.gatewayPollToken(device.deviceCode)
+        if (cancelled) return
+        if (result.status === "authorized") {
+          setAccessToken(result.accessToken)
+          const user = await AltimateApi.gatewayGetUser(result.accessToken)
+          if (cancelled) return
+          setInstanceName(user.suggestedInstance)
+          setPromptKey(1)
+          return
+        }
+        if (result.status === "expired") return setAuthError("Device code expired. Press esc and try again.")
+        if (result.status === "denied") return setAuthError("Sign-in was denied. Press esc and try again.")
+        if (result.status === "slow_down") interval += 5000
+        setTimeout(tick, interval)
+      }
+      setTimeout(tick, interval)
+    } catch (err) {
+      if (!cancelled) setAuthError(err instanceof Error ? err.message : "Sign-in failed")
+    }
+  })
+
+  async function submitInstance(raw: string) {
+    const name = raw.trim().toLowerCase()
+    if (!name) return setInstanceError("Enter an instance name")
+    setInstanceError(null)
+    setProvisioning(true)
+    try {
+      const created = await AltimateApi.gatewayCreateInstance(accessToken(), name)
+      if (cancelled) return
+      if (created === "name_taken") {
+        setProvisioning(false)
+        const suggestion = `${name}-2`
+        setInstanceName(suggestion)
+        setInstanceError(`"${name}" is taken — try ${suggestion}`)
+        setPromptKey(promptKey() + 1)
+        return
+      }
+      if (created === "invalid_name") {
+        setProvisioning(false)
+        setInstanceError("Use lowercase letters, numbers, - or _ (must start with a letter)")
+        setPromptKey(promptKey() + 1)
+        return
+      }
+      const poll = async () => {
+        if (cancelled) return
+        const res = await AltimateApi.gatewayPollInstance(accessToken())
+        if (cancelled) return
+        if (res.status === "ready") return finish(res.instance, res.apiKey)
+        setTimeout(poll, 1500)
+      }
+      poll()
+    } catch (err) {
+      if (cancelled) return
+      setProvisioning(false)
+      setInstanceError(err instanceof Error ? err.message : "Provisioning failed")
+      setPromptKey(promptKey() + 1)
+    }
+  }
+
+  async function finish(instance: string, apiKey: string) {
+    await AltimateApi.saveCredentials({
+      altimateUrl: AltimateApi.gatewayBaseUrl(),
+      altimateInstanceName: instance,
+      altimateApiKey: apiKey,
+    })
+    await sdk.client.instance.dispose()
+    await sync.bootstrap()
+    if (cancelled) return
+    local.model.set({ providerID: "altimate-backend", modelID: "altimate-default" }, { recent: true })
+    toast.show({ message: "✓ Instance ready · 10M free tokens active", variant: "success" })
+    dialog.clear()
+  }
+
+  // A fresh DialogPrompt each call, so a server-suggested name shows in the field.
+  const instancePrompt = () => (
+    <DialogPrompt
+      title="Instance name"
+      value={instanceName()}
+      placeholder="your-company"
+      busy={provisioning()}
+      busyText="Provisioning your instance..."
+      description={() => (
+        <box gap={1}>
+          <text fg={theme.textMuted}>This is your Altimate AI instance. Enter to accept · you can rename later.</text>
+          <Show when={instanceError()}>
+            <text fg={theme.error}>{instanceError()}</text>
+          </Show>
+        </box>
+      )}
+      onConfirm={submitInstance}
+    />
+  )
+
+  return (
+    <>
+      <Show when={promptKey() === 0}>
+        <box paddingLeft={2} paddingRight={2} gap={1} paddingBottom={1}>
+          <box flexDirection="row" justifyContent="space-between">
+            <text attributes={TextAttributes.BOLD} fg={theme.text}>
+              Altimate LLM Gateway
+            </text>
+            <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+              esc
+            </text>
+          </box>
+          <Show when={!authError()} fallback={<text fg={theme.error}>{authError()}</text>}>
+            <box gap={1}>
+              <text fg={theme.textMuted}>Sign in to activate your free Altimate instance (10M tokens).</text>
+              <text fg={theme.textMuted}>Opening your browser — if it didn't open, go to:</text>
+              <Link href={authUrl()} fg={theme.primary} />
+              <Show when={userCode()}>
+                <text fg={theme.text}>
+                  Code: <span style={{ fg: theme.primary }}>{userCode()}</span>
+                </text>
+              </Show>
+              <Spinner color={theme.textMuted}>Waiting for authorization...</Spinner>
+            </box>
+          </Show>
+        </box>
+      </Show>
+      {/* Two mutually-exclusive slots; bumping promptKey swaps them, forcing the
+          prompt to remount with the current (possibly server-suggested) name. */}
+      <Show when={promptKey() > 0 && promptKey() % 2 === 1}>{instancePrompt()}</Show>
+      <Show when={promptKey() > 0 && promptKey() % 2 === 0}>{instancePrompt()}</Show>
+    </>
+  )
+}
+// altimate_change end
