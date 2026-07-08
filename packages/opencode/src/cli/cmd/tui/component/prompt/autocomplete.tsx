@@ -11,6 +11,8 @@ import { useTuiConfig } from "../../context/tui-config"
 import { useTheme, selectedForeground } from "@tui/context/theme"
 import { SplitBorder } from "@tui/component/border"
 import { useCommandDialog } from "@tui/component/dialog-command"
+// altimate_change — first run: slash menu shows only /connect until a model is ready
+import { useReady } from "@tui/component/dialog-model"
 import { useTerminalDimensions } from "@opentui/solid"
 import { Locale } from "@/util/locale"
 import type { PromptInfo } from "./history"
@@ -80,6 +82,8 @@ export function Autocomplete(props: {
   const sdk = useSDK()
   const sync = useSync()
   const command = useCommandDialog()
+  // altimate_change — readiness gate for first-run slash filtering
+  const ready = useReady()
   const { theme } = useTheme()
   const dimensions = useTerminalDimensions()
   const frecency = useFrecency()
@@ -358,6 +362,12 @@ export function Autocomplete(props: {
 
   const commands = createMemo((): AutocompleteOption[] => {
     const results: AutocompleteOption[] = [...command.slashes()]
+
+    // altimate_change start — first run: command.slashes() is already filtered to
+    // /connect (dialog-command.tsx); also hide server-defined commands (/learn etc.)
+    // until a model is ready.
+    if (!ready()) return results
+    // altimate_change end
 
     for (const serverCommand of sync.data.command) {
       if (serverCommand.source === "skill") continue

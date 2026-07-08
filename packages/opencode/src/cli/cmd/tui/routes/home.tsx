@@ -162,10 +162,10 @@ export function Home() {
   return (
     <>
       <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
-        {/* altimate_change start — first run: fixed top offset keeps the welcome panel
-            clear of the top toast/chrome region (rows ~1-5) which otherwise blanks its
-            top; ready users keep the centered logo via a growing spacer */}
-        <Show when={ready()} fallback={<box height={5} flexShrink={0} />}>
+        {/* altimate_change start — first run: welcome panel near the top, chat input
+            pushed to the bottom of the screen (Claude Code boot style) via a growing
+            spacer between them; ready users keep the centered-logo layout */}
+        <Show when={ready()} fallback={<box height={2} flexShrink={0} />}>
           <box flexGrow={1} minHeight={0} />
         </Show>
         <Show
@@ -179,6 +179,9 @@ export function Home() {
             </box>
             <box height={1} minHeight={0} flexShrink={1} />
           </>
+        </Show>
+        <Show when={!ready()}>
+          <box flexGrow={1} minHeight={0} />
         </Show>
         {/* altimate_change end */}
         <box width="100%" maxWidth={75} zIndex={1000} paddingTop={1} flexShrink={0}>
@@ -208,14 +211,16 @@ export function Home() {
           </box>
         </Show>
         {/* altimate_change end */}
-        <box height={4} minHeight={0} width="100%" maxWidth={75} alignItems="center" paddingTop={3} flexShrink={1}>
-          <Show when={ready() && showTips()}>
-            {/* altimate_change start — pass first-time flag for beginner tips */}
-            <Tips isFirstTime={isFirstTimeUser() === true} />
-            {/* altimate_change end */}
-          </Show>
-        </box>
-        <box flexGrow={1} minHeight={0} />
+        {/* altimate_change — tips block and bottom spacer only for ready users; on
+            first run the prompt sits at the bottom of the screen */}
+        <Show when={ready()}>
+          <box height={4} minHeight={0} width="100%" maxWidth={75} alignItems="center" paddingTop={3} flexShrink={1}>
+            <Show when={showTips()}>
+              <Tips isFirstTime={isFirstTimeUser() === true} />
+            </Show>
+          </box>
+          <box flexGrow={1} minHeight={0} />
+        </Show>
         <Toast />
       </box>
       <box paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0} gap={2}>
