@@ -26,6 +26,7 @@ import {
   type SpecTestGenInput,
 } from "./spec-test-gen"
 import { sanitizeAssertionSql } from "./spec-test-sandbox"
+import { getMemory, type MemoryEntry } from "./corrective-memory"
 
 /**
  * The deterministic review recipe.
@@ -205,6 +206,8 @@ export interface ReviewRunner {
 export interface OrchestrateInput {
   changedFiles: ChangedFile[]
   config: ReviewConfig
+  /** Memory isolation key. Falls back to the single configured memory project. */
+  project?: string
   rubric: Rubric
   mode: ReviewMode
   runner: ReviewRunner
@@ -237,6 +240,63 @@ export interface OrchestrateInput {
 /** Derive the dbt model name from a model file path. */
 export function modelNameFromPath(p: string): string {
   return path.basename(p).replace(/\.(sql|py)$/i, "")
+}
+
+function configuredMemoryEntries(input: OrchestrateInput): MemoryEntry[] {
+  return input.config.memory?.entries ?? []
+}
+
+function memoryProjectForInput(input: OrchestrateInput): string | undefined {
+  const entries = configuredMemoryEntries(input)
+  if (input.project && entries.some((entry) => entry.scope.project === input.project)) return input.project
+  const projects = new Set(entries.map((entry) => entry.scope.project))
+  return projects.size === 1 ? [...projects][0] : undefined
+}
+
+function specTestMemoryPriors(
+  entries: MemoryEntry[],
+  project: string,
+): Array<{ derivedFromKind: string; polarity: "prefer" | "suppress" }> {
+  return getMemory(entries, { project, derivedFromKind: "*" })
+    .filter((entry) => entry.scope.derivedFromKind)
+    .map((entry) => ({
+      derivedFromKind: entry.scope.derivedFromKind!,
+      polarity: entry.polarity,
+    }))
+}
+
+function generatedTestMemoryKind(test: GeneratedTest): string {
+  // Current GeneratedTest.kind is the actionable behavior; older prompt text
+  // named this derivedFromKind. Track A is never filtered by this helper.
+  return test.kind || test.derivedFrom.kind
+}
+
+function memorySuppressesTrackBTest(entries: MemoryEntry[], project: string, test: GeneratedTest): boolean {
+  return getMemory(entries, { project, derivedFromKind: generatedTestMemoryKind(test) }).some(
+    (entry) => entry.polarity === "suppress",
+  )
+}
+
+function memoryMaySuppressFinding(finding: Finding): boolean {
+  if (finding.severity === "critical") return false
+  if (finding.evidence?.tool === "altimate.spec_test.executed") return false
+  if (finding.severity === "suggestion") return true
+  if (finding.confidence === "unknown") return true
+  return (
+    finding.evidence?.tool === "ai-review" ||
+    finding.evidence?.tool === "altimate.spec_test.proposed" ||
+    finding.evidence?.tool === "altimate.spec_test.candidate"
+  )
+}
+
+function memorySuppressesFinding(entries: MemoryEntry[], project: string, finding: Finding): boolean {
+  if (!memoryMaySuppressFinding(finding)) return false
+  return getMemory(entries, {
+    project,
+    category: finding.category,
+    table: finding.model,
+    column: finding.column,
+  }).some((entry) => entry.polarity === "suppress")
 }
 
 const VALID_CATEGORIES = new Set<string>(ReviewCategoryEnum.options)
@@ -1218,6 +1278,9 @@ async function specTestSynthesisLane(
   ])
   if (!specSources.length) return findings
 
+  const memoryEntries = configuredMemoryEntries(input)
+  const memoryProject = memoryProjectForInput(input)
+  const priors = memoryProject ? specTestMemoryPriors(memoryEntries, memoryProject) : []
   let proposed: GeneratedTest[] = []
   try {
     proposed = await input.generateSpecTests({
@@ -1231,22 +1294,27 @@ async function specTestSynthesisLane(
         .map((s) => ({ model: s.text ?? s.ref.replace(/^(ref|source):/, ""), columns: [] })),
       prTitle: input.prTitle,
       prBody: input.prBody,
+      priors,
     })
   } catch {
     return findings
   }
 
   const { kept } = filterToSpecDerived(proposed, specSources)
-  if (!kept.length) return findings
+  const memoryKept =
+    memoryProject && memoryEntries.length
+      ? kept.filter((test) => !memorySuppressesTrackBTest(memoryEntries, memoryProject, test))
+      : kept
+  if (!memoryKept.length) return findings
 
   const shouldExecuteTrackB = input.config.specTests?.execute === true && !!input.runner.runGeneratedTests
   if (!shouldExecuteTrackB) {
-    findings.push(...kept.map((test) => proposedSpecTestFinding(model, ctx.file.path, test)))
+    findings.push(...memoryKept.map((test) => proposedSpecTestFinding(model, ctx.file.path, test)))
     return findings
   }
 
   const allowedRelations = allowedRelationsForSpecTests(model, specSources)
-  const executable = executableTrackBTests(kept, allowedRelations)
+  const executable = executableTrackBTests(memoryKept, allowedRelations)
   if (!executable.length) return findings
 
   let results: Record<string, GeneratedTestResult> | null = null
@@ -1860,6 +1928,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Flatten, drop excluded, dedupe, threshold-filter.
   let findings = dedupe(merged)
   findings = findings.filter((f) => !exclusionReason(f, input.rubric))
+  const memoryEntries = configuredMemoryEntries(input)
+  const memoryProject = memoryProjectForInput(input)
+  if (memoryProject && memoryEntries.length) {
+    findings = findings.filter((f) => !memorySuppressesFinding(memoryEntries, memoryProject, f))
+  }
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // Sort by severity desc, then file.

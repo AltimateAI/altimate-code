@@ -124,6 +124,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   return runReview({
     changedFiles,
     config,
+    project: projectName,
     rubric,
     mode: config.mode,
     runner,

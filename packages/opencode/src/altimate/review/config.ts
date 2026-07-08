@@ -5,6 +5,7 @@ import YAML from "yaml"
 import { Rubric, DEFAULT_RUBRIC } from "./rubric"
 import { ReviewMode } from "./verdict"
 import { Severity } from "./finding"
+import { MemoryEntry } from "./corrective-memory"
 
 /**
  * Per-repo review configuration, read from `.altimate/review.yml` (the
@@ -48,6 +49,12 @@ export const ReviewConfig = z.object({
       execute: z.boolean().default(false),
     })
     .default({ execute: false }),
+  /** Read-only corrective memory seeded by `.altimate/review.yml` for P0. */
+  memory: z
+    .object({
+      entries: z.array(MemoryEntry).default([]),
+    })
+    .default({ entries: [] }),
   /** Rubric overrides, deep-merged onto DEFAULT_RUBRIC. */
   rubric: Rubric.partial().default({}),
   /** Extra path suffixes to exclude from review. */

@@ -277,6 +277,7 @@ function buildUserMessage(input: SpecTestGenInput): string {
       dialect: input.dialect,
       specSources: input.specSources.slice(0, MAX_SPEC_SOURCES),
       upstream: input.upstream,
+      priors: input.priors ?? [],
     },
     null,
     2,
