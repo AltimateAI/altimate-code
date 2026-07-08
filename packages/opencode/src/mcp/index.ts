@@ -23,10 +23,8 @@ import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-// altimate_change start — needed for the lenient tools/list schema (#792) and to
-// resolve `headersCommand` for remote MCP servers that require bearer tokens with
-// short TTLs (Microsoft Fabric, etc.) (#791)
-import z from "zod/v4"
+// altimate_change start — needed to resolve `headersCommand` for remote MCP
+// servers that require bearer tokens with short TTLs (Microsoft Fabric, etc.) (#791)
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 const execFileAsync = promisify(execFile)
@@ -166,78 +164,9 @@ function remoteURL(value: string) {
 type TransportLabel = "stdio" | "sse" | "streamable-http"
 // altimate_change end
 
-// altimate_change start — Microsoft Fabric Core MCP returns `null` for
-// `tool.annotations.{readOnlyHint,destructiveHint,idempotentHint,openWorldHint}`,
-// which the SDK's `ListToolsResultSchema` (z.boolean().optional()) rejects via
-// Zod, blocking listTools() entirely. We accept `null` as "hint absent" by
-// calling `client.request()` with a permissive schema in place of the SDK's
-// strict one. See https://github.com/AltimateAI/altimate-code/issues/792.
-const LenientToolAnnotationsSchema = z.looseObject({
-  title: z.string().optional(),
-  readOnlyHint: z.boolean().nullable().optional(),
-  destructiveHint: z.boolean().nullable().optional(),
-  idempotentHint: z.boolean().nullable().optional(),
-  openWorldHint: z.boolean().nullable().optional(),
-})
-
-const LenientToolSchema = z.looseObject({
-  name: z.string(),
-  title: z.string().optional(),
-  description: z.string().optional(),
-  inputSchema: z.any(),
-  outputSchema: z.any().optional(),
-  annotations: LenientToolAnnotationsSchema.optional(),
-  _meta: z.record(z.string(), z.unknown()).optional(),
-})
-
-const LenientListToolsResultSchema = z.looseObject({
-  tools: z.array(LenientToolSchema),
-  nextCursor: z.string().optional(),
-  _meta: z.record(z.string(), z.unknown()).optional(),
-})
-
-function isSchemaError(err: unknown): boolean {
-  // Narrowly match Zod validation errors only. We key off the error *name*
-  // (not `instanceof z.ZodError`) because the MCP SDK may throw a ZodError
-  // from a different zod copy (it depends on `zod@^3.25 || ^4.0`), which
-  // would fail a cross-realm `instanceof`. In practice the SDK's z4-mini path
-  // names the error `$ZodError` (the primary case); the public ZodError
-  // subclass names it `ZodError`. We require an `issues` *array* (rather than
-  // `"issues" in err`) to avoid a throwing getter and to reject unrelated
-  // errors that merely carry an `issues` property of some other type.
-  if (typeof err !== "object" || err === null) return false
-  const name = (err as { name?: string }).name ?? (err as { constructor?: { name?: string } }).constructor?.name
-  return (name === "ZodError" || name === "$ZodError") && Array.isArray((err as { issues?: unknown }).issues)
-}
-
-/**
- * Calls the SDK's strict `listTools()` first; on a Zod schema-validation
- * failure (e.g. server emits non-spec values like `null` annotation hints),
- * retries via `client.request()` with a permissive schema. This keeps the
- * fast path unchanged for compliant servers while letting non-compliant
- * ones (Microsoft Fabric, etc.) still register their tools.
- */
-async function listToolsLenient(client: MCPClient): Promise<{ tools: MCPToolDef[] }> {
-  try {
-    return await client.listTools()
-  } catch (err) {
-    if (!isSchemaError(err)) throw err
-    log.info("listTools strict schema rejected response, retrying with lenient schema", {
-      error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
-    })
-    const result = await client.request({ method: "tools/list", params: {} }, LenientListToolsResultSchema as any)
-    return result as { tools: MCPToolDef[] }
-  }
-}
-
+// altimate_change start — internal test hooks for headersCommand resolution (#791/#792)
 /** @internal — exported only for unit tests. Prefer using `tools()` in production code. */
 export const _testing = {
-  LenientListToolsResultSchema,
-  isSchemaError,
-  listToolsLenient: (client: {
-    listTools: () => Promise<{ tools: MCPToolDef[] }>
-    request: (...args: any[]) => Promise<unknown>
-  }) => listToolsLenient(client as unknown as MCPClient),
   resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") =>
     resolveHeadersCommand(spec, key),
   hasAuthorizationHeader,
@@ -394,26 +323,6 @@ function trackCensus(key: string, transport: TransportLabel, toolCount: number) 
     tool_count: toolCount,
     resource_count: 0,
   })
-}
-// altimate_change end
-
-// altimate_change start — fall back to a single-page lenient retry when a server's
-// tools/list response fails McpCatalog's validation (e.g. Microsoft Fabric Core MCP
-// emits `null` for boolean annotation hints, which the SDK's strict schema rejects).
-// McpCatalog.defs() already tolerates outputSchema reference-resolution errors and
-// paginates; this adds annotation-null tolerance for the first page only, so
-// non-compliant servers still register their tools instead of failing to connect.
-// See https://github.com/AltimateAI/altimate-code/issues/792.
-function defsLenient(client: MCPClient, timeout?: number) {
-  return McpCatalog.defs(client, timeout).pipe(
-    Effect.flatMap((listed): Effect.Effect<MCPToolDef[] | undefined> => {
-      if (listed) return Effect.succeed(listed)
-      return Effect.tryPromise(() => listToolsLenient(client)).pipe(
-        Effect.map((result) => result.tools as MCPToolDef[] | undefined),
-        Effect.orElseSucceed((): MCPToolDef[] | undefined => undefined),
-      )
-    }),
-  )
 }
 // altimate_change end
 
@@ -720,9 +629,11 @@ export const layer = Layer.effect(
         }
 
         return yield* Effect.gen(function* () {
-          // altimate_change — use the lenient fallback so servers that emit `null`
-          // annotation hints (e.g. Fabric) still register their tools (#792).
-          const listed = mcpClient.getServerCapabilities()?.tools ? yield* defsLenient(mcpClient, mcp.timeout) : []
+          // altimate_change — McpCatalog.defs() tolerates both outputSchema
+          // reference errors and Fabric-style null annotation hints (#792).
+          const listed = mcpClient.getServerCapabilities()?.tools
+            ? yield* McpCatalog.defs(mcpClient, mcp.timeout)
+            : []
           if (!listed) {
             return yield* Effect.fail(new Error("Failed to get tools"))
           }
@@ -793,9 +704,9 @@ export const layer = Layer.effect(
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
-        // altimate_change — use the lenient fallback so annotation-null tools stay
-        // registered on a live tool-list refresh, matching create() (#792).
-        const listed = await bridge.promise(defsLenient(client, timeout))
+        // altimate_change — matches create(): McpCatalog.defs() tolerates
+        // annotation-null tools on a live tool-list refresh (#792).
+        const listed = await bridge.promise(McpCatalog.defs(client, timeout))
         if (!listed) return
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
@@ -1297,11 +1208,11 @@ export const layer = Layer.effect(
           Effect.tapError(() => Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)),
         )
 
-        // altimate_change — use the lenient fallback so annotation-null tools don't
-        // block the post-OAuth connect from completing (#792).
+        // altimate_change — McpCatalog.defs() tolerates annotation-null tools so
+        // they don't block the post-OAuth connect from completing (#792).
         const listed = client
           ? client.getServerCapabilities()?.tools
-            ? yield* defsLenient(client, mcpConfig.timeout)
+            ? yield* McpCatalog.defs(client, mcpConfig.timeout)
             : []
           : undefined
         if (!client || !listed) {

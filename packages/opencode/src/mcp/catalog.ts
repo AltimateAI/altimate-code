@@ -2,18 +2,41 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import {
   CallToolResultSchema,
   ListToolsResultSchema,
+  ToolAnnotationsSchema,
   ToolSchema,
   type Tool as MCPToolDef,
 } from "@modelcontextprotocol/sdk/types.js"
 import { dynamicTool, jsonSchema, type JSONSchema7, type Tool } from "ai"
 import { Effect } from "effect"
+// altimate_change start — needed for the annotation-hint tolerance below (#792)
+import z from "zod/v4"
+// altimate_change end
 
 const DEFAULT_TIMEOUT = 30_000
 const MAX_LIST_PAGES = 1_000
 
-const TolerantListToolsResultSchema = ListToolsResultSchema.extend({
-  tools: ToolSchema.omit({ outputSchema: true }).array(),
+// altimate_change start — Microsoft Fabric Core MCP returns `null` (instead of
+// omitting the field) for `tool.annotations.{readOnlyHint,destructiveHint,
+// idempotentHint,openWorldHint}`, which the SDK's strict schema (boolean,
+// optional — no `null`) rejects. Accept `null` as "hint absent" here.
+// See https://github.com/AltimateAI/altimate-code/issues/792.
+const LenientToolAnnotationsSchema = ToolAnnotationsSchema.extend({
+  readOnlyHint: z.boolean().nullable().optional(),
+  destructiveHint: z.boolean().nullable().optional(),
+  idempotentHint: z.boolean().nullable().optional(),
+  openWorldHint: z.boolean().nullable().optional(),
 })
+// altimate_change end
+
+// altimate_change start — exported (was module-private) and extended to also
+// tolerate null annotation hints (#792); tests import this directly instead of
+// duplicating a schema in mcp/index.ts.
+export const TolerantListToolsResultSchema = ListToolsResultSchema.extend({
+  tools: ToolSchema.omit({ outputSchema: true })
+    .extend({ annotations: LenientToolAnnotationsSchema.optional() })
+    .array(),
+})
+// altimate_change end
 
 export async function paginate<T, R extends { nextCursor?: string }>(
   list: (cursor?: string) => Promise<R>,
@@ -134,8 +157,16 @@ function listTools(client: Client, timeout: number) {
           try {
             return await client.listTools(params, { timeout })
           } catch (error) {
-            if (!(error instanceof Error) || !isOutputSchemaValidationError(error)) throw error
-            return client.request({ method: "tools/list", params }, TolerantListToolsResultSchema, { timeout })
+            if (!(error instanceof Error)) throw error
+            // altimate_change start — also retry for Fabric-style null-annotation
+            // validation errors, not just outputSchema-reference errors (#792).
+            // Both matchers are narrow (message-content based) so transport
+            // failures and the pagination duplicate-cursor guard still rethrow.
+            if (!isOutputSchemaValidationError(error) && !isAnnotationHintValidationError(error)) throw error
+            return client
+              .request({ method: "tools/list", params }, TolerantListToolsResultSchema, { timeout })
+              .then((result) => ({ ...result, tools: result.tools.map(normalizeAnnotationHints) }))
+            // altimate_change end
           }
         },
         (result) => result.tools,
@@ -149,5 +180,43 @@ function isOutputSchemaValidationError(error: Error) {
     error.message,
   )
 }
+
+// altimate_change start — classify Fabric-style null-annotation-hint validation
+// errors (#792). Keyed off the SDK's Zod validation-error message shape (a
+// JSON array of issues with `"path": [..., "annotations", "<hint>"]`), never
+// off transport or pagination-guard error text.
+function isAnnotationHintValidationError(error: Error) {
+  return (
+    /annotations/i.test(error.message) &&
+    /readOnlyHint|destructiveHint|idempotentHint|openWorldHint/.test(error.message)
+  )
+}
+
+// Collapse the `null` hint values the tolerant schema accepts back to `undefined`
+// so tools returned from the fallback path match the SDK's strict `Tool` type
+// (and downstream code never has to special-case `null` vs `undefined`).
+function normalizeAnnotationHints(tool: {
+  annotations?: {
+    title?: string
+    readOnlyHint?: boolean | null
+    destructiveHint?: boolean | null
+    idempotentHint?: boolean | null
+    openWorldHint?: boolean | null
+  }
+}): MCPToolDef {
+  return {
+    ...tool,
+    annotations: tool.annotations
+      ? {
+          ...tool.annotations,
+          readOnlyHint: tool.annotations.readOnlyHint ?? undefined,
+          destructiveHint: tool.annotations.destructiveHint ?? undefined,
+          idempotentHint: tool.annotations.idempotentHint ?? undefined,
+          openWorldHint: tool.annotations.openWorldHint ?? undefined,
+        }
+      : undefined,
+  } as MCPToolDef
+}
+// altimate_change end
 
 export * as McpCatalog from "./catalog"

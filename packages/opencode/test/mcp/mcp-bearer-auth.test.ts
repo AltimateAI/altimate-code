@@ -1,18 +1,17 @@
 import { describe, test, expect } from "bun:test"
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+import { McpCatalog } from "../../src/mcp/catalog"
 
-// Assert against the *production* lenient schema directly (exported via
-// MCP._testing) so this test can never pass against a stale duplicate. The MCP
-// module is already imported dynamically by the resolveHeadersCommand tests
-// below, so pulling it in here adds no new import surface.
-const { MCP } = await import("../../src/mcp")
-const { LenientListToolsResultSchema } = MCP._testing
+// Assert against the *production* tolerant schema directly (exported from
+// mcp/catalog.ts) so this test can never pass against a stale duplicate.
+const { TolerantListToolsResultSchema } = McpCatalog
 
 // ---------------------------------------------------------------------------
-// 1. Lenient tools/list schema accepts what real-world servers emit.
+// 1. Tolerant tools/list schema accepts what real-world servers emit.
 // ---------------------------------------------------------------------------
-describe("lenient tools/list schema", () => {
+describe("tolerant tools/list schema", () => {
   test("accepts null annotation hints (Microsoft Fabric Core MCP behavior)", () => {
     // Real payload shape we observed from https://api.fabric.microsoft.com/v1/mcp/core
     const fabricStyleResponse = {
@@ -31,7 +30,7 @@ describe("lenient tools/list schema", () => {
         },
       ],
     }
-    const result = LenientListToolsResultSchema.safeParse(fabricStyleResponse)
+    const result = TolerantListToolsResultSchema.safeParse(fabricStyleResponse)
     expect(result.success).toBe(true)
     if (result.success) {
       expect(result.data.tools).toHaveLength(1)
@@ -54,65 +53,42 @@ describe("lenient tools/list schema", () => {
         },
       ],
     }
-    const result = LenientListToolsResultSchema.safeParse(compliantResponse)
+    const result = TolerantListToolsResultSchema.safeParse(compliantResponse)
     expect(result.success).toBe(true)
   })
 
   test("accepts tools without annotations at all", () => {
-    const result = LenientListToolsResultSchema.safeParse({
-      tools: [{ name: "minimal", inputSchema: {} }],
+    const result = TolerantListToolsResultSchema.safeParse({
+      tools: [{ name: "minimal", inputSchema: { type: "object" } }],
     })
     expect(result.success).toBe(true)
   })
 
   test("rejects malformed top-level (missing tools array)", () => {
-    expect(LenientListToolsResultSchema.safeParse({ tools: "not-an-array" }).success).toBe(false)
-    expect(LenientListToolsResultSchema.safeParse({}).success).toBe(false)
+    expect(TolerantListToolsResultSchema.safeParse({ tools: "not-an-array" }).success).toBe(false)
+    expect(TolerantListToolsResultSchema.safeParse({}).success).toBe(false)
   })
 
-  test("preserves unknown fields via .loose() (forward compatibility)", () => {
+  test("preserves unknown fields (forward compatibility)", () => {
     const future = {
-      tools: [{ name: "x", inputSchema: {}, futureField: { nested: 1 } }],
+      tools: [{ name: "x", inputSchema: { type: "object" }, futureField: { nested: 1 } }],
       futureTopLevel: "ok",
     }
-    const result = LenientListToolsResultSchema.safeParse(future)
+    const result = TolerantListToolsResultSchema.safeParse(future)
     expect(result.success).toBe(true)
   })
 })
 
 // ---------------------------------------------------------------------------
-// 1b. End-to-end listToolsLenient retry (#792). Locks in the load-bearing
-// contract: when the SDK's strict listTools() rejects a Fabric-style payload,
-// the rejected error is named `$ZodError` (zod v4-mini), isSchemaError catches
-// it, and the lenient client.request() retry returns the tools. A future
-// re-narrowing of isSchemaError would break this without tripping the
-// schema-only tests above.
+// 1b. End-to-end fallback through McpCatalog.defs() (#792). Locks in the
+// load-bearing contract: when the SDK's strict listTools() rejects a
+// Fabric-style payload, the single gated retry in catalog.ts's listTools()
+// classifies the error and retries with the tolerant schema — while a
+// non-schema error (e.g. a transport failure) is rethrown, not retried, so
+// defs() resolves undefined without ever calling client.request().
 // ---------------------------------------------------------------------------
-describe("listToolsLenient retry against SDK $ZodError (#792)", () => {
-  test("retries with lenient schema when strict listTools() rejects Fabric-style nulls", async () => {
-    // Deliberately NOT imported from @modelcontextprotocol/sdk: mcp.test.ts
-    // replaces sdk/types.js via mock.module (process-global in bun), so a
-    // full-suite run would hand this test a mock without ListToolsResultSchema.
-    // Instead, replicate the SDK's strict annotation typing (boolean, null
-    // rejected — SDK 1.26.0/1.29.0 ToolAnnotationsSchema) with zod/v4-mini,
-    // the same zod build the SDK validates with, so safeParse produces the
-    // identical `$ZodError` the real listTools() rejects with.
-    const zm = await import("zod/v4-mini")
-    const strictAnnotations = zm.object({
-      readOnlyHint: zm.optional(zm.boolean()),
-      destructiveHint: zm.optional(zm.boolean()),
-      idempotentHint: zm.optional(zm.boolean()),
-      openWorldHint: zm.optional(zm.boolean()),
-    })
-    const strictListToolsResult = zm.object({
-      tools: zm.array(
-        zm.object({
-          name: zm.string(),
-          inputSchema: zm.any(),
-          annotations: zm.optional(strictAnnotations),
-        }),
-      ),
-    })
+describe("McpCatalog.defs() tolerant-schema fallback (#792)", () => {
+  test("retries with the tolerant schema when strict listTools() rejects Fabric-style nulls", async () => {
     // Real payload shape from Microsoft Fabric Core MCP: null annotation hints.
     const fabricPayload = {
       tools: [
@@ -123,42 +99,51 @@ describe("listToolsLenient retry against SDK $ZodError (#792)", () => {
         },
       ],
     }
-    // Produce the exact error the SDK would reject with (a `$ZodError`).
-    const strict: any = strictListToolsResult.safeParse(fabricPayload)
-    expect(strict.success).toBe(false)
-    expect(strict.error?.name).toBe("$ZodError")
-
     let requestCalled = false
     const fakeClient = {
       listTools: async () => {
-        throw strict.error
+        // Replicate the exact shape of the SDK's real Zod validation-error
+        // message for a null annotation hint (see catalog.ts's
+        // isAnnotationHintValidationError).
+        throw new Error(
+          JSON.stringify([
+            {
+              code: "invalid_type",
+              expected: "boolean",
+              path: ["tools", 0, "annotations", "destructiveHint"],
+              message: "Invalid input",
+            },
+          ]),
+        )
       },
       request: async () => {
         requestCalled = true
         return fabricPayload
       },
-    }
+    } as unknown as Client
 
-    const result = await MCP._testing.listToolsLenient(fakeClient)
+    // McpCatalog.defs() flattens paginated pages into a single tool array.
+    const result = await Effect.runPromise(McpCatalog.defs(fakeClient, 1_000))
     expect(requestCalled).toBe(true)
-    expect(result.tools).toHaveLength(1)
-    expect(result.tools[0].name).toBe("list_workspaces")
+    expect(result).toHaveLength(1)
+    expect(result?.[0]?.name).toBe("list_workspaces")
   })
 
-  test("does NOT retry (rethrows) when the error is not a schema error", async () => {
-    const transportError = new Error("ECONNREFUSED")
+  test("does NOT retry (rethrows, resolves undefined) when the error is not a schema error", async () => {
     let requestCalled = false
     const fakeClient = {
       listTools: async () => {
-        throw transportError
+        throw new Error("ECONNREFUSED")
       },
       request: async () => {
         requestCalled = true
         return { tools: [] }
       },
-    }
-    await expect(MCP._testing.listToolsLenient(fakeClient)).rejects.toThrow(/ECONNREFUSED/)
+    } as unknown as Client
+
+    const result = await Effect.runPromise(McpCatalog.defs(fakeClient, 1_000))
     expect(requestCalled).toBe(false)
+    expect(result).toBeUndefined()
   })
 })
 
