@@ -306,35 +306,100 @@ export function DialogModelWelcome(props: { intro?: string }) {
   )
 }
 
-// Big Pickle interstitial — one confirm, default No (the "No" row is selected by
-// default; enter accepts it). "Yes" switches to opencode/big-pickle.
+// Big Pickle interstitial — one confirm, default No. Custom component (not
+// DialogSelect) so the full warning wraps instead of clipping; y/n keys work,
+// enter accepts the highlighted row (No by default).
 export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
+  const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
-  const message = "Big Pickle works for chat but often fails at data tasks. The Gateway is free to start (10M tokens)."
+  const [selected, setSelected] = createSignal(0) // 0 = No (default)
+
+  function no() {
+    dialog.replace(() => (props.origin === "welcome" ? <DialogModelWelcome /> : <DialogModel />))
+  }
+  function yes() {
+    dialog.clear()
+    local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
+    markSetupComplete()
+  }
+  const options = [
+    { label: "No — pick something else", hint: "(default)", run: no },
+    { label: "Yes — continue with Big Pickle", hint: "", run: yes },
+  ]
+
+  useKeyboard((evt) => {
+    if (evt.name === "up" || evt.name === "down") {
+      setSelected((prev) => (prev + 1) % 2)
+      evt.preventDefault()
+      return
+    }
+    if (evt.name === "return") {
+      evt.preventDefault()
+      evt.stopPropagation()
+      options[selected()].run()
+      return
+    }
+    if (evt.name === "y" && !evt.ctrl && !evt.meta) {
+      evt.preventDefault()
+      yes()
+      return
+    }
+    if (evt.name === "n" && !evt.ctrl && !evt.meta) {
+      evt.preventDefault()
+      no()
+    }
+  })
+
+  const selFg = selectedForeground(theme)
+  const transparent = RGBA.fromInts(0, 0, 0, 0)
+
   return (
-    <DialogSelect
-      title="Use Big Pickle?"
-      options={[
-        {
-          title: "No — pick something else",
-          description: "(default)",
-          value: "no",
-          category: message,
-          onSelect: () => dialog.replace(() => (props.origin === "welcome" ? <DialogModelWelcome /> : <DialogModel />)),
-        },
-        {
-          title: "Yes — continue with Big Pickle",
-          value: "yes",
-          category: message,
-          onSelect: () => {
-            dialog.clear()
-            local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
-            markSetupComplete()
-          },
-        },
-      ]}
-    />
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <box flexDirection="row" justifyContent="space-between">
+        <text attributes={TextAttributes.BOLD} fg={theme.text}>
+          Use Big Pickle?
+        </text>
+        <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+          esc
+        </text>
+      </box>
+      <text fg={theme.textMuted} wrapMode="word" width="100%">
+        Big Pickle works for chat but often fails at data tasks. The Gateway is free to start (10M tokens). Continue?
+        [y/N]
+      </text>
+      <box>
+        <For each={options}>
+          {(option, index) => (
+            <box
+              flexDirection="row"
+              gap={1}
+              onMouseMove={() => setSelected(index())}
+              onMouseUp={() => option.run()}
+            >
+              <text flexShrink={0} fg={theme.primary}>
+                {selected() === index() ? "›" : " "}
+              </text>
+              <box
+                paddingLeft={1}
+                paddingRight={1}
+                backgroundColor={selected() === index() ? theme.primary : transparent}
+              >
+                <text
+                  fg={selected() === index() ? selFg : theme.text}
+                  attributes={selected() === index() ? TextAttributes.BOLD : undefined}
+                >
+                  {option.label}
+                </text>
+              </box>
+              <Show when={option.hint}>
+                <text fg={theme.textMuted}>{option.hint}</text>
+              </Show>
+            </box>
+          )}
+        </For>
+      </box>
+    </box>
   )
 }
 // altimate_change end

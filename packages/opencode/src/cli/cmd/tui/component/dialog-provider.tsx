@@ -388,6 +388,11 @@ function ApiMethod(props: ApiMethodProps) {
 
 // altimate_change start — BYOK validation failure dialogs (Part 1 onboarding).
 
+// Section headers must fit the medium dialog on one line (DialogSelect renders
+// categories as single-line headers — long text clips).
+const KEY_INVALID_MSG = "This key can't work — the provider rejected it."
+const TOOLS_FAILED_MSG = "Key valid — model failed a forced tool call."
+
 // Stage-1 failure: an invalid key can never work, so exactly two options and
 // NO "continue anyway" here.
 function DialogKeyInvalid(props: { providerID: string; title: string; error: string }) {
@@ -399,14 +404,14 @@ function DialogKeyInvalid(props: { providerID: string; title: string; error: str
         {
           title: "Enter a valid API key",
           value: "reenter",
-          category: props.error,
+          category: KEY_INVALID_MSG,
           onSelect: () => dialog.replace(() => <ApiMethod providerID={props.providerID} title={props.title} />),
         },
         {
           title: "Use Altimate LLM Gateway",
           description: "recommended · free 10M tokens",
           value: "gateway",
-          category: props.error,
+          category: KEY_INVALID_MSG,
           onSelect: () => dialog.replace(() => <GatewayFlow />),
         },
       ]}
@@ -434,7 +439,7 @@ function DialogToolsFailed(props: { providerID: string; error: string }) {
         {
           title: "Retry",
           value: "retry",
-          category: props.error,
+          category: TOOLS_FAILED_MSG,
           onSelect: async () => {
             const result = await AltimateApi.byokValidateTools(props.providerID)
             if (result.ok) {
@@ -449,7 +454,7 @@ function DialogToolsFailed(props: { providerID: string; error: string }) {
           title: "Use Altimate LLM Gateway",
           description: "recommended · free 10M tokens",
           value: "gateway",
-          category: props.error,
+          category: TOOLS_FAILED_MSG,
           onSelect: () => dialog.replace(() => <GatewayFlow />),
         },
         // PM-DECISION: stage-2 continue-anyway is the earlier locked decision; the
@@ -459,7 +464,7 @@ function DialogToolsFailed(props: { providerID: string; error: string }) {
           title: "Continue anyway",
           description: 'requires typing "continue"',
           value: "continue",
-          category: props.error,
+          category: TOOLS_FAILED_MSG,
           onSelect: () => dialog.replace(() => <DialogToolsContinue providerID={props.providerID} onProceed={proceed} />),
         },
       ]}
