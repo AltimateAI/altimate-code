@@ -13,6 +13,10 @@ import PROMPT_CONFIGURE_CLAUDE from "./template/configure-claude.txt"
 import PROMPT_CONFIGURE_CODEX from "./template/configure-codex.txt"
 import PROMPT_DISCOVER_MCPS from "./template/discover-and-add-mcps.txt"
 // altimate_change end
+// altimate_change start — Part 2 onboarding: scan-gate orchestration (invokes the
+// existing /discover flow on the found path; discover.txt is unchanged)
+import PROMPT_ONBOARD_CONNECT from "./template/onboard-connect.txt"
+// altimate_change end
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import { Log } from "../util/log"
@@ -73,6 +77,7 @@ export namespace Command {
     CONFIGURE_CODEX: "configure-codex",
     DISCOVER_MCPS: "discover-and-add-mcps",
     MCPS: "mcps",
+    ONBOARD_CONNECT: "onboard-connect",
     // altimate_change end
   } as const
 
@@ -98,6 +103,19 @@ export namespace Command {
         },
         hints: hints(PROMPT_DISCOVER),
       },
+      // altimate_change start — Part 2 scan gate (invoked programmatically by the
+      // TUI gate with "scan"/"skip"; hidden from the slash menu in autocomplete)
+      [Default.ONBOARD_CONNECT]: {
+        name: Default.ONBOARD_CONNECT,
+        description: "onboarding: scan environment and connect (scan|skip)",
+        source: "command",
+        subtask: false,
+        get template() {
+          return PROMPT_ONBOARD_CONNECT
+        },
+        hints: hints(PROMPT_ONBOARD_CONNECT),
+      },
+      // altimate_change end
       [Default.REVIEW]: {
         name: Default.REVIEW,
         description: "review changes [commit|branch|pr], defaults to uncommitted",

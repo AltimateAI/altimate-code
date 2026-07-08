@@ -17,6 +17,8 @@ import { DialogModel, DialogModelWelcome, useConnected, useReady } from "@tui/co
 // altimate_change — returning-user silent re-auth via the gateway device flow
 import { GatewayFlow } from "@tui/component/dialog-provider"
 import { AltimateApi } from "@/altimate/api/client"
+// altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
+import { DialogScanGate } from "@tui/component/dialog-scan-gate"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -478,6 +480,33 @@ function App() {
 
   const connected = useConnected()
   const ready = useReady()
+
+  // altimate_change start — Part 2 scan gate: fire EXACTLY once, on the first time
+  // this session reaches "ready" from a not-ready start (i.e. the user just finished
+  // Part 1 in a fresh onboarding). `prev === false` guarantees a genuine false→true
+  // transition, so a returning user (ready from launch, prev === undefined) never
+  // sees it, and a later /model change (ready stays true, no transition) never
+  // re-triggers it. We do NOT auto-scan — the gate just asks.
+  let scanGateShown = false
+  createEffect(
+    on(ready, (isReady, prev) => {
+      if (scanGateShown) return
+      if (isReady && prev === false) {
+        scanGateShown = true
+        dialog.replace(() => (
+          <DialogScanGate
+            onChoose={(arg) => {
+              const ref = promptRef.current
+              if (!ref) return
+              ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
+              ref.submit()
+            }}
+          />
+        ))
+      }
+    }),
+  )
+  // altimate_change end
 
   // altimate_change start — returning users: valid stored creds go straight to the
   // session; an expired/invalid gateway key triggers a silent re-auth via the device

@@ -368,6 +368,9 @@ export function Autocomplete(props: {
     if (ready()) {
       for (const serverCommand of sync.data.command) {
         if (serverCommand.source === "skill") continue
+        // altimate_change — onboard-connect is invoked programmatically by the Part 2
+        // scan gate, not typed; keep it out of the slash menu.
+        if (serverCommand.name === "onboard-connect") continue
         const label = serverCommand.source === "mcp" ? ":mcp" : ""
         results.push({
           display: "/" + serverCommand.name + label,
