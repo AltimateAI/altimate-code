@@ -100,8 +100,6 @@ export function Home() {
       border
       borderStyle="rounded"
       borderColor={theme.border}
-      title=" Altimate Code "
-      titleAlignment="left"
       flexShrink={0}
       width={75}
       zIndex={2000}
@@ -170,7 +168,17 @@ export function Home() {
         </Show>
         <Show
           when={ready()}
-          fallback={<WelcomePanel />}
+          fallback={
+            <>
+              {/* the big block-letter wordmark, same as the ready home screen;
+                  zIndex + bg keep it above transient top toasts like the panel */}
+              <box flexShrink={0} zIndex={2000} backgroundColor={theme.background}>
+                <Logo />
+              </box>
+              <box height={1} flexShrink={0} />
+              <WelcomePanel />
+            </>
+          }
         >
           <>
             <box height={4} minHeight={0} flexShrink={1} />
