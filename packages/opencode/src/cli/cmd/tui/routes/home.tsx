@@ -141,15 +141,29 @@ export function Home() {
           <text fg={theme.accent} attributes={TextAttributes.BOLD}>
             Tips for getting started
           </text>
-          <text wrapMode="word" width="100%">
-            <span style={{ fg: theme.textMuted }}>Run </span>
-            <span style={{ fg: theme.primary }}>/connect</span>
-            <span style={{ fg: theme.textMuted }}>
-              {" "}
-              to pick your AI model provider — 75+ providers supported · Altimate LLM Gateway recommended (10M free
-              tokens)
-            </span>
-          </text>
+          <Show
+            when={ready()}
+            fallback={
+              <text wrapMode="word" width="100%">
+                <span style={{ fg: theme.textMuted }}>Run </span>
+                <span style={{ fg: theme.primary }}>/connect</span>
+                <span style={{ fg: theme.textMuted }}>
+                  {" "}
+                  to pick your AI model provider — 75+ providers supported · Altimate LLM Gateway recommended (10M free
+                  tokens)
+                </span>
+              </text>
+            }
+          >
+            <text wrapMode="word" width="100%">
+              <span style={{ fg: theme.textMuted }}>Now connect your warehouse or dbt project — run </span>
+              <span style={{ fg: theme.primary }}>/discover</span>
+              <span style={{ fg: theme.textMuted }}>
+                {" "}
+                to detect your data stack, then just say what you want to do
+              </span>
+            </text>
+          </Show>
         </box>
         <box border={["top"]} borderColor={theme.border} />
         <box gap={0}>
@@ -199,27 +213,11 @@ export function Home() {
   return (
     <>
       <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
-        {/* altimate_change start — first run: welcome panel near the top, chat input
-            pushed to the bottom of the screen (Claude Code boot style) via a growing
-            spacer between them; ready users keep the centered-logo layout */}
-        <Show when={ready()} fallback={<box height={2} flexShrink={0} />}>
-          <box flexGrow={1} minHeight={0} />
-        </Show>
-        <Show
-          when={ready()}
-          fallback={<WelcomePanel />}
-        >
-          <>
-            <box height={4} minHeight={0} flexShrink={1} />
-            <box flexShrink={0}>
-              <Logo />
-            </box>
-            <box height={1} minHeight={0} flexShrink={1} />
-          </>
-        </Show>
-        <Show when={!ready()}>
-          <box flexGrow={1} minHeight={0} />
-        </Show>
+        {/* altimate_change start — boot box always shows on home (tips section is
+            readiness-aware); chat input pushed to the bottom via a growing spacer */}
+        <box height={2} flexShrink={0} />
+        <WelcomePanel />
+        <box flexGrow={1} minHeight={0} />
         {/* altimate_change end */}
         {/* altimate_change — full-width input bar, Claude Code style */}
         <box width="100%" zIndex={1000} paddingTop={1} flexShrink={0}>
@@ -232,32 +230,12 @@ export function Home() {
             workspaceID={route.workspaceID}
           />
         </box>
-        {/* altimate_change start — first-time onboarding hint (ready users only) */}
-        <Show when={ready() && isFirstTimeUser() === true}>
-          <box width="100%" maxWidth={75} paddingTop={1} flexShrink={0}>
-            <text>
-              <span style={{ fg: theme.textMuted }}>Get started: </span>
-              <span style={{ fg: theme.text }}>/connect</span>
-              <span style={{ fg: theme.textMuted }}> to add your API key</span>
-              <span style={{ fg: theme.textMuted }}> · </span>
-              <span style={{ fg: theme.text }}>/discover</span>
-              <span style={{ fg: theme.textMuted }}> to detect your data stack</span>
-              <span style={{ fg: theme.textMuted }}> · </span>
-              <span style={{ fg: theme.text }}>Ctrl+P</span>
-              <span style={{ fg: theme.textMuted }}> for all commands</span>
-            </text>
+        {/* altimate_change — rotating tips under the input (ready users only); the
+            panel's "Tips for getting started" covers first-run guidance */}
+        <Show when={ready() && showTips()}>
+          <box height={2} minHeight={0} width="100%" alignItems="center" paddingTop={1} flexShrink={1}>
+            <Tips isFirstTime={isFirstTimeUser() === true} />
           </box>
-        </Show>
-        {/* altimate_change end */}
-        {/* altimate_change — tips block and bottom spacer only for ready users; on
-            first run the prompt sits at the bottom of the screen */}
-        <Show when={ready()}>
-          <box height={4} minHeight={0} width="100%" maxWidth={75} alignItems="center" paddingTop={3} flexShrink={1}>
-            <Show when={showTips()}>
-              <Tips isFirstTime={isFirstTimeUser() === true} />
-            </Show>
-          </box>
-          <box flexGrow={1} minHeight={0} />
         </Show>
         <Toast />
       </box>
