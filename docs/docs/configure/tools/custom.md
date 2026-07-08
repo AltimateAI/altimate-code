@@ -7,7 +7,7 @@ There are two ways to extend altimate-code with custom tools:
 
 ## CLI Tools (Recommended)
 
-The simplest way to add custom functionality. Drop any executable into `.opencode/tools/` and it's automatically available to the agent via bash.
+The simplest way to add custom functionality. Drop any executable into `.altimate-code/tools/` and it's automatically available to the agent via bash.
 
 ### Quick Start
 
@@ -16,22 +16,23 @@ The simplest way to add custom functionality. Drop any executable into `.opencod
 altimate-code skill create my-tool
 
 # Or create manually:
-mkdir -p .opencode/tools
-cat > .opencode/tools/my-tool << 'EOF'
+mkdir -p .altimate-code/tools
+cat > .altimate-code/tools/my-tool << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "Hello from my-tool!"
 EOF
-chmod +x .opencode/tools/my-tool
+chmod +x .altimate-code/tools/my-tool
 ```
 
-Tools in `.opencode/tools/` are automatically prepended to PATH when the agent runs bash commands. No configuration needed.
+Tools in `.altimate-code/tools/` are automatically prepended to PATH when the agent runs bash commands. No configuration needed. The legacy `.opencode/tools/` directory is also loaded for back-compat.
 
 ### Tool Locations
 
 | Location | Scope | Auto-discovered |
 |----------|-------|-----------------|
-| `.opencode/tools/` | Project | Yes |
+| `.altimate-code/tools/` | Project | Yes |
+| `.opencode/tools/` | Project (legacy) | Yes |
 | `~/.config/altimate-code/tools/` | Global (all projects) | Yes |
 
 ### Pairing with Skills
@@ -42,7 +43,7 @@ Create a `SKILL.md` that teaches the agent when and how to use your tool:
 altimate-code skill create my-tool --language python
 ```
 
-This creates both `.opencode/skills/my-tool/SKILL.md` and `.opencode/tools/my-tool`. Edit both files to implement your tool.
+This scaffolds a `SKILL.md` and a paired executable under the project config dir. Edit both files to implement your tool. (Both `.altimate-code/` and `.opencode/` locations are auto-discovered, so either works.)
 
 ### Validating
 

@@ -31,34 +31,18 @@ const ROOT = path.resolve(__dirname, "../../../")
 //     fires when the projected `workspaceID` actually changes.
 
 describe("trace-clearing-on-workspace-set regression", () => {
-  test("worker.setWorkspace short-circuits when workspaceID is unchanged", async () => {
-    const workerSrc = await fs.readFile(path.join(ROOT, "src/cli/cmd/tui/worker.ts"), "utf-8")
+  test("worker no longer exposes a workspace reset RPC", async () => {
+    const workerSrc = await fs.readFile(path.join(ROOT, "src/cli/tui/worker.ts"), "utf-8")
 
-    // A `currentWorkspaceID` tracker is declared at module scope.
-    expect(workerSrc).toMatch(/let currentWorkspaceID:\s*string\s*\|\s*undefined/)
-
-    // The setWorkspace handler must guard on equality with the tracker before
-    // calling startEventStream. Match either a strict-equality early return or
-    // the same pattern wrapped in a block.
-    expect(workerSrc).toMatch(
-      /async setWorkspace\(input: \{ workspaceID\?: string \}\)\s*\{[\s\S]{0,400}if \(input\.workspaceID === currentWorkspaceID\) return/,
-    )
-
-    // After the guard, the tracker must be updated to the new value, otherwise
-    // a subsequent same-value call wouldn't short-circuit.
-    expect(workerSrc).toMatch(
-      /if \(input\.workspaceID === currentWorkspaceID\) return\s*\n\s*currentWorkspaceID = input\.workspaceID/,
-    )
+    expect(workerSrc).not.toMatch(/setWorkspace/)
+    expect(workerSrc).not.toMatch(/startEventStream/)
+    expect(workerSrc).not.toMatch(/sessionTraces\.clear/)
   })
 
-  test("session route's workspaceID effect uses `on()` so it only fires when workspaceID actually changes", async () => {
-    const routeSrc = await fs.readFile(path.join(ROOT, "src/cli/cmd/tui/routes/session/index.tsx"), "utf-8")
+  test("session route does not call a workspace reset RPC from session signal changes", async () => {
+    const routeSrc = await fs.readFile(path.join(ROOT, "../tui/src/routes/session/index.tsx"), "utf-8")
 
-    // The previous shape (`createEffect(() => { if (session()?.workspaceID) ... })`)
-    // re-runs on every session() signal change. The fixed shape uses `on()` with
-    // an explicit projector returning workspaceID, so SolidJS dirty-tracks only
-    // that value.
-    expect(routeSrc).toMatch(/createEffect\(\s*on\(\s*\(\)\s*=>\s*session\(\)\?\.workspaceID/)
+    expect(routeSrc).not.toMatch(/setWorkspace/)
 
     // Reject the three bug-equivalent spellings the reviewers flagged. Each
     // pattern is bounded so it can't span across unrelated createEffect bodies
@@ -84,7 +68,7 @@ describe("trace-clearing-on-workspace-set regression", () => {
   test("worker does NOT call endTrace+delete on session.status=idle", async () => {
     // Idle handling lives in the shared TraceConsumer now; the destructive
     // shape must not exist there (nor anywhere the worker delegates).
-    const workerSrc = await fs.readFile(path.join(ROOT, "src/cli/cmd/tui/worker.ts"), "utf-8")
+    const workerSrc = await fs.readFile(path.join(ROOT, "src/cli/tui/worker.ts"), "utf-8")
     const consumerSrc = await fs.readFile(path.join(ROOT, "src/altimate/observability/trace-consumer.ts"), "utf-8")
 
     // The destructive shape must not exist in either file.

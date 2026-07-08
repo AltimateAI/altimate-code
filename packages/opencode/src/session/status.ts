@@ -1,102 +1,145 @@
-import { BusEvent } from "@/bus/bus-event"
-import { Bus } from "@/bus"
-import { InstanceState } from "@/effect/instance-state"
+// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
+// altimate_change end
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { InstanceState } from "@/effect/instance-state"
 import { SessionID } from "./schema"
-import { Effect, Layer, ServiceMap } from "effect"
+import { NonNegativeInt } from "@opencode-ai/core/schema"
+import { Effect, Layer, Context, Schema } from "effect"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
+import { Bus } from "@/bus"
+import { BusEvent } from "@/bus/bus-event"
 import z from "zod"
 
-export namespace SessionStatus {
-  export const Info = z
-    .union([
-      z.object({
-        type: z.literal("idle"),
-      }),
-      z.object({
-        type: z.literal("retry"),
-        attempt: z.number(),
-        message: z.string(),
-        next: z.number(),
-      }),
-      z.object({
-        type: z.literal("busy"),
-      }),
-    ])
-    .meta({
-      ref: "SessionStatus",
-    })
-  export type Info = z.infer<typeof Info>
-
-  export const Event = {
-    Status: BusEvent.define(
-      "session.status",
-      z.object({
-        sessionID: SessionID.zod,
-        status: Info,
+export const Info = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("idle"),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("retry"),
+    attempt: NonNegativeInt,
+    message: Schema.String,
+    action: Schema.optional(
+      Schema.Struct({
+        reason: Schema.String,
+        provider: Schema.String,
+        title: Schema.String,
+        message: Schema.String,
+        label: Schema.String,
+        link: Schema.optional(Schema.String),
       }),
     ),
-    // deprecated
-    Idle: BusEvent.define(
-      "session.idle",
-      z.object({
-        sessionID: SessionID.zod,
-      }),
-    ),
-  }
+    next: NonNegativeInt,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("busy"),
+  }),
+]).annotate({ identifier: "SessionStatus" })
+export type Info = Schema.Schema.Type<typeof Info>
 
-  export interface Interface {
-    readonly get: (sessionID: SessionID) => Effect.Effect<Info>
-    readonly list: () => Effect.Effect<Map<SessionID, Info>>
-    readonly set: (sessionID: SessionID, status: Info) => Effect.Effect<void>
-  }
-
-  export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/SessionStatus") {}
-
-  export const layer = Layer.effect(
-    Service,
-    Effect.gen(function* () {
-      const bus = yield* Bus.Service
-
-      const state = yield* InstanceState.make(
-        Effect.fn("SessionStatus.state")(() => Effect.succeed(new Map<SessionID, Info>())),
-      )
-
-      const get = Effect.fn("SessionStatus.get")(function* (sessionID: SessionID) {
-        const data = yield* InstanceState.get(state)
-        return data.get(sessionID) ?? { type: "idle" as const }
-      })
-
-      const list = Effect.fn("SessionStatus.list")(function* () {
-        return new Map(yield* InstanceState.get(state))
-      })
-
-      const set = Effect.fn("SessionStatus.set")(function* (sessionID: SessionID, status: Info) {
-        const data = yield* InstanceState.get(state)
-        yield* bus.publish(Event.Status, { sessionID, status })
-        if (status.type === "idle") {
-          yield* bus.publish(Event.Idle, { sessionID })
-          data.delete(sessionID)
-          return
-        }
-        data.set(sessionID, status)
-      })
-
-      return Service.of({ get, list, set })
-    }),
-  )
-
-  const defaultLayer = layer.pipe(Layer.provide(Bus.layer))
-  const { runPromise } = makeRuntime(Service, defaultLayer)
-
-  export async function get(sessionID: SessionID) {
-    return runPromise((svc) => svc.get(sessionID))
-  }
-
-  export async function list() {
-    return runPromise((svc) => svc.list())
-  }
-
-  export async function set(sessionID: SessionID, status: Info) {
-    return runPromise((svc) => svc.set(sessionID, status))
-  }
+export const Event = {
+  Status: EventV2.define({
+    type: "session.status",
+    schema: {
+      sessionID: SessionID,
+      status: Info,
+    },
+  }),
+  // deprecated
+  Idle: EventV2.define({
+    type: "session.idle",
+    schema: {
+      sessionID: SessionID,
+    },
+  }),
 }
+
+// altimate_change start - mirror status events onto the legacy Bus SSE stream
+// consumed by `altimate-code run`.
+const LegacyEvent = {
+  Status: BusEvent.define(
+    "session.status",
+    z.object({
+      sessionID: SessionID.zod,
+      status: z.any(),
+    }),
+  ),
+  Idle: BusEvent.define(
+    "session.idle",
+    z.object({
+      sessionID: SessionID.zod,
+    }),
+  ),
+}
+// altimate_change end
+
+export interface Interface {
+  readonly get: (sessionID: SessionID) => Effect.Effect<Info>
+  readonly list: () => Effect.Effect<Map<SessionID, Info>>
+  readonly set: (sessionID: SessionID, status: Info) => Effect.Effect<void>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/SessionStatus") {}
+
+export const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const events = yield* EventV2Bridge.Service
+
+    const state = yield* InstanceState.make(
+      Effect.fn("SessionStatus.state")(() => Effect.succeed(new Map<SessionID, Info>())),
+    )
+
+    const get = Effect.fn("SessionStatus.get")(function* (sessionID: SessionID) {
+      const data = yield* InstanceState.get(state)
+      return data.get(sessionID) ?? { type: "idle" as const }
+    })
+
+    const list = Effect.fn("SessionStatus.list")(function* () {
+      return new Map(yield* InstanceState.get(state))
+    })
+
+    const set = Effect.fn("SessionStatus.set")(function* (sessionID: SessionID, status: Info) {
+      const data = yield* InstanceState.get(state)
+      yield* events.publish(Event.Status, { sessionID, status })
+      if (status.type === "idle") {
+        yield* events.publish(Event.Idle, { sessionID })
+        data.delete(sessionID)
+        return
+      }
+      data.set(sessionID, status)
+    })
+
+    return Service.of({ get, list, set })
+  }),
+)
+
+// altimate_change start — Layer.suspend defers facade refs past circular module-init
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EventV2Bridge.defaultLayer)))
+// altimate_change end
+
+// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
+export const node = LayerNode.make(layer, () => [EventV2Bridge.node])
+// altimate_change end
+
+// altimate_change start — restore the imperative Promise wrapper upstream removed in the
+// Effect-only migration; the session prompt loop sets status synchronously.
+const { runPromise: runStatus } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+export async function set(sessionID: SessionID, status: Info) {
+  const result = await runStatus((s) => s.set(sessionID, status))
+  // altimate_change start - keep legacy /event subscribers in sync with EventV2 status.
+  await Bus.publish(LegacyEvent.Status, { sessionID, status })
+  if (status.type === "idle") await Bus.publish(LegacyEvent.Idle, { sessionID })
+  // altimate_change end
+  return result
+}
+export async function get(sessionID: SessionID) {
+  return runStatus((s) => s.get(sessionID))
+}
+export async function list() {
+  return runStatus((s) => s.list())
+}
+// altimate_change end
+
+export * as SessionStatus from "./status"

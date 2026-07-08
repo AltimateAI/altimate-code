@@ -7,6 +7,7 @@
  */
 
 import { Dispatcher } from "../../src/altimate/native"
+import { initTool } from "./tool-fixture"
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
@@ -169,7 +170,7 @@ async function main() {
   console.log("\n--- altimate_core_validate ---")
 
   const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
-  const validateTool = await AltimateCoreValidateTool.init()
+  const validateTool = await initTool(AltimateCoreValidateTool)
 
   await check(
     "validate: no schema → early return with 'No schema provided'",
@@ -225,7 +226,7 @@ async function main() {
   console.log("\n--- altimate_core_semantics ---")
 
   const { AltimateCoreSemanticsTool } = await import("../../src/altimate/tools/altimate-core-semantics")
-  const semanticsTool = await AltimateCoreSemanticsTool.init()
+  const semanticsTool = await initTool(AltimateCoreSemanticsTool)
 
   await check(
     "semantics: no schema → early return with 'No schema provided'",
@@ -257,7 +258,7 @@ async function main() {
   console.log("\n--- altimate_core_equivalence ---")
 
   const { AltimateCoreEquivalenceTool } = await import("../../src/altimate/tools/altimate-core-equivalence")
-  const equivTool = await AltimateCoreEquivalenceTool.init()
+  const equivTool = await initTool(AltimateCoreEquivalenceTool)
 
   const sql2 = "SELECT u.id, u.name, o.total FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE o.total > 100"
 
@@ -291,7 +292,7 @@ async function main() {
   console.log("\n--- altimate_core_fix ---")
 
   const { AltimateCoreFixTool } = await import("../../src/altimate/tools/altimate-core-fix")
-  const fixTool = await AltimateCoreFixTool.init()
+  const fixTool = await initTool(AltimateCoreFixTool)
 
   await check(
     "fix: unfixable syntax error → error propagated",
@@ -315,7 +316,7 @@ async function main() {
   console.log("\n--- altimate_core_correct ---")
 
   const { AltimateCoreCorrectTool } = await import("../../src/altimate/tools/altimate-core-correct")
-  const correctTool = await AltimateCoreCorrectTool.init()
+  const correctTool = await initTool(AltimateCoreCorrectTool)
 
   await check(
     "correct: unfixable syntax error → error propagated",
@@ -331,7 +332,7 @@ async function main() {
   console.log("\n--- sql_analyze ---")
 
   const { SqlAnalyzeTool } = await import("../../src/altimate/tools/sql-analyze")
-  const analyzeTool = await SqlAnalyzeTool.init()
+  const analyzeTool = await initTool(SqlAnalyzeTool)
 
   await check(
     "analyze: no schema → lint issues found (partial success)",
@@ -372,7 +373,7 @@ async function main() {
   console.log("\n--- sql_explain ---")
 
   const { SqlExplainTool } = await import("../../src/altimate/tools/sql-explain")
-  const explainTool = await SqlExplainTool.init()
+  const explainTool = await initTool(SqlExplainTool)
 
   await check(
     "explain: no warehouse → error propagated (not 'unknown error')",
@@ -388,7 +389,7 @@ async function main() {
   console.log("\n--- finops_query_history ---")
 
   const { FinopsQueryHistoryTool } = await import("../../src/altimate/tools/finops-query-history")
-  const queryHistTool = await FinopsQueryHistoryTool.init()
+  const queryHistTool = await initTool(FinopsQueryHistoryTool)
 
   await check(
     "query_history: no warehouse → error propagated",
@@ -404,7 +405,7 @@ async function main() {
   console.log("\n--- finops_expensive_queries ---")
 
   const { FinopsExpensiveQueriesTool } = await import("../../src/altimate/tools/finops-expensive-queries")
-  const expensiveTool = await FinopsExpensiveQueriesTool.init()
+  const expensiveTool = await initTool(FinopsExpensiveQueriesTool)
 
   await check(
     "expensive_queries: no warehouse → error propagated",
@@ -420,7 +421,7 @@ async function main() {
   console.log("\n--- finops_analyze_credits ---")
 
   const { FinopsAnalyzeCreditsTool } = await import("../../src/altimate/tools/finops-analyze-credits")
-  const creditsTool = await FinopsAnalyzeCreditsTool.init()
+  const creditsTool = await initTool(FinopsAnalyzeCreditsTool)
 
   await check(
     "analyze_credits: no warehouse → error propagated",
@@ -436,7 +437,7 @@ async function main() {
   console.log("\n--- finops_unused_resources ---")
 
   const { FinopsUnusedResourcesTool } = await import("../../src/altimate/tools/finops-unused-resources")
-  const unusedTool = await FinopsUnusedResourcesTool.init()
+  const unusedTool = await initTool(FinopsUnusedResourcesTool)
 
   await check(
     "unused_resources: no warehouse → error propagated",
@@ -452,7 +453,7 @@ async function main() {
   console.log("\n--- finops_warehouse_advice ---")
 
   const { FinopsWarehouseAdviceTool } = await import("../../src/altimate/tools/finops-warehouse-advice")
-  const adviceTool = await FinopsWarehouseAdviceTool.init()
+  const adviceTool = await initTool(FinopsWarehouseAdviceTool)
 
   await check(
     "warehouse_advice: no warehouse → error propagated",

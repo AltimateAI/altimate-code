@@ -29,14 +29,14 @@ describe("Identifier: prefix format and length", () => {
 describe("Identifier: ascending sort order", () => {
   test("IDs with increasing timestamps sort ascending (string order)", () => {
     const t = 1700000000000
-    const a = Identifier.create("session", false, t)
-    const b = Identifier.create("session", false, t + 1)
+    const a = Identifier.create("session", "ascending", t)
+    const b = Identifier.create("session", "ascending", t + 1)
     expect(a < b).toBe(true)
   })
 
   test("multiple IDs at same timestamp are unique and ascending", () => {
     const t = 1700000001000
-    const ids = Array.from({ length: 10 }, () => Identifier.create("session", false, t))
+    const ids = Array.from({ length: 10 }, () => Identifier.create("session", "ascending", t))
     const unique = new Set(ids)
     expect(unique.size).toBe(10)
     for (let i = 1; i < ids.length; i++) {
@@ -48,8 +48,8 @@ describe("Identifier: ascending sort order", () => {
 describe("Identifier: descending sort order", () => {
   test("IDs with increasing timestamps sort descending (string order)", () => {
     const t = 1700000002000
-    const a = Identifier.create("session", true, t)
-    const b = Identifier.create("session", true, t + 1)
+    const a = Identifier.create("session", "descending", t)
+    const b = Identifier.create("session", "descending", t + 1)
     // Later timestamp → smaller string for descending
     expect(a > b).toBe(true)
   })
@@ -59,8 +59,8 @@ describe("Identifier: timestamp comparison", () => {
   test("timestamp() preserves relative ordering for ascending IDs", () => {
     const t1 = 1700000003000
     const t2 = 1700000004000
-    const id1 = Identifier.create("session", false, t1)
-    const id2 = Identifier.create("session", false, t2)
+    const id1 = Identifier.create("session", "ascending", t1)
+    const id2 = Identifier.create("session", "ascending", t2)
     // timestamp() may not recover the exact input due to 48-bit storage,
     // but it must preserve relative ordering (used for cleanup cutoffs)
     expect(Identifier.timestamp(id1)).toBeLessThan(Identifier.timestamp(id2))
@@ -68,8 +68,8 @@ describe("Identifier: timestamp comparison", () => {
 
   test("timestamp() returns same value for IDs created at same time", () => {
     const t = 1700000005000
-    const id1 = Identifier.create("session", false, t)
-    const id2 = Identifier.create("session", false, t)
+    const id1 = Identifier.create("session", "ascending", t)
+    const id2 = Identifier.create("session", "ascending", t)
     // Both IDs at same timestamp should produce the same (or very close) extracted timestamp
     // The counter increment adds at most a few units that divide away
     expect(Identifier.timestamp(id1)).toBe(Identifier.timestamp(id2))
@@ -90,22 +90,25 @@ describe("Identifier: given passthrough", () => {
   })
 })
 
-describe("Identifier: schema validation", () => {
+// altimate_change start — upstream v1.17.9 removed Identifier.schema(); validation now lives in the
+// branded Schema definitions (src/session/schema.ts). These tests target a removed API.
+describe.skip("Identifier: schema validation (removed in upstream v1.17.9)", () => {
   test("schema accepts valid session ID", () => {
-    const s = Identifier.schema("session")
+    const s = (Identifier as any).schema("session")
     const id = Identifier.ascending("session")
     expect(s.safeParse(id).success).toBe(true)
   })
 
   test("schema rejects ID with wrong prefix", () => {
-    const s = Identifier.schema("session")
+    const s = (Identifier as any).schema("session")
     expect(s.safeParse("msg_abc123").success).toBe(false)
   })
 
   test("schema for tool prefix works (4-char prefix)", () => {
-    const s = Identifier.schema("tool")
+    const s = (Identifier as any).schema("tool")
     const id = Identifier.ascending("tool")
     expect(s.safeParse(id).success).toBe(true)
     expect(s.safeParse("ses_abc").success).toBe(false)
   })
 })
+// altimate_change end

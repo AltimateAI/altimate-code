@@ -50,6 +50,24 @@ describe("isToolOnPath", () => {
     })
   })
 
+  test("returns true when tool exists in .altimate-code/tools/ under cwd", async () => {
+    await using tmp = await tmpdirGit(async (dir) => {
+      const toolsDir = path.join(dir, ".altimate-code", "tools")
+      await fs.mkdir(toolsDir, { recursive: true })
+      const toolPath = path.join(toolsDir, "my-altimate-tool")
+      await fs.writeFile(toolPath, "#!/bin/sh\necho ok\n")
+      await fs.chmod(toolPath, 0o755)
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const found = await isToolOnPath("my-altimate-tool", tmp.path)
+        expect(found).toBe(true)
+      },
+    })
+  })
+
   test("returns false when tool does not exist anywhere", async () => {
     savedEnv.ALTIMATE_BIN_DIR = process.env.ALTIMATE_BIN_DIR
     delete process.env.ALTIMATE_BIN_DIR

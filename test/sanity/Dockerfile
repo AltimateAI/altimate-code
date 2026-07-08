@@ -40,7 +40,7 @@ RUN cd /home/testuser/.altimate-install && \
 ARG TARGETARCH
 RUN ARCH="${TARGETARCH:-$(uname -m | sed 's/x86_64/x64/' | sed 's/aarch64/arm64/')}" && \
     mkdir -p /home/testuser/.local/bin && \
-    cp /home/testuser/.altimate-install/dist/@altimateai/altimate-code-linux-${ARCH}/bin/altimate /home/testuser/.local/bin/altimate && \
+    cp /home/testuser/.altimate-install/dist/@altimateai/altimate-code-linux-${ARCH}/bin/altimate-code /home/testuser/.local/bin/altimate && \
     chmod +x /home/testuser/.local/bin/altimate && \
     mkdir -p /home/testuser/.altimate/builtin && \
     cp -r /home/testuser/.altimate-install/skills/* /home/testuser/.altimate/builtin/

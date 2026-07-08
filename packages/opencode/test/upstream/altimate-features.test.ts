@@ -263,7 +263,11 @@ describe("altimate features: agent safety denial wiring", () => {
   test("agent.ts source has 'build' alias resolving to 'builder'", async () => {
     const src = await readSrc("agent", "agent.ts")
     expect(src).toMatch(/agent === ["']build["']/)
-    expect(src).toMatch(/x\["builder"\]|x\.builder/)
+    // v1.17.9 merge refactored agent lookup into Effect.fnUntraced; the local
+    // map variable is `agents` (was `x`). The alias must still resolve to the
+    // 'builder' entry — match either the current `agents["builder"]` form or
+    // the legacy `x["builder"]`/`x.builder`.
+    expect(src).toMatch(/agents\["builder"\]|agents\.builder|x\["builder"\]|x\.builder/)
   })
 
   test("agent.ts source registers 'builder' (NOT 'build') as the canonical primary agent", async () => {
@@ -333,22 +337,33 @@ describe("altimate features: anthropic provider stays bundled", () => {
 // We can't directly import Config (the chain is broken). But we can verify
 // the helpers exist and their bodies are the trivially-correct one-liners
 // they need to be.
+// v1.17.9 merge re-homed these helpers from config/config.ts into the dedicated
+// config/plugin.ts module, and moved the spec type into core's V1 config
+// namespace (ConfigPluginV1.Spec, defined in @opencode-ai/core/v1/config/plugin
+// as `string | [string, Options]`). The fork bodies (array-or-string /
+// array-or-undefined) survive unchanged — only their home and type-name moved.
 describe("altimate features: Config plugin helpers added in bridge", () => {
-  test("config.ts exports pluginSpecifier with the array-or-string body", async () => {
-    const src = await readSrc("config", "config.ts")
-    expect(src).toMatch(/export function pluginSpecifier\(plugin: PluginSpec\): string/)
+  test("config/plugin.ts exports pluginSpecifier with the array-or-string body", async () => {
+    const src = await readSrc("config", "plugin.ts")
+    expect(src).toMatch(/export function pluginSpecifier\(plugin: ConfigPluginV1\.Spec\): string/)
     expect(src).toMatch(/Array\.isArray\(plugin\)\s*\?\s*plugin\[0\]\s*:\s*plugin/)
   })
 
-  test("config.ts exports pluginOptions with the array-or-undefined body", async () => {
-    const src = await readSrc("config", "config.ts")
-    expect(src).toMatch(/export function pluginOptions\(plugin: PluginSpec\)/)
+  test("config/plugin.ts exports pluginOptions with the array-or-undefined body", async () => {
+    const src = await readSrc("config", "plugin.ts")
+    expect(src).toMatch(/export function pluginOptions\(plugin: ConfigPluginV1\.Spec\)/)
     expect(src).toMatch(/Array\.isArray\(plugin\)\s*\?\s*plugin\[1\]\s*:\s*undefined/)
   })
 
-  test("config.ts declares PluginSpec type as string | [string, PluginOptions]", async () => {
-    const src = await readSrc("config", "config.ts")
-    expect(src).toMatch(/export type PluginSpec\s*=\s*string\s*\|\s*\[string,\s*PluginOptions\]/)
+  test("core V1 config declares the plugin Spec type as string | [string, Options]", async () => {
+    const src = await fs.readFile(
+      path.join(repoRoot, "packages", "core", "src", "v1", "config", "plugin.ts"),
+      "utf-8",
+    )
+    // Schema.Union of a bare string and a [string, Options] tuple — the
+    // structural equivalent of the old `string | [string, PluginOptions]`.
+    expect(src).toMatch(/export const Spec\s*=\s*Schema\.Union\(\[\s*Schema\.String\s*,/)
+    expect(src).toMatch(/Schema\.Tuple\(\[Schema\.String,\s*Options\]\)/)
   })
 })
 
@@ -415,14 +430,22 @@ describe("altimate features: Account.active returns Promise", () => {
 // ===========================================================================
 // 11. OAuth callback HTML escaping (security)
 // ===========================================================================
+// v1.17.9 merge extracted the inline escapeHtml helper out of oauth-callback.ts
+// into a shared util (src/util/html.ts). The XSS protection is unchanged:
+// oauth-callback.ts imports escapeHtml and still wraps every interpolated error
+// with it. We verify the full chain — the util defines the escaping, and the
+// callback imports + uses it.
 describe("altimate features: OAuth callback HTML escapes user-controllable error", () => {
-  test("oauth-callback.ts defines an escapeHtml function", async () => {
-    const src = await readSrc("mcp", "oauth-callback.ts")
-    expect(src).toMatch(/function\s+escapeHtml/)
+  test("escapeHtml is defined (shared util) and imported by oauth-callback.ts", async () => {
+    const callback = await readSrc("mcp", "oauth-callback.ts")
+    // Must pull escapeHtml in from the shared html util.
+    expect(callback).toMatch(/import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/)
+    const util = await readSrc("util", "html.ts")
+    expect(util).toMatch(/export function escapeHtml/)
   })
 
   test("escapeHtml replaces &, <, >, \", ' with HTML entities", async () => {
-    const src = await readSrc("mcp", "oauth-callback.ts")
+    const src = await readSrc("util", "html.ts")
     // All five entity replacements must be present in the body.
     expect(src).toContain("&amp;")
     expect(src).toContain("&lt;")

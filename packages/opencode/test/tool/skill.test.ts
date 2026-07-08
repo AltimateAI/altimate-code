@@ -3,27 +3,35 @@ import { afterEach, describe, expect, test } from "bun:test"
 // altimate_change end
 import path from "path"
 import { pathToFileURL } from "url"
-import type { PermissionNext } from "../../src/permission/next"
-import type { Tool } from "../../src/tool/tool"
 import { Instance } from "../../src/project/instance"
 import { SkillTool } from "../../src/tool/skill"
-import { tmpdir } from "../fixture/fixture"
+import { tmpdir, provideTestInstance } from "../fixture/fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
+
+// Load the instance through the Effect InstanceStore (DB-safe — same path grep/it.instance
+// tests use), then restore the legacy Instance ALS around the test body so SkillTool (a
+// legacy tool reading Instance.directory + Skill.available) resolves. The plain
+// Instance.provide path re-runs project migrations and trips the shared-DB split-brain.
+async function provideInstance<T>(directory: string, fn: () => Promise<T>): Promise<T> {
+  return provideTestInstance({ directory, fn: (ctx) => Instance.restore(ctx, fn) })
+}
 // altimate_change start - imports for env fingerprint skill selection tests
 import { resetSkillSelectorCache, selectSkillsWithLLM, type SkillSelectorDeps } from "../../src/altimate/skill-selector"
 import type { Skill } from "../../src/skill"
 import { Fingerprint } from "../../src/altimate/fingerprint/index"
+import { initTool, type TestToolContext } from "../altimate/tool-fixture"
 // altimate_change end
 
-const baseCtx: Omit<Tool.Context, "ask"> = {
+const baseCtx: Omit<TestToolContext, "ask"> = {
   sessionID: SessionID.make("ses_test"),
-  messageID: MessageID.make(""),
+  messageID: MessageID.make("msg_test"),
   callID: "",
   agent: "build",
   abort: AbortSignal.any([]),
   messages: [],
   metadata: () => {},
 }
+type TestPermissionRequest = Parameters<NonNullable<TestToolContext["ask"]>>[0]
 
 // altimate_change start - helpers for env fingerprint skill selection tests
 /** Pre-populate the skill selector cache with a specific subset */
@@ -72,16 +80,13 @@ description: Skill for tool tests.
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const tool = await SkillTool.init()
+      await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
           const skillPath = path.join(tmp.path, ".opencode", "skill", "tool-skill", "SKILL.md")
           // altimate_change start - updated assertion to match XML skill description format
           expect(tool.description).toContain(`<name>tool-skill</name>`)
           expect(tool.description).toContain(`<description>Skill for tool tests.</description>`)
           // altimate_change end
-        },
       })
     } finally {
       process.env.OPENCODE_TEST_HOME = home
@@ -113,12 +118,10 @@ Use this skill.
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const tool = await SkillTool.init()
-          const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-          const ctx: Tool.Context = {
+      await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
+          const requests: TestPermissionRequest[] = []
+          const ctx: TestToolContext = {
             ...baseCtx,
             ask: async (req) => {
               requests.push(req)
@@ -138,7 +141,6 @@ Use this skill.
           expect(result.output).toContain(`<skill_content name="tool-skill">`)
           expect(result.output).toContain(`Base directory for this skill: ${pathToFileURL(dir).href}`)
           expect(result.output).toContain(`<file>${file}</file>`)
-        },
       })
     } finally {
       process.env.OPENCODE_TEST_HOME = home
@@ -170,11 +172,9 @@ Build models with dbt.
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const tool = await SkillTool.init()
-          const ctx: Tool.Context = {
+      await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
+          const ctx: TestToolContext = {
             ...baseCtx,
             ask: async () => {},
           }
@@ -197,7 +197,6 @@ Build models with dbt.
           expect(result.output).toContain(`<skill_content name="dbt-develop">`)
           expect(result.output).toContain("Build models with dbt.")
           expect(result.output).toContain("</skill_content>")
-        },
       })
     } finally {
       process.env.OPENCODE_TEST_HOME = home
@@ -228,11 +227,9 @@ Do custom things.
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const tool = await SkillTool.init()
-          const ctx: Tool.Context = {
+      await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
+          const ctx: TestToolContext = {
             ...baseCtx,
             ask: async () => {},
           }
@@ -246,7 +243,6 @@ Do custom things.
           // Output starts directly with skill_content
           expect(result.output).toMatch(/^<skill_content/)
           expect(result.output).toContain("Do custom things.")
-        },
       })
     } finally {
       process.env.OPENCODE_TEST_HOME = home
@@ -275,14 +271,11 @@ Do custom things.
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const tool = await SkillTool.init()
+      await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
           // No config set → default false → selector bypassed → both skills appear
           expect(tool.description).toContain("<name>skill-alpha</name>")
           expect(tool.description).toContain("<name>skill-beta</name>")
-        },
       })
     } finally {
       process.env.OPENCODE_TEST_HOME = home
@@ -315,14 +308,11 @@ Do custom things.
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const tool = await SkillTool.init()
+      await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
           // Selector was bypassed → both skills appear (from Skill.available, not cache)
           expect(tool.description).toContain("<name>skill-alpha</name>")
           expect(tool.description).toContain("<name>skill-beta</name>")
-        },
       })
     } finally {
       process.env.OPENCODE_TEST_HOME = home
@@ -364,14 +354,11 @@ Do custom things.
     process.env.OPENCODE_TEST_HOME = tmp.path
 
     try {
-      await Instance.provide({
-        directory: tmp.path,
-        fn: async () => {
-          const tool = await SkillTool.init()
+      await provideInstance(tmp.path, async () => {
+          const tool = await initTool(SkillTool)
           // Selector was called → returns cached subset (only skill-alpha)
           expect(tool.description).toContain("<name>skill-alpha</name>")
           expect(tool.description).not.toContain("<name>skill-beta</name>")
-        },
       })
     } finally {
       process.env.OPENCODE_TEST_HOME = home

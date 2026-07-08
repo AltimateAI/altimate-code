@@ -53,18 +53,26 @@ function stripComments(src: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-module consistency: ServiceMap.Service identifier uniqueness
+// Cross-module consistency: Effect Service identifier uniqueness
 // ---------------------------------------------------------------------------
 
-describe("invariant: ServiceMap.Service identifier strings are globally unique", () => {
+describe("invariant: Effect Service identifier strings are globally unique", () => {
   // Cycle 5 surfaced a duplicate "@opencode/Account" identifier that allowed two
   // unrelated Service classes to silently share one Effect Layer slot. Any future
   // upstream merge that re-introduces this collision (by importing a duplicate
   // Service or moving identifiers around) must fail this test.
-  test("no two ServiceMap.Service classes share the same identifier string", async () => {
+  //
+  // v1.17.9 note: upstream replaced the effect beta.43 `ServiceMap.Service<…>()("id")`
+  // registration form with `Context.Service<…>()("id")` (beta.74). The regex below
+  // tracks the current Context.Service form so the uniqueness invariant stays live.
+  const SERVICE_RE = () => /Context\.Service<[^>]+>\(\)\(\s*"([^"]+)"\s*\)/g
+  // v1.17.9 merge note: account/account.ts is the canonical LayerNode service and
+  // keeps "@opencode/Account"; account/index.ts is a live promise facade for
+  // share/telemetry and uses "@opencode/Account.cli", mirroring auth/index.ts.
+  test("no two Effect Service classes share the same identifier string", async () => {
     const files = await walkSource(srcDir)
     const occurrences = new Map<string, string[]>()
-    const re = /ServiceMap\.Service<[^>]+>\(\)\(\s*"([^"]+)"\s*\)/g
+    const re = SERVICE_RE()
     for (const file of files) {
       const content = stripComments(await readText(file))
       let m: RegExpExecArray | null
@@ -87,7 +95,7 @@ describe("invariant: ServiceMap.Service identifier strings are globally unique",
   test("at least one Service is registered (sanity — regex didn't silently break)", async () => {
     const files = await walkSource(srcDir)
     let count = 0
-    const re = /ServiceMap\.Service<[^>]+>\(\)\(\s*"([^"]+)"\s*\)/g
+    const re = SERVICE_RE()
     for (const file of files) {
       const content = stripComments(await readText(file))
       while (re.exec(content) !== null) count++
@@ -155,10 +163,16 @@ describe("invariant: event-type literals match between producer and consumers", 
   // If upstream renames an event (e.g. "message.updated" -> "message.update"),
   // producer and consumer drift silently — typecheck only catches it if the
   // producer and consumer share a discriminated union, which they don't always
-  // do across acp/agent.ts, cli/cmd/run.ts, cli/cmd/tui/worker.ts, sync.tsx.
-  const consumers: Array<{ file: string; types: string[] }> = [
+  // do across acp/event.ts, cli/cmd/run.ts, packages/tui sync.tsx.
+  //
+  // v1.17.9 note: the TUI moved out of packages/opencode/src/cli/cmd/tui into the
+  // standalone packages/tui workspace, so its consumers are resolved from repoRoot
+  // (via `base: "tui"`) instead of srcDir. The ACP message-event consumption moved
+  // from acp/agent.ts (now a thin Effect wrapper) into acp/event.ts.
+  const consumers: Array<{ file: string; types: string[]; base?: "src" | "tui" }> = [
     {
-      file: "cli/cmd/tui/context/sync.tsx",
+      file: "src/context/sync.tsx",
+      base: "tui",
       types: ["message.updated", "message.removed", "message.part.updated", "message.part.removed"],
     },
     // worker.ts's inline event handling moved into the shared trace consumer
@@ -168,11 +182,12 @@ describe("invariant: event-type literals match between producer and consumers", 
       types: ["message.updated", "message.part.updated", "session.updated", "session.deleted"],
     },
     { file: "cli/cmd/run.ts", types: ["message.updated", "message.part.updated"] },
-    { file: "acp/agent.ts", types: ["message.part.updated"] },
+    { file: "acp/event.ts", types: ["message.part.updated"] },
   ]
   for (const c of consumers) {
     test(`${c.file} consumes the canonical event-type literals`, async () => {
-      const content = await readText(path.join(srcDir, c.file))
+      const baseDir = c.base === "tui" ? path.join(repoRoot, "packages", "tui") : srcDir
+      const content = await readText(path.join(baseDir, c.file))
       for (const t of c.types) {
         // Match the literal as a quoted string. Tolerate either single or double quotes.
         const re = new RegExp(`["']${t.replace(/\./g, "\\.")}["']`)
@@ -202,12 +217,17 @@ interface AsyncCheck {
   callers?: string[]
 }
 
+// v1.17.9 note: the Effect migration removed the imperative `export async function update`
+// wrapper from session/todo.ts. Its only call site (src/tool/todo.ts) is an Effect
+// generator (`yield* todo.update(...)`), so no Promise wrapper is needed and keeping
+// one would be dead code. `get` keeps its wrapper because server/routes/session.ts reads
+// the todo list from plain async code — so it stays in this list. The `Todo.update`
+// caller-scan below still guards against a future imperative caller appearing un-awaited.
 const ASYNC_FUNCTIONS: AsyncCheck[] = [
   { file: "account/index.ts", fn: "active" },
   { file: "session/message-v2.ts", fn: "toModelMessages" },
   { file: "session/status.ts", fn: "set" },
   { file: "session/prompt.ts", fn: "cancel" },
-  { file: "session/todo.ts", fn: "update" },
   { file: "session/todo.ts", fn: "get" },
 ]
 
@@ -478,13 +498,18 @@ describe("invariant: SyncEvent and BusEvent agree on type-name shape (no version
 // ---------------------------------------------------------------------------
 
 describe("invariant: build infrastructure pinning (cycle 2)", () => {
-  test("root package.json overrides pin effect@4.0.0-beta.43", async () => {
+  test("root catalog pins effect@4.0.0-beta.74 (coordinated with @effect/* siblings)", async () => {
     const pkg = JSON.parse(await readText(path.join(repoRoot, "package.json")))
-    // Cycle 2 bug: beta.58 removed ServiceMap; we depend on it. Future bumps
-    // require coordinated migration to Context — until then, this pin must hold.
-    expect(pkg.overrides?.["effect"]).toBe("4.0.0-beta.43")
-    expect(pkg.overrides?.["@effect/platform-node"]).toBe("4.0.0-beta.43")
-    expect(pkg.overrides?.["@effect/platform-node-shared"]).toBe("4.0.0-beta.43")
+    // v1.17.9: the merge migrated off effect beta.43 ServiceMap onto beta.74
+    // Context.Service, and moved the version pin from `overrides` into the bun
+    // `workspaces.catalog`. The effect core + its @effect/* peers MUST stay on the
+    // same beta so the Context/Layer ABI matches; a partial bump re-breaks the build.
+    const cat = pkg.workspaces?.catalog ?? pkg.catalog ?? {}
+    const EFFECT_PIN = "4.0.0-beta.74"
+    expect(cat["effect"]).toBe(EFFECT_PIN)
+    expect(cat["@effect/platform-node"]).toBe(EFFECT_PIN)
+    expect(cat["@effect/opentelemetry"]).toBe(EFFECT_PIN)
+    expect(cat["@effect/sql-sqlite-bun"]).toBe(EFFECT_PIN)
   })
 
   test("root catalog declares cross-spawn and @types/cross-spawn", async () => {
@@ -510,12 +535,47 @@ describe("invariant: build infrastructure pinning (cycle 2)", () => {
     expect(allDeps["@types/cross-spawn"]).toBeDefined()
   })
 
-  test("packages/opencode declares @effect/platform-node + @npmcli/arborist", async () => {
-    const pkg = JSON.parse(await readText(path.join(repoRoot, "packages", "opencode", "package.json")))
-    const allDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
-    expect(allDeps["@effect/platform-node"]).toBeDefined()
-    expect(allDeps["@npmcli/arborist"]).toBeDefined()
+  test("@effect/platform-node declared in opencode; @npmcli/arborist declared in core", async () => {
+    // v1.17.9: the npm/plugin-tree logic (the sole @npmcli/arborist consumer,
+    // now packages/core/src/npm.ts) was re-homed from packages/opencode into
+    // packages/core, so the dep declaration moved with it. opencode keeps only a
+    // minimal arborist.d.ts type shim. @effect/platform-node stays in opencode.
+    const ocPkg = JSON.parse(await readText(path.join(repoRoot, "packages", "opencode", "package.json")))
+    const ocDeps = { ...(ocPkg.dependencies ?? {}), ...(ocPkg.devDependencies ?? {}) }
+    expect(ocDeps["@effect/platform-node"]).toBeDefined()
+
+    const corePkg = JSON.parse(await readText(path.join(repoRoot, "packages", "core", "package.json")))
+    const coreDeps = { ...(corePkg.dependencies ?? {}), ...(corePkg.devDependencies ?? {}) }
+    expect(coreDeps["@npmcli/arborist"]).toBeDefined()
   })
+
+  // altimate_change start — upstream_fix: CI TypeScript filter tracks workspace typecheck packages
+  test("CI TypeScript path filter includes every workspace with a typecheck script", async () => {
+    const rootPkg = JSON.parse(await readText(path.join(repoRoot, "package.json")))
+    const workspaces: string[] = rootPkg.workspaces?.packages ?? []
+    const ci = await readText(path.join(repoRoot, ".github", "workflows", "ci.yml"))
+    const missing: string[] = []
+
+    for (const ws of workspaces) {
+      const pkgPath = path.join(repoRoot, ws, "package.json")
+      let workspacePkg: any
+      try {
+        workspacePkg = JSON.parse(await readText(pkgPath))
+      } catch {
+        continue
+      }
+      if (!workspacePkg.scripts?.typecheck) continue
+
+      const exact = `- '${ws}/**'`
+      const sdkUmbrella = ws === "packages/sdk/js" ? "- 'packages/sdk/**'" : undefined
+      if (!ci.includes(exact) && (!sdkUmbrella || !ci.includes(sdkUmbrella))) {
+        missing.push(ws)
+      }
+    }
+
+    expect(missing).toEqual([])
+  })
+  // altimate_change end
 })
 
 // ---------------------------------------------------------------------------

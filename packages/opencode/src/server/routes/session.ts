@@ -1,5 +1,7 @@
 import { Hono } from "hono"
-import { formatTranscript } from "@/cli/cmd/tui/util/transcript"
+// altimate_change start — transcript util moved to packages/tui in the v1.17.9 TUI extraction
+import { formatTranscript } from "@opencode-ai/tui/util/transcript"
+// altimate_change end
 import { stream } from "hono/streaming"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import { SessionID, MessageID, PartID } from "@/session/schema"
@@ -23,9 +25,14 @@ import { PermissionNext } from "@/permission/next"
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { errors } from "../error"
+import { NotFoundError as StorageNotFoundError } from "../../storage/db"
 import { lazy } from "../../util/lazy"
 import { Bus } from "../../bus"
-import { NamedError } from "@opencode-ai/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
+// altimate_change start — SessionStatus/Todo/Snapshot/SessionRevert Info+Input schemas migrated to
+// Effect Schema in v1.17.9; convert to zod for hono-openapi resolvers/validators
+import { zod } from "@/util/effect-zod"
+// altimate_change end
 
 const log = Log.create({ service: "server" })
 
@@ -87,7 +94,7 @@ export const SessionRoutes = lazy(() =>
             description: "Get session status",
             content: {
               "application/json": {
-                schema: resolver(z.record(z.string(), SessionStatus.Info)),
+                schema: resolver(z.record(z.string(), zod(SessionStatus.Info))),
               },
             },
           },
@@ -173,7 +180,7 @@ export const SessionRoutes = lazy(() =>
             description: "Todo list",
             content: {
               "application/json": {
-                schema: resolver(Todo.Info.array()),
+                schema: resolver(z.array(zod(Todo.Info))),
               },
             },
           },
@@ -433,7 +440,7 @@ export const SessionRoutes = lazy(() =>
             description: "Successfully retrieved diff",
             content: {
               "application/json": {
-                schema: resolver(Snapshot.FileDiff.array()),
+                schema: resolver(z.array(zod(Snapshot.FileDiff))),
               },
             },
           },
@@ -497,9 +504,50 @@ export const SessionRoutes = lazy(() =>
         }),
       ),
       async (c) => {
-        const sessionID = c.req.valid("param").sessionID
+        // altimate_change start — the zod brand adapter accepts any string at runtime.
+        // Validate with the Effect Schema constructor so malformed transcript IDs return
+        // the documented 400 instead of falling through to storage and surfacing as 500.
+        const rawSessionID = c.req.param("sessionID")
+        let sessionID: SessionID
+        try {
+          sessionID = SessionID.make(rawSessionID)
+        } catch {
+          return c.json(
+            {
+              data: { sessionID: rawSessionID },
+              errors: [{ message: "Invalid sessionID" }],
+              success: false as const,
+            },
+            400,
+          )
+        }
+        // altimate_change end
         const query = c.req.valid("query")
-        const session = await Session.get(sessionID)
+        let session: Session.Info
+        try {
+          session = await Session.get(sessionID)
+        } catch (error) {
+          // altimate_change start — legacy Server.Default imports the core NamedError
+          // base, while storage/session NotFoundError uses the util NamedError base.
+          // Map this expected domain miss locally so transcript keeps its declared 404.
+          if (error instanceof StorageNotFoundError || StorageNotFoundError.isInstance(error)) {
+            const notFound =
+              error instanceof StorageNotFoundError
+                ? error
+                : new StorageNotFoundError({
+                    message:
+                      typeof error === "object" &&
+                      error !== null &&
+                      "data" in error &&
+                      typeof (error as { data?: { message?: unknown } }).data?.message === "string"
+                        ? (error as { data: { message: string } }).data.message
+                        : `Session not found: ${sessionID}`,
+                  })
+            return c.json(notFound.toObject(), 404)
+          }
+          // altimate_change end
+          throw error
+        }
         const messages = await Session.messages({ sessionID })
         const transcript = formatTranscript(session, messages, {
           thinking: query.thinking,
@@ -577,7 +625,10 @@ export const SessionRoutes = lazy(() =>
         const sessionID = c.req.valid("param").sessionID
         const body = c.req.valid("json")
         const session = await Session.get(sessionID)
-        await SessionRevert.cleanup(session)
+        // altimate_change start — bridge fork zod Session.Info (projectID brand "ProjectID") to the
+        // core Effect Session.Info (brand "Project.ID") SessionRevert.cleanup expects; identity at runtime
+        await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
+        // altimate_change end
         const msgs = await Session.messages({ sessionID })
         let currentAgent = await Agent.defaultAgent()
         for (let i = msgs.length - 1; i >= 0; i--) {
@@ -1006,7 +1057,16 @@ export const SessionRoutes = lazy(() =>
           sessionID: SessionID.zod,
         }),
       ),
-      validator("json", SessionRevert.RevertInput.omit({ sessionID: true })),
+      // altimate_change start — RevertInput migrated to Effect Schema; build the sessionID-omitted
+      // payload schema directly from the branded fork IDs (matches the other route validators here)
+      validator(
+        "json",
+        z.object({
+          messageID: MessageID.zod,
+          partID: PartID.zod.optional(),
+        }),
+      ),
+      // altimate_change end
       async (c) => {
         const sessionID = c.req.valid("param").sessionID
         log.info("revert", c.req.valid("json"))

@@ -1,4 +1,4 @@
-import { Cache, Clock, Duration, Effect, Layer, Option, Schema, SchemaGetter, ServiceMap } from "effect"
+import { Cache, Clock, Context, Duration, Effect, Layer, Option, Schema, SchemaGetter } from "effect"
 import {
   FetchHttpClient,
   HttpClient,
@@ -181,12 +181,15 @@ export namespace Account {
     readonly poll: (input: Login) => Effect.Effect<PollResult, AccountError>
   }
 
-  export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/Account") {}
+  // altimate_change start — disambiguate the promise-facade service from the
+  // canonical LayerNode service in account/account.ts, which keeps "@opencode/Account".
+  export class Service extends Context.Service<Service, Interface>()("@opencode/Account.cli") {}
+  // altimate_change end
 
-  export const layer: Layer.Layer<Service, never, AccountRepo | HttpClient.HttpClient> = Layer.effect(
+  export const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpClient> = Layer.effect(
     Service,
     Effect.gen(function* () {
-      const repo = yield* AccountRepo
+      const repo = yield* AccountRepo.Service
       const http = yield* HttpClient.HttpClient
       const httpRead = withTransientReadRetry(http)
       const httpOk = HttpClient.filterStatusOk(http)
@@ -453,7 +456,9 @@ export namespace Account {
     }),
   )
 
-  export const defaultLayer = layer.pipe(Layer.provide(AccountRepo.layer), Layer.provide(FetchHttpClient.layer))
+  // altimate_change start — Layer.suspend defers facade refs past circular module-init
+  export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(FetchHttpClient.layer)))
+  // altimate_change end
 
   export const { runPromise } = makeRuntime(Service, defaultLayer)
 

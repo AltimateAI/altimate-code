@@ -1,7 +1,7 @@
 // altimate_change - Training remove tool for AI Teammate
 import z from "zod"
 import { Tool } from "../../tool/tool"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 import { TrainingStore, TrainingPrompt } from "../training"
 import { TrainingKind } from "../training/types"
 

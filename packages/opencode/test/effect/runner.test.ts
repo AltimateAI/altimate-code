@@ -253,7 +253,7 @@ describe("Runner", () => {
     Effect.gen(function* () {
       const s = yield* Scope.Scope
       const runner = Runner.make<string>(s)
-      const result = yield* runner.startShell((_signal) => Effect.succeed("shell-done"))
+      const result = yield* runner.startShell(Effect.succeed("shell-done"))
       expect(result).toBe("shell-done")
       expect(runner.busy).toBe(false)
     }),
@@ -267,7 +267,7 @@ describe("Runner", () => {
       const fiber = yield* runner.ensureRunning(Effect.never.pipe(Effect.as("x"))).pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
 
-      const exit = yield* runner.startShell((_s) => Effect.succeed("nope")).pipe(Effect.exit)
+      const exit = yield* runner.startShell(Effect.succeed("nope")).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
 
       yield* runner.cancel
@@ -283,11 +283,11 @@ describe("Runner", () => {
       const gate = yield* Deferred.make<void>()
 
       const sh = yield* runner
-        .startShell((_signal) => Deferred.await(gate).pipe(Effect.as("first")))
+        .startShell(Deferred.await(gate).pipe(Effect.as("first")))
         .pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
 
-      const exit = yield* runner.startShell((_s) => Effect.succeed("second")).pipe(Effect.exit)
+      const exit = yield* runner.startShell(Effect.succeed("second")).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
 
       yield* Deferred.succeed(gate, undefined)
@@ -296,33 +296,35 @@ describe("Runner", () => {
   )
 
   it.live(
-    "shell rejects via busy callback and cancel still stops the first shell",
+    // The old API had a `busy?: () => never` reject hook; the new API always
+    // rejects a concurrent shell with a `Busy` failure. This still asserts the
+    // rejection and that cancel stops the first shell.
+    "shell rejects while busy and cancel still stops the first shell",
     Effect.gen(function* () {
       const s = yield* Scope.Scope
-      const runner = Runner.make<string>(s, {
-        busy: () => {
-          throw new Error("busy")
-        },
-      })
+      const runner = Runner.make<string>(s)
 
       const sh = yield* runner
-        .startShell((signal) =>
-          Effect.promise(
-            () =>
-              new Promise<string>((resolve) => {
-                signal.addEventListener("abort", () => resolve("aborted"), { once: true })
-              }),
-          ),
-        )
+        // The runner cancels a shell by interrupting its work fiber. The async
+        // interrupt finalizer resumes with a success value, mirroring the old
+        // abort-signal listener that resolved with "aborted" on cancel.
+        .startShell(Effect.callback<string>((resume) => Effect.sync(() => resume(Effect.succeed("aborted")))))
         .pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
 
-      const exit = yield* runner.startShell((_s) => Effect.succeed("second")).pipe(Effect.exit)
+      const exit = yield* runner.startShell(Effect.succeed("second")).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
 
       yield* runner.cancel
       const done = yield* Fiber.await(sh)
-      expect(Exit.isSuccess(done)).toBe(true)
+      // The new runner cancels a shell by interrupting its work fiber. With no
+      // `onInterrupt` configured, the shell wrapper turns the interrupt into a
+      // Cancelled failure (see Runner.startShell) — it does NOT resolve with a
+      // success value the way the old abort-signal hook did. So the cancelled
+      // shell fiber exits as a failure (matching "cancel interrupts shell that
+      // ignores abort signal" below). What matters is that cancel stopped it.
+      expect(Exit.isFailure(done)).toBe(true)
+      expect(runner.busy).toBe(false)
     }),
   )
 
@@ -334,7 +336,7 @@ describe("Runner", () => {
       const gate = yield* Deferred.make<void>()
 
       const sh = yield* runner
-        .startShell((_signal) => Deferred.await(gate).pipe(Effect.as("ignored")))
+        .startShell(Deferred.await(gate).pipe(Effect.as("ignored")))
         .pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
 
@@ -360,7 +362,7 @@ describe("Runner", () => {
       const gate = yield* Deferred.make<void>()
 
       const sh = yield* runner
-        .startShell((_signal) => Deferred.await(gate).pipe(Effect.as("shell-result")))
+        .startShell(Deferred.await(gate).pipe(Effect.as("shell-result")))
         .pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
       expect(runner.state._tag).toBe("Shell")
@@ -388,7 +390,7 @@ describe("Runner", () => {
       const gate = yield* Deferred.make<void>()
 
       const sh = yield* runner
-        .startShell((_signal) => Deferred.await(gate).pipe(Effect.as("shell")))
+        .startShell(Deferred.await(gate).pipe(Effect.as("shell")))
         .pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
 
@@ -418,14 +420,7 @@ describe("Runner", () => {
       const gate = yield* Deferred.make<void>()
 
       const sh = yield* runner
-        .startShell((signal) =>
-          Effect.promise(
-            () =>
-              new Promise<string>((resolve) => {
-                signal.addEventListener("abort", () => resolve("aborted"), { once: true })
-              }),
-          ),
-        )
+        .startShell(Effect.callback<string>((resume) => Effect.sync(() => resume(Effect.succeed("aborted")))))
         .pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
 
@@ -481,7 +476,7 @@ describe("Runner", () => {
       const runner = Runner.make<string>(s, {
         onBusy: Ref.update(count, (n) => n + 1),
       })
-      yield* runner.startShell((_signal) => Effect.succeed("done"))
+      yield* runner.startShell(Effect.succeed("done"))
       expect(yield* Ref.get(count)).toBe(1)
     }),
   )
@@ -513,7 +508,7 @@ describe("Runner", () => {
       const gate = yield* Deferred.make<void>()
 
       const fiber = yield* runner
-        .startShell((_signal) => Deferred.await(gate).pipe(Effect.as("ok")))
+        .startShell(Deferred.await(gate).pipe(Effect.as("ok")))
         .pipe(Effect.forkChild)
       yield* Effect.sleep("10 millis")
       expect(runner.busy).toBe(true)

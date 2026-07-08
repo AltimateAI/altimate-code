@@ -8,9 +8,14 @@ import { GlobalBus } from "@/bus/global"
 import { AsyncQueue } from "@/util/queue"
 import { Instance } from "../../project/instance"
 import { Installation } from "@/installation"
+// altimate_change start — upstream_fix: branch/dev-build upgrade guard (see upgrade route)
+import { InstallationChannel, isPublishableChannel } from "@opencode-ai/core/installation/version"
+// altimate_change end
 import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
 import { Config } from "../../config/config"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { zod } from "@/util/effect-zod"
 import { errors } from "../error"
 
 const log = Log.create({ service: "server" })
@@ -188,7 +193,7 @@ export const GlobalRoutes = lazy(() =>
             description: "Get global config info",
             content: {
               "application/json": {
-                schema: resolver(Config.Info),
+                schema: resolver(zod(ConfigV1.Info)),
               },
             },
           },
@@ -209,18 +214,31 @@ export const GlobalRoutes = lazy(() =>
             description: "Successfully updated global config",
             content: {
               "application/json": {
-                schema: resolver(Config.Info),
+                schema: resolver(zod(ConfigV1.Info)),
               },
             },
           },
           ...errors(400),
         },
       }),
-      validator("json", Config.Info),
+      validator("json", zod(ConfigV1.Info)),
       async (c) => {
-        const config = c.req.valid("json")
+        const config = c.req.valid("json") as ConfigV1.Info
         const next = await Config.updateGlobal(config)
-        return c.json(next)
+        // altimate_change start — upstream_fix: dispose all instances after global config write
+        void Instance.disposeAll()
+          .catch(() => undefined)
+          .finally(() => {
+            GlobalBus.emit("event", {
+              directory: "global",
+              payload: {
+                type: GlobalDisposedEvent.type,
+                properties: {},
+              },
+            })
+          })
+        // altimate_change end
+        return c.json(next.info)
       },
     )
     .post(
@@ -294,7 +312,17 @@ export const GlobalRoutes = lazy(() =>
         if (method === "unknown") {
           return c.json({ success: false, error: "Unknown installation method" }, 400)
         }
-        const target = c.req.valid("json").target || (await Installation.latest(method))
+        // altimate_change start — upstream_fix: branch/dev builds have no published release, so an
+        // implicit Installation.latest() builds a non-existent npm dist-tag URL (channel = git branch
+        // name) and 404s — and latest() is Effect.orDie, so this handler throws → opaque 500. Return a
+        // clean 400 like the unknown-method branch. isPublishableChannel is an allowlist of channels we
+        // actually publish (latest/beta) — a slash-free branch name like "main" is still not publishable.
+        const explicitTarget = c.req.valid("json").target
+        if (!explicitTarget && (Installation.isLocal() || !isPublishableChannel(InstallationChannel))) {
+          return c.json({ success: false, error: "This build has no published release to upgrade to" }, 400)
+        }
+        const target = explicitTarget || (await Installation.latest(method))
+        // altimate_change end
         const result = await Installation.upgrade(method, target)
           .then(() => ({ success: true as const, version: target }))
           .catch((e) => ({ success: false as const, error: e instanceof Error ? e.message : String(e) }))

@@ -5,6 +5,7 @@ import { resolveConfigPath, addMcpToConfig, findAllConfigPaths, listMcpInConfig 
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { MCP } from "../../mcp"
+import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 
 /**
  * Check which MCP server names are permanently configured on disk
@@ -43,7 +44,7 @@ function safeDetail(server: { type: string } & Record<string, any>): string {
 // Stripping it forces runtime discovery via ~/.altimate/extension-rpc/ sidecars,
 // which always resolves the correct live bridge by matching process.cwd() against
 // each bridge's recorded workspaceFolders.
-function stripSessionEnv(cfg: import("../../config/config").Config.Mcp): import("../../config/config").Config.Mcp {
+function stripSessionEnv(cfg: ConfigMCPV1.Info): ConfigMCPV1.Info {
   if (cfg.type !== "local" || !cfg.environment) return cfg
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { ALTIMATE_EXTENSION_RPC: _rpc, ...rest } = cfg.environment
@@ -129,7 +130,7 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       //  as a security default (no auto-connect until user approves).
       // When the user explicitly adds a server via this tool, it should be enabled.
       const { enabled: _discardEnabled, ...cfgToWrite } = stripSessionEnv(discovered[name]) as any
-      await addMcpToConfig(name, { ...cfgToWrite, enabled: true, updatedAt: new Date().toISOString() } as import('../../config/config').Config.Mcp, configPath)
+      await addMcpToConfig(name, { ...cfgToWrite, enabled: true, updatedAt: new Date().toISOString() } as ConfigMCPV1.Info, configPath)
       // Connect immediately so /mcps reflects the server status in the current session
       // without requiring a restart.
       await MCP.connect(name)

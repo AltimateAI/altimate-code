@@ -1,14 +1,14 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import type { Model } from "@opencode-ai/sdk/v2"
-import { Installation } from "@/installation"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { iife } from "@/util/iife"
-import { Log } from "../../util/log"
 import { setTimeout as sleep } from "node:timers/promises"
 import { CopilotModels } from "./models"
-
-const log = Log.create({ service: "plugin.copilot" })
+import { MessageV2 } from "@/session/message-v2"
 
 const CLIENT_ID = "Ov23li8tweQw6odWQebz"
+const API_VERSION = "2026-06-01"
+const UTILITY_MODELS = ["gpt-5.4-nano", "gpt-4.1", "gpt-4o", "gpt-4o-mini"]
 // Add a small safety buffer when polling to avoid hitting the server
 // slightly too early due to clock skew / timer drift.
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000 // 3 seconds
@@ -27,11 +27,27 @@ function base(enterpriseUrl?: string) {
   return enterpriseUrl ? `https://copilot-api.${normalizeDomain(enterpriseUrl)}` : "https://api.githubcopilot.com"
 }
 
-function fix(model: Model): Model {
+// Check if a message is a synthetic user msg used to attach an image from a tool call
+function imgMsg(msg: any): boolean {
+  if (msg?.role !== "user") return false
+
+  // Handle the 3 api formats
+
+  const content = msg.content
+  if (typeof content === "string") return content === MessageV2.SYNTHETIC_ATTACHMENT_PROMPT
+  if (!Array.isArray(content)) return false
+  return content.some(
+    (part: any) =>
+      (part?.type === "text" || part?.type === "input_text") && part.text === MessageV2.SYNTHETIC_ATTACHMENT_PROMPT,
+  )
+}
+
+function fix(model: Model, url: string): Model {
   return {
     ...model,
     api: {
       ...model.api,
+      url,
       npm: "@ai-sdk/github-copilot",
     },
   }
@@ -39,27 +55,42 @@ function fix(model: Model): Model {
 
 export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
   const sdk = input.client
+  let models: Record<string, Model> = {}
   return {
     provider: {
       id: "github-copilot",
       async models(provider, ctx) {
         if (ctx.auth?.type !== "oauth") {
-          return Object.fromEntries(Object.entries(provider.models).map(([id, model]) => [id, fix(model)]))
+          models = {}
+          return Object.fromEntries(Object.entries(provider.models).map(([id, model]) => [id, fix(model, base())]))
         }
 
+        const auth = ctx.auth
+
         return CopilotModels.get(
-          base(ctx.auth.enterpriseUrl),
+          base(auth.enterpriseUrl),
           {
-            Authorization: `Bearer ${ctx.auth.refresh}`,
+            ...(provider.options?.headers as Record<string, string> | undefined),
+            Authorization: `Bearer ${auth.refresh}`,
             // altimate_change start — upstream_fix: UA brand
-"User-Agent": `altimate-code/${Installation.VERSION}`,
-// altimate_change end
+            "User-Agent": `altimate-code/${InstallationVersion}`,
+            // altimate_change end
+            "X-GitHub-Api-Version": API_VERSION,
           },
           provider.models,
-        ).catch((error) => {
-          log.error("failed to fetch copilot models", { error })
-          return Object.fromEntries(Object.entries(provider.models).map(([id, model]) => [id, fix(model)]))
-        })
+        )
+          .then((result) => {
+            models = result.models
+            return Object.fromEntries(
+              Object.entries(result.models).filter(([, model]) => result.pickerEnabled.has(model.api.id)),
+            )
+          })
+          .catch((error) => {
+            models = {}
+            return Object.fromEntries(
+              Object.entries(provider.models).map(([id, model]) => [id, fix(model, base(auth.enterpriseUrl))]),
+            )
+          })
       },
     },
     auth: {
@@ -68,16 +99,13 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
         const info = await getAuth()
         if (!info || info.type !== "oauth") return {}
 
-        const baseURL = base(info.enterpriseUrl)
-
         return {
-          baseURL,
           apiKey: "",
           async fetch(request: RequestInfo | URL, init?: RequestInit) {
             const info = await getAuth()
             if (info.type !== "oauth") return fetch(request, init)
 
-            const url = request instanceof URL ? request.href : request.toString()
+            const url = request instanceof URL ? request.href : typeof request === "string" ? request : request.url
             const { isVision, isAgent } = iife(() => {
               try {
                 const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body
@@ -90,7 +118,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                       (msg: any) =>
                         Array.isArray(msg.content) && msg.content.some((part: any) => part.type === "image_url"),
                     ),
-                    isAgent: last?.role !== "user",
+                    isAgent: last?.role !== "user" || imgMsg(last),
                   }
                 }
 
@@ -102,7 +130,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                       (item: any) =>
                         Array.isArray(item?.content) && item.content.some((part: any) => part.type === "input_image"),
                     ),
-                    isAgent: last?.role !== "user",
+                    isAgent: last?.role !== "user" || imgMsg(last),
                   }
                 }
 
@@ -124,7 +152,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                               part.content.some((nested: any) => nested?.type === "image")),
                         ),
                     ),
-                    isAgent: !(last?.role === "user" && hasNonToolCalls),
+                    isAgent: !(last?.role === "user" && hasNonToolCalls) || imgMsg(last),
                   }
                 }
               } catch {}
@@ -135,8 +163,8 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
               "x-initiator": isAgent ? "agent" : "user",
               ...(init?.headers as Record<string, string>),
               // altimate_change start — upstream_fix: UA brand
-"User-Agent": `altimate-code/${Installation.VERSION}`,
-// altimate_change end
+              "User-Agent": `altimate-code/${InstallationVersion}`,
+              // altimate_change end
               Authorization: `Bearer ${info.refresh}`,
               "Openai-Intent": "conversation-edits",
             }
@@ -213,8 +241,8 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                 Accept: "application/json",
                 "Content-Type": "application/json",
                 // altimate_change start — upstream_fix: UA brand
-"User-Agent": `altimate-code/${Installation.VERSION}`,
-// altimate_change end
+                "User-Agent": `altimate-code/${InstallationVersion}`,
+                // altimate_change end
               },
               body: JSON.stringify({
                 client_id: CLIENT_ID,
@@ -245,8 +273,8 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                       Accept: "application/json",
                       "Content-Type": "application/json",
                       // altimate_change start — upstream_fix: UA brand
-"User-Agent": `altimate-code/${Installation.VERSION}`,
-// altimate_change end
+                      "User-Agent": `altimate-code/${InstallationVersion}`,
+                      // altimate_change end
                     },
                     body: JSON.stringify({
                       client_id: CLIENT_ID,
@@ -324,9 +352,26 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
       if (incoming.model.api.id.includes("gpt")) {
         output.maxOutputTokens = undefined
       }
+
+      // GitHub Copilot's /v1/messages shim rejects the GA `eager_input_streaming`
+      // field on tool definitions ("Extra inputs are not permitted"). Opt out of
+      // the @ai-sdk/anthropic default so it stops injecting the field.
+      if (incoming.model.api.npm === "@ai-sdk/anthropic") {
+        output.options.toolStreaming = false
+      }
+    },
+    "experimental.provider.small_model": async (incoming, output) => {
+      if (incoming.provider.id !== "github-copilot") return
+      // GitHub exposes utility models for title generation without including them in the picker.
+      output.model = UTILITY_MODELS.map((id) => models[id]).find((model) => model !== undefined)
     },
     "chat.headers": async (incoming, output) => {
       if (!incoming.model.providerID.includes("github-copilot")) return
+
+      output.headers["X-GitHub-Api-Version"] = API_VERSION
+      if (incoming.agent === "title") {
+        output.headers["X-Interaction-Type"] = "agent-session-name-generation"
+      }
 
       if (incoming.model.api.npm === "@ai-sdk/anthropic") {
         output.headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
@@ -345,7 +390,15 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
         })
         .catch(() => undefined)
 
-      if (parts?.data.parts?.some((part) => part.type === "compaction")) {
+      if (
+        parts?.data.parts?.some(
+          (part) =>
+            part.type === "compaction" ||
+            // Auto-compaction resumes via a synthetic user text part. Treat only
+            // that marked followup as agent-initiated so manual prompts stay user-initiated.
+            (part.type === "text" && part.synthetic && part.metadata?.compaction_continue === true),
+        )
+      ) {
         output.headers["x-initiator"] = "agent"
         return
       }

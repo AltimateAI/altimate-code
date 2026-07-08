@@ -19,6 +19,13 @@ import type { SessionID, MessageID } from "./schema"
 // altimate_change start — import Telemetry for per-generation token tracking
 import { Telemetry } from "@/altimate/telemetry"
 // altimate_change end
+// altimate_change start — Effect Context.Service facade so the upstream Effect runtime
+// (app-runtime AppLayer + httpapi server LayerNode list) can compose SessionProcessor as
+// a Service. The fork keeps the imperative `create()` namespace function below; this is a
+// thin delegating facade that preserves behavior exactly.
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Context, Effect, Layer } from "effect"
+// altimate_change end
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -73,6 +80,11 @@ export namespace SessionProcessor {
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+            if (snapshot === undefined) {
+              // altimate_change — upstream_fix: capture the pre-tool snapshot
+              // before the LLM stream can execute provider-side tools.
+              snapshot = await Snapshot.track()
+            }
             const stream = await LLM.stream(streamInput)
 
             for await (const value of stream.fullStream) {
@@ -169,7 +181,14 @@ export namespace SessionProcessor {
                           start: Date.now(),
                         },
                       },
-                      metadata: value.providerMetadata,
+                      // altimate_change start — upstream_fix: preserve the provider-executed flag on the
+                      // tool part's metadata. native-runtime already SKIPS local execution for
+                      // provider-executed tools (they run server-side); tagging the part lets rendering/
+                      // serialization distinguish them from client-executed tool calls, matching upstream.
+                      metadata: value.providerExecuted
+                        ? { ...value.providerMetadata, providerExecuted: true }
+                        : value.providerMetadata,
+                      // altimate_change end
                     })
                     toolcalls[value.toolCallId] = part as MessageV2.ToolPart
                     // altimate_change start — session has now tool-called; suppresses plan refusal warning
@@ -290,7 +309,7 @@ export namespace SessionProcessor {
                   throw value.error
 
                 case "start-step":
-                  snapshot = await Snapshot.track()
+                  if (snapshot === undefined) snapshot = await Snapshot.track()
                   // altimate_change start — record step start time for generation telemetry duration
                   stepStartTime = Date.now()
                   // altimate_change end
@@ -312,6 +331,18 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  if (value.finishReason === "content-filter") {
+                    // altimate_change start — upstream_fix: content-filter
+                    // finishes are session errors, not successful stops.
+                    input.assistantMessage.error = new MessageV2.ContentFilterError({
+                      message: "The response was blocked by the provider's content filter",
+                    }).toObject()
+                    await Bus.publish(Session.Event.Error, {
+                      sessionID: input.assistantMessage.sessionID,
+                      error: input.assistantMessage.error,
+                    })
+                    // altimate_change end
+                  }
                   // altimate_change start — emit per-generation telemetry with token breakdown
                   // Optional fields are only included when the provider actually returns them.
                   Telemetry.track({
@@ -517,11 +548,24 @@ export namespace SessionProcessor {
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
             if (MessageV2.ContextOverflowError.isInstance(error)) {
-              needsCompaction = true
-              Bus.publish(Session.Event.Error, {
-                sessionID: input.sessionID,
-                error,
-              })
+              if ((await Config.get()).compaction?.auto === false && !input.assistantMessage.summary) {
+                // altimate_change start — upstream_fix: honor
+                // compaction.auto=false on reactive provider overflow.
+                input.assistantMessage.error = error
+                input.assistantMessage.finish = "error"
+                await Bus.publish(Session.Event.Error, {
+                  sessionID: input.sessionID,
+                  error,
+                })
+                await SessionStatus.set(input.sessionID, { type: "idle" })
+                // altimate_change end
+              } else {
+                needsCompaction = true
+                Bus.publish(Session.Event.Error, {
+                  sessionID: input.sessionID,
+                  error,
+                })
+              }
             } else {
               const retry = SessionRetry.retryable(error)
               // altimate_change start — cap retries to avoid infinite loops, log on exhaustion
@@ -589,14 +633,23 @@ export namespace SessionProcessor {
           const p = await MessageV2.parts(input.assistantMessage.id)
           for (const part of p) {
             if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
+              // altimate_change start — upstream_fix: mark aborted tools so partial output is replayed correctly.
+              const metadata =
+                part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true }
+              // altimate_change end
               await Session.updatePart({
                 ...part,
                 state: {
                   ...part.state,
                   status: "error",
                   error: "Tool execution aborted",
+                  // altimate_change start — upstream_fix: preserve running tool metadata, including shell partial output.
+                  metadata,
+                  // altimate_change end
                   time: {
-                    start: Date.now(),
+                    // altimate_change start — upstream_fix: keep the original running start time on abort.
+                    start: part.state.status === "running" ? part.state.time.start : Date.now(),
+                    // altimate_change end
                     end: Date.now(),
                   },
                 },
@@ -614,4 +667,46 @@ export namespace SessionProcessor {
     }
     return result
   }
+
+  // altimate_change start — Effect Context.Service facade (delegates to the namespace `create` above)
+  // Upstream's Effect-shaped processor handle, referenced by session/tools.ts and the
+  // processor effect tests. Pure type — the fork's imperative `create()` Promise wrappers
+  // are unaffected; consumers pick/construct from this type independently.
+  export interface Handle {
+    readonly message: MessageV2.Assistant
+    readonly updateToolCall: (
+      toolCallID: string,
+      update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
+    ) => Effect.Effect<MessageV2.ToolPart | undefined>
+    readonly completeToolCall: (
+      toolCallID: string,
+      output: {
+        title: string
+        metadata: Record<string, any>
+        output: string
+        attachments?: MessageV2.FilePart[]
+      },
+    ) => Effect.Effect<void>
+    readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  }
+
+  type CreateInput = Parameters<typeof create>[0]
+
+  export interface Interface {
+    readonly create: (input: CreateInput) => Effect.Effect<Info>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/SessionProcessor") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      create: (input: CreateInput) => Effect.sync(() => create(input)),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

@@ -11,6 +11,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll, beforeEach } from "bun:test"
+import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
 // Disable telemetry so tests don't need AppInsights
@@ -63,7 +64,7 @@ describe("altimate_core_validate error propagation", () => {
     }))
 
     const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute({ sql: "SELECT * FROM users" }, stubCtx())
 
     // The engine ran (success=true), schema-less mode is flagged, and the
@@ -95,7 +96,7 @@ describe("altimate_core_validate error propagation", () => {
     }))
 
     const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute(
       { sql: "SELECT * FROM users", schema_context: { orders: { id: "INT" } } },
       stubCtx(),
@@ -118,7 +119,7 @@ describe("altimate_core_semantics error propagation", () => {
 
   test("returns early with clear error when no schema provided", async () => {
     const { AltimateCoreSemanticsTool } = await import("../../src/altimate/tools/altimate-core-semantics")
-    const tool = await AltimateCoreSemanticsTool.init()
+    const tool = await initTool(AltimateCoreSemanticsTool)
     const result = await tool.execute({ sql: "SELECT * FROM users" }, stubCtx())
 
     expect(result.metadata.success).toBe(false)
@@ -140,7 +141,7 @@ describe("altimate_core_semantics error propagation", () => {
     }))
 
     const { AltimateCoreSemanticsTool } = await import("../../src/altimate/tools/altimate-core-semantics")
-    const tool = await AltimateCoreSemanticsTool.init()
+    const tool = await initTool(AltimateCoreSemanticsTool)
     const result = await tool.execute(
       { sql: "SELECT * FROM users", schema_context: { orders: { id: "INT" } } },
       stubCtx(),
@@ -161,7 +162,7 @@ describe("altimate_core_equivalence error propagation", () => {
 
   test("returns early with clear error when no schema provided", async () => {
     const { AltimateCoreEquivalenceTool } = await import("../../src/altimate/tools/altimate-core-equivalence")
-    const tool = await AltimateCoreEquivalenceTool.init()
+    const tool = await initTool(AltimateCoreEquivalenceTool)
     const result = await tool.execute({ sql1: "SELECT * FROM users", sql2: "SELECT * FROM users" }, stubCtx())
 
     expect(result.metadata.success).toBe(false)
@@ -182,7 +183,7 @@ describe("altimate_core_equivalence error propagation", () => {
     }))
 
     const { AltimateCoreEquivalenceTool } = await import("../../src/altimate/tools/altimate-core-equivalence")
-    const tool = await AltimateCoreEquivalenceTool.init()
+    const tool = await initTool(AltimateCoreEquivalenceTool)
     const result = await tool.execute(
       { sql1: "SELECT * FROM users", sql2: "SELECT * FROM users", schema_context: { orders: { id: "INT" } } },
       stubCtx(),
@@ -227,7 +228,7 @@ describe("altimate_core_fix error propagation", () => {
     }))
 
     const { AltimateCoreFixTool } = await import("../../src/altimate/tools/altimate-core-fix")
-    const tool = await AltimateCoreFixTool.init()
+    const tool = await initTool(AltimateCoreFixTool)
     const result = await tool.execute({ sql: "SELCT * FORM users" }, stubCtx())
 
     expect(result.metadata.error).toContain("Syntax error")
@@ -268,7 +269,7 @@ describe("altimate_core_correct error propagation", () => {
     }))
 
     const { AltimateCoreCorrectTool } = await import("../../src/altimate/tools/altimate-core-correct")
-    const tool = await AltimateCoreCorrectTool.init()
+    const tool = await initTool(AltimateCoreCorrectTool)
     const result = await tool.execute({ sql: "SELCT * FORM users" }, stubCtx())
 
     expect(result.metadata.error).toContain("Syntax error")
@@ -291,7 +292,7 @@ describe("sql_explain error propagation", () => {
     }))
 
     const { SqlExplainTool } = await import("../../src/altimate/tools/sql-explain")
-    const tool = await SqlExplainTool.init()
+    const tool = await initTool(SqlExplainTool)
     const result = await tool.execute({ sql: "SELECT 1", analyze: false }, stubCtx())
 
     expect(result.metadata.error).toBe("MissingParameterError: A password must be specified.")
@@ -314,7 +315,7 @@ describe("finops_query_history error propagation", () => {
     }))
 
     const { FinopsQueryHistoryTool } = await import("../../src/altimate/tools/finops-query-history")
-    const tool = await FinopsQueryHistoryTool.init()
+    const tool = await initTool(FinopsQueryHistoryTool)
     const result = await tool.execute({ warehouse: "default", days: 7, limit: 10 }, stubCtx())
 
     expect(result.metadata.error).toBe("Query history is not available for unknown warehouses.")
@@ -337,7 +338,7 @@ describe("finops_expensive_queries error propagation", () => {
     }))
 
     const { FinopsExpensiveQueriesTool } = await import("../../src/altimate/tools/finops-expensive-queries")
-    const tool = await FinopsExpensiveQueriesTool.init()
+    const tool = await initTool(FinopsExpensiveQueriesTool)
     const result = await tool.execute({ warehouse: "default", days: 7, limit: 20 }, stubCtx())
 
     expect(result.metadata.error).toBe("No warehouse connection configured.")
@@ -359,7 +360,7 @@ describe("finops_analyze_credits error propagation", () => {
     }))
 
     const { FinopsAnalyzeCreditsTool } = await import("../../src/altimate/tools/finops-analyze-credits")
-    const tool = await FinopsAnalyzeCreditsTool.init()
+    const tool = await initTool(FinopsAnalyzeCreditsTool)
     const result = await tool.execute({ warehouse: "default", days: 30, limit: 50 }, stubCtx())
 
     expect(result.metadata.error).toBe("ACCOUNT_USAGE access denied.")
@@ -372,7 +373,7 @@ describe("finops_analyze_credits error propagation", () => {
     })
 
     const { FinopsAnalyzeCreditsTool } = await import("../../src/altimate/tools/finops-analyze-credits")
-    const tool = await FinopsAnalyzeCreditsTool.init()
+    const tool = await initTool(FinopsAnalyzeCreditsTool)
     const result = await tool.execute({ warehouse: "default", days: 30, limit: 50 }, stubCtx())
 
     expect(result.metadata.error).toBe("Connection refused")
@@ -396,7 +397,7 @@ describe("finops_unused_resources error propagation", () => {
     }))
 
     const { FinopsUnusedResourcesTool } = await import("../../src/altimate/tools/finops-unused-resources")
-    const tool = await FinopsUnusedResourcesTool.init()
+    const tool = await initTool(FinopsUnusedResourcesTool)
     const result = await tool.execute({ warehouse: "default", days: 30, limit: 50 }, stubCtx())
 
     expect(result.metadata.error).toBe("Insufficient privileges.")
@@ -420,7 +421,7 @@ describe("finops_warehouse_advice error propagation", () => {
     }))
 
     const { FinopsWarehouseAdviceTool } = await import("../../src/altimate/tools/finops-warehouse-advice")
-    const tool = await FinopsWarehouseAdviceTool.init()
+    const tool = await initTool(FinopsWarehouseAdviceTool)
     const result = await tool.execute({ warehouse: "default", days: 14 }, stubCtx())
 
     expect(result.metadata.error).toBe("Warehouse not found.")
@@ -433,7 +434,7 @@ describe("finops_warehouse_advice error propagation", () => {
     })
 
     const { FinopsWarehouseAdviceTool } = await import("../../src/altimate/tools/finops-warehouse-advice")
-    const tool = await FinopsWarehouseAdviceTool.init()
+    const tool = await initTool(FinopsWarehouseAdviceTool)
     const result = await tool.execute({ warehouse: "default", days: 14 }, stubCtx())
 
     expect(result.metadata.error).toBe("Timeout")
@@ -486,7 +487,7 @@ describe("extractors handle empty message fields", () => {
     }))
 
     const { AltimateCoreValidateTool } = await import("../../src/altimate/tools/altimate-core-validate")
-    const tool = await AltimateCoreValidateTool.init()
+    const tool = await initTool(AltimateCoreValidateTool)
     const result = await tool.execute(
       { sql: "SELECT * FROM nonexistent_table", schema_context: { users: { id: "INT" } } },
       stubCtx(),

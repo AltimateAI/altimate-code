@@ -92,13 +92,34 @@ For remote servers requiring OAuth:
 
 ## CLI Management
 
-```bash
-# List configured MCP servers
-altimate mcp
+Manage MCP servers from the command line with `altimate-code mcp`:
 
-# Test a server connection
-altimate mcp test my-tools
+```bash
+# List configured servers and their connection status (alias: ls)
+altimate-code mcp list
+
+# Add a local (stdio) server
+altimate-code mcp add --name my-tools --type local --command "node ./server.js" \
+  --env API_KEY=secret
+
+# Add a remote (HTTP) server, with an extra header
+altimate-code mcp add --name remote-tools --type remote \
+  --url https://example.com/mcp --header "Authorization=Bearer TOKEN"
+
+# Authenticate / re-authenticate an OAuth-enabled server
+altimate-code mcp auth my-tools
+
+# Remove stored OAuth credentials for a server
+altimate-code mcp logout my-tools
+
+# Remove a server from the config (alias: rm)
+altimate-code mcp remove my-tools
+
+# Debug an OAuth connection for a server
+altimate-code mcp debug my-tools
 ```
+
+`altimate-code mcp add` writes to the project config (`.altimate-code/altimate-code.json`) by default; pass `--global` to write to the global config (`~/.config/altimate-code/`) instead. Use `--type local` with `--command` for stdio servers, or `--type remote` with `--url` for HTTP servers; `--env` and `--header` are repeatable. OAuth is enabled by default (`--oauth`).
 
 ## Experimental Settings
 

@@ -25,6 +25,12 @@ import { SystemPrompt } from "./system"
 import { Flag } from "@/flag/flag"
 import { PermissionNext } from "@/permission/next"
 import { Auth } from "@/auth"
+// altimate_change start — Effect Context.Service facade (upstream v1.17.9 shape)
+import { Context, Effect, Layer, Stream } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import type { LLMEvent } from "@opencode-ai/llm"
+import { LLMAISDK } from "./llm/ai-sdk"
+// altimate_change end
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -211,6 +217,10 @@ export namespace LLM {
           error,
         })
       },
+      // altimate_change start — upstream_fix: Copilot raw billing chunks
+      // Copilot exposes totalNanoAiu only through provider raw chunks.
+      includeRawChunks: input.model.providerID.includes("github-copilot"),
+      // altimate_change end
       async experimental_repairToolCall(failed) {
         const lower = failed.toolCall.toolName.toLowerCase()
         if (lower !== failed.toolCall.toolName && tools[lower]) {
@@ -275,6 +285,7 @@ export namespace LLM {
         model: language,
         middleware: [
           {
+            specificationVersion: "v3",
             async transformParams(args) {
               if (args.type === "stream") {
                 // @ts-expect-error
@@ -329,5 +340,47 @@ export namespace LLM {
     }
     return names
   }
+  // altimate_change end
+
+  // altimate_change start — Effect Context.Service facade so the new upstream consumers
+  // that do `yield* LLM.Service` / `LLM.defaultLayer` / `LLM.node` compile. The imperative
+  // `LLM.stream(...)` Promise API above is preserved unchanged; this Service delegates to it.
+  // The single `stream` method mirrors the upstream v1.17.9 shape: it returns an Effect
+  // `Stream` of `@opencode-ai/llm` `LLMEvent`s. We acquire a scoped AbortController, run the
+  // namespace `stream()` to get the AI-SDK `StreamTextResult`, then convert its `fullStream`
+  // to `LLMEvent`s via the existing `LLMAISDK.toLLMEvents` adapter (per-stream adapter state).
+  export interface Interface {
+    readonly stream: (input: Omit<StreamInput, "abort">) => Stream.Stream<LLMEvent, unknown>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/LLM") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      stream(input) {
+        return Stream.unwrap(
+          Effect.gen(function* () {
+            const ctrl = yield* Effect.acquireRelease(
+              Effect.sync(() => new AbortController()),
+              (c) => Effect.sync(() => c.abort()),
+            )
+            const result = yield* Effect.promise(() => stream({ ...input, abort: ctrl.signal }))
+            const state = LLMAISDK.adapterState()
+            return Stream.fromAsyncIterable(result.fullStream, (e) =>
+              e instanceof Error ? e : new Error(String(e)),
+            ).pipe(
+              Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+              Stream.flatMap((events) => Stream.fromIterable(events)),
+            )
+          }),
+        )
+      },
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
   // altimate_change end
 }

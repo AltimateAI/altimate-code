@@ -29,9 +29,9 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { setTimeout as sleep } from "node:timers/promises"
 import { Config } from "@/config/config"
-import { Log } from "@/util/log"
+import { Log } from "@/altimate/util/log"
 import { Server } from "@/server/server"
-import { Flag } from "@/flag/flag"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Trace, FileExporter, HttpExporter, type TraceExporter } from "./tracing"
 
 const MAX_TRACES = 100
@@ -329,6 +329,22 @@ export class TraceConsumer {
     this.sessionTraces.clear()
     this.sessionUserMsgIds.clear()
   }
+
+  // altimate_change start — synchronous clean finalize for shutdown paths where async fs writes do
+  // not flush (the quiet TUI Worker thread). Mirrors flush() but uses Trace.finalizeSync (writeFileSync)
+  // so every active session's trace lands on disk before the worker is torn down.
+  flushSync() {
+    for (const trace of this.sessionTraces.values()) {
+      try {
+        trace.finalizeSync()
+      } catch {
+        // best-effort — never throw during shutdown
+      }
+    }
+    this.sessionTraces.clear()
+    this.sessionUserMsgIds.clear()
+  }
+  // altimate_change end
 }
 
 /**

@@ -1,8 +1,8 @@
 import { Account } from "@/account"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
-import { Installation } from "@/installation"
-import { Log } from "@/util/log"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { Log } from "@/altimate/util/log"
 import { createHash, randomUUID } from "crypto"
 import fs from "fs"
 import path from "path"
@@ -1235,7 +1235,7 @@ export namespace Telemetry {
       const sid: string = fields.session_id ?? sessionId
 
       const properties: Record<string, string> = {
-        cli_version: Installation.VERSION,
+        cli_version: InstallationVersion,
         source: clientSource,
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
@@ -1265,7 +1265,7 @@ export namespace Telemetry {
           "ai.user.id": userEmail || machineId || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
-          "ai.application.ver": Installation.VERSION,
+          "ai.application.ver": InstallationVersion,
         },
         data: {
           baseType: "EventData",

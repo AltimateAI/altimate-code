@@ -14,6 +14,7 @@
  * `altimate_core.init()` marker can't reappear in a newly added tool either.
  */
 import { describe, test, expect } from "bun:test"
+import { initTool } from "./tool-fixture"
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { AltimateCoreColumnLineageTool } from "../../src/altimate/tools/altimate-core-column-lineage"
@@ -27,7 +28,7 @@ describe("altimate-core tool descriptions (issue #881)", () => {
 
   for (const { name, tool } of tools) {
     test(`${name} must not claim it requires an API key / altimate_core.init()`, async () => {
-      const { description } = await tool.init()
+      const { description } = await initTool(tool)
       expect(description).toBeTruthy()
       const lower = description.toLowerCase()
       // These deterministic engine tools run offline — no auth in their call path.

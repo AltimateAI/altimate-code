@@ -75,11 +75,11 @@ describe("install.ps1 — host consistency with the upgrade path", () => {
 
 describe("upgrade() — native Windows routes through PowerShell", () => {
   test("upgradePowershell exists and runs the PS installer", () => {
-    expect(INSTALLATION_SRC).toContain("async function upgradePowershell")
+    expect(INSTALLATION_SRC).toContain("const upgradePowershell = Effect.fnUntraced")
     expect(INSTALLATION_SRC).toMatch(/irm \$\{UPGRADE_INSTALL_PS_URL\} \| iex/)
   })
 
   test("curl branch dispatches on win32", () => {
-    expect(INSTALLATION_SRC).toMatch(/process\.platform === "win32"\s*\?\s*await upgradePowershell\(target\)/)
+    expect(INSTALLATION_SRC).toMatch(/process\.platform === "win32"\s*\?\s*yield\* upgradePowershell\(target\)/)
   })
 })

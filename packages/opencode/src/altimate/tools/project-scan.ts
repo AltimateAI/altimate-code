@@ -5,7 +5,6 @@ import { existsSync, readFileSync } from "fs"
 import path from "path"
 import { Telemetry } from "@/telemetry"
 import { Config } from "@/config/config"
-import { Flag } from "@/flag/flag"
 import { Skill } from "../../skill"
 
 // --- Types ---
@@ -860,14 +859,21 @@ export const ProjectScanTool = Tool.define("project_scan", {
       })
     const mcpServerCount = Object.keys(mcpConfig).length
 
+    // Upstream's Effect-logging migration removed these keys from the Flag namespace
+    // (and turned FILEWATCHER into an Effect Config<boolean>). For census we only need
+    // "was the env var set", so read process.env directly.
+    const flagSet = (key: string) => {
+      const v = process.env[key]
+      return v === "true" || v === "1"
+    }
     const enabledFlags: string[] = []
-    if (Flag.OPENCODE_EXPERIMENTAL) enabledFlags.push("experimental")
-    if (Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) enabledFlags.push("plan_mode")
-    if (Flag.OPENCODE_EXPERIMENTAL_FILEWATCHER) enabledFlags.push("filewatcher")
-    if (Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL) enabledFlags.push("lsp_tool")
-    if (Flag.OPENCODE_EXPERIMENTAL_OXFMT) enabledFlags.push("oxfmt")
-    if (Flag.OPENCODE_ENABLE_EXA) enabledFlags.push("exa")
-    if (Flag.OPENCODE_ENABLE_QUESTION_TOOL) enabledFlags.push("question_tool")
+    if (flagSet("OPENCODE_EXPERIMENTAL")) enabledFlags.push("experimental")
+    if (flagSet("OPENCODE_EXPERIMENTAL_PLAN_MODE")) enabledFlags.push("plan_mode")
+    if (flagSet("OPENCODE_EXPERIMENTAL_FILEWATCHER")) enabledFlags.push("filewatcher")
+    if (flagSet("OPENCODE_EXPERIMENTAL_LSP_TOOL")) enabledFlags.push("lsp_tool")
+    if (flagSet("OPENCODE_EXPERIMENTAL_OXFMT")) enabledFlags.push("oxfmt")
+    if (flagSet("OPENCODE_ENABLE_EXA")) enabledFlags.push("exa")
+    if (flagSet("OPENCODE_ENABLE_QUESTION_TOOL")) enabledFlags.push("question_tool")
 
     const skillCount = await Skill.all()
       .then((s) => s.length)

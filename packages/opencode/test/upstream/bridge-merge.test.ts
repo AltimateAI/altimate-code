@@ -347,7 +347,9 @@ describe("bridge merge: critical altimate features remain wired", () => {
     const agentPath = path.join(srcDir, "agent", "agent.ts")
     const content = await readText(agentPath)
     expect(content).toMatch(/agent === ["']build["']/)
-    expect(content).toContain('x["builder"]')
+    // v1.17.9 merge renamed the agent-map variable `x` -> `agents`; the alias
+    // still resolves "build" to the "builder" agent (agent.ts ~L539).
+    expect(content).toMatch(/\b(?:agents|x)\["builder"\]/)
   })
 
   test("Altimate-specific provider plugins exist", async () => {

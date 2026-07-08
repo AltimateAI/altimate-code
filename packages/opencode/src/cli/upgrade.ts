@@ -1,12 +1,15 @@
-import { Bus } from "@/bus"
 import { Config } from "@/config/config"
-import { Flag } from "@/flag/flag"
+import { AppRuntime } from "@/effect/app-runtime"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Installation } from "@/installation"
+import { InstallationVersion, InstallationChannel, isPublishableChannel } from "@opencode-ai/core/installation/version"
+import { GlobalBus } from "@/bus/global"
+// altimate_change start — re-export the centralized channel guard so existing importers
+// (cli/cmd/upgrade.ts, installation/upgrade.test.ts) keep resolving it from here.
+export { isPublishableChannel }
+// altimate_change end
+
 // altimate_change start — robust upgrade notification with zero external dependencies
-import { Log } from "@/util/log"
-
-const log = Log.create({ service: "upgrade" })
-
 /**
  * Compare two semver-like version strings. Returns:
  *   1  if a > b
@@ -45,6 +48,30 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
   if (!preA && preB) return 1
   if (preA && !preB) return -1
 
+  // altimate_change start — order prerelease identifiers so beta channels auto-upgrade
+  // (e.g. 0.9.0-beta.1 < 0.9.0-beta.2 < 0.9.0-beta.10). Without this a beta tester would
+  // be stuck on the first beta forever. Semver rule: compare dot-separated identifiers;
+  // numeric identifiers compare as numbers, otherwise lexically; a shorter set is lower.
+  if (preA && preB && preA !== preB) {
+    const idsA = preA.split(".")
+    const idsB = preB.split(".")
+    for (let i = 0; i < Math.max(idsA.length, idsB.length); i++) {
+      const x = idsA[i]
+      const y = idsB[i]
+      if (x === undefined) return -1
+      if (y === undefined) return 1
+      const nx = Number(x)
+      const ny = Number(y)
+      const bothNum = !isNaN(nx) && !isNaN(ny)
+      if (bothNum) {
+        if (nx > ny) return 1
+        if (nx < ny) return -1
+      } else if (x > y) return 1
+      else if (x < y) return -1
+    }
+  }
+  // altimate_change end
+
   return 0
 }
 
@@ -55,50 +82,98 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
 export function isValidVersion(version: string): boolean {
   return /^\d+\.\d+\.\d+/.test(version.replace(/^v/, ""))
 }
+// altimate_change end
+
+// altimate_change start — upstream_fix: honor both fork and upstream autoupdate-disable env vars
+function truthyEnv(name: string) {
+  const value = process.env[name]?.toLowerCase()
+  return value === "true" || value === "1"
+}
+
+export function isAutoupdateDisabledByEnv() {
+  return truthyEnv("ALTIMATE_CLI_DISABLE_AUTOUPDATE") || truthyEnv("OPENCODE_DISABLE_AUTOUPDATE")
+}
+// altimate_change end
 
 export async function upgrade() {
-  const config = await Config.global()
+  // altimate_change start — skip the upgrade check for local / branch / dev builds.
+  // These are never published to npm or GitHub releases, so the version lookup
+  // 404s and spams the TUI bottom bar (e.g. a build off branch
+  // "upstream/merge-v1.17.9" whose channel becomes that branch name). isLocal()
+  // covers explicit local builds; the channel-shape check covers branch-name
+  // channels that aren't a valid npm dist-tag.
+  if (Installation.isLocal() || !isPublishableChannel(InstallationChannel)) return
+  // altimate_change end
+  const config = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.getGlobal()))
   const method = await Installation.method()
+  // altimate_change start — log fetch failures instead of swallowing them silently
   const latest = await Installation.latest(method).catch((err) => {
-    log.warn("failed to fetch latest version", { error: String(err), method })
+    console.warn(`[upgrade] failed to fetch latest version (method=${method}): ${String(err)}`)
     return undefined
   })
+  // altimate_change end
   if (!latest) return
-  if (Installation.VERSION === latest) return
+  if (InstallationVersion === latest) return
 
-  // Prevent downgrade: if current version is already >= latest, skip
+  // altimate_change start — prevent downgrade when local version is already newer than latest release
   if (
-    Installation.VERSION !== "local" &&
-    isValidVersion(Installation.VERSION) &&
+    InstallationVersion !== "local" &&
+    isValidVersion(InstallationVersion) &&
     isValidVersion(latest) &&
-    compareVersions(Installation.VERSION, latest) >= 0
+    compareVersions(InstallationVersion, latest) >= 0
   ) {
     return
   }
+  // altimate_change end
 
-  const notify = () => Bus.publish(Installation.Event.UpdateAvailable, { version: latest })
+  const notify = () =>
+    GlobalBus.emit("event", {
+      directory: "global",
+      payload: {
+        type: Installation.Event.UpdateAvailable.type,
+        properties: { version: latest },
+      },
+    })
 
-  // Always notify when update is available, regardless of autoupdate setting
-  if (config.autoupdate === false || Flag.OPENCODE_DISABLE_AUTOUPDATE) {
-    await notify()
+  // altimate_change start — always notify when an update is available, regardless of autoupdate setting
+  // Upstream returns early on `autoupdate === false`; we surface the available update instead so
+  // users on pinned/disabled-autoupdate installs still learn a newer version exists.
+  if (config.autoupdate === false || isAutoupdateDisabledByEnv() || Flag.OPENCODE_ALWAYS_NOTIFY_UPDATE) {
+    notify()
     return
   }
-  if (config.autoupdate === "notify") {
-    await notify()
+  // altimate_change end
+
+  const kind = Installation.getReleaseType(InstallationVersion, latest)
+
+  if (config.autoupdate === "notify" || kind !== "patch") {
+    notify()
     return
   }
 
-  // Can't auto-upgrade for unknown or unsupported methods — notify instead
+  // altimate_change start — can't auto-upgrade for unknown or unsupported (yarn) methods; notify instead
+  // v1.17.9's Installation.upgrade() switch has no `yarn` case (hits default → UpgradeFailedError),
+  // so route yarn to a notify like `unknown` rather than letting the upgrade attempt fail.
   if (method === "unknown" || method === "yarn") {
-    await notify()
+    notify()
     return
   }
+  // altimate_change end
 
   await Installation.upgrade(method, latest)
-    .then(() => Bus.publish(Installation.Event.Updated, { version: latest }))
-    .catch(async (err) => {
-      log.warn("auto-upgrade failed, notifying instead", { error: String(err), method, target: latest })
-      await notify()
+    .then(() =>
+      GlobalBus.emit("event", {
+        directory: "global",
+        payload: {
+          type: Installation.Event.Updated.type,
+          properties: { version: latest },
+        },
+      }),
+    )
+    // altimate_change start — log auto-upgrade failures and fall back to a notify instead of swallowing
+    .catch((err) => {
+      console.warn(`[upgrade] auto-upgrade failed, notifying instead (method=${method}, target=${latest}): ${String(err)}`)
+      notify()
     })
+  // altimate_change end
 }
-// altimate_change end

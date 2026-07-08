@@ -2,7 +2,10 @@ import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { MCP } from "../../mcp"
-import { Config } from "../../config/config"
+// altimate_change start — Config.Mcp + MCP.Status migrated to Effect Schema in v1.17.9; convert to zod for HTTP schemas
+import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+import { zod } from "@/util/effect-zod"
+// altimate_change end
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
 
@@ -19,7 +22,7 @@ export const McpRoutes = lazy(() =>
             description: "MCP server status",
             content: {
               "application/json": {
-                schema: resolver(z.record(z.string(), MCP.Status)),
+                schema: resolver(z.record(z.string(), zod(MCP.Status))),
               },
             },
           },
@@ -40,7 +43,7 @@ export const McpRoutes = lazy(() =>
             description: "MCP server added successfully",
             content: {
               "application/json": {
-                schema: resolver(z.record(z.string(), MCP.Status)),
+                schema: resolver(z.record(z.string(), zod(MCP.Status))),
               },
             },
           },
@@ -51,7 +54,7 @@ export const McpRoutes = lazy(() =>
         "json",
         z.object({
           name: z.string(),
-          config: Config.Mcp,
+          config: zod(ConfigMCPV1.Info),
         }),
       ),
       async (c) => {
@@ -89,7 +92,11 @@ export const McpRoutes = lazy(() =>
           return c.json({ error: `MCP server ${name} does not support OAuth` }, 400)
         }
         const result = await MCP.startAuth(name)
-        return c.json(result)
+        // altimate_change start — upstream_fix: return only the documented `authorizationUrl`. startAuth
+        // also carries `oauthState` (and a live MCP client on the already-authenticated path); returning
+        // the raw result leaked OAuth state + a non-serializable client object (or 500'd on serialize).
+        return c.json({ authorizationUrl: result.authorizationUrl })
+        // altimate_change end
       },
     )
     .post(
@@ -104,7 +111,7 @@ export const McpRoutes = lazy(() =>
             description: "OAuth authentication completed",
             content: {
               "application/json": {
-                schema: resolver(MCP.Status),
+                schema: resolver(zod(MCP.Status)),
               },
             },
           },
@@ -135,7 +142,7 @@ export const McpRoutes = lazy(() =>
             description: "OAuth authentication completed",
             content: {
               "application/json": {
-                schema: resolver(MCP.Status),
+                schema: resolver(zod(MCP.Status)),
               },
             },
           },

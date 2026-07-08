@@ -1,3 +1,10 @@
+// altimate_change start — restore the fork's async-generator Ripgrep namespace
+// (files/tree/search/Match/filepath). Upstream v1.17.9 moved ripgrep to an
+// Effect Service (find/glob/grep) in @opencode-ai/core/ripgrep, but our tools
+// (tool/ls, tool/glob, tool/skill, file/index, session/system, server/routes/file)
+// consume the old Promise/async-generator API. This shim re-implements that API
+// over the same `rg` binary download/lookup so those callers keep working without
+// an Effect-context rewrite.
 // Ripgrep utility functions
 import path from "path"
 import { Global } from "../global"
@@ -374,3 +381,4 @@ export namespace Ripgrep {
       .map((r) => r.data)
   }
 }
+// altimate_change end

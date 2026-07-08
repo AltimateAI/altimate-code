@@ -4,17 +4,26 @@ import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { ProviderID, ModelID } from "@/provider/schema"
 import { Session } from "@/session"
+// altimate_change — SessionSummary.diff computes the full-session diff on read; the facade
+// Session.diff reads the persisted `session_diff` key, which the merge left unwritten after turns.
+import { SessionSummary } from "@/session/summary"
 import type { SessionID } from "@/session/schema"
 import { MessageV2 } from "@/session/message-v2"
 import { Database, eq } from "@/storage/db"
-import { SessionShareTable } from "./share.sql"
+import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { Log } from "@/util/log"
 import type * as SDK from "@opencode-ai/sdk/v2"
+// altimate_change start — Effect Context.Service facade for new upstream consumers
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Instance } from "@/project/instance"
+import { InstanceRef } from "@/effect/instance-ref"
+// altimate_change end
 
 export namespace ShareNext {
   const log = Log.create({ service: "share-next" })
 
-  type ApiEndpoints = {
+  export type ApiEndpoints = {
     create: string
     sync: (shareId: string) => string
     remove: (shareId: string) => string
@@ -140,7 +149,11 @@ export namespace ShareNext {
         })
         .run(),
     )
-    fullSync(sessionID)
+    // altimate_change start — upstream_fix: catch background full share sync failures
+    void fullSync(sessionID).catch((error) => {
+      log.error("share full sync failed", { sessionID, error })
+    })
+    // altimate_change end
     return result
   }
 
@@ -167,7 +180,7 @@ export namespace ShareNext {
       }
     | {
         type: "session_diff"
-        data: SDK.FileDiff[]
+        data: SDK.SnapshotFileDiff[]
       }
     | {
         type: "model"
@@ -206,25 +219,31 @@ export namespace ShareNext {
     }
 
     const timeout = setTimeout(async () => {
-      const queued = queue.get(sessionID)
-      if (!queued) return
-      queue.delete(sessionID)
-      const share = get(sessionID)
-      if (!share) return
+      // altimate_change start — upstream_fix: catch background share flush failures
+      try {
+        const queued = queue.get(sessionID)
+        if (!queued) return
+        queue.delete(sessionID)
+        const share = get(sessionID)
+        if (!share) return
 
-      const req = await request()
-      const response = await fetch(`${req.baseUrl}${req.api.sync(share.id)}`, {
-        method: "POST",
-        headers: { ...req.headers, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          secret: share.secret,
-          data: Array.from(queued.data.values()),
-        }),
-      })
+        const req = await request()
+        const response = await fetch(`${req.baseUrl}${req.api.sync(share.id)}`, {
+          method: "POST",
+          headers: { ...req.headers, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            secret: share.secret,
+            data: Array.from(queued.data.values()),
+          }),
+        })
 
-      if (!response.ok) {
-        log.warn("failed to sync share", { sessionID, shareID: share.id, status: response.status })
+        if (!response.ok) {
+          log.warn("failed to sync share", { sessionID, shareID: share.id, status: response.status })
+        }
+      } catch (error) {
+        log.error("share flush failed", { sessionID, error })
       }
+      // altimate_change end
     }, 1000)
     queue.set(sessionID, { timeout, data: dataMap })
   }
@@ -255,7 +274,7 @@ export namespace ShareNext {
   async function fullSync(sessionID: SessionID) {
     log.info("full sync", { sessionID })
     const session = await Session.get(sessionID)
-    const diffs = await Session.diff(sessionID)
+    const diffs = await SessionSummary.diff({ sessionID })
     const messages = await Array.fromAsync(MessageV2.stream(sessionID))
     const models = await Promise.all(
       Array.from(
@@ -287,4 +306,51 @@ export namespace ShareNext {
       },
     ])
   }
+
+  // altimate_change start — Effect Context.Service facade (delegates to namespace fns above)
+  export type ShareResult = { id: string; url: string; secret: string }
+  export type ShareRequest = {
+    headers: Record<string, string>
+    api: ApiEndpoints
+    baseUrl: string
+  }
+
+  export interface Interface {
+    readonly init: () => Effect.Effect<void>
+    readonly url: () => Effect.Effect<string>
+    readonly request: () => Effect.Effect<ShareRequest>
+    readonly create: (sessionID: SessionID) => Effect.Effect<ShareResult>
+    readonly remove: (sessionID: SessionID) => Effect.Effect<void>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/ShareNext") {}
+
+  // altimate_change start — bridge Effect InstanceRef back into the legacy ALS
+  // Instance namespace. The imperative ShareNext functions read Config/Account/
+  // Database via the makeRuntime facades, which resolve the active instance from
+  // the legacy Instance ALS. Without restoring the InstanceRef captured by the
+  // Effect runtime, those reads fail ("InstanceRef not provided"). Mirrors the
+  // Plugin facade bridge in src/plugin/index.ts.
+  const withInstance = <A>(fn: () => Promise<A>) =>
+    Effect.gen(function* () {
+      const ctx = yield* InstanceRef
+      return yield* Effect.promise(() => (ctx ? Instance.restore(ctx, fn) : fn()))
+    })
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      init: () => withInstance(() => init()),
+      url: () => withInstance(() => url()),
+      request: () => withInstance(() => request()),
+      create: (sessionID) => withInstance(() => create(sessionID)),
+      remove: (sessionID) => withInstance(() => remove(sessionID)),
+    }),
+  )
+  // altimate_change end
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

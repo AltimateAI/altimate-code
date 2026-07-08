@@ -1,4 +1,4 @@
-import { Slug } from "@opencode-ai/util/slug"
+import { Slug } from "@opencode-ai/core/util/slug"
 import path from "path"
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
@@ -11,8 +11,8 @@ import { Installation } from "../installation"
 
 import { Database, NotFoundError, eq, and, or, gte, isNull, desc, like, inArray, lt } from "../storage/db"
 import type { SQL } from "../storage/db"
-import { SessionTable, MessageTable, PartTable } from "./session.sql"
-import { ProjectTable } from "../project/project.sql"
+import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { Storage } from "@/storage/storage"
 import { Log } from "../util/log"
 import { MessageV2 } from "./message-v2"
@@ -32,6 +32,12 @@ import { PermissionNext } from "@/permission/next"
 import { Global } from "@/global"
 import type { LanguageModelV2Usage } from "@ai-sdk/provider"
 import { iife } from "@/util/iife"
+// altimate_change start — Effect runtime bridge for Promise-returning helpers (Storage reads)
+import { AppRuntime } from "@/effect/app-runtime"
+// core SessionTable columns brand project ids as "Project.ID"; re-brand the fork "ProjectID"
+// at the drizzle boundary so column comparisons/inserts typecheck.
+import { ProjectV2 } from "@opencode-ai/core/project"
+// altimate_change end
 
 export namespace Session {
   const log = Log.create({ service: "session" })
@@ -66,7 +72,10 @@ export namespace Session {
     return {
       id: row.id,
       slug: row.slug,
-      projectID: row.project_id,
+      // altimate_change start — core SQL tables brand ids as "Project.ID"; Info.projectID uses
+      // the fork "ProjectID" brand. ProjectID.make re-brands (identity at runtime).
+      projectID: ProjectID.make(row.project_id),
+      // altimate_change end
       workspaceID: row.workspace_id ?? undefined,
       directory: row.directory,
       parentID: row.parent_id ?? undefined,
@@ -75,7 +84,11 @@ export namespace Session {
       summary,
       share,
       revert,
-      permission: row.permission ?? undefined,
+      // altimate_change start — upstream_fix: core's SessionTable.permission column is typed
+      // as a readonly PermissionV1.Ruleset; Info.permission (PermissionNext.Ruleset) is the
+      // structurally-identical mutable form. Cast to drop readonly.
+      permission: (row.permission as PermissionNext.Ruleset | null) ?? undefined,
+      // altimate_change end
       metadata: row.metadata ?? undefined,
       time: {
         created: row.time_created,
@@ -89,7 +102,9 @@ export namespace Session {
   export function toRow(info: Info) {
     return {
       id: info.id,
-      project_id: info.projectID,
+      // altimate_change start — re-brand fork ProjectID to core "Project.ID" for the column
+      project_id: ProjectV2.ID.make(info.projectID),
+      // altimate_change end
       workspace_id: info.workspaceID,
       parent_id: info.parentID,
       slug: info.slug,
@@ -121,6 +136,17 @@ export namespace Session {
     return `${title} (fork #1)`
   }
 
+  // altimate_change start — zod mirror of Snapshot.FileDiff (now an Effect Struct) for the
+  // zod-based Info/event schemas below. Matches src/snapshot/index.ts FileDiff shape.
+  const FileDiffZod = z.object({
+    file: z.string().optional(),
+    patch: z.string().optional(),
+    additions: z.number(),
+    deletions: z.number(),
+    status: z.enum(["added", "deleted", "modified"]).optional(),
+  })
+  // altimate_change end
+
   export const Info = z
     .object({
       id: SessionID.zod,
@@ -134,7 +160,7 @@ export namespace Session {
           additions: z.number(),
           deletions: z.number(),
           files: z.number(),
-          diffs: Snapshot.FileDiff.array().optional(),
+          diffs: FileDiffZod.array().optional(),
         })
         .optional(),
       share: z
@@ -210,7 +236,7 @@ export namespace Session {
       "session.diff",
       z.object({
         sessionID: SessionID.zod,
-        diff: Snapshot.FileDiff.array(),
+        diff: FileDiffZod.array(),
       }),
     ),
     Error: BusEvent.define(
@@ -529,7 +555,11 @@ export namespace Session {
 
   export const diff = fn(SessionID.zod, async (sessionID) => {
     try {
-      return await Storage.read<Snapshot.FileDiff[]>(["session_diff", sessionID])
+      // altimate_change start — Storage is now an Effect Service; bridge the read to a Promise.
+      return await AppRuntime.runPromise(
+        Storage.Service.use((s) => s.read<Snapshot.FileDiff[]>(["session_diff", sessionID])),
+      )
+      // altimate_change end
     } catch {
       return []
     }
@@ -560,7 +590,9 @@ export namespace Session {
     limit?: number
   }) {
     const project = Instance.project
-    const conditions = [eq(SessionTable.project_id, project.id)]
+    // altimate_change start — re-brand fork ProjectID to core "Project.ID" for the column compare
+    const conditions = [eq(SessionTable.project_id, ProjectV2.ID.make(project.id))]
+    // altimate_change end
 
     if (WorkspaceContext.workspaceID) {
       conditions.push(eq(SessionTable.workspace_id, WorkspaceContext.workspaceID))
@@ -650,7 +682,9 @@ export namespace Session {
       )
       for (const item of items) {
         projects.set(item.id, {
-          id: item.id,
+          // altimate_change start — re-brand core "Project.ID" to fork "ProjectID"
+          id: ProjectID.make(item.id),
+          // altimate_change end
           name: item.name ?? undefined,
           worktree: item.worktree,
         })
@@ -669,7 +703,9 @@ export namespace Session {
       db
         .select()
         .from(SessionTable)
-        .where(and(eq(SessionTable.project_id, project.id), eq(SessionTable.parent_id, parentID)))
+        // altimate_change start — re-brand fork ProjectID to core "Project.ID" for the column compare
+        .where(and(eq(SessionTable.project_id, ProjectV2.ID.make(project.id)), eq(SessionTable.parent_id, parentID)))
+        // altimate_change end
         .all(),
     )
     return rows.map(fromRow)

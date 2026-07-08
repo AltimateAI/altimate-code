@@ -2,7 +2,7 @@
 import fs from "fs/promises"
 import fsSync from "fs"
 import path from "path"
-import { Global } from "@/global"
+import { Global } from "@opencode-ai/core/global"
 import { Instance } from "@/project/instance"
 import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, MemoryBlockSchema, type MemoryBlock, type Citation } from "./types"
 import { Telemetry } from "@/altimate/telemetry"

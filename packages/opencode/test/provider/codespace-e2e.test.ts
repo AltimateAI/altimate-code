@@ -23,9 +23,37 @@ import { test, expect, describe } from "bun:test"
 
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
+import { ProjectID } from "../../src/project/schema"
 import { Provider } from "../../src/provider/provider"
 import { Env } from "../../src/env"
 import { SessionRetry } from "../../src/session/retry"
+
+function provideProviderTestInstance<R>(input: {
+  directory: string
+  init?: () => Promise<unknown>
+  fn: () => R | Promise<R>
+}) {
+  const now = Date.now()
+  return Instance.restore(
+    {
+      directory: input.directory,
+      worktree: input.directory,
+      project: {
+        id: ProjectID.global,
+        worktree: input.directory,
+        time: {
+          created: now,
+          updated: now,
+        },
+        sandboxes: [],
+      },
+    },
+    async () => {
+      await input.init?.()
+      return input.fn()
+    },
+  )
+}
 
 // Machine environment vars that may leak from CI into tests.
 // These must be explicitly removed when testing "clean" environments.
@@ -35,7 +63,7 @@ const MACHINE_ENV_VARS = ["CODESPACES", "CODESPACE_NAME", "GITHUB_ACTIONS", "CI"
 // Removes all machine-env vars first to isolate tests from CI environment.
 async function withEnv(envVars: Record<string, string>, fn: () => Promise<void>) {
   await using tmp = await tmpdir({ config: {} })
-  await Instance.provide({
+  await provideProviderTestInstance({
     directory: tmp.path,
     init: async () => {
       // Remove machine-env vars that may leak from CI
@@ -218,7 +246,7 @@ describe("Adversarial: Codespace edge cases", () => {
     await using tmp = await tmpdir({
       config: { disabled_providers: ["github-models"] },
     })
-    await Instance.provide({
+    await provideProviderTestInstance({
       directory: tmp.path,
       init: async () => {
         for (const k of MACHINE_ENV_VARS) Env.remove(k)
@@ -245,7 +273,7 @@ describe("Adversarial: Codespace edge cases", () => {
         },
       },
     })
-    await Instance.provide({
+    await provideProviderTestInstance({
       directory: tmp.path,
       init: async () => {
         Env.set("CODESPACES", "true")

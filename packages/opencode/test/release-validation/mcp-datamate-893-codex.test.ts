@@ -334,11 +334,13 @@ describe("PR #893 /mcps and installer static safety checks", () => {
     const source = await readFile(path.join(REPO_ROOT, "packages/opencode/src/mcp/index.ts"), "utf-8")
 
     expect(source).toContain("let persistChain: Promise<void> = Promise.resolve()")
-    expect(source).toContain("findAllConfigPaths(Instance.directory, Global.Path.config)")
+    expect(source).toContain("const directory = yield* InstanceState.directory")
+    expect(source).toContain("persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config)")
+    expect(source).toContain("findAllConfigPaths(directory, globalConfig)")
     expect(source).toContain("readMcpEntryFromDisk(name, p)")
     expect(source).toContain("{ ...entry, enabled }")
-    expect(source).toContain("await persistMcpEnabled(name, true)")
-    expect(source).toContain("await persistMcpEnabled(name, false)")
+    expect(source).toContain("yield* persistMcpEnabled(name, true)")
+    expect(source).toContain("yield* persistMcpEnabled(name, false)")
   })
 
   test("install.ps1 remains static-analysis friendly and does not use npm/node execution paths", async () => {

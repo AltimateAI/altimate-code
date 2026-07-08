@@ -1,7 +1,3 @@
-import { createHash } from "crypto"
-
-export namespace Hash {
-  export function fast(input: string | Buffer): string {
-    return createHash("sha1").update(input).digest("hex")
-  }
-}
+// altimate_change start — re-export shim: util/hash moved to @opencode-ai/core.
+export * from "@opencode-ai/core/util/hash"
+// altimate_change end

@@ -10,8 +10,9 @@ import { afterAll } from "bun:test"
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
 await fs.mkdir(dir, { recursive: true })
 afterAll(async () => {
-  const { Database } = await import("../src/storage/db")
-  Database.close()
+  const { AppRuntime } = await import("../src/effect/app-runtime")
+  await AppRuntime.dispose()
+
   const busy = (error: unknown) =>
     typeof error === "object" && error !== null && "code" in error && error.code === "EBUSY"
   const rm = async (left: number): Promise<void> => {
@@ -19,7 +20,8 @@ afterAll(async () => {
     await sleep(100)
     return fs.rm(dir, { recursive: true, force: true }).catch((error) => {
       if (!busy(error)) throw error
-      if (left <= 1) throw error
+      if (left <= 1 && process.platform !== "win32") throw error
+      if (left <= 1) return
       return rm(left - 1)
     })
   }
@@ -34,6 +36,9 @@ process.env["XDG_CACHE_HOME"] = path.join(dir, "cache")
 process.env["XDG_CONFIG_HOME"] = path.join(dir, "config")
 process.env["XDG_STATE_HOME"] = path.join(dir, "state")
 process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtures", "models-api.json")
+process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
+process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
+process.env["OPENCODE_DISABLE_PROJECT_COPY_REFRESH"] = "1"
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills
@@ -55,12 +60,25 @@ delete process.env["ANTHROPIC_API_KEY"]
 delete process.env["OPENAI_API_KEY"]
 delete process.env["GOOGLE_API_KEY"]
 delete process.env["GOOGLE_GENERATIVE_AI_API_KEY"]
+// altimate_change start — also clear Google Vertex creds and redirect gcloud ADC to an empty
+// dir so a developer's Application Default Credentials (~/.config/gcloud) don't make the
+// provider list non-deterministic. Without this, `config.providers()` returns a real
+// google-vertex-anthropic entry whose model `variants`/`release_date` fail the generated SDK's
+// response schema (httpapi-sdk 400). CI has no creds; this makes local runs match CI.
+delete process.env["GOOGLE_APPLICATION_CREDENTIALS"]
+delete process.env["GOOGLE_VERTEX_PROJECT"]
+delete process.env["GOOGLE_VERTEX_LOCATION"]
+delete process.env["GOOGLE_CLOUD_PROJECT"]
+delete process.env["GCLOUD_PROJECT"]
+process.env["CLOUDSDK_CONFIG"] = path.join(dir, "gcloud-empty")
+// altimate_change end
 delete process.env["AZURE_OPENAI_API_KEY"]
 delete process.env["AWS_ACCESS_KEY_ID"]
 delete process.env["AWS_PROFILE"]
 delete process.env["AWS_REGION"]
 delete process.env["AWS_BEARER_TOKEN_BEDROCK"]
 delete process.env["OPENROUTER_API_KEY"]
+delete process.env["LLM_GATEWAY_API_KEY"]
 delete process.env["GROQ_API_KEY"]
 delete process.env["MISTRAL_API_KEY"]
 delete process.env["PERPLEXITY_API_KEY"]
@@ -72,12 +90,34 @@ delete process.env["CEREBRAS_API_KEY"]
 delete process.env["SAMBANOVA_API_KEY"]
 delete process.env["OPENCODE_SERVER_PASSWORD"]
 delete process.env["OPENCODE_SERVER_USERNAME"]
+delete process.env["OPENCODE_EXPERIMENTAL"]
+delete process.env["OPENCODE_ENABLE_EXPERIMENTAL_MODELS"]
+delete process.env["OTEL_EXPORTER_OTLP_ENDPOINT"]
+delete process.env["OTEL_EXPORTER_OTLP_HEADERS"]
+delete process.env["OTEL_RESOURCE_ATTRIBUTES"]
+
+// Use a file-backed sqlite DB so Effect SQL services and legacy compatibility
+// wrappers see the same rows during the v1.17.9 transition.
+const testDb = path.join(dir, "share", "altimate-code", "opencode-local.db")
+await fs.mkdir(path.dirname(testDb), { recursive: true })
+process.env["OPENCODE_DB"] = testDb
+process.env["OPENCODE_TEST_CORE_DB_OWNER"] = "1"
+
+// altimate_change start — v1.17.9 merge DB owner: build the shared test DB via
+// core before any legacy storage import can lazily migrate the same sqlite file.
+const [{ Effect }, { Database: CoreDatabase }] = await Promise.all([
+  import("effect"),
+  import("@opencode-ai/core/database/database"),
+])
+await Effect.runPromise(
+  CoreDatabase.Service.use(({ db }) => db.run("PRAGMA wal_checkpoint(FULL)")).pipe(
+    Effect.provide(CoreDatabase.layerFromPath(testDb)),
+    Effect.scoped,
+  ),
+)
+// altimate_change end
 
 // Now safe to import from src/
-const { Log } = await import("../src/util/log")
+const { initProjectors } = await import("../src/server/projectors")
 
-Log.init({
-  print: false,
-  dev: true,
-  level: "DEBUG",
-})
+initProjectors()
