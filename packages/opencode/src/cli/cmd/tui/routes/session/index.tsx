@@ -19,6 +19,8 @@ import { useRoute, useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
+// altimate_change — shared boot box at the top of the session scrollback
+import { WelcomePanel } from "@tui/component/welcome-panel"
 import { selectedForeground, useTheme } from "@tui/context/theme"
 import {
   BoxRenderable,
@@ -1094,6 +1096,13 @@ export function Session() {
               flexGrow={1}
               scrollAcceleration={scrollAcceleration()}
             >
+              {/* altimate_change start — same boot box as the home screen, at the top
+                  of the scrollback (Claude Code style: it scrolls away with content,
+                  keeping the header consistent when a command starts a session) */}
+              <box paddingBottom={1}>
+                <WelcomePanel />
+              </box>
+              {/* altimate_change end */}
               <For each={messages()}>
                 {(message, index) => (
                   <Switch>

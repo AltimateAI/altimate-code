@@ -1,9 +1,7 @@
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import { createEffect, createMemo, Match, on, onMount, Show, Switch } from "solid-js"
-import { TextAttributes } from "@opentui/core"
 import { useTheme } from "@tui/context/theme"
 import { useKeybind } from "@tui/context/keybind"
-import { Logo } from "../component/logo"
 import { Tips } from "../component/tips"
 import { Locale } from "@/util/locale"
 import { useSync } from "../context/sync"
@@ -16,8 +14,9 @@ import { Installation } from "@/installation"
 import { useKV } from "../context/kv"
 import { useCommandDialog } from "../component/dialog-command"
 import { useLocal } from "../context/local"
-// altimate_change start — first-run chat lock
+// altimate_change start — first-run guidance + shared boot box
 import { useReady } from "../component/dialog-model"
+import { WelcomePanel } from "../component/welcome-panel"
 // altimate_change end
 // altimate_change start — upgrade indicator import
 import { UpgradeIndicator } from "../component/upgrade-indicator"
@@ -91,97 +90,9 @@ export function Home() {
   let prompt: PromptRef
   const args = useArgs()
   const local = useLocal()
-  // altimate_change start — first-run welcome panel (shown until a provider is ready)
+  // altimate_change start — boot box extracted to component/welcome-panel.tsx so the
+  // session view can render the same header consistently
   const ready = useReady()
-  // Claude-Code-style full-width boot box: big block wordmark on the left, a
-  // "Tips for getting started" section and a "What is Altimate Code" section on
-  // the right. zIndex keeps it above transient top toasts (update/MCP) that would
-  // otherwise blank its top rows during first-run onboarding.
-  const WelcomePanel = () => (
-    <box
-      border
-      borderStyle="rounded"
-      borderColor={theme.border}
-      title={Installation.VERSION === "local" ? " Altimate Code " : ` Altimate Code v${Installation.VERSION} `}
-      titleAlignment="left"
-      flexShrink={0}
-      width="100%"
-      zIndex={2000}
-      backgroundColor={theme.background}
-      flexDirection="row"
-    >
-      {/* left column — the block-letter wordmark (59 cols wide) */}
-      <box
-        width={65}
-        flexShrink={0}
-        alignItems="center"
-        justifyContent="center"
-        gap={1}
-        paddingTop={1}
-        paddingBottom={1}
-        paddingLeft={1}
-      >
-        <text fg={theme.text} attributes={TextAttributes.BOLD}>
-          Welcome to Altimate Code
-        </text>
-        <Logo />
-      </box>
-      {/* right column — tips + what-is sections */}
-      <box
-        flexGrow={1}
-        border={["left"]}
-        borderColor={theme.border}
-        paddingLeft={2}
-        paddingRight={2}
-        paddingTop={1}
-        paddingBottom={1}
-        gap={1}
-      >
-        <box gap={0}>
-          <text fg={theme.accent} attributes={TextAttributes.BOLD}>
-            Tips for getting started
-          </text>
-          <Show
-            when={ready()}
-            fallback={
-              <text wrapMode="word" width="100%">
-                <span style={{ fg: theme.textMuted }}>Run </span>
-                <span style={{ fg: theme.primary }}>/connect</span>
-                <span style={{ fg: theme.textMuted }}>
-                  {" "}
-                  to pick your AI model provider — 75+ providers supported · Altimate LLM Gateway recommended (10M free
-                  tokens)
-                </span>
-              </text>
-            }
-          >
-            <text wrapMode="word" width="100%">
-              <span style={{ fg: theme.textMuted }}>Now connect your warehouse or dbt project — run </span>
-              <span style={{ fg: theme.primary }}>/discover</span>
-              <span style={{ fg: theme.textMuted }}>
-                {" "}
-                to detect your data stack, then just say what you want to do
-              </span>
-            </text>
-          </Show>
-        </box>
-        <box border={["top"]} borderColor={theme.border} />
-        <box gap={0}>
-          <text fg={theme.accent} attributes={TextAttributes.BOLD}>
-            What is Altimate Code
-          </text>
-          <text fg={theme.textMuted} wrapMode="word" width="100%">
-            The intelligence layer for data engineering AI — 100+ deterministic tools for SQL analysis, column-level
-            lineage, dbt, FinOps, and warehouse connectivity across every major cloud platform.
-          </text>
-          <text fg={theme.textMuted} wrapMode="word" width="100%">
-            Run standalone in your terminal, embed underneath Claude Code or Codex, or integrate into CI pipelines and
-            orchestration DAGs. Precision data tooling for any LLM.
-          </text>
-        </box>
-      </box>
-    </box>
-  )
   // altimate_change end
   onMount(() => {
     if (once) return
