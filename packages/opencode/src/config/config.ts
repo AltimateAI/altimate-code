@@ -652,11 +652,28 @@ export namespace Config {
       url: z.string().describe("URL of the remote MCP server"),
       enabled: z.boolean().optional().describe("Enable or disable the MCP server on startup"),
       headers: z.record(z.string(), z.string()).optional().describe("Headers to send with the request"),
+      // altimate_change start — dynamic header values produced by an argv command
+      // (run via execFile, not a shell — no shell interpolation unless the user
+      // explicitly invokes one like `sh -c`), resolved on each (re)connect so
+      // callers can refresh expiring bearer tokens without restarting the session
+      // (e.g. `az account get-access-token`).
+      headersCommand: z
+        .record(z.string(), z.array(z.string()).nonempty())
+        .optional()
+        .describe(
+          "Headers whose values are produced by running a command (argv form: [cmd, ...args]). " +
+            "stdout is trimmed and used as the header value. Resolved on every connect so tokens " +
+            "with short TTLs (e.g. Microsoft Entra ID bearer tokens for Fabric) refresh automatically. " +
+            "Values from headersCommand override matching keys in `headers`.",
+        ),
+      // altimate_change end
       oauth: z
         .union([McpOAuth, z.literal(false)])
         .optional()
         .describe(
-          "OAuth authentication configuration for the MCP server. Set to false to disable OAuth auto-detection.",
+          "OAuth authentication configuration for the MCP server. Set to false to disable OAuth auto-detection. " +
+            "When `headers.Authorization` or `headersCommand.Authorization` is set and `oauth` is not specified, " +
+            "OAuth is disabled automatically so a static bearer token isn't overridden by a competing OAuth flow.",
         ),
       timeout: z
         .number()
@@ -1451,7 +1468,22 @@ export namespace Config {
           servers[name] = transformed
         } else if (entry.url && typeof entry.url === "string") {
           const transformed: Record<string, any> = { type: "remote", url: entry.url }
+          // Copy `headers` / `headersCommand` through as-is — including malformed
+          // array shapes. The downstream `Info.safeParse` validates `mcp` against
+          // the McpRemote schema, and `z.record(...)` rejects an array with an
+          // actionable `invalid_type` error. Stripping arrays here would instead
+          // drop the field silently and connect a header-less server with no
+          // feedback to the user. See #791 / #792.
           if (entry.headers && typeof entry.headers === "object") transformed.headers = entry.headers
+          // altimate_change start — preserve fields that the original normalizer dropped
+          // silently. Without these passes, a user-supplied `oauth: false` or
+          // `headersCommand` would be reconstructed-away, leaving the runtime
+          // believing the config was bare. See #791 / #792.
+          if (entry.headersCommand && typeof entry.headersCommand === "object") {
+            transformed.headersCommand = entry.headersCommand
+          }
+          if (entry.oauth !== undefined) transformed.oauth = entry.oauth
+          // altimate_change end
           if (typeof entry.timeout === "number") transformed.timeout = entry.timeout
           if (typeof entry.enabled === "boolean") transformed.enabled = entry.enabled
           if (typeof entry.updatedAt === "string") transformed.updatedAt = entry.updatedAt

@@ -47,7 +47,7 @@ const { MCP } = await import("../../src/mcp/index")
 const { Instance } = await import("../../src/project/instance")
 const { tmpdir } = await import("../fixture/fixture")
 
-test("headers are passed to transports when oauth is enabled (default)", async () => {
+test("headers are passed to transports when oauth is enabled (default, no Authorization header)", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
@@ -59,8 +59,8 @@ test("headers are passed to transports when oauth is enabled (default)", async (
               type: "remote",
               url: "https://example.com/mcp",
               headers: {
-                Authorization: "Bearer test-token",
                 "X-Custom-Header": "custom-value",
+                "X-Trace-Id": "trace-1",
               },
             },
           },
@@ -77,8 +77,8 @@ test("headers are passed to transports when oauth is enabled (default)", async (
         type: "remote",
         url: "https://example.com/mcp",
         headers: {
-          Authorization: "Bearer test-token",
           "X-Custom-Header": "custom-value",
+          "X-Trace-Id": "trace-1",
         },
       }).catch(() => {})
 
@@ -88,15 +88,192 @@ test("headers are passed to transports when oauth is enabled (default)", async (
       for (const call of transportCalls) {
         expect(call.options.requestInit).toBeDefined()
         expect(call.options.requestInit?.headers).toEqual({
-          Authorization: "Bearer test-token",
           "X-Custom-Header": "custom-value",
+          "X-Trace-Id": "trace-1",
         })
-        // OAuth should be enabled by default, so authProvider should exist
+        // OAuth should be enabled by default when no Authorization header is provided.
         expect(call.options.authProvider).toBeDefined()
       }
     },
   })
 })
+
+// altimate_change start — covers the OAuth auto-disable behavior added for
+// https://github.com/AltimateAI/altimate-code/issues/792. When the user
+// supplies an explicit Authorization header (statically or via headersCommand),
+// the OAuth provider is not attached, so a failing OAuth flow (e.g. Microsoft
+// Entra ID rejecting RFC 7591 dynamic client registration) cannot pre-empt the
+// bearer token.
+test("OAuth is auto-disabled when an explicit Authorization header is present", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      transportCalls.length = 0
+      await MCP.add("auto-disable-server", {
+        type: "remote",
+        url: "https://example.com/mcp",
+        headers: {
+          Authorization: "Bearer static-token",
+          "X-Custom-Header": "x",
+        },
+      }).catch(() => {})
+
+      expect(transportCalls.length).toBeGreaterThanOrEqual(1)
+      for (const call of transportCalls) {
+        expect(call.options.requestInit?.headers).toMatchObject({
+          Authorization: "Bearer static-token",
+        })
+        // No authProvider — OAuth was auto-disabled because user provided bearer.
+        expect(call.options.authProvider).toBeUndefined()
+      }
+    },
+  })
+})
+
+test("OAuth is auto-disabled when Authorization is supplied via headersCommand", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      transportCalls.length = 0
+      await MCP.add("auto-disable-cmd-server", {
+        type: "remote",
+        url: "https://example.com/mcp",
+        headersCommand: {
+          Authorization: ["printf", "Bearer dynamic-token"],
+        },
+      }).catch(() => {})
+
+      expect(transportCalls.length).toBeGreaterThanOrEqual(1)
+      for (const call of transportCalls) {
+        expect(call.options.requestInit?.headers).toMatchObject({
+          Authorization: "Bearer dynamic-token",
+        })
+        expect(call.options.authProvider).toBeUndefined()
+      }
+    },
+  })
+})
+
+test("OAuth still attaches when Authorization header is present but oauth is explicitly configured", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      transportCalls.length = 0
+      await MCP.add("explicit-oauth-server", {
+        type: "remote",
+        url: "https://example.com/mcp",
+        headers: { Authorization: "Bearer fallback" },
+        oauth: { clientId: "client-xyz" },
+      }).catch(() => {})
+
+      expect(transportCalls.length).toBeGreaterThanOrEqual(1)
+      for (const call of transportCalls) {
+        // User explicitly opted in to OAuth, so provider is attached even
+        // though a static Authorization header is also present.
+        expect(call.options.authProvider).toBeDefined()
+      }
+    },
+  })
+})
+test("headersCommand overrides a static header that differs only in casing", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      transportCalls.length = 0
+      await MCP.add("case-merge-server", {
+        type: "remote",
+        url: "https://example.com/mcp",
+        headers: { authorization: "Bearer stale-static", "X-Other": "keep" },
+        headersCommand: {
+          Authorization: ["printf", "Bearer fresh-dynamic"],
+        },
+      }).catch(() => {})
+
+      expect(transportCalls.length).toBeGreaterThanOrEqual(1)
+      for (const call of transportCalls) {
+        // HTTP header names are case-insensitive: only the dynamic value may
+        // survive, or two Authorization headers would be sent on the wire.
+        expect(call.options.requestInit?.headers).toEqual({
+          Authorization: "Bearer fresh-dynamic",
+          "X-Other": "keep",
+        })
+        expect(call.options.authProvider).toBeUndefined()
+      }
+    },
+  })
+})
+
+test("mergeHeaders: dynamic value wins over static key differing only in casing", () => {
+  expect(
+    MCP._testing.mergeHeaders({ authorization: "Bearer stale", "X-Other": "keep" }, { Authorization: "Bearer fresh" }),
+  ).toEqual({
+    Authorization: "Bearer fresh",
+    "X-Other": "keep",
+  })
+})
+
+// Covers the auth API surface: `supportsOAuth()` must agree with `create()`'s
+// auto-disable, or `POST /:name/auth` would start an OAuth flow whose tokens
+// the bearer connection never uses.
+test("supportsOAuth mirrors the OAuth auto-disable for bearer-auth servers", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        `${dir}/opencode.json`,
+        JSON.stringify({
+          $schema: "https://altimate.ai/config.json",
+          mcp: {
+            "bearer-static": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              headers: { Authorization: "Bearer static-token" },
+            },
+            "bearer-cmd": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              headersCommand: { authorization: ["printf", "Bearer dynamic-token"] },
+            },
+            "explicit-oauth": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              headers: { Authorization: "Bearer fallback" },
+              oauth: { clientId: "client-xyz" },
+            },
+            "plain-remote": {
+              type: "remote",
+              url: "https://example.com/mcp",
+            },
+            "oauth-off": {
+              type: "remote",
+              url: "https://example.com/mcp",
+              oauth: false,
+            },
+          },
+        }),
+      )
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      // Bearer present (statically or via headersCommand), oauth unspecified —
+      // connect-time auto-disables OAuth, so the API must not advertise it.
+      expect(await MCP.supportsOAuth("bearer-static")).toBe(false)
+      expect(await MCP.supportsOAuth("bearer-cmd")).toBe(false)
+      // Explicit opt-in wins even with a bearer header present.
+      expect(await MCP.supportsOAuth("explicit-oauth")).toBe(true)
+      // Defaults unchanged.
+      expect(await MCP.supportsOAuth("plain-remote")).toBe(true)
+      expect(await MCP.supportsOAuth("oauth-off")).toBe(false)
+    },
+  })
+})
+// altimate_change end
 
 test("headers are passed to transports when oauth is explicitly disabled", async () => {
   await using tmp = await tmpdir()
