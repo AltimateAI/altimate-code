@@ -50,14 +50,21 @@ function init() {
   const isEnabled = (option: CommandOption) => option.enabled !== false
   const isVisible = (option: CommandOption) => isEnabled(option) && !option.hidden
 
-  // altimate_change — first run: until a model is ready, the command/slash menu
-  // surfaces only /connect. Full menu returns once a provider is set up.
+  // altimate_change start — first run: until a model is ready, the command/slash menu
+  // surfaces only commands that work without a provider (connect first, then a few
+  // utilities). Full menu returns once a provider is set up.
+  const FIRST_RUN_COMMANDS = ["provider.connect", "help.show", "theme.switch", "opencode.status", "app.exit"]
   const ready = useReady()
   const visibleOptions = createMemo(() => {
     const visible = entries().filter((option) => isVisible(option))
-    if (!ready()) return visible.filter((option) => option.value === "provider.connect")
+    if (!ready())
+      return FIRST_RUN_COMMANDS.flatMap((value) => {
+        const match = visible.find((option) => option.value === value)
+        return match ? [match] : []
+      })
     return visible
   })
+  // altimate_change end
   const suggestedOptions = createMemo(() =>
     visibleOptions()
       .filter((option) => option.suggested)
