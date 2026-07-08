@@ -323,6 +323,103 @@ export namespace AltimateApi {
     if (d.status === "ready" && d.api_key) return { status: "ready", instance: d.instance ?? "", apiKey: d.api_key }
     return { status: "provisioning" }
   }
+
+  // --- BYOK validation layers (Part 1 onboarding) -------------------------------
+  // Two stages after a key/code is submitted (the auth-method screens themselves
+  // are unchanged): stage 1 is a cheap auth ping, stage 2 a minimal forced tool
+  // call. PROTO_FAKE_VALIDATION=pass|fail_key|fail_tools makes both deterministic
+  // for demos: the failing stage fails the FIRST attempt per provider, then passes
+  // (so the recover -> retry -> pass demo path works without changing env).
+
+  export type ByokValidation = { ok: true } | { ok: false; error: string }
+
+  const fakeAttempts = new Map<string, number>()
+
+  function fakeMode(): string | undefined {
+    const v = process.env.PROTO_FAKE_VALIDATION
+    return v === "pass" || v === "fail_key" || v === "fail_tools" ? v : undefined
+  }
+
+  /** Fire-and-forget structured event to the local stub (instrumentation demo). */
+  export function protoEvent(event: string, data: Record<string, unknown> = {}): void {
+    if (!process.env.ALTIMATE_BASE_URL) return
+    fetch(`${gatewayBaseUrl()}/dev/event`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event, ...data }),
+    }).catch(() => {})
+  }
+
+  /** Stage 1 — cheap auth ping. Invalid key can never work, so callers must offer
+   *  no "continue anyway" on failure. */
+  export async function byokValidateKey(providerID: string, key: string): Promise<ByokValidation> {
+    const mode = fakeMode()
+    if (mode) {
+      const n = (fakeAttempts.get(`key:${providerID}`) ?? 0) + 1
+      fakeAttempts.set(`key:${providerID}`, n)
+      const ok = mode !== "fail_key" || n > 1
+      protoEvent("byok_validation_result", { provider: providerID, stage: "key", result: ok ? "pass" : "fail" })
+      return ok ? { ok: true } : { ok: false, error: "The provider rejected this API key (401 Unauthorized)." }
+    }
+    const result = await stage1Ping(providerID, key)
+    protoEvent("byok_validation_result", {
+      provider: providerID,
+      stage: "key",
+      result: result === "unauthorized" ? "fail" : "pass",
+    })
+    if (result === "unauthorized") return { ok: false, error: "The provider rejected this API key." }
+    // Transport errors / unknown providers don't block key entry.
+    return { ok: true }
+  }
+
+  async function stage1Ping(providerID: string, key: string): Promise<"ok" | "unauthorized" | "unknown"> {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10_000)
+    try {
+      let res: Response | undefined
+      if (providerID === "anthropic") {
+        res = await fetch("https://api.anthropic.com/v1/models", {
+          headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+          signal: controller.signal,
+        })
+      } else if (providerID === "openai") {
+        res = await fetch("https://api.openai.com/v1/models", {
+          headers: { authorization: `Bearer ${key}` },
+          signal: controller.signal,
+        })
+      } else if (providerID === "google") {
+        res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`, {
+          signal: controller.signal,
+        })
+      }
+      if (!res) return "unknown"
+      if (res.status === 401 || res.status === 403) return "unauthorized"
+      if (providerID === "google" && res.status === 400) return "unauthorized"
+      return "ok"
+    } catch {
+      return "unknown"
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  /** Stage 2 — tool-calling validation (key already valid). */
+  export async function byokValidateTools(providerID: string): Promise<ByokValidation> {
+    const mode = fakeMode()
+    if (mode) {
+      const n = (fakeAttempts.get(`tools:${providerID}`) ?? 0) + 1
+      fakeAttempts.set(`tools:${providerID}`, n)
+      const ok = mode !== "fail_tools" || n > 1
+      protoEvent("byok_validation_result", { provider: providerID, stage: "tools", result: ok ? "pass" : "fail" })
+      return ok
+        ? { ok: true }
+        : { ok: false, error: "The key is valid, but the model failed a minimal forced tool call." }
+    }
+    // Real stage-2 needs a live model round-trip (one minimal forced tool call);
+    // the prototype treats reachable providers as pass when not faked.
+    protoEvent("byok_validation_result", { provider: providerID, stage: "tools", result: "pass" })
+    return { ok: true }
+  }
   // altimate_change end
 
   async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {

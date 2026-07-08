@@ -14,6 +14,9 @@ import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
 import { DialogModel, DialogModelWelcome, useConnected, useReady } from "@tui/component/dialog-model"
+// altimate_change — returning-user silent re-auth via the gateway device flow
+import { GatewayFlow } from "@tui/component/dialog-provider"
+import { AltimateApi } from "@/altimate/api/client"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -475,6 +478,22 @@ function App() {
 
   const connected = useConnected()
   const ready = useReady()
+
+  // altimate_change start — returning users: valid stored creds go straight to the
+  // session; an expired/invalid gateway key triggers a silent re-auth via the device
+  // flow before chat — never an error after message one. Transport errors are NOT
+  // treated as invalid (don't force re-auth on a network hiccup).
+  onMount(async () => {
+    if (!(await AltimateApi.isConfigured())) return
+    const creds = await AltimateApi.getCredentials().catch(() => undefined)
+    if (!creds) return
+    const result = await AltimateApi.validateCredentials(creds)
+    if (result.ok) return
+    if (!result.error.startsWith("Invalid API key") && !result.error.startsWith("Invalid instance name")) return
+    toast.show({ message: "Altimate Gateway session expired — reconnecting...", variant: "info", duration: 5000 })
+    dialog.replace(() => <GatewayFlow />)
+  })
+  // altimate_change end
   command.register(() => [
     {
       title: "Switch session",

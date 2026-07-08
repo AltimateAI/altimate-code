@@ -9,6 +9,7 @@
 // Port override:  PORT=9000 bun run prototype/stub-server/server.ts
 
 import {
+  apiKeyInstance,
   authorize,
   createSession,
   getByDevice,
@@ -166,6 +167,31 @@ async function handle(req: Request): Promise<Response> {
       return json({ status: "ready", instance: result.instance, api_key: result.apiKey })
     }
     return json({ status: result.status })
+  }
+
+  // ---- API: credential validation (mirrors the real backend's endpoint used by
+  //      AltimateApi.validateCredentials) ----
+  if (pathname === "/dbt/v3/validate-credentials" && method === "GET") {
+    const token = bearerToken(req)
+    const tenant = req.headers.get("x-tenant") ?? ""
+    const instance = token ? apiKeyInstance(token) : undefined
+    if (!token || instance === undefined) {
+      logEvent("credential_validation_failed", { reason: "invalid_key" })
+      return json({ error: "invalid key" }, 401)
+    }
+    if (instance !== tenant.toLowerCase()) {
+      logEvent("credential_validation_failed", { reason: "invalid_instance", tenant })
+      return json({ error: "invalid instance" }, 403)
+    }
+    return json({ ok: true })
+  }
+
+  // ---- Prototype: CLI-side instrumentation events (fire-and-forget) ----
+  if (pathname === "/dev/event" && method === "POST") {
+    const body = await readBody(req)
+    const { event, ...data } = body
+    logEvent(String(event ?? "unknown"), data as Record<string, unknown>)
+    return json({ ok: true })
   }
 
   // ---- Web: OAuth (Google) path ----

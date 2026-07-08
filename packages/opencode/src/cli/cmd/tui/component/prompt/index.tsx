@@ -28,7 +28,9 @@ import { Locale } from "@/util/locale"
 import { formatDuration } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
-import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+import { DialogProvider as DialogProviderConnect, isProviderUnreliable } from "../dialog-provider"
+// altimate_change — prototype instrumentation events
+import { AltimateApi } from "../../../../../altimate/api/client"
 // altimate_change — first-run guidance: welcome picker + readiness gate at submit
 import { DialogModelWelcome, useReady } from "../dialog-model"
 import { DialogAlert } from "../../ui/dialog-alert"
@@ -602,6 +604,7 @@ export function Prompt(props: PromptProps) {
     // friendly line, rather than erroring. Slash commands never reach here (handled by
     // the autocomplete menu above).
     if (!ready()) {
+      AltimateApi.protoEvent("model_switch_blocked_no_credentials")
       dialog.replace(() => (
         <DialogModelWelcome intro="First, let's connect your AI model — then I'll get right on that." />
       ))
@@ -1129,6 +1132,11 @@ export function Prompt(props: PromptProps) {
                 <text>
                   <span style={{ fg: theme.warning, bold: true }}>{local.model.variant.current()}</span>
                 </text>
+              </Show>
+              {/* persistent chip for providers force-continued past a failed
+                  tool-calling validation (stage 2 "Continue anyway") */}
+              <Show when={isProviderUnreliable(local.model.current()?.providerID)}>
+                <text fg={theme.warning}>⚠ unreliable model</text>
               </Show>
             </box>
           </Show>

@@ -38,6 +38,17 @@ const PROVIDER_PRIORITY: Record<string, number> = {
 export const WARNLIST: Record<string, string> = {
   "qwen-plus": "⚠ known tool-calling issues",
 }
+
+// Providers the user force-continued past a failed tool-calling validation
+// (stage 2 "Continue anyway"). Drives the persistent "⚠ unreliable model" chip
+// in the status bar. Session-scoped: resets on relaunch.
+const [unreliableProviders, setUnreliableProviders] = createSignal<string[]>([])
+export function markUnreliableProvider(id: string) {
+  setUnreliableProviders((prev) => (prev.includes(id) ? prev : [...prev, id]))
+}
+export function isProviderUnreliable(id: string | undefined): boolean {
+  return !!id && unreliableProviders().includes(id)
+}
 // altimate_change end
 
 export function createDialogProviderOptions() {
@@ -157,6 +168,13 @@ function AutoMethod(props: AutoMethodProps) {
       dialog.clear()
       return
     }
+    // altimate_change start — stage-2 tool-calling validation after OAuth success
+    const stage2 = await AltimateApi.byokValidateTools(props.providerID)
+    if (!stage2.ok) {
+      dialog.replace(() => <DialogToolsFailed providerID={props.providerID} error={stage2.error} />)
+      return
+    }
+    // altimate_change end
     await sdk.client.instance.dispose()
     await sync.bootstrap()
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
@@ -208,6 +226,13 @@ function CodeMethod(props: CodeMethodProps) {
           code: value,
         })
         if (!error) {
+          // altimate_change start — stage-2 tool-calling validation after OAuth success
+          const stage2 = await AltimateApi.byokValidateTools(props.providerID)
+          if (!stage2.ok) {
+            dialog.replace(() => <DialogToolsFailed providerID={props.providerID} error={stage2.error} />)
+            return
+          }
+          // altimate_change end
           await sdk.client.instance.dispose()
           await sync.bootstrap()
           dialog.replace(() => <DialogModel providerID={props.providerID} />)
@@ -239,6 +264,8 @@ function ApiMethod(props: ApiMethodProps) {
   const { theme } = useTheme()
   // altimate_change start — altimate-backend: validation error signal
   const [validationError, setValidationError] = createSignal<string | null>(null)
+  // BYOK validation busy state (stage 1 + 2 run after submit)
+  const [busy, setBusy] = createSignal(false)
   // altimate_change end
 
   // altimate_change start — altimate-backend placeholder matches the credential format
@@ -248,8 +275,10 @@ function ApiMethod(props: ApiMethodProps) {
   return (
     <DialogPrompt
       title={props.title}
-      // altimate_change start — altimate-backend custom placeholder
+      // altimate_change start — altimate-backend custom placeholder + validation busy state
       placeholder={placeholder}
+      busy={busy()}
+      busyText="Validating key..."
       // altimate_change end
       description={
         {
@@ -325,6 +354,16 @@ function ApiMethod(props: ApiMethodProps) {
           return
         }
         // altimate_change end
+        // altimate_change start — BYOK validation layers (strictly after submit;
+        // the auth-method screens above are unchanged). Stage 1: cheap key ping.
+        // Stage 2: minimal forced tool call.
+        setBusy(true)
+        const stage1 = await AltimateApi.byokValidateKey(props.providerID, value)
+        if (!stage1.ok) {
+          setBusy(false)
+          dialog.replace(() => <DialogKeyInvalid providerID={props.providerID} title={props.title} error={stage1.error} />)
+          return
+        }
         await sdk.client.auth.set({
           providerID: props.providerID,
           auth: {
@@ -332,6 +371,13 @@ function ApiMethod(props: ApiMethodProps) {
             key: value,
           },
         })
+        const stage2 = await AltimateApi.byokValidateTools(props.providerID)
+        setBusy(false)
+        if (!stage2.ok) {
+          dialog.replace(() => <DialogToolsFailed providerID={props.providerID} error={stage2.error} />)
+          return
+        }
+        // altimate_change end
         await sdk.client.instance.dispose()
         await sync.bootstrap()
         dialog.replace(() => <DialogModel providerID={props.providerID} />)
@@ -340,12 +386,125 @@ function ApiMethod(props: ApiMethodProps) {
   )
 }
 
+// altimate_change start — BYOK validation failure dialogs (Part 1 onboarding).
+
+// Stage-1 failure: an invalid key can never work, so exactly two options and
+// NO "continue anyway" here.
+function DialogKeyInvalid(props: { providerID: string; title: string; error: string }) {
+  const dialog = useDialog()
+  return (
+    <DialogSelect
+      title="Invalid API key"
+      options={[
+        {
+          title: "Enter a valid API key",
+          value: "reenter",
+          category: props.error,
+          onSelect: () => dialog.replace(() => <ApiMethod providerID={props.providerID} title={props.title} />),
+        },
+        {
+          title: "Use Altimate LLM Gateway",
+          description: "recommended · free 10M tokens",
+          value: "gateway",
+          category: props.error,
+          onSelect: () => dialog.replace(() => <GatewayFlow />),
+        },
+      ]}
+    />
+  )
+}
+
+// Stage-2 failure: key valid, but the model can't drive the harness.
+function DialogToolsFailed(props: { providerID: string; error: string }) {
+  const dialog = useDialog()
+  const sdk = useSDK()
+  const sync = useSync()
+  const toast = useToast()
+
+  async function proceed() {
+    await sdk.client.instance.dispose()
+    await sync.bootstrap()
+    dialog.replace(() => <DialogModel providerID={props.providerID} />)
+  }
+
+  return (
+    <DialogSelect
+      title="Tool-calling check failed"
+      options={[
+        {
+          title: "Retry",
+          value: "retry",
+          category: props.error,
+          onSelect: async () => {
+            const result = await AltimateApi.byokValidateTools(props.providerID)
+            if (result.ok) {
+              toast.show({ message: "Tool-calling check passed", variant: "success" })
+              await proceed()
+              return
+            }
+            dialog.replace(() => <DialogToolsFailed providerID={props.providerID} error={result.error} />)
+          },
+        },
+        {
+          title: "Use Altimate LLM Gateway",
+          description: "recommended · free 10M tokens",
+          value: "gateway",
+          category: props.error,
+          onSelect: () => dialog.replace(() => <GatewayFlow />),
+        },
+        // PM-DECISION: stage-2 continue-anyway is the earlier locked decision; the
+        // "remove continue-anyway" instruction applies to stage-1 invalid keys only.
+        // If PM wants it gone from stage 2 as well, delete this option.
+        {
+          title: "Continue anyway",
+          description: 'requires typing "continue"',
+          value: "continue",
+          category: props.error,
+          onSelect: () => dialog.replace(() => <DialogToolsContinue providerID={props.providerID} onProceed={proceed} />),
+        },
+      ]}
+    />
+  )
+}
+
+// Gated continue: the user must type "continue"; the provider is then flagged
+// with a persistent "⚠ unreliable model" chip in the status bar.
+function DialogToolsContinue(props: { providerID: string; onProceed: () => Promise<void> }) {
+  const { theme } = useTheme()
+  const [wrong, setWrong] = createSignal(false)
+  return (
+    <DialogPrompt
+      title="Continue with an unreliable model?"
+      placeholder='Type "continue" to proceed'
+      description={() => (
+        <box gap={1}>
+          <text fg={theme.textMuted}>
+            This model failed the tool-calling check — data tasks may fail or silently produce wrong results.
+          </text>
+          <Show when={wrong()}>
+            <text fg={theme.error}>Type "continue" to proceed, or press esc to go back.</text>
+          </Show>
+        </box>
+      )}
+      onConfirm={async (value) => {
+        if (value.trim().toLowerCase() !== "continue") {
+          setWrong(true)
+          return
+        }
+        markUnreliableProvider(props.providerID)
+        await props.onProceed()
+      }}
+    />
+  )
+}
+// altimate_change end
+
 // altimate_change start — Altimate LLM Gateway sign-in (Part 1 onboarding).
 // Standard OAuth device flow (mirrors account.ts) → GET /api/user → instance
 // name prompt (pre-filled from suggested_instance) → POST /api/instance (409 →
 // suggest "<name>-2") → poll GET /api/instance → save 3-part creds. The API key
 // is never displayed or pasted anywhere on this path.
-function GatewayFlow() {
+export function GatewayFlow() {
   const { theme } = useTheme()
   const dialog = useDialog()
   const sdk = useSDK()

@@ -112,10 +112,7 @@ export function DialogModel(props: { providerID?: string }) {
             category: "NEEDS SETUP",
             footer: undefined as string | undefined,
             async onSelect() {
-              dialog.clear()
-              // Stage 4 adds the confirm interstitial ahead of this switch.
-              local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
-              markSetupComplete()
+              dialog.replace(() => <DialogBigPickleConfirm origin="model" />)
             },
           }
           // Big Pickle sits at priority 4 — just above OpenCode Zen (priority 5).
@@ -202,10 +199,7 @@ export function DialogModelWelcome(props: { intro?: string }) {
   }
 
   function chooseBigPickle() {
-    dialog.clear()
-    // Stage 4 adds the confirm interstitial ahead of this switch.
-    local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
-    markSetupComplete()
+    dialog.replace(() => <DialogBigPickleConfirm origin="welcome" />)
   }
 
   function openFullCatalog() {
@@ -309,6 +303,38 @@ export function DialogModelWelcome(props: { intro?: string }) {
         <Row row={rows()[5]} index={5} />
       </box>
     </box>
+  )
+}
+
+// Big Pickle interstitial — one confirm, default No (the "No" row is selected by
+// default; enter accepts it). "Yes" switches to opencode/big-pickle.
+export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
+  const dialog = useDialog()
+  const local = useLocal()
+  const message = "Big Pickle works for chat but often fails at data tasks. The Gateway is free to start (10M tokens)."
+  return (
+    <DialogSelect
+      title="Use Big Pickle?"
+      options={[
+        {
+          title: "No — pick something else",
+          description: "(default)",
+          value: "no",
+          category: message,
+          onSelect: () => dialog.replace(() => (props.origin === "welcome" ? <DialogModelWelcome /> : <DialogModel />)),
+        },
+        {
+          title: "Yes — continue with Big Pickle",
+          value: "yes",
+          category: message,
+          onSelect: () => {
+            dialog.clear()
+            local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
+            markSetupComplete()
+          },
+        },
+      ]}
+    />
   )
 }
 // altimate_change end

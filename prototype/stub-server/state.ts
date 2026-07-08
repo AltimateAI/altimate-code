@@ -173,11 +173,20 @@ export function startProvisioning(session: Session, name: string): void {
   claimInstance(name)
 }
 
+// Issued gateway API keys (key -> instance), so /dbt/v3/validate-credentials can
+// verify them the same way the real backend does.
+const issuedKeys = new Map<string, string>()
+
+export function apiKeyInstance(key: string): string | undefined {
+  return issuedKeys.get(key)
+}
+
 /** Returns the current instance status, minting the API key on first ready. */
 export function pollInstance(session: Session): { status: InstanceStatus; instance?: string; apiKey?: string } {
   if (session.instanceStatus === "provisioning" && session.provisionReadyAt && Date.now() >= session.provisionReadyAt) {
     session.instanceStatus = "ready"
     session.apiKey = `alt_proto_${randLower(28)}`
+    issuedKeys.set(session.apiKey, session.instance ?? "")
   }
   return { status: session.instanceStatus, instance: session.instance, apiKey: session.apiKey }
 }
