@@ -1075,6 +1075,17 @@ export function Session() {
       <box flexDirection="row">
         <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
           <Show when={session()}>
+            {/* altimate_change start — same boot box as the home screen, pinned above
+                the conversation so the header stays consistent when a command (e.g.
+                /discover) starts a session. Outside the scrollbox: the bordered panel
+                does not paint reliably inside the scroll viewport. Toggleable with the
+                existing header toggle. */}
+            <Show when={showHeader()}>
+              <box flexShrink={0}>
+                <WelcomePanel />
+              </box>
+            </Show>
+            {/* altimate_change end */}
             <Show when={showHeader() && (!sidebarVisible() || !wide())}>
               <Header />
             </Show>
@@ -1096,13 +1107,6 @@ export function Session() {
               flexGrow={1}
               scrollAcceleration={scrollAcceleration()}
             >
-              {/* altimate_change start — same boot box as the home screen, at the top
-                  of the scrollback (Claude Code style: it scrolls away with content,
-                  keeping the header consistent when a command starts a session) */}
-              <box paddingBottom={1}>
-                <WelcomePanel />
-              </box>
-              {/* altimate_change end */}
               <For each={messages()}>
                 {(message, index) => (
                   <Switch>
