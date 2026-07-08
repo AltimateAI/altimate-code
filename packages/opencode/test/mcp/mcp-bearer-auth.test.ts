@@ -145,6 +145,26 @@ describe("McpCatalog.defs() tolerant-schema fallback (#792)", () => {
     expect(requestCalled).toBe(false)
     expect(result).toBeUndefined()
   })
+
+  test("does NOT retry when a non-validation error merely mentions annotation words", async () => {
+    // A transport/server error whose text happens to contain "annotations" and a
+    // hint name, but is NOT a Zod issue payload (no `"path"`), must not be
+    // misclassified as the Fabric null-annotation case and trigger the retry.
+    let requestCalled = false
+    const fakeClient = {
+      listTools: async () => {
+        throw new Error("upstream proxy error while fetching annotations.readOnlyHint metadata: 502")
+      },
+      request: async () => {
+        requestCalled = true
+        return { tools: [] }
+      },
+    } as unknown as Client
+
+    const result = await Effect.runPromise(McpCatalog.defs(fakeClient, 1_000))
+    expect(requestCalled).toBe(false)
+    expect(result).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------

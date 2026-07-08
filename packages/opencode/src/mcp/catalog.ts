@@ -187,6 +187,10 @@ function isOutputSchemaValidationError(error: Error) {
 // off transport or pagination-guard error text.
 function isAnnotationHintValidationError(error: Error) {
   return (
+    // Require the Zod issue-payload shape (a JSON array of issues carrying a
+    // `"path"`) so arbitrary transport/server text that merely mentions these
+    // words can't trip the tolerant retry — only a real validation error does.
+    /"path"/.test(error.message) &&
     /annotations/i.test(error.message) &&
     /readOnlyHint|destructiveHint|idempotentHint|openWorldHint/.test(error.message)
   )
