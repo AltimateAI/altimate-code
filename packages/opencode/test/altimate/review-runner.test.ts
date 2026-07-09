@@ -232,6 +232,44 @@ describe("review runner declared constraints", () => {
     expect(uniques.map((c) => (c.args?.columns as string[]).join(",")).sort()).toEqual(["customer_id", "order_id"])
     await tmp[Symbol.asyncDispose]?.()
   })
+
+  test("does not mark arg-distinct accepted_values constraints as already enforced", async () => {
+    const { tmp, runner } = await runnerWithNodes({
+      "model.demo.fct_orders": {
+        resource_type: "model",
+        name: "fct_orders",
+        original_file_path: "models/fct_orders.sql",
+        config: { materialized: "table", contract: { enforced: true } },
+        depends_on: { nodes: [] },
+        columns: {
+          status: {
+            name: "status",
+            data_type: "text",
+            constraints: [{ type: "accepted_values", values: ["new"] }],
+          },
+        },
+      },
+      "test.demo.accepted_values_fct_orders_status": {
+        resource_type: "test",
+        unique_id: "test.demo.accepted_values_fct_orders_status",
+        name: "accepted_values_fct_orders_status",
+        attached_node: "model.demo.fct_orders",
+        depends_on: { nodes: ["model.demo.fct_orders"] },
+        test_metadata: {
+          name: "accepted_values",
+          kwargs: { column_name: "status", values: ["placed"] },
+        },
+      },
+    })
+
+    const constraints = (await runner.declaredConstraints?.("fct_orders")) ?? []
+    const declaredStatus = constraints.find(
+      (c) => c.kind === "accepted_values" && c.column === "status" && (c.args?.values as string[] | undefined)?.[0] === "new",
+    )
+
+    expect(declaredStatus?.hasEnforcingTest).toBe(false)
+    await tmp[Symbol.asyncDispose]?.()
+  })
 })
 
 describe("review runner generated spec-test sandbox", () => {
@@ -264,6 +302,41 @@ describe("review runner generated spec-test sandbox", () => {
           },
         },
         sources: {},
+      }),
+    )
+    return { tmp, runner: createDispatcherRunner({ manifestPath }) }
+  }
+
+  async function runnerWithSourceManifest() {
+    const tmp = await tmpdir()
+    const manifestPath = path.join(tmp.path, "manifest.json")
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        metadata: { adapter_type: "duckdb" },
+        nodes: {
+          "model.demo.fct_orders": {
+            resource_type: "model",
+            name: "fct_orders",
+            original_file_path: "models/fct_orders.sql",
+            config: { materialized: "table" },
+            depends_on: { nodes: ["source.demo.raw.orders"] },
+            columns: {
+              customer_id: { name: "customer_id", data_type: "integer" },
+            },
+          },
+        },
+        sources: {
+          "source.demo.raw.orders": {
+            resource_type: "source",
+            name: "orders",
+            source_name: "raw",
+            database: "analytics",
+            schema: "raw_schema",
+            identifier: "orders_raw",
+            columns: { customer_id: { name: "customer_id", data_type: "integer" } },
+          },
+        },
       }),
     )
     return { tmp, runner: createDispatcherRunner({ manifestPath }) }
@@ -320,6 +393,102 @@ describe("review runner generated spec-test sandbox", () => {
     }
 
     const results = await runner.runGeneratedTests?.([test], undefined, { allowedRelations: ["dim_customers"] })
+
+    expect(results?.[test.id]?.status).toBe("error")
+    expect(results?.[test.id]?.detail).toContain("sandbox")
+    expect(calls).toBe(0)
+    await tmp[Symbol.asyncDispose]?.()
+  })
+
+  test("resolves source() relationship targets to the manifest physical relation", async () => {
+    const { tmp, runner } = await runnerWithSourceManifest()
+    let seenSql = ""
+    dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async (_method: string, params: any) => {
+      seenSql = params.sql
+      return { rows: [[0]] }
+    }) as any)
+    const test: GeneratedTest = {
+      id: "rel-source",
+      kind: "relationships",
+      dbtTest: {
+        column: "customer_id",
+        test: "relationships",
+        args: { to: "source('raw', 'orders')", field: "customer_id" },
+      },
+      rationale: "declared relationship",
+      derivedFrom: {
+        origin: "declared_constraint",
+        kind: "relationships",
+        ref: "schema.yml:fct_orders.customer_id:relationships",
+      },
+    }
+
+    const results = await runner.runGeneratedTests?.([test], undefined, { model: "fct_orders" })
+
+    expect(results?.[test.id]?.status).toBe("pass")
+    expect(seenSql).toContain("analytics.raw_schema.orders_raw")
+    expect(seenSql).not.toContain("raw.orders")
+    await tmp[Symbol.asyncDispose]?.()
+  })
+
+  test("skips source() relationship execution when the manifest source cannot be resolved", async () => {
+    const { tmp, runner } = await runnerWithSourceManifest()
+    let calls = 0
+    dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async () => {
+      calls++
+      return { rows: [[0]] }
+    }) as any)
+    const test: GeneratedTest = {
+      id: "rel-missing-source",
+      kind: "relationships",
+      dbtTest: {
+        column: "customer_id",
+        test: "relationships",
+        args: { to: "source('missing', 'orders')", field: "customer_id" },
+      },
+      rationale: "declared relationship",
+      derivedFrom: {
+        origin: "declared_constraint",
+        kind: "relationships",
+        ref: "schema.yml:fct_orders.customer_id:relationships",
+      },
+    }
+
+    const results = await runner.runGeneratedTests?.([test], undefined, { model: "fct_orders" })
+
+    expect(results?.[test.id]?.status).toBe("error")
+    expect(results?.[test.id]?.detail).toContain("not found in the manifest")
+    expect(calls).toBe(0)
+    await tmp[Symbol.asyncDispose]?.()
+  })
+
+  test("rejects track-A relationships when the target relation is not allowlisted", async () => {
+    const { tmp, runner } = await runnerWithManifest()
+    let calls = 0
+    dispatcherSpy = spyOn(Dispatcher, "call").mockImplementation((async () => {
+      calls++
+      return { rows: [[0]] }
+    }) as any)
+    const test: GeneratedTest = {
+      id: "rel-track-a-rejected",
+      kind: "relationships",
+      dbtTest: {
+        column: "customer_id",
+        test: "relationships",
+        args: { to: "secret_customers", field: "customer_id" },
+      },
+      rationale: "declared relationship",
+      derivedFrom: {
+        origin: "declared_constraint",
+        kind: "relationships",
+        ref: "schema.yml:fct_orders.customer_id:relationships",
+      },
+    }
+
+    const results = await runner.runGeneratedTests?.([test], undefined, {
+      model: "fct_orders",
+      allowedRelations: ["fct_orders"],
+    })
 
     expect(results?.[test.id]?.status).toBe("error")
     expect(results?.[test.id]?.detail).toContain("sandbox")

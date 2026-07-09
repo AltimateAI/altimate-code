@@ -75,13 +75,12 @@ export interface SpecSource {
 }
 
 /** Test classes. `not_null`/`unique`/`accepted_values`/`relationships`/
- *  `column_type` map to track-A declared constraints; `range` is an
- *  inferred-context proposal. No golden/snapshot class exists — current output
- *  is never an expected value. */
+ *  `column_type` map to track-A declared constraints. No golden/snapshot class
+ *  exists — current output is never an expected value. */
 export type GeneratedTestKind = "not_null" | "unique" | "accepted_values" | "relationships" | "column_type" | "range"
 
 /** Kinds that can derive from a declared constraint (track A, block-eligible when
- *  executed). `range` and any description-derived test are advisory only. */
+ *  executed). Any description-derived test is advisory only. */
 export const DECLARED_CONSTRAINT_KINDS: ReadonlySet<GeneratedTestKind> = new Set<GeneratedTestKind>([
   "not_null",
   "unique",
@@ -97,7 +96,6 @@ export const ALLOWED_TEST_KINDS: ReadonlySet<GeneratedTestKind> = new Set<Genera
   "unique",
   "accepted_values",
   "relationships",
-  "range",
 ])
 
 export interface GeneratedTest {
@@ -238,7 +236,7 @@ function buildSystemPrompt(): string {
     "- Propose dbt generic tests only. Fill dbtTest; do not use assertionSql.",
     "- Every proposal must copy one derivedFrom object from specSources exactly, including derivedFrom.ref.",
     "- The derivedFrom.ref must be one of the provided refs. Never invent refs.",
-    "- Allowed kind values: not_null, unique, accepted_values, relationships, range.",
+    "- Allowed kind values: not_null, unique, accepted_values, relationships.",
     "- Return ONLY a JSON array of GeneratedTest objects. Return [] when there is no grounded proposal.",
   ].join("\n")
 }

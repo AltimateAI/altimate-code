@@ -38,6 +38,18 @@ describe("sanitizeAssertionSql", () => {
     })
   })
 
+  test("ignores relation-looking text inside string literals", () => {
+    expect(sanitizeAssertionSql("select 'from secret_orders' as note from fct_orders", ["fct_orders"]).ok).toBe(true)
+  })
+
+  test("preserves quoted CTE and relation identifiers while scanning references", () => {
+    const sanitized = sanitizeAssertionSql(
+      'with "quoted cte" as (select id from "allowed relation") select id from "quoted cte"',
+      ["allowed relation"],
+    )
+    expect(sanitized.ok).toBe(true)
+  })
+
   test("allows trailing semicolon followed only by a comment", () => {
     expect(sanitizeAssertionSql("select order_id from fct_orders; -- bounded assertion", ["fct_orders"]).ok).toBe(true)
   })

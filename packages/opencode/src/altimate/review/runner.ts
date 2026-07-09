@@ -13,6 +13,7 @@ import type {
 import type { GeneratedTest, GeneratedTestResult } from "./spec-test-gen"
 import { sanitizeAssertionSql } from "./spec-test-sandbox"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
+import { stableJson } from "./stable-json"
 
 /**
  * Production ReviewRunner backed by the native Dispatcher (the Rust core).
@@ -35,9 +36,22 @@ interface ManifestModel {
   raw?: any
 }
 
+interface ManifestSource {
+  unique_id: string
+  name: string
+  source_name: string
+  database?: string
+  schema_name?: string
+  identifier?: string
+  relation_name?: string
+  raw?: any
+}
+
 interface CachedManifest {
   models: Map<string, ManifestModel> // unique_id -> model
   byName: Map<string, ManifestModel>
+  sources: Map<string, ManifestSource> // unique_id -> source
+  sourcesByName: Map<string, ManifestSource> // source_name.name -> source
   children: Map<string, string[]> // unique_id -> direct child unique_ids
   testDeps: Map<string, Set<string>> // model unique_id -> set of test unique_ids depending on it
   testNodes: any[]
@@ -131,12 +145,32 @@ function constraintColumns(args?: Record<string, unknown>): string[] {
   return Array.isArray(cols) ? cols.map(String).filter(Boolean) : []
 }
 
+function normalizedConstraintArgs(
+  kind: DeclaredConstraint["kind"],
+  args?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (kind !== "accepted_values" && kind !== "relationships") return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(args ?? {})) {
+    if (key === "type" || key === "name") continue
+    if (key === "values" && Array.isArray(value)) {
+      out[key] = [...value].map((v) => (typeof v === "string" ? v.trim() : v)).sort((a, b) => String(a).localeCompare(String(b)))
+    } else if ((key === "to" || key === "field") && typeof value === "string") {
+      out[key] = value.trim().replace(/\s+/g, " ")
+    } else {
+      out[key] = value
+    }
+  }
+  return out
+}
+
 function constraintKey(kind: DeclaredConstraint["kind"], column?: string, args?: Record<string, unknown>): string {
   const columns = constraintColumns(args)
     .map((c) => c.toLowerCase())
     .sort()
     .join(",")
-  return `${kind}:${(column ?? "").toLowerCase()}:${columns}`
+  const argKey = normalizedConstraintArgs(kind, args)
+  return `${kind}:${(column ?? "").toLowerCase()}:${columns}:${argKey ? stableJson(argKey) : ""}`
 }
 
 function declaredConstraintKey(c: DeclaredConstraint): string {
@@ -174,9 +208,20 @@ function relationForModel(model: ManifestModel): string {
   return sqlTableRef(parts.join("."))
 }
 
+function relationForSource(source: ManifestSource): string {
+  if (source.relation_name) return source.relation_name
+  const parts = [source.database, source.schema_name, source.identifier || source.name].filter((p): p is string => !!p)
+  return sqlTableRef(parts.join("."))
+}
+
 function findModel(manifest: CachedManifest, model: string | undefined): ManifestModel | undefined {
   if (!model) return undefined
   return manifest.byName.get(model) ?? [...manifest.models.values()].find((m) => m.name.endsWith(`.${model}`))
+}
+
+function findSource(manifest: CachedManifest, sourceName: string | undefined, tableName: string | undefined): ManifestSource | undefined {
+  if (!sourceName || !tableName) return undefined
+  return manifest.sourcesByName.get(`${sourceName}.${tableName}`.toLowerCase())
 }
 
 function addRelationVariants(out: Set<string>, relation: string | undefined): void {
@@ -193,6 +238,27 @@ function addRelationVariants(out: Set<string>, relation: string | undefined): vo
   if (parts.length >= 2) out.add(parts.slice(-2).join("."))
 }
 
+function addAllowedModelDeps(out: Set<string>, manifest: CachedManifest, modelName: string | undefined): void {
+  const model = findModel(manifest, modelName)
+  if (!model) return
+  for (const dep of model.depends_on) {
+    const depModel = manifest.models.get(dep)
+    if (depModel) {
+      addRelationVariants(out, depModel.name)
+      addRelationVariants(out, depModel.alias)
+      addRelationVariants(out, relationForModel(depModel))
+      continue
+    }
+    const depSource = manifest.sources.get(dep)
+    if (depSource) {
+      addRelationVariants(out, `${depSource.source_name}.${depSource.name}`)
+      addRelationVariants(out, depSource.name)
+      addRelationVariants(out, depSource.identifier)
+      addRelationVariants(out, relationForSource(depSource))
+    }
+  }
+}
+
 function expandedAllowedRelations(manifest: CachedManifest, options?: GeneratedTestExecutionOptions): string[] {
   const out = new Set<string>()
   const seed = [...(options?.allowedRelations ?? []), options?.model].filter((v): v is string => !!v)
@@ -204,7 +270,13 @@ function expandedAllowedRelations(manifest: CachedManifest, options?: GeneratedT
       addRelationVariants(out, model.alias)
       addRelationVariants(out, relationForModel(model))
     }
+    const sourceParts = relation.split(".")
+    if (sourceParts.length === 2) {
+      const source = findSource(manifest, sourceParts[0], sourceParts[1])
+      if (source) addRelationVariants(out, relationForSource(source))
+    }
   }
+  addAllowedModelDeps(out, manifest, options?.model)
   return [...out]
 }
 
@@ -224,16 +296,21 @@ function columnsForUnique(test: GeneratedTest): string[] {
   return Array.isArray(cols) ? cols.map(String).filter(Boolean) : []
 }
 
-function relationshipTarget(raw: unknown, manifest: CachedManifest): string | undefined {
-  if (typeof raw !== "string" || !raw.trim()) return undefined
+function relationshipTarget(raw: unknown, manifest: CachedManifest): { relation?: string; detail?: string } {
+  if (typeof raw !== "string" || !raw.trim()) return { detail: "relationships test is missing target relation" }
   const ref = /\bref\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(raw)?.[1]
   if (ref) {
     const model = manifest.byName.get(ref)
-    return model ? relationForModel(model) : sqlTableRef(ref)
+    return { relation: model ? relationForModel(model) : sqlTableRef(ref) }
   }
   const source = /\bsource\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/.exec(raw)
-  if (source) return sqlTableRef(`${source[1]}.${source[2]}`)
-  return sqlTableRef(raw)
+  if (source) {
+    const resolved = findSource(manifest, source[1], source[2])
+    return resolved
+      ? { relation: relationForSource(resolved) }
+      : { detail: `relationships source target ${source[1]}.${source[2]} was not found in the manifest` }
+  }
+  return { relation: sqlTableRef(raw) }
 }
 
 function buildGeneratedTestSql(
@@ -292,13 +369,12 @@ function buildGeneratedTestSql(
   if (test.kind === "relationships") {
     if (!column) return { detail: "relationships test is missing column" }
     const args = test.dbtTest?.args ?? {}
-    const target = relationshipTarget(args["to"], manifest)
+    const resolvedTarget = relationshipTarget(args["to"], manifest)
+    const target = resolvedTarget.relation
     const field = typeof args["field"] === "string" && args["field"].trim() ? args["field"].trim() : undefined
-    if (!target || !field) return { detail: "relationships test is missing target relation or field" }
-    if (trackB) {
-      const targetCheck = sanitizeAssertionSql(`select 1 from ${target}`, expandedAllowedRelations(manifest, options))
-      if (!targetCheck.ok) return { detail: `relationships target rejected by sandbox: ${targetCheck.reason}` }
-    }
+    if (!target || !field) return { detail: resolvedTarget.detail ?? "relationships test is missing target relation or field" }
+    const targetCheck = sanitizeAssertionSql(`select 1 from ${target}`, expandedAllowedRelations(manifest, options))
+    if (!targetCheck.ok) return { detail: `relationships target rejected by sandbox: ${targetCheck.reason}` }
     const assertionSql =
       `select child.${sqlIdent(column)} from ${relation} as child ` +
       `left join ${target} as parent on child.${sqlIdent(column)} = parent.${sqlIdent(field)} ` +
@@ -399,6 +475,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           const rawNodes = (rawManifest?.nodes ?? {}) as Record<string, any>
           const models = new Map<string, ManifestModel>()
           const byName = new Map<string, ManifestModel>()
+          const sources = new Map<string, ManifestSource>()
+          const sourcesByName = new Map<string, ManifestSource>()
           const children = new Map<string, string[]>()
           const nodes = [...asArray<ManifestModel>(res.models), ...asArray<ManifestModel>((res as any).snapshots)]
           for (const m of nodes) {
@@ -413,6 +491,19 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
             }
             models.set(enriched.unique_id, enriched)
             byName.set(enriched.name, enriched)
+          }
+          for (const source of asArray<ManifestSource>(res.sources)) {
+            const raw = (rawManifest?.sources ?? {})[source.unique_id]
+            const enriched = {
+              ...source,
+              database: (source as any).database,
+              schema_name: (source as any).schema_name,
+              identifier: raw?.identifier,
+              relation_name: raw?.relation_name,
+              raw,
+            }
+            sources.set(enriched.unique_id, enriched)
+            sourcesByName.set(`${enriched.source_name}.${enriched.name}`.toLowerCase(), enriched)
           }
           // Invert depends_on (upstream) into children (downstream).
           for (const m of nodes) {
@@ -438,11 +529,13 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
             asArray(res.seeds),
             asArray((res as any).snapshots),
           )
-          return { models, byName, children, testDeps, testNodes, schemaContext, ok: models.size > 0 }
+          return { models, byName, sources, sourcesByName, children, testDeps, testNodes, schemaContext, ok: models.size > 0 }
         } catch {
           return {
             models: new Map(),
             byName: new Map(),
+            sources: new Map(),
+            sourcesByName: new Map(),
             children: new Map(),
             testDeps: new Map(),
             testNodes: [],

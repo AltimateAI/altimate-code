@@ -229,7 +229,7 @@ describe("spec test synthesis lane (P1 declared-constraint execution)", () => {
     expect(env.findings.some((f) => f.evidence?.tool?.startsWith("altimate.spec_test"))).toBe(false)
   })
 
-  test("declared column_type is kept out of generated tests", async () => {
+  test("declared column_type emits a non-blocking advisory but is not executed", async () => {
     let calls = 0
     const env = await reviewWith(
       baseRunner({
@@ -252,6 +252,18 @@ describe("spec test synthesis lane (P1 declared-constraint execution)", () => {
     )
 
     expect(calls).toBe(0)
-    expect(env.findings.some((f) => f.evidence?.tool?.startsWith("altimate.spec_test"))).toBe(false)
+    const finding = env.findings.find((f) => f.evidence?.tool === "altimate.spec_test.proposed")
+    expect(finding).toMatchObject({
+      severity: "suggestion",
+      confidence: "unknown",
+      category: "test_coverage",
+    })
+    expect(finding?.body).toContain("order_id")
+    expect(finding?.body).toContain("integer")
+    expect(finding?.body).toContain("Automated type verification is not yet available")
+    expect(finding?.evidence?.result).toMatchObject({
+      columnTypes: [{ column: "order_id", data_type: "integer" }],
+    })
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 })

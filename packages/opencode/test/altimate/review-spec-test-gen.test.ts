@@ -122,8 +122,16 @@ describe("isBlockEligible (only track-A declared constraints can block)", () => 
     expect(isBlockEligible(mkTest({ derivedFrom: backLabeled, kind: "not_null" }))).toBe(false)
   })
 
-  test("range proposal → never block-eligible", () => {
-    expect(isBlockEligible(mkTest({ derivedFrom: inferred, kind: "range" }))).toBe(false)
+  test("range proposal is dropped by the guard and never block-eligible", () => {
+    const test = mkTest({
+      derivedFrom: inferred,
+      kind: "range",
+      dbtTest: { column: "discount_pct", test: "range", args: { min: 0, max: 100 } },
+    })
+    const { kept, dropped } = filterToSpecDerived([test], providedSources)
+    expect(kept.length).toBe(0)
+    expect(dropped[0]?.reason).toBe("kind_not_allowed")
+    expect(isBlockEligible(test)).toBe(false)
   })
 })
 
@@ -215,6 +223,39 @@ describe("spec test synthesis lane (P0 propose-only)", () => {
     const summary = renderSummary(env)
     expect(summary).toContain("### Proposed tests")
     expect(summary).toContain("Candidate tests to consider adding")
+  })
+
+  test("composite declared unique renders dbt_utils.unique_combination_of_columns YAML", async () => {
+    const env = await runReview({
+      changedFiles,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["spec_tests"], ai: false, specTests: { execute: false } },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: {
+        ...fakeRunner(),
+        async declaredConstraints() {
+          return [
+            {
+              kind: "unique",
+              args: { columns: ["customer_id", "order_id"] },
+              hasEnforcingTest: false,
+              sourceRef: "schema.yml:fct_orders:unique",
+            },
+          ]
+        },
+      },
+      getContent: content({
+        "models/marts/fct_orders.sql": modelSql,
+        "models/marts/schema.yml": schemaYaml,
+      }),
+    })
+
+    const finding = env.findings.find((f) => f.evidence?.tool === "altimate.spec_test.proposed")
+    const yaml = String((finding?.evidence?.result as any)?.yaml ?? "")
+    expect(yaml).toContain("dbt_utils.unique_combination_of_columns")
+    expect(yaml).toContain("combination_of_columns")
+    expect(yaml).toContain("customer_id")
+    expect(yaml).toContain("order_id")
   })
 
   test("proposed findings never request changes in comment or gate mode", async () => {

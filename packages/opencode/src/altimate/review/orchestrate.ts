@@ -1086,8 +1086,30 @@ interface EnforcedConstraintMetrics {
   failed: number
 }
 
+function constraintColumns(args?: Record<string, unknown>): string[] {
+  const cols = args?.["columns"] ?? args?.["combination_of_columns"] ?? args?.["column_names"] ?? args?.["fields"]
+  return Array.isArray(cols) ? cols.map(String).filter(Boolean) : []
+}
+
 function declaredGeneratedTestId(test: Omit<GeneratedTest, "id">): string {
   return "gst_declared_" + createHash("sha256").update(stableJson(test)).digest("hex").slice(0, 16)
+}
+
+function dbtTestForDeclaredConstraint(c: DeclaredConstraint): GeneratedTest["dbtTest"] {
+  const args = c.args && Object.keys(c.args).length ? c.args : undefined
+  if (c.kind === "unique" && !c.column) {
+    const columns = constraintColumns(args)
+    if (columns.length > 1) {
+      return {
+        test: "dbt_utils.unique_combination_of_columns",
+        args: { combination_of_columns: columns },
+      }
+    }
+    if (columns.length === 1) {
+      return { test: "unique", args: { column_name: columns[0] } }
+    }
+  }
+  return { column: c.column, test: c.kind, args }
 }
 
 function materializeDeclaredConstraints(model: string, constraints: DeclaredConstraint[]): GeneratedTest[] {
@@ -1100,7 +1122,7 @@ function materializeDeclaredConstraints(model: string, constraints: DeclaredCons
     const args = c.args && Object.keys(c.args).length ? c.args : undefined
     const draft: Omit<GeneratedTest, "id"> = {
       kind: c.kind,
-      dbtTest: { column: c.column, test: c.kind, args },
+      dbtTest: dbtTestForDeclaredConstraint(c),
       rationale: `The model declares an unenforced ${c.kind} constraint${c.column ? ` on ${c.column}` : ""}.`,
       derivedFrom: {
         origin: "declared_constraint",
@@ -1120,6 +1142,39 @@ function specTestRuleKey(test: GeneratedTest): string {
   const columns = args["columns"] ?? args["combination_of_columns"] ?? args["column_names"] ?? args["fields"]
   const columnKey = Array.isArray(columns) ? columns.map(String).sort().join(",") : (test.dbtTest?.column ?? "")
   return `spec_test:${test.derivedFrom.ref}:${test.kind}:${columnKey}`
+}
+
+function columnTypeAdvisoryFinding(model: string, file: string, constraints: DeclaredConstraint[]): Finding {
+  const pairs = constraints
+    .map((c) => ({ column: c.column ?? "(model)", data_type: String(c.args?.data_type ?? c.args?.["type"] ?? "").trim() }))
+    .filter((p) => p.data_type)
+  const body = [
+    "The model declares column data types that this review could not verify automatically.",
+    "",
+    ...pairs.map((p) => `- \`${p.column}\` -> \`${p.data_type}\``),
+    "",
+    "Automated type verification is not yet available for these contract declarations, so no dbt generic YAML patch was generated and nothing was executed.",
+  ].join("\n")
+  return makeFinding({
+    severity: "suggestion",
+    category: "test_coverage",
+    title: `${model}: declared column_type constraints are unverified`,
+    body,
+    file,
+    model,
+    confidence: "unknown",
+    evidence: {
+      tool: "altimate.spec_test.proposed",
+      result: {
+        proposal: {
+          kind: "column_type",
+          derivedFrom: { origin: "declared_constraint", kind: "column_type", ref: `schema.yml:${model}:column_type` },
+        },
+        columnTypes: pairs,
+      },
+    },
+    ruleKey: `spec_test:${model}:column_type:unverified`,
+  })
 }
 
 function proposedSpecTestFinding(model: string, file: string, test: GeneratedTest): Finding {
@@ -1217,12 +1272,21 @@ async function specTestSynthesisLane(
   const model = modelNameFromPath(ctx.file.path)
   const sql = ctx.engineNewSql ?? ctx.newSql ?? ""
   const findings: Finding[] = []
-  const trackAAllowedRelations = [model]
+  const specSources = dedupeSpecSources([
+    ...(await changedSchemaSources(model, input)),
+    ...sqlIntentSources(ctx.newSql),
+    ...sqlIntentSources(ctx.engineNewSql),
+    ...prIntentSources(model, input),
+  ])
+  const trackAAllowedRelations = allowedRelationsForSpecTests(model, specSources)
 
   let trackATests: GeneratedTest[] = []
   if (input.runner.declaredConstraints) {
     try {
-      trackATests = materializeDeclaredConstraints(model, await input.runner.declaredConstraints(model))
+      const constraints = await input.runner.declaredConstraints(model)
+      const columnTypes = constraints.filter((c) => c.kind === "column_type" && !c.hasEnforcingTest)
+      if (columnTypes.length) findings.push(columnTypeAdvisoryFinding(model, ctx.file.path, columnTypes))
+      trackATests = materializeDeclaredConstraints(model, constraints)
     } catch {
       trackATests = []
     }
@@ -1263,12 +1327,6 @@ async function specTestSynthesisLane(
   }
 
   if (!input.generateSpecTests) return findings
-  const specSources = dedupeSpecSources([
-    ...(await changedSchemaSources(model, input)),
-    ...sqlIntentSources(ctx.newSql),
-    ...sqlIntentSources(ctx.engineNewSql),
-    ...prIntentSources(model, input),
-  ])
   if (!specSources.length) return findings
 
   const memoryEntries = configuredMemoryEntries(input)

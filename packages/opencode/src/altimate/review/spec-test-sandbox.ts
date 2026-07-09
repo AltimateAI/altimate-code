@@ -155,11 +155,107 @@ function withoutStringsAndComments(sql: string): string {
   return out
 }
 
+function withoutCommentsAndStringLiterals(sql: string): string {
+  let state: ScanState = "normal"
+  let out = ""
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]!
+    const next = sql[i + 1]
+    if (state === "line_comment") {
+      if (ch === "\n") {
+        state = "normal"
+        out += "\n"
+      } else {
+        out += " "
+      }
+      continue
+    }
+    if (state === "block_comment") {
+      if (ch === "*" && next === "/") {
+        state = "normal"
+        out += "  "
+        i++
+      } else {
+        out += ch === "\n" ? "\n" : " "
+      }
+      continue
+    }
+    if (state === "single") {
+      if (ch === "'" && next === "'") {
+        out += "  "
+        i++
+      } else if (ch === "'") {
+        state = "normal"
+        out += " "
+      } else {
+        out += ch === "\n" ? "\n" : " "
+      }
+      continue
+    }
+    if (state === "double") {
+      out += ch
+      if (ch === '"' && next === '"') {
+        out += next
+        i++
+      } else if (ch === '"') {
+        state = "normal"
+      }
+      continue
+    }
+    if (state === "backtick") {
+      out += ch
+      if (ch === "`") state = "normal"
+      continue
+    }
+    if (state === "bracket") {
+      out += ch
+      if (ch === "]") state = "normal"
+      continue
+    }
+
+    if (ch === "-" && next === "-") {
+      state = "line_comment"
+      out += "  "
+      i++
+    } else if (ch === "/" && next === "*") {
+      state = "block_comment"
+      out += "  "
+      i++
+    } else if (ch === "'") {
+      state = "single"
+      out += " "
+    } else if (ch === '"') {
+      state = "double"
+      out += ch
+    } else if (ch === "`") {
+      state = "backtick"
+      out += ch
+    } else if (ch === "[") {
+      state = "bracket"
+      out += ch
+    } else {
+      out += ch
+    }
+  }
+  return out
+}
+
+function normalizeIdentifierPart(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) return trimmed.slice(1, -1)
+  if (trimmed.length >= 2 && trimmed[0] === trimmed[trimmed.length - 1] && (trimmed[0] === '"' || trimmed[0] === "`")) {
+    const quote = trimmed[0]
+    return trimmed.slice(1, -1).replaceAll(`${quote}${quote}`, quote)
+  }
+  return trimmed
+}
+
 function normalizeRelation(value: string): string {
   return value
     .trim()
-    .replace(/^[`"\[]|[`"\]]$/g, "")
-    .replace(/\s*\.\s*/g, ".")
+    .split(/\s*\.\s*/g)
+    .map(normalizeIdentifierPart)
+    .join(".")
     .toLowerCase()
 }
 
@@ -213,15 +309,16 @@ export function sanitizeAssertionSql(sql: string, allowedRelations: Iterable<str
   const trimmed = single.sql.trim()
   if (!trimmed) return { ok: false, reason: "empty" }
 
-  const scanned = withoutStringsAndComments(trimmed)
-  if (SIDE_EFFECT_RE.test(scanned)) return { ok: false, reason: "side_effect" }
-  if (!/^\s*select\b/i.test(scanned) && !/^\s*with\b[\s\S]*\bselect\b/i.test(scanned)) {
+  const structuralScan = withoutStringsAndComments(trimmed)
+  if (SIDE_EFFECT_RE.test(structuralScan)) return { ok: false, reason: "side_effect" }
+  if (!/^\s*select\b/i.test(structuralScan) && !/^\s*with\b[\s\S]*\bselect\b/i.test(structuralScan)) {
     return { ok: false, reason: "not_select" }
   }
 
+  const relationScan = withoutCommentsAndStringLiterals(trimmed)
   const allowed = allowedRelationSet(allowedRelations)
-  const ctes = cteNames(scanned)
-  for (const relation of referencedRelations(trimmed)) {
+  const ctes = cteNames(relationScan)
+  for (const relation of referencedRelations(relationScan)) {
     if (ctes.has(relation)) continue
     if (!relationAllowed(relation, allowed)) return { ok: false, reason: "unknown_relation" }
   }
