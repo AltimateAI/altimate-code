@@ -18,6 +18,9 @@ import { AltimateApi } from "../../../../altimate/api/client"
 // altimate_change end
 
 const PROVIDER_PRIORITY: Record<string, number> = {
+  // altimate_change start — surface the Altimate LLM Gateway first (social signup)
+  "altimate-backend": -1,
+  // altimate_change end
   opencode: 0,
   "opencode-go": 1,
   openai: 2,
@@ -38,6 +41,9 @@ export function createDialogProviderOptions() {
         title: provider.name,
         value: provider.id,
         description: {
+          // altimate_change start
+          "altimate-backend": "Recommended · best tool-calling · 10M free tokens",
+          // altimate_change end
           opencode: "(Recommended)",
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",

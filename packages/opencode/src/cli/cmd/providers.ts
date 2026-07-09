@@ -319,6 +319,9 @@ export const ProvidersLoginCommand = cmd({
         })
 
         const priority: Record<string, number> = {
+          // altimate_change start — surface the Altimate LLM Gateway first
+          "altimate-backend": -1,
+          // altimate_change end
           opencode: 0,
           openai: 1,
           "github-copilot": 2,
