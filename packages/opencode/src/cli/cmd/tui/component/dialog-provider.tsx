@@ -1,5 +1,6 @@
 import { createMemo, createSignal, onMount, Show } from "solid-js"
 import { useSync } from "@tui/context/sync"
+import { useLocal } from "@tui/context/local"
 import { map, pipe, sortBy } from "remeda"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
@@ -9,7 +10,7 @@ import { Link } from "../ui/link"
 import { useTheme } from "../context/theme"
 import { TextAttributes } from "@opentui/core"
 import type { ProviderAuthAuthorization } from "@opencode-ai/sdk/v2"
-import { DialogModel } from "./dialog-model"
+import { DialogModel, markSetupComplete } from "./dialog-model"
 import { useKeyboard } from "@opentui/solid"
 import { Clipboard } from "@tui/util/clipboard"
 import { useToast } from "../ui/toast"
@@ -18,16 +19,27 @@ import { AltimateApi } from "../../../../altimate/api/client"
 // altimate_change end
 
 const PROVIDER_PRIORITY: Record<string, number> = {
-  // altimate_change start — surface the Altimate LLM Gateway first (social signup)
-  "altimate-backend": -1,
-  // altimate_change end
-  opencode: 0,
-  "opencode-go": 1,
+  // altimate_change start — Part 1 onboarding: Altimate LLM Gateway is the
+  // recommended default first; the BYOK providers rank next; OpenCode Zen loses
+  // its "Recommended" tag and drops below. (Big Pickle occupies priority 4, injected
+  // by dialog-model between Google and Zen.)
+  "altimate-backend": 0,
+  anthropic: 1,
   openai: 2,
-  "github-copilot": 3,
-  anthropic: 4,
-  google: 5,
+  google: 3,
+  // 4 reserved for Big Pickle (see dialog-model)
+  opencode: 5,
+  "opencode-go": 6,
+  "github-copilot": 7,
+  // altimate_change end
 }
+
+// altimate_change start — known-bad tool-callers, surfaced inline in the model picker
+// (imported by dialog-model's READY/NEEDS-SETUP list).
+export const WARNLIST: Record<string, string> = {
+  "qwen-plus": "⚠ known tool-calling issues",
+}
+// altimate_change end
 
 export function createDialogProviderOptions() {
   const sync = useSync()
@@ -38,17 +50,18 @@ export function createDialogProviderOptions() {
       sync.data.provider_next.all,
       sortBy((x) => PROVIDER_PRIORITY[x.id] ?? 99),
       map((provider) => ({
-        title: provider.name,
+        // altimate_change start — brand the gateway entry + relabel priorities
+        title: provider.id === "altimate-backend" ? "Altimate LLM Gateway" : provider.name,
         value: provider.id,
         description: {
-          // altimate_change start
           "altimate-backend": "Recommended · best tool-calling · 10M free tokens",
-          // altimate_change end
-          opencode: "(Recommended)",
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
+          google: "(API key)",
+          opencode: "Bring your own Zen key",
           "opencode-go": "Low cost subscription for everyone",
         }[provider.id],
+        // altimate_change end
         category: provider.id in PROVIDER_PRIORITY ? "Popular" : "Other",
         async onSelect() {
           const methods = sync.data.provider_auth[provider.id] ?? [
@@ -119,9 +132,14 @@ function AutoMethod(props: AutoMethodProps) {
   const sdk = useSDK()
   const dialog = useDialog()
   const sync = useSync()
+  const local = useLocal()
   const toast = useToast()
+  // altimate_change — success state: confirm inline (green) below the "waiting" line,
+  // then auto-close, instead of jumping into the model picker.
+  const [connected, setConnected] = createSignal(false)
 
   useKeyboard((evt) => {
+    if (connected()) return
     if (evt.name === "c" && !evt.ctrl && !evt.meta) {
       const code = props.authorization.instructions.match(/[A-Z0-9]{4}-[A-Z0-9]{4,5}/)?.[0] ?? props.authorization.url
       Clipboard.copy(code)
@@ -141,6 +159,23 @@ function AutoMethod(props: AutoMethodProps) {
     }
     await sdk.client.instance.dispose()
     await sync.bootstrap()
+    // altimate_change start — mark setup complete (flips useReady → unlocks first-run chat/tips)
+    markSetupComplete()
+    // The gateway sign-in already shows the auth URL + "Waiting for authorization…".
+    // On success, confirm inline (green) and auto-close after a moment rather than
+    // opening the model picker. Auto-select a model so the user can chat right away.
+    if (props.providerID === "altimate-backend") {
+      const provider = sync.data.provider.find((p) => p.id === props.providerID)
+      const model = provider
+        ? Object.entries(provider.models).find(([, info]) => info.status !== "deprecated")?.[0]
+        : undefined
+      if (model) local.model.set({ providerID: props.providerID, modelID: model }, { recent: true })
+      setConnected(true)
+      setTimeout(() => dialog.clear(), 5000)
+      return
+    }
+    // altimate_change end
+    toast.show({ message: `Connected to ${props.title}`, variant: "success" })
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
   })
 
@@ -150,18 +185,35 @@ function AutoMethod(props: AutoMethodProps) {
         <text attributes={TextAttributes.BOLD} fg={theme.text}>
           {props.title}
         </text>
-        <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
-          esc
-        </text>
+        <Show when={!connected()}>
+          <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+            esc
+          </text>
+        </Show>
       </box>
       <box gap={1}>
         <Link href={props.authorization.url} fg={theme.primary} />
         <text fg={theme.textMuted}>{props.authorization.instructions}</text>
       </box>
-      <text fg={theme.textMuted}>Waiting for authorization...</text>
-      <text fg={theme.text}>
-        c <span style={{ fg: theme.textMuted }}>copy</span>
-      </text>
+      {/* altimate_change — swap the "waiting" line for a green success confirmation */}
+      <Show
+        when={connected()}
+        fallback={
+          <>
+            <text fg={theme.textMuted}>Waiting for authorization...</text>
+            <text fg={theme.text}>
+              c <span style={{ fg: theme.textMuted }}>copy</span>
+            </text>
+          </>
+        }
+      >
+        {/* theme.success is plain ANSI green (col 2) — dim/gray in many palettes;
+            diffHighlightAdded is the bright green (greenBright) so it reads clearly. */}
+        <text fg={theme.diffHighlightAdded} attributes={TextAttributes.BOLD}>
+          ✓ Authentication successful
+        </text>
+        <text fg={theme.textMuted}>You are all set — returning to Altimate Code…</text>
+      </Show>
     </box>
   )
 }
@@ -238,8 +290,8 @@ function ApiMethod(props: ApiMethodProps) {
           opencode: (
             <box gap={1}>
               <text fg={theme.textMuted}>
-                Altimate Code Zen gives you access to all the best coding models at the cheapest prices with a single API
-                key.
+                Altimate Code Zen gives you access to all the best coding models at the cheapest prices with a single
+                API key.
               </text>
               <text fg={theme.text}>
                 Go to <span style={{ fg: theme.primary }}>https://altimate.ai/zen</span> to get a key
@@ -249,8 +301,8 @@ function ApiMethod(props: ApiMethodProps) {
           "opencode-go": (
             <box gap={1}>
               <text fg={theme.textMuted}>
-                Altimate Code Go is a $10 per month subscription that provides reliable access to popular open coding models
-                with generous usage limits.
+                Altimate Code Go is a $10 per month subscription that provides reliable access to popular open coding
+                models with generous usage limits.
               </text>
               <text fg={theme.text}>
                 Go to <span style={{ fg: theme.primary }}>https://altimate.ai/zen</span> and enable Altimate Code Go
@@ -261,18 +313,10 @@ function ApiMethod(props: ApiMethodProps) {
           "altimate-backend": (
             <box gap={1}>
               {/* altimate_change start — default-URL credential format (2-part preferred) */}
-              <text fg={theme.textMuted}>
-                Enter your Altimate credentials in this format:
-              </text>
-              <text fg={theme.text}>
-                instance-name::api-key
-              </text>
-              <text fg={theme.textMuted}>
-                e.g. mycompany::abc123 (uses https://api.myaltimate.com)
-              </text>
-              <text fg={theme.textMuted}>
-                For a custom API URL, use: api-url::instance-name::api-key
-              </text>
+              <text fg={theme.textMuted}>Enter your Altimate credentials in this format:</text>
+              <text fg={theme.text}>instance-name::api-key</text>
+              <text fg={theme.textMuted}>e.g. mycompany::abc123 (uses https://api.myaltimate.com)</text>
+              <text fg={theme.textMuted}>For a custom API URL, use: api-url::instance-name::api-key</text>
               {/* altimate_change end */}
               <Show when={validationError()}>
                 <text fg={theme.error}>{validationError()!}</text>
@@ -288,7 +332,9 @@ function ApiMethod(props: ApiMethodProps) {
         if (props.providerID === "altimate-backend") {
           const parsed = AltimateApi.parseAltimateKey(value)
           if (!parsed) {
-            setValidationError("Invalid format — use: instance-name::api-key (or api-url::instance-name::api-key for a custom URL)")
+            setValidationError(
+              "Invalid format — use: instance-name::api-key (or api-url::instance-name::api-key for a custom URL)",
+            )
             return
           }
           const validation = await AltimateApi.validateCredentials(parsed)

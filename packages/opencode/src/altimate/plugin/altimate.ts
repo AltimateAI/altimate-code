@@ -141,6 +141,8 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
 
             const webUrl = (process.env.ALTIMATE_WEB_URL || DEFAULT_WEB_URL).replace(/\/+$/, "")
             const redirect = `http://localhost:${CALLBACK_PORT}/callback`
+            // Land on the sign-up page and let the user choose how to authenticate
+            // (Google today, more providers later) rather than forcing Google.
             const authorizeUrl =
               `${webUrl}/register?client=altimate-code` +
               `&redirect=${encodeURIComponent(redirect)}` +
@@ -150,7 +152,7 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
 
             return {
               url: authorizeUrl,
-              instructions: "Sign in with Google in your browser to connect Altimate LLM Gateway.",
+              instructions: "Complete sign-in in your browser to connect Altimate LLM Gateway.",
               method: "auto",
               async callback() {
                 try {

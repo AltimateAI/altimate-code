@@ -3,18 +3,17 @@ import { Clipboard } from "@tui/util/clipboard"
 import { Selection } from "@tui/util/selection"
 import { MouseButton, TextAttributes } from "@opentui/core"
 import { RouteProvider, useRoute } from "@tui/context/route"
-import { Switch, Match, createEffect, untrack, ErrorBoundary, createSignal, onMount, batch, Show, on } from "solid-js"
+import { Switch, Match, createEffect, untrack, ErrorBoundary, createSignal, onMount, batch, Show } from "solid-js"
 import { win32DisableProcessedInput, win32FlushInputBuffer, win32InstallCtrlCGuard } from "./win32"
 import { Installation } from "@/installation"
 import { UPGRADE_KV_KEY } from "./component/upgrade-indicator-utils"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
-import { DialogProvider as DialogProviderList } from "@tui/component/dialog-provider"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
-import { DialogModel, useConnected } from "@tui/component/dialog-model"
+import { DialogModel, DialogModelWelcome, useConnected, useReady } from "@tui/component/dialog-model"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -470,18 +469,12 @@ function App() {
     })
   })
 
-  createEffect(
-    on(
-      () => sync.status === "complete" && sync.data.provider.length === 0,
-      (isEmpty, wasEmpty) => {
-        // only trigger when we transition into an empty-provider state
-        if (!isEmpty || wasEmpty) return
-        dialog.replace(() => <DialogProviderList />)
-      },
-    ),
-  )
+  // altimate_change — first run is now a welcoming home-screen panel (see routes/home.tsx),
+  // not an auto-opened modal. The welcome panel's readiness-aware tips guide the user to
+  // run /connect, which opens the curated DialogModelWelcome picker.
 
   const connected = useConnected()
+  const ready = useReady()
   command.register(() => [
     {
       title: "Switch session",
@@ -659,14 +652,14 @@ function App() {
       },
     },
     {
-      title: "Connect provider",
+      title: "Connect to your AI model provider",
       value: "provider.connect",
       suggested: !connected(),
       slash: {
         name: "connect",
       },
       onSelect: () => {
-        dialog.replace(() => <DialogProviderList />)
+        dialog.replace(() => <DialogModelWelcome />)
       },
       category: "Provider",
     },
@@ -891,6 +884,9 @@ function App() {
   // altimate_change start — branding: altimate upgrade
   sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
     kv.set(UPGRADE_KV_KEY, evt.properties.version)
+    // altimate_change — don't cover the first-run welcome panel with the update toast;
+    // the upgrade indicator in the footer still surfaces it. Show once a model is ready.
+    if (!ready()) return
     toast.show({
       variant: "info",
       title: "Update Available",

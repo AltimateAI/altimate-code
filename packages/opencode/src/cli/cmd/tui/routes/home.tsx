@@ -2,7 +2,6 @@ import { Prompt, type PromptRef } from "@tui/component/prompt"
 import { createEffect, createMemo, Match, on, onMount, Show, Switch } from "solid-js"
 import { useTheme } from "@tui/context/theme"
 import { useKeybind } from "@tui/context/keybind"
-import { Logo } from "../component/logo"
 import { Tips } from "../component/tips"
 import { Locale } from "@/util/locale"
 import { useSync } from "../context/sync"
@@ -15,6 +14,10 @@ import { Installation } from "@/installation"
 import { useKV } from "../context/kv"
 import { useCommandDialog } from "../component/dialog-command"
 import { useLocal } from "../context/local"
+// altimate_change start — first-run guidance + shared boot box
+import { useReady } from "../component/dialog-model"
+import { WelcomePanel } from "../component/welcome-panel"
+// altimate_change end
 // altimate_change start — upgrade indicator import
 import { UpgradeIndicator } from "../component/upgrade-indicator"
 // altimate_change end
@@ -87,6 +90,10 @@ export function Home() {
   let prompt: PromptRef
   const args = useArgs()
   const local = useLocal()
+  // altimate_change start — boot box extracted to component/welcome-panel.tsx so the
+  // tips section is readiness-aware (/connect → /discover)
+  const ready = useReady()
+  // altimate_change end
   onMount(() => {
     if (once) return
     if (route.initialPrompt) {
@@ -117,13 +124,14 @@ export function Home() {
   return (
     <>
       <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
+        {/* altimate_change start — boot box always shows on home (tips section is
+            readiness-aware); chat input pushed to the bottom via a growing spacer */}
+        <box height={2} flexShrink={0} />
+        <WelcomePanel />
         <box flexGrow={1} minHeight={0} />
-        <box height={4} minHeight={0} flexShrink={1} />
-        <box flexShrink={0}>
-          <Logo />
-        </box>
-        <box height={1} minHeight={0} flexShrink={1} />
-        <box width="100%" maxWidth={75} zIndex={1000} paddingTop={1} flexShrink={0}>
+        {/* altimate_change end */}
+        {/* altimate_change — full-width input bar, Claude Code style */}
+        <box width="100%" zIndex={1000} paddingTop={1} flexShrink={0}>
           <Prompt
             ref={(r) => {
               prompt = r
@@ -133,31 +141,13 @@ export function Home() {
             workspaceID={route.workspaceID}
           />
         </box>
-        {/* altimate_change start — first-time onboarding hint */}
-        <Show when={isFirstTimeUser() === true}>
-          <box width="100%" maxWidth={75} paddingTop={1} flexShrink={0}>
-            <text>
-              <span style={{ fg: theme.textMuted }}>Get started: </span>
-              <span style={{ fg: theme.text }}>/connect</span>
-              <span style={{ fg: theme.textMuted }}> to add your API key</span>
-              <span style={{ fg: theme.textMuted }}> · </span>
-              <span style={{ fg: theme.text }}>/discover</span>
-              <span style={{ fg: theme.textMuted }}> to detect your data stack</span>
-              <span style={{ fg: theme.textMuted }}> · </span>
-              <span style={{ fg: theme.text }}>Ctrl+P</span>
-              <span style={{ fg: theme.textMuted }}> for all commands</span>
-            </text>
+        {/* altimate_change — rotating tips under the input (ready users only); the
+            panel's "Tips for getting started" covers first-run guidance */}
+        <Show when={ready() && showTips()}>
+          <box height={2} minHeight={0} width="100%" alignItems="center" paddingTop={1} flexShrink={1}>
+            <Tips isFirstTime={isFirstTimeUser() === true} />
           </box>
         </Show>
-        {/* altimate_change end */}
-        <box height={4} minHeight={0} width="100%" maxWidth={75} alignItems="center" paddingTop={3} flexShrink={1}>
-          <Show when={showTips()}>
-            {/* altimate_change start — pass first-time flag for beginner tips */}
-            <Tips isFirstTime={isFirstTimeUser() === true} />
-            {/* altimate_change end */}
-          </Show>
-        </box>
-        <box flexGrow={1} minHeight={0} />
         <Toast />
       </box>
       <box paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0} gap={2}>
