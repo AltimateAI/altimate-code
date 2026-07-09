@@ -36,7 +36,22 @@ let loaded = false
 // Config file paths
 // ---------------------------------------------------------------------------
 
+// altimate_change start — PROTO_FRESH sandbox (same pattern as auth.json): demo
+// runs keep warehouse connections out of the real home dir, wiped each launch.
+const PROTO_FRESH_CONNECTIONS =
+  process.env.PROTO_FRESH === "1" ? path.join(os.tmpdir(), "altimate-proto-fresh", "connections.json") : null
+if (PROTO_FRESH_CONNECTIONS) {
+  try {
+    fs.rmSync(PROTO_FRESH_CONNECTIONS, { force: true })
+  } catch {
+    /* best-effort */
+  }
+}
+// altimate_change end
+
 function globalConfigPath(): string {
+  // altimate_change — PROTO_FRESH sandbox
+  if (PROTO_FRESH_CONNECTIONS) return PROTO_FRESH_CONNECTIONS
   return path.join(os.homedir(), ".altimate-code", "connections.json")
 }
 

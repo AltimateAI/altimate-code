@@ -49,6 +49,8 @@ import { WarehouseTestTool } from "../altimate/tools/warehouse-test"
 import { WarehouseAddTool } from "../altimate/tools/warehouse-add"
 import { WarehouseRemoveTool } from "../altimate/tools/warehouse-remove"
 import { WarehouseDiscoverTool } from "../altimate/tools/warehouse-discover"
+// altimate_change — Part 3 activation: jaffle-shop sample environment
+import { SampleSetupTool } from "../altimate/tools/sample-setup"
 import { McpDiscoverTool } from "../altimate/tools/mcp-discover"
 
 import { DbtManifestTool } from "../altimate/tools/dbt-manifest"
@@ -236,6 +238,7 @@ export namespace ToolRegistry {
       WarehouseAddTool,
       WarehouseRemoveTool,
       WarehouseDiscoverTool,
+      SampleSetupTool,
       // altimate_change start - register MCP discovery tool
       McpDiscoverTool,
       // altimate_change end
