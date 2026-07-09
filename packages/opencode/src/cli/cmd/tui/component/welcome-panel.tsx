@@ -88,13 +88,16 @@ export function WelcomePanel() {
             What is Altimate Code
           </text>
           <text fg={theme.textMuted} wrapMode="word" width="100%">
-            The intelligence layer for data engineering AI — 100+ deterministic tools for SQL analysis, column-level
-            lineage, dbt, FinOps, and warehouse connectivity across every major cloud platform.
+            Altimate Code is a specialized data engineering harness that sits between any LLM and your entire data
+            stack. It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse
+            metadata — so it reasons about your data instead of guessing.
           </text>
-          <text fg={theme.textMuted} wrapMode="word" width="100%">
-            Run standalone in your terminal, embed underneath Claude Code or Codex, or integrate into CI pipelines and
-            orchestration DAGs. Precision data tooling for any LLM.
-          </text>
+          {/* CTA only until a model is connected — stale afterwards */}
+          <Show when={!ready()}>
+            <text fg={theme.text} wrapMode="word" width="100%">
+              Connect your AI model to start.
+            </text>
+          </Show>
         </box>
       </box>
     </box>
