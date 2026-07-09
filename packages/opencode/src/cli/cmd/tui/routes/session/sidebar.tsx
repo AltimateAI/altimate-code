@@ -9,8 +9,9 @@ import { Global } from "@/global"
 import { Installation } from "@/installation"
 import { useKeybind } from "../../context/keybind"
 import { useDirectory } from "../../context/directory"
-import { useKV } from "../../context/kv"
 import { TodoItem } from "../../component/todo-item"
+// altimate_change — click-to-open for community/docs links
+import open from "open"
 // altimate_change start - trace section
 // altimate_change end
 
@@ -48,12 +49,6 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   })
 
   const directory = useDirectory()
-  const kv = useKV()
-
-  const hasProviders = createMemo(() =>
-    sync.data.provider.some((x) => x.id !== "opencode" || Object.values(x.models).some((y) => y.cost?.input !== 0)),
-  )
-  const gettingStartedDismissed = createMemo(() => kv.get("dismissed_getting_started", false))
 
   return (
     <Show when={session()}>
@@ -93,6 +88,33 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>{context()?.percentage ?? 0}% used</text>
               <text fg={theme.textMuted}>{cost()} spent</text>
             </box>
+            {/* altimate_change start — slim community + docs lines (replaces the old
+                Getting-started box). URLs are plain copyable text; clicking the line
+                opens the browser as a bonus, never a dependency. The Slack URL is the
+                repo's stable vanity link (README badge) rather than a raw
+                shared_invite, which can expire. */}
+            <box>
+              <text fg={theme.textMuted} wrapMode="word" width="100%">
+                Ideas or issues? Join the community.
+              </text>
+              <text
+                wrapMode="word"
+                width="100%"
+                onMouseUp={() => open("https://altimate.studio/join-agentic-data-engineering-slack").catch(() => {})}
+              >
+                <span style={{ fg: theme.textMuted }}>Community · </span>
+                <span style={{ fg: theme.accent }}>altimate.studio/join-agentic-data-engineering-slack</span>
+              </text>
+              <text
+                wrapMode="word"
+                width="100%"
+                onMouseUp={() => open("https://help.altimate.ai/code/").catch(() => {})}
+              >
+                <span style={{ fg: theme.textMuted }}>Docs · </span>
+                <span style={{ fg: theme.accent }}>help.altimate.ai/code</span>
+              </text>
+            </box>
+            {/* altimate_change end */}
             {/* altimate_change start — jobs panel (replaces Trace / MCP / LSP).
                 These are JOBS, not commands — no slash commands appended. */}
             <box gap={1}>
@@ -175,39 +197,8 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
         </scrollbox>
 
         <box flexShrink={0} gap={1} paddingTop={1}>
-          <Show when={!hasProviders() && !gettingStartedDismissed()}>
-            <box
-              backgroundColor={theme.backgroundElement}
-              paddingTop={1}
-              paddingBottom={1}
-              paddingLeft={2}
-              paddingRight={2}
-              flexDirection="row"
-              gap={1}
-            >
-              <text flexShrink={0} fg={theme.text}>
-                ⬖
-              </text>
-              <box flexGrow={1} gap={1}>
-                <box flexDirection="row" justifyContent="space-between">
-                  <text fg={theme.text}>
-                    <b>Getting started</b>
-                  </text>
-                  <text fg={theme.textMuted} onMouseDown={() => kv.set("dismissed_getting_started", true)}>
-                    ✕
-                  </text>
-                </box>
-                <text fg={theme.textMuted}>Altimate CLI includes free models so you can start immediately.</text>
-                <text fg={theme.textMuted}>
-                  Connect from 75+ providers to use other models, including Claude, GPT, Gemini etc
-                </text>
-                <box flexDirection="row" gap={1} justifyContent="space-between">
-                  <text fg={theme.text}>Connect provider</text>
-                  <text fg={theme.textMuted}>/connect</text>
-                </box>
-              </box>
-            </box>
-          </Show>
+          {/* altimate_change — old "Getting started" box removed: stale for a
+              connected user; the community/docs lines up top replace its purpose */}
           <text>
             <span style={{ fg: theme.textMuted }}>{directory().split("/").slice(0, -1).join("/")}/</span>
             <span style={{ fg: theme.text }}>{directory().split("/").at(-1)}</span>
