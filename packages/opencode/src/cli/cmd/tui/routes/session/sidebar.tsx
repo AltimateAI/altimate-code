@@ -10,7 +10,9 @@ import { Installation } from "@/installation"
 import { useKeybind } from "../../context/keybind"
 import { useDirectory } from "../../context/directory"
 import { TodoItem } from "../../component/todo-item"
-// altimate_change — click-to-open for community/docs links
+// altimate_change — community/docs links: plain copyable text, underlined for
+// affordance; clicking the line opens the browser. (OSC-8 word-links are not
+// supported by the current @opentui/solid JSX layer — raw TextChunk children crash.)
 import open from "open"
 // altimate_change start - trace section
 // altimate_change end
@@ -50,6 +52,9 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
 
   const directory = useDirectory()
 
+  // altimate_change — light dotted divider between sidebar sections
+  const Dotted = () => <text fg={theme.border}>┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</text>
+
   return (
     <Show when={session()}>
       <box
@@ -80,6 +85,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 <text fg={theme.textMuted}>{session().share!.url}</text>
               </Show>
             </box>
+            <Dotted />
             <box>
               <text fg={theme.text}>
                 <b>Context</b>
@@ -88,12 +94,13 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>{context()?.percentage ?? 0}% used</text>
               <text fg={theme.textMuted}>{cost()} spent</text>
             </box>
+            <Dotted />
             {/* altimate_change start — slim community + docs lines (replaces the old
-                Getting-started box). URLs are plain copyable text; clicking the line
-                opens the browser as a bonus, never a dependency. The Slack URL is the
-                repo's stable vanity link (README badge) rather than a raw
-                shared_invite, which can expire. */}
-            <box>
+                Getting-started box). URLs are plain copyable text, underlined for
+                affordance; clicking the line opens the browser as a bonus, never a
+                dependency. The Slack URL is the repo's stable vanity link (README
+                badge) rather than a raw shared_invite, which can expire. */}
+            <box gap={1}>
               <text fg={theme.textMuted} wrapMode="word" width="100%">
                 Ideas or issues? Join the community.
               </text>
@@ -103,7 +110,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 onMouseUp={() => open("https://altimate.studio/join-agentic-data-engineering-slack").catch(() => {})}
               >
                 <span style={{ fg: theme.textMuted }}>Community · </span>
-                <span style={{ fg: theme.accent }}>altimate.studio/join-agentic-data-engineering-slack</span>
+                <span style={{ fg: theme.accent, underline: true }}>altimate.studio/join-agentic-data-engineering-slack</span>
               </text>
               <text
                 wrapMode="word"
@@ -111,10 +118,11 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 onMouseUp={() => open("https://help.altimate.ai/code/").catch(() => {})}
               >
                 <span style={{ fg: theme.textMuted }}>Docs · </span>
-                <span style={{ fg: theme.accent }}>help.altimate.ai/code</span>
+                <span style={{ fg: theme.accent, underline: true }}>help.altimate.ai/code</span>
               </text>
             </box>
             {/* altimate_change end */}
+            <Dotted />
             {/* altimate_change start — jobs panel (replaces Trace / MCP / LSP).
                 These are JOBS, not commands — no slash commands appended. */}
             <box gap={1}>
@@ -131,7 +139,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 <text fg={theme.textMuted}>• Debug &amp; monitor your warehouse</text>
                 <text fg={theme.textMuted}>• Govern data: lineage, PII, tests</text>
               </box>
-              <text fg={theme.border}>─────────────────</text>
+              <text fg={theme.border}>┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</text>
               <text fg={theme.textMuted} wrapMode="word" width="100%">
                 New here? <span style={{ fg: theme.accent }}>/discover</span> finds your stack in one scan
               </text>
