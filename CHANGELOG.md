@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-07-08
+
+This release rebases altimate-code onto **upstream OpenCode v1.17.9** (bridged up from v1.4.0 — ~165 upstream commits) behind the fork's own fixes and hardening. It is a larger-than-usual jump from 0.8.10; the upgrade is automatic and in-place (see **Upgrading from 0.8.10** below).
+
+### Security
+
+- **MCP tool calls now correctly enforce the permission check.** During the v1.17.9 re-home, the MCP tool wrapper awaited a permission `Effect` without running it, so an MCP tool could execute without going through the permission prompt. It was caught in pre-release review and never reached a published stable release; upgrading closes the gap. Users who loosened permissions expecting MCP tools to run unprompted will now see the prompt they were always meant to go through. (`e7ec6a9b29`)
+- **The `sensitive_write` guard now actually fires** on paths it previously let through by defaulting open. (#209 follow-up)
+
+### Added
+
+- **Bearer-auth remote MCP servers via `headersCommand`.** A remote MCP entry can now compute header values by running a command (argv form, run via `execFile` — no shell), re-resolved on every connect so short-lived bearer tokens refresh automatically. This unlocks token-gated servers such as **Microsoft Fabric Core MCP** and Azure Entra ID without a local proxy. When an `Authorization` header is present (statically or via `headersCommand`) and `oauth` is not explicitly configured, OAuth auto-detection is disabled so the bearer token isn't overridden; servers that return `null` tool-annotation hints (Fabric) are tolerated. See the [MCP servers docs](https://docs.altimate.ai/configure/mcp-servers). (#793, #791, #792)
+- **A `source` field on `session_start` telemetry**, so extension-spawned sessions sharing one `altimate serve` process are distinguishable. (#968)
+
+### Changed
+
+- **Upstream OpenCode v1.4.0 → v1.17.9 bridge merge.** Config validation moved from Zod to Effect `Schema`, the MCP layer was rewritten onto Effect, and session persistence moved to the core `SessionTable`. Existing config files and local databases are migrated/adapted automatically on first launch. (#964)
+- **Background auto-upgrade now only auto-applies patch releases.** A minor/major release (like this one) shows a notification instead — run `altimate upgrade` explicitly to move onto 0.9.x. This bounds exposure to large jumps.
+- **Model reasoning ("thinking") is collapsed by default.** It could previously render expanded for existing users, which risked showing pasted secrets in the reasoning trace. Toggle full visibility back on with `/thinking`. (`e695b536f4`)
+
+### Fixed
+
+- **Upgrade-path database-migration hardening.** Fixed a duplicate-column crash on legacy databases created by older binaries, a fresh-install crash, and unbounded migration-journal row growth — so a 0.8.10 database migrates cleanly and idempotently to 0.9.1. (`cf62f1f512`, `57584ed4d8`, `27c490515a`)
+- **TUI and runtime fixes carried in from the bridge**: clicking a truncated URL opens the full URL (#976); Ctrl+A/Ctrl+E and history recall restored in the prompt (#973, #975); `/mcps` autocomplete de-duplicated and the MCP auth command surfaced (#971, #972, #974); reviewer mode made usable (#978); session traces pruned by modification time rather than filename.
+
+### Upgrading from 0.8.10
+
+- **No manual steps required.** First launch on 0.9.1 runs an automatic, idempotent database migration (validated against mixed old/new-binary databases).
+- Config validation is now stricter (Effect `Schema`). If configured providers, agents, or MCP servers appear to disappear after upgrading, your global config may have failed validation and fallen back to defaults — check the logs for the offending key and report it.
+- As a precaution before a jump this large, you may back up `~/.local/share/altimate-code/opencode.db` for a rollback path.
+
+### Internal
+
+- Merge-resolution correctness: Fabric annotation-hint tolerance was folded into the gated `listTools` fallback (keyed off the Zod issue-payload shape to avoid false-positive retries), and `headersCommand` was added to the Effect-`Schema` MCP config. Conflict resolutions were verified via Codex deep-review, the full `packages/opencode` suite (10,647 pass), and a v0.9.1 adversarial suite.
+- Release infra: the release version derives from the fork package; prerelease tags publish to the npm `beta` channel; auto-generated release notes now diff against the last stable ancestor tag.
+- Deferred review findings filed as #995–#1000.
+
 ## [0.8.10] - 2026-06-22
 
 ### Fixed
