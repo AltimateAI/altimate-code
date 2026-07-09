@@ -26,7 +26,7 @@ live in the normal source tree (`packages/opencode/src/...`).
 
 Then open:
 
-- <http://localhost:8787/register> — sign-up (Google / Microsoft / email fallback)
+- <http://localhost:8787/register> — sign-up (Google, or email fallback)
 - <http://localhost:8787/dev/inbox> — the prototype email mailbox (email path)
 
 ### Pages

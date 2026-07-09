@@ -13,13 +13,6 @@ const googleGMark = `<svg width="20" height="20" viewBox="0 0 48 48" xmlns="http
   <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
 </svg>`
 
-const microsoftMark = `<svg width="18" height="18" viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <rect x="1" y="1" width="9" height="9" fill="#F25022"/>
-  <rect x="11" y="1" width="9" height="9" fill="#7FBA00"/>
-  <rect x="1" y="11" width="9" height="9" fill="#00A4EF"/>
-  <rect x="11" y="11" width="9" height="9" fill="#FFB900"/>
-</svg>`
-
 const PW_RULES = [
   { id: "len", label: "Be at least 12 characters long", test: `v.length >= 12` },
   { id: "upper", label: "Contain at least one uppercase letter", test: `/[A-Z]/.test(v)` },
@@ -52,14 +45,8 @@ export function registerPage(
     <a class="btn btn-oauth" href="/oauth/google?code=${encodeURIComponent(userCode)}">
       ${googleGMark}<span>Continue with Google</span>
     </a>
-    <button type="button" class="btn btn-oauth secondary" onclick="document.getElementById('ms-note').style.display='block'">
-      ${microsoftMark}<span>Continue with Microsoft</span>
-    </button>
-    <p id="ms-note" style="display:none;color:var(--muted);font-size:13px;margin-top:10px">
-      Microsoft SSO isn't wired in this prototype — use Google or the email option below.
-    </p>
 
-    <div class="divider">or</div>
+    <div class="divider"></div>
     <div style="text-align:center;margin-top:6px">
       <button type="button" class="link-btn" id="email-toggle">or use email instead</button>
     </div>
@@ -86,6 +73,15 @@ export function registerPage(
       </form>
     </div>
 
+    <div class="value-section">
+      <p class="value-hook">Free to start — 10M tokens included.</p>
+      <ul class="value-list">
+        <li>Build &amp; ship dbt pipelines</li>
+        <li>Optimize warehouse cost &amp; speed</li>
+        <li>Govern data: lineage, PII, tests</li>
+      </ul>
+    </div>
+
     <p class="legal">By creating an account, you agree to the
       <b>Terms &amp; Conditions</b> and our <b>Privacy Policy</b>.</p>
   `
@@ -104,6 +100,11 @@ export function registerPage(
     .pw-panel li.ok { color: var(--success); }
     .pw-panel li .mark { font-weight: 700; width: 14px; }
     .inline-err { color: var(--error); font-size: 13px; margin-top: 8px; min-height: 0; }
+    .value-section { margin-top: 36px; }
+    .value-hook { color: var(--text); font-size: 14px; font-weight: 600; margin-bottom: 16px; }
+    .value-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+    .value-list li { color: var(--muted); font-size: 13.5px; padding-left: 24px; position: relative; }
+    .value-list li::before { content: "✓"; position: absolute; left: 2px; color: var(--success); font-weight: 700; }
   `
 
   const rulesJs = PW_RULES.map((r) => `{ id: "${r.id}", test: (v) => ${r.test} }`).join(",\n")
