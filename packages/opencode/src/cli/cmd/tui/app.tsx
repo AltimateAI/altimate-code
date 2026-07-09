@@ -474,12 +474,27 @@ function App() {
     })
   })
 
-  // altimate_change — first run is now a welcoming home-screen panel (see routes/home.tsx),
-  // not an auto-opened modal. The no-dead-chat invariant is enforced at submit time
-  // (prompt/index.tsx) and the command menu is filtered to /connect until ready.
-
   const connected = useConnected()
   const ready = useReady()
+
+  // altimate_change start — picker-first first run: on a fresh launch with no valid
+  // credentials, the model/provider picker IS the first screen — no welcome-then-
+  // type-/connect step. Fires once per launch when sync first completes; returning
+  // users (ready at boot) never see it. Dismissing it (esc) leaves the calm
+  // "Type /connect…" placeholder; the no-dead-chat invariant is still enforced at
+  // submit time (prompt/index.tsx) and the command menu stays filtered until ready.
+  let firstRunPickerDone = false
+  createEffect(
+    on(
+      () => sync.status === "complete",
+      (complete) => {
+        if (!complete || firstRunPickerDone) return
+        firstRunPickerDone = true
+        if (!ready()) dialog.replace(() => <DialogModelWelcome />)
+      },
+    ),
+  )
+  // altimate_change end
 
   // altimate_change start — Part 2 scan gate: fire EXACTLY once, on the first time
   // this session reaches "ready" from a not-ready start (i.e. the user just finished

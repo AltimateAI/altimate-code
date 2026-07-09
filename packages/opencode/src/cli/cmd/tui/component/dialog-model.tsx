@@ -290,6 +290,13 @@ export function DialogModelWelcome(props: { intro?: string }) {
         paddingBottom={1}
         gap={1}
       >
+        {/* short intro header — picker-first means this is the first thing a fresh
+            user reads, so the positioning copy lives here, above the action */}
+        <text fg={theme.textMuted} wrapMode="word" width="100%">
+          Altimate Code is a specialized data engineering harness that sits between any LLM and your entire data stack.
+          It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse metadata — so it
+          reasons about your data instead of guessing.
+        </text>
         <text wrapMode="none">
           <span style={{ fg: theme.text }}>
             <b>Select a provider</b>
