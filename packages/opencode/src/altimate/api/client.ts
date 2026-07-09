@@ -284,34 +284,12 @@ export namespace AltimateApi {
     }
   }
 
-  export interface GatewayUser {
-    email: string
-    suggestedInstance: string
-  }
-
-  export async function gatewayGetUser(accessToken: string): Promise<GatewayUser> {
-    const res = await fetch(`${gatewayBaseUrl()}/api/user`, {
-      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
-    })
-    if (!res.ok) throw new Error(`Could not load your account (${res.status})`)
-    const d = (await res.json()) as { email?: string; suggested_instance?: string }
-    return { email: d.email ?? "", suggestedInstance: d.suggested_instance ?? "" }
-  }
-
-  export type GatewayInstanceCreate = "provisioning" | "name_taken" | "invalid_name"
-
-  export async function gatewayCreateInstance(accessToken: string, name: string): Promise<GatewayInstanceCreate> {
-    const res = await fetch(`${gatewayBaseUrl()}/api/instance`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ name }),
-    })
-    if (res.status === 201) return "provisioning"
-    if (res.status === 409) return "name_taken"
-    return "invalid_name"
-  }
-
+  // The instance name is collected on the WEB signup flow (right after OAuth); the
+  // CLI never prompts for it. It polls GET /api/instance through `awaiting_name`
+  // (user still naming in the browser) and `provisioning` until `ready` returns
+  // BOTH the chosen name and the minted key.
   export type GatewayInstancePoll =
+    | { status: "awaiting_name" }
     | { status: "provisioning" }
     | { status: "ready"; instance: string; apiKey: string }
 
@@ -321,6 +299,7 @@ export namespace AltimateApi {
     })
     const d = (await res.json()) as { status?: string; instance?: string; api_key?: string }
     if (d.status === "ready" && d.api_key) return { status: "ready", instance: d.instance ?? "", apiKey: d.api_key }
+    if (d.status === "awaiting_name") return { status: "awaiting_name" }
     return { status: "provisioning" }
   }
 

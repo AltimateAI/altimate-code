@@ -18,6 +18,7 @@ import {
   getByUser,
   isInstanceTaken,
   isPersonalEmail,
+  suggestInstance,
   listPendingEmails,
   markEmailVerified,
   mintToken,
@@ -26,7 +27,7 @@ import {
   rotateToken,
   startProvisioning,
 } from "./state"
-import { connectedPage, devInboxPage, googleChooserPage, registerPage, verifyPage } from "./pages"
+import { connectedPage, devInboxPage, googleChooserPage, instancePage, registerPage, verifyPage } from "./pages"
 
 const PORT = Number(process.env.PORT ?? 8787)
 const TOKEN_TTL_SECONDS = 3600
@@ -166,7 +167,55 @@ async function handle(req: Request): Promise<Response> {
       }
       return json({ status: "ready", instance: result.instance, api_key: result.apiKey })
     }
+    // The name is entered on the WEB (/instance); until the form is submitted the
+    // CLI polls through this state silently.
+    if (result.status === "none") return json({ status: "awaiting_name" })
     return json({ status: result.status })
+  }
+
+  // ---- API: live instance-name availability (used by the /instance web page) ----
+  if (pathname === "/api/instance/check" && method === "GET") {
+    const name = (url.searchParams.get("name") ?? "").trim().toLowerCase()
+    if (!VALID_TENANT_REGEX.test(name)) {
+      return json({
+        valid: false,
+        error: "Use lowercase letters, numbers, - or _, starting with a letter or underscore.",
+      })
+    }
+    if (isInstanceTaken(name)) return json({ valid: true, available: false, suggestion: suggestInstance(name) })
+    return json({ valid: true, available: true })
+  }
+
+  // ---- Web: instance naming (same flow, right after sign-in) ----
+  if (pathname === "/instance" && method === "GET") {
+    const code = url.searchParams.get("code") ?? ""
+    const session = getByUser(code)
+    if (!session || session.status !== "authorized") return html(errorPage("Complete sign-in first."), 404)
+    if (session.instanceStatus !== "none") return redirect("/connected")
+    return html(instancePage(session.userCode, session.suggestedInstance ?? "workspace"))
+  }
+
+  if (pathname === "/web/instance" && method === "POST") {
+    const body = await readBody(req)
+    const code = String(body.code ?? "")
+    const name = String(body.name ?? "").trim().toLowerCase()
+    const session = getByUser(code)
+    if (!session || session.status !== "authorized") return html(errorPage("Complete sign-in first."), 404)
+    if (session.instanceStatus !== "none") return redirect("/connected")
+    if (!VALID_TENANT_REGEX.test(name)) {
+      return html(
+        instancePage(session.userCode, name, {
+          error: "Use lowercase letters, numbers, - or _, starting with a letter or underscore.",
+        }),
+      )
+    }
+    if (isInstanceTaken(name)) {
+      logEvent("instance_name_taken", { name })
+      return html(instancePage(session.userCode, name, { error: `"${name}" is taken — try ${suggestInstance(name)}` }))
+    }
+    startProvisioning(session, name)
+    logEvent("instance_provisioning", { name })
+    return redirect("/connected")
   }
 
   // ---- API: credential validation (mirrors the real backend's endpoint used by
@@ -207,7 +256,8 @@ async function handle(req: Request): Promise<Response> {
     if (!session) return html(errorPage("Unknown or expired sign-in session."), 404)
     authorize(session, PRIYA_EMAIL)
     logEvent("device_authorized", { method: "google", email: PRIYA_EMAIL })
-    return redirect("/connected")
+    // Instance naming happens in the same web flow, right after sign-in.
+    return redirect(`/instance?code=${encodeURIComponent(session.userCode)}`)
   }
 
   // ---- Web: email path ----
@@ -241,6 +291,8 @@ async function handle(req: Request): Promise<Response> {
     if (pending && session) {
       authorize(session, pending.email)
       logEvent("device_authorized", { method: "email", email: pending.email })
+      // Continue the same web flow: name the instance right after verification.
+      return redirect(`/instance?code=${encodeURIComponent(session.userCode)}`)
     }
     return redirect("/dev/inbox")
   }

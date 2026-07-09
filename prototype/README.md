@@ -35,6 +35,7 @@ Then open:
 |---|---|
 | `/register` | Altimate sign-up. "or use email instead" expands the email form in place; password rules light up live. |
 | `/oauth/google` | Google account-chooser replica (Priya Sharma · priya@acme.com). |
+| `/instance` | Name your instance (same flow, right after sign-in): pre-filled from the email domain, debounced live availability, inline validation. |
 | `/connected` | "Connected" confirmation the CLI's polling makes truthful. |
 | `/verify` | "Check your inbox" (email fallback). |
 | `/dev/inbox` | Prototype mailbox — click **Verify email** to authorize the session. |
@@ -46,8 +47,10 @@ Then open:
 | `POST /auth/device/code` | Issue `device_code` / `user_code` / `verification_uri_complete`. |
 | `POST /auth/device/token` | Standard OAuth device-grant poll → `authorization_pending` then `access_token`. Also `refresh_token` grant. |
 | `GET /api/user` (bearer) | `{ id, email, suggested_instance }`. |
-| `POST /api/instance {name}` (bearer) | `201 provisioning` or `409 name_taken` (`acme` seeded taken). |
-| `GET /api/instance` (bearer) | `{ status: "provisioning" }` → `{ status: "ready", instance, api_key }` after ~8s. |
+| `GET /api/instance/check?name=` | Live availability for the `/instance` page: `{valid,error?}` / `{valid,available,suggestion?}`. |
+| `POST /web/instance` (form) | Web submit of the instance name → provisioning (`acme` seeded taken → suggests `acme-2`). |
+| `GET /api/instance` (bearer) | `{status:"awaiting_name"}` (user still naming in the browser) → `{status:"provisioning"}` → `{status:"ready", instance, api_key}` after ~8s. The CLI polls this silently — it never prompts for the name. |
+| `POST /api/instance {name}` (bearer) | Legacy direct-create (kept for scripting): `201 provisioning` or `409 name_taken`. |
 
 Every event logs a structured JSON line to stdout (`device_code_issued`,
 `provider_selected`, `device_authorized`, `signup_blocked_personal_email`,

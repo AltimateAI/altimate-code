@@ -99,6 +99,17 @@ export function isInstanceTaken(name: string): boolean {
   return takenInstances.has(name.toLowerCase())
 }
 
+/** First free "<base>-N" (N from 2), for the "taken — try acme-2" hint. */
+export function suggestInstance(base: string): string {
+  let n = 2
+  let candidate = `${base}-${n}`
+  while (isInstanceTaken(candidate)) {
+    n++
+    candidate = `${base}-${n}`
+  }
+  return candidate
+}
+
 export function claimInstance(name: string): void {
   takenInstances.add(name.toLowerCase())
 }

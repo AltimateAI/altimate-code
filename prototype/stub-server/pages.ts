@@ -235,6 +235,80 @@ export function googleChooserPage(userCode: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Page 2b — /instance  (name your instance; same web flow, register skin)
+// ---------------------------------------------------------------------------
+export function instancePage(userCode: string, suggested: string, opts: { error?: string } = {}): string {
+  const body = `
+    <h1>Name your instance</h1>
+    <p class="sub">Almost done — confirm the name and we'll provision it for you.</p>
+
+    <form id="instance-form" method="POST" action="/web/instance">
+      <input type="hidden" name="code" value="${escapeAttr(userCode)}" />
+      <label class="field-label" for="name">Instance name</label>
+      <input class="field" type="text" id="name" name="name" value="${escapeAttr(suggested)}"
+             autocomplete="off" autocapitalize="none" spellcheck="false" autofocus />
+      <div id="status" class="status-line">${opts.error ? `<span class="err">${escapeHtml(opts.error)}</span>` : ""}</div>
+      <p class="help-line">This names your Altimate instance. You can rename it later.</p>
+      <button type="submit" class="btn btn-primary" id="continue-btn" style="margin-top:18px">Continue</button>
+    </form>
+
+    <p class="legal">Your terminal is waiting — it will continue automatically once provisioning finishes.</p>
+  `
+
+  const extraCss = `
+    .status-line { font-size: 13.5px; margin-top: 8px; min-height: 20px; }
+    .status-line .ok { color: var(--success); font-weight: 600; }
+    .status-line .warn { color: #B45309; font-weight: 600; }
+    .status-line .err { color: var(--error); }
+    .status-line .use-btn { background: none; border: none; padding: 0; color: var(--accent);
+                            font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+    .help-line { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  `
+
+  const extraJs = `
+    (function () {
+      var input = document.getElementById('name');
+      var status = document.getElementById('status');
+      var btn = document.getElementById('continue-btn');
+      var timer = null;
+
+      function render(html, disabled) {
+        status.innerHTML = html;
+        btn.disabled = !!disabled;
+      }
+
+      function check() {
+        var v = input.value.trim();
+        if (!v) { render('', true); return; }
+        fetch('/api/instance/check?name=' + encodeURIComponent(v))
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (input.value.trim() !== v) return; // stale response
+            if (!d.valid) {
+              render('<span class="err">' + d.error + '</span>', true);
+            } else if (!d.available) {
+              render('<span class="warn">taken — try <button type="button" class="use-btn" id="use-suggestion">' + d.suggestion + '</button></span>', true);
+              var use = document.getElementById('use-suggestion');
+              if (use) use.addEventListener('click', function () { input.value = d.suggestion; check(); });
+            } else {
+              render('<span class="ok">✓ available</span>', false);
+            }
+          })
+          .catch(function () { render('', false); });
+      }
+
+      input.addEventListener('input', function () {
+        clearTimeout(timer);
+        timer = setTimeout(check, 350);
+      });
+      check(); // initial pre-fill check
+    })();
+  `
+
+  return altimateShell({ title: "Name your instance · Altimate AI", body, extraCss, extraJs })
+}
+
+// ---------------------------------------------------------------------------
 // Page 3 — /connected
 // ---------------------------------------------------------------------------
 export function connectedPage(email: string): string {
@@ -248,7 +322,7 @@ export function connectedPage(email: string): string {
       </div>
       <h1 style="font-size:28px">Connected</h1>
       <p class="sub" style="margin-top:12px">Signed in as ${email}.</p>
-      <p class="sub" style="margin-top:6px">Return to your terminal to continue — this tab can be closed.</p>
+      <p class="sub" style="margin-top:6px">Your instance is being provisioned — return to your terminal; this tab can be closed.</p>
     </div>
   `
   return altimateShell({ title: "Connected · Altimate AI", body })
