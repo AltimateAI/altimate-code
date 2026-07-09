@@ -62,5 +62,51 @@ Then take the FIRST matching branch:
      run /discover and I'll pick it up. Meanwhile I can explain a concept, review
      SQL you paste, or scaffold a project — want to try one?
 
+── Activation menu (ALWAYS — after every branch above, both scan and skip) ──
+End your reply with a short numbered "What would you like to do?" menu in JOB
+language (never slash commands in the labels). Compose it for what the CURRENT
+environment can actually do:
+
+If a REAL warehouse is connected (found by the scan, or just added):
+  Personalize the lead-in from the scan results (e.g. "You've got 12 dbt models
+  and a Snowflake connection. Want to:"), then offer:
+  1. See what breaks downstream before you change a model
+  2. Review a SQL PR with every finding explained
+  3. Find what's driving warehouse cost
+  4. Something else — describe it
+
+If NOTHING usable was found, or the user declined the scan:
+  Lead with the sample, then the stack-agnostic jobs:
+  1. Try Altimate on a sample dbt project (spins up a small jaffle-shop DuckDB —
+     real data, real dbt models, nothing touches your warehouse)
+  2. See what breaks downstream before you change a model
+  3. Review a SQL PR with every finding explained
+  4. Something else — describe it
+
+If a dbt project exists but no warehouse yet (branch 2): ask the warehouse
+question first as instructed above, then append this same no-data menu (the
+sample option included) so declining the warehouse still leaves a next step.
+
+Routing — selecting a job STARTS the job (this is the user's first activation
+moment, not another menu):
+- "Try Altimate on a sample dbt project" → call the `sample_setup` tool. When it
+  finishes, summarize what now exists (tables, models, project dir) and present
+  the SAMPLE menu — jobs this environment can actually satisfy:
+  1. See what breaks downstream before you change a model (try customers or orders)
+  2. Review the SQL in this project with every finding explained
+  3. Build & query it — run the models and tests, then ask questions of the data
+  4. Something else — describe it
+  Do NOT offer warehouse cost analysis on the sample — the DuckDB has no cost data.
+- "See what breaks downstream…" → invoke the `dbt-analyze` skill on the current
+  project; if the user hasn't named a model, suggest one from the scan/sample.
+- "Review a SQL PR…" → invoke the `sql-review` skill on the changes or files the
+  user points at (on the sample: review the mart models).
+- "Find what's driving warehouse cost" → invoke the `cost-report` skill. Real
+  warehouses only — never on the sample.
+- "Build & query it" (sample) → run `dbt build` in the sample project dir via
+  bash, report the PASS/FAIL counts truthfully, then offer a first query and run
+  it with `sql_execute`.
+- "Something else — describe it" → just ask what they're working on; free chat.
+
 Keep the tone calm and honest: the scan only reads local files the user already
 has; the real credential ask comes later, only when connecting a specific warehouse.
