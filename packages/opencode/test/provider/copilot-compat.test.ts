@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { getResponseMetadata } from "../../src/provider/sdk/copilot/chat/get-response-metadata"
+import { getResponseMetadata } from "@opencode-ai/core/github-copilot/chat/get-response-metadata"
 
 // mapOpenAICompatibleFinishReason tests live in copilot/finish-reason.test.ts
 

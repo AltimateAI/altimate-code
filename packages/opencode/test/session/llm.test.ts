@@ -405,7 +405,7 @@ describe("session.llm.stream", () => {
         } satisfies Agent.Info
 
         const user = {
-          id: MessageID.make("user-2"),
+          id: MessageID.make("msg_user_2"),
           sessionID,
           role: "user",
           time: { created: Date.now() },
@@ -634,7 +634,7 @@ describe("session.llm.stream", () => {
         } satisfies Agent.Info
 
         const user = {
-          id: MessageID.make("user-4"),
+          id: MessageID.make("msg_user_4"),
           sessionID,
           role: "user",
           time: { created: Date.now() },

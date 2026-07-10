@@ -28,18 +28,25 @@ import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
-import { Config } from "../../config/config"
+// altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
+import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+// altimate_change end
 
-type ToolProps<T extends Tool.Info> = {
-  input: Tool.InferParameters<T>
+// When a tool's parameters can't be statically inferred (legacy fork tools whose
+// param schema erases to `unknown`), fall back to a string-keyed record so the
+// display helpers can still read fields like `input.name`/`input.command`.
+type ToolInput<T> = unknown extends Tool.InferParameters<T> ? Record<string, unknown> : Tool.InferParameters<T>
+
+type ToolProps<T = Tool.Info> = {
+  input: ToolInput<T>
   metadata: Tool.InferMetadata<T>
   part: ToolPart
 }
 
-function props<T extends Tool.Info>(part: ToolPart): ToolProps<T> {
+function props<T = Tool.Info>(part: ToolPart): ToolProps<T> {
   const state = part.state
   return {
-    input: state.input as Tool.InferParameters<T>,
+    input: state.input as ToolInput<T>,
     metadata: ("metadata" in state ? state.metadata : {}) as Tool.InferMetadata<T>,
     part,
   }
@@ -540,6 +547,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
     async function execute(sdk: OpencodeClient) {
       const outputParts: string[] = []
+      // altimate_change start — validate explicit models before starting the session event loop.
+      // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
+      // `run` waiting until the process-level timeout kills it.
+      if (args.model) {
+        const parsed = Provider.parseModel(args.model)
+        const providers = (await sdk.provider.list()).data?.all ?? []
+        const provider = providers.find((item) => item.id === parsed.providerID)
+        if (!provider?.models?.[parsed.modelID]) {
+          throw new Provider.ModelNotFoundError({
+            providerID: parsed.providerID,
+            modelID: parsed.modelID,
+            suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
+          })
+        }
+      }
+      // altimate_change end
 
       function tool(part: ToolPart) {
         try {
@@ -578,8 +601,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
         try {
           if (args.trace === false) return null
 
-          const cfg = await Config.get()
-          const tracingCfg = cfg.tracing
+          // altimate_change start — upstream_fix: read tracing config via the server client. The local
+          // Config.get() facade cannot resolve the instance ALS across the CLI module boundary in the
+          // `run` path (InstanceRef not provided → swallowed by the catch below → tracer null → no trace
+          // file is ever written). The v1.17.9 merge reverted this to Config.get(); restore sdk.config.get().
+          // Guarded by test/cli/run/run-process.test.ts "--trace writes a session trace artifact".
+          // The sdk's generated Config type omits the fork-only `tracing` field; the server returns it
+          // at runtime, so assert just that field's shape from ConfigV1 (avoids the local Config.get()).
+          const cfg = (await sdk.config.get()).data as { tracing?: ConfigV1.Info["tracing"] } | undefined
+          const tracingCfg = cfg?.tracing
+          // altimate_change end
           if (tracingCfg?.enabled === false) return null
 
           const exporters: TraceExporter[] = [new FileExporter(tracingCfg?.dir)]
@@ -914,6 +945,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
     await bootstrap(process.cwd(), async () => {
       const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init)
+        // altimate_change start — upstream_fix: attach basic-auth header to in-process run requests
+        // so local `run` still reaches the embedded server when OPENCODE_SERVER_PASSWORD is set
+        // (the server enforces basicAuth on all routes; without this the in-process fetch 401s).
+        const { ServerAuth } = await import("@/server/auth")
+        const auth = ServerAuth.header()
+        if (auth) {
+          const headers = new Headers(request.headers)
+          headers.set("Authorization", auth)
+          return Server.Default().fetch(new Request(request, { headers }))
+        }
+        // altimate_change end
         return Server.Default().fetch(request)
       }) as typeof globalThis.fetch
       const sdk = createOpencodeClient({ baseUrl: "http://altimate-code.internal", fetch: fetchFn })

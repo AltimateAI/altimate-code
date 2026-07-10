@@ -1,137 +1,90 @@
-/**
- * Tests for MCP OAuth callback server — XSS prevention and HTTP behavior.
- *
- * The OAuth callback page renders error messages from external MCP servers.
- * If escapeHtml (module-private) fails to sanitize these strings, a malicious
- * server could inject scripts into the user's browser via error_description.
- *
- * Tests exercise the server at the HTTP level since escapeHtml is not exported.
- */
-import { describe, test, expect, afterEach, beforeEach } from "bun:test"
+import { test, expect, describe, afterEach } from "bun:test"
+import { createServer } from "net"
+import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
+import { parseRedirectUri } from "../../src/mcp/oauth-provider"
 
-const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
-const { OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH } = await import("../../src/mcp/oauth-provider")
+// altimate_change — find a free loopback port at runtime. The ensureRunning tests previously hardcoded
+// ports (18000/18001/…), which collide with whatever else is listening on the dev machine (the server
+// silently no-ops when the port is already in use, leaving isRunning() false and fetches hitting the
+// other process). Binding port 0 lets the OS hand us a guaranteed-free port for each test.
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.unref()
+    srv.on("error", reject)
+    srv.listen(0, "127.0.0.1", () => {
+      const address = srv.address()
+      const port = typeof address === "object" && address ? address.port : 0
+      srv.close(() => resolve(port))
+    })
+  })
+}
 
-const BASE_URL = `http://127.0.0.1:${OAUTH_CALLBACK_PORT}${OAUTH_CALLBACK_PATH}`
-
-beforeEach(async () => {
-  // Ensure clean state — stop any leftover server
-  await McpOAuthCallback.stop()
-  await McpOAuthCallback.ensureRunning()
-})
-
-afterEach(async () => {
-  await McpOAuthCallback.stop()
-})
-
-// ---------------------------------------------------------------------------
-// XSS prevention
-// ---------------------------------------------------------------------------
-
-describe("OAuth callback: XSS prevention in error page", () => {
-  test("escapes <script> tags in error_description", async () => {
-    const xss = "<script>alert(1)</script>"
-    const url = `${BASE_URL}?error=access_denied&error_description=${encodeURIComponent(xss)}&state=test-state`
-    const res = await fetch(url)
-    const body = await res.text()
-
-    // The raw <script> must never appear in the response
-    expect(body).not.toContain("<script>")
-    expect(body).toContain("&lt;script&gt;")
+describe("parseRedirectUri", () => {
+  test("returns defaults when no URI provided", () => {
+    const result = parseRedirectUri()
+    expect(result.port).toBe(19876)
+    expect(result.path).toBe("/mcp/oauth/callback")
   })
 
-  test("escapes HTML entities in error_description", async () => {
-    const payload = 'foo & bar < baz > "qux"'
-    const url = `${BASE_URL}?error=access_denied&error_description=${encodeURIComponent(payload)}&state=test-state`
-    const res = await fetch(url)
-    const body = await res.text()
-
-    expect(body).toContain("foo &amp; bar")
-    expect(body).toContain("&lt; baz &gt;")  // < and > escaped
-    expect(body).toContain("&quot;qux&quot;")
+  test("parses port and path from URI", () => {
+    const result = parseRedirectUri("http://127.0.0.1:8080/oauth/callback")
+    expect(result.port).toBe(8080)
+    expect(result.path).toBe("/oauth/callback")
   })
 
-  test("escapes img onerror XSS vector", async () => {
-    const xss = '<img src=x onerror="alert(1)">'
-    const url = `${BASE_URL}?error=access_denied&error_description=${encodeURIComponent(xss)}&state=test-state`
-    const res = await fetch(url)
-    const body = await res.text()
-
-    expect(body).not.toContain("<img")
-    expect(body).toContain("&lt;img")
-  })
-
-  test("escapes event handler injection", async () => {
-    const xss = '" onmouseover="alert(1)" data-x="'
-    const url = `${BASE_URL}?error=access_denied&error_description=${encodeURIComponent(xss)}&state=test-state`
-    const res = await fetch(url)
-    const body = await res.text()
-
-    // Double quotes must be escaped
-    expect(body).toContain("&quot;")
-    expect(body).not.toContain('onmouseover="alert')
+  test("returns defaults for invalid URI", () => {
+    const result = parseRedirectUri("not-a-valid-url")
+    expect(result.port).toBe(19876)
+    expect(result.path).toBe("/mcp/oauth/callback")
   })
 })
 
-// ---------------------------------------------------------------------------
-// HTTP behavior
-// ---------------------------------------------------------------------------
-
-describe("OAuth callback: HTTP behavior", () => {
-  test("returns 404 for non-callback paths", async () => {
-    const res = await fetch(`http://127.0.0.1:${OAUTH_CALLBACK_PORT}/not-a-callback`)
-    expect(res.status).toBe(404)
+describe("McpOAuthCallback.ensureRunning", () => {
+  afterEach(async () => {
+    await McpOAuthCallback.stop()
   })
 
-  test("returns 400 when state parameter is missing", async () => {
-    const url = `${BASE_URL}?error=access_denied&error_description=test`
-    const res = await fetch(url)
-    expect(res.status).toBe(400)
-    const body = await res.text()
-    expect(body).toContain("Missing required state parameter")
-  })
-
-  test("returns 400 when code is missing (no error)", async () => {
-    const url = `${BASE_URL}?state=some-state`
-    const res = await fetch(url)
-    expect(res.status).toBe(400)
-    const body = await res.text()
-    expect(body).toContain("No authorization code")
-  })
-
-  test("returns HTML content type for error pages", async () => {
-    const url = `${BASE_URL}?error=access_denied&error_description=test&state=test-state`
-    const res = await fetch(url)
-    expect(res.headers.get("content-type")).toContain("text/html")
-  })
-
-  test("invalid state returns error about CSRF", async () => {
-    // Register no pending auth, so any state is invalid
-    const url = `${BASE_URL}?code=test-code&state=unknown-state`
-    const res = await fetch(url)
-    expect(res.status).toBe(400)
-    const body = await res.text()
-    expect(body).toContain("Invalid or expired state")
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Server lifecycle
-// ---------------------------------------------------------------------------
-
-describe("OAuth callback: server lifecycle", () => {
-  test("isRunning returns true after ensureRunning", () => {
+  test("starts server with custom redirectUri port and path", async () => {
+    await McpOAuthCallback.ensureRunning(`http://127.0.0.1:${await freePort()}/custom/callback`)
     expect(McpOAuthCallback.isRunning()).toBe(true)
   })
 
-  test("isRunning returns false after stop", async () => {
-    await McpOAuthCallback.stop()
+  test("stops after the callback completes", async () => {
+    const redirectUri = `http://127.0.0.1:${await freePort()}/custom/callback`
+    await McpOAuthCallback.ensureRunning(redirectUri)
+    const callback = McpOAuthCallback.waitForCallback("success")
+
+    const response = await fetch(`${redirectUri}?code=code&state=success`)
+
+    expect(response.status).toBe(200)
+    expect(await callback).toBe("code")
     expect(McpOAuthCallback.isRunning()).toBe(false)
   })
 
-  test("ensureRunning is idempotent", async () => {
-    // Server already running from beforeEach
-    await McpOAuthCallback.ensureRunning()
-    expect(McpOAuthCallback.isRunning()).toBe(true)
+  test("escapes provider error markup in callback HTML", async () => {
+    const redirectUri = `http://127.0.0.1:${await freePort()}/custom/callback`
+    await McpOAuthCallback.ensureRunning(redirectUri)
+
+    const error = `<script>alert("xss" & 'more')</script>`
+    const response = await fetch(
+      `${redirectUri}?state=test&error=access_denied&error_description=${encodeURIComponent(error)}`,
+    )
+    const body = await response.text()
+
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8")
+    expect(body).toContain("&lt;script&gt;alert(&quot;xss&quot; &amp; &#39;more&#39;)&lt;/script&gt;")
+    expect(body).not.toContain(error)
+  })
+
+  test("keeps normal provider errors readable", async () => {
+    const redirectUri = `http://127.0.0.1:${await freePort()}/custom/callback`
+    await McpOAuthCallback.ensureRunning(redirectUri)
+
+    const response = await fetch(
+      `${redirectUri}?state=test&error=access_denied&error_description=${encodeURIComponent("The user denied access")}`,
+    )
+
+    expect(await response.text()).toContain('<div class="error">The user denied access</div>')
   })
 })

@@ -4,6 +4,15 @@ import { tmpdir } from "../fixture/fixture"
 import path from "path"
 import fs from "fs/promises"
 
+describe("ConfigPaths.fileInDirectory", () => {
+  test("returns jsonc before json in the same directory", () => {
+    expect(ConfigPaths.fileInDirectory("/tmp/config", "tui")).toEqual([
+      path.join("/tmp/config", "tui.jsonc"),
+      path.join("/tmp/config", "tui.json"),
+    ])
+  })
+})
+
 describe("ConfigPaths.parseText: JSONC parsing", () => {
   test("parses plain JSON object", async () => {
     const result = await ConfigPaths.parseText('{"key": "value"}', "/fake/config.json")

@@ -21,6 +21,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll, beforeEach } from "bun:test"
+import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
 // ─── Test Infrastructure ───────────────────────────────────────────────
@@ -419,7 +420,7 @@ async function runToolScenario(opts: {
     Dispatcher.register(opts.dispatcherMethod as any, async () => opts.mockResponse)
 
     const mod = await import(opts.importPath)
-    const tool = await mod[opts.exportName].init()
+    const tool = await initTool(mod[opts.exportName])
     const result = await tool.execute(opts.args, stubCtx())
 
     // Universal assertions
@@ -1308,7 +1309,7 @@ describe("Category 8: Error Handling", () => {
 
         try {
           const mod = await import(tool.path)
-          const toolInstance = await mod[tool.export].init()
+          const toolInstance = await initTool(mod[tool.export])
           const result = await toolInstance.execute(tool.args, stubCtx())
 
           // Should have caught the exception and returned gracefully
@@ -1611,7 +1612,7 @@ describe("Category 10: Edge Cases", () => {
     const start = performance.now()
     try {
       const mod = await import("../../src/altimate/tools/sql-analyze")
-      const tool = await mod.SqlAnalyzeTool.init()
+      const tool = await initTool(mod.SqlAnalyzeTool)
       const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, stubCtx())
       // Should handle circular reference gracefully
       recordResult("edge_cases", "circular_reference", "sql-analyze", "pass", performance.now() - start)

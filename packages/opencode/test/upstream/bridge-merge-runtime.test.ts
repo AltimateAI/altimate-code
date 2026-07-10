@@ -49,6 +49,12 @@ describe("bridge-merge-runtime: cycle 3 SyncEvent → BusEvent bridge", () => {
     const { SyncEvent } = await import("@/sync")
     const { BusEvent } = await import("@/bus/bus-event")
 
+    // The v1.17.9 import graph loads server/projectors.ts (which calls SyncEvent.init
+    // and freezes the registry) before this file runs. reset() lifts the freeze so we
+    // can register ad-hoc test events — the cycle-3 bridge behavior we're asserting is
+    // unchanged; only the test's setup needs to escape the post-init freeze.
+    SyncEvent.reset()
+
     const fresh = "runtime-bridge.fresh." + Date.now().toString(36)
     SyncEvent.define({
       type: fresh,
@@ -65,6 +71,7 @@ describe("bridge-merge-runtime: cycle 3 SyncEvent → BusEvent bridge", () => {
     const { SyncEvent } = await import("@/sync")
     const { BusEvent } = await import("@/bus/bus-event")
 
+    SyncEvent.reset() // lift the post-init freeze (see fresh-type test above)
     const name = "runtime-bridge.unversioned." + Date.now().toString(36)
     SyncEvent.define({
       type: name,
@@ -112,6 +119,7 @@ describe("bridge-merge-runtime: cycle 4 BusEvent.define idempotency", () => {
 
   test("SyncEvent.define double registration of same type does not throw at runtime", async () => {
     const { SyncEvent } = await import("@/sync")
+    SyncEvent.reset() // lift the post-init freeze (see cycle-3 fresh-type test)
     const t = "runtime-bridge.double." + Date.now().toString(36)
     const def1 = SyncEvent.define({
       type: t,
@@ -190,6 +198,7 @@ describe("bridge-merge-runtime: cycle 5 immediate transaction", () => {
 
   test("SyncEvent.run rejects payload missing the aggregate field with a clear error", async () => {
     const { SyncEvent } = await import("@/sync")
+    SyncEvent.reset() // lift the post-init freeze (see cycle-3 fresh-type test)
     const def = SyncEvent.define({
       type: "runtime-bridge.missing-agg." + Date.now().toString(36),
       version: 1,
@@ -213,9 +222,10 @@ describe("bridge-merge-runtime: cycle 5 ServiceMap.Service identifier uniqueness
 
   test("no two ServiceMap.Service classes across major namespaces share an Identifier", async () => {
     // Import the major Effect Services and walk their identifiers.
-    const [{ Auth }, { Account }, { Bus }, { Permission }, { SessionStatus }] = await Promise.all([
+    const [{ Auth }, { Account }, accountCore, { Bus }, { Permission }, { SessionStatus }] = await Promise.all([
       import("@/auth"),
       import("@/account"),
+      import("@/account/account"),
       import("@/bus"),
       import("@/permission"),
       import("@/session/status"),
@@ -224,6 +234,7 @@ describe("bridge-merge-runtime: cycle 5 ServiceMap.Service identifier uniqueness
     const services: Array<[string, any]> = [
       ["Auth.Service", Auth.Service],
       ["Account.Service", Account.Service],
+      ["AccountCore.Service", accountCore.Account.Service],
       ["Bus.Service", Bus.Service],
       ["Permission.Service", Permission.Service],
       ["SessionStatus.Service", SessionStatus.Service],

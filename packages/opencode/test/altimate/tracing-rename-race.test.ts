@@ -292,14 +292,25 @@ describe("trace corruption — flushSync vs in-flight rename race", () => {
         })
       }
 
-      // Simulate "process exits without endTrace" by waiting for any
-      // in-flight write to settle, then reading. NO subsequent event fires
-      // to trigger a catch-up snapshot.
-      await new Promise((r) => setTimeout(r, 100))
-
+      // Wait for the in-flight write + the M2 follow-up snapshot to settle, then read. A FIXED delay
+      // is unreliable under CI load: this trace is ~1.6MB, so its writeFile + the follow-up snapshot
+      // can exceed any constant, making the read see a stale file (flaked 1/20 trials in CI). Poll
+      // until all burst events land (or a generous deadline) — still a valid M2 guard: if the M2
+      // follow-up snapshot were broken, the events would NEVER land and the poll would time out.
       const filePath = path.join(tmpDir, `${sessionId}.json`)
-      const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
-      const burstFound = traceFile.spans.filter((s) => s.name.startsWith("burst-")).map((s) => s.name)
+      let burstFound: string[] = []
+      const deadline = Date.now() + 3000
+      for (;;) {
+        try {
+          const tf: TraceFile = JSON.parse(await fs.readFile(filePath, "utf-8"))
+          burstFound = tf.spans.filter((s) => s.name.startsWith("burst-")).map((s) => s.name)
+          if (burstFound.length === burstNames.length) break
+        } catch {
+          // file not ready
+        }
+        if (Date.now() > deadline) break
+        await new Promise((r) => setTimeout(r, 20))
+      }
       const missing = burstNames.length - burstFound.length
       if (missing > 0) observedDrops++
       detail.push({ trial, expected: burstNames.length, actual: burstFound.length, missing })

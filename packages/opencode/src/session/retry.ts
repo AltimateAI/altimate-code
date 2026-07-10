@@ -1,4 +1,4 @@
-import type { NamedError } from "@opencode-ai/util/error"
+import type { NamedError } from "@opencode-ai/core/util/error"
 import { MessageV2 } from "./message-v2"
 import { iife } from "@/util/iife"
 
@@ -69,15 +69,25 @@ export namespace SessionRetry {
       return `Authentication failed — retrying. If this persists, run: altimate-code auth login ${error.data.providerID}`
     }
     if (MessageV2.APIError.isInstance(error)) {
-      if (!error.data.isRetryable) return undefined
+      // altimate_change start — upstream_fix: retry transient 5xx API errors
+      if (!error.data.isRetryable) {
+        const status = error.data.statusCode
+        if (!(status !== undefined && status >= 500)) return undefined
+      }
+      // altimate_change end
       if (error.data.responseBody?.includes("FreeUsageLimitError"))
         return `Free usage exceeded, add credits https://altimate.ai/zen`
       return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
     }
 
+    // altimate_change start — core NamedError.toObject() now types `data` as `unknown`;
+    // narrow to an optional-message view for the generic (non-typed-error) paths below.
+    const data = error.data as { message?: unknown } | undefined
+    // altimate_change end
+
     // altimate_change start — bridge upstream PR #21355: detect plain-text rate-limit
     // messages so providers (Alibaba/DashScope, etc.) that return non-JSON 429s get retried.
-    const msg = error.data?.message
+    const msg = data?.message
     if (typeof msg === "string") {
       const lower = msg.toLowerCase()
       if (
@@ -92,12 +102,12 @@ export namespace SessionRetry {
 
     const json = iife(() => {
       try {
-        if (typeof error.data?.message === "string") {
-          const parsed = JSON.parse(error.data.message)
+        if (typeof data?.message === "string") {
+          const parsed = JSON.parse(data.message)
           return parsed
         }
 
-        return JSON.parse(error.data.message)
+        return JSON.parse(data?.message as string)
       } catch {
         return undefined
       }

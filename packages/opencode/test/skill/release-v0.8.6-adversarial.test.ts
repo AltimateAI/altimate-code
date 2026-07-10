@@ -227,9 +227,13 @@ describe("v0.8.6 adversarial — TraceConsumer hostile input", () => {
     for (const e of userMsg(sid, "u1", "first")) await consumer.handleEvent(e)
     await consumer.handleEvent(toolEvent(sid, "c1"))
     await consumer.handleEvent({ type: "session.deleted", properties: { info: { id: sid } } })
+    // These synthetic events have no generation span, so EVERY incremental snapshot writes
+    // status "completed" (status is "running" only while a generation span is open). Waiting on
+    // status alone races: an early snapshot (before the tool event's write lands) can be read with
+    // totalToolCalls 0. Wait for the actual final state so the poll can't return a pre-tool snapshot.
     const finalized = await waitFor(
       () => fs.readFile(path.join(tmpDir, `${sid}.json`), "utf8").then((r) => JSON.parse(r) as TraceFile),
-      (t) => t.summary.status === "completed",
+      (t) => t.summary.status === "completed" && t.summary.totalToolCalls === 1,
     )
     expect(finalized.summary.totalToolCalls).toBe(1)
     // A late event for the same (now-evicted) session must rehydrate the rich

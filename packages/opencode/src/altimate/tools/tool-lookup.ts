@@ -1,4 +1,6 @@
 import z from "zod"
+import { Effect } from "effect"
+import type { JSONSchema7, JSONSchema7Definition } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
 import { ToolRegistry } from "../../tool/registry"
 
@@ -21,8 +23,11 @@ export const ToolLookupTool = Tool.define("tool_lookup", {
       }
     }
 
-    const tool = await info.init()
-    const params = describeZodSchema(tool.parameters)
+    // Upstream's Tool rewrite made `init()` an Effect (was a Promise) and `parameters`
+    // an Effect Schema (was a zod schema). Describe from the JSON Schema instead — it's
+    // populated for both native tools and our legacy zod tools (via tool-zod-compat).
+    const tool = await Effect.runPromise(info.init())
+    const params = describeJsonSchema(tool.jsonSchema)
     const lines = [info.id, `  ${tool.description}`, ""]
     if (params.length) {
       lines.push("  Parameters:")
@@ -46,56 +51,43 @@ interface ParamInfo {
   description: string
 }
 
-function describeZodSchema(schema: z.ZodType): ParamInfo[] {
-  const shape = getShape(schema)
-  if (!shape) return []
+function describeJsonSchema(schema: JSONSchema7 | undefined): ParamInfo[] {
+  if (!schema || typeof schema !== "object") return []
+  const properties = schema.properties
+  if (!properties) return []
+  const required = new Set(Array.isArray(schema.required) ? schema.required : [])
 
   const params: ParamInfo[] = []
-  for (const [name, field] of Object.entries<any>(shape)) {
-    const unwrapped = unwrap(field)
+  for (const [name, field] of Object.entries(properties)) {
+    if (typeof field !== "object") continue
     params.push({
       name,
-      type: inferZodType(field),
-      required: !field.isOptional(),
-      description: unwrapped.description ?? field.description ?? "",
+      type: inferJsonType(field),
+      required: required.has(name),
+      description: typeof field.description === "string" ? field.description : "",
     })
   }
   return params
 }
 
-function getShape(schema: any): Record<string, any> | null {
-  if (schema?._def?.shape) {
-    return typeof schema._def.shape === "function" ? schema._def.shape() : schema._def.shape
+/** Render a JSON Schema fragment as a short human-readable type string. */
+function inferJsonType(field: JSONSchema7Definition): string {
+  if (typeof field !== "object" || field === null) return "unknown"
+  // enum / const literals first — most specific.
+  if (Array.isArray(field.enum)) return `enum(${field.enum.map((v) => JSON.stringify(v)).join("|")})`
+  if ("const" in field && field.const !== undefined) return JSON.stringify(field.const)
+  // anyOf/oneOf unions (zod optionals/unions land here).
+  const union = field.anyOf ?? field.oneOf
+  if (Array.isArray(union)) {
+    const parts = union.map((o) => inferJsonType(o)).filter((t) => t !== "unknown" && t !== "null")
+    if (parts.length) return parts.join(" | ")
   }
-  if (schema?._def?.innerType) return getShape(schema._def.innerType)
-  return null
-}
-
-/** Unwrap optional/default wrappers to reach the inner type. */
-function unwrap(field: any): any {
-  const type = field?._def?.type
-  if (type === "optional" || type === "default" || type === "nullable") {
-    return field._def.innerType ? unwrap(field._def.innerType) : field
+  const type = Array.isArray(field.type) ? field.type.find((t) => t !== "null") : field.type
+  if (type === "array") {
+    const items = Array.isArray(field.items) ? field.items[0] : field.items
+    return `array<${items ? inferJsonType(items) : "unknown"}>`
   }
-  return field
-}
-
-function inferZodType(field: any): string {
-  const type: string = field?._def?.type ?? ""
-  if (type === "optional" || type === "default" || type === "nullable") {
-    return field._def.innerType ? inferZodType(field._def.innerType) : "unknown"
-  }
-  if (type === "string") return "string"
-  if (type === "number") return "number"
-  if (type === "boolean") return "boolean"
-  if (type === "array") return `array<${inferZodType(field._def.element)}>`
-  if (type === "enum") return `enum(${field.options?.join("|") ?? Object.keys(field._def.entries ?? {}).join("|")})`
-  if (type === "record") return "record"
-  if (type === "object") return "object"
-  if (type === "union") return field._def.options?.map((o: any) => inferZodType(o)).join(" | ") ?? "union"
-  if (type === "literal") return JSON.stringify(field._def.value)
-  if (type === "any") return "any"
-  if (type === "unknown") return "unknown"
-  // Fallback: use constructor name or _def.type
-  return type || field?.constructor?.name?.replace("Zod", "").toLowerCase() || "unknown"
+  if (type === "object") return field.additionalProperties ? "record" : "object"
+  if (typeof type === "string") return type
+  return "unknown"
 }

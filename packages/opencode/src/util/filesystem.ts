@@ -3,8 +3,15 @@ import { createWriteStream, existsSync, statSync } from "fs"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
+// altimate_change start — upstream_fix: convert Git Bash/Cygwin/WSL paths before Windows realpath
+import { win32 } from "path"
+// altimate_change end
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
+// altimate_change start — used by resolveFilePath for "~" expansion and file:// URLs
+import { homedir } from "os"
+import { fileURLToPath } from "url"
+// altimate_change end
 import { Glob } from "./glob"
 
 export namespace Filesystem {
@@ -126,11 +133,14 @@ export namespace Filesystem {
    */
   export function normalizePath(p: string): string {
     if (process.platform !== "win32") return p
+    // altimate_change start — upstream_fix: convert Git Bash/Cygwin/WSL paths before Windows realpath
+    const resolved = win32.normalize(win32.resolve(windowsPath(p)))
     try {
-      return realpathSync.native(p)
+      return realpathSync.native(resolved)
     } catch {
-      return p
+      return resolved
     }
+    // altimate_change end
   }
 
   export function normalizePathPattern(p: string): string {
@@ -154,6 +164,17 @@ export namespace Filesystem {
       throw e
     }
   }
+
+  // altimate_change start — resolve a config-supplied file path (theme/sound) that may be
+  // "~"-prefixed, a file:// URL, absolute, or relative to a config root directory.
+  export function resolveFilePath(root: string, file: string): string {
+    let value = file
+    if (value.startsWith("file://")) value = fileURLToPath(value)
+    if (value === "~" || value.startsWith("~/")) value = join(homedir(), value.slice(1))
+    if (isAbsolute(value)) return value
+    return pathResolve(root, value)
+  }
+  // altimate_change end
 
   export function windowsPath(p: string): string {
     if (process.platform !== "win32") return p

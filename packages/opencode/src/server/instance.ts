@@ -4,6 +4,10 @@ import { proxy } from "hono/proxy"
 import type { UpgradeWebSocket } from "hono/ws"
 import z from "zod"
 import { createHash } from "node:crypto"
+// altimate_change start — effect Schema -> zod adapter for hono-openapi resolver()/validator()
+// (upstream migrated Vcs/Command/Agent/Skill/Format schemas from zod to effect Schema)
+import { zod } from "@/util/effect-zod"
+// altimate_change end
 import { Log } from "../util/log"
 import { Format } from "../format"
 import { TuiRoutes } from "./routes/tui"
@@ -135,7 +139,7 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, app: Hono = new Hono()
             description: "VCS info",
             content: {
               "application/json": {
-                schema: resolver(Vcs.Info),
+                schema: resolver(zod(Vcs.Info)),
               },
             },
           },
@@ -160,7 +164,7 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, app: Hono = new Hono()
             description: "VCS diff",
             content: {
               "application/json": {
-                schema: resolver(Vcs.FileDiff.array()),
+                schema: resolver(zod(Vcs.FileDiff).array()),
               },
             },
           },
@@ -169,7 +173,7 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, app: Hono = new Hono()
       validator(
         "query",
         z.object({
-          mode: Vcs.Mode,
+          mode: zod(Vcs.Mode),
         }),
       ),
       async (c) => {
@@ -187,7 +191,7 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, app: Hono = new Hono()
             description: "List of commands",
             content: {
               "application/json": {
-                schema: resolver(Command.Info.array()),
+                schema: resolver(zod(Command.Info).array()),
               },
             },
           },
@@ -209,7 +213,7 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, app: Hono = new Hono()
             description: "List of agents",
             content: {
               "application/json": {
-                schema: resolver(Agent.Info.array()),
+                schema: resolver(zod(Agent.Info).array()),
               },
             },
           },
@@ -231,7 +235,7 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, app: Hono = new Hono()
             description: "List of skills",
             content: {
               "application/json": {
-                schema: resolver(Skill.Info.array()),
+                schema: resolver(zod(Skill.Info).array()),
               },
             },
           },
@@ -274,7 +278,7 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, app: Hono = new Hono()
             description: "Formatter status",
             content: {
               "application/json": {
-                schema: resolver(Format.Status.array()),
+                schema: resolver(zod(Format.Status).array()),
               },
             },
           },

@@ -21,7 +21,7 @@ import fsSync from "fs"
 import path from "path"
 import { Global } from "../../global"
 import { randomUUIDv7 } from "bun"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 
 // ---------------------------------------------------------------------------
 // Trace data types — v2 schema
@@ -271,16 +271,65 @@ export class FileExporter implements TraceExporter {
       }),
     )
 
-    const jsonFiles = entries
-      .filter((e) => e.isFile() && e.name.endsWith(".json"))
-      .map((e) => e.name)
-      .sort() // UUIDv7-based filenames are lexicographically time-sorted
+    const jsonFiles = entries.filter((e) => e.isFile() && e.name.endsWith(".json")).map((e) => e.name)
 
     if (jsonFiles.length <= this.maxFiles) return
 
-    const toDelete = jsonFiles.slice(0, jsonFiles.length - this.maxFiles)
-    await Promise.allSettled(toDelete.map((name) => fs.unlink(path.join(this.dir, name))))
+    // altimate_change start — upstream_fix: prune by MODIFICATION TIME, oldest first. Do NOT sort by
+    // filename: session trace files are `ses_<id>` where the id is Identifier.descending()
+    // (session/schema.ts), so lexical order is NEWEST-first — a `.sort()` + slice-from-front prune
+    // deletes the NEWEST traces and keeps the oldest (verified: a fresh TUI session's trace was pruned
+    // on shutdown once the dir hit maxFiles). mtime is correct regardless of the id encoding.
+    const withMtime = await Promise.all(
+      jsonFiles.map(async (name) => ({
+        name,
+        mtime: (await fs.stat(path.join(this.dir, name)).catch(() => undefined))?.mtimeMs ?? 0,
+      })),
+    )
+    withMtime.sort((a, b) => a.mtime - b.mtime) // oldest first
+    const toDelete = withMtime.slice(0, withMtime.length - this.maxFiles)
+    await Promise.allSettled(toDelete.map((f) => fs.unlink(path.join(this.dir, f.name))))
+    // altimate_change end
   }
+
+  // altimate_change start — synchronous prune for Trace.finalizeSync()'s shutdown write. That path
+  // uses writeFileSync (the quiet Bun Worker thread doesn't flush async writes before teardown) and so
+  // bypasses export()'s pruneOldTraces — without this, the traces dir would grow unbounded for a
+  // TUI-only user. Best-effort + sync so it completes before the worker exits.
+  pruneSync() {
+    if (this.maxFiles <= 0) return
+    try {
+      const jsonFiles = fsSync
+        .readdirSync(this.dir, { withFileTypes: true })
+        .filter((e) => e.isFile() && e.name.endsWith(".json")) // skip a dir literally named "*.json"
+        .map((e) => e.name)
+      if (jsonFiles.length <= this.maxFiles) return
+      // Prune by MODIFICATION TIME, oldest first — NOT by filename. `ses_` ids are
+      // Identifier.descending() (newest sorts lexically first), so a filename sort + slice-from-front
+      // deletes the NEWEST traces (the just-finalized session) and keeps the oldest. mtime is correct
+      // regardless of id encoding. See pruneOldTraces for the full note.
+      const withMtime = jsonFiles.map((name) => {
+        let mtime = 0
+        try {
+          mtime = fsSync.statSync(path.join(this.dir, name)).mtimeMs
+        } catch {
+          // unreadable → treat as oldest (mtime 0) so it's pruned first
+        }
+        return { name, mtime }
+      })
+      withMtime.sort((a, b) => a.mtime - b.mtime) // oldest first
+      for (const f of withMtime.slice(0, withMtime.length - this.maxFiles)) {
+        try {
+          fsSync.unlinkSync(path.join(this.dir, f.name))
+        } catch {
+          // best-effort
+        }
+      }
+    } catch {
+      // best-effort — prune must never break shutdown
+    }
+  }
+  // altimate_change end
 }
 
 /**
@@ -1234,6 +1283,42 @@ export class Trace {
     const trace = this.buildTraceFile(error)
 
     // altimate_change start — trace: post-session summary (narrative, loops, topTools)
+    this.enrichSummary(trace, error)
+    // altimate_change end
+
+    // Wrap each exporter call with a timeout to prevent hanging exporters
+    // from blocking the entire endTrace call
+    const EXPORTER_TIMEOUT_MS = 5_000
+    const withTimeout = (p: Promise<string | undefined>, name: string) => {
+      let timer: ReturnType<typeof setTimeout>
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          Log.Default.warn(`[tracing] Exporter "${name}" timed out after ${EXPORTER_TIMEOUT_MS}ms`)
+          resolve(undefined)
+        }, EXPORTER_TIMEOUT_MS)
+      })
+      return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+    }
+
+    const results = await Promise.allSettled(
+      this.exporters.map((e) => {
+        try {
+          return withTimeout(Promise.resolve(e.export(trace)), e.name)
+        } catch {
+          return Promise.resolve(undefined)
+        }
+      }),
+    )
+
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) return r.value
+    }
+    return undefined
+  }
+
+  // altimate_change start — post-session summary enrichment shared by endTrace (async) and
+  // finalizeSync (sync). Extracted verbatim so both write byte-identical summaries.
+  private enrichSummary(trace: TraceFile, error?: string) {
     try {
       // Top tools by call count
       const toolCounts = new Map<string, { count: number; totalDuration: number }>()
@@ -1277,37 +1362,62 @@ export class Trace {
     } catch {
       // Narrative generation must never crash the trace
     }
-    // altimate_change end
-
-    // Wrap each exporter call with a timeout to prevent hanging exporters
-    // from blocking the entire endTrace call
-    const EXPORTER_TIMEOUT_MS = 5_000
-    const withTimeout = (p: Promise<string | undefined>, name: string) => {
-      let timer: ReturnType<typeof setTimeout>
-      const timeout = new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => {
-          Log.Default.warn(`[tracing] Exporter "${name}" timed out after ${EXPORTER_TIMEOUT_MS}ms`)
-          resolve(undefined)
-        }, EXPORTER_TIMEOUT_MS)
-      })
-      return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
-    }
-
-    const results = await Promise.allSettled(
-      this.exporters.map((e) => {
-        try {
-          return withTimeout(Promise.resolve(e.export(trace)), e.name)
-        } catch {
-          return Promise.resolve(undefined)
-        }
-      }),
-    )
-
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value) return r.value
-    }
-    return undefined
   }
+
+  /**
+   * Synchronous CLEAN finalize for clean shutdown paths (not a crash). Writes the complete trace
+   * — closed root span, full summary (status "completed"), narrative/topTools — to disk with
+   * `writeFileSync`, the same way `flushSync` does for crashes but WITHOUT the crashed marker.
+   *
+   * Why this exists: on a quiet/idle Bun **Worker thread** (the TUI worker after a turn finishes),
+   * pending async `fs` writes from `snapshot()`/`endTrace()` are not flushed before the worker is
+   * torn down — so an async finalize silently writes nothing. A synchronous write does not depend on
+   * the worker's event loop being pumped.
+   *
+   * Limitation: writes only the local file (+ a sync maxFiles prune). It does NOT invoke async
+   * `TraceExporter.export()`, so HTTP exporters don't receive the trace on this shutdown path — async
+   * network can't complete on the stalling worker loop anyway. This is no worse than the prior state
+   * (the broken TUI worker emitted no traces at all); HTTP-on-TUI-shutdown is a future enhancement.
+   */
+  finalizeSync(): string | undefined {
+    try {
+      if (!this.snapshotDir || !this.sessionId) return undefined
+      // If flushSync already wrote the canonical (crashed) file, don't clobber it.
+      if (this.crashed) return this.getTracePath()
+      // Claim the canonical write so any in-flight/queued async snapshot bails at its crashed check.
+      this.endTraceStarted = true
+      this.crashed = true
+      for (const exp of this.exporters) exp.markCrashed?.(this.sessionId)
+      this.currentGenerationSpanId = undefined
+      const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
+      if (rootSpan) {
+        rootSpan.endTime = Date.now()
+        rootSpan.status = "ok"
+        const costStr = Number.isFinite(this.totalCost) ? this.totalCost.toFixed(4) : "0.0000"
+        rootSpan.output = `${this.generationCount} generations, ${this.toolCallCount} tool calls, ${this.totalTokens} tokens, $${costStr}`
+      }
+      const trace = this.buildTraceFile() // no error → summary.status "completed" (or "running" if a gen is open)
+      this.enrichSummary(trace)
+      const safeId = (this.sessionId || "unknown").replace(/[/\\.:]/g, "_") || "unknown"
+      const filePath = path.join(this.snapshotDir, `${safeId}.json`)
+      fsSync.mkdirSync(this.snapshotDir, { recursive: true })
+      fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
+      // FileExporter: prune synchronously (this path bypasses export()'s async pruneOldTraces, so
+      // without it the traces dir grows unbounded for a TUI-only user). Non-file exporters (HTTP):
+      // fire best-effort so configured `tracing.exporters` still receive interactive-session traces
+      // — fire-and-forget because async network can't be guaranteed on the stalling worker loop, but
+      // the local file above is already guaranteed.
+      for (const exp of this.exporters) {
+        if (exp instanceof FileExporter) exp.pruneSync()
+        else void Promise.resolve(exp.export(trace)).catch(() => {})
+      }
+      return filePath
+    } catch {
+      // best-effort — shutdown finalize must never throw
+      return undefined
+    }
+  }
+  // altimate_change end
 
   /**
    * Best-effort synchronous flush for process exit handlers.

@@ -1,5 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import type { LegacyResult } from "../tool-zod-compat"
 import { Dispatcher } from "../native"
 
 export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
@@ -17,7 +18,7 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
         "If true, verify each rewrite is semantically equivalent to the original before recommending it (requires a schema).",
       ),
   }),
-  async execute(args) {
+  async execute(args): Promise<LegacyResult> {
     try {
       const result = (await Dispatcher.call("altimate_core.rewrite", {
         sql: args.sql,

@@ -11,7 +11,7 @@ import {
 } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
-import { Log } from "../../util/log"
+import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
 
 const log = Log.create({ service: "datamate" })
@@ -403,7 +403,11 @@ async function handleDelete(args: { datamate_id?: string }) {
     const disconnected: string[] = []
     if (serverName in allStatus) {
       try {
+        // altimate_change start — MCP.remove (was disconnect): the datamate is deleted, so fully
+        // remove its MCP server from runtime state + publish ToolsChanged so the agent's tool list
+        // refreshes. disconnect alone left a stale "disabled" entry and skipped the refresh.
         await MCP.remove(serverName)
+        // altimate_change end
         disconnected.push(serverName)
       } catch {
         // Log but don't fail the delete operation
@@ -484,7 +488,10 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
   }
   try {
     // Fully remove from runtime state (disconnect + purge from MCP list)
+    // altimate_change start — MCP.remove (was disconnect): delete the status entry + publish
+    // ToolsChanged so the removed server's tools stop being offered without a restart.
     await MCP.remove(args.server_name).catch(() => {})
+    // altimate_change end
 
     // Remove from config files — when no scope specified, try both to avoid orphaned entries
     const removed: string[] = []

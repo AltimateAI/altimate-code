@@ -1,13 +1,16 @@
 import { BusEvent } from "@/bus/bus-event"
 import { SessionID, MessageID, PartID } from "./schema"
 import z from "zod"
+// altimate_change start — upstream v1.17.9 repointed this to the Effect-Schema
+// NamedError in @opencode-ai/core; this file's schema tree is zod (the SyncEvent
+// event system below requires zod schemas), so keep the zod NamedError whose
+// `.Schema` is a zod schema and `.create(name, z.object(...))` matches the calls.
 import { NamedError } from "@opencode-ai/util/error"
+// altimate_change end
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
-import { LSP } from "../lsp"
-import { Snapshot } from "@/snapshot"
 import { SyncEvent } from "../sync"
 import { Database, NotFoundError, and, desc, eq, inArray, lt, or } from "@/storage/db"
-import { MessageTable, PartTable, SessionTable } from "./session.sql"
+import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
@@ -28,6 +31,35 @@ export namespace MessageV2 {
     return mime.startsWith("image/") || mime === "application/pdf"
   }
 
+  // altimate_change start — shared synthetic-attachment prompt text. Used both when
+  // injecting tool-result media as a user message (below) and by the GitHub Copilot
+  // plugin's imgMsg() heuristic so the two stay in sync.
+  export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:"
+  // altimate_change end
+
+  // altimate_change start — upstream v1.17.9 moved the branded IDs, LSP.Range and
+  // Snapshot.FileDiff to Effect Schema. This file's schema tree (and the SyncEvent
+  // event system) is zod, so reconstruct the zod equivalents locally. Shapes are
+  // identical to the Effect-Schema sources (id/id.ts, lsp/lsp.ts, snapshot/index.ts).
+  const SessionIDSchema = z.string().pipe(z.custom<SessionID>())
+  const MessageIDSchema = z.string().pipe(z.custom<MessageID>())
+  const PartIDSchema = z.string().pipe(z.custom<PartID>())
+
+  const RangeSchema = z.object({
+    start: z.object({ line: z.number(), character: z.number() }),
+    end: z.object({ line: z.number(), character: z.number() }),
+  })
+
+  // Mirrors Snapshot.FileDiff: file/patch optional (legacy on-disk summary_diffs).
+  const FileDiffSchema = z.object({
+    file: z.string().optional(),
+    patch: z.string().optional(),
+    additions: z.number(),
+    deletions: z.number(),
+    status: z.enum(["added", "deleted", "modified"]).optional(),
+  })
+  // altimate_change end
+
   export const OutputLengthError = NamedError.create("MessageOutputLengthError", z.object({}))
   export const AbortedError = NamedError.create("MessageAbortedError", z.object({ message: z.string() }))
   export const StructuredOutputError = NamedError.create(
@@ -35,6 +67,14 @@ export namespace MessageV2 {
     z.object({
       message: z.string(),
       retries: z.number(),
+    }),
+  )
+  // altimate_change — upstream_fix: content-filter finishes are persisted as
+  // assistant errors so the session surfaces provider blocking clearly.
+  export const ContentFilterError = NamedError.create(
+    "ContentFilterError",
+    z.object({
+      message: z.string(),
     }),
   )
   export const AuthError = NamedError.create(
@@ -85,9 +125,9 @@ export namespace MessageV2 {
   export type OutputFormat = z.infer<typeof Format>
 
   const PartBase = z.object({
-    id: PartID.zod,
-    sessionID: SessionID.zod,
-    messageID: MessageID.zod,
+    id: PartIDSchema,
+    sessionID: SessionIDSchema,
+    messageID: MessageIDSchema,
   })
 
   export const SnapshotPart = PartBase.extend({
@@ -159,7 +199,7 @@ export namespace MessageV2 {
   export const SymbolSource = FilePartSourceBase.extend({
     type: z.literal("symbol"),
     path: z.string(),
-    range: LSP.Range,
+    range: RangeSchema,
     name: z.string(),
     kind: z.number().int(),
   }).meta({
@@ -208,6 +248,8 @@ export namespace MessageV2 {
     type: z.literal("compaction"),
     auto: z.boolean(),
     overflow: z.boolean().optional(),
+    // altimate_change — compaction markers persist the first retained tail message.
+    tail_start_id: MessageIDSchema.optional(),
   }).meta({
     ref: "CompactionPart",
   })
@@ -350,8 +392,8 @@ export namespace MessageV2 {
   export type ToolPart = z.infer<typeof ToolPart>
 
   const Base = z.object({
-    id: MessageID.zod,
-    sessionID: SessionID.zod,
+    id: MessageIDSchema,
+    sessionID: SessionIDSchema,
   })
 
   export const User = Base.extend({
@@ -364,7 +406,7 @@ export namespace MessageV2 {
       .object({
         title: z.string().optional(),
         body: z.string().optional(),
-        diffs: Snapshot.FileDiff.array(),
+        diffs: FileDiffSchema.array(),
       })
       .optional(),
     agent: z.string(),
@@ -417,11 +459,12 @@ export namespace MessageV2 {
         OutputLengthError.Schema,
         AbortedError.Schema,
         StructuredOutputError.Schema,
+        ContentFilterError.Schema,
         ContextOverflowError.Schema,
         APIError.Schema,
       ])
       .optional(),
-    parentID: MessageID.zod,
+    parentID: MessageIDSchema,
     modelID: ModelID.zod,
     providerID: ProviderID.zod,
     /**
@@ -464,7 +507,7 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
+        sessionID: SessionIDSchema,
         info: Info,
       }),
     }),
@@ -473,8 +516,8 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
-        messageID: MessageID.zod,
+        sessionID: SessionIDSchema,
+        messageID: MessageIDSchema,
       }),
     }),
     PartUpdated: SyncEvent.define({
@@ -482,7 +525,7 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
+        sessionID: SessionIDSchema,
         part: Part,
         time: z.number(),
       }),
@@ -490,9 +533,9 @@ export namespace MessageV2 {
     PartDelta: BusEvent.define(
       "message.part.delta",
       z.object({
-        sessionID: SessionID.zod,
-        messageID: MessageID.zod,
-        partID: PartID.zod,
+        sessionID: SessionIDSchema,
+        messageID: MessageIDSchema,
+        partID: PartIDSchema,
         field: z.string(),
         delta: z.string(),
       }),
@@ -502,9 +545,9 @@ export namespace MessageV2 {
       version: 1,
       aggregate: "sessionID",
       schema: z.object({
-        sessionID: SessionID.zod,
-        messageID: MessageID.zod,
-        partID: PartID.zod,
+        sessionID: SessionIDSchema,
+        messageID: MessageIDSchema,
+        partID: PartIDSchema,
       }),
     }),
   }
@@ -516,7 +559,7 @@ export namespace MessageV2 {
   export type WithParts = z.infer<typeof WithParts>
 
   const Cursor = z.object({
-    id: MessageID.zod,
+    id: MessageIDSchema,
     time: z.number(),
   })
   type Cursor = z.infer<typeof Cursor>
@@ -535,7 +578,11 @@ export namespace MessageV2 {
       ...row.data,
       id: row.id,
       sessionID: row.session_id,
-    }) as MessageV2.Info
+      // altimate_change start — upstream v1.17.9 made MessageTable.data an
+      // Effect-Schema type that no longer structurally overlaps the zod-inferred
+      // MessageV2.Info; cast through unknown (runtime shape is unchanged).
+    }) as unknown as MessageV2.Info
+  // altimate_change end
 
   const part = (row: typeof PartTable.$inferSelect) =>
     ({
@@ -580,7 +627,9 @@ export namespace MessageV2 {
   export const toModelMessagesEffect = Effect.fnUntraced(function* (
     input: WithParts[],
     model: Provider.Model,
-    options?: { stripMedia?: boolean },
+    // altimate_change start — toolOutputMaxChars caps tool output length for compaction
+    options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+    // altimate_change end
   ) {
     const result: UIMessage[] = []
     const toolNames = new Set<string>()
@@ -606,6 +655,10 @@ export namespace MessageV2 {
     })()
 
     const toModelOutput = (output: unknown) => {
+      // altimate_change — unwrap AI SDK v6 tool-result wrapper.
+      if (output && typeof output === "object" && "output" in output && "toolCallId" in output)
+        output = (output as { output: unknown }).output
+
       if (typeof output === "string") {
         return { type: "text", value: output }
       }
@@ -704,13 +757,24 @@ export namespace MessageV2 {
           role: "assistant",
           parts: [],
         }
+        // altimate_change start — upstream_fix: preserve a non-empty separator
+        // between Anthropic signed reasoning blocks during replay.
+        const hasSignedReasoning = msg.parts.some((part) => {
+          if (part.type !== "reasoning") return false
+          return part.metadata?.anthropic?.signature != null
+        })
+        // altimate_change end
         for (const part of msg.parts) {
-          if (part.type === "text")
+          if (part.type === "text") {
+            // altimate_change — upstream_fix: AI SDK drops "", but Anthropic
+            // signed reasoning needs a surviving separator.
+            const text = part.text === "" && hasSignedReasoning ? " " : part.text
             assistantMessage.parts.push({
               type: "text",
-              text: part.text,
+              text,
               ...(differentModel ? {} : { providerMetadata: part.metadata }),
             })
+          }
           if (part.type === "step-start")
             assistantMessage.parts.push({
               type: "step-start",
@@ -718,7 +782,18 @@ export namespace MessageV2 {
           if (part.type === "tool") {
             toolNames.add(part.tool)
             if (part.state.status === "completed") {
-              const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
+              // altimate_change start — toolOutputMaxChars truncates long tool output for compaction
+              const rawOutputText = part.state.time.compacted
+                ? "[Old tool result content cleared]"
+                : part.state.output
+              const maxChars = options?.toolOutputMaxChars
+              const outputText =
+                !part.state.time.compacted && maxChars !== undefined && rawOutputText.length > maxChars
+                  ? `${rawOutputText.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${
+                      rawOutputText.length - maxChars
+                    } chars]`
+                  : rawOutputText
+              // altimate_change end
               const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
               // For providers that don't support media in tool results, extract media files
@@ -747,15 +822,30 @@ export namespace MessageV2 {
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
               })
             }
-            if (part.state.status === "error")
-              assistantMessage.parts.push({
-                type: ("tool-" + part.tool) as `tool-${string}`,
-                state: "output-error",
-                toolCallId: part.callID,
-                input: part.state.input,
-                errorText: part.state.error,
-                ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
-              })
+            if (part.state.status === "error") {
+              // altimate_change start — upstream_fix: preserve partial output from aborted tools.
+              const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
+              if (typeof output === "string") {
+                assistantMessage.parts.push({
+                  type: ("tool-" + part.tool) as `tool-${string}`,
+                  state: "output-available",
+                  toolCallId: part.callID,
+                  input: part.state.input,
+                  output,
+                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                })
+              } else {
+                assistantMessage.parts.push({
+                  type: ("tool-" + part.tool) as `tool-${string}`,
+                  state: "output-error",
+                  toolCallId: part.callID,
+                  input: part.state.input,
+                  errorText: part.state.error,
+                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                })
+              }
+              // altimate_change end
+            }
             // Handle pending/running tool calls to prevent dangling tool_use blocks
             // Anthropic/Claude APIs require every tool_use to have a corresponding tool_result
             if (part.state.status === "pending" || part.state.status === "running")
@@ -787,7 +877,7 @@ export namespace MessageV2 {
               parts: [
                 {
                   type: "text" as const,
-                  text: "Attached image(s) from tool result:",
+                  text: SYNTHETIC_ATTACHMENT_PROMPT,
                 },
                 ...media.map((attachment) => ({
                   type: "file" as const,
@@ -803,7 +893,10 @@ export namespace MessageV2 {
 
     const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
-    return yield* Effect.sync(() =>
+    // altimate_change start — upstream v1.17.9 made convertToModelMessages async
+    // (returns Promise<ModelMessage[]>); use Effect.promise so the Effect resolves
+    // to ModelMessage[] rather than Promise<ModelMessage[]>.
+    return yield* Effect.promise(() =>
       convertToModelMessages(
         result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
         {
@@ -812,12 +905,15 @@ export namespace MessageV2 {
         },
       ),
     )
+    // altimate_change end
   })
 
   export function toModelMessages(
     input: WithParts[],
     model: Provider.Model,
-    options?: { stripMedia?: boolean },
+    // altimate_change start — toolOutputMaxChars caps tool output length for compaction
+    options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+    // altimate_change end
   ): Promise<ModelMessage[]> {
     return Effect.runPromise(toModelMessagesEffect(input, model, options))
   }
@@ -906,17 +1002,41 @@ export namespace MessageV2 {
   export function filterCompacted(msgs: Iterable<MessageV2.WithParts>) {
     const result = [] as MessageV2.WithParts[]
     const completed = new Set<string>()
+    // altimate_change — retain the post-summary tail that compaction kept.
+    let includeUntil: MessageID | undefined
+    let tailMove: { summaryIndex: number; compactionIndex: number } | undefined
     for (const msg of msgs) {
       result.push(msg)
+      if (includeUntil && msg.info.id === includeUntil) break
       if (
         msg.info.role === "user" &&
         completed.has(msg.info.id) &&
         msg.parts.some((part) => part.type === "compaction")
-      )
+      ) {
+        const tailStart = msg.parts.find((part) => part.type === "compaction")?.tail_start_id
+        if (tailStart) {
+          includeUntil = tailStart
+          tailMove = {
+            summaryIndex: result.findIndex(
+              (item) => item.info.role === "assistant" && item.info.summary && item.info.parentID === msg.info.id,
+            ),
+            compactionIndex: result.length - 1,
+          }
+          continue
+        }
         break
+      }
       if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
         completed.add(msg.info.parentID)
     }
+    // altimate_change start — render compacted summary before the retained tail.
+    if (tailMove && tailMove.summaryIndex >= 0) {
+      const newer = result.slice(0, tailMove.summaryIndex)
+      const summary = result.slice(tailMove.summaryIndex, tailMove.compactionIndex + 1)
+      const tail = result.slice(tailMove.compactionIndex + 1)
+      return [...newer, ...tail, ...summary].reverse()
+    }
+    // altimate_change end
     result.reverse()
     return result
   }
@@ -924,6 +1044,44 @@ export namespace MessageV2 {
   export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
     return filterCompacted(stream(sessionID))
   })
+
+  // altimate_change start — extract loop "latest message state" selection into a testable helper.
+  // Message IDs are monotonic/chronological, so selection must be by id, not array position:
+  // filterCompacted reorders messages (#27145), so picking the array-latest finished assistant
+  // lands on the pre-compaction overflow assistant and bypasses the summary overflow guard.
+  export interface Latest {
+    user?: User
+    assistant?: Assistant
+    finished?: Assistant
+    tasks: (CompactionPart | SubtaskPart)[]
+  }
+
+  export function latest(msgs: Iterable<MessageV2.WithParts>): Latest {
+    const list = [...msgs]
+    let user: User | undefined
+    let assistant: Assistant | undefined
+    let finished: Assistant | undefined
+    for (const msg of list) {
+      if (msg.info.role === "user") {
+        if (!user || msg.info.id > user.id) user = msg.info as User
+        continue
+      }
+      if (msg.info.role === "assistant") {
+        const info = msg.info as Assistant
+        if (!assistant || info.id > assistant.id) assistant = info
+        if (info.finish && (!finished || info.id > finished.id)) finished = info
+      }
+    }
+    const tasks: (CompactionPart | SubtaskPart)[] = []
+    for (const msg of list) {
+      if (finished && msg.info.id <= finished.id) continue
+      for (const part of msg.parts) {
+        if (part.type === "compaction" || part.type === "subtask") tasks.push(part)
+      }
+    }
+    return { user, assistant, finished, tasks }
+  }
+  // altimate_change end
 
   export function fromError(
     e: unknown,

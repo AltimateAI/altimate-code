@@ -37,11 +37,10 @@ import { Flag } from "../flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
 import { Command } from "../command"
-import { $ } from "bun"
 import { pathToFileURL, fileURLToPath } from "url"
 import { ConfigMarkdown } from "../config/markdown"
 import { SessionSummary } from "./summary"
-import { NamedError } from "@opencode-ai/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { fn } from "@/util/fn"
 import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
@@ -53,6 +52,13 @@ import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
 import { decodeDataUrl } from "@/util/data-url"
+// altimate_change start — bridge the Effect-based Tool API (v1.17.9) back to this Promise-based module
+import { AppRuntime } from "@/effect/app-runtime"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { ToolJsonSchema } from "@/tool/json-schema"
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 // altimate_change start - import fingerprint for env-based skill selection
 import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change end
@@ -214,7 +220,9 @@ export namespace SessionPrompt {
 
   export const prompt = fn(PromptInput, async (input) => {
     const session = await Session.get(input.sessionID)
-    await SessionRevert.cleanup(session)
+    // altimate_change start — fork Session.Info (index zod) ≡ core Session.Info (session.ts) at the SessionRevert boundary
+    await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
+    // altimate_change end
 
     const message = await createUserMessage(input)
     await Session.touch(input.sessionID)
@@ -425,9 +433,12 @@ export namespace SessionPrompt {
     // so the next resolveTools() call (once per LLM turn) naturally picks up fresh
     // tools without any extra work here. This subscription makes the session layer
     // explicitly aware of the reconnect and logs it so it is traceable in prod.
-    const unsubscribeToolsChanged = Bus.subscribe(MCP.ToolsChanged, (event) => {
+    // MCP.ToolsChanged migrated to an EventV2 definition upstream; the EventV2Bridge
+    // republishes it onto the legacy Bus by type, so filter the wildcard stream.
+    const unsubscribeToolsChanged = Bus.subscribeAll((event) => {
+      if (event.type !== MCP.ToolsChanged.type) return
       log.info("MCP.ToolsChanged received — tools will refresh on next turn", {
-        server: event.properties.server,
+        server: (event.properties as { server?: string })?.server,
         sessionID,
       })
     })
@@ -462,14 +473,26 @@ export namespace SessionPrompt {
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
       // altimate_change end
+      // altimate_change start — upstream_fix: a provider can finish with
+      // "stop" while still emitting tool parts; those tools must be replayed
+      // into the next loop instead of terminating the session.
+      const lastAssistantHasToolParts =
+        lastAssistant !== undefined &&
+        (msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts.some((part) => {
+          if (part.type !== "tool") return false
+          return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
+        }) ??
+          false)
       if (
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+        !lastAssistantHasToolParts &&
         lastUser.id < lastAssistant.id
       ) {
         log.info("exiting loop", { sessionID })
         break
       }
+      // altimate_change end
 
       step++
       if (step === 1)
@@ -497,7 +520,11 @@ export namespace SessionPrompt {
       // pending subtask
       // TODO: centralize "invoke tool" logic
       if (task?.type === "subtask") {
-        const taskTool = await TaskTool.init()
+        // altimate_change start — v1.17.9: TaskTool is an Effect of Info; init() yields the executable def
+        const taskTool = await AppRuntime.runPromise(
+          Effect.flatMap(TaskTool, (info) => info.init()),
+        )
+        // altimate_change end
         const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
         const assistantMessage = (await Session.updateMessage({
           id: MessageID.ascending(),
@@ -568,26 +595,34 @@ export namespace SessionPrompt {
           abort,
           callID: part.callID,
           extra: { bypassAgentCheck: true },
-          messages: msgs,
-          async metadata(input) {
-            part = (await Session.updatePart({
-              ...part,
-              type: "tool",
-              state: {
-                ...part.state,
-                ...input,
-              },
-            } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
-          },
-          async ask(req) {
-            await PermissionNext.ask({
-              ...req,
-              sessionID: sessionID,
-              ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
-            })
-          },
+          // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
+          messages: msgs as unknown as Tool.Context["messages"],
+          metadata: (input) =>
+            // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+            Effect.promise(async () => {
+              part = (await Session.updatePart({
+                ...part,
+                type: "tool",
+                state: {
+                  ...part.state,
+                  ...input,
+                },
+              } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
+            }),
+          ask: (req) =>
+            Effect.promise(async () => {
+              // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
+              await PermissionNext.ask({
+                ...req,
+                sessionID: sessionID,
+                ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
+              } as Parameters<typeof PermissionNext.ask>[0])
+              // altimate_change end
+            }),
+          // altimate_change end
+          // altimate_change end
         }
-        const result = await taskTool.execute(taskArgs, taskCtx).catch((error) => {
+        const result = await AppRuntime.runPromise(taskTool.execute(taskArgs, taskCtx)).catch((error) => {
           executionError = error
           log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
           return undefined
@@ -924,6 +959,19 @@ export namespace SessionPrompt {
           os: process.platform,
           arch: process.arch,
           node_version: process.version,
+          // altimate_change start — per-session source override: VS Code extensions set
+          // metadata.source (e.g. "datamates", "poweruser") when creating the session via POST /session.
+          // This lets both extensions share the same altimate serve process while producing
+          // distinguishable session_start telemetry. session_start carries this per-session value;
+          // events without their own `source` fall back to the process-level Flag.ALTIMATE_CLI_CLIENT
+          // injected in telemetry, so per-extension attribution of those events requires a join on
+          // session_id. metadata is arbitrary client JSON, so type-guard source and fall back to the
+          // flag if it is absent or not a string (a non-string would otherwise be routed to
+          // measurements downstream instead of appearing as the source property).
+          source:
+            (typeof session.metadata?.source === "string" ? session.metadata.source : undefined) ??
+            Flag.ALTIMATE_CLI_CLIENT,
+          // altimate_change end
         })
         // altimate_change start — task intent classification (keyword/regex, zero LLM cost)
         const userMsg = msgs.find((m) => m.info.id === lastUser!.id)
@@ -986,26 +1034,9 @@ export namespace SessionPrompt {
 
       await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-      // altimate_change start — upstream_fix: carry the date in the trailing user message
-      // so it stays out of the long-lived, cache-controlled system prefix (see
-      // session/system.ts). It lands on the rolling last-user-turn cacheControl breakpoint,
-      // which applyCaching() rewrites every turn regardless — so steady-state cache cost is
-      // unchanged; we only stop midnight from busting the expensive system-prefix cache.
-      const lastUserForDate = msgs.findLast((m) => m.info.role === "user")
-      if (lastUserForDate) {
-        lastUserForDate.parts = [
-          ...lastUserForDate.parts,
-          {
-            type: "text" as const,
-            id: PartID.ascending(),
-            sessionID,
-            messageID: lastUserForDate.info.id,
-            text: `\n\n${SystemPrompt.currentDate()}`,
-            synthetic: true,
-          },
-        ]
-      }
-      // altimate_change end
+      // altimate_change — the current date is provided via the ambient <env> block in the system
+      // prompt (see session/system.ts), NOT appended to the trailing user message: appending it
+      // made models echo the date back on every turn.
 
       // Build system prompt, adding structured output instruction if needed
       const skills = await SystemPrompt.skills(agent)
@@ -1506,39 +1537,49 @@ export namespace SessionPrompt {
       callID: options.toolCallId,
       extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
       agent: input.agent.name,
-      messages: input.messages,
-      metadata: async (val: { title?: string; metadata?: any }) => {
-        const match = input.processor.partFromToolCall(options.toolCallId)
-        if (match && match.state.status === "running") {
-          await Session.updatePart({
-            ...match,
-            state: {
-              title: val.title,
-              metadata: val.metadata,
-              status: "running",
-              input: args,
-              time: {
-                start: Date.now(),
+      // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
+      messages: input.messages as unknown as Tool.Context["messages"],
+      // altimate_change end
+      metadata: (val: { title?: string; metadata?: any }) =>
+        // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+        Effect.promise(async () => {
+          const match = input.processor.partFromToolCall(options.toolCallId)
+          if (match && match.state.status === "running") {
+            await Session.updatePart({
+              ...match,
+              state: {
+                title: val.title,
+                metadata: val.metadata,
+                status: "running",
+                input: args,
+                time: {
+                  start: Date.now(),
+                },
               },
-            },
-          })
-        }
-      },
-      async ask(req) {
-        await PermissionNext.ask({
-          ...req,
-          sessionID: input.session.id,
-          tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-          ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
-        })
-      },
+            })
+          }
+        }),
+      ask: (req) =>
+        Effect.promise(async () => {
+          // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
+          await PermissionNext.ask({
+            ...req,
+            sessionID: input.session.id,
+            tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+            ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+          } as Parameters<typeof PermissionNext.ask>[0])
+          // altimate_change end
+        }),
+      // altimate_change end
     })
 
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
     )) {
-      const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+      // altimate_change start — v1.17.9: tool parameters are Effect Schema; derive JSON Schema via ToolJsonSchema
+      const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
+      // altimate_change end
       tools[item.id] = tool({
         id: item.id as any,
         description: item.description,
@@ -1556,7 +1597,9 @@ export namespace SessionPrompt {
               args,
             },
           )
-          const result = await item.execute(args, ctx)
+          // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
+          const result = await AppRuntime.runPromise(item.execute(args, ctx))
+          // altimate_change end
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({
@@ -1612,12 +1655,18 @@ export namespace SessionPrompt {
           },
         )
 
-        await ctx.ask({
-          permission: key,
-          metadata: {},
-          patterns: ["*"],
-          always: ["*"],
-        })
+        // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
+        // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
+        // check. Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
+        await AppRuntime.runPromise(
+          ctx.ask({
+            permission: key,
+            metadata: {},
+            patterns: ["*"],
+            always: ["*"],
+          }),
+        )
+        // altimate_change end
 
         const result = await execute(args, opts)
 
@@ -1732,7 +1781,13 @@ export namespace SessionPrompt {
       throw new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
     }
 
-    const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    const model = {
+      providerID: ProviderID.make(resolvedModel.providerID),
+      modelID: ModelID.make(resolvedModel.modelID),
+    }
+    // altimate_change end
     // Use agent.variant only when the user did not provide an explicit model
     // override; if the user picked a different model, agent.variant doesn't apply.
     const useAgentModel = !input.model
@@ -1925,62 +1980,70 @@ export namespace SessionPrompt {
                   },
                 ]
 
-                await ReadTool.init()
-                  .then(async (t) => {
-                    const model = await Provider.getModel(info.model.providerID, info.model.modelID)
-                    const readCtx: Tool.Context = {
-                      sessionID: input.sessionID,
-                      abort: new AbortController().signal,
-                      agent: input.agent!,
-                      messageID: info.id,
-                      extra: { bypassCwdCheck: true, model },
-                      messages: [],
-                      metadata: async () => {},
-                      ask: async () => {},
-                    }
-                    const result = await t.execute(args, readCtx)
-                    pieces.push({
-                      messageID: info.id,
-                      sessionID: input.sessionID,
-                      type: "text",
-                      synthetic: true,
-                      text: result.output,
-                    })
-                    if (result.attachments?.length) {
-                      pieces.push(
-                        ...result.attachments.map((attachment) => ({
-                          ...attachment,
-                          synthetic: true,
-                          filename: attachment.filename ?? part.filename,
-                          messageID: info.id,
-                          sessionID: input.sessionID,
-                        })),
-                      )
-                    } else {
-                      pieces.push({
-                        ...part,
+                // altimate_change start — upstream_fix: keep ReadTool init and execute inside the same Scope.
+                const model = await Provider.getModel(info.model.providerID, info.model.modelID)
+                const readCtx: Tool.Context = {
+                  sessionID: input.sessionID,
+                  abort: new AbortController().signal,
+                  agent: input.agent!,
+                  messageID: info.id,
+                  extra: { bypassCwdCheck: true, model },
+                  messages: [],
+                  // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+                  metadata: () => Effect.void,
+                  ask: () => Effect.void,
+                  // altimate_change end
+                }
+                try {
+                  const result = await AppRuntime.runPromise(
+                    Effect.scoped(
+                      Effect.flatMap(ReadTool, (info) => info.init()).pipe(
+                        Effect.flatMap((t) => t.execute(args, readCtx)),
+                      ),
+                    ),
+                  )
+                  pieces.push({
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: result.output,
+                  })
+                  if (result.attachments?.length) {
+                    pieces.push(
+                      ...result.attachments.map((attachment) => ({
+                        ...attachment,
+                        synthetic: true,
+                        filename: attachment.filename ?? part.filename,
                         messageID: info.id,
                         sessionID: input.sessionID,
-                      })
-                    }
-                  })
-                  .catch((error) => {
-                    log.error("failed to read file", { error })
-                    const message = error instanceof Error ? error.message : error.toString()
-                    Bus.publish(Session.Event.Error, {
-                      sessionID: input.sessionID,
-                      error: new NamedError.Unknown({
-                        message,
-                      }).toObject(),
-                    })
+                      })),
+                    )
+                  } else {
                     pieces.push({
+                      ...part,
                       messageID: info.id,
                       sessionID: input.sessionID,
-                      type: "text",
-                      synthetic: true,
-                      text: `Read tool failed to read ${filepath} with the following error: ${message}`,
                     })
+                  }
+                } catch (error) {
+                  log.error("failed to read file", { error })
+                  const message = error instanceof Error ? error.message : String(error)
+                  Bus.publish(Session.Event.Error, {
+                    sessionID: input.sessionID,
+                    error: new NamedError.Unknown({
+                      message,
+                    }).toObject(),
                   })
+                  pieces.push({
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: `Read tool failed to read ${filepath} with the following error: ${message}`,
+                  })
+                }
+                // altimate_change end
 
                 return pieces
               }
@@ -1994,10 +2057,21 @@ export namespace SessionPrompt {
                   messageID: info.id,
                   extra: { bypassCwdCheck: true },
                   messages: [],
-                  metadata: async () => {},
-                  ask: async () => {},
+                  // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+                  metadata: () => Effect.void,
+                  ask: () => Effect.void,
+                  // altimate_change end
                 }
-                const result = await ReadTool.init().then((t) => t.execute(args, listCtx))
+                // altimate_change start — v1.17.9: ReadTool is an Effect of Info; execute returns an Effect.
+                // ReadTool requires Scope.Scope — discharge it with Effect.scoped before running on AppRuntime.
+                const result = await AppRuntime.runPromise(
+                  Effect.scoped(
+                    Effect.flatMap(ReadTool, (info) => info.init()).pipe(
+                      Effect.flatMap((t) => t.execute(args, listCtx)),
+                    ),
+                  ),
+                )
+                // altimate_change end
                 return [
                   {
                     messageID: info.id,
@@ -2362,10 +2436,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const session = await Session.get(input.sessionID)
     if (session.revert) {
-      await SessionRevert.cleanup(session)
+      // altimate_change start — fork Session.Info (index zod) ≡ core Session.Info (session.ts) at the SessionRevert boundary
+      await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
+      // altimate_change end
     }
     const agent = await Agent.get(input.agent)
-    const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+    const resolvedModel = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    const model = {
+      providerID: ProviderID.make(resolvedModel.providerID),
+      modelID: ModelID.make(resolvedModel.modelID),
+    }
+    // altimate_change end
     const userMsg: MessageV2.User = {
       id: MessageID.ascending(),
       sessionID: input.sessionID,
@@ -2433,7 +2515,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       },
     }
     await Session.updatePart(part)
-    const shell = Shell.preferred()
+    // altimate_change — upstream_fix: command expansion must honor configured shell.
+    const shell = Shell.preferred((await Config.get()).shell)
     const shellName = (
       process.platform === "win32" ? path.win32.basename(shell, ".exe") : path.basename(shell)
     ).toLowerCase()
@@ -2613,7 +2696,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
    * Does not match when preceded by word characters or backticks (to avoid email addresses and quoted references)
    */
 
-  export async function command(input: CommandInput) {
+  // altimate_change start — shared text formatter for /mcps runtime status (#972)
+  /** @internal Exported for tests. */
+  export function formatMcpStatusForDisplay(name: string, status: MCP.Status) {
+    const icon = status.status === "connected" ? "\u2713" : "\u25cb"
+    if (status.status === "failed") return icon + " " + status.status + " (" + status.error + ")"
+    if (status.status === "needs_auth") return icon + " Needs authentication (run: altimate mcp auth " + name + ")"
+    return icon + " " + status.status
+  }
+  // altimate_change end
+
+  export async function command(input: CommandInput): Promise<MessageV2.WithParts> {
     log.info("command", input)
 
     // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
@@ -2640,10 +2733,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           type: "text", text: responseText, time: { start: now, end: now },
         }
         await Session.updatePart(textPart)
-        Bus.publish(Command.Event.Executed, {
-          name: input.command, sessionID: input.sessionID,
-          arguments: input.arguments, messageID: assistantMsg.id,
-        })
+        AppRuntime.runPromise(
+          EventV2Bridge.Service.use((events) =>
+            events.publish(Command.Event.Executed, {
+              name: input.command,
+              sessionID: input.sessionID,
+              arguments: input.arguments,
+              messageID: assistantMsg.id,
+            }),
+          ),
+        )
         return { info: assistantMsg, parts: [textPart] } as MessageV2.WithParts
       }
       const trimmed = input.arguments.trim()
@@ -2658,14 +2757,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const model = await lastModel(input.sessionID)
         const statusMap = await MCP.status()
         const rows = Object.entries(statusMap)
-          .map(([srv, s]) => {
-            const icon = s.status === "connected" ? "\u2713" : "\u25cb"
-            const label =
-              s.status === "failed"
-                ? icon + " " + s.status + " (" + s.error + ")"
-                : icon + " " + s.status
-            return "| `" + srv + "` | " + label + " |"
-          })
+          .map(([srv, s]) => "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s) + " |")
           .join("\n")
         const responseText = rows
           ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows
@@ -2771,21 +2863,37 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const shell = ConfigMarkdown.shell(template)
     if (shell.length > 0) {
+      // altimate_change start — upstream_fix: command template shell
+      // expansion must honor configured shell instead of Bun's default parser.
+      const sh = Shell.preferred((await Config.get()).shell)
       const results = await Promise.all(
         shell.map(async ([, cmd]) => {
           try {
-            return await $`${{ raw: cmd }}`.quiet().nothrow().text()
+            const proc = Bun.spawn([sh, ...Shell.args(sh, cmd, Instance.directory)], {
+              // altimate_change start — upstream_fix: non-bash command-template shells need an explicit cwd.
+              cwd: Instance.directory,
+              // altimate_change end
+              stdout: "pipe",
+              stderr: "pipe",
+            })
+            const [stdout, stderr, exitCode] = await Promise.all([
+              new Response(proc.stdout).text(),
+              new Response(proc.stderr).text(),
+              proc.exited,
+            ])
+            return exitCode === 0 ? stdout : stdout || stderr
           } catch (error) {
             return `Error executing command: ${error instanceof Error ? error.message : String(error)}`
           }
         }),
       )
+      // altimate_change end
       let index = 0
       template = template.replace(bashRegex, () => results[index++])
     }
     template = template.trim()
 
-    const taskModel = await (async () => {
+    const taskModelRaw = await (async () => {
       if (command.model) {
         return Provider.parseModel(command.model)
       }
@@ -2798,6 +2906,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       if (input.model) return Provider.parseModel(input.model)
       return await lastModel(input.sessionID)
     })()
+    // altimate_change start — cmdAgent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+    const taskModel = {
+      providerID: ProviderID.make(taskModelRaw.providerID),
+      modelID: ModelID.make(taskModelRaw.modelID),
+    }
+    // altimate_change end
 
     try {
       await Provider.getModel(taskModel.providerID, taskModel.modelID)
@@ -2869,12 +2983,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       variant: input.variant,
     })) as MessageV2.WithParts
 
-    Bus.publish(Command.Event.Executed, {
-      name: input.command,
-      sessionID: input.sessionID,
-      arguments: input.arguments,
-      messageID: result.info.id,
-    })
+    AppRuntime.runPromise(
+      EventV2Bridge.Service.use((events) =>
+        events.publish(Command.Event.Executed, {
+          name: input.command,
+          sessionID: input.sessionID,
+          arguments: input.arguments,
+          messageID: result.info.id,
+        }),
+      ),
+    )
 
     return result
   }
@@ -2912,7 +3030,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const agent = await Agent.get("title")
     if (!agent) return
     const model = await iife(async () => {
-      if (agent.model) return await Provider.getModel(agent.model.providerID, agent.model.modelID)
+      // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+      if (agent.model)
+        return await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
+      // altimate_change end
       return (
         (await Provider.getSmallModel(input.providerID)) ?? (await Provider.getModel(input.providerID, input.modelID))
       )
@@ -2953,4 +3074,48 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return Session.setTitle({ sessionID: input.session.id, title })
     }
   }
+
+  // altimate_change start — Effect Context.Service facade over the existing Promise namespace.
+  //
+  // Upstream v1.17.9 composes SessionPrompt into the Effect runtime as a
+  // Context.Service; consumers do `yield* SessionPrompt.Service` and call the
+  // resolved methods, plus reference `SessionPrompt.defaultLayer` / `.node`.
+  // The fork keeps SessionPrompt as a Promise-based namespace (imperative callers
+  // still use `SessionPrompt.prompt(...)` etc.), so this facade just delegates each
+  // Service method to the existing namespace function — behavior is unchanged.
+  //
+  // Error channels are chosen to match how consumers compose the methods:
+  //   - prompt: mapped to BadRequest by the HTTP handler (any error channel works).
+  //   - shell:  wrapped by SessionError.mapBusy, which requires the error channel
+  //             to be Session.BusyError (shell throws BusyError when the session is
+  //             already running), so we surface it via Effect.tryPromise.
+  export interface Interface {
+    readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts>
+    readonly loop: (input: z.infer<typeof LoopInput>) => Effect.Effect<MessageV2.WithParts>
+    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+    readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+    readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      prompt: (input) => Effect.promise(() => prompt(input)),
+      loop: (input) => Effect.promise(() => loop(input)),
+      cancel: (sessionID) => Effect.promise(() => cancel(sessionID)),
+      shell: (input) =>
+        Effect.tryPromise({
+          try: () => shell(input),
+          catch: (e) => (e instanceof Session.BusyError ? e : new Session.BusyError(input.sessionID)),
+        }),
+      command: (input) => Effect.promise(() => command(input)),
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

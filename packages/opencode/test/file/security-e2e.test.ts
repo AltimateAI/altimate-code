@@ -6,6 +6,7 @@
  * the security boundaries work against actual attack scenarios.
  */
 import { test, expect, describe, beforeAll } from "bun:test"
+import { Effect } from "effect"
 import path from "path"
 import fs from "fs/promises"
 import { existsSync, symlinkSync, mkdirSync, writeFileSync } from "fs"
@@ -13,6 +14,8 @@ import { Filesystem } from "../../src/util/filesystem"
 import { File } from "../../src/file"
 import { Instance } from "../../src/project/instance"
 import { Protected } from "../../src/file/protected"
+// Import the PRODUCTION guard — a prior version inlined a private copy here, which made this suite
+// pass green while the production wiring was dropped by the v1.17.9 merge. Test the real thing.
 import { assertSensitiveWrite } from "../../src/tool/external-directory"
 import { PermissionNext } from "../../src/permission/next"
 import type { Tool } from "../../src/tool/tool"
@@ -21,21 +24,24 @@ import { tmpdir } from "../fixture/fixture"
 
 // Helper: create a mock Tool.Context that records permission requests
 function mockContext() {
-  const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+  const requests: Array<Parameters<Tool.Context["ask"]>[0]> = []
   const ctx: Tool.Context = {
     sessionID: SessionID.make("ses_test"),
-    messageID: MessageID.make(""),
+    messageID: MessageID.make("msg_test"),
     callID: "",
     agent: "build",
     abort: AbortSignal.any([]),
     messages: [],
-    metadata: () => {},
-    ask: async (req) => {
-      requests.push(req)
-    },
+    metadata: () => Effect.void,
+    ask: (req) =>
+      Effect.sync(() => {
+        requests.push(req)
+      }),
   }
   return { ctx, requests }
 }
+
+// (assertSensitiveWrite is imported from the production module above — no local copy.)
 
 // ─────────────────────────────────────────────────────────────────────
 // SYMLINK ESCAPE ATTACKS

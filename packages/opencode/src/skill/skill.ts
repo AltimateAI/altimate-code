@@ -9,7 +9,11 @@ import { Instance } from "../project/instance"
 // altimate_change start — import State for cache invalidation
 import { State } from "../project/state"
 // altimate_change end
+// altimate_change start — this legacy namespace uses the zod NamedError (.create(z.object()))
 import { NamedError } from "@opencode-ai/util/error"
+// FrontmatterError moved to core v1 config error (no longer re-exported from ConfigMarkdown)
+import { FrontmatterError } from "@opencode-ai/core/v1/config/error"
+// altimate_change end
 import { ConfigMarkdown } from "../config/markdown"
 import { Log } from "../util/log"
 import { Global } from "@/global"
@@ -83,7 +87,7 @@ export namespace Skill {
 
     const addSkill = async (match: string) => {
       const md = await ConfigMarkdown.parse(match).catch((err) => {
-        const message = ConfigMarkdown.FrontmatterError.isInstance(err)
+        const message = FrontmatterError.isInstance(err)
           ? err.data.message
           : `Failed to parse skill ${match}`
         Bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })

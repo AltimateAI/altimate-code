@@ -224,10 +224,16 @@ export const DbtSchemaVerifyValidator: Validator = {
     }
 
     const mismatchNames = mismatches.map((m) => m.model).filter(Boolean) as string[]
+    // altimate_change start — surface the affected model names in the errored-path
+    // reason too (not just the mismatch path). The errored results carry `.model`
+    // (set at push time), so the operator can see WHICH models couldn't be verified
+    // instead of an anonymous count.
+    const erroredNames = results.filter((r) => r.error).map((r) => r.model).filter(Boolean) as string[]
     const reason =
       mismatches.length > 0
         ? `${mismatches.length} of ${results.length} models you edited have a column-shape mismatch against schema.yml${mismatchNames.length ? `: ${mismatchNames.join(", ")}` : ""}. The build may be green, but equality tests will fail.`
-        : `${errored} model(s) could not be schema-verified (spawn or tool errors) — schema drift cannot be ruled out. Investigate before declaring done.`
+        : `${errored} model(s) could not be schema-verified (spawn or tool errors)${erroredNames.length ? `: ${erroredNames.join(", ")}` : ""} — schema drift cannot be ruled out. Investigate before declaring done.`
+    // altimate_change end
 
     return {
       ok: false,
@@ -241,6 +247,8 @@ export const DbtSchemaVerifyValidator: Validator = {
         ...baseDetails,
         mismatch: mismatches.length,
         mismatch_models: mismatchNames,
+        // altimate_change: expose errored model names alongside mismatch names
+        errored_models: erroredNames,
       },
     }
   },

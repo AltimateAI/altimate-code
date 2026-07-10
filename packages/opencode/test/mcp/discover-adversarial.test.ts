@@ -6,9 +6,9 @@
  * null bytes, unicode edge cases, race conditions, type coercion traps,
  * and the consumeDiscoveryResult / setDiscoveryResult lifecycle.
  */
-import { describe, test, expect, beforeEach, afterEach } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
 import { mkdtemp, rm, mkdir, writeFile, symlink } from "fs/promises"
-import { tmpdir } from "os"
+import os, { tmpdir } from "os"
 import path from "path"
 import {
   discoverExternalMcp,
@@ -17,13 +17,23 @@ import {
 } from "../../src/mcp/discover"
 
 let tempDir: string
+let homeDir: string
+let homedirSpy: ReturnType<typeof spyOn> | undefined
 
 beforeEach(async () => {
   tempDir = await mkdtemp(path.join(tmpdir(), "mcp-adversarial-"))
+  // Isolate the home dir to an empty temp dir. discoverExternalMcp also reads the home-scoped
+  // global config (~/.claude.json etc.); without isolation these hermetic cases pick up the
+  // developer's real MCP servers and fail off-CI. (bun's os.homedir() caches $HOME at startup,
+  // so it must be spied rather than set via process.env.)
+  homeDir = await mkdtemp(path.join(tmpdir(), "mcp-adversarial-home-"))
+  homedirSpy = spyOn(os, "homedir").mockImplementation(() => homeDir)
 })
 
 afterEach(async () => {
+  homedirSpy?.mockRestore()
   await rm(tempDir, { recursive: true, force: true })
+  await rm(homeDir, { recursive: true, force: true })
 })
 
 // ---------------------------------------------------------------------------

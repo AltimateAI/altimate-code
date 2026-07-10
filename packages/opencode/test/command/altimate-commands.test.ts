@@ -26,12 +26,12 @@ describe("Altimate builtin commands", () => {
     expect(Command.Default.CONFIGURE_CLAUDE).toBe("configure-claude")
     expect(Command.Default.CONFIGURE_CODEX).toBe("configure-codex")
     expect(Command.Default.DISCOVER_MCPS).toBe("discover-and-add-mcps")
-    expect(Command.Default.FEEDBACK).toBe("feedback")
+    expect(Command.Default).toHaveProperty("FEEDBACK", "feedback")
   })
 
   test("discover-and-add-mcps has correct metadata and template", async () => {
     await withInstance(async () => {
-      const cmd = await Command.get("discover-and-add-mcps")
+      const cmd = (await Command.get("discover-and-add-mcps"))!
       expect(cmd).toBeDefined()
       expect(cmd.name).toBe("discover-and-add-mcps")
       expect(cmd.source).toBe("command")
@@ -44,7 +44,7 @@ describe("Altimate builtin commands", () => {
 
   test("configure-claude has correct metadata", async () => {
     await withInstance(async () => {
-      const cmd = await Command.get("configure-claude")
+      const cmd = (await Command.get("configure-claude"))!
       expect(cmd).toBeDefined()
       expect(cmd.name).toBe("configure-claude")
       expect(cmd.source).toBe("command")
@@ -54,7 +54,7 @@ describe("Altimate builtin commands", () => {
 
   test("configure-codex has correct metadata", async () => {
     await withInstance(async () => {
-      const cmd = await Command.get("configure-codex")
+      const cmd = (await Command.get("configure-codex"))!
       expect(cmd).toBeDefined()
       expect(cmd.name).toBe("configure-codex")
       expect(cmd.source).toBe("command")

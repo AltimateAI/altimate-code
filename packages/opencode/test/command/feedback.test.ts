@@ -20,7 +20,7 @@ describe("/feedback command", () => {
 
     test("feedback command has correct metadata", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         expect(cmd).toBeDefined()
         expect(cmd.name).toBe("feedback")
         expect(cmd.source).toBe("command")
@@ -29,14 +29,14 @@ describe("/feedback command", () => {
     })
 
     test("feedback is in Command.Default constants", () => {
-      expect(Command.Default.FEEDBACK).toBe("feedback")
+      expect(Command.Default).toHaveProperty("FEEDBACK", "feedback")
     })
   })
 
   describe("template content", () => {
     test("template references feedback_submit tool", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         const template = await cmd.template
         expect(template).toContain("feedback_submit")
       })
@@ -44,14 +44,14 @@ describe("/feedback command", () => {
 
     test("template has $ARGUMENTS placeholder", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         expect(cmd.hints).toContain("$ARGUMENTS")
       })
     })
 
     test("template mentions all four categories", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         const template = await cmd.template
         expect(template).toContain("bug")
         expect(template).toContain("feature")
@@ -62,7 +62,7 @@ describe("/feedback command", () => {
 
     test("template describes the multi-step collection flow", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         const template = await cmd.template
         // Should have steps for collecting feedback details
         expect(template).toContain("Title")
@@ -73,7 +73,7 @@ describe("/feedback command", () => {
 
     test("template mentions session context opt-in", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         const template = await cmd.template
         expect(template).toContain("include_context")
         expect(template).toContain("session context")
@@ -82,17 +82,29 @@ describe("/feedback command", () => {
 
     test("template warns about not including credentials", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         const template = await cmd.template
         expect(template).toContain("credentials")
       })
     })
 
-    test("template includes confirmation step", async () => {
+    test("template proceeds directly when enough detail is available", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         const template = await cmd.template
-        expect(template).toContain("confirm")
+        expect(template).toContain("proceed directly to filing")
+        expect(template).toContain("submit directly")
+        expect(template).not.toContain("Ask the user to confirm")
+      })
+    })
+
+    test("template limits clarifying questions but preserves label follow-up", async () => {
+      await withInstance(async () => {
+        const cmd = (await Command.get("feedback"))!
+        const template = await cmd.template
+        expect(template).toContain("Ask at most one round of clarifying questions")
+        expect(template).toContain("Keep the category/label follow-up behavior")
+        expect(template).toContain("ask the user to pick one if unclear")
       })
     })
   })
@@ -100,14 +112,14 @@ describe("/feedback command", () => {
   describe("command isolation", () => {
     test("feedback command is not a subtask", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         expect(cmd.subtask).toBeUndefined()
       })
     })
 
     test("feedback command has source 'command'", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("feedback")
+        const cmd = (await Command.get("feedback"))!
         expect(cmd.source).toBe("command")
       })
     })

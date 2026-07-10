@@ -60,7 +60,40 @@ async function waitForPort(
   throw new Error(`Port ${port} not reachable after ${timeoutMs}ms`)
 }
 
-const duckdbAvailable = isDuckDBAvailable()
+// altimate_change start — authoritative DuckDB availability probe.
+// `require("duckdb")` (isDuckDBAvailable) can return true when the native binding
+// is present in the process module cache but actually fails to CONNECT in this
+// run (e.g. node-pre-gyp .node not built for the worktree). `test.skipIf` is
+// evaluated at collection time, so it cannot read the beforeAll `duckdbReady`
+// flag — when the cheap require() check passed but connect() later failed, the
+// tests un-skipped and ran against an undefined connector. Probe the real
+// connect path here (top-level await) so skipIf reflects true connectivity.
+async function probeDuckDB(): Promise<boolean> {
+  if (!isDuckDBAvailable()) return false
+  try {
+    const mod = await import("@altimateai/drivers/duckdb")
+    const probe = await mod.connect({ type: "duckdb" })
+    await probe.connect()
+    // Guard against a leaked mock.module from another test file (e.g.
+    // dbt-first-execution.test.ts mocks @altimateai/drivers/duckdb at module
+    // load, and Bun's mock.module leaks across files). The real native connector
+    // exposes the full Connector surface (listSchemas/listTables/describeTable)
+    // and returns true row data; the mock only has connect/execute/close/schemas.
+    // If the Connector API is incomplete, we are looking at the mock — skip.
+    if (typeof (probe as any).listSchemas !== "function" || typeof (probe as any).describeTable !== "function") {
+      await probe.close()
+      return false
+    }
+    const sanity = await probe.execute("SELECT 1 AS num, 'hello' AS msg")
+    await probe.close()
+    // The real driver returns columns ["num","msg"] and rows [[1,"hello"]].
+    return Array.isArray(sanity?.columns) && sanity.columns[0] === "num" && sanity?.rows?.[0]?.[1] === "hello"
+  } catch {
+    return false
+  }
+}
+const duckdbAvailable = await probeDuckDB()
+// altimate_change end
 const dockerAvailable = isDockerAvailable()
 
 // ---------------------------------------------------------------------------

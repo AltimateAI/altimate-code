@@ -11,6 +11,7 @@
 
 import { describe, expect, test, beforeEach, mock } from "bun:test"
 import { Dispatcher } from "../../src/altimate/native"
+import { initTool } from "../altimate/tool-fixture"
 import { Log } from "../../src/util/log"
 // Static import so resetShownSuggestions() targets the SAME module instance that
 // the tools (sql-analyze, schema-inspect) use. A dynamic `await import` here can
@@ -52,7 +53,7 @@ beforeEach(async () => {
 describe("REAL EXEC: warehouse_add tool", () => {
   async function execWarehouseAdd(name: string, config: Record<string, unknown>) {
     const mod = await import("../../src/altimate/tools/warehouse-add")
-    const tool = await mod.WarehouseAddTool.init()
+    const tool = await initTool(mod.WarehouseAddTool)
     return tool.execute({ name, config }, makeCtx())
   }
 
@@ -186,7 +187,7 @@ describe("REAL EXEC: warehouse_add tool", () => {
 describe("REAL EXEC: sql_execute tool", () => {
   async function execSqlExecute(query: string, warehouse?: string) {
     const mod = await import("../../src/altimate/tools/sql-execute")
-    const tool = await mod.SqlExecuteTool.init()
+    const tool = await initTool(mod.SqlExecuteTool)
     return tool.execute({ query, warehouse, limit: 100 }, makeCtx())
   }
 
@@ -266,7 +267,7 @@ describe("REAL EXEC: sql_execute tool", () => {
 describe("REAL EXEC: sql_analyze tool", () => {
   async function execSqlAnalyze(sql: string) {
     const mod = await import("../../src/altimate/tools/sql-analyze")
-    const tool = await mod.SqlAnalyzeTool.init()
+    const tool = await initTool(mod.SqlAnalyzeTool)
     return tool.execute({ sql, dialect: "snowflake" }, makeCtx())
   }
 
@@ -326,7 +327,7 @@ describe("REAL EXEC: sql_analyze tool", () => {
 describe("REAL EXEC: schema_inspect tool", () => {
   async function execSchemaInspect(table: string, warehouse?: string) {
     const mod = await import("../../src/altimate/tools/schema-inspect")
-    const tool = await mod.SchemaInspectTool.init()
+    const tool = await initTool(mod.SchemaInspectTool)
     return tool.execute({ table, warehouse }, makeCtx())
   }
 
@@ -370,7 +371,7 @@ describe("REAL EXEC: schema_inspect tool", () => {
 describe("REAL EXEC: schema_index tool", () => {
   async function execSchemaIndex(warehouse: string) {
     const mod = await import("../../src/altimate/tools/schema-index")
-    const tool = await mod.SchemaIndexTool.init()
+    const tool = await initTool(mod.SchemaIndexTool)
     return tool.execute({ warehouse }, makeCtx())
   }
 
@@ -433,32 +434,32 @@ describe("REAL EXEC: full user journey simulations", () => {
 
     // Step 1: warehouse_add
     const whMod = await import("../../src/altimate/tools/warehouse-add")
-    const whTool = await whMod.WarehouseAddTool.init()
+    const whTool = await initTool(whMod.WarehouseAddTool)
     const r1 = await whTool.execute({ name: "prod_sf", config: { type: "snowflake" } }, makeCtx())
     expect(r1.metadata.success).toBe(true)
     expect(r1.output).toContain("schema_index") // Post-connect suggestion
 
     // Step 2: schema_index
     const siMod = await import("../../src/altimate/tools/schema-index")
-    const siTool = await siMod.SchemaIndexTool.init()
+    const siTool = await initTool(siMod.SchemaIndexTool)
     const r2 = await siTool.execute({ warehouse: "prod_sf" }, makeCtx())
     expect(r2.output).toContain("sql_analyze") // Post-index capabilities
 
     // Step 3: sql_execute
     const seMod = await import("../../src/altimate/tools/sql-execute")
-    const seTool = await seMod.SqlExecuteTool.init()
+    const seTool = await initTool(seMod.SqlExecuteTool)
     const r3 = await seTool.execute({ query: "SELECT * FROM users", limit: 100 }, makeCtx())
     expect(r3.output).toContain("sql_analyze") // Progressive: suggests sql_analyze
 
     // Step 4: sql_analyze
     const saMod = await import("../../src/altimate/tools/sql-analyze")
-    const saTool = await saMod.SqlAnalyzeTool.init()
+    const saTool = await initTool(saMod.SqlAnalyzeTool)
     const r4 = await saTool.execute({ sql: "SELECT * FROM users", dialect: "snowflake" }, makeCtx())
     expect(r4.output).toContain("schema_inspect") // Progressive: suggests schema_inspect
 
     // Step 5: schema_inspect
     const scMod = await import("../../src/altimate/tools/schema-inspect")
-    const scTool = await scMod.SchemaInspectTool.init()
+    const scTool = await initTool(scMod.SchemaInspectTool)
     const r5 = await scTool.execute({ table: "users" }, makeCtx())
     expect(r5.output).toContain("lineage_check") // Progressive: suggests lineage_check
 
@@ -471,7 +472,7 @@ describe("REAL EXEC: full user journey simulations", () => {
     }))
 
     const mod = await import("../../src/altimate/tools/sql-execute")
-    const tool = await mod.SqlExecuteTool.init()
+    const tool = await initTool(mod.SqlExecuteTool)
 
     // Run 20 queries — simulate a user exploring data
     const outputs: string[] = []
@@ -502,9 +503,9 @@ describe("REAL EXEC: full user journey simulations", () => {
     const saTool = (await import("../../src/altimate/tools/sql-analyze"))
     const scTool = (await import("../../src/altimate/tools/schema-inspect"))
 
-    const se = await seMod.SqlExecuteTool.init()
-    const sa = await saTool.SqlAnalyzeTool.init()
-    const sc = await scTool.SchemaInspectTool.init()
+    const se = await initTool(seMod.SqlExecuteTool)
+    const sa = await initTool(saTool.SqlAnalyzeTool)
+    const sc = await initTool(scTool.SchemaInspectTool)
 
     // Interleave: execute, analyze, execute, inspect, analyze, execute
     const r1 = await se.execute({ query: "Q1", limit: 10 }, makeCtx())
@@ -532,7 +533,7 @@ describe("REAL EXEC: full user journey simulations", () => {
     Dispatcher.register("warehouse.list", async () => { throw new Error("fail") })
 
     const mod = await import("../../src/altimate/tools/warehouse-add")
-    const tool = await mod.WarehouseAddTool.init()
+    const tool = await initTool(mod.WarehouseAddTool)
     const result = await tool.execute({ name: "resilient", config: { type: "postgres" } }, makeCtx())
 
     expect(result.metadata.success).toBe(true)
@@ -551,7 +552,7 @@ describe("REAL EXEC: performance verification", () => {
     Dispatcher.register("warehouse.list", async () => ({ warehouses: [{ name: "fast" }] }))
 
     const mod = await import("../../src/altimate/tools/warehouse-add")
-    const tool = await mod.WarehouseAddTool.init()
+    const tool = await initTool(mod.WarehouseAddTool)
 
     const start = performance.now()
     await tool.execute({ name: "fast", config: { type: "snowflake" } }, makeCtx())
@@ -565,7 +566,7 @@ describe("REAL EXEC: performance verification", () => {
     }))
 
     const mod = await import("../../src/altimate/tools/sql-execute")
-    const tool = await mod.SqlExecuteTool.init()
+    const tool = await initTool(mod.SqlExecuteTool)
 
     const start = performance.now()
     for (let i = 0; i < 50; i++) {

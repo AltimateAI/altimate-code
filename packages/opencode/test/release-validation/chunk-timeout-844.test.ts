@@ -1,10 +1,11 @@
-import { describe, test, expect } from "bun:test"
+import { beforeAll, describe, test, expect } from "bun:test"
 import { readFileSync } from "fs"
 import path from "path"
 
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
 import { Provider } from "../../src/provider/provider"
+import { prepareReleaseValidationDatabase } from "./db-prepare"
 
 // PR #844 — raise the provider SSE chunk-watchdog default from 2min (120_000) to 5min (300_000).
 //
@@ -90,6 +91,8 @@ function sseResponse(chunks: string[], close = false): Response {
 }
 
 describe("PR #844 — DEFAULT_CHUNK_TIMEOUT 2min→5min", () => {
+  beforeAll(() => prepareReleaseValidationDatabase())
+
   // Gap 1: default falls back to 300_000 (NOT the old 120_000) when no chunkTimeout is configured.
   test("default_chunk_timeout_value_is_5min: wrapSSE arms setTimeout(300000) when chunkTimeout omitted", async () => {
     await using tmp = await tmpdir({ init: (dir) => writeCapturingProvider(dir, { apiKey: "x" }) })

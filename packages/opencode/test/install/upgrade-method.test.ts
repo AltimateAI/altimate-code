@@ -12,6 +12,10 @@ const INSTALLATION_SRC = fs.readFileSync(
   path.resolve(import.meta.dir, "../../src/installation/index.ts"),
   "utf-8",
 )
+const CORE_VERSION_SRC = fs.readFileSync(
+  path.resolve(import.meta.dir, "../../../../packages/core/src/installation/version.ts"),
+  "utf-8",
+)
 
 describe("installation method detection", () => {
   test("checks brew with correct formula name", () => {
@@ -64,7 +68,7 @@ describe("brew latest() version resolution", () => {
   })
 
   test("GitHub releases fallback validates tag_name exists", () => {
-    expect(INSTALLATION_SRC).toContain("Missing tag_name")
+    expect(INSTALLATION_SRC).toContain("const GitHubRelease = Schema.Struct({ tag_name: Schema.String })")
   })
 })
 
@@ -99,12 +103,9 @@ describe("upgrade execution", () => {
 
   test("curl upgrade fetch has a bounded timeout", () => {
     // Without a timeout the install-script fetch can stall indefinitely on a
-    // hung CDN/origin, blocking `altimate upgrade` forever. Use AbortSignal.timeout
-    // so the request fails fast with a clear error instead.
-    // Assert on the named constant + 15s value separately so a future refactor
-    // that extracts the literal (e.g., `AbortSignal.timeout(UPGRADE_FETCH_TIMEOUT_MS)`)
-    // doesn't break this regression guard for cosmetic reasons.
-    expect(INSTALLATION_SRC).toMatch(/AbortSignal\.timeout\(/)
+    // hung CDN/origin, blocking `altimate upgrade` forever. The current Effect
+    // HTTP path uses Effect.timeout around the fetch.
+    expect(INSTALLATION_SRC).toContain("Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS)")
     expect(INSTALLATION_SRC).toMatch(/UPGRADE_FETCH_TIMEOUT_MS\s*=\s*15_000/)
   })
 
@@ -118,7 +119,7 @@ describe("upgrade execution", () => {
   })
 
   test("VERSION normalization strips v prefix", () => {
-    expect(INSTALLATION_SRC).toContain('OPENCODE_VERSION.trim().replace(/^v/, "")')
+    expect(CORE_VERSION_SRC).toContain('OPENCODE_VERSION.trim().replace(/^v/, "")')
   })
 })
 

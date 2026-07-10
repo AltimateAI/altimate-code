@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
+import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { SqlAnalyzeTool } from "../../src/altimate/tools/sql-analyze"
 import { SchemaInspectTool } from "../../src/altimate/tools/schema-inspect"
@@ -33,7 +34,7 @@ describe("tool response normalization", () => {
       },
     }))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(true)
@@ -53,7 +54,7 @@ describe("tool response normalization", () => {
       },
     }))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.title).toContain("ERROR")
@@ -75,7 +76,7 @@ describe("tool response normalization", () => {
       },
     }))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(true)
@@ -96,7 +97,7 @@ describe("tool response normalization", () => {
       },
     }))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -117,7 +118,7 @@ describe("tool response normalization", () => {
       },
     }))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -137,7 +138,7 @@ describe("tool response normalization", () => {
       },
     }))
 
-    const tool = await SchemaInspectTool.init()
+    const tool = await initTool(SchemaInspectTool)
     const result = await tool.execute({ table: "orders" }, ctx as any)
 
     expect(result.metadata.success).toBe(true)
@@ -152,7 +153,7 @@ describe("tool response normalization", () => {
       data: {},
     }))
 
-    const tool = await LineageCheckTool.init()
+    const tool = await initTool(LineageCheckTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -168,7 +169,7 @@ describe("tool response normalization", () => {
       },
     }))
 
-    const tool = await AltimateCoreColumnLineageTool.init()
+    const tool = await initTool(AltimateCoreColumnLineageTool)
     const result = await tool.execute({ sql: "SELECT id FROM orders", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(true)
@@ -182,7 +183,7 @@ describe("tool response normalization", () => {
       data: { success: false, column_lineage: [] },
     }))
 
-    const tool = await AltimateCoreColumnLineageTool.init()
+    const tool = await initTool(AltimateCoreColumnLineageTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.title).toContain("ERROR")
@@ -195,7 +196,7 @@ describe("tool response normalization", () => {
       data: { error: { token: "secret-token" }, column_lineage: [{ source: "a", target: "b" }] },
     }))
 
-    const tool = await AltimateCoreColumnLineageTool.init()
+    const tool = await initTool(AltimateCoreColumnLineageTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -209,7 +210,7 @@ describe("tool response normalization", () => {
       data: { success: false },
     }))
 
-    const tool = await LineageCheckTool.init()
+    const tool = await initTool(LineageCheckTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.title).toContain("PARTIAL")

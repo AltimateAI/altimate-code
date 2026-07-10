@@ -1,11 +1,11 @@
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
-import { Config } from "@/config/config"
+import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { SessionID, MessageID } from "@/session/schema"
 import { PermissionID } from "./schema"
 import { Instance } from "@/project/instance"
 import { Database, eq } from "@/storage/db"
-import { PermissionTable } from "@/session/session.sql"
+import { PermissionTable } from "./permission.sql"
 import { Telemetry } from "@/telemetry"
 import { fn } from "@/util/fn"
 import { Log } from "@/util/log"
@@ -46,7 +46,7 @@ export namespace PermissionNext {
   })
   export type Ruleset = z.infer<typeof Ruleset>
 
-  export function fromConfig(permission: Config.Permission) {
+  export function fromConfig(permission: ConfigPermissionV1.Info) {
     const ruleset: Ruleset = []
     for (const [key, value] of Object.entries(permission)) {
       if (typeof value === "string") {

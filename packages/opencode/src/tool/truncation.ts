@@ -35,10 +35,18 @@ export namespace Truncate {
   }
 
   export async function cleanup() {
-    const cutoff = Identifier.timestamp(Identifier.create("tool", false, Date.now() - RETENTION_MS))
+    const cutoff = Identifier.timestamp(Identifier.create("tool", "ascending", Date.now() - RETENTION_MS))
     const entries = await Glob.scan("tool_*", { cwd: DIR, include: "file" }).catch(() => [] as string[])
     for (const entry of entries) {
-      if (Identifier.timestamp(entry) >= cutoff) continue
+      // altimate_change start - tolerate stale/malformed tool-output files from older builds.
+      let timestamp: number
+      try {
+        timestamp = Identifier.timestamp(entry)
+      } catch {
+        continue
+      }
+      if (timestamp >= cutoff) continue
+      // altimate_change end
       await fs.unlink(path.join(DIR, entry)).catch(() => {})
     }
   }

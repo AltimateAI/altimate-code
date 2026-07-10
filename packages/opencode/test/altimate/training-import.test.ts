@@ -6,6 +6,7 @@
  * the parsing and import logic without a real filesystem or memory store.
  */
 import { describe, test, expect, spyOn, afterAll, beforeEach } from "bun:test"
+import { initTool } from "./tool-fixture"
 import { TrainingImportTool } from "../../src/altimate/tools/training-import"
 import { TrainingStore } from "../../src/altimate/training"
 import { TrainingPrompt } from "../../src/altimate/training"
@@ -90,7 +91,7 @@ describe("training_import: markdown parsing (dry_run)", () => {
       ].join("\n"),
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "style-guide.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
       ctx,
@@ -112,7 +113,7 @@ describe("training_import: markdown parsing (dry_run)", () => {
       ].join("\n"),
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "doc.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
       ctx,
@@ -133,7 +134,7 @@ describe("training_import: markdown parsing (dry_run)", () => {
       ].join("\n"),
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "empty.md", kind: "glossary", scope: "project", dry_run: true, max_entries: 20 },
       ctx,
@@ -157,7 +158,7 @@ describe("training_import: markdown parsing (dry_run)", () => {
       ].join("\n"),
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "mixed.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
       ctx,
@@ -174,7 +175,7 @@ describe("training_import: markdown parsing (dry_run)", () => {
     ).join("\n\n")
     setupMocks({ fileContent: sections })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "many.md", kind: "standard", scope: "project", dry_run: true, max_entries: 3 },
       ctx,
@@ -199,7 +200,7 @@ describe("training_import: capacity enforcement", () => {
       currentCount: TRAINING_MAX_PATTERNS_PER_KIND - 2,
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "doc.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
       ctx,
@@ -223,7 +224,7 @@ describe("training_import: actual import (dry_run=false)", () => {
       ].join("\n"),
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "guide.md", kind: "standard", scope: "project", dry_run: false, max_entries: 20 },
       ctx,
@@ -244,7 +245,7 @@ describe("training_import: actual import (dry_run=false)", () => {
       saveShouldFail: true,
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "fail.md", kind: "standard", scope: "project", dry_run: false, max_entries: 20 },
       ctx,
@@ -265,7 +266,7 @@ describe("training_import: slugify edge cases", () => {
       ].join("\n"),
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "special.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
       ctx,
@@ -283,7 +284,7 @@ describe("training_import: error handling", () => {
       throw new Error("ENOENT: no such file")
     })
 
-    const tool = await TrainingImportTool.init()
+    const tool = await initTool(TrainingImportTool)
     const result = await tool.execute(
       { file_path: "nonexistent.md", kind: "standard", scope: "project", dry_run: true, max_entries: 20 },
       ctx,

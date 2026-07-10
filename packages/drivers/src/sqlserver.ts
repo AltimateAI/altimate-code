@@ -165,10 +165,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
           try {
             // @azure/identity is an optional peer dependency — dynamic import so users
-            // who don't use Azure AD don't need to install it. Types are resolved at
-            // runtime via the installed package.
-            // @ts-expect-error — optional peer; types only present when installed
-            const azureIdentity = await import("@azure/identity")
+            // who don't use Azure AD don't need to install it. Typed `any` (via a non-literal
+            // specifier) so it compiles regardless of which @azure/identity version (if any) is
+            // installed; the runtime API is resolved from the user's installed package.
+            const azureIdentity: any = await import("@azure/identity" as string)
             const credential = new azureIdentity.DefaultAzureCredential(
               config.azure_client_id
                 ? { managedIdentityClientId: config.azure_client_id as string }

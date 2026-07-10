@@ -30,7 +30,7 @@ describe("Command module", () => {
 
     test("discover command has correct metadata", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("discover")
+        const cmd = (await Command.get("discover"))!
         expect(cmd).toBeDefined()
         expect(cmd.name).toBe("discover")
         expect(cmd.source).toBe("command")
@@ -40,7 +40,7 @@ describe("Command module", () => {
 
     test("discover template references project_scan tool", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("discover")
+        const cmd = (await Command.get("discover"))!
         const template = await cmd.template
         expect(template).toContain("project_scan")
       })
@@ -48,14 +48,14 @@ describe("Command module", () => {
 
     test("discover template has $ARGUMENTS placeholder", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("discover")
+        const cmd = (await Command.get("discover"))!
         expect(cmd.hints).toContain("$ARGUMENTS")
       })
     })
 
     test("init command has correct metadata", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("init")
+        const cmd = (await Command.get("init"))!
         expect(cmd).toBeDefined()
         expect(cmd.name).toBe("init")
         expect(cmd.source).toBe("command")
@@ -65,7 +65,7 @@ describe("Command module", () => {
 
     test("review command has subtask flag", async () => {
       await withInstance(async () => {
-        const cmd = await Command.get("review")
+        const cmd = (await Command.get("review"))!
         expect(cmd).toBeDefined()
         expect(cmd.name).toBe("review")
         expect(cmd.subtask).toBe(true)
@@ -116,7 +116,7 @@ describe("Command module", () => {
           expect(names).toContain("review")
           // Custom command also present
           expect(names).toContain("my-custom")
-          const custom = await Command.get("my-custom")
+          const custom = (await Command.get("my-custom"))!
           expect(custom.source).toBe("command")
           expect(custom.description).toBe("Custom command")
         },

@@ -6,6 +6,7 @@ import { Question } from "../../question"
 import z from "zod"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
+import { zod } from "../../util/effect-zod"
 
 export const QuestionRoutes = lazy(() =>
   new Hono()
@@ -20,7 +21,7 @@ export const QuestionRoutes = lazy(() =>
             description: "List of pending questions",
             content: {
               "application/json": {
-                schema: resolver(Question.Request.array()),
+                schema: resolver(z.array(zod(Question.Request))),
               },
             },
           },
@@ -52,10 +53,12 @@ export const QuestionRoutes = lazy(() =>
       validator(
         "param",
         z.object({
+          // altimate_change start — upstream_fix: use QuestionID.zod so invalid prefixes reject at the Hono edge
           requestID: QuestionID.zod,
+          // altimate_change end
         }),
       ),
-      validator("json", Question.Reply),
+      validator("json", zod(Question.Reply)),
       async (c) => {
         const params = c.req.valid("param")
         const json = c.req.valid("json")
@@ -87,7 +90,9 @@ export const QuestionRoutes = lazy(() =>
       validator(
         "param",
         z.object({
+          // altimate_change start — upstream_fix: use QuestionID.zod so invalid prefixes reject at the Hono edge
           requestID: QuestionID.zod,
+          // altimate_change end
         }),
       ),
       async (c) => {

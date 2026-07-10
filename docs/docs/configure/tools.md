@@ -129,7 +129,7 @@ The `mcp_discover` tool finds MCP servers configured in other AI coding tools an
 
 - `mcp_discover(action: "list")` — Show discovered servers and which are already in your config
 - `mcp_discover(action: "add", scope: "project")` — Write new servers to `.altimate-code/altimate-code.json`
-- `mcp_discover(action: "add", scope: "global")` — Write to the global config dir (`~/.config/opencode/`)
+- `mcp_discover(action: "add", scope: "global")` — Write to the global config dir (`~/.config/altimate-code/`)
 
 **Auto-discovery:** At startup, altimate-code discovers external MCP servers and shows a toast notification. Servers from your home directory (`~/.claude.json`, `~/.gemini/settings.json`) are auto-enabled since they're user-owned. Servers from project-level files (`.vscode/mcp.json`, `.mcp.json`, `.cursor/mcp.json`) are discovered but **disabled by default** for security — ask the assistant to add them or use `mcp_discover(action: "add")`.
 

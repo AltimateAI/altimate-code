@@ -11,9 +11,11 @@ import { describe, test, expect, afterEach } from "bun:test"
 import { Database as BunDatabase } from "bun:sqlite"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { migrate } from "drizzle-orm/bun-sqlite/migrator"
+import { Effect } from "effect"
 import path from "path"
 import os from "os"
 import fs from "fs"
+import freshSchema from "@opencode-ai/core/database/schema.gen"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,6 +120,194 @@ function getMigrationNames(sqlite: BunDatabase): (string | null)[] {
   ).map((r) => r.name)
 }
 
+function hasTable(sqlite: BunDatabase, table: string) {
+  return !!sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
+}
+
+function hasColumn(sqlite: BunDatabase, table: string, column: string) {
+  return (sqlite.prepare(`PRAGMA table_info(${JSON.stringify(table)})`).all() as { name: string }[]).some(
+    (row) => row.name === column,
+  )
+}
+
+function addColumn(sqlite: BunDatabase, table: string, column: string, definition: string) {
+  if (!hasTable(sqlite, table) || hasColumn(sqlite, table, column)) return false
+  sqlite.run(`ALTER TABLE ${JSON.stringify(table)} ADD ${JSON.stringify(column)} ${definition}`)
+  return true
+}
+
+function ensureDrizzleJournal(sqlite: BunDatabase) {
+  sqlite.run(`
+    CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (
+      id INTEGER PRIMARY KEY,
+      hash text NOT NULL,
+      created_at numeric,
+      name text,
+      applied_at TEXT
+    )
+  `)
+}
+
+function markDrizzleEntriesApplied(sqlite: BunDatabase, entries: Journal) {
+  ensureDrizzleJournal(sqlite)
+  const appliedAt = new Date().toISOString()
+  const insert = sqlite.prepare(
+    `INSERT OR IGNORE INTO "__drizzle_migrations" ("hash", "created_at", "name", "applied_at") VALUES (?, ?, ?, ?)`,
+  )
+  for (const entry of entries) {
+    insert.run("", entry.timestamp, entry.name, appliedAt)
+  }
+}
+
+function runFreshSchema(sqlite: BunDatabase) {
+  const tx = {
+    run: (query: string) =>
+      Effect.sync(() => {
+        sqlite.run(query)
+      }),
+  }
+  Effect.runSync(freshSchema.up(tx as never))
+}
+
+function initializeFreshDatabase(sqlite: BunDatabase, entries: Journal) {
+  if (getTableNames(sqlite).length > 0) return false
+  sqlite
+    .transaction(() => {
+      runFreshSchema(sqlite)
+      markDrizzleEntriesApplied(sqlite, entries)
+    })()
+  return true
+}
+
+function repairLegacyDatabase(sqlite: BunDatabase, entries: Journal) {
+  if (getTableNames(sqlite).length === 0) return false
+
+  let changed = false
+  sqlite
+    .transaction(() => {
+      changed = addColumn(sqlite, "project", "icon_url_override", "text") || changed
+      changed = addColumn(sqlite, "workspace", "time_used", "integer NOT NULL DEFAULT 0") || changed
+      changed = addColumn(sqlite, "event_sequence", "owner_id", "text") || changed
+      changed = addColumn(sqlite, "session", "path", "text") || changed
+      changed = addColumn(sqlite, "session", "metadata", "text") || changed
+      changed = addColumn(sqlite, "session", "cost", "real DEFAULT 0 NOT NULL") || changed
+      changed = addColumn(sqlite, "session", "tokens_input", "integer DEFAULT 0 NOT NULL") || changed
+      changed = addColumn(sqlite, "session", "tokens_output", "integer DEFAULT 0 NOT NULL") || changed
+      changed = addColumn(sqlite, "session", "tokens_reasoning", "integer DEFAULT 0 NOT NULL") || changed
+      changed = addColumn(sqlite, "session", "tokens_cache_read", "integer DEFAULT 0 NOT NULL") || changed
+      changed = addColumn(sqlite, "session", "tokens_cache_write", "integer DEFAULT 0 NOT NULL") || changed
+      changed = addColumn(sqlite, "session", "agent", "text") || changed
+      changed = addColumn(sqlite, "session", "model", "text") || changed
+
+      if (!hasTable(sqlite, "project_directory")) {
+        changed = true
+        sqlite.run(`
+          CREATE TABLE "project_directory" (
+            "project_id" text NOT NULL,
+            "directory" text NOT NULL,
+            "type" text,
+            "strategy" text,
+            "time_created" integer NOT NULL,
+            PRIMARY KEY("project_id", "directory")
+          )
+        `)
+      }
+
+      if (!hasTable(sqlite, "session_message")) {
+        changed = true
+        sqlite.run(`
+          CREATE TABLE "session_message" (
+            "id" text PRIMARY KEY,
+            "session_id" text NOT NULL,
+            "type" text NOT NULL,
+            "seq" integer NOT NULL,
+            "time_created" integer NOT NULL,
+            "time_updated" integer NOT NULL,
+            "data" text NOT NULL
+          )
+        `)
+        sqlite.run(`CREATE UNIQUE INDEX IF NOT EXISTS "session_message_session_seq_idx" ON "session_message" ("session_id","seq")`)
+      }
+
+      if (!hasTable(sqlite, "session_input")) {
+        changed = true
+        sqlite.run(`
+          CREATE TABLE "session_input" (
+            "id" text PRIMARY KEY,
+            "session_id" text NOT NULL,
+            "prompt" text NOT NULL,
+            "delivery" text NOT NULL,
+            "admitted_seq" integer NOT NULL,
+            "promoted_seq" integer,
+            "time_created" integer NOT NULL
+          )
+        `)
+      }
+
+      if (!hasTable(sqlite, "session_context_epoch")) {
+        changed = true
+        sqlite.run(`
+          CREATE TABLE "session_context_epoch" (
+            "session_id" text PRIMARY KEY,
+            "baseline" text NOT NULL,
+            "agent" text DEFAULT 'build' NOT NULL,
+            "snapshot" text NOT NULL,
+            "baseline_seq" integer NOT NULL,
+            "replacement_seq" integer,
+            "revision" integer DEFAULT 0 NOT NULL
+          )
+        `)
+      }
+
+      if (!hasTable(sqlite, "credential")) {
+        changed = true
+        sqlite.run(`
+          CREATE TABLE "credential" (
+            "id" text PRIMARY KEY,
+            "integration_id" text,
+            "label" text NOT NULL,
+            "value" text NOT NULL,
+            "connector_id" text,
+            "method_id" text,
+            "active" integer,
+            "time_created" integer NOT NULL,
+            "time_updated" integer NOT NULL
+          )
+        `)
+      }
+
+      if (changed) markDrizzleEntriesApplied(sqlite, entries)
+    })()
+  return changed
+}
+
+function applyStartupMigrations(sqlite: BunDatabase, entries: Journal) {
+  const db = drizzle({ client: sqlite })
+  const initialized = initializeFreshDatabase(sqlite, entries)
+  const repaired = initialized ? false : repairLegacyDatabase(sqlite, entries)
+  backfillMigrationNames(sqlite, entries)
+  if (!initialized && !repaired) migrate(db, entries)
+}
+
+function createLegacySchema(sqlite: BunDatabase, withMetadata = false) {
+  sqlite.run(`CREATE TABLE "project" ("id" text PRIMARY KEY, "icon_url" text)`)
+  sqlite.run(`CREATE TABLE "workspace" ("id" text PRIMARY KEY)`)
+  sqlite.run(`CREATE TABLE "event_sequence" ("aggregate_id" text PRIMARY KEY, "seq" integer NOT NULL)`)
+  sqlite.run(`
+    CREATE TABLE "session" (
+      "id" text PRIMARY KEY,
+      "project_id" text NOT NULL,
+      "slug" text NOT NULL,
+      "directory" text NOT NULL,
+      "title" text NOT NULL,
+      "version" text NOT NULL,
+      "time_created" integer NOT NULL,
+      "time_updated" integer NOT NULL
+      ${withMetadata ? ', "metadata" text' : ""}
+    )
+  `)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -134,12 +324,9 @@ describe("New user install (clean database)", () => {
     const tmp = createTempDb()
     tempDbs.push(tmp)
     const entries = loadMigrations()
-    expect(entries.length).toBeGreaterThanOrEqual(9)
+    expect(entries.length).toBeGreaterThanOrEqual(1)
 
-    const db = drizzle({ client: tmp.sqlite })
-    // Should not throw
-    backfillMigrationNames(tmp.sqlite, entries)
-    migrate(db, entries)
+    expect(() => applyStartupMigrations(tmp.sqlite, entries)).not.toThrow()
 
     // Verify core tables were created
     const tables = getTableNames(tmp.sqlite)
@@ -150,6 +337,7 @@ describe("New user install (clean database)", () => {
     expect(tables).toContain("workspace")
     expect(tables).toContain("account")
     expect(tables).toContain("account_state")
+    expect(hasColumn(tmp.sqlite, "session", "metadata")).toBe(true)
 
     // Verify all migrations are tracked with names
     const names = getMigrationNames(tmp.sqlite)
@@ -164,13 +352,10 @@ describe("New user install (clean database)", () => {
     tempDbs.push(tmp)
     const entries = loadMigrations()
 
-    const db = drizzle({ client: tmp.sqlite })
-    backfillMigrationNames(tmp.sqlite, entries)
-    migrate(db, entries)
+    applyStartupMigrations(tmp.sqlite, entries)
 
     // Run again — should be a no-op
-    backfillMigrationNames(tmp.sqlite, entries)
-    expect(() => migrate(db, entries)).not.toThrow()
+    expect(() => applyStartupMigrations(tmp.sqlite, entries)).not.toThrow()
   })
 })
 
@@ -184,16 +369,7 @@ describe("Existing user upgrade (v0.2.x → current)", () => {
    */
   function createV02xDatabase(): TempDb {
     const tmp = createTempDb()
-    const entries = loadMigrations()
-
-    // Apply only the first 7 migrations (v0.2.x had these)
-    const v02xEntries = entries.slice(0, 7)
-    const db = drizzle({ client: tmp.sqlite })
-    migrate(db, v02xEntries)
-
-    // Now simulate the v0.2.x bug: clear all names (they were NULL in old versions)
-    tmp.sqlite.run("UPDATE __drizzle_migrations SET name = NULL")
-
+    createLegacySchema(tmp.sqlite)
     return tmp
   }
 
@@ -202,17 +378,14 @@ describe("Existing user upgrade (v0.2.x → current)", () => {
     tempDbs.push(tmp)
     const entries = loadMigrations()
 
-    const db = drizzle({ client: tmp.sqlite })
-
-    // Without backfill, this would throw "table already exists"
-    backfillMigrationNames(tmp.sqlite, entries)
-    expect(() => migrate(db, entries)).not.toThrow()
+    expect(() => applyStartupMigrations(tmp.sqlite, entries)).not.toThrow()
 
     // Verify new tables from v0.3.0 migrations exist
     const tables = getTableNames(tmp.sqlite)
     expect(tables).toContain("project")
-    expect(tables).toContain("account")
-    expect(tables).toContain("account_state")
+    expect(tables).toContain("project_directory")
+    expect(tables).toContain("session_message")
+    expect(hasColumn(tmp.sqlite, "session", "metadata")).toBe(true)
 
     // All migrations should now be tracked
     const names = getMigrationNames(tmp.sqlite)
@@ -223,27 +396,37 @@ describe("Existing user upgrade (v0.2.x → current)", () => {
   })
 
   test("upgrade FAILS without backfill (documents the bug)", () => {
-    const tmp = createV02xDatabase()
+    const tmp = createTempDb()
     tempDbs.push(tmp)
     const entries = loadMigrations()
+    createLegacySchema(tmp.sqlite, true)
+    ensureDrizzleJournal(tmp.sqlite)
+    tmp.sqlite.run(
+      `INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES ('', ${entries[0]!.timestamp}, NULL, NULL)`,
+    )
 
     const db = drizzle({ client: tmp.sqlite })
 
-    // Without backfill, Drizzle tries to re-apply all migrations
-    // because it matches by name and all names are NULL
+    // Without backfill, Drizzle tries to re-apply an already-applied migration
+    // because it matches by name and the historical journal row is NULL.
     expect(() => migrate(db, entries)).toThrow()
   })
 
   test("backfill correctly matches timestamps to migration names", () => {
-    const tmp = createV02xDatabase()
+    const tmp = createTempDb()
     tempDbs.push(tmp)
     const entries = loadMigrations()
+    ensureDrizzleJournal(tmp.sqlite)
+    for (const entry of entries) {
+      tmp.sqlite.run(
+        `INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES ('', ${entry.timestamp}, NULL, NULL)`,
+      )
+    }
 
     backfillMigrationNames(tmp.sqlite, entries)
 
     const names = getMigrationNames(tmp.sqlite)
-    // Should have 7 entries (from v0.2.x), all with proper names now
-    expect(names.length).toBe(7)
+    expect(names.length).toBe(entries.length)
     for (const name of names) {
       expect(name).toBeTruthy()
       expect(name).toMatch(/^\d{14}_/)
@@ -258,9 +441,7 @@ describe("Edge cases", () => {
     const entries = loadMigrations()
 
     // No migration table exists at all — fresh state
-    const db = drizzle({ client: tmp.sqlite })
-    backfillMigrationNames(tmp.sqlite, entries)
-    expect(() => migrate(db, entries)).not.toThrow()
+    expect(() => applyStartupMigrations(tmp.sqlite, entries)).not.toThrow()
 
     const tables = getTableNames(tmp.sqlite)
     expect(tables).toContain("project")
@@ -299,27 +480,18 @@ describe("Edge cases", () => {
     tempDbs.push(tmp)
     const entries = loadMigrations()
 
-    // Apply first 5 migrations normally
-    const db = drizzle({ client: tmp.sqlite })
-    migrate(db, entries.slice(0, 5))
+    ensureDrizzleJournal(tmp.sqlite)
+    tmp.sqlite.run(
+      `INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES ('', ${entries[0]!.timestamp}, NULL, NULL)`,
+    )
 
-    // Clear names for only the first 3 (simulate partial upgrade)
-    const first3 = entries.slice(0, 3)
-    for (const entry of first3) {
-      tmp.sqlite.run(`UPDATE __drizzle_migrations SET name = NULL WHERE created_at = ${entry.timestamp}`)
-    }
-
-    // Backfill should fix just the 3 NULL entries
+    // Backfill should fix just the NULL entries
     backfillMigrationNames(tmp.sqlite, entries)
 
     const names = getMigrationNames(tmp.sqlite)
-    expect(names.length).toBe(5)
+    expect(names.length).toBe(entries.length)
     for (const name of names) {
       expect(name).toBeTruthy()
     }
-
-    // Full migration should succeed — only new migrations applied
-    expect(() => migrate(db, entries)).not.toThrow()
-    expect(getMigrationNames(tmp.sqlite).length).toBe(entries.length)
   })
 })

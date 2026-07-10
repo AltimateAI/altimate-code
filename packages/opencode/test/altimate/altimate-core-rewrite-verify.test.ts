@@ -8,6 +8,7 @@
  * on a rewrite that changes results. The adversarial block below pins that.
  */
 import { describe, expect, test, beforeAll, afterAll, beforeEach } from "bun:test"
+import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 // Import the native index so its setRegistrationHook() runs NOW (before beforeAll).
 // Otherwise the lazy hook is armed only when the tool first imports ../native
@@ -44,7 +45,7 @@ const REWRITE = "SELECT customer_id FROM customers WHERE customer_id = 1"
 // verified-optimization path folded into the rewrite tool.
 async function runTool(args: any) {
   const { AltimateCoreRewriteTool } = await import("../../src/altimate/tools/altimate-core-rewrite")
-  const tool = await AltimateCoreRewriteTool.init()
+  const tool = await initTool(AltimateCoreRewriteTool)
   return tool.execute({ ...args, verify_equivalence: true }, stubCtx())
 }
 

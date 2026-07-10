@@ -76,13 +76,30 @@ function object(ast: SchemaAST.Objects): z.ZodTypeAny {
     return z.record(z.string(), walk(sig.type))
   }
 
+  // altimate_change start - support StructWithRest schemas used by config maps
+  if (ast.indexSignatures.length === 1) {
+    const sig = ast.indexSignatures[0]
+    if (sig.parameter._tag !== "String") return fail(ast)
+    return z
+      .object(Object.fromEntries(ast.propertySignatures.map((prop) => [String(prop.name), walk(prop.type)])))
+      .catchall(walk(sig.type))
+  }
+  // altimate_change end
+
   if (ast.indexSignatures.length > 0) return fail(ast)
 
   return z.object(Object.fromEntries(ast.propertySignatures.map((sig) => [String(sig.name), walk(sig.type)])))
 }
 
 function array(ast: SchemaAST.Arrays): z.ZodTypeAny {
-  if (ast.elements.length > 0) return fail(ast)
+  // altimate_change start - support tuple schemas used by config plugin specs
+  if (ast.elements.length > 0) {
+    const elements = ast.elements.map(walk)
+    if (ast.rest.length === 0) return z.tuple(elements as [z.ZodTypeAny, ...Array<z.ZodTypeAny>])
+    if (ast.rest.length === 1) return z.tuple(elements as [z.ZodTypeAny, ...Array<z.ZodTypeAny>]).rest(walk(ast.rest[0]))
+    return fail(ast)
+  }
+  // altimate_change end
   if (ast.rest.length !== 1) return fail(ast)
   return z.array(walk(ast.rest[0]))
 }

@@ -1,17 +1,22 @@
+// altimate_change start — re-export shim: permission/schema moved to @opencode-ai/core.
+export * from "@opencode-ai/core/permission/schema"
+
+// Restore the fork's PermissionID brand. Core's permission/schema only ships the
+// PermissionV2 rule/effect schemas, not the request ID. Fork consumers
+// (permission/next.ts, server/routes/{permission,session}.ts, tests) construct branded
+// IDs via `.make`/`.ascending` and validate request payloads with `.zod`.
 import { Schema } from "effect"
 import z from "zod"
-
 import { Identifier } from "@/id/id"
-import { Newtype } from "@/util/schema"
+import { withStatics } from "@opencode-ai/core/schema"
 
-export class PermissionID extends Newtype<PermissionID>()("PermissionID", Schema.String) {
-  static make(id: string): PermissionID {
-    return this.makeUnsafe(id)
-  }
-
-  static ascending(id?: string): PermissionID {
-    return this.makeUnsafe(Identifier.ascending("permission", id))
-  }
-
-  static readonly zod = Identifier.schema("permission") as unknown as z.ZodType<PermissionID>
-}
+export const PermissionID = Schema.String.check(Schema.isStartsWith("per")).pipe(
+  Schema.brand("PermissionID"),
+  withStatics((s) => ({
+    make: (id: string) => s.make(id),
+    ascending: (id?: string) => s.make(Identifier.ascending("permission", id)),
+    zod: z.string().pipe(z.custom<Schema.Schema.Type<typeof s>>()),
+  })),
+)
+export type PermissionID = Schema.Schema.Type<typeof PermissionID>
+// altimate_change end

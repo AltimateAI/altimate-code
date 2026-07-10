@@ -7,7 +7,7 @@
  * 3. Refuse — never store plaintext credentials in config JSON
  */
 
-import { Log } from "../../../util/log"
+import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig } from "@altimateai/drivers"
 
 const SERVICE_NAME = "altimate-code"
