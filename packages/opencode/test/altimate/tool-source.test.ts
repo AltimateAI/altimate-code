@@ -43,6 +43,16 @@ describe("mcpToolSource", () => {
     expect(mcpToolSource("github_search_issues")).toBe("mcp")
     expect(mcpToolSource("linear_create_issue")).toBe("mcp")
   })
+
+  test("a third-party client that merely starts with 'datamate' is NOT Altimate", () => {
+    // Only the parsed <client> segment counts — not a whole-key prefix match.
+    expect(mcpToolSource("datamatex_do_thing")).toBe("mcp")
+    expect(mcpToolSource("datamateworks_run")).toBe("mcp")
+  })
+
+  test("a datamate-prefixed client variant is Altimate", () => {
+    expect(mcpToolSource("datamate-prod_query")).toBe("altimate")
+  })
 })
 
 describe("humanizeMcpTitle", () => {

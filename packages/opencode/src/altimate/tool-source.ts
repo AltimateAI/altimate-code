@@ -48,7 +48,7 @@ const NATIVE_TOOL_IDS = new Set<string>([
   "StructuredOutput",
 ])
 
-/** MCP client-name prefixes that are Altimate-owned (Datamates as an MCP server). */
+/** MCP client names that are Altimate-owned (Datamates as an MCP server). */
 const ALTIMATE_MCP_PREFIXES = ["datamate"]
 
 /** Classify a registry tool (never an MCP tool) as builtin vs Altimate. */
@@ -56,10 +56,19 @@ export function registryToolSource(id: string): ToolSource {
   return NATIVE_TOOL_IDS.has(id) ? "builtin" : "altimate"
 }
 
-/** Classify an MCP tool by its `<client>_<tool>` key: Altimate (Datamates) vs third-party. */
+/**
+ * Classify an MCP tool by its `<client>_<tool>` key: Altimate (Datamates) vs third-party.
+ * Matches the parsed `<client>` segment (before the first `_`), not the whole key, so a
+ * third-party client that merely starts with "datamate" (e.g. `datamatex_foo`) isn't
+ * mislabeled Altimate. Accepts the exact name, its plural (`datamates`), and a
+ * `datamate-…` prefixed client.
+ */
 export function mcpToolSource(key: string): ToolSource {
-  const lower = key.toLowerCase()
-  return ALTIMATE_MCP_PREFIXES.some((p) => lower.startsWith(p)) ? "altimate" : "mcp"
+  const underscore = key.indexOf("_")
+  const client = (underscore === -1 ? key : key.slice(0, underscore)).toLowerCase()
+  return ALTIMATE_MCP_PREFIXES.some((p) => client === p || client === `${p}s` || client.startsWith(`${p}-`))
+    ? "altimate"
+    : "mcp"
 }
 
 /**
