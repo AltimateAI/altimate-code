@@ -90,6 +90,50 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
+  // altimate_change start (AI-7519) — first-answer latency instrumentation +
+  // user-facing phase label.
+  //
+  // Wraps an awaited operation with a Tracer span so bootstrap sub-steps are
+  // visible in session traces. Every wrapped await opens a discrete span so a
+  // future regression that adds a slow await also shows up automatically.
+  //
+  // On top of the tracing, publish a session.phase event (start on entry, end
+  // on exit) so the TUI can render an honest label like "Discovering
+  // warehouse tools..." during the pre-first-visible-response window. This is
+  // the SLO half of AI-7519 — target <10s to first *visible* response. The
+  // instrumentation names double as user-facing signal.
+  //
+  // The trace span is a sibling of the root (tracing.ts:1009 assigns
+  // parentSpanId to rootSpanId), not a nested child — good enough for
+  // waterfall correlation via timestamps, and no schema change is required.
+  async function traceSpan<T>(
+    name: string,
+    fn: () => Promise<T>,
+    input?: unknown,
+    sessionID?: SessionID,
+  ): Promise<T> {
+    const startTime = Date.now()
+    if (sessionID) void SessionStatus.publishPhase(sessionID, name, true)
+    try {
+      const result = await fn()
+      Tracer.active?.logSpan({ name, startTime, endTime: Date.now(), input })
+      return result
+    } catch (e) {
+      Tracer.active?.logSpan({
+        name,
+        startTime,
+        endTime: Date.now(),
+        status: "error",
+        input,
+        output: { error: String(e) },
+      })
+      throw e
+    } finally {
+      if (sessionID) void SessionStatus.publishPhase(sessionID, name, false)
+    }
+  }
+  // altimate_change end
+
   // altimate_change start — single source of truth for legacy agent-name normalization
   //
   // The "build" agent was renamed to "builder" but some persisted sessions and
@@ -359,17 +403,32 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
-    const session = await Session.get(sessionID)
+    // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
+    // single "bootstrap" span right before the first processor.process call so
+    // the pre-first-generation region has a visible parent duration in traces.
+    const bootstrapStart = Date.now()
+    // altimate_change end
+    const session = await traceSpan(
+      "bootstrap.session-get",
+      () => Session.get(sessionID),
+      { sessionID },
+      sessionID,
+    )
     // altimate_change start - detect environment fingerprint at session start
-    const altCfg = await Config.get()
+    const altCfg = await traceSpan("bootstrap.config-get", () => Config.get(), undefined, sessionID)
     if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
-      await Fingerprint.detect(Instance.directory, Instance.worktree).catch((e) => {
+      await traceSpan(
+        "bootstrap.fingerprint-detect",
+        () => Fingerprint.detect(Instance.directory, Instance.worktree),
+        undefined,
+        sessionID,
+      ).catch((e) => {
         log.warn("fingerprint detection failed", { error: e })
       })
     }
     // altimate_change end
     // altimate_change start — session telemetry tracking
-    await Telemetry.init()
+    await traceSpan("bootstrap.telemetry-init", () => Telemetry.init(), undefined, sessionID)
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
     const sessionStartTime = Date.now()
     let sessionTotalCost = 0
@@ -913,15 +972,25 @@ export namespace SessionPrompt {
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
-      const tools = await resolveTools({
-        agent,
-        session,
-        model,
-        tools: lastUser.tools,
-        processor,
-        bypassAgentCheck,
-        messages: msgs,
-      })
+      // altimate_change start (AI-7519) — trace resolveTools per step. Included
+      // in bootstrap on step===1; on subsequent steps this measures the
+      // per-turn tool-listing overhead (MCP.tools connect cost etc.).
+      const tools = await traceSpan(
+        "bootstrap.resolve-tools",
+        () =>
+          resolveTools({
+            agent,
+            session,
+            model,
+            tools: lastUser.tools,
+            processor,
+            bypassAgentCheck,
+            messages: msgs,
+          }),
+        { step, agent: agent.name },
+        sessionID,
+      )
+      // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled
       if (lastUser.format?.type === "json_schema") {
@@ -1070,6 +1139,22 @@ export namespace SessionPrompt {
           input: { agent: agent.name, step },
           output: { parts: system.length, content: system.join("\n\n") },
         })
+        // altimate_change start (AI-7519) — emit the parent bootstrap span
+        // covering everything from loop() entry to just-before-first-generation.
+        // Companion sub-spans (bootstrap.session-get, bootstrap.config-get,
+        // bootstrap.resolve-tools, etc.) are already emitted; this span gives
+        // the waterfall a single top-level duration to render + gate against.
+        Tracer.active?.logSpan({
+          name: "bootstrap",
+          startTime: bootstrapStart,
+          endTime: Date.now(),
+          input: { agent: agent.name, sessionID },
+          output: {
+            duration_ms: Date.now() - bootstrapStart,
+            system_parts: system.length,
+          },
+        })
+        // altimate_change end
       }
       // altimate_change end
 

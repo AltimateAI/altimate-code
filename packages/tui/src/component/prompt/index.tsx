@@ -28,6 +28,9 @@ import { useEvent } from "../../context/event"
 import { editorSelectionKey, useEditorContext, type EditorSelection } from "../../context/editor"
 import { normalizePromptContent, openEditor } from "../../editor"
 import { useExit } from "../../context/exit"
+// altimate_change start (AI-7519) — phase → user-facing label lookup
+import { phaseLabel } from "../../util/phase-label"
+// altimate_change end
 import { promptOffsetWidth } from "../../prompt/display"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { usePromptHistory, type PromptInfo } from "../../prompt/history"
@@ -195,6 +198,12 @@ export function Prompt(props: PromptProps) {
   const dialog = useDialog()
   const toast = useToast()
   const status = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" })
+  // altimate_change start (AI-7519) — active pre-first-visible phase for the current session.
+  // Backend publishes session.phase events during bootstrap and per-turn setup; this memo tracks
+  // the current one so the status renderer can show "Discovering tools..." etc. instead of a
+  // silent spinner.
+  const phase = createMemo(() => sync.data.session_phase?.[props.sessionID ?? ""])
+  // altimate_change end
   const history = usePromptHistory()
   const stash = usePromptStash()
   const keymap = useOpencodeKeymap()
@@ -1612,6 +1621,15 @@ export function Prompt(props: PromptProps) {
                       <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
                     </Show>
                   </box>
+                  {/* altimate_change start (AI-7519) — honest phase label during the busy
+                      pre-first-visible-response window. Shows "Discovering tools..." /
+                      "Loading config..." etc. driven by session.phase events, falls back to
+                      "Thinking...". Retry state keeps its own message (below), so only render
+                      when NOT in retry state. */}
+                  <Show when={status().type === "busy"}>
+                    <text fg={theme.textMuted}>{phaseLabel(phase())}</text>
+                  </Show>
+                  {/* altimate_change end */}
                   <box flexDirection="row" gap={1} flexShrink={0}>
                     {(() => {
                       const retry = createMemo(() => {

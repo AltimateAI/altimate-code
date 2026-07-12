@@ -211,4 +211,37 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(session).toMatch(/findIndex\(\(x\) => x\.id === session\(\)\?\.id\) \+ direction/)
     expect(session).not.toMatch(/findIndex\(\(x\) => x\.id === session\(\)\?\.id\) - direction/)
   })
+
+  // AI-7519: the session.phase event pipeline is a fork feature — server publishes on traceSpan
+  // entry/exit, TUI subscribes and renders an honest "Discovering tools..." style label during
+  // the pre-first-visible-response window. Every piece is load-bearing for the <10s SLO half of
+  // the ticket; a merge silently dropping any of them turns the label back into a silent spinner.
+  test("AI-7519: session.phase event pipeline is wired (publish + subscribe + render)", async () => {
+    const status = await read("src/session/status.ts")
+    expect(status).toMatch(/Phase:\s*EventV2\.define\(/)
+    expect(status).toMatch(/type:\s*"session\.phase"/)
+    expect(status).toMatch(/export async function publishPhase/)
+
+    const prompt = await read("src/session/prompt.ts")
+    expect(prompt).toMatch(/function traceSpan<T>\([\s\S]{0,200}sessionID\?: SessionID/)
+    expect(prompt).toMatch(/SessionStatus\.publishPhase\(sessionID, name, true\)/)
+    expect(prompt).toMatch(/SessionStatus\.publishPhase\(sessionID, name, false\)/)
+    expect(prompt).toMatch(/"bootstrap\.session-get",[\s\S]{0,120}sessionID/)
+    expect(prompt).toMatch(/"bootstrap\.config-get",[\s\S]{0,120}sessionID/)
+    expect(prompt).toMatch(/"bootstrap\.resolve-tools",[\s\S]{0,300}sessionID/)
+
+    const sync = await read("src/context/sync.tsx", MONO + "/tui")
+    expect(sync).toMatch(/session_phase:\s*\{/)
+    expect(sync).toMatch(/case "session\.phase":/)
+    expect(sync).toMatch(/setStore\("session_phase"/)
+
+    const phaseLabelSrc = await read("src/util/phase-label.ts", MONO + "/tui")
+    expect(phaseLabelSrc).toMatch(/export function phaseLabel/)
+    expect(phaseLabelSrc).toMatch(/"bootstrap\.session-get"/)
+    expect(phaseLabelSrc).toMatch(/"bootstrap\.resolve-tools"/)
+
+    const promptTsx = await read("src/component/prompt/index.tsx", MONO + "/tui")
+    expect(promptTsx).toMatch(/import\s*\{\s*phaseLabel\s*\}\s*from\s*"[^"]*phase-label"/)
+    expect(promptTsx).toMatch(/phaseLabel\(phase\(\)\)/)
+  })
 })

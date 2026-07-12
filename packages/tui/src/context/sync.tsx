@@ -85,6 +85,13 @@ export const {
       session_status: {
         [sessionID: string]: SessionStatus
       }
+      // altimate_change start (AI-7519) — active pre-first-visible phase per session,
+      // e.g. "bootstrap.resolve-tools". Populated by session.phase events from the
+      // backend; consumed by the prompt status renderer to show an honest label.
+      session_phase: {
+        [sessionID: string]: string | undefined
+      }
+      // altimate_change end
       session_diff: {
         [sessionID: string]: SnapshotFileDiff[]
       }
@@ -127,6 +134,9 @@ export const {
       provider_default: {},
       session: [],
       session_status: {},
+      // altimate_change start (AI-7519)
+      session_phase: {},
+      // altimate_change end
       session_diff: {},
       todo: {},
       message: {},
@@ -357,6 +367,24 @@ export const {
           setStore("session_status", event.properties.sessionID, event.properties.status)
           break
         }
+
+        // altimate_change start (AI-7519) — track the active bootstrap / per-turn phase per
+        // session. `active=true` sets the phase; `active=false` clears it iff it's still the
+        // current phase (defensive against reordered events).
+        case "session.phase": {
+          const { sessionID, phase, active } = event.properties as {
+            sessionID: string
+            phase: string
+            active: boolean
+          }
+          if (active) {
+            setStore("session_phase", sessionID, phase)
+          } else if (store.session_phase[sessionID] === phase) {
+            setStore("session_phase", sessionID, undefined)
+          }
+          break
+        }
+        // altimate_change end
 
         case "message.updated": {
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
