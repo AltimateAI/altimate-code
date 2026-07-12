@@ -104,6 +104,11 @@ export interface Interface {
   readonly get: (sessionID: SessionID) => Effect.Effect<Info>
   readonly list: () => Effect.Effect<Map<SessionID, Info>>
   readonly set: (sessionID: SessionID, status: Info) => Effect.Effect<void>
+  // altimate_change start (AI-7519) — publish a session.phase event through
+  // the EventV2 bus so V2 subscribers see phase transitions alongside the
+  // legacy bus mirror.
+  readonly publishPhase: (sessionID: SessionID, phase: string, active: boolean) => Effect.Effect<void>
+  // altimate_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionStatus") {}
@@ -137,7 +142,19 @@ export const layer = Layer.effect(
       data.set(sessionID, status)
     })
 
-    return Service.of({ get, list, set })
+    // altimate_change start (AI-7519) — V2 publish for the session.phase event.
+    // Complements the LegacyEvent.Phase publish that happens in the imperative
+    // wrapper below so both V1 (SSE mirror) and V2 subscribers see phases.
+    const publishPhase = Effect.fn("SessionStatus.publishPhase")(function* (
+      sessionID: SessionID,
+      phase: string,
+      active: boolean,
+    ) {
+      yield* events.publish(Event.Phase, { sessionID, phase, active })
+    })
+    // altimate_change end
+
+    return Service.of({ get, list, set, publishPhase })
   }),
 )
 
@@ -170,9 +187,15 @@ export async function list() {
 
 // altimate_change start (AI-7519) — publish a session.phase event. Fired by SessionPrompt.traceSpan
 // on entry (active=true) and exit (active=false); the TUI subscribes to render an honest label like
-// "Discovering warehouse tools..." during the pre-first-visible-response window. Best-effort: any
-// failure here must not affect the traced operation itself.
+// "Discovering warehouse tools..." during the pre-first-visible-response window. Publishes on both
+// the EventV2 bus (for V2 subscribers) and the LegacyEvent.Phase bus (for the SSE mirror the TUI
+// consumes). Best-effort: any failure here must not affect the traced operation itself.
 export async function publishPhase(sessionID: SessionID, phase: string, active: boolean) {
+  try {
+    await runStatus((s) => s.publishPhase(sessionID, phase, active))
+  } catch {
+    // never surface phase-publish failures back to the caller
+  }
   try {
     await Bus.publish(LegacyEvent.Phase, { sessionID, phase, active })
   } catch {

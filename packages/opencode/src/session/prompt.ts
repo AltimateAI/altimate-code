@@ -407,6 +407,16 @@ export namespace SessionPrompt {
     // single "bootstrap" span right before the first processor.process call so
     // the pre-first-generation region has a visible parent duration in traces.
     const bootstrapStart = Date.now()
+    // Enter busy state BEFORE the first bootstrap traceSpan fires so the
+    // phase labels the TUI renders are actually visible during
+    // session-get / config-get / fingerprint-detect / telemetry-init. The
+    // TUI's status renderer gates on `status.type === "busy"`; without
+    // this early set only `bootstrap.resolve-tools` (which fires inside
+    // the while-loop after the existing busy set at line 506) would show
+    // a label. The while-loop re-set below is now a no-op busy → busy
+    // transition, preserved for legacy call sites that may enter the
+    // loop from elsewhere.
+    await SessionStatus.set(sessionID, { type: "busy" })
     // altimate_change end
     const session = await traceSpan(
       "bootstrap.session-get",

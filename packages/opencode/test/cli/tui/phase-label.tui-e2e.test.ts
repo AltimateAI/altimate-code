@@ -10,31 +10,36 @@
  * exactly that failure mode. This spec drives the real TUI end-to-end so the
  * label is verified against the user's actual view.
  *
- * The label is expected to appear during the brief interval between
- * `status.type === "busy"` and the first token from the model. On a bare
- * prompt with no auth configured, the busy window closes almost immediately
- * with an error banner — but the phase spans still fire (Session.get,
- * Config.get, Telemetry.init all run before any LLM call is attempted) and
- * the "Thinking..." fallback rendered next to the spinner is a strict
- * superset of the specific bootstrap labels. Asserting on "Thinking..." keeps
- * the test tolerant to timing variance and provider unreachability.
+ * Two hard assertions:
+ *   1. The "Thinking..." fallback renders during any busy window — proves
+ *      the render chain (status → phaseLabel → spinner row) is intact.
+ *   2. A specific mapped label ("Discovering tools") renders somewhere in
+ *      the run — proves the full phase-event pipeline (publishPhase →
+ *      Bus.publish → sync.tsx handler → store update → render) is intact
+ *      end-to-end. Without this, a regression that entirely broke phase
+ *      publishing would still green here because the fallback renders
+ *      regardless.
+ *
+ * "Discovering tools" is the label mapped from `bootstrap.resolve-tools`,
+ * whose span duration (~30-100ms while listing MCP tools) is comfortably
+ * larger than the PTY harness poll interval (50ms). The other bootstrap
+ * sub-spans are sub-millisecond and observed to not survive PTY sampling —
+ * a diagnostic dump of all specific label hits is retained for future
+ * timing-driven debugging.
  */
 
 import { describe, expect, test } from "bun:test"
-import path from "path"
-import { mkdtempSync, rmSync } from "fs"
-import { tmpdir } from "os"
 import { launchTui } from "../../fixture/pty-tui"
-
-function makeProjectDir(): string {
-  return mkdtempSync(path.join(tmpdir(), "altimate-tui-phase-"))
-}
+import { tmpdir } from "../../fixture/fixture"
 
 describe("TUI e2e — AI-7519 phase-label render", () => {
-  test("phase-label renders next to the busy spinner after a prompt is submitted", async () => {
-    const project = makeProjectDir()
+  test("phase-label pipeline renders 'Discovering tools' + 'Thinking...' fallback beside the busy spinner", async () => {
+    // await using ensures the temp directory is cleaned up even if launchTui
+    // rejects before the try block — matches the codebase convention in
+    // scheduler.test.ts and the coding guideline enforced by CI.
+    await using tmp = await tmpdir()
     const tui = await launchTui({
-      cwd: project,
+      cwd: tmp.path,
       cols: 140,
       rows: 50,
       waitForReady: "Ask anything",
@@ -53,14 +58,22 @@ describe("TUI e2e — AI-7519 phase-label render", () => {
       }
       tui.sendKey("Enter")
 
-      // The label lookup falls back to "Thinking..." for any active busy
-      // window without a specific phase name mapped. That fallback is a
-      // strict superset of every specific bootstrap label, so asserting on
-      // the fallback is robust to timing races (the specific labels flash
-      // very briefly during their sub-millisecond spans).
+      // (1) Fallback assertion — proves the render chain is alive.
+      // phaseLabel(undefined) renders "Thinking..." during any busy window
+      // without a specific phase name mapped.
       await tui.waitForText(/Thinking\.\.\./, { timeoutMs: 8000 })
 
-      // Diagnostic dump for the specific labels — write out which ones caught.
+      // (2) Mapped-label assertion — proves the full phase pipeline is alive.
+      // "Discovering tools" is the label for `bootstrap.resolve-tools`, which
+      // fires on step===1 inside loop(). Its span (MCP tool listing) is
+      // reliably longer than the PTY poll interval. Regression that breaks
+      // publishPhase / Bus.publish / sync handler / store update would fail
+      // this assertion even though the fallback above still succeeds.
+      await tui.waitForText("Discovering tools", { timeoutMs: 8000 })
+
+      // Diagnostic dump of any other mapped labels that landed — helpful for
+      // future timing-related debugging without gating the test on
+      // sub-millisecond span durations we can't reliably observe over PTY.
       const rendered = tui.text()
       const specificLabels = {
         "Loading session": rendered.includes("Loading session"),
@@ -71,13 +84,10 @@ describe("TUI e2e — AI-7519 phase-label render", () => {
       }
       // eslint-disable-next-line no-console
       console.log("[AI-7519 e2e] specific label hits:", JSON.stringify(specificLabels))
-      // The fallback assertion above is the load-bearing check; the specific
-      // labels are timing-sensitive (sub-millisecond spans + PTY polling
-      // interval). Not gated on hard equality.
       expect(rendered).toContain("Thinking...")
+      expect(rendered).toContain("Discovering tools")
     } finally {
       await tui.dispose()
-      rmSync(project, { recursive: true, force: true })
     }
   }, 45_000)
 })
