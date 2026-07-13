@@ -1173,13 +1173,16 @@ export namespace SessionPrompt {
         // Companion sub-spans (bootstrap.session-get, bootstrap.config-get,
         // bootstrap.resolve-tools, etc.) are already emitted; this span gives
         // the waterfall a single top-level duration to render + gate against.
+        // Capture endTime once so duration_ms is guaranteed to match — two
+        // Date.now() calls can straddle a clock tick.
+        const bootstrapEnd = Date.now()
         Tracer.active?.logSpan({
           name: "bootstrap",
           startTime: bootstrapStart,
-          endTime: Date.now(),
+          endTime: bootstrapEnd,
           input: { agent: agent.name, sessionID },
           output: {
-            duration_ms: Date.now() - bootstrapStart,
+            duration_ms: bootstrapEnd - bootstrapStart,
             system_parts: system.length,
           },
         })

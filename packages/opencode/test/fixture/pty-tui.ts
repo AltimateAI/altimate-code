@@ -146,8 +146,12 @@ export async function launchTui(opts: LaunchOptions): Promise<TuiSession> {
     stripped += stripAnsi(chunk)
   })
 
+  let hasExited = false
   const exited = new Promise<{ exitCode: number; signal?: number | string }>((resolve) => {
-    child.onExit((event) => resolve(event))
+    child.onExit((event) => {
+      hasExited = true
+      resolve(event)
+    })
   })
 
   let disposed = false
@@ -177,11 +181,27 @@ export async function launchTui(opts: LaunchOptions): Promise<TuiSession> {
     async waitForText(needle, waitOpts) {
       const timeoutMs = waitOpts?.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
       const deadline = Date.now() + timeoutMs
-      const matches = (s: string) => (typeof needle === "string" ? s.includes(needle) : needle.test(s))
+      const matches = (s: string) => {
+        if (typeof needle === "string") return s.includes(needle)
+        // Reset lastIndex so a RegExp with the `g` flag (which makes .test()
+        // stateful) still returns consistently across successive polls.
+        needle.lastIndex = 0
+        return needle.test(s)
+      }
       if (matches(stripped)) return
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
         if (matches(stripped)) return
+        // Fail fast if the child exited before the needle showed up —
+        // otherwise a crash silently burns the full timeout budget and
+        // masks the underlying cause.
+        if (hasExited) {
+          throw new Error(
+            `waitForText saw child exit before matching ${
+              typeof needle === "string" ? JSON.stringify(needle) : needle.toString()
+            }\n\n--- captured (stripped, last 4000 chars) ---\n${stripped.slice(-4000)}\n--- end ---`,
+          )
+        }
       }
       throw new Error(
         `waitForText timed out after ${timeoutMs}ms waiting for ${
