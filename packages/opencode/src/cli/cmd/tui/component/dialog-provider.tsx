@@ -121,6 +121,40 @@ export function DialogProvider() {
   return <DialogSelect title="Connect a provider" options={options()} />
 }
 
+// altimate_change start — /auth entry: go straight to the Altimate LLM Gateway
+// sign-in (the OAuth loopback method, index 0), skipping the provider picker.
+export function DialogAltimateAuth() {
+  const { theme } = useTheme()
+  const sdk = useSDK()
+  const dialog = useDialog()
+
+  onMount(async () => {
+    const providerID = "altimate-backend"
+    const result = await sdk.client.provider.oauth.authorize({ providerID, method: 0 })
+    if (result.data?.method === "auto") {
+      dialog.replace(() => (
+        <AutoMethod providerID={providerID} title="Altimate LLM Gateway" index={0} authorization={result.data!} />
+      ))
+    } else if (result.data?.method === "code") {
+      dialog.replace(() => (
+        <CodeMethod providerID={providerID} title="Altimate LLM Gateway" index={0} authorization={result.data!} />
+      ))
+    } else {
+      dialog.clear()
+    }
+  })
+
+  return (
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <text attributes={TextAttributes.BOLD} fg={theme.text}>
+        Altimate LLM Gateway
+      </text>
+      <text fg={theme.textMuted}>Starting sign-in…</text>
+    </box>
+  )
+}
+// altimate_change end
+
 interface AutoMethodProps {
   index: number
   providerID: string

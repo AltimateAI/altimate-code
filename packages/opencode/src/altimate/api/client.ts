@@ -1,5 +1,6 @@
 import z from "zod"
 import path from "path"
+import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
 
@@ -132,6 +133,11 @@ export namespace AltimateApi {
       { ...creds, altimateUrl: creds.altimateUrl.replace(/\/+$/, "") },
       0o600,
     )
+  }
+
+  /** Remove the stored gateway credential file (sign out). No-op if absent. */
+  export async function clearCredentials(): Promise<void> {
+    await rm(credentialsPath(), { force: true })
   }
 
   const VALID_TENANT_REGEX = /^[a-z_][a-z0-9_-]*$/

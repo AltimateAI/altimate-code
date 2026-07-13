@@ -14,6 +14,9 @@ import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
 import { DialogModel, DialogModelWelcome, useConnected, useReady } from "@tui/component/dialog-model"
+// altimate_change — /auth (gateway sign-in) + /logout commands
+import { DialogAltimateAuth } from "@tui/component/dialog-provider"
+import { AltimateApi } from "../../../altimate/api/client"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -663,6 +666,36 @@ function App() {
       },
       category: "Provider",
     },
+    // altimate_change start — /auth: sign in to the Altimate LLM Gateway directly;
+    // /logout: clear the stored gateway credential and disconnect.
+    {
+      title: "Sign in to Altimate LLM Gateway",
+      value: "altimate.auth",
+      suggested: !connected(),
+      slash: {
+        name: "auth",
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogAltimateAuth />)
+      },
+      category: "Provider",
+    },
+    {
+      title: "Sign out of Altimate LLM Gateway",
+      value: "altimate.logout",
+      slash: {
+        name: "logout",
+      },
+      onSelect: async () => {
+        await AltimateApi.clearCredentials()
+        await sdk.client.instance.dispose()
+        await sync.bootstrap()
+        toast.show({ message: "Signed out of Altimate LLM Gateway", variant: "success" })
+        dialog.clear()
+      },
+      category: "Provider",
+    },
+    // altimate_change end
     {
       title: "View status",
       keybind: "status_view",
