@@ -418,27 +418,46 @@ export namespace SessionPrompt {
     // loop from elsewhere.
     await SessionStatus.set(sessionID, { type: "busy" })
     // altimate_change end
-    const session = await traceSpan(
-      "bootstrap.session-get",
-      () => Session.get(sessionID),
-      { sessionID },
-      sessionID,
-    )
-    // altimate_change start - detect environment fingerprint at session start
-    const altCfg = await traceSpan("bootstrap.config-get", () => Config.get(), undefined, sessionID)
-    if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
-      await traceSpan(
-        "bootstrap.fingerprint-detect",
-        () => Fingerprint.detect(Instance.directory, Instance.worktree),
-        undefined,
+    // altimate_change start (AI-7519) — discharge the busy status if a bootstrap
+    // await throws. cancel() (prompt.ts:364) deliberately does NOT set idle
+    // when the state entry still exists — it relies on the processor's catch
+    // block for that. But during bootstrap the processor hasn't taken over
+    // yet, so a throw here (Session.get / Config.get / Fingerprint.detect /
+    // Telemetry.init) would leave the session permanently `busy` with no
+    // idle/error transition. Reset to idle on any bootstrap failure and
+    // re-throw so callers still see the error.
+    let session: Awaited<ReturnType<typeof Session.get>>
+    let altCfg: Awaited<ReturnType<typeof Config.get>>
+    try {
+      session = await traceSpan(
+        "bootstrap.session-get",
+        () => Session.get(sessionID),
+        { sessionID },
         sessionID,
-      ).catch((e) => {
-        log.warn("fingerprint detection failed", { error: e })
-      })
+      )
+      // altimate_change start - detect environment fingerprint at session start
+      altCfg = await traceSpan("bootstrap.config-get", () => Config.get(), undefined, sessionID)
+      if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
+        await traceSpan(
+          "bootstrap.fingerprint-detect",
+          () => Fingerprint.detect(Instance.directory, Instance.worktree),
+          undefined,
+          sessionID,
+        ).catch((e) => {
+          log.warn("fingerprint detection failed", { error: e })
+        })
+      }
+      // altimate_change end
+      // altimate_change start — session telemetry tracking
+      await traceSpan("bootstrap.telemetry-init", () => Telemetry.init(), undefined, sessionID)
+    } catch (e) {
+      // Best-effort transition to idle so the TUI spinner + any busy-gated
+      // callers don't stay stuck. Swallow inner failure so the original
+      // bootstrap error is what bubbles out.
+      await SessionStatus.set(sessionID, { type: "idle" }).catch(() => {})
+      throw e
     }
     // altimate_change end
-    // altimate_change start — session telemetry tracking
-    await traceSpan("bootstrap.telemetry-init", () => Telemetry.init(), undefined, sessionID)
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
     const sessionStartTime = Date.now()
     let sessionTotalCost = 0
