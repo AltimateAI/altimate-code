@@ -189,7 +189,11 @@ export async function list() {
 // on entry (active=true) and exit (active=false); the TUI subscribes to render an honest label like
 // "Discovering warehouse tools..." during the pre-first-visible-response window. Publishes on both
 // the EventV2 bus (for V2 subscribers) and the LegacyEvent.Phase bus (for the SSE mirror the TUI
-// consumes). Best-effort: any failure here must not affect the traced operation itself.
+// consumes). Best-effort: any failure here must not affect the traced operation itself. The two
+// publishes are intentionally sequential (V2 first, legacy second) — an earlier attempt to
+// parallelise them via `Promise.allSettled` produced intermittent e2e failures where the label
+// wouldn't render, likely because the first ManagedRuntime warm-up races with the immediate
+// legacy Bus.publish. Sequential is reliable + the cost is negligible on the hot path.
 export async function publishPhase(sessionID: SessionID, phase: string, active: boolean) {
   try {
     await runStatus((s) => s.publishPhase(sessionID, phase, active))

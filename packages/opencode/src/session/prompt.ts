@@ -1001,11 +1001,14 @@ export namespace SessionPrompt {
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
-      // altimate_change start (AI-7519) — trace resolveTools per step. Included
-      // in bootstrap on step===1; on subsequent steps this measures the
-      // per-turn tool-listing overhead (MCP.tools connect cost etc.).
+      // altimate_change start (AI-7519) — trace resolveTools per step.
+      // Included in the parent `bootstrap` span on step===1; on later steps
+      // this measures the per-turn tool-listing overhead (MCP.tools connect
+      // cost etc.). Distinct span name per phase so telemetry doesn't
+      // double-count non-bootstrap turns under "bootstrap.*", and the TUI
+      // falls back to the safe "Thinking..." label on later turns.
       const tools = await traceSpan(
-        "bootstrap.resolve-tools",
+        step === 1 ? "bootstrap.resolve-tools" : "turn.resolve-tools",
         () =>
           resolveTools({
             agent,

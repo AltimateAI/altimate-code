@@ -228,7 +228,11 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(prompt).toMatch(/SessionStatus\.publishPhase\(sessionID, name, false\)/)
     expect(prompt).toMatch(/"bootstrap\.session-get",[\s\S]{0,120}sessionID/)
     expect(prompt).toMatch(/"bootstrap\.config-get",[\s\S]{0,120}sessionID/)
-    expect(prompt).toMatch(/"bootstrap\.resolve-tools",[\s\S]{0,300}sessionID/)
+    // resolve-tools span name is step-aware — "bootstrap.resolve-tools" on
+    // step===1, "turn.resolve-tools" on subsequent steps so telemetry doesn't
+    // over-count bootstrap operations.
+    expect(prompt).toMatch(/"bootstrap\.resolve-tools"\s*:\s*"turn\.resolve-tools"/)
+    expect(prompt).toMatch(/step\s*===\s*1[\s\S]{0,200}resolve-tools[\s\S]{0,400}sessionID/)
 
     const sync = await read("src/context/sync.tsx", MONO + "/tui")
     expect(sync).toMatch(/session_phase:\s*\{/)
