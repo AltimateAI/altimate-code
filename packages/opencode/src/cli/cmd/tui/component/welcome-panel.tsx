@@ -2,7 +2,7 @@ import { Show } from "solid-js"
 import { TextAttributes } from "@opentui/core"
 import { useTheme } from "@tui/context/theme"
 import { Logo } from "@tui/component/logo"
-import { useReady } from "@tui/component/dialog-model"
+import { useReady } from "@tui/component/altimate-onboarding"
 import { Installation } from "@/installation"
 
 // altimate_change — Claude-Code-style full-width boot box: big block wordmark on

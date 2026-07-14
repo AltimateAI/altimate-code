@@ -15,7 +15,7 @@ import { useKV } from "../context/kv"
 import { useCommandDialog } from "../component/dialog-command"
 import { useLocal } from "../context/local"
 // altimate_change start — first-run guidance + shared boot box
-import { useReady } from "../component/dialog-model"
+import { useReady } from "../component/altimate-onboarding"
 import { WelcomePanel } from "../component/welcome-panel"
 // altimate_change end
 // altimate_change start — upgrade indicator import
