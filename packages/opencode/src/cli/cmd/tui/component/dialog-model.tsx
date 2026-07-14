@@ -179,6 +179,10 @@ interface WelcomeRow {
   note: string
   tone: WelcomeTone
   activate: () => void
+  // Identifies the row for the "currently selected" tick. providerID alone matches
+  // any model of that provider; add modelID to match a specific model (Big Pickle).
+  providerID?: string
+  modelID?: string
 }
 
 export function DialogModelWelcome(props: { intro?: string }) {
@@ -211,19 +215,30 @@ export function DialogModelWelcome(props: { intro?: string }) {
       name: "Altimate LLM Gateway",
       note: "Recommended · best tool-calling · 10M free tokens",
       tone: "success",
+      providerID: "altimate-backend",
       activate: () => connectProvider("altimate-backend"),
     },
-    { name: "Anthropic (Claude)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("anthropic") },
-    { name: "OpenAI (GPT)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("openai") },
-    { name: "Google (Gemini)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("google") },
+    { name: "Anthropic (Claude)", note: "bring your own API key", tone: "muted", providerID: "anthropic", activate: () => connectProvider("anthropic") },
+    { name: "OpenAI (GPT)", note: "bring your own API key", tone: "muted", providerID: "openai", activate: () => connectProvider("openai") },
+    { name: "Google (Gemini)", note: "bring your own API key", tone: "muted", providerID: "google", activate: () => connectProvider("google") },
     {
       name: "Big Pickle",
       note: "free, no signup — slower, unreliable tool-calling",
       tone: "warning",
+      providerID: "opencode",
+      modelID: "big-pickle",
       activate: chooseBigPickle,
     },
     { name: "Search all providers…", note: "/", tone: "muted", activate: openFullCatalog },
   ])
+
+  // The currently active model → drives the green "selected" tick.
+  const current = createMemo(() => local.model.current())
+  const isCurrent = (row: WelcomeRow) => {
+    const c = current()
+    if (!row.providerID || !c || c.providerID !== row.providerID) return false
+    return row.modelID ? c.modelID === row.modelID : true
+  }
 
   // Indices 0-4 are providers, 5 is the search row (rendered below a divider).
   const COUNT = 6
@@ -264,8 +279,12 @@ export function DialogModelWelcome(props: { intro?: string }) {
             {props.row.name}
           </text>
         </box>
+        {/* bright green so it reads clearly even where ANSI green renders dim */}
+        <text flexShrink={0} fg={theme.diffHighlightAdded} attributes={TextAttributes.BOLD}>
+          {isCurrent(props.row) ? "✓" : " "}
+        </text>
         <text flexGrow={1} fg={noteColor(props.row.tone)} wrapMode="none">
-          {props.row.note}
+          {isCurrent(props.row) ? `${props.row.note} · selected` : props.row.note}
         </text>
       </box>
     )
