@@ -277,7 +277,9 @@ interface State {
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
-  readonly tools: () => Effect.Effect<Record<string, Tool>>
+  // altimate_change — carry the original (pre-sanitize) client name so tool-source classification
+  // works from the real name, not the flattened `<client>_<tool>` key (see altimate/tool-source).
+  readonly tools: () => Effect.Effect<Record<string, Tool & { client: string }>>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
@@ -1010,7 +1012,8 @@ export const layer = Layer.effect(
     }
 
     const tools = Effect.fn("MCP.tools")(function* () {
-      const result: Record<string, Tool> = {}
+      // altimate_change — values carry the original client name (see Interface.tools).
+      const result: Record<string, Tool & { client: string }> = {}
       const s = yield* InstanceState.get(state)
 
       const cfg = yield* cfgSvc.get()
@@ -1028,7 +1031,8 @@ export const layer = Layer.effect(
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
         for (const mcpTool of listed) {
           const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
-          result[key] = McpCatalog.convertTool(mcpTool, client, timeout)
+          // altimate_change — attach the original client name for source classification downstream.
+          result[key] = Object.assign(McpCatalog.convertTool(mcpTool, client, timeout), { client: clientName })
         }
       }
       return result

@@ -72,7 +72,7 @@ registerAltimateValidators()
 import { Config } from "../config/config"
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change — stamp an authoritative tool source + humanized MCP title
-import { registryToolSource, mcpToolSource, humanizeMcpTitle, skillToolSource } from "../altimate/tool-source"
+import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 
@@ -1610,13 +1610,8 @@ export namespace SessionPrompt {
             })),
           }
           // altimate_change — stamp authoritative tool source so clients render the right badge.
-          // The `skill` tool loads skills of varying origin, so classify it per-call from the
-          // origin it reports (Altimate-shipped → altimate mark, user global/project → neutral).
-          const metadata = output.metadata ?? {}
-          output.metadata = {
-            ...metadata,
-            source: item.id === "skill" ? skillToolSource(metadata.skillOrigin) : registryToolSource(item.id),
-          }
+          // Shared with SessionTools.resolve (session/tools.ts) so the two resolvers can't drift.
+          const stamped = stampRegistryToolSource(output, item)
           await Plugin.trigger(
             "tool.execute.after",
             {
@@ -1625,14 +1620,17 @@ export namespace SessionPrompt {
               callID: ctx.callID,
               args,
             },
-            output,
+            stamped,
           )
-          return output
+          return stamped
         },
       })
     }
 
-    for (const [key, item] of Object.entries(await MCP.tools())) {
+    for (const [key, entry] of Object.entries(await MCP.tools())) {
+      // altimate_change — split the original client name off the model-facing tool object so it's
+      // used only for source classification and never leaks into the tool schema sent to the model.
+      const { client: clientName, ...item } = entry
       const execute = item.execute
       if (!execute) continue
 
@@ -1710,17 +1708,19 @@ export namespace SessionPrompt {
         }
 
         const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
+        // altimate_change — authoritative source + readable title from the original client name,
+        // shared with SessionTools.resolve (session/tools.ts) so the two resolvers can't drift.
+        const described = describeMcpTool(key, clientName)
         const metadata = {
           ...(result.metadata ?? {}),
           truncated: truncated.truncated,
           ...(truncated.truncated && { outputPath: truncated.outputPath }),
-          // altimate_change — authoritative source so the chat can badge Datamates MCP tools
-          source: mcpToolSource(key),
+          source: described.source,
         }
 
         return {
           // altimate_change — MCP tools have no native title; give a readable label
-          title: humanizeMcpTitle(key),
+          title: described.title,
           metadata,
           output: truncated.content,
           attachments: attachments.map((attachment) => ({

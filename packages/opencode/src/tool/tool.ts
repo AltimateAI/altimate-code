@@ -95,6 +95,11 @@ export interface Info<
   M extends Metadata = Metadata,
 > {
   id: string
+  // altimate_change start — declared origin so the tool-source badge classifier doesn't have to
+  // infer ownership from the id. Only external (user custom / third-party plugin) tools set it;
+  // native + Altimate tools omit it and rely on the id fallback. See altimate/tool-source.
+  registrySource?: import("../altimate/tool-source").RegistryToolOrigin
+  // altimate_change end
   // altimate_change start — upstream_fix: restore caller context for deferred tool init.
   init: (ctx?: InitContext) => Effect.Effect<DefWithoutID<Parameters, M>>
   // altimate_change end
