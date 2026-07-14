@@ -217,8 +217,22 @@ export async function launchTui(opts: LaunchOptions): Promise<TuiSession> {
       } catch {
         // already gone
       }
-      // give the process a beat to exit cleanly before returning
-      await Promise.race([exited, new Promise((r) => setTimeout(r, 1000))])
+      // Give the process a beat to exit cleanly, then escalate to SIGKILL if it
+      // hasn't. A child that traps/ignores SIGTERM (or is slow to tear down its
+      // render loop + worker) would otherwise be left orphaned when dispose()
+      // returns — a silent test-process leak on CI.
+      const exitedCleanly = await Promise.race([
+        exited.then(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 1000)),
+      ])
+      if (!exitedCleanly) {
+        try {
+          child.kill("SIGKILL")
+        } catch {
+          // already gone
+        }
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 500))])
+      }
     },
     exited,
   }
