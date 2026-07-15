@@ -240,6 +240,10 @@ export namespace ToolRegistry {
   function fromPlugin(id: string, def: ToolDefinition): Tool.Info {
     return {
       id,
+      // altimate_change — user custom tools (file-scanned) and third-party plugin tools both flow
+      // through here; mark them "external" so the tool-source badge stays neutral and never
+      // over-claims them as Altimate-owned.
+      registrySource: "external",
       init: () =>
         legacyToInit({
           // altimate_change start — tolerate JSON-Schema-shaped legacy args (see argsToZodShape)
@@ -555,6 +559,8 @@ export namespace ToolRegistry {
           await Plugin.trigger("tool.definition", { toolID: t.id }, output)
           return {
             id: t.id,
+            // altimate_change — carry declared origin to the resolvers' source-badge stamping.
+            registrySource: t.registrySource,
             // altimate_change start — upstream_fix: hide disabled runtime-gated tool schema fields.
             ...applyRuntimeToolSchemaFlags(t.id, tool, runtimeFlags),
             // altimate_change end

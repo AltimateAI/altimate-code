@@ -6,6 +6,7 @@ import { Effect, Layer, Result, Schema } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ToolRegistry } from "@/tool/registry"
 import { Tool } from "@/tool/tool"
+import { registryToolSource, stampRegistryToolSource } from "@/altimate/tool-source"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { TestConfig } from "../fixture/config"
@@ -139,6 +140,56 @@ describe("tool.registry", () => {
       const registry = yield* ToolRegistry.Service
       const ids = yield* registry.ids()
       expect(ids).toContain("hello")
+    }),
+  )
+
+  // altimate_change — end-to-end: a resolved tool's `registrySource` drives the source badge.
+  // A file-scanned custom tool must classify neutral ("builtin"), never "altimate" — the id-based
+  // fallback alone would wrongly call any non-native id "altimate" (reviewer finding on #980).
+  it.instance("resolved custom tools carry registrySource=external and classify neutral", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const tool = path.join(test.directory, ".opencode", "tool")
+      yield* Effect.promise(() => fs.mkdir(tool, { recursive: true }))
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(tool, "deploy.ts"),
+          [
+            "export default {",
+            "  description: 'a user custom tool',",
+            "  args: {},",
+            "  execute: async () => 'ok',",
+            "}",
+            "",
+          ].join("\n"),
+        ),
+      )
+
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const resolved = yield* registry.tools({
+        providerID: ProviderID.opencode,
+        modelID: ModelID.make("test"),
+        agent: yield* agent.defaultInfo(),
+      })
+
+      const custom = resolved.find((t) => t.id === "deploy")
+      expect(custom?.registrySource).toBe("external")
+      expect(registryToolSource(custom!.id, custom!.registrySource)).toBe("builtin")
+
+      // A native tool declares no origin and classifies builtin via the id fallback.
+      const read = resolved.find((t) => t.id === "read")
+      expect(read?.registrySource).toBeUndefined()
+      expect(registryToolSource(read!.id, read!.registrySource)).toBe("builtin")
+
+      // An Altimate tool declares no origin and classifies altimate via the id fallback.
+      const altimate = resolved.find((t) => t.id === "sql_analyze")
+      expect(altimate?.registrySource).toBeUndefined()
+      expect(registryToolSource(altimate!.id, altimate!.registrySource)).toBe("altimate")
+
+      // The shared stamping helper matches, end-to-end.
+      expect(stampRegistryToolSource({ metadata: {} }, custom!).metadata.source).toBe("builtin")
+      expect(stampRegistryToolSource({ metadata: {} }, altimate!).metadata.source).toBe("altimate")
     }),
   )
 

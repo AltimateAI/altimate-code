@@ -306,14 +306,16 @@ describe("tool.write", () => {
   })
 
   describe("title generation", () => {
-    it.instance("returns relative path as title", () =>
+    it.instance("humanizes the title to a readable label", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "src", "components", "Button.tsx")
         yield* Effect.promise(() => fs.mkdir(path.dirname(filepath), { recursive: true }))
 
         const result = yield* run({ filePath: filepath, content: "export const Button = () => {}" })
-        expect(result.title).toEndWith(path.join("src", "components", "Button.tsx"))
+        // The execute() wrapper humanizes file-tool titles at the source
+        // (see src/altimate/tool-label.ts); a non-dbt path degrades to the filename.
+        expect(result.title).toBe("Writing Button.tsx")
       }),
     )
   })

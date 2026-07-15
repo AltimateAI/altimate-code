@@ -18,6 +18,8 @@ import { Session } from "./session"
 import { SessionProcessor } from "./processor"
 import { PartID } from "./schema"
 import { EffectBridge } from "@/effect/bridge"
+// altimate_change — shared tool-source stamping so this resolver can't drift from prompt.ts
+import { stampRegistryToolSource, describeMcpTool } from "@/altimate/tool-source"
 // altimate_change start — upstream_fix: ToolRegistry expects fork-branded model ids here
 import { ModelID } from "@/provider/schema"
 // altimate_change end
@@ -102,22 +104,27 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 messageID: input.processor.message.id,
               })),
             }
+            // altimate_change — stamp authoritative tool source (shared with prompt.ts resolveTools)
+            const stamped = stampRegistryToolSource(output, item)
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
-              output,
+              stamped,
             )
             if (options.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(options.toolCallId, output)
+              yield* input.processor.completeToolCall(options.toolCallId, stamped)
             }
-            return output
+            return stamped
           }),
         )
       },
     })
   }
 
-  for (const [key, item] of Object.entries(yield* mcp.tools())) {
+  for (const [key, entry] of Object.entries(yield* mcp.tools())) {
+    // altimate_change — split the original client name off the model-facing tool object so it's
+    // used only for source classification and never leaks into the tool schema sent to the model.
+    const { client: clientName, ...item } = entry
     const execute = item.execute
     if (!execute) continue
 
@@ -177,14 +184,18 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           }
 
           const truncated = yield* truncate.output(textParts.join("\n\n"), {}, input.agent)
+          // altimate_change — authoritative source + readable title from the original client name,
+          // shared with prompt.ts resolveTools so the two resolvers can't drift.
+          const described = describeMcpTool(key, clientName)
           const metadata = {
             ...result.metadata,
             truncated: truncated.truncated,
             ...(truncated.truncated && { outputPath: truncated.outputPath }),
+            source: described.source,
           }
 
           const output = {
-            title: "",
+            title: described.title,
             metadata,
             output: truncated.content,
             attachments: attachments.map((attachment) => ({
