@@ -29,7 +29,7 @@ altimate
 ```
 
 !!! tip "Don't want to manage API keys?"
-    The [Altimate LLM Gateway](https://datamates-docs.myaltimate.com/user-guide/components/llm-gateway/) gives you 10M tokens free — no API keys needed. It dynamically routes to the best model for each task across Sonnet 4.6, Opus 4.6, GPT-5.4, and more.
+    The [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/) gives you 10M tokens free — no API keys needed. It dynamically routes to the best model for each task across Sonnet 4.6, Opus 4.6, GPT-5.4, and more.
 
 ---
 

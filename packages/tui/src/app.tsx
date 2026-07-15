@@ -809,7 +809,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         title: "Open docs",
         run: () => {
           // altimate_change start — altimate docs URL
-          open("https://docs.altimate.sh").catch(() => {})
+          open("https://help.altimate.ai/code").catch(() => {})
           // altimate_change end
           dialog.clear()
         },
