@@ -197,6 +197,24 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(skill).toMatch(/url:\s*"\/skill"[\s\S]*query:\s*\{\s*reload:\s*"true"\s*\}/)
   })
 
+  // Minimal merge-drop guards for the synthetic "Install <query>" top-of-list option in
+  // /skills. A silent upstream drop of any of these would remove a user-facing feature
+  // (ctrl+i can't be trusted — its wire byte 0x09 collides with Tab — so Enter on this
+  // synthetic row is the only reliable install path). Behavioural coverage of the
+  // classifier lives in `test/altimate/skill-install-classifier.test.ts`; keep this test
+  // narrow so cosmetic refactors don't churn it.
+  test("DialogSkillList wires synthetic install option + prefill plumbing", async () => {
+    const skill = await read("src/plugin/tui/altimate/skill-ops.tsx")
+    // Shared classifier + sentinel exist at module scope (installer and list must not drift).
+    expect(skill).toMatch(/classifyInstallSource/)
+    expect(skill).toMatch(/INSTALL_ACTION_VALUE/)
+    // Enter on the synthetic row routes to the install flow with the typed filter text.
+    expect(skill).toMatch(/item\.value === INSTALL_ACTION_VALUE[\s\S]{0,120}showInstall\(api, filter\(\)/)
+    // Install/create sub-dialogs receive the typed text as a prefill.
+    expect(skill).toMatch(/DialogSkillInstall[\s\S]{0,80}initialValue/)
+    expect(skill).toMatch(/DialogSkillCreate[\s\S]{0,80}initialValue/)
+  })
+
   test("re-homed TUI upstream fixes keep prompt/update/child-session behavior", async () => {
     const promptEnhance = await read("src/plugin/tui/altimate/prompt-enhance.tsx")
     expect(promptEnhance).toMatch(
