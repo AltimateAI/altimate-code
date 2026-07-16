@@ -46,6 +46,7 @@ export function createDialogProviderOptions() {
   const sync = useSync()
   const dialog = useDialog()
   const sdk = useSDK()
+  const toast = useToast()
   const options = createMemo(() => {
     return pipe(
       sync.data.provider_next.all,
@@ -92,19 +93,38 @@ export function createDialogProviderOptions() {
           if (index == null) return
           const method = methods[index]
           if (method.type === "oauth") {
-            const result = await sdk.client.provider.oauth.authorize({
-              providerID: provider.id,
-              method: index,
-            })
-            if (result.data?.method === "code") {
-              dialog.replace(() => (
-                <CodeMethod providerID={provider.id} title={method.label} index={index} authorization={result.data!} />
-              ))
-            }
-            if (result.data?.method === "auto") {
-              dialog.replace(() => (
-                <AutoMethod providerID={provider.id} title={method.label} index={index} authorization={result.data!} />
-              ))
+            // altimate_change — guard the authorize (e.g. loopback port busy) so the
+            // recommended /connect path surfaces the error instead of failing silently
+            // (parity with DialogAltimateAuth).
+            try {
+              const result = await sdk.client.provider.oauth.authorize({
+                providerID: provider.id,
+                method: index,
+              })
+              if (result.data?.method === "code") {
+                dialog.replace(() => (
+                  <CodeMethod
+                    providerID={provider.id}
+                    title={method.label}
+                    index={index}
+                    authorization={result.data!}
+                  />
+                ))
+              } else if (result.data?.method === "auto") {
+                dialog.replace(() => (
+                  <AutoMethod
+                    providerID={provider.id}
+                    title={method.label}
+                    index={index}
+                    authorization={result.data!}
+                  />
+                ))
+              } else {
+                dialog.clear()
+              }
+            } catch (err) {
+              toast.error(err instanceof Error ? err : new Error("Failed to start sign-in"))
+              dialog.clear()
             }
           }
           if (method.type === "api") {
@@ -204,6 +224,13 @@ function AutoMethod(props: AutoMethodProps) {
     })
     if (disposed) return
     if (result.error) {
+      // altimate_change — surface the failure instead of clearing silently. The
+      // precise reason is also logged server-side by the plugin callback.
+      toast.error(
+        result.error instanceof Error
+          ? result.error
+          : new Error("Sign-in didn't complete. Please try again (see the terminal/logs for details)."),
+      )
       dialog.clear()
       return
     }

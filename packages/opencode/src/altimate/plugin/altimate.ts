@@ -24,9 +24,12 @@ function escapeHtml(s: string): string {
   )
 }
 
+// Neutral copy: the loopback returns this as soon as it RECEIVES the token, before
+// the CLI has exchanged/persisted it — so don't claim "Signed in" (the terminal is
+// the source of truth for actual success/failure).
 const HTML_SUCCESS = `<!doctype html><meta charset="utf-8"><title>Altimate Code</title>
 <body style="font-family:system-ui;text-align:center;padding:64px">
-<h2>Signed in ✓</h2><p>You can return to your terminal.</p>
+<h2>Authorization received</h2><p>Return to your terminal to finish connecting.</p>
 <script>setTimeout(()=>window.close(),1500)</script></body>`
 
 const HTML_ERROR = (msg: string) => `<!doctype html><meta charset="utf-8"><title>Altimate Code</title>
@@ -161,9 +164,16 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             // Register the pending flow BEFORE opening the browser so an instant
             // redirect can be matched by state rather than dropped as CSRF.
             const result = registerPending(state)
+            // If callback() is never awaited (e.g. the dialog is dismissed before it
+            // runs), the pending promise still rejects on timeout — swallow that here
+            // so it can't surface as an unhandled rejection. callback() awaits the
+            // same promise independently.
+            void result.catch(() => {})
 
             const webUrl = (process.env.ALTIMATE_WEB_URL || DEFAULT_WEB_URL).replace(/\/+$/, "")
-            const redirect = `http://localhost:${CALLBACK_PORT}/callback`
+            // Use 127.0.0.1 to match the loopback bind — a plain `localhost` redirect
+            // can resolve to ::1 first and hit a closed IPv6 port.
+            const redirect = `http://127.0.0.1:${CALLBACK_PORT}/callback`
             // Land on the sign-up page and let the user choose how to authenticate
             // (Google today, more providers later) rather than forcing Google.
             const authorizeUrl =
