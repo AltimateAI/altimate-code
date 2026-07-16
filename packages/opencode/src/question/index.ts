@@ -7,6 +7,10 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 // altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
+import { registerDisposer } from "@/effect/instance-registry"
+import { Bus } from "@/bus"
+import { BusEvent } from "@/bus/bus-event"
+import z from "zod"
 // altimate_change end
 
 // Schemas — these are pure data; nothing checks class identity (see PR
@@ -93,6 +97,39 @@ export const Event = {
   Rejected: EventV2.define({ type: "question.rejected", schema: Rejected.fields }),
 }
 
+// altimate_change start — BusEvent mirrors of the question events.
+//
+// The EventV2 `Event` defs above publish to GlobalBus/EventV2 consumers only.
+// The IDE webview subscribes to the `/event` SSE route, which is fed by the Bus
+// *wildcard PubSub* (`Bus.publish`), a different channel. So `question.asked`
+// never reached the webview → `pendingQuestions` stayed empty → the mcp-add
+// question card had no request id to reply with → "submit does nothing".
+// Publish these via `Bus.publish` too so they reach /event like every other
+// webview-visible event. (Schemas are loose — Bus.publish does not re-validate;
+// they exist for the `type` string and typing.)
+const BusAsked = BusEvent.define(
+  "question.asked",
+  z.object({
+    id: QuestionID.zod,
+    sessionID: SessionID.zod,
+    questions: z.array(z.any()),
+    tool: z.object({ messageID: MessageID.zod, callID: z.string() }).optional(),
+  }),
+)
+const BusReplied = BusEvent.define(
+  "question.replied",
+  z.object({
+    sessionID: SessionID.zod,
+    requestID: QuestionID.zod,
+    answers: z.array(z.array(z.string())),
+  }),
+)
+const BusRejected = BusEvent.define(
+  "question.rejected",
+  z.object({ sessionID: SessionID.zod, requestID: QuestionID.zod }),
+)
+// altimate_change end
+
 export class RejectedError extends Schema.TaggedErrorClass<RejectedError>()("QuestionRejectedError", {}) {
   override get message() {
     return "The user dismissed this question"
@@ -108,9 +145,31 @@ interface PendingEntry {
   deferred: Deferred.Deferred<ReadonlyArray<Answer>, RejectedError>
 }
 
-interface State {
-  pending: Map<QuestionID, PendingEntry>
+// altimate_change start — process-global pending registry.
+//
+// The imperative `Question.ask()`/`reply()`/`list()` wrappers (bottom of file)
+// get bundled into MORE THAN ONE module instance (proven: a module-scoped id
+// differs between the tool's ask() and the HTTP route's reply()). Consistent
+// `@/question` imports did NOT dedupe them. Each copy ran its own module-scoped
+// `makeRuntime(...)` runtime with its own `InstanceState` cache, so the question
+// TOOL registered the pending Deferred in one copy's map while the HTTP reply
+// route looked it up in the OTHER copy's empty map — the Deferred never resolved
+// and the `/discover-and-add-mcps` question hung on "Thinking…" after answering.
+//
+// Anchor the registry on `globalThis` so every module copy shares one Map. Keyed
+// by instance directory so `list()` stays per-instance.
+type PendingByDir = Map<string, Map<QuestionID, PendingEntry>>
+const pendingByDir: PendingByDir = ((globalThis as Record<string, unknown>)["__altimateQuestionPending"] ??=
+  new Map<string, Map<QuestionID, PendingEntry>>()) as PendingByDir
+function pendingFor(directory: string): Map<QuestionID, PendingEntry> {
+  let map = pendingByDir.get(directory)
+  if (!map) {
+    map = new Map<QuestionID, PendingEntry>()
+    pendingByDir.set(directory, map)
+  }
+  return map
 }
+// altimate_change end
 
 // Service
 
@@ -134,31 +193,30 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
-    const state = yield* InstanceState.make<State>(
-      Effect.fn("Question.state")(function* () {
-        const state = {
-          pending: new Map<QuestionID, PendingEntry>(),
-        }
 
-        yield* Effect.addFinalizer(() =>
-          Effect.gen(function* () {
-            for (const item of state.pending.values()) {
-              yield* Deferred.fail(item.deferred, new RejectedError())
-            }
-            state.pending.clear()
-          }),
-        )
-
-        return state
-      }),
-    )
+    // altimate_change start — clear a directory's pending questions when its
+    // instance is disposed/reloaded (mirrors the removed InstanceState finalizer)
+    // so entries in the process-global registry don't leak across instances.
+    const off = registerDisposer(async (directory) => {
+      const map = pendingByDir.get(directory)
+      if (!map) return
+      pendingByDir.delete(directory)
+      for (const { deferred } of map.values()) {
+        await Effect.runPromise(Deferred.fail(deferred, new RejectedError())).catch(() => {})
+      }
+    })
+    yield* Effect.addFinalizer(() => Effect.sync(off))
+    // altimate_change end
 
     const ask = Effect.fn("Question.ask")(function* (input: {
       sessionID: SessionID
       questions: ReadonlyArray<Info>
       tool?: Tool
     }) {
-      const pending = (yield* InstanceState.get(state)).pending
+      // altimate_change start — pending map lives in the globalThis registry (see top of file)
+      const directory = yield* InstanceState.directory
+      const pending = pendingFor(directory)
+      // altimate_change end
       const id = QuestionID.ascending()
       yield* Effect.logInfo("asking", { id, questions: input.questions.length })
 
@@ -171,6 +229,12 @@ export const layer = Layer.effect(
       }
       pending.set(id, { info, deferred })
       yield* events.publish(Event.Asked, info)
+      // altimate_change start — also publish on the Bus wildcard so the IDE webview
+      // (subscribed to /event) receives question.asked and can answer the card.
+      yield* Effect.promise(() =>
+        Bus.publish(BusAsked, { id, sessionID: input.sessionID, questions: [...input.questions], tool: input.tool }),
+      )
+      // altimate_change end
 
       return yield* Effect.ensuring(
         Deferred.await(deferred),
@@ -184,7 +248,9 @@ export const layer = Layer.effect(
       requestID: QuestionID
       answers: ReadonlyArray<Answer>
     }) {
-      const pending = (yield* InstanceState.get(state)).pending
+      // altimate_change start — pending map lives in the globalThis registry (see top of file)
+      const pending = pendingFor(yield* InstanceState.directory)
+      // altimate_change end
       const existing = pending.get(input.requestID)
       if (!existing) {
         yield* Effect.logWarning("reply for unknown request", { requestID: input.requestID })
@@ -197,11 +263,22 @@ export const layer = Layer.effect(
         requestID: existing.info.id,
         answers: input.answers.map((a) => [...a]),
       })
+      // altimate_change start — mirror on the Bus wildcard for /event (webview) clients.
+      yield* Effect.promise(() =>
+        Bus.publish(BusReplied, {
+          sessionID: existing.info.sessionID,
+          requestID: existing.info.id,
+          answers: input.answers.map((a) => [...a]),
+        }),
+      )
+      // altimate_change end
       yield* Deferred.succeed(existing.deferred, input.answers)
     })
 
     const reject = Effect.fn("Question.reject")(function* (requestID: QuestionID) {
-      const pending = (yield* InstanceState.get(state)).pending
+      // altimate_change start — pending map lives in the globalThis registry (see top of file)
+      const pending = pendingFor(yield* InstanceState.directory)
+      // altimate_change end
       const existing = pending.get(requestID)
       if (!existing) {
         yield* Effect.logWarning("reject for unknown request", { requestID })
@@ -213,11 +290,18 @@ export const layer = Layer.effect(
         sessionID: existing.info.sessionID,
         requestID: existing.info.id,
       })
+      // altimate_change start — mirror on the Bus wildcard for /event (webview) clients.
+      yield* Effect.promise(() =>
+        Bus.publish(BusRejected, { sessionID: existing.info.sessionID, requestID: existing.info.id }),
+      )
+      // altimate_change end
       yield* Deferred.fail(existing.deferred, new RejectedError())
     })
 
     const list = Effect.fn("Question.list")(function* () {
-      const pending = (yield* InstanceState.get(state)).pending
+      // altimate_change start — pending map lives in the globalThis registry (see top of file)
+      const pending = pendingFor(yield* InstanceState.directory)
+      // altimate_change end
       return Array.from(pending.values(), (x) => x.info)
     })
 
