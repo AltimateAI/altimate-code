@@ -16,7 +16,7 @@ into CI pipelines and orchestration DAGs. Precision data tooling for any LLM.
 [![npm](https://img.shields.io/npm/v/altimate-code)](https://www.npmjs.com/package/altimate-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Slack](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://altimate.studio/join-agentic-data-engineering-slack)
-[![Docs](https://img.shields.io/badge/docs-docs.altimate.sh-blue)](https://docs.altimate.sh)
+[![Docs](https://img.shields.io/badge/docs-help.altimate.ai%2Fcode-blue)](https://help.altimate.ai/code)
 [![Install GitHub App](https://img.shields.io/badge/GitHub-Install%20App-24292f?logo=github)](https://github.com/apps/altimate-code-agent/installations/new)
 [![Live dbt review](https://img.shields.io/badge/dbt-Live%20PR%20Demo-ff694b?logo=dbt)](https://github.com/AltimateAI/dbt-pr-review-demo/pulls)
 
@@ -185,7 +185,7 @@ Each mode has scoped permissions, tool access, and SQL write-access control.
 | **Analyst** | Explore data, run SELECT queries, FinOps analysis, and generate insights | Read-only enforced (SELECT only, no file writes) |
 | **Plan** | Outline an approach before acting | Minimal (read files only, no SQL or bash) |
 
-> **New to altimate?** Start with **Analyst mode** — it's read-only and safe to run against production connections. Need specialized workflows (validation, migration, research)? Create [custom agent modes](https://docs.altimate.sh).
+> **New to altimate?** Start with **Analyst mode** — it's read-only and safe to run against production connections. Need specialized workflows (validation, migration, research)? Create [custom agent modes](https://help.altimate.ai/code).
 
 ## Supported Warehouses
 
