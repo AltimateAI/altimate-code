@@ -43,8 +43,17 @@ const id = "altimate:skill-ops"
 // surface the synthetic Install row when Enter will actually try to install.
 export type InstallSourceKind = "github-url" | "owner-repo" | "absolute-path"
 const OWNER_REPO_REGEX = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/
+
+// Strip the surface variation the classifier tolerates — whitespace, trailing dots,
+// and a `.git` suffix — before comparing. Exported so callers that consume the
+// classified string (e.g. installSkillDirect building a clone URL) can use the exact
+// same shape as the classifier, avoiding double-suffix bugs like `owner/repo.git.git`.
+export function normalizeInstallSource(source: string): string {
+  return source.trim().replace(/\.+$/, "").replace(/\.git$/, "")
+}
+
 export function classifyInstallSource(source: string): InstallSourceKind | null {
-  const trimmed = source.trim().replace(/\.+$/, "").replace(/\.git$/, "")
+  const trimmed = normalizeInstallSource(source)
   if (trimmed.length < 3) return null
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return "github-url"
   if (OWNER_REPO_REGEX.test(trimmed)) return "owner-repo"
@@ -176,7 +185,12 @@ async function installSkillDirect(
   // reach the installer without going through the UI's install-preview.
   const kind = classifyInstallSource(normalized)
   if (kind === "github-url" || kind === "owner-repo") {
-    const url = normalized.startsWith("http") ? normalized : `https://github.com/${normalized}.git`
+    // Build the clone URL from the *normalized* source so a `.git` suffix or trailing
+    // dot in the typed query doesn't produce `owner/repo.git.git` (bug reported by
+    // OpenCodeReview): the classifier tolerates those shapes but the raw `normalized`
+    // still carries them until stripped.
+    const cleaned = normalizeInstallSource(normalized)
+    const url = cleaned.startsWith("http") ? cleaned : `https://github.com/${cleaned}.git`
     const label = url.replace(/https?:\/\/github\.com\//, "").replace(/\.git$/, "")
     onProgress?.(`Cloning ${label}...`)
     const cache = cacheDir()
@@ -589,10 +603,14 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
   currentFilter = filter
   // altimate_change end
 
-  const options = createMemo<TuiDialogSelectOption<string>[]>(() => {
+  // Base list — depends only on `skills()`. Kept separate from the `options` memo below
+  // so that per-keystroke filter changes don't re-run `detectToolReferences` (regex parse
+  // per skill) across the whole list. On projects with many installed skills the previous
+  // fused memo produced noticeable typing lag.
+  const baseOptions = createMemo<TuiDialogSelectOption<string>[]>(() => {
     const list = skills() ?? []
     const maxWidth = Math.max(0, ...list.map((s) => s.name.length))
-    const items = list.map((skill) => {
+    return list.map((skill) => {
       const tools = detectToolReferences(skill.content)
       const category = SKILL_CATEGORIES[skill.name] ?? "Other"
       const desc = skill.description?.replace(/\s+/g, " ").trim()
@@ -605,6 +623,10 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
         category,
       } satisfies TuiDialogSelectOption<string>
     })
+  })
+
+  const options = createMemo<TuiDialogSelectOption<string>[]>(() => {
+    const items = baseOptions()
     // altimate_change start — when the filter looks like a shape installSkillDirect will
     // accept (github URL, `owner/repo` shorthand, or absolute path), prepend a synthetic
     // "Install <query>" top option. Selecting it (Enter) routes to installSkillDirect.

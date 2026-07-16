@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { classifyInstallSource } from "@/plugin/tui/altimate/skill-ops"
+import { classifyInstallSource, normalizeInstallSource } from "@/plugin/tui/altimate/skill-ops"
 
 // classifyInstallSource is the shared classifier for the DialogSkillList's "Install <query>"
 // affordance and installSkillDirect. Keeping the two in lockstep matters: an earlier version
@@ -61,5 +61,32 @@ describe("classifyInstallSource", () => {
   test("trims surrounding whitespace before classifying", () => {
     expect(classifyInstallSource("  owner/repo  ")).toBe("owner-repo")
     expect(classifyInstallSource("\thttps://github.com/x/y\n")).toBe("github-url")
+  })
+})
+
+// normalizeInstallSource is the shared trim/strip helper that installSkillDirect uses
+// before building a clone URL from an `owner/repo` shorthand. Without it, an input like
+// `owner/repo.git` (accepted by the classifier because it strips `.git`) would produce
+// `https://github.com/owner/repo.git.git` — real bug flagged in review.
+describe("normalizeInstallSource", () => {
+  test("strips a trailing `.git` suffix", () => {
+    expect(normalizeInstallSource("owner/repo.git")).toBe("owner/repo")
+    expect(normalizeInstallSource("https://github.com/x/y.git")).toBe("https://github.com/x/y")
+  })
+
+  test("strips trailing dots", () => {
+    expect(normalizeInstallSource("owner/repo.")).toBe("owner/repo")
+    expect(normalizeInstallSource("owner/repo...")).toBe("owner/repo")
+  })
+
+  test("trims surrounding whitespace", () => {
+    expect(normalizeInstallSource("  owner/repo  ")).toBe("owner/repo")
+    expect(normalizeInstallSource("\n\towner/repo\r\n")).toBe("owner/repo")
+  })
+
+  test("returns the source unchanged when nothing to strip", () => {
+    expect(normalizeInstallSource("owner/repo")).toBe("owner/repo")
+    expect(normalizeInstallSource("/tmp/skills")).toBe("/tmp/skills")
+    expect(normalizeInstallSource("")).toBe("")
   })
 })
