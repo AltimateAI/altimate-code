@@ -142,6 +142,11 @@ export namespace AltimateApi {
 
   const VALID_TENANT_REGEX = /^[a-z_][a-z0-9_-]*$/
 
+  /** True if `name` is a well-formed instance/tenant name. */
+  export function isValidInstanceName(name: string): boolean {
+    return VALID_TENANT_REGEX.test(name)
+  }
+
   /** Validates credentials against the Altimate API.
    *  Mirrors AltimateSettingsHelper.validateSettings from altimate-mcp-engine. */
   export async function validateCredentials(creds: {
@@ -284,8 +289,7 @@ export namespace AltimateApi {
     const allIntegrations = await listIntegrations()
     return integrationIds.map((id) => {
       const def = allIntegrations.find((i) => i.id === id)
-      const tools =
-        def?.tools?.flatMap((t) => (t.enable_all ?? [t.key]).map((k) => ({ key: k }))) ?? []
+      const tools = def?.tools?.flatMap((t) => (t.enable_all ?? [t.key]).map((k) => ({ key: k }))) ?? []
       return { id, tools }
     })
   }

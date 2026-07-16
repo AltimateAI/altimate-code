@@ -14,7 +14,7 @@ import { SDKProvider, useSDK } from "@tui/context/sdk"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
 import { DialogModel, useConnected } from "@tui/component/dialog-model"
-import { DialogModelWelcome, useReady } from "@tui/component/altimate-onboarding"
+import { DialogModelWelcome, useReady, resetSetupComplete } from "@tui/component/altimate-onboarding"
 // altimate_change — /auth (gateway sign-in) + /logout commands
 import { DialogAltimateAuth } from "@tui/component/dialog-provider"
 import { AltimateApi } from "../../../altimate/api/client"
@@ -688,11 +688,17 @@ function App() {
         name: "logout",
       },
       onSelect: async () => {
-        await AltimateApi.clearCredentials()
-        await sdk.client.instance.dispose()
-        await sync.bootstrap()
-        toast.show({ message: "Signed out of Altimate LLM Gateway", variant: "success" })
-        dialog.clear()
+        try {
+          await AltimateApi.clearCredentials()
+          resetSetupComplete()
+          await sdk.client.instance.dispose()
+          await sync.bootstrap()
+          toast.show({ message: "Signed out of Altimate LLM Gateway", variant: "success" })
+        } catch (err) {
+          toast.error(err instanceof Error ? err : new Error("Sign-out failed"))
+        } finally {
+          dialog.clear()
+        }
       },
       category: "Provider",
     },

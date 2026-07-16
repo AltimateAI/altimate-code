@@ -16,7 +16,11 @@ import { markSetupComplete, DialogBigPickleConfirm } from "./altimate-onboarding
 export function useConnected() {
   const sync = useSync()
   return createMemo(() =>
-    sync.data.provider.some((x) => x.id !== "opencode" || Object.values(x.models).some((y) => y.cost?.input !== 0)),
+    // altimate_change — treat undefined cost as "not paid" (upstream `!== 0` was
+    // true for undefined, mislabeling OpenCode as connected without a Zen key).
+    sync.data.provider.some(
+      (x) => x.id !== "opencode" || Object.values(x.models).some((y) => y.cost?.input != null && y.cost.input !== 0),
+    ),
   )
 }
 
@@ -40,7 +44,7 @@ export function DialogModel(props: { providerID?: string }) {
   function providerReady(id: string) {
     const p = sync.data.provider.find((x) => x.id === id)
     if (!p) return false
-    if (id === "opencode") return Object.values(p.models).some((m) => m.cost?.input !== 0)
+    if (id === "opencode") return Object.values(p.models).some((m) => m.cost?.input != null && m.cost.input !== 0)
     return Object.keys(p.models).length > 0
   }
 
@@ -145,6 +149,9 @@ export function DialogModel(props: { providerID?: string }) {
           title: "Favorite",
           disabled: !connected(),
           onTrigger: (option) => {
+            // altimate_change — NEEDS-SETUP rows carry plain string values (provider
+            // ids / "big-pickle"); only real {providerID, modelID} rows are favoritable.
+            if (typeof option.value === "string") return
             local.model.toggleFavorite(option.value as { providerID: string; modelID: string })
           },
         },

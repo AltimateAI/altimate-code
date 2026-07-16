@@ -21,6 +21,11 @@ const [setupComplete, setSetupComplete] = createSignal(false)
 export function markSetupComplete() {
   setSetupComplete(true)
 }
+// Cleared on /logout so first-run tips don't keep showing "you're all set" after
+// the credential is gone.
+export function resetSetupComplete() {
+  setSetupComplete(false)
+}
 export function useReady() {
   const connected = useConnected()
   return createMemo(() => connected() || setupComplete())
@@ -77,9 +82,27 @@ export function DialogModelWelcome(props: { intro?: string }) {
       providerID: "altimate-backend",
       activate: () => connectProvider("altimate-backend"),
     },
-    { name: "Anthropic (Claude)", note: "bring your own API key", tone: "muted", providerID: "anthropic", activate: () => connectProvider("anthropic") },
-    { name: "OpenAI (GPT)", note: "bring your own API key", tone: "muted", providerID: "openai", activate: () => connectProvider("openai") },
-    { name: "Google (Gemini)", note: "bring your own API key", tone: "muted", providerID: "google", activate: () => connectProvider("google") },
+    {
+      name: "Anthropic (Claude)",
+      note: "bring your own API key",
+      tone: "muted",
+      providerID: "anthropic",
+      activate: () => connectProvider("anthropic"),
+    },
+    {
+      name: "OpenAI (GPT)",
+      note: "bring your own API key",
+      tone: "muted",
+      providerID: "openai",
+      activate: () => connectProvider("openai"),
+    },
+    {
+      name: "Google (Gemini)",
+      note: "bring your own API key",
+      tone: "muted",
+      providerID: "google",
+      activate: () => connectProvider("google"),
+    },
     {
       name: "Big Pickle",
       note: "free, no signup — slower, unreliable tool-calling",
@@ -129,12 +152,27 @@ export function DialogModelWelcome(props: { intro?: string }) {
   const Row = (props: { row: WelcomeRow; index: number }) => {
     const active = createMemo(() => selected() === props.index)
     return (
-      <box flexDirection="row" gap={1} onMouseMove={() => setSelected(props.index)} onMouseUp={() => props.row.activate()}>
+      <box
+        flexDirection="row"
+        gap={1}
+        onMouseMove={() => setSelected(props.index)}
+        onMouseUp={() => props.row.activate()}
+      >
         <text flexShrink={0} fg={theme.primary}>
           {active() ? "›" : " "}
         </text>
-        <box width={NAME_W} flexShrink={0} paddingLeft={1} paddingRight={1} backgroundColor={active() ? theme.primary : transparent}>
-          <text fg={active() ? selFg : theme.text} attributes={active() ? TextAttributes.BOLD : undefined} wrapMode="none">
+        <box
+          width={NAME_W}
+          flexShrink={0}
+          paddingLeft={1}
+          paddingRight={1}
+          backgroundColor={active() ? theme.primary : transparent}
+        >
+          <text
+            fg={active() ? selFg : theme.text}
+            attributes={active() ? TextAttributes.BOLD : undefined}
+            wrapMode="none"
+          >
             {props.row.name}
           </text>
         </box>
@@ -249,12 +287,7 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
       <box>
         <For each={options}>
           {(option, index) => (
-            <box
-              flexDirection="row"
-              gap={1}
-              onMouseMove={() => setSelected(index())}
-              onMouseUp={() => option.run()}
-            >
+            <box flexDirection="row" gap={1} onMouseMove={() => setSelected(index())} onMouseUp={() => option.run()}>
               <text flexShrink={0} fg={theme.primary}>
                 {selected() === index() ? "›" : " "}
               </text>

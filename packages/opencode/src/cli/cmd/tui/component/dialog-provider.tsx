@@ -1,4 +1,4 @@
-import { createMemo, createSignal, onMount, Show } from "solid-js"
+import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js"
 import { useSync } from "@tui/context/sync"
 import { useLocal } from "@tui/context/local"
 import { map, pipe, sortBy } from "remeda"
@@ -128,19 +128,26 @@ export function DialogAltimateAuth() {
   const { theme } = useTheme()
   const sdk = useSDK()
   const dialog = useDialog()
+  const toast = useToast()
 
   onMount(async () => {
     const providerID = "altimate-backend"
-    const result = await sdk.client.provider.oauth.authorize({ providerID, method: 0 })
-    if (result.data?.method === "auto") {
-      dialog.replace(() => (
-        <AutoMethod providerID={providerID} title="Altimate LLM Gateway" index={0} authorization={result.data!} />
-      ))
-    } else if (result.data?.method === "code") {
-      dialog.replace(() => (
-        <CodeMethod providerID={providerID} title="Altimate LLM Gateway" index={0} authorization={result.data!} />
-      ))
-    } else {
+    try {
+      const result = await sdk.client.provider.oauth.authorize({ providerID, method: 0 })
+      if (result.data?.method === "auto") {
+        dialog.replace(() => (
+          <AutoMethod providerID={providerID} title="Altimate LLM Gateway" index={0} authorization={result.data!} />
+        ))
+      } else if (result.data?.method === "code") {
+        dialog.replace(() => (
+          <CodeMethod providerID={providerID} title="Altimate LLM Gateway" index={0} authorization={result.data!} />
+        ))
+      } else {
+        dialog.clear()
+      }
+    } catch (err) {
+      // e.g. the loopback port is busy — don't hang on "Starting sign-in…".
+      toast.error(err instanceof Error ? err : new Error("Failed to start sign-in"))
       dialog.clear()
     }
   })
@@ -172,6 +179,13 @@ function AutoMethod(props: AutoMethodProps) {
   // altimate_change — success state: confirm inline (green) below the "waiting" line,
   // then auto-close, instead of jumping into the model picker.
   const [connected, setConnected] = createSignal(false)
+  // Guard against a late callback / auto-close firing after the dialog is dismissed.
+  let disposed = false
+  let closeTimer: ReturnType<typeof setTimeout> | undefined
+  onCleanup(() => {
+    disposed = true
+    if (closeTimer) clearTimeout(closeTimer)
+  })
 
   useKeyboard((evt) => {
     if (connected()) return
@@ -188,12 +202,14 @@ function AutoMethod(props: AutoMethodProps) {
       providerID: props.providerID,
       method: props.index,
     })
+    if (disposed) return
     if (result.error) {
       dialog.clear()
       return
     }
     await sdk.client.instance.dispose()
     await sync.bootstrap()
+    if (disposed) return
     // altimate_change start — mark setup complete (flips useReady → unlocks first-run chat/tips)
     markSetupComplete()
     // The gateway sign-in already shows the auth URL + "Waiting for authorization…".
@@ -204,9 +220,21 @@ function AutoMethod(props: AutoMethodProps) {
       const model = provider
         ? Object.entries(provider.models).find(([, info]) => info.status !== "deprecated")?.[0]
         : undefined
-      if (model) local.model.set({ providerID: props.providerID, modelID: model }, { recent: true })
+      if (!model) {
+        // Connected, but nothing usable to select — don't fake a green ✓; open the
+        // picker so the user can choose a model (or another provider).
+        toast.show({
+          message: "Connected, but no model is available yet — pick one to start.",
+          variant: "warning",
+        })
+        dialog.replace(() => <DialogModel />)
+        return
+      }
+      local.model.set({ providerID: props.providerID, modelID: model }, { recent: true })
       setConnected(true)
-      setTimeout(() => dialog.clear(), 5000)
+      closeTimer = setTimeout(() => {
+        if (!disposed) dialog.clear()
+      }, 5000)
       return
     }
     // altimate_change end

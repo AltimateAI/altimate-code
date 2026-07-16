@@ -97,12 +97,24 @@ async function startCallbackServer(): Promise<void> {
     html(200, HTML_SUCCESS)
   })
 
-  await new Promise<void>((resolve, reject) => {
-    // Bind to loopback only — the credential/abort endpoints must not be reachable
-    // from the LAN.
-    server!.listen(CALLBACK_PORT, "127.0.0.1", () => resolve())
-    server!.on("error", reject)
-  })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      // Bind to loopback only — the credential/abort endpoints must not be reachable
+      // from the LAN.
+      server!.listen(CALLBACK_PORT, "127.0.0.1", () => resolve())
+      server!.on("error", reject)
+    })
+  } catch (err) {
+    // Reset so a retry isn't blocked by the `if (server) return` guard, and surface
+    // a clear reason (e.g. the port is already taken) instead of hanging.
+    server = undefined
+    const code = (err as NodeJS.ErrnoException)?.code
+    throw new Error(
+      code === "EADDRINUSE"
+        ? `Port ${CALLBACK_PORT} is already in use — close whatever is using it and try again.`
+        : `Could not start the sign-in server: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
 }
 
 function stopCallbackServer() {
@@ -166,6 +178,11 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
               async callback() {
                 try {
                   const creds = await result
+                  // The instance name comes from the browser callback; validate it
+                  // before persisting (the manual paste path validates too).
+                  if (!AltimateApi.isValidInstanceName(creds.instance)) {
+                    throw new Error(`invalid instance name from callback: ${creds.instance}`)
+                  }
                   // Persist to ~/.altimate/altimate.json — the provider loader
                   // reads this first (it carries the instance/tenant + api_url
                   // the generic auth.json store can't).
@@ -175,7 +192,10 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                     altimateApiKey: creds.api_key,
                   })
                   return { type: "success", key: creds.api_key, provider: "altimate-backend" }
-                } catch {
+                } catch (err) {
+                  // Log the reason (CSRF / timeout / invalid instance / …). Runs in the
+                  // server process, so this goes to the log, not the TUI display.
+                  console.error("[altimate] gateway sign-in failed:", err instanceof Error ? err.message : err)
                   return { type: "failed" }
                 } finally {
                   // Keep the shared server up while another flow is still waiting.
