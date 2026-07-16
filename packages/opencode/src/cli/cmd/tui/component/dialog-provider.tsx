@@ -585,16 +585,11 @@ export function GatewayFlow() {
     dialog.clear()
   }
 
-  const spinnerText = createMemo(() => {
-    switch (phase()) {
-      case "auth":
-        return "Waiting for authorization..."
-      case "naming":
-        return "Waiting for you to finish signup in the browser (naming your instance)..."
-      case "provisioning":
-        return "Provisioning your instance..."
-    }
-  })
+  // Provisioning is a WEB-side process (the browser shows "Provisioning your
+  // environment…" then "Connected"); the CLI only ever waits for the finished
+  // result — one spinner text for the whole wait, no terminal-side provisioning
+  // step. `phase` is kept solely to hide the link/code once sign-in completes.
+  const spinnerText = () => "Waiting for authentication..."
 
   return (
     <box paddingLeft={2} paddingRight={2} gap={1} paddingBottom={1}>

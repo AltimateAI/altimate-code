@@ -480,9 +480,10 @@ function App() {
   // altimate_change start — picker-first first run: on a fresh launch with no valid
   // credentials, the model/provider picker IS the first screen — no welcome-then-
   // type-/connect step. Fires once per launch when sync first completes; returning
-  // users (ready at boot) never see it. Dismissing it (esc) leaves the calm
-  // "Type /connect…" placeholder; the no-dead-chat invariant is still enforced at
-  // submit time (prompt/index.tsx) and the command menu stays filtered until ready.
+  // users (ready at boot) never see it. Dismissing it (esc) leaves the normal
+  // input; the no-dead-chat invariant is still enforced at submit time
+  // (prompt/index.tsx routes any message back into the picker) and the command
+  // menu stays filtered until ready.
   let firstRunPickerDone = false
   createEffect(
     on(

@@ -310,6 +310,57 @@ export function instancePage(userCode: string, suggested: string, opts: { error?
 }
 
 // ---------------------------------------------------------------------------
+// Page 2c — /provisioning  (web-side provisioning indicator → Connected)
+// ---------------------------------------------------------------------------
+export function provisioningPage(userCode: string, email: string): string {
+  const body = `
+    <div style="text-align:center;padding-top:8px">
+      <div id="prov-state">
+        <div class="spinner" aria-hidden="true"></div>
+        <h1 style="font-size:28px">Provisioning your environment…</h1>
+        <p class="sub" style="margin-top:12px">Setting up your Altimate instance — this takes a moment.</p>
+      </div>
+      <div id="done-state" style="display:none">
+        <div style="width:68px;height:68px;border-radius:50%;background:rgba(34,160,107,.12);
+             display:flex;align-items:center;justify-content:center;margin:0 auto 22px">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M5 12.5l4.5 4.5L19 7.5" stroke="${BRAND.success}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h1 style="font-size:28px">Connected</h1>
+        <p class="sub" style="margin-top:12px">Signed in as ${escapeHtml(email)}. Your instance is ready.</p>
+        <p class="sub" style="margin-top:6px">Return to your terminal — this tab can be closed.</p>
+      </div>
+    </div>
+  `
+  const extraCss = `
+    .spinner { width: 44px; height: 44px; margin: 0 auto 24px; border-radius: 50%;
+               border: 4px solid var(--border); border-top-color: var(--blue);
+               animation: spin 0.9s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  `
+  const extraJs = `
+    (function () {
+      function poll() {
+        fetch('/web/instance/status?code=${encodeURIComponent(userCode)}')
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d.status === 'ready') {
+              document.getElementById('prov-state').style.display = 'none';
+              document.getElementById('done-state').style.display = 'block';
+              return;
+            }
+            setTimeout(poll, 1000);
+          })
+          .catch(function () { setTimeout(poll, 1500); });
+      }
+      poll();
+    })();
+  `
+  return altimateShell({ title: "Provisioning · Altimate AI", body, extraCss, extraJs })
+}
+
+// ---------------------------------------------------------------------------
 // Page 3 — /connected
 // ---------------------------------------------------------------------------
 export function connectedPage(email: string): string {

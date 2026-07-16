@@ -58,29 +58,16 @@ export function WelcomePanel() {
           <text fg={theme.accent} attributes={TextAttributes.BOLD}>
             Tips for getting started
           </text>
-          <Show
-            when={ready()}
-            fallback={
-              <text wrapMode="word" width="100%">
-                <span style={{ fg: theme.textMuted }}>Run </span>
-                <span style={{ fg: theme.primary }}>/connect</span>
-                <span style={{ fg: theme.textMuted }}>
-                  {" "}
-                  to pick your AI model provider — 75+ providers supported · Altimate LLM Gateway recommended (10M free
-                  tokens)
-                </span>
-              </text>
-            }
-          >
-            <text wrapMode="word" width="100%">
-              <span style={{ fg: theme.textMuted }}>Now connect your warehouse or dbt project — run </span>
-              <span style={{ fg: theme.primary }}>/discover</span>
-              <span style={{ fg: theme.textMuted }}>
-                {" "}
-                to detect your data stack, then just say what you want to do
-              </span>
-            </text>
-          </Show>
+          {/* static copy — the picker opens by itself on first run, so no
+              "/connect" instruction is needed here */}
+          <text wrapMode="word" width="100%">
+            <span style={{ fg: theme.textMuted }}>Now connect your warehouse or dbt project — run </span>
+            <span style={{ fg: theme.primary }}>/discover</span>
+            <span style={{ fg: theme.textMuted }}>
+              {" "}
+              to detect your data stack, then just say what you want to do
+            </span>
+          </text>
         </box>
         <box border={["top"]} borderColor={theme.border} />
         <box gap={0}>

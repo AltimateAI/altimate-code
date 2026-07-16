@@ -27,7 +27,7 @@ import {
   rotateToken,
   startProvisioning,
 } from "./state"
-import { connectedPage, devInboxPage, googleChooserPage, instancePage, registerPage, verifyPage } from "./pages"
+import { connectedPage, devInboxPage, googleChooserPage, instancePage, provisioningPage, registerPage, verifyPage } from "./pages"
 
 const PORT = Number(process.env.PORT ?? 8787)
 const TOKEN_TTL_SECONDS = 3600
@@ -215,7 +215,26 @@ async function handle(req: Request): Promise<Response> {
     }
     startProvisioning(session, name)
     logEvent("instance_provisioning", { name })
-    return redirect("/connected")
+    // Provisioning is shown WEB-side: spinner page that flips to "Connected"
+    // when ready (the CLI just waits for authentication and consumes the key).
+    return redirect(`/provisioning?code=${encodeURIComponent(session.userCode)}`)
+  }
+
+  if (pathname === "/provisioning" && method === "GET") {
+    const code = url.searchParams.get("code") ?? ""
+    const session = getByUser(code)
+    if (!session || session.instanceStatus === "none") return html(errorPage("Complete sign-in first."), 404)
+    return html(provisioningPage(session.userCode, session.email ?? ""))
+  }
+
+  // Web-side provisioning status (keyed by user_code; no key material returned —
+  // the api_key travels only through the bearer-authenticated GET /api/instance)
+  if (pathname === "/web/instance/status" && method === "GET") {
+    const code = url.searchParams.get("code") ?? ""
+    const session = getByUser(code)
+    if (!session) return json({ error: "unknown session" }, 404)
+    const result = pollInstance(session)
+    return json({ status: result.status === "ready" ? "ready" : "provisioning" })
   }
 
   // ---- API: credential validation (mirrors the real backend's endpoint used by

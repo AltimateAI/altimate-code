@@ -874,8 +874,8 @@ export function Prompt(props: PromptProps) {
   })
 
   const placeholderText = createMemo(() => {
-    // altimate_change — first-run guidance (no lock framing)
-    if (!ready() && !props.sessionID) return "Type /connect to set up your AI provider"
+    // altimate_change — no "/connect" instruction needed: the picker opens by itself
+    // on first run, and submitting any message routes back into it until ready.
     if (props.sessionID) return undefined
     if (store.mode === "shell") {
       const example = SHELL_PLACEHOLDERS[store.placeholder % SHELL_PLACEHOLDERS.length]
