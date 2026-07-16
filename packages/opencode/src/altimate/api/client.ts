@@ -196,6 +196,35 @@ export namespace AltimateApi {
     }
   }
 
+  /**
+   * Exchange a short-lived social `login_token` for the user's gateway
+   * `auth_token` via POST {altimateUrl}/auth/social/exchange. The token is
+   * one-time and short-lived, which keeps the raw api_key out of the loopback
+   * callback URL. Throws on a non-ok response or a missing `auth_token`.
+   */
+  export async function exchangeSocialToken(altimateUrl: string, instance: string, token: string): Promise<string> {
+    const url = `${altimateUrl.replace(/\/+$/, "")}/auth/social/exchange`
+    // upstream_fix parity: bound the request so a network stall can't hang the callback.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 15_000)
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "x-tenant": instance,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ token }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout))
+    if (!res.ok) {
+      const body = await res.text().catch(() => "")
+      throw new Error(`Social token exchange failed (${res.status} ${res.statusText}) ${body}`)
+    }
+    const data = (await res.json()) as { auth_token?: string }
+    if (!data.auth_token) throw new Error("Social token exchange did not return an auth_token")
+    return data.auth_token
+  }
+
   async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {
     const url = `${creds.altimateUrl}${endpoint}`
     const res = await fetch(url, {

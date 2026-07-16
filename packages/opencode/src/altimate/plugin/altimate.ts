@@ -36,7 +36,9 @@ const HTML_ERROR = (msg: string) => `<!doctype html><meta charset="utf-8"><title
 interface CallbackResult {
   api_url: string
   instance: string
-  api_key: string
+  // Short-lived, one-time login_token delivered by the browser. Exchanged for
+  // the gateway auth_token in callback() — the raw api_key never rides in the URL.
+  token: string
 }
 
 interface Pending {
@@ -83,17 +85,17 @@ async function startCallbackServer(): Promise<void> {
       return
     }
 
-    const apiKey = url.searchParams.get("key")
+    const token = url.searchParams.get("token")
     const instance = url.searchParams.get("instance")
     const apiUrl = url.searchParams.get("url") || DEFAULT_API_URL
-    if (!apiKey || !instance) {
+    if (!token || !instance) {
       const msg = "Missing credential in callback"
       entry.reject(new Error(msg))
       html(400, HTML_ERROR(msg))
       return
     }
 
-    entry.resolve({ api_url: apiUrl, instance, api_key: apiKey })
+    entry.resolve({ api_url: apiUrl, instance, token })
     html(200, HTML_SUCCESS)
   })
 
@@ -183,15 +185,18 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                   if (!AltimateApi.isValidInstanceName(creds.instance)) {
                     throw new Error(`invalid instance name from callback: ${creds.instance}`)
                   }
+                  // Exchange the short-lived, one-time login_token for the gateway
+                  // auth_token server-side — the raw api_key never rides in the URL.
+                  const authToken = await AltimateApi.exchangeSocialToken(creds.api_url, creds.instance, creds.token)
                   // Persist to ~/.altimate/altimate.json — the provider loader
                   // reads this first (it carries the instance/tenant + api_url
                   // the generic auth.json store can't).
                   await AltimateApi.saveCredentials({
                     altimateUrl: creds.api_url,
                     altimateInstanceName: creds.instance,
-                    altimateApiKey: creds.api_key,
+                    altimateApiKey: authToken,
                   })
-                  return { type: "success", key: creds.api_key, provider: "altimate-backend" }
+                  return { type: "success", key: authToken, provider: "altimate-backend" }
                 } catch (err) {
                   // Log the reason (CSRF / timeout / invalid instance / …). Runs in the
                   // server process, so this goes to the log, not the TUI display.
