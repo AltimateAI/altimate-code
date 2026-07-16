@@ -27,7 +27,7 @@ import {
   rotateToken,
   startProvisioning,
 } from "./state"
-import { connectedPage, devInboxPage, googleChooserPage, instancePage, provisioningPage, registerPage, verifyPage } from "./pages"
+import { connectedPage, devInboxPage, googleChooserPage, instancePage, loginPage, provisioningPage, registerPage, verifyPage } from "./pages"
 
 const PORT = Number(process.env.PORT ?? 8787)
 const TOKEN_TTL_SECONDS = 3600
@@ -192,7 +192,11 @@ async function handle(req: Request): Promise<Response> {
     const session = getByUser(code)
     if (!session || session.status !== "authorized") return html(errorPage("Complete sign-in first."), 404)
     if (session.instanceStatus !== "none") return redirect("/connected")
-    return html(instancePage(session.userCode, session.suggestedInstance ?? "workspace"))
+    return html(
+      instancePage(session.userCode, session.suggestedInstance ?? "workspace", {
+        askAttribution: session.attribution === undefined,
+      }),
+    )
   }
 
   if (pathname === "/web/instance" && method === "POST") {
@@ -202,16 +206,35 @@ async function handle(req: Request): Promise<Response> {
     const session = getByUser(code)
     if (!session || session.status !== "authorized") return html(errorPage("Complete sign-in first."), 404)
     if (session.instanceStatus !== "none") return redirect("/connected")
+    const askAttribution = session.attribution === undefined
     if (!VALID_TENANT_REGEX.test(name)) {
       return html(
         instancePage(session.userCode, name, {
           error: "Use lowercase letters, numbers, - or _, starting with a letter or underscore.",
+          askAttribution,
         }),
       )
     }
     if (isInstanceTaken(name)) {
       logEvent("instance_name_taken", { name })
-      return html(instancePage(session.userCode, name, { error: `"${name}" is taken — try ${suggestInstance(name)}` }))
+      return html(
+        instancePage(session.userCode, name, {
+          error: `"${name}" is taken — try ${suggestInstance(name)}`,
+          askAttribution,
+        }),
+      )
+    }
+    if (askAttribution) {
+      session.attribution = {
+        referral: String(body.referral ?? "").trim() || undefined,
+        source: String(body.source ?? "").trim() || undefined,
+      }
+    }
+    if (session.attribution?.referral || session.attribution?.source) {
+      logEvent("signup_attribution", {
+        referral: session.attribution.referral ?? null,
+        source: session.attribution.source ?? null,
+      })
     }
     startProvisioning(session, name)
     logEvent("instance_provisioning", { name })
@@ -288,13 +311,18 @@ async function handle(req: Request): Promise<Response> {
       logEvent("signup_blocked_personal_email", { email })
       return html(
         registerPage(code, {
-          open: true,
           emailValue: email,
           emailError: "Please use your work email — personal email domains aren't supported.",
         }),
       )
     }
-    recordPendingEmail(code, email)
+    // Attribution captured on the email form (Screen 1) — /instance will skip these.
+    recordPendingEmail(code, email, {
+      name: String(body.name ?? "").trim() || undefined,
+      referral: String(body.referral ?? "").trim() || undefined,
+      source: String(body.source ?? "").trim() || undefined,
+      newsletter: body.newsletter === "1",
+    })
     logEvent("email_signup_started", { email })
     return redirect(`/verify?code=${encodeURIComponent(code)}&email=${encodeURIComponent(email)}`)
   }
@@ -309,11 +337,33 @@ async function handle(req: Request): Promise<Response> {
     const session = getByUser(code)
     if (pending && session) {
       authorize(session, pending.email)
+      session.attribution = pending.attribution
       logEvent("device_authorized", { method: "email", email: pending.email })
       // Continue the same web flow: name the instance right after verification.
       return redirect(`/instance?code=${encodeURIComponent(session.userCode)}`)
     }
     return redirect("/dev/inbox")
+  }
+
+  // ---- Web: sign in ----
+  if (pathname === "/login" && method === "GET") {
+    const code = url.searchParams.get("code") ?? ""
+    return html(loginPage(code))
+  }
+
+  if (pathname === "/web/login" && method === "POST") {
+    const body = await readBody(req)
+    const code = String(body.code ?? "")
+    const email = String(body.email ?? "").trim()
+    const session = getByUser(code)
+    if (!session) return html(errorPage("Unknown or expired sign-in session."), 404)
+    if (isPersonalEmail(email) || !/.+@.+\..+/.test(email)) {
+      return html(loginPage(code, { error: "Please sign in with your work email." }))
+    }
+    // Prototype: any work email + password signs in (no real account store).
+    authorize(session, email)
+    logEvent("device_authorized", { method: "password", email })
+    return redirect(`/instance?code=${encodeURIComponent(session.userCode)}`)
   }
 
   // ---- Web: Altimate pages ----

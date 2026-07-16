@@ -27,15 +27,24 @@ export interface Session {
   refreshToken?: string
   instance?: string
   instanceStatus: InstanceStatus
+  attribution?: Attribution
   provisionReadyAt?: number
   apiKey?: string
   createdAt: number
+}
+
+export interface Attribution {
+  name?: string
+  referral?: string
+  source?: string // "How did you hear about us"
+  newsletter?: boolean
 }
 
 export interface PendingEmail {
   userCode: string
   email: string
   verified: boolean
+  attribution?: Attribution
 }
 
 const byDevice = new Map<string, Session>()
@@ -202,8 +211,13 @@ export function pollInstance(session: Session): { status: InstanceStatus; instan
   return { status: session.instanceStatus, instance: session.instance, apiKey: session.apiKey }
 }
 
-export function recordPendingEmail(userCode: string, email: string): void {
-  pendingEmails.set(userCode.toUpperCase().trim(), { userCode: userCode.toUpperCase().trim(), email, verified: false })
+export function recordPendingEmail(userCode: string, email: string, attribution?: Attribution): void {
+  pendingEmails.set(userCode.toUpperCase().trim(), {
+    userCode: userCode.toUpperCase().trim(),
+    email,
+    verified: false,
+    attribution,
+  })
 }
 
 export function listPendingEmails(): PendingEmail[] {

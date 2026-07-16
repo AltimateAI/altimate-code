@@ -28,9 +28,21 @@ const PW_RULES = [
 // ---------------------------------------------------------------------------
 // Page 1 — /register
 // ---------------------------------------------------------------------------
+export const HEAR_ABOUT_OPTIONS = [
+  "Recommendation from a colleague or friend",
+  "VSCode Marketplace",
+  "Social Media (Twitter, LinkedIn, Facebook)",
+  "Online Advertisement",
+  "Blog Post",
+  "Educational Course or Workshop",
+  "Other",
+]
+
+const hearAboutDatalist = `<datalist id="hear-options">${HEAR_ABOUT_OPTIONS.map((o) => `<option value="${o}"></option>`).join("")}</datalist>`
+
 export function registerPage(
   userCode: string,
-  opts: { open?: boolean; emailValue?: string; emailError?: string } = {},
+  opts: { emailValue?: string; emailError?: string } = {},
 ): string {
   const rulesHtml = PW_RULES.map(
     (r) => `<li data-rule="${r.id}"><span class="mark">✗</span><span>${r.label}</span></li>`,
@@ -46,49 +58,53 @@ export function registerPage(
       ${googleGMark}<span>Continue with Google</span>
     </a>
 
-    <div class="divider"></div>
-    <div style="text-align:center;margin-top:6px">
-      <button type="button" class="link-btn" id="email-toggle">or use email instead</button>
-    </div>
+    <div class="divider">or</div>
+    <p class="section-label">or use email instead</p>
 
-    <div id="email-wrap" class="collapsible${opts.open ? " open" : ""}">
-      <form id="email-form" method="POST" action="/auth/email">
-        <input type="hidden" name="code" value="${userCode}" />
-        <label class="field-label" for="email">Work email</label>
-        <input class="field" type="email" id="email" name="email" placeholder="name@company.com" autocomplete="email"${emailValue} />
-        <div id="email-err" class="inline-err">${emailErr}</div>
+    <form id="email-form" method="POST" action="/auth/email">
+      <input type="hidden" name="code" value="${userCode}" />
 
-        <label class="field-label" for="password">Password</label>
-        <div class="pw-row">
-          <input class="field" type="password" id="password" name="password" placeholder="Password" autocomplete="new-password" />
-          <button type="button" class="pw-eye" id="pw-eye" aria-label="Show password">👁</button>
-        </div>
+      <label class="field-label" for="fullname">Name</label>
+      <input class="field" type="text" id="fullname" name="name" placeholder="Name" autocomplete="name" />
 
-        <div id="pw-rules" class="pw-panel">
-          <div class="pw-title">Password Should:</div>
-          <ul>${rulesHtml}</ul>
-        </div>
+      <label class="field-label" for="email">Business Email</label>
+      <input class="field" type="email" id="email" name="email" placeholder="name@company.com" autocomplete="email"${emailValue} />
+      <div id="email-err" class="inline-err">${emailErr}</div>
 
-        <button type="submit" class="btn btn-primary" id="create-btn" disabled style="margin-top:22px">Create account</button>
-      </form>
-    </div>
+      <label class="field-label" for="referral">Referral code <span class="opt">(Optional)</span></label>
+      <input class="field" type="text" id="referral" name="referral" placeholder="e.g. WELCOME2026" autocomplete="off" />
 
-    <div class="value-section">
-      <p class="value-hook">Free to start — 10M tokens included.</p>
-      <ul class="value-list">
-        <li>Build &amp; ship dbt pipelines</li>
-        <li>Optimize warehouse cost &amp; speed</li>
-        <li>Govern data: lineage, PII, tests</li>
-      </ul>
-    </div>
+      <label class="field-label" for="password">Password</label>
+      <div class="pw-row">
+        <input class="field" type="password" id="password" name="password" placeholder="Password" autocomplete="new-password" />
+        <button type="button" class="pw-eye" id="pw-eye" aria-label="Show password">👁</button>
+      </div>
+
+      <div id="pw-rules" class="pw-panel">
+        <div class="pw-title">Password Should:</div>
+        <ul>${rulesHtml}</ul>
+      </div>
+
+      <label class="field-label" for="source">How did you hear about us <span class="opt">(Optional)</span></label>
+      <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" />
+      ${hearAboutDatalist}
+
+      <label class="check-row">
+        <input type="checkbox" name="newsletter" value="1" checked />
+        <span>Subscribe to our newsletter &amp; stay updated</span>
+      </label>
+
+      <button type="submit" class="btn btn-primary" id="create-btn" disabled style="margin-top:22px">Sign Up</button>
+    </form>
 
     <p class="legal">By creating an account, you agree to the
       <b>Terms &amp; Conditions</b> and our <b>Privacy Policy</b>.</p>
+    <p class="foot-link">Already have an account? <a href="/login?code=${encodeURIComponent(userCode)}"><b>Sign In</b></a></p>
   `
 
   const extraCss = `
-    .collapsible { max-height: 0; opacity: 0; overflow: hidden; transition: max-height .45s ease, opacity .35s ease; }
-    .collapsible.open { max-height: 760px; opacity: 1; }
+    .section-label { text-align: center; color: var(--muted); font-size: 14px; margin: 4px 0 6px; }
+    .opt { color: var(--muted); font-weight: 400; }
     .pw-row { position: relative; }
     .pw-eye { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none;
               border: none; cursor: pointer; font-size: 15px; opacity: .6; }
@@ -100,29 +116,32 @@ export function registerPage(
     .pw-panel li.ok { color: var(--success); }
     .pw-panel li .mark { font-weight: 700; width: 14px; }
     .inline-err { color: var(--error); font-size: 13px; margin-top: 8px; min-height: 0; }
-    .value-section { margin-top: 36px; }
-    .value-hook { color: var(--text); font-size: 14px; font-weight: 600; margin-bottom: 16px; }
-    .value-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
-    .value-list li { color: var(--muted); font-size: 13.5px; padding-left: 24px; position: relative; }
-    .value-list li::before { content: "✓"; position: absolute; left: 2px; color: var(--success); font-weight: 700; }
+    .check-row { display: flex; align-items: center; gap: 10px; margin-top: 20px; color: var(--text);
+                 font-size: 14px; cursor: pointer; }
+    .check-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+    .foot-link { text-align: center; color: var(--muted); font-size: 14px; margin-top: 18px; }
+    .foot-link a { color: var(--accent); text-decoration: none; }
   `
 
   const rulesJs = PW_RULES.map((r) => `{ id: "${r.id}", test: (v) => ${r.test} }`).join(",\n")
 
   const extraJs = `
     (function () {
-      var toggle = document.getElementById('email-toggle');
-      var wrap = document.getElementById('email-wrap');
-      toggle.addEventListener('click', function () {
-        wrap.classList.toggle('open');
-        if (wrap.classList.contains('open')) document.getElementById('email').focus();
-      });
-
       var pw = document.getElementById('password');
       var panel = document.getElementById('pw-rules');
       var email = document.getElementById('email');
+      var nameInput = document.getElementById('fullname');
+      var emailErr = document.getElementById('email-err');
       var createBtn = document.getElementById('create-btn');
       var rules = [${rulesJs}];
+      var consumer = ['gmail.com','googlemail.com','yahoo.com','hotmail.com','outlook.com','live.com','icloud.com','me.com','aol.com','proton.me','protonmail.com'];
+
+      function emailStatus() {
+        var v = email.value.trim();
+        if (!/.+@.+\\..+/.test(v)) return 'incomplete';
+        var domain = v.split('@')[1].toLowerCase();
+        return consumer.indexOf(domain) !== -1 ? 'consumer' : 'ok';
+      }
 
       function refresh() {
         var v = pw.value;
@@ -136,11 +155,13 @@ export function registerPage(
           li.classList.toggle('ok', ok);
           li.querySelector('.mark').textContent = ok ? '✓' : '✗';
         });
-        var emailOk = /.+@.+\\..+/.test(email.value);
-        createBtn.disabled = !(allOk && emailOk);
+        var status = emailStatus();
+        emailErr.textContent = status === 'consumer' ? 'Please use your work email — personal email domains aren\u2019t supported.' : '';
+        createBtn.disabled = !(allOk && status === 'ok' && nameInput.value.trim().length > 0);
       }
       pw.addEventListener('input', refresh);
       email.addEventListener('input', refresh);
+      nameInput.addEventListener('input', refresh);
 
       document.getElementById('pw-eye').addEventListener('click', function () {
         pw.type = pw.type === 'password' ? 'text' : 'password';
@@ -149,6 +170,56 @@ export function registerPage(
   `
 
   return altimateShell({ title: "Sign Up · Altimate AI", body, extraCss, extraJs })
+}
+
+// ---------------------------------------------------------------------------
+// Page 1b — /login  (Sign In: Google on top, everything else as live)
+// ---------------------------------------------------------------------------
+export function loginPage(userCode: string, opts: { error?: string } = {}): string {
+  const body = `
+    <h1>Sign In</h1>
+
+    <a class="btn btn-oauth" href="/oauth/google?code=${encodeURIComponent(userCode)}">
+      ${googleGMark}<span>Continue with Google</span>
+    </a>
+
+    <div class="divider">or</div>
+
+    <form id="login-form" method="POST" action="/web/login">
+      <input type="hidden" name="code" value="${escapeAttr(userCode)}" />
+
+      <label class="field-label" for="email">Email</label>
+      <input class="field" type="email" id="email" name="email" placeholder="name@company.com" autocomplete="email" />
+      <div class="inline-err">${opts.error ? escapeHtml(opts.error) : ""}</div>
+
+      <label class="field-label" for="password">Password</label>
+      <input class="field" type="password" id="password" name="password" placeholder="Password" autocomplete="current-password" />
+
+      <div class="row-between">
+        <label class="check-row" style="margin-top:0">
+          <input type="checkbox" name="remember" value="1" />
+          <span>Remember me</span>
+        </label>
+        <a class="small-link" href="#">Forgot password?</a>
+      </div>
+
+      <button type="submit" class="btn btn-primary" style="margin-top:22px">Sign In</button>
+    </form>
+
+    <p class="foot-link">Don&#39;t have an account? <a href="/register?code=${encodeURIComponent(userCode)}"><b>Register</b></a></p>
+  `
+
+  const extraCss = `
+    .inline-err { color: var(--error); font-size: 13px; margin-top: 8px; min-height: 0; }
+    .check-row { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: 14px; cursor: pointer; }
+    .check-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+    .row-between { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }
+    .small-link { color: var(--accent); font-size: 14px; text-decoration: none; }
+    .foot-link { text-align: center; color: var(--muted); font-size: 14px; margin-top: 22px; }
+    .foot-link a { color: var(--accent); text-decoration: none; }
+  `
+
+  return altimateShell({ title: "Sign In · Altimate AI", body, extraCss })
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +309,22 @@ export function googleChooserPage(userCode: string): string {
 // ---------------------------------------------------------------------------
 // Page 2b — /instance  (name your instance; same web flow, register skin)
 // ---------------------------------------------------------------------------
-export function instancePage(userCode: string, suggested: string, opts: { error?: string } = {}): string {
+export function instancePage(
+  userCode: string,
+  suggested: string,
+  opts: { error?: string; askAttribution?: boolean } = {},
+): string {
+  // De-dup: on the email path these were already offered on /register — don't ask twice.
+  const attributionFields = opts.askAttribution
+    ? `
+      <label class="field-label" for="referral">Referral code <span class="opt">(Optional)</span></label>
+      <input class="field" type="text" id="referral" name="referral" placeholder="e.g. WELCOME2026" autocomplete="off" />
+
+      <label class="field-label" for="source">How did you hear about us <span class="opt">(Optional)</span></label>
+      <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" />
+      ${hearAboutDatalist}
+    `
+    : ""
   const body = `
     <h1>Name your instance</h1>
     <p class="sub">Almost done — confirm the name and we'll provision it for you.</p>
@@ -250,6 +336,7 @@ export function instancePage(userCode: string, suggested: string, opts: { error?
              autocomplete="off" autocapitalize="none" spellcheck="false" autofocus />
       <div id="status" class="status-line">${opts.error ? `<span class="err">${escapeHtml(opts.error)}</span>` : ""}</div>
       <p class="help-line">This names your Altimate instance. You can rename it later.</p>
+      ${attributionFields}
       <button type="submit" class="btn btn-primary" id="continue-btn" style="margin-top:18px">Continue</button>
     </form>
 
@@ -264,6 +351,7 @@ export function instancePage(userCode: string, suggested: string, opts: { error?
     .status-line .use-btn { background: none; border: none; padding: 0; color: var(--accent);
                             font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
     .help-line { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .opt { color: var(--muted); font-weight: 400; }
   `
 
   const extraJs = `
