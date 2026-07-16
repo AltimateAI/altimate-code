@@ -61,7 +61,7 @@ export function WelcomePanel() {
           {/* static copy — the picker opens by itself on first run, so no
               "/connect" instruction is needed here */}
           <text wrapMode="word" width="100%">
-            <span style={{ fg: theme.textMuted }}>Now connect your warehouse or dbt project — run </span>
+            <span style={{ fg: theme.textMuted }}>Connect your warehouse or dbt project — run </span>
             <span style={{ fg: theme.primary }}>/discover</span>
             <span style={{ fg: theme.textMuted }}>
               {" "}
