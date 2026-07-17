@@ -19,7 +19,7 @@ import { useToast } from "../ui/toast"
 import { AltimateApi } from "../../../../altimate/api/client"
 // altimate_change end
 
-const PROVIDER_PRIORITY: Record<string, number> = {
+export const PROVIDER_PRIORITY: Record<string, number> = {
   // altimate_change start — Part 1 onboarding: Altimate LLM Gateway is the
   // recommended default first; the BYOK providers rank next; OpenCode Zen loses
   // its "Recommended" tag and drops below. (Big Pickle occupies priority 4, injected

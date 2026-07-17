@@ -4,7 +4,7 @@ import { useSync } from "@tui/context/sync"
 import { map, pipe, flatMap, entries, filter, sortBy } from "remeda"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useDialog } from "@tui/ui/dialog"
-import { createDialogProviderOptions, DialogProvider, WARNLIST } from "./dialog-provider"
+import { createDialogProviderOptions, DialogProvider, WARNLIST, PROVIDER_PRIORITY } from "./dialog-provider"
 import { useKeybind } from "../context/keybind"
 import * as fuzzysort from "fuzzysort"
 // altimate_change — onboarding helpers (readiness state, welcome picker, Big Pickle
@@ -57,6 +57,9 @@ export function DialogModel(props: { providerID?: string }) {
     const readyOptions = pipe(
       sync.data.provider,
       filter((provider) => providerReady(provider.id)),
+      // altimate_change — order ready providers by the same PROVIDER_PRIORITY as the
+      // welcome/NEEDS-SETUP lists so the Altimate LLM Gateway leads the full list too.
+      sortBy((provider) => PROVIDER_PRIORITY[provider.id] ?? 99),
       flatMap((provider) =>
         pipe(
           provider.models,
