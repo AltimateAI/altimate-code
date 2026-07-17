@@ -65,10 +65,31 @@ Connect to a remote MCP server over HTTP:
 |-------|------|-------------|
 | `type` | `"remote"` | Remote HTTP server |
 | `url` | `string` | Server URL |
-| `headers` | `object` | Custom HTTP headers |
+| `headers` | `object` | Static custom HTTP headers |
+| `headersCommand` | `object` | Headers whose values are produced by running a command (see below) |
 | `enabled` | `boolean` | Enable/disable (default: `true`) |
 | `oauth` | `object \| false` | OAuth configuration |
 | `timeout` | `number` | Timeout in ms (default: `5000`) |
+
+## Dynamic / Bearer-Token Headers (`headersCommand`)
+
+For servers gated by short-lived bearer tokens (e.g. **Microsoft Fabric Core MCP**, Azure Entra ID), use `headersCommand` to compute a header value by running a command. Each value is an **argv array** run directly via `execFile` (no shell — values are not subject to shell injection unless you explicitly invoke one like `sh -c`). It is **re-resolved on every connect**, so expiring tokens refresh automatically without editing config:
+
+```json
+{
+  "mcp": {
+    "fabric": {
+      "type": "remote",
+      "url": "https://api.fabric.microsoft.com/v1/mcp/core",
+      "headersCommand": {
+        "Authorization": ["sh", "-c", "printf 'Bearer %s' \"$(az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv)\""]
+      }
+    }
+  }
+}
+```
+
+Values from `headersCommand` override matching keys in `headers` (case-insensitively). When an `Authorization` header is supplied (via `headers` or `headersCommand`) and `oauth` is not explicitly configured, **OAuth auto-detection is disabled** so the static/dynamic bearer token is not overridden by a competing OAuth flow.
 
 ## OAuth Authentication
 
@@ -92,13 +113,34 @@ For remote servers requiring OAuth:
 
 ## CLI Management
 
-```bash
-# List configured MCP servers
-altimate mcp
+Manage MCP servers from the command line with `altimate-code mcp`:
 
-# Test a server connection
-altimate mcp test my-tools
+```bash
+# List configured servers and their connection status (alias: ls)
+altimate-code mcp list
+
+# Add a local (stdio) server
+altimate-code mcp add --name my-tools --type local --command "node ./server.js" \
+  --env API_KEY=secret
+
+# Add a remote (HTTP) server, with an extra header
+altimate-code mcp add --name remote-tools --type remote \
+  --url https://example.com/mcp --header "Authorization=Bearer TOKEN"
+
+# Authenticate / re-authenticate an OAuth-enabled server
+altimate-code mcp auth my-tools
+
+# Remove stored OAuth credentials for a server
+altimate-code mcp logout my-tools
+
+# Remove a server from the config (alias: rm)
+altimate-code mcp remove my-tools
+
+# Debug an OAuth connection for a server
+altimate-code mcp debug my-tools
 ```
+
+`altimate-code mcp add` writes to the project config (`.altimate-code/altimate-code.json`) by default; pass `--global` to write to the global config (`~/.config/altimate-code/`) instead. Use `--type local` with `--command` for stdio servers, or `--type remote` with `--url` for HTTP servers; `--env` and `--header` are repeatable. OAuth is enabled by default (`--oauth`).
 
 ## Experimental Settings
 

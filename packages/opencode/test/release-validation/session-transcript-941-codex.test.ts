@@ -1,10 +1,13 @@
-import { describe, expect, test } from "bun:test"
+import { beforeAll, describe, expect, test } from "bun:test"
 import { Instance } from "../../src/project/instance"
 import { Server } from "../../src/server/server"
 import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { tmpdir } from "../fixture/fixture"
+import { prepareReleaseValidationDatabase } from "./db-prepare"
+
+beforeAll(() => prepareReleaseValidationDatabase())
 
 async function inProject<T>(fn: () => Promise<T>) {
   await using tmp = await tmpdir({ git: true })

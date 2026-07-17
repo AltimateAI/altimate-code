@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { Instance } from "../../src/project/instance"
 import { Server } from "../../src/server/server"
 import { Session } from "../../src/session"
@@ -6,12 +6,15 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { Log } from "../../src/util/log"
 import { tmpdir } from "../fixture/fixture"
+import { prepareReleaseValidationDatabase } from "./db-prepare"
 
 // Regression tests for PR #941 — session transcript REST endpoint
 // (packages/opencode/src/server/routes/session.ts).
 // Style + helpers mirror test/server/session-transcript.test.ts.
 
 Log.init({ print: false })
+
+beforeAll(() => prepareReleaseValidationDatabase())
 
 afterEach(async () => {
   await Instance.disposeAll()

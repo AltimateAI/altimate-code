@@ -18,6 +18,7 @@ import {
 } from "../../src/altimate/plugin/databricks"
 import { LLM } from "../../src/session/llm"
 import { DataDiffTool } from "../../src/altimate/tools/data-diff"
+import { initTool } from "../altimate/tool-fixture"
 import type { ModelMessage } from "ai"
 
 // ---------------------------------------------------------------------------
@@ -291,7 +292,7 @@ describe("toolNamesFromMessages — validation guards", () => {
 
 describe("data_diff tool description — release contract", () => {
   test("description mentions all 5 algorithms (auto, joindiff, hashdiff, profile, cascade)", async () => {
-    const info = await DataDiffTool.init()
+    const info = await initTool(DataDiffTool)
     expect(info.description).toContain("auto:")
     expect(info.description).toContain("joindiff:")
     expect(info.description).toContain("hashdiff:")
@@ -301,34 +302,23 @@ describe("data_diff tool description — release contract", () => {
   })
 
   test("description warns about PII/PHI/PCI data (Chaos Gremlin P0 partial fix)", async () => {
-    const info = await DataDiffTool.init()
+    const info = await initTool(DataDiffTool)
     expect(info.description.toLowerCase()).toMatch(/pii|phi|pci|compliance/)
     expect(info.description).toContain("profile")
   })
 
   test("description mentions partition threshold", async () => {
-    const info = await DataDiffTool.init()
+    const info = await initTool(DataDiffTool)
     expect(info.description.toLowerCase()).toContain("partition")
   })
 
   test("tool parameters enum includes cascade", async () => {
-    const info = await DataDiffTool.init()
-    const algorithmField = (info.parameters as any).shape?.algorithm
+    // altimate_change: post-v1.17.9 the new Tool API stores `parameters` as an opaque
+    // Effect Schema (no zod `.shape`). The introspectable parameter contract is now
+    // `info.jsonSchema` (zodToJsonSchema of the legacy zod params, via tool-zod-compat).
+    const info = await initTool(DataDiffTool)
+    const algorithmField = (info as any).jsonSchema?.properties?.algorithm
     expect(algorithmField).toBeDefined()
-    // Walk zod 4 .def tree through wrapper nodes (default, optional) to find the enum
-    let node: any = algorithmField
-    for (let i = 0; i < 6 && node; i++) {
-      const def = node.def ?? node._def
-      if (def?.entries && typeof def.entries === "object") {
-        expect(Object.keys(def.entries)).toContain("cascade")
-        return
-      }
-      if (def?.values && Array.isArray(def.values)) {
-        expect(def.values).toContain("cascade")
-        return
-      }
-      node = def?.innerType
-    }
-    throw new Error("Could not find enum values for algorithm field")
+    expect(algorithmField.enum).toContain("cascade")
   })
 })

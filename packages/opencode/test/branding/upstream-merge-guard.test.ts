@@ -22,8 +22,10 @@ describe("Installation script branding", () => {
   const installSrc = readText(join(srcDir, "installation", "index.ts"))
 
   test("USER_AGENT starts with `altimate-code/` not `opencode/`", () => {
-    expect(installSrc).toContain("USER_AGENT = `altimate-code/")
+    expect(installSrc).toContain("return `altimate-code/")
+    expect(installSrc).toContain("export const USER_AGENT = userAgent()")
     expect(installSrc).not.toMatch(/USER_AGENT\s*=\s*`opencode\//)
+    expect(installSrc).not.toMatch(/return\s+`opencode\//)
   })
 
   test("brew tap references AltimateAI/tap not anomalyco/tap", () => {
@@ -51,8 +53,8 @@ describe("Installation script branding", () => {
   test("method() detects npm-installed @altimateai/altimate-code, not opencode-ai", () => {
     // The installedName for npm/bun/pnpm must be our scoped package, not upstream
     const methodBlock = installSrc.slice(
-      installSrc.indexOf("export async function method()"),
-      installSrc.indexOf("export const UpgradeFailedError"),
+      installSrc.indexOf('method: Effect.fn("Installation.method")'),
+      installSrc.indexOf('latest: Effect.fn("Installation.latest")'),
     )
     expect(methodBlock).toContain("@altimateai/altimate-code")
     expect(methodBlock).not.toMatch(/installedName[^@]*opencode-ai/)
@@ -68,7 +70,10 @@ describe("Installation script branding", () => {
   })
 
   test("latest() fetches @altimateai/altimate-code from npm registry, not opencode-ai", () => {
-    const latestBlock = installSrc.slice(installSrc.indexOf("export async function latest("))
+    const latestBlock = installSrc.slice(
+      installSrc.indexOf('latest: Effect.fn("Installation.latest")'),
+      installSrc.indexOf('upgrade: Effect.fn("Installation.upgrade")'),
+    )
     // The npm registry fetch must use our package name
     expect(latestBlock).toContain("@altimateai/altimate-code")
     expect(latestBlock).not.toMatch(/registry.*opencode-ai/)
@@ -76,8 +81,8 @@ describe("Installation script branding", () => {
 
   test("getBrewFormula() references AltimateAI/tap/altimate-code", () => {
     const formulaBlock = installSrc.slice(
-      installSrc.indexOf("async function getBrewFormula()"),
-      installSrc.indexOf("export async function upgrade("),
+      installSrc.indexOf("const getBrewFormula = Effect.fnUntraced"),
+      installSrc.indexOf("const upgradeFailure ="),
     )
     expect(formulaBlock).toContain("AltimateAI/tap/altimate-code")
     expect(formulaBlock).not.toContain("anomalyco")
@@ -306,7 +311,7 @@ describe("No opencode.ai domain leaks in src/", () => {
 // 5b. TUI Branding (sidebar, headers, etc.)
 // ---------------------------------------------------------------------------
 describe("TUI branding", () => {
-  const sidebarPath = join(srcDir, "cli", "cmd", "tui", "routes", "session", "sidebar.tsx")
+  const sidebarPath = join(repoRoot, "packages", "tui", "src", "routes", "session", "sidebar.tsx")
   const sidebarContent = readText(sidebarPath)
 
   test("sidebar shows 'Altimate' not 'Open' as branded name", () => {

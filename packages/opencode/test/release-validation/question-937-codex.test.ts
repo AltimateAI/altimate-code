@@ -1,7 +1,11 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
 import { QuestionTool } from "../../src/tool/question"
 import * as QuestionModule from "../../src/question"
 import { SessionID, MessageID } from "../../src/session/schema"
+// altimate_change start — upstream v1.17.9 made tools Effect definitions (no static .init());
+// resolve the executable tool via the shared initTool fixture.
+import { initTool } from "../altimate/tool-fixture"
+// altimate_change end
 
 const ctx = {
   sessionID: SessionID.make("ses_question-937"),
@@ -47,12 +51,11 @@ async function withQuestionAsk<T>(
   implementation: typeof QuestionModule.Question.ask,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const original = QuestionModule.Question.ask
-  ;(QuestionModule.Question as any).ask = implementation
+  const askSpy = spyOn(QuestionModule.Question, "ask").mockImplementation(implementation)
   try {
     return await fn()
   } finally {
-    ;(QuestionModule.Question as any).ask = original
+    askSpy.mockRestore()
   }
 }
 
@@ -64,7 +67,7 @@ describe("release validation PR #937 question tool output contract", () => {
         calls++
         return [["Approve"], ["Read", "Write"]]
       }, async () => {
-        const tool = await QuestionTool.init()
+        const tool = await initTool(QuestionTool)
         const result = await tool.execute(
           {
             questions: [
@@ -97,7 +100,7 @@ describe("release validation PR #937 question tool output contract", () => {
   test("interactive formatting marks missing or empty answer slots as Unanswered", async () => {
     await withEnv({}, async () => {
       await withQuestionAsk(async () => [[]], async () => {
-        const tool = await QuestionTool.init()
+        const tool = await initTool(QuestionTool)
         const result = await tool.execute(
           {
             questions: [
@@ -129,7 +132,7 @@ describe("release validation PR #937 question tool output contract", () => {
         calls++
         return [["SHOULD_NOT_BE_USED"]]
       }, async () => {
-        const tool = await QuestionTool.init()
+        const tool = await initTool(QuestionTool)
         const result = await tool.execute({ questions: [colorQuestion] }, ctx)
 
         expect(calls).toBe(0)
@@ -152,7 +155,7 @@ describe("release validation PR #937 question tool output contract", () => {
           calls++
           return [["Red"]]
         }, async () => {
-          const tool = await QuestionTool.init()
+          const tool = await initTool(QuestionTool)
           const result = await tool.execute({ questions: [colorQuestion] }, ctx)
 
           expect(calls).toBe(1)
@@ -171,7 +174,7 @@ describe("release validation PR #937 question tool output contract", () => {
           calls++
           return [["Red"]]
         }, async () => {
-          const tool = await QuestionTool.init()
+          const tool = await initTool(QuestionTool)
           const result = await tool.execute({ questions: [colorQuestion] }, ctx)
 
           expect(calls).toBe(0)
@@ -187,7 +190,7 @@ describe("release validation PR #937 question tool output contract", () => {
         calls++
         return [["Green"]]
       }, async () => {
-        const tool = await QuestionTool.init()
+        const tool = await initTool(QuestionTool)
         const result = await tool.execute({ questions: [colorQuestion] }, ctx)
 
         expect(calls).toBe(1)
@@ -199,7 +202,7 @@ describe("release validation PR #937 question tool output contract", () => {
 
   test("ALTIMATE_AUTO_ANSWER label matching is case-insensitive and per question", async () => {
     await withEnv({ ALTIMATE_NON_INTERACTIVE: "1", ALTIMATE_AUTO_ANSWER: "sHiP iT" }, async () => {
-      const tool = await QuestionTool.init()
+      const tool = await initTool(QuestionTool)
       const result = await tool.execute(
         {
           questions: [
@@ -226,7 +229,7 @@ describe("release validation PR #937 question tool output contract", () => {
 
   test("ALTIMATE_AUTO_ANSWER first and last are reserved modes, not label lookups", async () => {
     await withEnv({ ALTIMATE_NON_INTERACTIVE: "1", ALTIMATE_AUTO_ANSWER: "first" }, async () => {
-      const tool = await QuestionTool.init()
+      const tool = await initTool(QuestionTool)
       const result = await tool.execute(
         {
           questions: [
@@ -245,7 +248,7 @@ describe("release validation PR #937 question tool output contract", () => {
     })
 
     await withEnv({ ALTIMATE_NON_INTERACTIVE: "1", ALTIMATE_AUTO_ANSWER: "last" }, async () => {
-      const tool = await QuestionTool.init()
+      const tool = await initTool(QuestionTool)
       const result = await tool.execute(
         {
           questions: [
@@ -267,7 +270,7 @@ describe("release validation PR #937 question tool output contract", () => {
   test("ALTIMATE_AUTO_ANSWER first and last safely leave empty-option questions unanswered", async () => {
     for (const mode of ["first", "last"]) {
       await withEnv({ ALTIMATE_NON_INTERACTIVE: "1", ALTIMATE_AUTO_ANSWER: mode }, async () => {
-        const tool = await QuestionTool.init()
+        const tool = await initTool(QuestionTool)
         const result = await tool.execute(
           {
             questions: [
@@ -292,7 +295,7 @@ describe("release validation PR #937 question tool output contract", () => {
     const sql = "select * from finance.payroll_credentials"
 
     await withEnv({ ALTIMATE_NON_INTERACTIVE: "1", ALTIMATE_AUTO_ANSWER: ` ${secret} ` }, async () => {
-      const tool = await QuestionTool.init()
+      const tool = await initTool(QuestionTool)
       const result = await tool.execute(
         {
           questions: [
@@ -319,7 +322,7 @@ describe("release validation PR #937 question tool output contract", () => {
 
   test("non-interactive zero-question call is bounded and reports an empty result", async () => {
     await withEnv({ ALTIMATE_NON_INTERACTIVE: "1" }, async () => {
-      const tool = await QuestionTool.init()
+      const tool = await initTool(QuestionTool)
       const result = await tool.execute({ questions: [] }, ctx)
 
       expect(result.title).toBe("Asked 0 question")

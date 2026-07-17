@@ -74,14 +74,19 @@ export function skillSource(location: string): string {
   return "project"
 }
 
-/** Check if a tool is available on the current PATH (including .opencode/tools/). */
+/** Check if a tool is available on the current PATH (including .altimate-code/tools/ and .opencode/tools/). */
 export async function isToolOnPath(toolName: string, cwd: string): Promise<boolean> {
-  // Check .opencode/tools/ in both cwd and worktree (they may differ in monorepos)
+  // Check project tools/ in both cwd and worktree (they may differ in monorepos)
+  const worktreeRoot = Instance.worktree !== "/" ? Instance.worktree : cwd
+  // altimate_change start — prefer .altimate-code/tools, keep .opencode/tools for back-compat
   const dirsToCheck = new Set([
+    path.join(cwd, ".altimate-code", "tools"),
     path.join(cwd, ".opencode", "tools"),
-    path.join(Instance.worktree !== "/" ? Instance.worktree : cwd, ".opencode", "tools"),
+    path.join(worktreeRoot, ".altimate-code", "tools"),
+    path.join(worktreeRoot, ".opencode", "tools"),
     path.join(Global.Path.config, "tools"),
   ])
+  // altimate_change end
 
   for (const dir of dirsToCheck) {
     try {

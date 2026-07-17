@@ -351,27 +351,32 @@ function patchDir(input: PatchInput) {
   // altimate_change end
 }
 
-function patchName(kind: Kind): "altimate-code" | "opencode" | "tui" {
-  // altimate_change start — upstream_fix: new server-config files land as
-  // `altimate-code.json` (primary brand). The patchOne caller uses dep.files()
-  // to discover existing config files — both altimate-code.json and opencode.json
-  // are candidates so existing installs are picked up.
-  if (kind === "server") return "altimate-code"
-  // altimate_change end
-  return "tui"
+// altimate_change start — upstream_fix: server config is brand-aware. New
+// installs land as `altimate-code.json` (primary brand, first candidate), but an
+// existing `opencode.json(c)` from a prior install is discovered and updated in
+// place rather than orphaned under a new name. The candidate order is the
+// discovery order; the first entry is also the default path for new files.
+function patchNames(kind: Kind): Array<"altimate-code" | "opencode" | "tui"> {
+  if (kind === "server") return ["altimate-code", "opencode"]
+  return ["tui"]
 }
+// altimate_change end
 
 async function patchOne(dir: string, target: Target, spec: string, force: boolean, dep: PatchDeps): Promise<PatchOne> {
-  const name = patchName(target.kind)
-  await using _ = await Flock.acquire(`plug-config:${Filesystem.resolve(path.join(dir, name))}`)
+  // altimate_change start — upstream_fix: discover existing config across both
+  // brand basenames so prior `.opencode/opencode.*` installs are reused, while
+  // new files default to the primary brand (`altimate-code.*`).
+  const names = patchNames(target.kind)
+  await using _ = await Flock.acquire(`plug-config:${Filesystem.resolve(path.join(dir, names[0]))}`)
 
-  const files = dep.files(dir, name)
+  const files = names.flatMap((name) => dep.files(dir, name))
   let cfg = files[0]
   for (const file of files) {
     if (!(await dep.exists(file))) continue
     cfg = file
     break
   }
+  // altimate_change end
 
   const src = await dep.readText(cfg).catch((err: NodeJS.ErrnoException) => {
     if (err.code === "ENOENT") return "{}"

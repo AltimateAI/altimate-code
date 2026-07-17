@@ -22,7 +22,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
-          bun-version: "1.3.10"
+          bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -75,7 +75,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
-          bun-version: "1.3.10"
+          bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -92,7 +92,10 @@ jobs:
         run: bun run packages/opencode/script/build.ts --target-index=${{ matrix.index }}
         env:
           OPENCODE_VERSION: ${{ github.ref_name }}
-          OPENCODE_CHANNEL: latest
+          # altimate_change — derive channel from the tag: a prerelease tag (e.g. v0.9.0-beta.1)
+          # publishes to the npm `beta` dist-tag so existing `latest` users are NOT auto-upgraded;
+          # a plain tag (v0.9.0) goes to `latest`. Prevents a beta tag from bricking the whole user base.
+          OPENCODE_CHANNEL: ${{ contains(github.ref_name, '-') && 'beta' || 'latest' }}
           OPENCODE_RELEASE: "1"
           GH_REPO: ${{ env.GH_REPO }}
           MODELS_DEV_API_JSON: test/tool/fixtures/models-api.json
@@ -105,7 +108,10 @@ jobs:
         if: matrix.name == 'linux-x64'
         run: |
           # Resolve to an absolute path before we cd away from the workspace.
-          BINARY=$(find "$(pwd)/packages/opencode/dist" -name altimate -type f | head -1)
+          # Test `altimate-code` — the binary the platform package actually ships
+          # (the redundant `altimate` copy is dropped from the npm package after the
+          # release archive is built, to stay under npm's tarball size limit).
+          BINARY=$(find "$(pwd)/packages/opencode/dist" -name altimate-code -type f | head -1)
           if [ -z "$BINARY" ]; then
             echo "::error::No binary found in dist/"
             exit 1
@@ -143,7 +149,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
-          bun-version: "1.3.10"
+          bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -185,7 +191,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
-          bun-version: "1.3.10"
+          bun-version: "1.3.14"
 
       - name: Cache Bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -260,7 +266,7 @@ jobs:
       - name: Pre-publish smoke test
         run: |
           # Resolve to an absolute path before we cd away from the workspace.
-          BINARY=$(find "$(pwd)/packages/opencode/dist" -path '*altimate-code-linux-x64/bin/altimate' -type f | head -1)
+          BINARY=$(find "$(pwd)/packages/opencode/dist" -path '*altimate-code-linux-x64/bin/altimate-code' -type f | head -1)
           if [ -z "$BINARY" ]; then
             echo "::error::No linux-x64 binary found in artifacts — cannot verify release"
             exit 1
@@ -278,7 +284,10 @@ jobs:
         run: bun run packages/opencode/script/publish.ts
         env:
           OPENCODE_VERSION: ${{ github.ref_name }}
-          OPENCODE_CHANNEL: latest
+          # altimate_change — derive channel from the tag: a prerelease tag (e.g. v0.9.0-beta.1)
+          # publishes to the npm `beta` dist-tag so existing `latest` users are NOT auto-upgraded;
+          # a plain tag (v0.9.0) goes to `latest`. Prevents a beta tag from bricking the whole user base.
+          OPENCODE_CHANNEL: ${{ contains(github.ref_name, '-') && 'beta' || 'latest' }}
           OPENCODE_RELEASE: "1"
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -310,8 +319,17 @@ jobs:
             exit 1
           fi
 
-          # Get the previous tag
-          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | head -2 | tail -1)
+          # Get the previous tag.
+          # altimate_change — pick the newest STABLE tag that is an ANCESTOR of this
+          # commit, excluding the current tag and any prerelease (-beta etc). Plain
+          # `--sort=-version:refname | head -2 | tail -1` picked the 2nd-highest tag by
+          # name, which for a stable release lands on a prerelease or a stray/divergent
+          # tag (e.g. a dangling v0.9.0), producing a bogus compare range. Restricting to
+          # `--merged HEAD` non-prerelease tags yields the real previous release.
+          PREV_TAG=$(git tag --merged HEAD --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vx "$CURRENT_TAG" \
+            | head -1)
 
           # Generate changelog from commits between tags
           echo "## What's Changed" > notes.md

@@ -1,8 +1,9 @@
 import type { MiddlewareHandler } from "hono"
 import { Flag } from "../flag/flag"
-import { getAdaptor } from "./adaptors"
+import { getAdapter } from "./adapters"
 import { Workspace } from "./workspace"
 import { WorkspaceContext } from "./workspace-context"
+import { AppRuntime } from "@/effect/app-runtime"
 
 // This middleware forwards all non-GET requests if the workspace is a
 // remote. The remote workspace needs to handle session mutations
@@ -15,7 +16,9 @@ async function routeRequest(req: Request) {
 
   if (!WorkspaceContext.workspaceID) return
 
-  const workspace = await Workspace.get(WorkspaceContext.workspaceID)
+  // altimate_change start — Workspace.get is now an Effect Service method; run it via AppRuntime
+  const workspace = await AppRuntime.runPromise(Workspace.Service.use((svc) => svc.get(WorkspaceContext.workspaceID!)))
+  // altimate_change end
   if (!workspace) {
     return new Response(`Workspace not found: ${WorkspaceContext.workspaceID}`, {
       status: 500,
@@ -33,7 +36,7 @@ async function routeRequest(req: Request) {
   // ourselves — ServerProxy.http overrides the URL with target.url
   // verbatim, dropping the request path, which would route every request
   // to the workspace's root.
-  const adaptor = await getAdaptor(workspace.type)
+  const adaptor = getAdapter(workspace.projectID, workspace.type)
   const target = await Promise.resolve(adaptor.target(workspace))
   if (target.type === "local") return
 

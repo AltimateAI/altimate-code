@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { prepareTools } from "../../../src/provider/sdk/copilot/chat/openai-compatible-prepare-tools"
+import { prepareTools } from "@opencode-ai/core/github-copilot/chat/openai-compatible-prepare-tools"
 
 describe("prepareTools", () => {
   test("undefined tools returns all undefined", () => {
@@ -40,9 +40,9 @@ describe("prepareTools", () => {
     expect(result.toolWarnings).toEqual([])
   })
 
-  test("provider-defined tool emits unsupported-tool warning", () => {
+  test("provider tool emits unsupported-feature warning", () => {
     const providerTool = {
-      type: "provider-defined" as const,
+      type: "provider" as const,
       id: "some.provider-tool" as `${string}.${string}`,
       name: "provider_tool",
       args: {},
@@ -52,10 +52,10 @@ describe("prepareTools", () => {
     })
     expect(result.toolWarnings).toHaveLength(1)
     expect(result.toolWarnings[0]).toEqual({
-      type: "unsupported-tool",
-      tool: providerTool,
+      type: "unsupported",
+      feature: "tool type: provider",
     })
-    // Provider-defined tools are not included in the output tools array
+    // Provider tools are not included in the output tools array
     expect(result.tools).toEqual([])
   })
 

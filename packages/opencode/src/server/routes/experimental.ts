@@ -8,10 +8,10 @@ import { Instance } from "../../project/instance"
 import { Project } from "../../project/project"
 import { MCP } from "../../mcp"
 import { Session } from "../../session"
-import { zodToJsonSchema } from "zod-to-json-schema"
+import { zodToJsonSchema } from "../../altimate/tool-zod-compat"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
-import { WorkspaceRoutes } from "./workspace"
+import { zod } from "../../util/effect-zod"
 
 export const ExperimentalRoutes = lazy(() =>
   new Hono()
@@ -89,7 +89,12 @@ export const ExperimentalRoutes = lazy(() =>
         )
       },
     )
-    .route("/workspace", WorkspaceRoutes())
+    // altimate_change start — upstream_fix: the /workspace sub-route is gated until
+    // control-plane/workspace.ts (the Workspace Effect Service) is reconciled. That module
+    // currently fails to typecheck on the SessionPrompt/Project Service mismatch, so its
+    // Promise wrappers + route can't be restored yet. Re-mount once that lands.
+    // .route("/workspace", WorkspaceRoutes())
+    // altimate_change end
     .post(
       "/worktree",
       describeRoute({
@@ -101,14 +106,14 @@ export const ExperimentalRoutes = lazy(() =>
             description: "Worktree created",
             content: {
               "application/json": {
-                schema: resolver(Worktree.Info),
+                schema: resolver(zod(Worktree.Info)),
               },
             },
           },
           ...errors(400),
         },
       }),
-      validator("json", Worktree.create.schema),
+      validator("json", zod(Worktree.CreateInput)),
       async (c) => {
         const body = c.req.valid("json")
         const worktree = await Worktree.create(body)
@@ -155,7 +160,7 @@ export const ExperimentalRoutes = lazy(() =>
           ...errors(400),
         },
       }),
-      validator("json", Worktree.remove.schema),
+      validator("json", zod(Worktree.RemoveInput)),
       async (c) => {
         const body = c.req.valid("json")
         await Worktree.remove(body)
@@ -181,7 +186,7 @@ export const ExperimentalRoutes = lazy(() =>
           ...errors(400),
         },
       }),
-      validator("json", Worktree.reset.schema),
+      validator("json", zod(Worktree.ResetInput)),
       async (c) => {
         const body = c.req.valid("json")
         await Worktree.reset(body)
@@ -258,7 +263,7 @@ export const ExperimentalRoutes = lazy(() =>
             description: "MCP resources",
             content: {
               "application/json": {
-                schema: resolver(z.record(z.string(), MCP.Resource)),
+                schema: resolver(z.record(z.string(), zod(MCP.Resource))),
               },
             },
           },

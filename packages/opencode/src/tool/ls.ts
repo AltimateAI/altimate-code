@@ -4,7 +4,7 @@ import * as path from "path"
 import DESCRIPTION from "./ls.txt"
 import { Instance } from "../project/instance"
 import { Ripgrep } from "../file/ripgrep"
-import { assertExternalDirectory } from "./external-directory"
+import { assertExternalDirectoryLegacy } from "./external-directory"
 
 export const IGNORE_PATTERNS = [
   "node_modules/",
@@ -43,7 +43,7 @@ export const ListTool = Tool.define("list", {
   }),
   async execute(params, ctx) {
     const searchPath = path.resolve(Instance.directory, params.path || ".")
-    await assertExternalDirectory(ctx, searchPath, { kind: "directory" })
+    await assertExternalDirectoryLegacy(ctx, searchPath, { kind: "directory" })
 
     await ctx.ask({
       permission: "list",

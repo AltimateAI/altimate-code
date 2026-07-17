@@ -9,7 +9,7 @@ import { proxy } from "hono/proxy"
 import { basicAuth } from "hono/basic-auth"
 import z from "zod"
 import { Provider } from "../provider/provider"
-import { NamedError } from "@opencode-ai/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { LSP } from "../lsp"
 import { Format } from "../format"
 import { TuiRoutes } from "./routes/tui"
@@ -29,13 +29,14 @@ import { ProjectRoutes } from "./routes/project"
 import { SessionRoutes } from "./routes/session"
 import { PtyRoutes } from "./routes/pty"
 import { McpRoutes } from "./routes/mcp"
-// altimate_change start — reload-datamate endpoint
+// altimate_change start — Altimate-only server endpoints
 import { MCP } from "../mcp"
 // Import sync + fresh-read helpers directly from the shared transport module.
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
 import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
+import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -48,6 +49,9 @@ import { websocket } from "hono/bun"
 import { HTTPException } from "hono/http-exception"
 import { errors } from "./error"
 import { Filesystem } from "@/util/filesystem"
+// altimate_change start — effect→zod converter for HTTP schemas whose modules migrated to Effect Schema
+import { zod } from "@/util/effect-zod"
+// altimate_change end
 import { QuestionRoutes } from "./routes/question"
 import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
@@ -61,9 +65,41 @@ export namespace Server {
   const log = Log.create({ service: "server" })
 
   export const Default = lazy(() => createApp({}))
+  // altimate_change start — upstream_fix: preserve upstream v1.17.9 /api HttpApi routes.
+  // The v2 SDK/TUI calls /api/provider and /api/model; without this bridge the legacy
+  // Hono catch-all proxies those requests to app.altimate.ai and floods the TUI on failure.
+  const httpApiBridge = lazy(async () => {
+    const { HttpApiApp } = await import("./routes/instance/httpapi/server")
+    return {
+      handler: HttpApiApp.webHandler().handler as (
+        request: Request,
+        context: unknown,
+      ) => Response | Promise<Response>,
+      context: HttpApiApp.context,
+    }
+  })
+  // altimate_change end
+
+  // altimate_change start — legacy zod NamedError instances come from a different
+  // package than the core Effect NamedError, so instanceof misses them.
+  function namedErrorLike(input: unknown): input is { name: string; toObject(): unknown } {
+    return (
+      typeof input === "object" &&
+      input !== null &&
+      typeof (input as { name?: unknown }).name === "string" &&
+      typeof (input as { toObject?: unknown }).toObject === "function"
+    )
+  }
+  // altimate_change end
 
   export const createApp = (opts: { cors?: string[] }): Hono => {
     const app = new Hono()
+    // altimate_change start — upstream_fix: forward shipped non-/api HttpApi routes used by the TUI
+    const forwardHttpApiBridge = async (c: { req: { raw: Request } }) => {
+      const bridge = await httpApiBridge()
+      return bridge.handler(c.req.raw, bridge.context)
+    }
+    // altimate_change end
     return app
       .onError((err, c) => {
         log.error("failed", {
@@ -77,6 +113,15 @@ export namespace Server {
           else status = 500
           return c.json(err.toObject(), { status })
         }
+        // altimate_change start — preserve legacy zod NamedError wire/status shape.
+        if (namedErrorLike(err)) {
+          let status: ContentfulStatusCode
+          if (err.name === "NotFoundError") status = 404
+          else if (err.name.startsWith("Worktree")) status = 400
+          else status = 500
+          return c.json(err.toObject(), { status })
+        }
+        // altimate_change end
         if (err instanceof HTTPException) return err.getResponse()
         const message = err instanceof Error && err.stack ? err.stack : err.toString()
         return c.json(new NamedError.Unknown({ message }).toObject(), {
@@ -89,7 +134,14 @@ export namespace Server {
         if (c.req.method === "OPTIONS") return next()
         const password = Flag.OPENCODE_SERVER_PASSWORD
         if (!password) return next()
-        const username = Flag.OPENCODE_SERVER_USERNAME ?? "altimate" // altimate_change — branded default username
+        // altimate_change start — upstream_fix: align the Hono guard's default username with the
+        // HttpApi /api/* auth (ServerAuth, auth.ts) and every client (ServerAuth.header, plugin,
+        // run, attach, trace-consumer), which all default to "opencode". A branded "altimate" here
+        // made the guard reject the TUI worker's `opencode:<password>` header (and "altimate:<pwd>"
+        // was then rejected by the HttpApi auth), breaking authenticated server/TUI API calls
+        // unless OPENCODE_SERVER_USERNAME was set explicitly.
+        const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
+        // altimate_change end
         return basicAuth({ username, password })(c, next)
       })
       .use(async (c, next) => {
@@ -135,6 +187,22 @@ export namespace Server {
           },
         }),
       )
+      // altimate_change start — upstream_fix: route v2 SDK/TUI /api requests before legacy instance/UI routes.
+      .all("/api/*", forwardHttpApiBridge)
+      // altimate_change end
+      // altimate_change start — upstream_fix: bridge non-/api HttpApi routes declared outside /api/*.
+      // The TUI calls these generated SDK groups directly: workspace sync/list/status/adapter/warp,
+      // sync.start, control-plane move-session, project copy management/name generation, and project
+      // directories. Mount them before the legacy Hono route trees so they do not fall through to the
+      // app.altimate.ai catch-all proxy or a partial legacy route.
+      .all("/experimental/workspace", forwardHttpApiBridge)
+      .all("/experimental/workspace/*", forwardHttpApiBridge)
+      .all("/sync/*", forwardHttpApiBridge)
+      .all("/experimental/control-plane/move-session", forwardHttpApiBridge)
+      .all("/experimental/project/:projectID/copy", forwardHttpApiBridge)
+      .all("/experimental/project/:projectID/copy/*", forwardHttpApiBridge)
+      .all("/project/:projectID/directories", forwardHttpApiBridge)
+      // altimate_change end
       .route("/global", GlobalRoutes())
       .put(
         "/auth/:providerID",
@@ -160,7 +228,9 @@ export namespace Server {
             providerID: ProviderID.zod,
           }),
         ),
-        validator("json", Auth.Info.zod),
+        // altimate_change start — Auth.Info migrated to Effect Schema; convert to zod for the validator
+        validator("json", zod(Auth.Info)),
+        // altimate_change end
         async (c) => {
           const providerID = c.req.valid("param").providerID
           const info = c.req.valid("json")
@@ -332,7 +402,7 @@ export namespace Server {
               description: "VCS info",
               content: {
                 "application/json": {
-                  schema: resolver(Vcs.Info),
+                  schema: resolver(zod(Vcs.Info)),
                 },
               },
             },
@@ -356,7 +426,7 @@ export namespace Server {
               description: "List of commands",
               content: {
                 "application/json": {
-                  schema: resolver(Command.Info.array()),
+                  schema: resolver(z.array(zod(Command.Info))),
                 },
               },
             },
@@ -430,7 +500,7 @@ export namespace Server {
               description: "List of agents",
               content: {
                 "application/json": {
-                  schema: resolver(Agent.Info.array()),
+                  schema: resolver(z.array(zod(Agent.Info))),
                 },
               },
             },
@@ -501,7 +571,7 @@ export namespace Server {
               description: "Formatter status",
               content: {
                 "application/json": {
-                  schema: resolver(Format.Status.array()),
+                  schema: resolver(z.array(zod(Format.Status))),
                 },
               },
             },
@@ -569,6 +639,29 @@ export namespace Server {
           })
         },
       )
+      // altimate_change start — POST /altimate/prompt/enhance
+      // Keep the fork-owned LLM/config prompt enhancement on the opencode side while letting the
+      // extracted upstream TUI call it from the submit path. The endpoint is intentionally a no-op
+      // unless experimental.auto_enhance_prompt is true, and failures return the original prompt so
+      // submit is never blocked by the rewrite path.
+      .post(
+        "/altimate/prompt/enhance",
+        validator("json", z.object({ text: z.string() })),
+        async (c) => {
+          const { text } = c.req.valid("json")
+          try {
+            if (!(await isAutoEnhanceEnabled())) {
+              return c.json({ text, enabled: false, enhanced: false })
+            }
+            const enhanced = await enhancePrompt(text)
+            return c.json({ text: enhanced, enabled: true, enhanced: enhanced !== text })
+          } catch (err) {
+            log.error("prompt enhance failed; using original prompt", { error: err })
+            return c.json({ text, enabled: true, enhanced: false })
+          }
+        },
+      )
+      // altimate_change end
       // altimate_change start — POST /altimate/mcp/reload-datamate
       // Updates the datamate MCP server config from IDE MCP config files and reconnects
       // the live MCP client so the new transport takes effect without a server restart.

@@ -1,5 +1,5 @@
 import path from "path"
-import { Effect, Layer, Record, Result, Schema, ServiceMap } from "effect"
+import { Context, Effect, Layer, Record, Result, Schema } from "effect"
 import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
 
@@ -46,7 +46,7 @@ export namespace AuthService {
   }
 }
 
-export class AuthService extends ServiceMap.Service<AuthService, AuthService.Service>()("@opencode/Auth") {
+export class AuthService extends Context.Service<AuthService, AuthService.Service>()("@opencode/Auth") {
   static readonly layer = Layer.effect(
     AuthService,
     Effect.gen(function* () {

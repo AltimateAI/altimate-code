@@ -19,6 +19,11 @@ const SCRIPT_INDEX = fs.readFileSync(
   "utf-8",
 )
 
+const CORE_VERSION_SRC = fs.readFileSync(
+  path.resolve(import.meta.dir, "../../../../packages/core/src/installation/version.ts"),
+  "utf-8",
+)
+
 describe("Script.version normalization", () => {
   test("strips v prefix from OPENCODE_VERSION env var", () => {
     // The source of truth: packages/script/src/index.ts
@@ -32,11 +37,7 @@ describe("Script.version normalization", () => {
   })
 
   test("Installation.VERSION also strips v prefix", () => {
-    const installationSrc = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/installation/index.ts"),
-      "utf-8",
-    )
-    expect(installationSrc).toContain('OPENCODE_VERSION.trim().replace(/^v/, "")')
+    expect(CORE_VERSION_SRC).toContain('OPENCODE_VERSION.trim().replace(/^v/, "")')
   })
 })
 

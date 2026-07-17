@@ -1,17 +1,19 @@
 import { Schema } from "effect"
+// altimate_change start — upstream_fix: QuestionID zod validators must preserve the que prefix
 import z from "zod"
+// altimate_change end
 
 import { Identifier } from "@/id/id"
-import { Newtype } from "@/util/schema"
+import { Newtype } from "@opencode-ai/core/schema"
 
-export class QuestionID extends Newtype<QuestionID>()("QuestionID", Schema.String) {
-  static make(id: string): QuestionID {
-    return this.makeUnsafe(id)
-  }
-
+export class QuestionID extends Newtype<QuestionID>()("QuestionID", Schema.String.check(Schema.isStartsWith("que"))) {
   static ascending(id?: string): QuestionID {
-    return this.makeUnsafe(Identifier.ascending("question", id))
+    return this.make(Identifier.ascending("question", id))
   }
-
-  static readonly zod = Identifier.schema("question") as unknown as z.ZodType<QuestionID>
+  // altimate_change start — upstream_fix: restore que-prefix validation for zod callers
+  static zod = z
+    .string()
+    .startsWith("que")
+    .transform((value) => QuestionID.make(value))
+  // altimate_change end
 }

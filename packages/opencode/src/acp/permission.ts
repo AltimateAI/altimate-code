@@ -1,0 +1,140 @@
+import type { AgentSideConnection, PermissionOption, RequestPermissionResponse } from "@agentclientprotocol/sdk"
+import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2"
+import { applyPatch } from "diff"
+// altimate_change start — upstream_fix: use Filesystem facade after filesystem helper extraction
+import { Filesystem } from "@/util/filesystem"
+// altimate_change end
+// altimate_change start — yolo mode over ACP (restore dropped fork behavior)
+import { Flag } from "@/flag/flag"
+// altimate_change end
+import type { ACPSession } from "./session"
+import { toLocations, toToolKind, type ToolInput } from "./tool"
+import { Effect } from "effect"
+
+type PermissionEvent = Extract<Event, { type: "permission.asked" }>
+type Reply = "once" | "always" | "reject"
+type Connection = Partial<Pick<AgentSideConnection, "requestPermission" | "writeTextFile">>
+
+const permissionOptions: PermissionOption[] = [
+  { optionId: "once", kind: "allow_once", name: "Allow once" },
+  { optionId: "always", kind: "allow_always", name: "Always allow" },
+  { optionId: "reject", kind: "reject_once", name: "Reject" },
+]
+
+export class Handler {
+  private readonly queues = new Map<string, Promise<void>>()
+
+  constructor(
+    private readonly input: {
+      sdk: OpencodeClient
+      connection: Connection
+      session: ACPSession.Interface
+    },
+  ) {}
+
+  handle(event: PermissionEvent) {
+    const permission = event.properties
+    const previous = this.queues.get(permission.sessionID) ?? Promise.resolve()
+    const next = previous
+      .then(() => this.process(event))
+      .catch(() => {})
+      .finally(() => {
+        if (this.queues.get(permission.sessionID) === next) {
+          this.queues.delete(permission.sessionID)
+        }
+      })
+    this.queues.set(permission.sessionID, next)
+  }
+
+  private async process(event: PermissionEvent) {
+    const permission = event.properties
+    const session = await Effect.runPromise(this.input.session.tryGet(permission.sessionID))
+    if (!session) return
+
+    // altimate_change start — yolo mode: auto-approve without asking the ACP client (restores dropped fork
+    // behavior; ALTIMATE_CLI_YOLO is explicit opt-in. The interactive `run` path additionally honors
+    // deny rules — run.ts — which the ACP handler has no ruleset access to here.)
+    if (Flag.ALTIMATE_CLI_YOLO) {
+      await this.reply(permission.id, "once", session.cwd)
+      return
+    }
+    // altimate_change end
+
+    if (!this.input.connection.requestPermission) {
+      await this.reply(permission.id, "reject", session.cwd)
+      return
+    }
+
+    const result = await this.input.connection
+      .requestPermission({
+        sessionId: permission.sessionID,
+        toolCall: {
+          toolCallId: permission.tool?.callID ?? permission.id,
+          status: "pending",
+          title: permission.permission,
+          rawInput: permission.metadata,
+          kind: toToolKind(permission.permission),
+          locations: toLocations(permission.permission, permission.metadata),
+        },
+        options: permissionOptions,
+      })
+      .catch(async () => {
+        await this.reply(permission.id, "reject", session.cwd)
+        return undefined
+      })
+
+    if (!result) return
+
+    const reply = selectedReply(result)
+    if (reply !== "once" && reply !== "always") {
+      await this.reply(permission.id, "reject", session.cwd)
+      return
+    }
+
+    if (permission.permission === "edit") {
+      await this.writeProposedEdit(session.id, permission.metadata).catch(() => {})
+    }
+
+    await this.reply(permission.id, reply, session.cwd)
+  }
+
+  private async reply(requestID: string, reply: Reply, directory: string) {
+    await this.input.sdk.permission.reply({
+      requestID,
+      reply,
+      directory,
+    })
+  }
+
+  private async writeProposedEdit(sessionId: string, metadata: ToolInput) {
+    const filepath = stringValue(metadata.filepath)
+    const diff = stringValue(metadata.diff)
+    if (!filepath || !diff || !this.input.connection.writeTextFile) return
+
+    // altimate_change start — upstream_fix: read proposed edit content through Filesystem facade
+    const content = (await Filesystem.exists(filepath)) ? await Filesystem.readText(filepath) : ""
+    // altimate_change end
+    const next = applyPatch(content, diff)
+    if (next === false) {
+      return
+    }
+
+    void this.input.connection.writeTextFile({
+      sessionId,
+      path: filepath,
+      content: next,
+    })
+  }
+}
+
+function selectedReply(result: RequestPermissionResponse): Reply {
+  if (result.outcome.outcome !== "selected") return "reject"
+  if (result.outcome.optionId === "once" || result.outcome.optionId === "always") return result.outcome.optionId
+  return "reject"
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : undefined
+}
+
+export * as ACPPermission from "./permission"

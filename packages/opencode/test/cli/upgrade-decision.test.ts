@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Installation } from "../../src/installation"
-import { compareVersions, isValidVersion } from "../../src/cli/upgrade"
+import { compareVersions, isAutoupdateDisabledByEnv, isValidVersion } from "../../src/cli/upgrade"
 
 // ─── compareVersions: exhaustive tests ──────────────────────────────────────
 // This function has ZERO external dependencies by design. If it breaks,
@@ -50,9 +50,21 @@ describe("compareVersions", () => {
       expect(compareVersions("1.0.0-beta.1", "1.0.0")).toBe(-1)
     })
 
-    test("both prerelease, same core → equal (simplified)", () => {
-      expect(compareVersions("1.0.0-alpha", "1.0.0-beta")).toBe(0)
+    // altimate_change start — prerelease identifiers are now ordered so beta channels auto-upgrade
+    test("both prerelease, same core → ordered by prerelease identifiers", () => {
+      // numeric identifiers compare as numbers (not strings) so beta.10 > beta.2
+      expect(compareVersions("1.0.0-beta.1", "1.0.0-beta.2")).toBe(-1)
+      expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.1")).toBe(1)
+      expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.10")).toBe(-1)
+      // lexical for non-numeric identifiers
+      expect(compareVersions("1.0.0-alpha", "1.0.0-beta")).toBe(-1)
+      expect(compareVersions("1.0.0-beta", "1.0.0-rc")).toBe(-1)
+      // a shorter identifier set is lower (beta < beta.1)
+      expect(compareVersions("1.0.0-beta", "1.0.0-beta.1")).toBe(-1)
+      // identical prerelease → equal
+      expect(compareVersions("1.0.0-beta.1", "1.0.0-beta.1")).toBe(0)
     })
+    // altimate_change end
 
     test("prerelease of higher version > release of lower", () => {
       expect(compareVersions("2.0.0-beta.1", "1.0.0")).toBe(1)
@@ -138,6 +150,44 @@ describe("isValidVersion", () => {
     expect(isValidVersion("1")).toBe(false)
   })
 })
+
+// altimate_change start — upstream_fix: regression coverage for fork autoupdate-disable env alias
+function withAutoupdateEnv(input: Record<string, string | undefined>, fn: () => void) {
+  const keys = ["ALTIMATE_CLI_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_AUTOUPDATE"] as const
+  const previous = new Map(keys.map((key) => [key, process.env[key]]))
+  try {
+    for (const key of keys) delete process.env[key]
+    for (const [key, value] of Object.entries(input)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fn()
+  } finally {
+    for (const key of keys) {
+      const value = previous.get(key)
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+describe("isAutoupdateDisabledByEnv", () => {
+  test("honors ALTIMATE_CLI_DISABLE_AUTOUPDATE", () =>
+    withAutoupdateEnv({ ALTIMATE_CLI_DISABLE_AUTOUPDATE: "1" }, () => {
+      expect(isAutoupdateDisabledByEnv()).toBe(true)
+    }))
+
+  test("honors OPENCODE_DISABLE_AUTOUPDATE", () =>
+    withAutoupdateEnv({ OPENCODE_DISABLE_AUTOUPDATE: "true" }, () => {
+      expect(isAutoupdateDisabledByEnv()).toBe(true)
+    }))
+
+  test("false when both env vars are absent or false", () =>
+    withAutoupdateEnv({ ALTIMATE_CLI_DISABLE_AUTOUPDATE: "0", OPENCODE_DISABLE_AUTOUPDATE: "false" }, () => {
+      expect(isAutoupdateDisabledByEnv()).toBe(false)
+    }))
+})
+// altimate_change end
 
 // ─── Decision Logic ─────────────────────────────────────────────────────────
 // These mirror the exact checks in cli/upgrade.ts so we can test every path.

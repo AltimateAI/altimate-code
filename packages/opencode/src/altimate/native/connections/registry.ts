@@ -12,7 +12,7 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
-import { Log } from "../../../util/log"
+import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
 import { normalizeConfig } from "@altimateai/drivers"
 import { resolveConfig, saveConnection } from "./credential-store"

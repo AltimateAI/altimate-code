@@ -10,7 +10,7 @@ If the user asks for help or wants to give feedback inform them of the following
   https://github.com/AltimateAI/altimate-code
 
 // altimate_change start — altimate docs URL
-When the user directly asks about Altimate Code (eg. "can Altimate Code do...", "does Altimate Code have..."), or asks in second person (eg. "are you able...", "can you do..."), or asks how to use a specific Altimate Code feature (eg. implement a hook, write a slash command, or install an MCP server), use the WebFetch tool to gather information to answer the question from Altimate Code docs. The list of available docs is available at https://docs.altimate.sh
+When the user directly asks about Altimate Code (eg. "can Altimate Code do...", "does Altimate Code have..."), or asks in second person (eg. "are you able...", "can you do..."), or asks how to use a specific Altimate Code feature (eg. implement a hook, write a slash command, or install an MCP server), use the WebFetch tool to gather information to answer the question from Altimate Code docs. The list of available docs is available at https://help.altimate.ai/code
 // altimate_change end
 
 # Tone and style

@@ -34,12 +34,17 @@ const IS_PREVIEW = CHANNEL !== "latest"
 const VERSION = await (async () => {
   if (env.OPENCODE_VERSION) return env.OPENCODE_VERSION.replace(/^v/, "")
   if (IS_PREVIEW) return `0.0.0-${CHANNEL}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`
-  const version = await fetch("https://registry.npmjs.org/opencode-ai/latest")
+  // altimate_change start — upstream_fix: derive the next version from the FORK's published package,
+  // not upstream's `opencode-ai`. Upstream is on 1.17.x; deriving from it would bump a fork release to
+  // ~1.18.0 instead of 0.x. That inverts version ordering: existing users auto-upgrade to the bogus
+  // high version, then can never auto-upgrade to the real fix (a lower 0.x is treated as a downgrade).
+  const version = await fetch("https://registry.npmjs.org/@altimateai/altimate-code/latest")
     .then((res) => {
       if (!res.ok) throw new Error(res.statusText)
       return res.json()
     })
     .then((data: any) => data.version)
+  // altimate_change end
   const [major, minor, patch] = version.split(".").map((x: string) => Number(x) || 0)
   const t = env.OPENCODE_BUMP?.toLowerCase()
   if (t === "major") return `${major + 1}.0.0`

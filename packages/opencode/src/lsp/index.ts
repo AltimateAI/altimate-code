@@ -4,12 +4,21 @@ import { Log } from "../util/log"
 import { LSPClient } from "./client"
 import path from "path"
 import { pathToFileURL, fileURLToPath } from "url"
-import { LSPServer } from "./server"
+import * as LSPServer from "./server"
 import z from "zod"
 import { Config } from "../config/config"
 import { spawn } from "child_process"
 import { Instance } from "../project/instance"
 import { Flag } from "@/flag/flag"
+// altimate_change start — upstream moved LSPServer/LSPClient to a context-aware API
+// (root(file, ctx) / spawn(root, ctx, flags) / create({ directory, instance })).
+// Resolve the runtime flags once and pass the instance context through so this
+// legacy Promise-based LSP namespace keeps working alongside the new Effect `lsp.ts`.
+import { Effect } from "effect"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { AppRuntime } from "@/effect/app-runtime"
+import type { InstanceContext } from "@/project/instance-context"
+// altimate_change end
 
 export namespace LSP {
   const log = Log.create({ service: "lsp" })
@@ -81,6 +90,11 @@ export namespace LSP {
       const clients: LSPClient.Info[] = []
       const servers: Record<string, LSPServer.Info> = {}
       const cfg = await Config.get()
+      // altimate_change start — resolve runtime flags once for the new spawn(root, ctx, flags) API
+      const flags = await AppRuntime.runPromise(Effect.gen(function* () {
+        return yield* RuntimeFlags.Service
+      }))
+      // altimate_change end
 
       if (cfg.lsp === false) {
         log.info("all LSPs are disabled")
@@ -89,6 +103,9 @@ export namespace LSP {
           servers,
           clients,
           spawning: new Map<string, Promise<LSPClient.Info | undefined>>(),
+          // altimate_change start
+          flags,
+          // altimate_change end
         }
       }
 
@@ -108,7 +125,9 @@ export namespace LSP {
         servers[name] = {
           ...existing,
           id: name,
-          root: existing?.root ?? (async () => Instance.directory),
+          // altimate_change start — RootFunction now receives (file, ctx)
+          root: existing?.root ?? (async (_file: string, ctx: InstanceContext) => ctx.directory),
+          // altimate_change end
           extensions: item.extensions ?? existing?.extensions ?? [],
           spawn: async (root) => {
             return {
@@ -137,6 +156,9 @@ export namespace LSP {
         servers,
         clients,
         spawning: new Map<string, Promise<LSPClient.Info | undefined>>(),
+        // altimate_change start
+        flags,
+        // altimate_change end
       }
     },
     async (state) => {
@@ -179,10 +201,13 @@ export namespace LSP {
     const s = await state()
     const extension = path.parse(file).ext || file
     const result: LSPClient.Info[] = []
+    // altimate_change start — capture the instance context for the new ctx-aware server/client API
+    const ctx: InstanceContext = Instance.current
+    // altimate_change end
 
     async function schedule(server: LSPServer.Info, root: string, key: string) {
       const handle = await server
-        .spawn(root)
+        .spawn(root, ctx, s.flags)
         .then((value) => {
           if (!value) s.broken.add(key)
           return value
@@ -200,6 +225,10 @@ export namespace LSP {
         serverID: server.id,
         server: handle,
         root,
+        // altimate_change start — new create() requires directory + instance context
+        directory: ctx.directory,
+        instance: ctx,
+        // altimate_change end
       }).catch((err) => {
         s.broken.add(key)
         handle.process.kill()
@@ -225,7 +254,7 @@ export namespace LSP {
     for (const server of Object.values(s.servers)) {
       if (server.extensions.length && !server.extensions.includes(extension)) continue
 
-      const root = await server.root(file)
+      const root = await server.root(file, ctx)
       if (!root) continue
       if (s.broken.has(root + server.id)) continue
 
@@ -265,9 +294,12 @@ export namespace LSP {
   export async function hasClients(file: string) {
     const s = await state()
     const extension = path.parse(file).ext || file
+    // altimate_change start — RootFunction now requires the instance context
+    const ctx: InstanceContext = Instance.current
+    // altimate_change end
     for (const server of Object.values(s.servers)) {
       if (server.extensions.length && !server.extensions.includes(extension)) continue
-      const root = await server.root(file)
+      const root = await server.root(file, ctx)
       if (!root) continue
       if (s.broken.has(root + server.id)) continue
       return true
@@ -280,9 +312,12 @@ export namespace LSP {
     const clients = await getClients(input)
     await Promise.all(
       clients.map(async (client) => {
-        const wait = waitForDiagnostics ? client.waitForDiagnostics({ path: input }) : Promise.resolve()
-        await client.notify.open({ path: input })
-        return wait
+        // altimate_change start — open returns the document version which waitForDiagnostics now requires
+        const after = Date.now()
+        const version = await client.notify.open({ path: input })
+        if (!waitForDiagnostics) return
+        return client.waitForDiagnostics({ path: input, version, after })
+        // altimate_change end
       }),
     ).catch((err) => {
       log.error("failed to touch file", { err, file: input })

@@ -5,6 +5,51 @@
 import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 
+/**
+ * Run `fn` with stdout/stderr writes swallowed for the (synchronous) duration of
+ * the call, then restore. Used to keep snowflake-sdk's own logging off the
+ * console — the SDK runs in-process with the interactive TUI, so any line it
+ * writes corrupts the render. Only wrap synchronous calls so no concurrent
+ * (TUI) output is ever caught in the window.
+ */
+export function silenceConsole<T>(fn: () => T): T {
+  // Save the exact original method references (no .bind — binding would create a
+  // new wrapper and we'd never restore the true original). They retain correct
+  // `this` when re-assigned as a property of process.stdout/stderr.
+  const out = process.stdout.write
+  const err = process.stderr.write
+  process.stdout.write = (() => true) as typeof process.stdout.write
+  process.stderr.write = (() => true) as typeof process.stderr.write
+  try {
+    return fn()
+  } finally {
+    process.stdout.write = out
+    process.stderr.write = err
+  }
+}
+
+/**
+ * Suppress snowflake-sdk's Winston console logging.
+ *
+ * The SDK logs via Winston with a Console transport (additionalLogToConsole
+ * defaults to true) and emits a "Configuring logger with level: ..." line at INFO
+ * whenever `configure()` runs while a console transport is live — that is how our
+ * own OFF call leaked a JSON log line into the TUI. We therefore run `configure()`
+ * with the console silenced so its self-confirmation can never reach the display.
+ * Call this both before any SDK use and again after connect(), since Snowflake
+ * "Easy Logging" can re-raise the level from a client-config file during connect.
+ */
+export function suppressSnowflakeLogging(snowflake: any): void {
+  if (typeof snowflake?.configure !== "function") return
+  silenceConsole(() => {
+    try {
+      snowflake.configure({ logLevel: "OFF", additionalLogToConsole: false })
+    } catch {
+      // Older SDK versions may not support these options; ignore.
+    }
+  })
+}
+
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let snowflake: any
   try {
@@ -16,18 +61,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     )
   }
 
-  // Suppress snowflake-sdk's Winston console logging — it writes JSON log
-  // lines into the interactive TUI output and corrupts the display.
-  if (typeof snowflake.configure === "function") {
-    try {
-      snowflake.configure({
-        logLevel: "OFF",
-        additionalLogToConsole: false,
-      })
-    } catch {
-      // Older SDK versions may not support these options; ignore.
-    }
-  }
+  // Suppress snowflake-sdk's Winston console logging as early as possible — it
+  // writes JSON log lines into the interactive TUI output and corrupts the
+  // display. Re-applied after connect() below (Easy Logging can re-raise it).
+  suppressSnowflakeLogging(snowflake)
 
   let connection: any
 
@@ -230,6 +267,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           })
         }
       })
+
+      // Re-apply suppression: Snowflake "Easy Logging" reads a client-config file
+      // during connect() and can re-raise the log level (and re-attach a console
+      // transport), defeating the suppression set before connect.
+      suppressSnowflakeLogging(snowflake)
     },
 
     async execute(sql: string, limit?: number, binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {

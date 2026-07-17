@@ -2,10 +2,38 @@ import { describe, expect, test } from "bun:test"
 import path from "path"
 import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
+import { ProjectID } from "../../src/project/schema"
 import { Provider } from "../../src/provider/provider"
 import { Auth } from "../../src/auth"
 import { Env } from "../../src/env"
 import { buildToolCapableSet, parseSnowflakePAT, transformSnowflakeBody } from "../../src/altimate/plugin/snowflake"
+
+function provideProviderTestInstance<R>(input: {
+  directory: string
+  init?: () => Promise<unknown>
+  fn: () => R | Promise<R>
+}) {
+  const now = Date.now()
+  return Instance.restore(
+    {
+      directory: input.directory,
+      worktree: input.directory,
+      project: {
+        id: ProjectID.global,
+        worktree: input.directory,
+        time: {
+          created: now,
+          updated: now,
+        },
+        sandboxes: [],
+      },
+    },
+    async () => {
+      await input.init?.()
+      return input.fn()
+    },
+  )
+}
 
 // Fixture allowlist for transformSnowflakeBody unit tests. Reflects what
 // Snowflake Cortex actually accepts tools for today (Claude + OpenAI families).
@@ -440,7 +468,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -464,7 +492,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         init: async () => {
           Env.remove("SNOWFLAKE_ACCOUNT")
@@ -488,7 +516,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         init: async () => {
           Env.set("SNOWFLAKE_ACCOUNT", "myorg-myaccount")
@@ -511,7 +539,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -538,7 +566,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -563,7 +591,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -586,7 +614,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -606,7 +634,7 @@ describe("snowflake-cortex provider", () => {
     await setupOAuth()
     try {
       await using tmp = await tmpdir({ config: {} })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -652,7 +680,7 @@ describe("snowflake-cortex provider", () => {
     await setupOAuth()
     try {
       await using tmp = await tmpdir({ config: {} })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -690,7 +718,7 @@ describe("snowflake-cortex provider", () => {
           },
         } as any,
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -733,7 +761,7 @@ describe("snowflake-cortex provider", () => {
           },
         } as any,
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -784,7 +812,7 @@ describe("snowflake-cortex provider", () => {
           },
         } as any,
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -832,7 +860,7 @@ describe("snowflake-cortex provider", () => {
           },
         } as any,
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -858,7 +886,7 @@ describe("snowflake-cortex provider", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
@@ -885,7 +913,7 @@ describe("Provider.all() discoverability", () => {
           await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
         },
       })
-      await Instance.provide({
+      await provideProviderTestInstance({
         directory: tmp.path,
         init: async () => {
           Env.remove("SNOWFLAKE_ACCOUNT")
@@ -910,7 +938,7 @@ describe("Provider.all() discoverability", () => {
         await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ $schema: "https://altimate.ai/config.json" }))
       },
     })
-    await Instance.provide({
+    await provideProviderTestInstance({
       directory: tmp.path,
       fn: async () => {
         const allProviders = await Provider.all()
@@ -931,7 +959,7 @@ describe("Provider.all() discoverability", () => {
         )
       },
     })
-    await Instance.provide({
+    await provideProviderTestInstance({
       directory: tmp.path,
       fn: async () => {
         // Provider.all() returns raw database, config filtering happens at the route level.
@@ -960,7 +988,7 @@ describe("Provider.all() discoverability", () => {
         )
       },
     })
-    await Instance.provide({
+    await provideProviderTestInstance({
       directory: tmp.path,
       fn: async () => {
         const allProviders = await Provider.all()

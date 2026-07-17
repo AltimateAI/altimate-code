@@ -18,8 +18,13 @@
  *     coverage gap, not a code bug)
  */
 import { describe, expect, test } from "bun:test"
+import { Schema } from "effect"
 import { Telemetry } from "../../src/altimate/telemetry"
-import { Config } from "../../src/config/config"
+// v1.17.9 merge: the TUI (and its keybind schema) moved to packages/tui. The
+// old zod `Config.Keybinds` was replaced by the effect-Schema `TuiKeybind`
+// (KeybindOverrides struct + Keybinds.parse defaulting). variant_list (PR
+// #21185) is still wired — see Definitions/CommandMap in keybind.ts.
+import { TuiKeybind } from "../../../tui/src/config/keybind"
 import { readFileSync } from "fs"
 import path from "path"
 
@@ -109,17 +114,22 @@ describe("v1.4.0 chaos — deriveAgentOutcomeReason isolates state across parall
 
 // ---------- Config schema migration ----------
 describe("v1.4.0 chaos — Keybinds schema accepts pre-PR-21185 configs", () => {
+  const decodeOverrides = Schema.decodeUnknownOption(TuiKeybind.KeybindOverrides)
+
   test("keybinds without variant_list still validate (default 'none')", () => {
-    const Keybinds = (Config as any).Keybinds
-    const r = Keybinds.safeParse({ agent_cycle: "tab", variant_cycle: "ctrl+t" })
-    expect(r.success).toBe(true)
-    if (r.success) expect(r.data.variant_list).toBe("none")
+    // A pre-PR-21185 config (no variant_list) must still decode...
+    const decoded = decodeOverrides({ agent_cycle: "tab", variant_cycle: "ctrl+t" })
+    expect(decoded._tag).toBe("Some")
+    // ...and Keybinds.parse fills the omitted key with its "none" default.
+    const parsed = TuiKeybind.Keybinds.parse({ agent_cycle: "tab", variant_cycle: "ctrl+t" })
+    expect(parsed.variant_list).toBe("none")
   })
 
   test("keybinds with variant_list rejected when not a string", () => {
-    const Keybinds = (Config as any).Keybinds
-    const r = Keybinds.safeParse({ variant_list: 42 })
-    expect(r.success).toBe(false)
+    // A number is not in BindingValueSchema (false | "none" | binding | binding[]).
+    expect(decodeOverrides({ variant_list: 42 })._tag).toBe("None")
+    // Sanity: a string binding is accepted.
+    expect(decodeOverrides({ variant_list: "ctrl+v" })._tag).toBe("Some")
   })
 })
 

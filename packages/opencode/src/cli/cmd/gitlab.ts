@@ -470,7 +470,7 @@ async function runReview(
     throw new Error(`${err.name}: ${err.data?.message || ""}`)
   }
 
-  const text = extractResponseText(result.parts)
+  const text = extractResponseText(result.parts as Parameters<typeof extractResponseText>[0])
   if (!text) {
     throw new Error("No review text returned from the model.")
   }

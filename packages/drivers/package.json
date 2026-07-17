@@ -7,8 +7,11 @@
     ".": "./src/index.ts",
     "./*": "./src/*.ts"
   },
-  "files": ["src"],
+  "files": [
+    "src"
+  ],
   "devDependencies": {
+    "@types/pg": "^8.15.0",
     "mongodb": "^6.0.0"
   },
   "optionalDependencies": {

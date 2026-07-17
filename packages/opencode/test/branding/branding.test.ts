@@ -73,15 +73,24 @@ describe("CLI Branding", () => {
 
   test("logo.ts does not contain opencode branding", () => {
     const content = readText(join(srcDir, "cli", "logo.ts"))
-    // The logo is ASCII block art — it won't contain literal "altimate" text,
-    // but it must NOT contain any "opencode" literal either.
-    expect(content.toLowerCase()).not.toMatch(/opencode/)
+    // Internal package imports keep the upstream npm scope; user-facing logo
+    // content must not carry literal opencode branding.
+    const userFacingLines = content
+      .split("\n")
+      .filter((line) => !line.includes("@opencode-ai/") && !line.trim().startsWith("import "))
+    expect(userFacingLines.join("\n").toLowerCase()).not.toMatch(/opencode/)
   })
 
   test("welcome.ts banner says altimate-code not opencode", () => {
     const content = readText(join(srcDir, "cli", "welcome.ts"))
     expect(content).toContain("altimate-code")
     expect(content).not.toMatch(/\bopencode\b(?!\.)/i)
+  })
+
+  test("initialize command prompt says Altimate Code config, not OpenCode config", () => {
+    const content = readText(join(repoRoot, "packages", "core", "src", "plugin", "command", "initialize.txt"))
+    expect(content).toContain("repo-local Altimate Code config")
+    expect(content).not.toContain("repo-local OpenCode config")
   })
 })
 
@@ -189,7 +198,9 @@ describe("GitHub Action", () => {
 describe("User-Agent & Version", () => {
   test("USER_AGENT contains altimate-code", () => {
     const content = readText(join(srcDir, "installation", "index.ts"))
-    expect(content).toContain("USER_AGENT = `altimate-code/")
+    expect(content).toContain("return `altimate-code/")
+    expect(content).toContain("export const USER_AGENT = userAgent()")
+    expect(content).not.toMatch(/return\s+`opencode\//)
   })
 })
 

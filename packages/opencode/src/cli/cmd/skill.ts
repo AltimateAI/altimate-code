@@ -2,6 +2,7 @@
 import { EOL } from "os"
 import path from "path"
 import fs from "fs/promises"
+import { Glob as BunGlob } from "bun"
 import { Skill } from "../../skill"
 import { bootstrap } from "../bootstrap"
 import { cmd } from "./cmd"
@@ -210,7 +211,7 @@ const SkillListCommand = cmd({
         const rawToolStr = tools.length > 0 ? tools.join(", ") : "—"
         const toolStr = rawToolStr.length > toolsWidth ? rawToolStr.slice(0, toolsWidth - 3) + "..." : rawToolStr
         // Truncate on word boundary
-        let desc = skill.description
+        let desc = skill.description ?? ""
         if (desc.length > 60) {
           desc = desc.slice(0, 60)
           const lastSpace = desc.lastIndexOf(" ")
@@ -381,7 +382,7 @@ const SkillTestCommand = cmd({
         fail(`Frontmatter incomplete — name and description are required`)
       }
 
-      if (skill.description.startsWith("TODO")) {
+      if (skill.description?.startsWith("TODO")) {
         warn(`Description starts with "TODO" — update it before sharing`)
       }
 
@@ -571,7 +572,6 @@ const SkillInstallCommand = cmd({
       }
 
       // Find all SKILL.md files in the source
-      const { Glob: BunGlob } = globalThis.Bun
       const glob = new BunGlob("**/SKILL.md")
       const matches: string[] = []
       for await (const match of glob.scan({ cwd: skillDir, absolute: true })) {
@@ -670,10 +670,16 @@ const SkillRemoveCommand = cmd({
         process.exit(1)
       }
 
-      if (skill.location.startsWith("builtin:")) {
+      // altimate_change start — guard against removing non-filesystem (built-in) skills. The
+      // `customize-opencode` builtin registers location "<built-in>" (NOT the "builtin:" prefix),
+      // so a prefix-only check missed it and path.dirname("<built-in>") === "." — meaning
+      // `skill remove customize-opencode` then rm -rf'd the current working directory. Reject any
+      // location that is not a real absolute filesystem path (all built-ins are non-absolute).
+      if (skill.location.startsWith("builtin:") || !path.isAbsolute(skill.location)) {
         process.stderr.write(`Error: Cannot remove built-in skill "${name}".` + EOL)
         process.exit(1)
       }
+      // altimate_change end
 
       // Check if skill is tracked by git (part of the repo, not user-installed)
       const skillDir = path.dirname(skill.location)

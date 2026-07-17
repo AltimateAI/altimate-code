@@ -1,0 +1,22 @@
+.git
+.opencode
+.sst
+.turbo
+.wrangler
+node_modules
+**/node_modules
+**/.output
+**/dist
+**/.turbo
+**/.vite
+**/coverage
+# altimate_change: the exclusions above speed up app image builds, but the Verdaccio sanity
+# Dockerfile (test/sanity/Dockerfile.verdaccio) COPYs packages/opencode/dist, packages/dbt-tools/dist,
+# and .opencode/skills from this same repo-root context. Re-include exactly those so the sanity build
+# context has them (without this the release "Sanity (Verdaccio)" job fails: "<path>: not found").
+!.opencode/skills
+!.opencode/skills/**
+!packages/opencode/dist
+!packages/opencode/dist/**
+!packages/dbt-tools/dist
+!packages/dbt-tools/dist/**

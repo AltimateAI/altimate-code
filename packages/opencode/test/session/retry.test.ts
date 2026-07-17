@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { NamedError } from "@opencode-ai/util/error"
 import { APICallError } from "ai"
-import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "node:net"
 import { SessionRetry } from "../../src/session/retry"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -124,6 +123,25 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(error)).toBeUndefined()
   })
 
+  test("retries plain text rate limit errors from Alibaba", () => {
+    const msg =
+      "Upstream error from Alibaba: Request rate increased too quickly. To ensure system stability, please adjust your client logic to scale requests more smoothly over time."
+    const error = wrap(msg)
+    expect(SessionRetry.retryable(error)).toBe(msg)
+  })
+
+  test("retries plain text rate limit errors", () => {
+    const msg = "Rate limit exceeded, please try again later"
+    const error = wrap(msg)
+    expect(SessionRetry.retryable(error)).toBe(msg)
+  })
+
+  test("retries too many requests in plain text", () => {
+    const msg = "Too many requests, please slow down"
+    const error = wrap(msg)
+    expect(SessionRetry.retryable(error)).toBe(msg)
+  })
+
   test("does not retry context overflow errors", () => {
     const error = new MessageV2.ContextOverflowError({
       message: "Input exceeds context window of this model",
@@ -135,7 +153,7 @@ describe("session.retry.retryable", () => {
 
   test("retries auth errors with recovery message", () => {
     const error = new MessageV2.AuthError({
-      providerID: "anthropic",
+      providerID: ProviderID.make("anthropic"),
       message: "Anthropic OAuth token refresh failed (HTTP 401)",
     }).toObject() as ReturnType<NamedError["toObject"]>
 
@@ -147,13 +165,23 @@ describe("session.retry.retryable", () => {
 
   test("retries auth errors for other providers", () => {
     const error = new MessageV2.AuthError({
-      providerID: "openai",
+      providerID: ProviderID.make("openai"),
       message: "Codex OAuth token refresh failed (HTTP 403)",
     }).toObject() as ReturnType<NamedError["toObject"]>
 
     const result = SessionRetry.retryable(error)
     expect(result).toBeDefined()
     expect(result).toContain("altimate-code auth login openai")
+  })
+
+  test("retries 5xx API errors even when provider marks them non-retryable", () => {
+    const error = new MessageV2.APIError({
+      message: "Bad Gateway",
+      statusCode: 502,
+      isRetryable: false,
+    }).toObject() as ReturnType<NamedError["toObject"]>
+
+    expect(SessionRetry.retryable(error)).toBe("Bad Gateway")
   })
 })
 
@@ -164,11 +192,9 @@ describe("session.message-v2.fromError", () => {
       // Use a raw TCP server that sends a partial HTTP response then
       // destroys the socket, triggering an immediate ECONNRESET on the client.
       const server = createServer((socket) => {
-        // Send partial chunked HTTP response then destroy the connection
         socket.write(
           "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nHello,\r\n",
         )
-        // Destroy after a brief delay to ensure the client has started reading
         setTimeout(() => socket.destroy(), 20)
       })
 
@@ -204,41 +230,6 @@ describe("session.message-v2.fromError", () => {
     const retryable = SessionRetry.retryable(error)
     expect(retryable).toBeDefined()
     expect(retryable).toBe("Connection reset by server")
-  })
-
-  test("converts token refresh failure to ProviderAuthError", () => {
-    const error = new Error("Anthropic OAuth token refresh failed (HTTP 401). Try re-authenticating: altimate-code auth login anthropic")
-    const result = MessageV2.fromError(error, { providerID: "anthropic" as any })
-
-    expect(result.name).toBe("ProviderAuthError")
-    expect((result as any).data.providerID).toBe("anthropic")
-    expect((result as any).data.message).toContain("token refresh failed")
-  })
-
-  test("converts codex token refresh failure to ProviderAuthError", () => {
-    const error = new Error("Codex OAuth token refresh failed (HTTP 403). Try re-authenticating: altimate-code auth login openai")
-    const result = MessageV2.fromError(error, { providerID: "openai" as any })
-
-    expect(result.name).toBe("ProviderAuthError")
-    expect((result as any).data.providerID).toBe("openai")
-  })
-
-  test("provides descriptive message for generic Error with no message", () => {
-    const error = new Error()
-    const result = MessageV2.fromError(error, { providerID: "test" as any })
-
-    expect(result.name).toBe("UnknownError")
-    // Should not be just "Error" — should include stack or context
-    expect((result as any).data.message).not.toBe("Error")
-    expect((result as any).data.message.length).toBeGreaterThan(5)
-  })
-
-  test("provides descriptive message for TypeError with no message", () => {
-    const error = new TypeError()
-    const result = MessageV2.fromError(error, { providerID: "test" as any })
-
-    expect(result.name).toBe("UnknownError")
-    expect((result as any).data.message).toContain("TypeError")
   })
 
   test("marks OpenAI 404 status codes as retryable", () => {

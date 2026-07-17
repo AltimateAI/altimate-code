@@ -7,6 +7,7 @@
  * Tests use Dispatcher.call spying to supply known RBAC data.
  */
 import { describe, test, expect, spyOn, afterAll, beforeEach } from "bun:test"
+import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import {
   FinopsRoleGrantsTool,
@@ -59,7 +60,7 @@ describe("formatGrants: privilege summary and grant rows", () => {
       },
     })
 
-    const tool = await FinopsRoleGrantsTool.init()
+    const tool = await initTool(FinopsRoleGrantsTool)
     const result = await tool.execute({ warehouse: "test_wh", limit: 100 }, ctx as any)
 
     expect(result.title).toContain("2 found")
@@ -82,7 +83,7 @@ describe("formatGrants: privilege summary and grant rows", () => {
       },
     })
 
-    const tool = await FinopsRoleGrantsTool.init()
+    const tool = await initTool(FinopsRoleGrantsTool)
     const result = await tool.execute({ warehouse: "test_wh", limit: 100 }, ctx as any)
 
     // formatGrants should fall back to r.role, r.granted_on, r.name
@@ -99,7 +100,7 @@ describe("formatGrants: privilege summary and grant rows", () => {
       },
     })
 
-    const tool = await FinopsRoleGrantsTool.init()
+    const tool = await initTool(FinopsRoleGrantsTool)
     const result = await tool.execute({ warehouse: "test_wh", limit: 100 }, ctx as any)
 
     expect(result.output).toContain("No grants found")
@@ -113,7 +114,7 @@ describe("formatGrants: privilege summary and grant rows", () => {
       },
     })
 
-    const tool = await FinopsRoleGrantsTool.init()
+    const tool = await initTool(FinopsRoleGrantsTool)
     const result = await tool.execute({ warehouse: "test_wh", limit: 100 }, ctx as any)
 
     expect(result.title).toContain("FAILED")
@@ -139,7 +140,7 @@ describe("formatHierarchy: recursive role tree rendering", () => {
       },
     })
 
-    const tool = await FinopsRoleHierarchyTool.init()
+    const tool = await initTool(FinopsRoleHierarchyTool)
     const result = await tool.execute({ warehouse: "test_wh" }, ctx as any)
 
     expect(result.title).toContain("3 roles")
@@ -163,7 +164,7 @@ describe("formatHierarchy: recursive role tree rendering", () => {
       },
     })
 
-    const tool = await FinopsRoleHierarchyTool.init()
+    const tool = await initTool(FinopsRoleHierarchyTool)
     const result = await tool.execute({ warehouse: "test_wh" }, ctx as any)
 
     // Should use r.role as name and r.granted_roles as children
@@ -180,7 +181,7 @@ describe("formatHierarchy: recursive role tree rendering", () => {
       },
     })
 
-    const tool = await FinopsRoleHierarchyTool.init()
+    const tool = await initTool(FinopsRoleHierarchyTool)
     const result = await tool.execute({ warehouse: "test_wh" }, ctx as any)
 
     expect(result.output).toContain("Role Hierarchy")
@@ -202,7 +203,7 @@ describe("formatUserRoles: user-role assignment table", () => {
       },
     })
 
-    const tool = await FinopsUserRolesTool.init()
+    const tool = await initTool(FinopsUserRolesTool)
     const result = await tool.execute({ warehouse: "test_wh", limit: 100 }, ctx as any)
 
     expect(result.title).toContain("2 assignments")
@@ -222,7 +223,7 @@ describe("formatUserRoles: user-role assignment table", () => {
       },
     })
 
-    const tool = await FinopsUserRolesTool.init()
+    const tool = await initTool(FinopsUserRolesTool)
     const result = await tool.execute({ warehouse: "test_wh", limit: 100 }, ctx as any)
 
     // Falls back to r.user_name (via user fallback chain), r.role_name, r.grantor
@@ -238,7 +239,7 @@ describe("formatUserRoles: user-role assignment table", () => {
       },
     })
 
-    const tool = await FinopsUserRolesTool.init()
+    const tool = await initTool(FinopsUserRolesTool)
     const result = await tool.execute({ warehouse: "test_wh", limit: 100 }, ctx as any)
 
     expect(result.output).toContain("No user role assignments found")

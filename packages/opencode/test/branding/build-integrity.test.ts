@@ -284,10 +284,14 @@ describe("Bundle Completeness", () => {
     expect(buildScript).toContain("SKILL.md")
   })
 
-  test("skill.ts loads embedded skills from OPENCODE_BUILTIN_SKILLS", () => {
-    const skillTs = readFileSync(join(repoRoot, "packages/opencode/src/skill/skill.ts"), "utf-8")
-    expect(skillTs).toContain("OPENCODE_BUILTIN_SKILLS")
-    expect(skillTs).toContain("builtin:")
+  test("the LIVE skill module loads embedded builtins from OPENCODE_BUILTIN_SKILLS", () => {
+    // Must read the LIVE module (skill/index.ts = @/skill), NOT the orphaned skill.ts. The v1.17.9
+    // merge rewrote index.ts and dropped the builtin loader while skill.ts kept it — this test used to
+    // read skill.ts and stayed green while builtins were absent from the runtime. Pin the live module.
+    const liveSkill = readFileSync(join(repoRoot, "packages/opencode/src/skill/index.ts"), "utf-8")
+    expect(liveSkill).toContain("OPENCODE_BUILTIN_SKILLS")
+    expect(liveSkill).toContain("builtin:")
+    expect(liveSkill).toContain(".altimate") // the ~/.altimate/builtin FS path too
   })
 
   test("publish.ts bundles dbt-tools binary and dist", () => {

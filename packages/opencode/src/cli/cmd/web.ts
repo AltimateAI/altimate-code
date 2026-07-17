@@ -2,6 +2,7 @@ import { Server } from "../../server/server"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { withNetworkOptions, resolveNetworkOptions } from "../network"
+import { AppRuntime } from "../../effect/app-runtime"
 import { Flag } from "../../flag/flag"
 import open from "open"
 import { networkInterfaces } from "os"
@@ -38,8 +39,8 @@ export const WebCommand = cmd({
     if (!Flag.OPENCODE_SERVER_PASSWORD) {
       UI.println(UI.Style.TEXT_WARNING_BOLD + "!  " + "OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
     }
-    const opts = await resolveNetworkOptions(args)
-    const server = await Server.listen(opts)
+    const opts = await AppRuntime.runPromise(resolveNetworkOptions(args))
+    const server = Server.listen(opts)
     UI.empty()
     UI.println(UI.logo("  "))
     UI.empty()

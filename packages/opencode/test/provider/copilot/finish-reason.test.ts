@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test"
-import { mapOpenAICompatibleFinishReason } from "../../../src/provider/sdk/copilot/chat/map-openai-compatible-finish-reason"
-import { mapOpenAIResponseFinishReason } from "../../../src/provider/sdk/copilot/responses/map-openai-responses-finish-reason"
+import { mapOpenAICompatibleFinishReason } from "@opencode-ai/core/github-copilot/chat/map-openai-compatible-finish-reason"
+import { mapOpenAIResponseFinishReason } from "@opencode-ai/core/github-copilot/responses/map-openai-responses-finish-reason"
 
 // ---------------------------------------------------------------------------
 // mapOpenAICompatibleFinishReason (Chat API path)
@@ -27,20 +27,20 @@ describe("mapOpenAICompatibleFinishReason", () => {
     expect(mapOpenAICompatibleFinishReason("tool_calls")).toBe("tool-calls")
   })
 
-  test("maps null to 'unknown'", () => {
-    expect(mapOpenAICompatibleFinishReason(null)).toBe("unknown")
+  test("maps null to 'other'", () => {
+    expect(mapOpenAICompatibleFinishReason(null)).toBe("other")
   })
 
-  test("maps undefined to 'unknown'", () => {
-    expect(mapOpenAICompatibleFinishReason(undefined)).toBe("unknown")
+  test("maps undefined to 'other'", () => {
+    expect(mapOpenAICompatibleFinishReason(undefined)).toBe("other")
   })
 
-  test("maps empty string to 'unknown'", () => {
-    expect(mapOpenAICompatibleFinishReason("")).toBe("unknown")
+  test("maps empty string to 'other'", () => {
+    expect(mapOpenAICompatibleFinishReason("")).toBe("other")
   })
 
-  test("maps unrecognized string to 'unknown'", () => {
-    expect(mapOpenAICompatibleFinishReason("something_else")).toBe("unknown")
+  test("maps unrecognized string to 'other'", () => {
+    expect(mapOpenAICompatibleFinishReason("something_else")).toBe("other")
   })
 })
 
@@ -79,8 +79,8 @@ describe("mapOpenAIResponseFinishReason", () => {
     )
   })
 
-  test("unknown string without function call returns 'unknown'", () => {
-    expect(mapOpenAIResponseFinishReason({ finishReason: "something_else", hasFunctionCall: false })).toBe("unknown")
+  test("unknown string without function call returns 'other'", () => {
+    expect(mapOpenAIResponseFinishReason({ finishReason: "something_else", hasFunctionCall: false })).toBe("other")
   })
 
   test("unknown string with function call returns 'tool-calls'", () => {

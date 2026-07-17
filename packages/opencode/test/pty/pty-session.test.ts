@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import { Pty } from "../../src/pty"
-import type { PtyID } from "../../src/pty/schema"
+import { PtyID } from "../../src/pty/schema"
 import { tmpdir } from "../fixture/fixture"
 import { setTimeout as sleep } from "node:timers/promises"
 
@@ -22,6 +22,11 @@ const pick = (log: Array<{ type: "created" | "exited" | "deleted"; id: PtyID }>,
 }
 
 describe("pty", () => {
+  test("PtyID.zod rejects non-pty prefixes", () => {
+    expect(PtyID.zod.parse("pty_schema_route")).toBe(PtyID.make("pty_schema_route"))
+    expect(() => PtyID.zod.parse("ses_schema_route")).toThrow()
+  })
+
   // altimate_change start - add retry to handle flaky Bus event delivery under parallel test load
   test("publishes created, exited, deleted in order for /bin/ls + remove", async () => {
     if (process.platform === "win32") return

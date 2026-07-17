@@ -2,6 +2,10 @@ import type { Hooks, PluginInput, Plugin as PluginInstance } from "@opencode-ai/
 import { Config } from "../config/config"
 import { Bus } from "../bus"
 import { Log } from "../util/log"
+// altimate_change start — Effect Context.Service facade imports
+import { Context, Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change end
 import { createOpencodeClient } from "@opencode-ai/sdk"
 import { Server } from "../server/server"
 import { BunProc } from "../bun"
@@ -9,9 +13,14 @@ import { Instance } from "../project/instance"
 import { Flag } from "../flag/flag"
 import { CodexAuthPlugin } from "./codex"
 import { Session } from "../session"
-import { NamedError } from "@opencode-ai/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { CopilotAuthPlugin } from "./copilot"
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
+// altimate_change start — upstream_fix: restore provider auth plugin imports
+import { AzureAuthPlugin } from "./azure"
+import { DigitalOceanAuthPlugin } from "./digitalocean"
+import { XaiAuthPlugin } from "./xai"
+// altimate_change end
 // altimate_change start — snowflake cortex plugin import
 import { SnowflakeCortexAuthPlugin } from "../altimate/plugin/snowflake"
 // altimate_change end
@@ -20,6 +29,13 @@ import { DatabricksAuthPlugin } from "../altimate/plugin/databricks"
 // altimate_change end
 // altimate_change start — altimate backend auth plugin
 import { AltimateAuthPlugin } from "../altimate/plugin/altimate"
+// altimate_change end
+// altimate_change start — wire plugin experimental_workspace.register into the
+// control-plane adapter registry consumed by control-plane/workspace.ts
+import { registerAdapter } from "../control-plane/adapters"
+import type { WorkspaceAdapter as ControlPlaneWorkspaceAdapter } from "../control-plane/types"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import { InstanceRef } from "../effect/instance-ref"
 // altimate_change end
 
 export namespace Plugin {
@@ -36,6 +52,11 @@ export namespace Plugin {
     CodexAuthPlugin,
     CopilotAuthPlugin,
     GitlabAuthPlugin as unknown as PluginInstance,
+    // altimate_change start — upstream_fix: restore provider auth internal plugins
+    AzureAuthPlugin,
+    DigitalOceanAuthPlugin,
+    XaiAuthPlugin,
+    // altimate_change end
     SnowflakeCortexAuthPlugin,
     DatabricksAuthPlugin,
     AltimateAuthPlugin,
@@ -63,6 +84,18 @@ export namespace Plugin {
       get serverUrl(): URL {
         return Server.url ?? new URL("http://localhost:4096")
       },
+      // altimate_change start — register plugin-provided workspace adapters with the
+      // control-plane registry, scoped to the current project.
+      experimental_workspace: {
+        register(type, adapter) {
+          registerAdapter(
+            ProjectV2.ID.make(Instance.project.id),
+            type,
+            adapter as unknown as ControlPlaneWorkspaceAdapter,
+          )
+        },
+      },
+      // altimate_change end
       $: Bun.$,
     }
 
@@ -80,7 +113,12 @@ export namespace Plugin {
       plugins = [...BUILTIN, ...plugins]
     }
 
-    for (let plugin of plugins) {
+    for (const entry of plugins) {
+      // altimate_change start — plugin entries may be a bare spec string or a
+      // [spec, options] tuple (upstream v1.17.9); normalize and forward options.
+      let plugin = Array.isArray(entry) ? entry[0] : entry
+      const options = Array.isArray(entry) ? entry[1] : undefined
+      // altimate_change end
       // ignore old codex plugin since it is supported first party now
       if (plugin.includes("opencode-openai-codex-auth") || plugin.includes("opencode-copilot-auth")) continue
       log.info("loading plugin", { path: plugin })
@@ -108,9 +146,13 @@ export namespace Plugin {
         .then(async (mod) => {
           const seen = new Set<PluginInstance>()
           for (const [_name, fn] of Object.entries<PluginInstance>(mod)) {
+            // altimate_change start — upstream_fix: skip non-function exports (e.g. `export const version`)
+            // so a plugin module with any non-callable export doesn't throw "fn is not a function" on load
+            if (typeof fn !== "function") continue
+            // altimate_change end
             if (seen.has(fn)) continue
             seen.add(fn)
-            hooks.push(await fn(input))
+            hooks.push(await fn(input, options))
           }
         })
         .catch((err) => {
@@ -170,13 +212,75 @@ export namespace Plugin {
       // @ts-expect-error this is because we haven't moved plugin to sdk v2
       await hook.config?.(config)
     }
-    Bus.subscribeAll(async (input) => {
-      const hooks = await state().then((x) => x.hooks)
-      for (const hook of hooks) {
-        hook["event"]?.({
-          event: input,
-        })
-      }
-    })
+    // altimate_change start — event callbacks fire after bootstrap returns, so bind the
+    // current legacy Instance ALS context captured during Plugin.init.
+    Bus.subscribeAll(
+      Instance.bind(async (input) => {
+        const hooks = await state().then((x) => x.hooks)
+        for (const hook of hooks) {
+          hook["event"]?.({
+            event: input,
+          })
+        }
+      }),
+    )
+    // altimate_change end
   }
+
+  // altimate_change start — Effect Context.Service facade.
+  // Upstream v1.17.9 composes Plugin into the Effect runtime as a Context.Service.
+  // This facade exposes Service/layer/defaultLayer/node by delegating each method to
+  // the existing namespace functions above (which self-manage Instance state via
+  // `Instance.state`). The imperative Promise-based exports (trigger/list/init) remain
+  // the source of truth; this only adds an Effect-shaped wrapper for new consumers.
+  type TriggerName = {
+    [K in keyof Hooks]-?: NonNullable<Hooks[K]> extends (input: any, output: any) => Promise<void> ? K : never
+  }[keyof Hooks]
+
+  export interface Interface {
+    readonly trigger: <
+      Name extends TriggerName,
+      Input = Parameters<Required<Hooks>[Name]>[0],
+      Output = Parameters<Required<Hooks>[Name]>[1],
+    >(
+      name: Name,
+      input: Input,
+      output: Output,
+    ) => Effect.Effect<Output>
+    readonly list: () => Effect.Effect<Hooks[]>
+    readonly init: () => Effect.Effect<void>
+  }
+
+  export class Service extends Context.Service<Service, Interface>()("@opencode/Plugin") {}
+
+  export const layer = Layer.succeed(
+    Service,
+    Service.of({
+      // altimate_change start — bridge Effect InstanceRef back into the legacy ALS
+      // Instance namespace used by plugin state during bootstrap.
+      trigger: (name, input, output) =>
+        Effect.gen(function* () {
+          const ctx = yield* InstanceRef
+          return yield* Effect.promise(() =>
+            ctx ? Instance.restore(ctx, () => trigger(name as any, input, output)) : trigger(name as any, input, output),
+          )
+        }),
+      list: () =>
+        Effect.gen(function* () {
+          const ctx = yield* InstanceRef
+          return yield* Effect.promise(() => (ctx ? Instance.restore(ctx, () => list()) : list()))
+        }),
+      init: () =>
+        Effect.gen(function* () {
+          const ctx = yield* InstanceRef
+          return yield* Effect.promise(() => (ctx ? Instance.restore(ctx, () => init()) : init()))
+        }),
+      // altimate_change end
+    }),
+  )
+
+  export const defaultLayer = layer
+
+  export const node = LayerNode.make(layer, [])
+  // altimate_change end
 }

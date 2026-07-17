@@ -22,6 +22,7 @@ import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/altimate-core"
 import { AltimateCoreColumnLineageTool } from "../../src/altimate/tools/altimate-core-column-lineage"
 import { AltimateCoreTrackLineageTool } from "../../src/altimate/tools/altimate-core-track-lineage"
+import { initTool } from "../altimate/tool-fixture"
 
 // Plausible altimate auth/account env vars. The native engine reads NONE of
 // these — stripping them must not change lineage behavior. That is the whole
@@ -77,13 +78,13 @@ describe("v0.8.2 — altimate-core lineage runs offline (no API key)", () => {
   // Text claim and runtime behavior must agree: a tool that SAYS "no API key"
   // must also WORK with no API key. Pin both together so neither can drift.
   test("description claim matches runtime: column_lineage", async () => {
-    const { description } = await AltimateCoreColumnLineageTool.init()
+    const { description } = await initTool(AltimateCoreColumnLineageTool)
     expect(description.toLowerCase()).toContain("no api key")
     expect(description.toLowerCase()).not.toContain("altimate_core.init")
   })
 
   test("description claim matches runtime: track_lineage", async () => {
-    const { description } = await AltimateCoreTrackLineageTool.init()
+    const { description } = await initTool(AltimateCoreTrackLineageTool)
     expect(description.toLowerCase()).toContain("no api key")
     expect(description.toLowerCase()).not.toContain("altimate_core.init")
   })

@@ -104,30 +104,31 @@ describe("install endpoint URL — altimate.sh present and consistent", () => {
 // ---------------------------------------------------------------------------
 
 describe("upgradeCurl bounded timeout", () => {
-  test("AbortSignal.timeout is wired into the fetch options", () => {
+  test("a bounded timeout is wired into the upgrade fetch", () => {
+    // altimate_change: post-v1.17.9 the upgrade fetch was migrated from
+    // fetch()+AbortSignal.timeout() to the Effect HttpClient. The bounded-timeout
+    // invariant is preserved via Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS).
     // Without a timeout the install-script fetch can hang on a stalled CDN.
-    // Assert the AbortSignal is passed, separately from the value, so a
-    // refactor that extracts the literal does not break this regression.
-    expect(INSTALLATION_SRC).toMatch(/AbortSignal\.timeout\(/)
+    expect(INSTALLATION_SRC).toMatch(/Effect\.timeout\(\s*UPGRADE_FETCH_TIMEOUT_MS\s*\)/)
   })
 
   test("timeout value is a named constant set to 15 seconds", () => {
     expect(INSTALLATION_SRC).toMatch(/UPGRADE_FETCH_TIMEOUT_MS\s*=\s*15_000/)
   })
 
-  test("timeout constant is referenced by upgradeCurl, not duplicated", () => {
-    // The reviewer should see the constant in the fetch call site. A
-    // double-defined literal would mean someone reverted the named-constant
-    // refactor — flag it.
+  test("timeout constant is referenced by the upgrade fetch, not duplicated", () => {
+    // altimate_change: assert the named constant is at the call site (Effect form);
+    // a double-defined literal would mean someone reverted the named-constant refactor.
     expect(INSTALLATION_SRC).toMatch(
-      /AbortSignal\.timeout\(\s*UPGRADE_FETCH_TIMEOUT_MS\s*\)/,
+      /Effect\.timeout\(\s*UPGRADE_FETCH_TIMEOUT_MS\s*\)/,
     )
-    const timeoutLiterals = INSTALLATION_SRC.match(/AbortSignal\.timeout\(\s*15_000\s*\)/g)
+    const timeoutLiterals = INSTALLATION_SRC.match(/Effect\.timeout\(\s*15_000\s*\)/g)
     expect(timeoutLiterals).toBeNull()
   })
 
-  test("URL constant is referenced by upgradeCurl, not duplicated", () => {
-    expect(INSTALLATION_SRC).toMatch(/fetch\(\s*UPGRADE_INSTALL_URL\b/)
+  test("URL constant is referenced by the upgrade fetch, not duplicated", () => {
+    // altimate_change: fetch() was replaced by HttpClientRequest.get(...) in Effect form.
+    expect(INSTALLATION_SRC).toMatch(/HttpClientRequest\.get\(\s*UPGRADE_INSTALL_URL\b/)
   })
 })
 
@@ -136,16 +137,18 @@ describe("upgradeCurl bounded timeout", () => {
 // ---------------------------------------------------------------------------
 
 describe("upgradeCurl error surface", () => {
-  test("fetch is wrapped in try/catch (raw AbortError must not reach the user)", () => {
-    // Locate the try { ... } catch block in upgradeCurl. A future refactor
-    // that drops the wrapper would regress to "DOMException: The operation
-    // was aborted" reaching the user with no URL, no instructions.
+  test("the upgrade fetch error is mapped to a friendly error (raw AbortError must not reach the user)", () => {
+    // altimate_change: upgradeCurl is now an Effect.fnUntraced. The error wrapper
+    // is Effect.mapError on the fetch pipe instead of try/catch. A future refactor
+    // that drops the wrapper would regress to "DOMException: The operation was
+    // aborted" reaching the user with no URL, no instructions.
     const upgradeCurlBody = INSTALLATION_SRC.match(
-      /async function upgradeCurl[\s\S]*?\n {2}}\n/,
+      /const upgradeCurl = Effect\.fnUntraced\([\s\S]*?\n {4}\)/,
     )
     expect(upgradeCurlBody).not.toBeNull()
-    expect(upgradeCurlBody![0]).toMatch(/try\s*{[\s\S]*?fetch\(UPGRADE_INSTALL_URL/)
-    expect(upgradeCurlBody![0]).toMatch(/}\s*catch\s*\(\s*err/)
+    expect(upgradeCurlBody![0]).toMatch(/HttpClientRequest\.get\(UPGRADE_INSTALL_URL\)/)
+    expect(upgradeCurlBody![0]).toMatch(/Effect\.mapError\(/)
+    expect(upgradeCurlBody![0]).toMatch(/Could not download install script from/)
   })
 
   test("rethrown error names the install URL", () => {
@@ -166,10 +169,16 @@ describe("upgradeCurl error surface", () => {
   })
 
   test("HTTP non-2xx is surfaced as a tagged error, not a bare statusText", () => {
-    // `new Error(res.statusText)` produced "Not Found" / "Service Unavailable"
-    // with no status code and no URL. The v0.7.2 path includes the numeric
-    // status so the rethrown message is "HTTP 404 Not Found", not "Not Found".
-    expect(INSTALLATION_SRC).toMatch(/HTTP \$\{res\.status\} \$\{res\.statusText\}/)
+    // altimate_change: the manual `new Error(res.statusText)` path was replaced by
+    // HttpClient.filterStatusOk, which turns any non-2xx into a structured Effect
+    // ResponseError (carrying status + request). That error is then mapped to the
+    // friendly UpgradeFailedError naming the install URL — never a bare statusText.
+    expect(INSTALLATION_SRC).toMatch(/HttpClient\.filterStatusOk\(/)
+    const upgradeCurlBody = INSTALLATION_SRC.match(
+      /const upgradeCurl = Effect\.fnUntraced\([\s\S]*?\n {4}\)/,
+    )
+    expect(upgradeCurlBody).not.toBeNull()
+    expect(upgradeCurlBody![0]).toMatch(/new UpgradeFailedError\(/)
   })
 })
 
@@ -233,9 +242,11 @@ describe("altimate_change markers around upgradeCurl", () => {
     expect(INSTALLATION_SRC).toMatch(blockRe)
   })
 
-  test("try/catch wrapper lives inside an altimate_change block", () => {
+  test("the friendly-error wrapper lives inside an altimate_change block", () => {
+    // altimate_change: the wrapper is now the Effect.mapError pipe on the fetch
+    // (HttpClientRequest.get(UPGRADE_INSTALL_URL)) rather than a try/catch.
     const wrapperRe =
-      /\/\/ altimate_change start[\s\S]*?try\s*{[\s\S]*?fetch\(UPGRADE_INSTALL_URL[\s\S]*?Could not download install script[\s\S]*?\/\/ altimate_change end/
+      /\/\/ altimate_change start[\s\S]*?HttpClientRequest\.get\(UPGRADE_INSTALL_URL\)[\s\S]*?Could not download install script[\s\S]*?\/\/ altimate_change end/
     expect(INSTALLATION_SRC).toMatch(wrapperRe)
   })
 

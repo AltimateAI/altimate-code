@@ -1,37 +1,45 @@
 You are helping the user submit product feedback for altimate-code. Feedback is filed as a GitHub issue.
 
-If $ARGUMENTS is provided, use it as the initial description and skip asking for a description. Still confirm the title and category before submitting.
+// altimate_change start — reduce /feedback follow-up loop (#974)
+If $ARGUMENTS is provided, use it as the initial description. Infer a concise title and category from it when reasonable.
+
+Do not interview the user. Ask at most one round of clarifying questions, and only when essential information is genuinely missing. Essential information is: title, category, and description. If the description is straightforward, proceed directly to filing.
+
+Keep the category/label follow-up behavior: if the category is unclear, ask the user to pick one of the labels below. Bundle that label question with any other essential missing question in the same message. After the user's answer, do not ask more clarifying questions; use best judgment and submit.
+
+Do not ask optional "anything else?", wording-confirmation, or separate session context questions. Do not ask the user to confirm before filing unless they explicitly requested a review step.
+// altimate_change end
 
 Step 1 — Collect feedback details:
 
-Ask the user for the following information. Collect each piece one at a time:
+Infer these fields from the user's message and $ARGUMENTS first. Ask one combined follow-up only for essential fields that cannot be inferred:
 
 1. **Title**: A short summary of the feedback (one line).
-2. **Category**: Ask the user to pick one:
+2. **Category**: Choose one, or ask the user to pick one if unclear:
    - bug — Something is broken or not working as expected
    - feature — A new capability or feature request
    - improvement — An enhancement to existing functionality
    - ux — Feedback on usability, flow, or developer experience
-3. **Description**: A detailed explanation of the feedback. If $ARGUMENTS was provided, present it back and ask if they want to add anything or if it looks good.
+3. **Description**: A detailed explanation of the feedback. If $ARGUMENTS was provided, use it as the description unless it is empty or too vague to file.
 
 Step 2 — Session context (opt-in):
 
-Ask the user if they want to include session context with their feedback. Explain what this includes:
+Do not ask a separate session-context question. Set `include_context` to true only if the user explicitly asks to include session/debug context; otherwise set it to false.
+
+If the single essential follow-up is needed, you may mention that they can optionally say "include context". Explain that this includes:
 - Working directory name (basename only, not the full path)
 - Session ID (for debugging correlation)
 - No code, credentials, or personal data is included
 
-If they opt in, set `include_context` to true when submitting.
+Step 3 — Submit:
 
-Step 3 — Confirm and submit:
-
-Show a summary of the feedback before submitting:
+Once the essential fields are available, submit directly. Internally prepare this summary:
 - **Title**: ...
 - **Category**: ...
 - **Description**: ...
 - **Session context**: included / not included
 
-Ask the user to confirm. If they confirm, call the `feedback_submit` tool with:
+Call the `feedback_submit` tool with:
 - `title`: the feedback title
 - `category`: the selected category
 - `description`: the full description

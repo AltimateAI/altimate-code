@@ -8,16 +8,21 @@
 // Style/imports follow packages/opencode/test/tool/question.test.ts and
 // packages/opencode/test/tool/bash.test.ts.
 
-import { describe, expect, test, spyOn, beforeEach, afterEach } from "bun:test"
+import { describe, expect, test, spyOn, beforeAll, beforeEach, afterEach } from "bun:test"
 import { QuestionTool } from "../../src/tool/question"
 import * as QuestionModule from "../../src/question"
 import { BashTool } from "../../src/tool/bash"
 import { Instance } from "../../src/project/instance"
 import { SessionID, MessageID } from "../../src/session/schema"
+// altimate_change start — upstream v1.17.9 made tools Effect definitions (no static .init());
+// resolve the executable tool via the shared initTool fixture.
+import { initTool } from "../altimate/tool-fixture"
+import { prepareReleaseValidationDatabase } from "./db-prepare"
+// altimate_change end
 
 const ctx = {
   sessionID: SessionID.make("ses_test-session"),
-  messageID: MessageID.make("test-message"),
+  messageID: MessageID.make("msg_test-message"),
   callID: "test-call",
   agent: "test-agent",
   abort: AbortSignal.any([]),
@@ -25,6 +30,8 @@ const ctx = {
   metadata: () => {},
   ask: async () => {},
 }
+
+beforeAll(() => prepareReleaseValidationDatabase())
 
 // ---------------------------------------------------------------------------
 // Gap #1 — empty-string ALTIMATE_NON_INTERACTIVE behaves interactive.
@@ -56,7 +63,7 @@ describe("tool.question default detection — empty-string ALTIMATE_NON_INTERACT
     // it is set-but-falsy. Assert the desired behavior — interactive path.
     process.env["ALTIMATE_NON_INTERACTIVE"] = ""
 
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const questions = [
       {
         question: "Pick a color",
@@ -98,7 +105,7 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
   // Gap #2 — multiple questions map answers positionally (mode=first).
   test("ALTIMATE_AUTO_ANSWER=first maps each question to its OWN first option", async () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "first"
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const questions = [
       { question: "Q1", header: "Q1", options: [{ label: "A", description: "" }, { label: "B", description: "" }] },
       { question: "Q2", header: "Q2", options: [{ label: "C", description: "" }, { label: "D", description: "" }] },
@@ -115,7 +122,7 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
 
   // Gap #2 — multiple questions, default (no AUTO_ANSWER) → every entry Unanswered.
   test("no ALTIMATE_AUTO_ANSWER returns Unanswered for every question independently", async () => {
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const questions = [
       { question: "Q1", header: "Q1", options: [{ label: "A", description: "" }, { label: "B", description: "" }] },
       { question: "Q2", header: "Q2", options: [{ label: "C", description: "" }, { label: "D", description: "" }] },
@@ -130,7 +137,7 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
   // Gap #3 — label match is case-insensitive but emits the option's original casing.
   test("ALTIMATE_AUTO_ANSWER label match is case-insensitive; emits original casing", async () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "snowflake"
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const questions = [
       {
         question: "Pick a warehouse",
@@ -152,7 +159,7 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
   // Gap #4 — reserved keyword 'first' wins over a literal label named 'First'.
   test("ALTIMATE_AUTO_ANSWER=first is positional even when an option is labeled 'First'", async () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "first"
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const questions = [
       {
         question: "Pick",
@@ -177,7 +184,7 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
       if (mode === undefined) delete process.env["ALTIMATE_AUTO_ANSWER"]
       else process.env["ALTIMATE_AUTO_ANSWER"] = mode
 
-      const tool = await QuestionTool.init()
+      const tool = await initTool(QuestionTool)
       const questions = [{ question: "Empty?", header: "Empty", options: [] as { label: string; description: string }[] }]
 
       const result = await tool.execute({ questions }, ctx)
@@ -189,7 +196,7 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
   // Gap #6 — multiple:true still yields a single selected label under auto-answer.
   test("multiple:true question yields a single label under ALTIMATE_AUTO_ANSWER=last", async () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "last"
-    const tool = await QuestionTool.init()
+    const tool = await initTool(QuestionTool)
     const questions = [
       {
         question: "Pick many",
@@ -232,7 +239,7 @@ describe("tool.bash strips ALTIMATE_NON_INTERACTIVE from child env", () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
-        const bash = await BashTool.init()
+        const bash = await initTool(BashTool)
         // printenv exits non-zero when the var is unset, so `|| echo MISSING`
         // proves the delete reached spawn's env.
         const result = await bash.execute(

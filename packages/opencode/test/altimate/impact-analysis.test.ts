@@ -6,6 +6,7 @@
  * findDownstream logic without a real napi binary or dbt project.
  */
 import { describe, test, expect, spyOn, afterAll, beforeEach } from "bun:test"
+import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { ImpactAnalysisTool } from "../../src/altimate/tools/impact-analysis"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -49,7 +50,7 @@ describe("impact_analysis: empty / missing manifest", () => {
     mockDispatcher({
       "dbt.manifest": { models: [], model_count: 0, test_count: 0 },
     })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "stg_orders", change_type: "remove", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -67,7 +68,7 @@ describe("impact_analysis: empty / missing manifest", () => {
         test_count: 0,
       },
     })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "stg_orders", change_type: "remove", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -92,7 +93,7 @@ describe("impact_analysis: DAG traversal", () => {
 
   test("finds direct and transitive dependents in a linear chain", async () => {
     mockDispatcher({ "dbt.manifest": linearDAG })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "stg_orders", change_type: "remove", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -108,7 +109,7 @@ describe("impact_analysis: DAG traversal", () => {
 
   test("SAFE severity when no downstream models exist", async () => {
     mockDispatcher({ "dbt.manifest": linearDAG })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     // rpt_daily is a leaf — nothing depends on it
     const result = await tool.execute(
       { model: "rpt_daily", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
@@ -133,7 +134,7 @@ describe("impact_analysis: DAG traversal", () => {
         test_count: 0,
       },
     })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "src", change_type: "rename", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -157,7 +158,7 @@ describe("impact_analysis: DAG traversal", () => {
         test_count: 0,
       },
     })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "stg_users", change_type: "retype", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -180,7 +181,7 @@ describe("impact_analysis: severity classification", () => {
 
   test("LOW severity boundary: exactly 3 downstream models", async () => {
     mockDispatcher({ "dbt.manifest": makeManifest(3) })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -190,7 +191,7 @@ describe("impact_analysis: severity classification", () => {
 
   test("MEDIUM severity boundary: exactly 4 downstream models", async () => {
     mockDispatcher({ "dbt.manifest": makeManifest(4) })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -200,7 +201,7 @@ describe("impact_analysis: severity classification", () => {
 
   test("MEDIUM severity boundary: exactly 10 downstream models", async () => {
     mockDispatcher({ "dbt.manifest": makeManifest(10) })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -210,7 +211,7 @@ describe("impact_analysis: severity classification", () => {
 
   test("HIGH severity boundary: exactly 11 downstream models", async () => {
     mockDispatcher({ "dbt.manifest": makeManifest(11) })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "root", change_type: "modify", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -222,7 +223,7 @@ describe("impact_analysis: severity classification", () => {
 describe("impact_analysis: error handling", () => {
   test("returns ERROR when Dispatcher throws", async () => {
     mockDispatcher({}) // no mock for dbt.manifest — will throw
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "x", change_type: "remove", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,
@@ -249,7 +250,7 @@ describe("impact_analysis: blast radius percentage", () => {
         test_count: 3,
       },
     })
-    const tool = await ImpactAnalysisTool.init()
+    const tool = await initTool(ImpactAnalysisTool)
     const result = await tool.execute(
       { model: "root", change_type: "remove", manifest_path: "target/manifest.json", dialect: "snowflake" },
       ctx,

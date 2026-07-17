@@ -9,6 +9,7 @@ import { ProviderID } from "../../provider/schema"
 import { mapValues } from "remeda"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
+import { zod } from "@/util/effect-zod"
 
 export const ProviderRoutes = lazy(() =>
   new Hono()
@@ -82,7 +83,7 @@ export const ProviderRoutes = lazy(() =>
             description: "Provider auth methods",
             content: {
               "application/json": {
-                schema: resolver(z.record(z.string(), z.array(ProviderAuth.Method))),
+                schema: resolver(z.record(z.string(), z.array(zod(ProviderAuth.Method)))),
               },
             },
           },
@@ -103,7 +104,7 @@ export const ProviderRoutes = lazy(() =>
             description: "Authorization URL and method",
             content: {
               "application/json": {
-                schema: resolver(ProviderAuth.Authorization.optional()),
+                schema: resolver(zod(ProviderAuth.Authorization).optional()),
               },
             },
           },

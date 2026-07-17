@@ -57,9 +57,19 @@ const model: Provider.Model = {
   release_date: "2026-01-01",
 } as Provider.Model
 
+// altimate_change: post-v1.17.9 the branded IDs enforce prefixes
+// (MessageID → "msg", PartID → "prt"). Normalize the short test ids so the
+// fixtures keep their readable names ("u1", "p1") while satisfying the brand.
+function msgId(id: string) {
+  return MessageID.make(id.startsWith("msg") ? id : `msg_${id}`)
+}
+function partId(id: string) {
+  return PartID.make(id.startsWith("prt") ? id : `prt_${id}`)
+}
+
 function userInfo(id: string): MessageV2.User {
   return {
-    id,
+    id: msgId(id),
     sessionID,
     role: "user",
     time: { created: 0 },
@@ -71,15 +81,15 @@ function userInfo(id: string): MessageV2.User {
 }
 
 function basePart(messageID: string, id: string) {
-  return { id: PartID.make(id), sessionID, messageID: MessageID.make(messageID) }
+  return { id: partId(id), sessionID, messageID: msgId(messageID) }
 }
 
 /**
- * Faithful replica of the prompt.ts append (the inline block at
- * session/prompt.ts:987-1003 is not exported). Mutates a copy and returns it so
- * tests can assert the observable contract via toModelMessages. The SHAPE here
- * must mirror the real code: a trailing `synthetic:true` text part whose text is
- * `\n\n${SystemPrompt.currentDate()}`, attached to the LAST user message only.
+ * Local test fixture that appends a `synthetic:true` date text part to the last
+ * user message. NOTE: this used to mirror live prompt.ts behavior, but as of the
+ * v1.17.9 merge the app no longer appends the date to the user turn (it moved to
+ * the system <env> block — see session/system.ts). This helper is retained only
+ * to exercise toModelMessages' handling of synthetic parts.
  */
 function appendDateToLastUserMessage(msgs: MessageV2.WithParts[]): MessageV2.WithParts[] {
   const copy = msgs.map((m) => ({ info: m.info, parts: [...m.parts] }))
@@ -133,10 +143,15 @@ describe("v0.8.10 #950: currentDate() generator", () => {
 })
 
 // ---------------------------------------------------------------------------
-// #950 (b) — the date reaches the model via the trailing user message
-// (the half that the pre-existing system.test.ts did NOT cover)
+// synthetic date-part survival through toModelMessages.
+// NOTE: as of the v1.17.9 merge the app NO LONGER appends the date to the last
+// user message — doing so made models treat the date as user input and echo it
+// back every turn. The date now lives in the ambient system <env> block (see
+// session/system.ts). These cases still exercise a real, valid property — that a
+// `synthetic:true` text part survives toModelMessages — using
+// appendDateToLastUserMessage() purely as a local fixture, not as live behavior.
 // ---------------------------------------------------------------------------
-describe("v0.8.10 #950: date carried to the model on the last user message", () => {
+describe("v0.8.10: synthetic date-part survives toModelMessages (fixture)", () => {
   test("appended synthetic date survives toModelMessages and reaches the model", async () => {
     setSystemTime(new Date("2026-06-22T12:00:00.000Z"))
     try {

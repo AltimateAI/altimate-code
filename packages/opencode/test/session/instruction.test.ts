@@ -1,365 +1,301 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import path from "path"
-import { InstructionPrompt } from "../../src/session/instruction"
-import { Instance } from "../../src/project/instance"
-import { Global } from "../../src/global"
-import { tmpdir } from "../fixture/fixture"
+import { Effect, FileSystem, Layer } from "effect"
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
+import { NodeFileSystem } from "@effect/platform-node"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+
+import { Instruction } from "../../src/session/instruction"
 import type { MessageV2 } from "../../src/session/message-v2"
-import { SessionID, MessageID, PartID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { Global } from "@opencode-ai/core/global"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { provideInstance, provideTmpdirInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
+import { TestConfig } from "../fixture/config"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
-// ─── Helpers for InstructionPrompt.loaded() ─────────────────────────────────
+const it = testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, NodeFileSystem.layer, testInstanceStoreLayer))
 
-const sid = SessionID.make("test-session")
+const configLayer = TestConfig.layer()
 
-function makeUserMsg(id: string, parts: MessageV2.Part[]): MessageV2.WithParts {
-  return {
-    info: {
-      id: MessageID.make(id),
-      sessionID: sid,
-      role: "user" as const,
-      time: { created: 0 },
-      agent: "user",
-      model: { providerID: "test" as any, modelID: "test" as any },
-      tools: {},
-      mode: "",
-    } as MessageV2.User,
-    parts,
-  }
-}
+const instructionLayer = (
+  global: Partial<Global.Interface>,
+  flags: Partial<RuntimeFlags.Info> = {},
+  config = configLayer,
+  http: Layer.Layer<HttpClient.HttpClient> = FetchHttpClient.layer,
+) =>
+  Instruction.layer.pipe(
+    Layer.provide(config),
+    Layer.provide(FSUtil.defaultLayer),
+    Layer.provide(http),
+    Layer.provide(Global.layerWith(global)),
+    Layer.provide(RuntimeFlags.layer(flags)),
+  )
 
-function readToolPart(opts: {
-  id: string
-  messageID: string
-  status: "completed" | "running" | "error"
-  loaded?: unknown[]
-  compacted?: number
-}): MessageV2.ToolPart {
-  if (opts.status === "completed") {
-    return {
-      id: PartID.make(opts.id),
-      sessionID: sid,
-      messageID: MessageID.make(opts.messageID),
-      type: "tool",
-      callID: opts.id,
-      tool: "read",
-      state: {
-        status: "completed",
-        input: {},
-        output: "file content",
-        title: "Read file",
-        metadata: opts.loaded !== undefined ? { loaded: opts.loaded } : {},
-        time: { start: 0, end: 1, ...(opts.compacted !== undefined ? { compacted: opts.compacted } : {}) },
+const provideInstruction =
+  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>) =>
+  <A, E, R>(self: Effect.Effect<A, E, R>) =>
+    self.pipe(Effect.provide(instructionLayer(global, flags)))
+
+const write = (filepath: string, content: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    yield* fs.makeDirectory(path.dirname(filepath), { recursive: true })
+    yield* fs.writeFileString(filepath, content)
+  })
+
+const writeFiles = (dir: string, files: Record<string, string>) =>
+  Effect.all(
+    Object.entries(files).map(([file, content]) => write(path.join(dir, file), content)),
+    { discard: true },
+  )
+
+const withFiles = <A, E, R>(files: Record<string, string>, self: (dir: string) => Effect.Effect<A, E, R>) =>
+  provideTmpdirInstance((dir) =>
+    Effect.gen(function* () {
+      yield* writeFiles(dir, files)
+      return yield* self(dir).pipe(provideInstruction({ home: dir, config: dir }))
+    }),
+  )
+
+const tmpWithFiles = (files: Record<string, string>) =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    yield* writeFiles(dir, files)
+    return dir
+  })
+
+function loaded(filepath: string): SessionV1.WithParts[] {
+  const sessionID = SessionID.make("session-loaded-1")
+  const messageID = MessageID.make("msg_message-loaded-1")
+
+  return [
+    {
+      info: {
+        id: messageID,
+        sessionID,
+        role: "user",
+        time: { created: 0 },
+        agent: "build",
+        model: {
+          providerID: ProviderV2.ID.make("anthropic"),
+          modelID: ModelV2.ID.make("claude-sonnet-4-20250514"),
+        },
       },
-    } as MessageV2.ToolPart
-  }
-  if (opts.status === "running") {
-    return {
-      id: PartID.make(opts.id),
-      sessionID: sid,
-      messageID: MessageID.make(opts.messageID),
-      type: "tool",
-      callID: opts.id,
-      tool: "read",
-      state: {
-        status: "running",
-        input: {},
-        time: { start: 0 },
-      },
-    } as MessageV2.ToolPart
-  }
-  return {
-    id: PartID.make(opts.id),
-    sessionID: sid,
-    messageID: MessageID.make(opts.messageID),
-    type: "tool",
-    callID: opts.id,
-    tool: "read",
-    state: {
-      status: "error",
-      input: {},
-      error: "read failed",
-      time: { start: 0, end: 1 },
+      parts: [
+        {
+          id: PartID.make("prt_part-loaded-1"),
+          messageID,
+          sessionID,
+          type: "tool",
+          callID: "call-loaded-1",
+          tool: "read",
+          state: {
+            status: "completed",
+            input: {},
+            output: "done",
+            title: "Read",
+            metadata: { loaded: [filepath] },
+            time: { start: 0, end: 1 },
+          },
+        },
+      ],
     },
-  } as MessageV2.ToolPart
+  ]
 }
 
-function nonReadToolPart(opts: {
-  id: string
-  messageID: string
-  tool: string
-  loaded?: unknown[]
-}): MessageV2.ToolPart {
-  return {
-    id: PartID.make(opts.id),
-    sessionID: sid,
-    messageID: MessageID.make(opts.messageID),
-    type: "tool",
-    callID: opts.id,
-    tool: opts.tool,
-    state: {
-      status: "completed",
-      input: {},
-      output: "done",
-      title: "Tool done",
-      metadata: opts.loaded !== undefined ? { loaded: opts.loaded } : {},
-      time: { start: 0, end: 1 },
-    },
-  } as MessageV2.ToolPart
-}
+describe("Instruction.resolve", () => {
+  it.live("returns empty when AGENTS.md is at project root (already in systemPaths)", () =>
+    withFiles({ "AGENTS.md": "# Root Instructions", "src/file.ts": "const x = 1" }, (dir) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const system = yield* svc.systemPaths()
+        expect(system.has(path.join(dir, "AGENTS.md"))).toBe(true)
 
-// ─── InstructionPrompt.loaded() ─────────────────────────────────────────────
-
-describe("InstructionPrompt.loaded", () => {
-  test("returns empty set for messages with no tool parts", () => {
-    const textPart = {
-      id: PartID.make("p1"),
-      sessionID: sid,
-      messageID: MessageID.make("m1"),
-      type: "text",
-      content: "hello",
-    } as unknown as MessageV2.Part
-    const result = InstructionPrompt.loaded([makeUserMsg("m1", [textPart])])
-    expect(result.size).toBe(0)
-  })
-
-  test("extracts paths from completed read tool parts with loaded metadata", () => {
-    const part = readToolPart({
-      id: "p1",
-      messageID: "m1",
-      status: "completed",
-      loaded: ["/project/subdir/AGENTS.md", "/project/lib/AGENTS.md"],
-    })
-    const result = InstructionPrompt.loaded([makeUserMsg("m1", [part])])
-    expect(result.size).toBe(2)
-    expect(result.has("/project/subdir/AGENTS.md")).toBe(true)
-    expect(result.has("/project/lib/AGENTS.md")).toBe(true)
-  })
-
-  test("skips compacted tool parts", () => {
-    const part = readToolPart({
-      id: "p1",
-      messageID: "m1",
-      status: "completed",
-      loaded: ["/project/AGENTS.md"],
-      compacted: 12345,
-    })
-    const result = InstructionPrompt.loaded([makeUserMsg("m1", [part])])
-    expect(result.size).toBe(0)
-  })
-
-  test("skips non-read tool parts even with loaded metadata", () => {
-    const part = nonReadToolPart({
-      id: "p1",
-      messageID: "m1",
-      tool: "bash",
-      loaded: ["/project/AGENTS.md"],
-    })
-    const result = InstructionPrompt.loaded([makeUserMsg("m1", [part])])
-    expect(result.size).toBe(0)
-  })
-
-  test("skips non-completed read tool parts", () => {
-    const runningPart = readToolPart({ id: "p1", messageID: "m1", status: "running" })
-    const errorPart = readToolPart({ id: "p2", messageID: "m1", status: "error" })
-    const result = InstructionPrompt.loaded([makeUserMsg("m1", [runningPart, errorPart])])
-    expect(result.size).toBe(0)
-  })
-
-  test("filters out non-string entries in the loaded array", () => {
-    const part = readToolPart({
-      id: "p1",
-      messageID: "m1",
-      status: "completed",
-      loaded: ["/valid/path", 42, null, { nested: true }, "/another/path", undefined],
-    })
-    const result = InstructionPrompt.loaded([makeUserMsg("m1", [part])])
-    expect(result.size).toBe(2)
-    expect(result.has("/valid/path")).toBe(true)
-    expect(result.has("/another/path")).toBe(true)
-  })
-
-  test("deduplicates paths across multiple messages", () => {
-    const part1 = readToolPart({
-      id: "p1",
-      messageID: "m1",
-      status: "completed",
-      loaded: ["/project/AGENTS.md"],
-    })
-    const part2 = readToolPart({
-      id: "p2",
-      messageID: "m2",
-      status: "completed",
-      loaded: ["/project/AGENTS.md", "/project/lib/AGENTS.md"],
-    })
-    const result = InstructionPrompt.loaded([makeUserMsg("m1", [part1]), makeUserMsg("m2", [part2])])
-    expect(result.size).toBe(2)
-    expect(result.has("/project/AGENTS.md")).toBe(true)
-    expect(result.has("/project/lib/AGENTS.md")).toBe(true)
-  })
-})
-
-// ─── InstructionPrompt.resolve ──────────────────────────────────────────────
-
-describe("InstructionPrompt.resolve", () => {
-  test("returns empty when AGENTS.md is at project root (already in systemPaths)", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "AGENTS.md"), "# Root Instructions")
-        await Bun.write(path.join(dir, "src", "file.ts"), "const x = 1")
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const system = await InstructionPrompt.systemPaths()
-        expect(system.has(path.join(tmp.path, "AGENTS.md"))).toBe(true)
-
-        const results = await InstructionPrompt.resolve([], path.join(tmp.path, "src", "file.ts"), "test-message-1")
+        const results = yield* svc.resolve([], path.join(dir, "src", "file.ts"), MessageID.make("msg_message-test-1"))
         expect(results).toEqual([])
-      },
-    })
-  })
+      }),
+    ),
+  )
 
-  test("returns AGENTS.md from subdirectory (not in systemPaths)", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "subdir", "AGENTS.md"), "# Subdir Instructions")
-        await Bun.write(path.join(dir, "subdir", "nested", "file.ts"), "const x = 1")
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const system = await InstructionPrompt.systemPaths()
-        expect(system.has(path.join(tmp.path, "subdir", "AGENTS.md"))).toBe(false)
+  it.live("returns AGENTS.md from subdirectory (not in systemPaths)", () =>
+    withFiles({ "subdir/AGENTS.md": "# Subdir Instructions", "subdir/nested/file.ts": "const x = 1" }, (dir) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const system = yield* svc.systemPaths()
+        expect(system.has(path.join(dir, "subdir", "AGENTS.md"))).toBe(false)
 
-        const results = await InstructionPrompt.resolve(
+        const results = yield* svc.resolve(
           [],
-          path.join(tmp.path, "subdir", "nested", "file.ts"),
-          "test-message-2",
+          path.join(dir, "subdir", "nested", "file.ts"),
+          MessageID.make("msg_message-test-2"),
         )
         expect(results.length).toBe(1)
-        expect(results[0].filepath).toBe(path.join(tmp.path, "subdir", "AGENTS.md"))
-      },
-    })
-  })
+        expect(results[0].filepath).toBe(path.join(dir, "subdir", "AGENTS.md"))
+      }),
+    ),
+  )
 
-  test("doesn't reload AGENTS.md when reading it directly", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "subdir", "AGENTS.md"), "# Subdir Instructions")
-        await Bun.write(path.join(dir, "subdir", "nested", "file.ts"), "const x = 1")
-      },
-    })
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const filepath = path.join(tmp.path, "subdir", "AGENTS.md")
-        const system = await InstructionPrompt.systemPaths()
+  it.live("doesn't reload AGENTS.md when reading it directly", () =>
+    withFiles({ "subdir/AGENTS.md": "# Subdir Instructions", "subdir/nested/file.ts": "const x = 1" }, (dir) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const filepath = path.join(dir, "subdir", "AGENTS.md")
+        const system = yield* svc.systemPaths()
         expect(system.has(filepath)).toBe(false)
 
-        const results = await InstructionPrompt.resolve([], filepath, "test-message-2")
+        const results = yield* svc.resolve([], filepath, MessageID.make("msg_message-test-3"))
         expect(results).toEqual([])
-      },
-    })
-  })
+      }),
+    ),
+  )
+
+  it.live("does not reattach the same nearby instructions twice for one message", () =>
+    withFiles({ "subdir/AGENTS.md": "# Subdir Instructions", "subdir/nested/file.ts": "const x = 1" }, (dir) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const filepath = path.join(dir, "subdir", "nested", "file.ts")
+        const id = MessageID.make("msg_message-claim-1")
+
+        const first = yield* svc.resolve([], filepath, id)
+        const second = yield* svc.resolve([], filepath, id)
+
+        expect(first).toHaveLength(1)
+        expect(first[0].filepath).toBe(path.join(dir, "subdir", "AGENTS.md"))
+        expect(second).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("clear allows nearby instructions to be attached again for the same message", () =>
+    withFiles({ "subdir/AGENTS.md": "# Subdir Instructions", "subdir/nested/file.ts": "const x = 1" }, (dir) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const filepath = path.join(dir, "subdir", "nested", "file.ts")
+        const id = MessageID.make("msg_message-claim-2")
+
+        const first = yield* svc.resolve([], filepath, id)
+        yield* svc.clear(id)
+        const second = yield* svc.resolve([], filepath, id)
+
+        expect(first).toHaveLength(1)
+        expect(second).toHaveLength(1)
+        expect(second[0].filepath).toBe(path.join(dir, "subdir", "AGENTS.md"))
+      }),
+    ),
+  )
+
+  it.live("skips instructions already reported by prior read metadata", () =>
+    withFiles({ "subdir/AGENTS.md": "# Subdir Instructions", "subdir/nested/file.ts": "const x = 1" }, (dir) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const agents = path.join(dir, "subdir", "AGENTS.md")
+        const filepath = path.join(dir, "subdir", "nested", "file.ts")
+        const id = MessageID.make("msg_message-claim-3")
+
+        const results = yield* svc.resolve(loaded(agents), filepath, id)
+        expect(results).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("fetches remote instructions from config URLs via HttpClient", () =>
+    Effect.gen(function* () {
+      const projectTmp = yield* tmpdirScoped()
+      const url = "https://instructions.example.test/AGENTS.md"
+      let seen: string | undefined
+      const http = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          seen = request.url
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response("# Remote Instructions\nUse remote rules.", {
+                status: 200,
+                headers: { "content-type": "text/plain" },
+              }),
+            ),
+          )
+        }),
+      )
+
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const rules = yield* svc.system()
+        expect(seen).toBe(url)
+        expect(rules).toEqual([`Instructions from: ${url}\n# Remote Instructions\nUse remote rules.`])
+      }).pipe(
+        provideInstance(projectTmp),
+        Effect.provide(
+          instructionLayer(
+            { home: projectTmp, config: projectTmp },
+            {},
+            TestConfig.layer({ get: () => Effect.succeed({ instructions: [url] }) }),
+            http,
+          ),
+        ),
+      )
+    }),
+  )
 })
 
-describe("InstructionPrompt.systemPaths OPENCODE_CONFIG_DIR", () => {
-  let originalConfigDir: string | undefined
+describe("Instruction.system", () => {
+  it.live("loads both project and global AGENTS.md when both exist", () =>
+    Effect.gen(function* () {
+      const globalTmp = yield* tmpWithFiles({ "AGENTS.md": "# Global Instructions" })
+      const projectTmp = yield* tmpWithFiles({ "AGENTS.md": "# Project Instructions" })
 
-  beforeEach(() => {
-    originalConfigDir = process.env["OPENCODE_CONFIG_DIR"]
-  })
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.has(path.join(projectTmp, "AGENTS.md"))).toBe(true)
+        expect(paths.has(path.join(globalTmp, "AGENTS.md"))).toBe(true)
 
-  afterEach(() => {
-    if (originalConfigDir === undefined) {
-      delete process.env["OPENCODE_CONFIG_DIR"]
-    } else {
-      process.env["OPENCODE_CONFIG_DIR"] = originalConfigDir
-    }
-  })
+        const rules = yield* svc.system()
+        expect(rules).toHaveLength(2)
+        expect(rules[0]).toBe(`Instructions from: ${path.join(globalTmp, "AGENTS.md")}\n# Global Instructions`)
+        expect(rules[1]).toBe(`Instructions from: ${path.join(projectTmp, "AGENTS.md")}\n# Project Instructions`)
+      }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
+    }),
+  )
 
-  test("prefers OPENCODE_CONFIG_DIR AGENTS.md over global when both exist", async () => {
-    await using profileTmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "AGENTS.md"), "# Profile Instructions")
-      },
-    })
-    await using globalTmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "AGENTS.md"), "# Global Instructions")
-      },
-    })
-    await using projectTmp = await tmpdir()
+  it.live("keeps project CLAUDE.md but skips global Claude prompt when Claude Code prompt is disabled", () =>
+    Effect.gen(function* () {
+      const globalTmp = yield* tmpWithFiles({ ".claude/CLAUDE.md": "# Global Claude" })
+      const projectTmp = yield* tmpWithFiles({ "CLAUDE.md": "# Project Claude" })
 
-    process.env["OPENCODE_CONFIG_DIR"] = profileTmp.path
-    const originalGlobalConfig = Global.Path.config
-    ;(Global.Path as { config: string }).config = globalTmp.path
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.has(path.join(globalTmp, ".claude", "CLAUDE.md"))).toBe(false)
+        expect(paths.has(path.join(projectTmp, "CLAUDE.md"))).toBe(true)
+        expect(yield* svc.system()).toEqual([
+          `Instructions from: ${path.join(projectTmp, "CLAUDE.md")}\n# Project Claude`,
+        ])
+      }).pipe(
+        provideInstance(projectTmp),
+        provideInstruction({ home: globalTmp, config: globalTmp }, { disableClaudeCodePrompt: true }),
+      )
+    }),
+  )
+})
 
-    try {
-      await Instance.provide({
-        directory: projectTmp.path,
-        fn: async () => {
-          const paths = await InstructionPrompt.systemPaths()
-          expect(paths.has(path.join(profileTmp.path, "AGENTS.md"))).toBe(true)
-          expect(paths.has(path.join(globalTmp.path, "AGENTS.md"))).toBe(false)
-        },
-      })
-    } finally {
-      ;(Global.Path as { config: string }).config = originalGlobalConfig
-    }
-  })
+describe("Instruction.systemPaths global config", () => {
+  it.live("uses Global.Service config AGENTS.md", () =>
+    Effect.gen(function* () {
+      const globalTmp = yield* tmpWithFiles({ "AGENTS.md": "# Global Instructions" })
+      const projectTmp = yield* tmpdirScoped()
 
-  test("falls back to global AGENTS.md when OPENCODE_CONFIG_DIR has no AGENTS.md", async () => {
-    await using profileTmp = await tmpdir()
-    await using globalTmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "AGENTS.md"), "# Global Instructions")
-      },
-    })
-    await using projectTmp = await tmpdir()
-
-    process.env["OPENCODE_CONFIG_DIR"] = profileTmp.path
-    const originalGlobalConfig = Global.Path.config
-    ;(Global.Path as { config: string }).config = globalTmp.path
-
-    try {
-      await Instance.provide({
-        directory: projectTmp.path,
-        fn: async () => {
-          const paths = await InstructionPrompt.systemPaths()
-          expect(paths.has(path.join(profileTmp.path, "AGENTS.md"))).toBe(false)
-          expect(paths.has(path.join(globalTmp.path, "AGENTS.md"))).toBe(true)
-        },
-      })
-    } finally {
-      ;(Global.Path as { config: string }).config = originalGlobalConfig
-    }
-  })
-
-  test("uses global AGENTS.md when OPENCODE_CONFIG_DIR is not set", async () => {
-    await using globalTmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "AGENTS.md"), "# Global Instructions")
-      },
-    })
-    await using projectTmp = await tmpdir()
-
-    delete process.env["OPENCODE_CONFIG_DIR"]
-    const originalGlobalConfig = Global.Path.config
-    ;(Global.Path as { config: string }).config = globalTmp.path
-
-    try {
-      await Instance.provide({
-        directory: projectTmp.path,
-        fn: async () => {
-          const paths = await InstructionPrompt.systemPaths()
-          expect(paths.has(path.join(globalTmp.path, "AGENTS.md"))).toBe(true)
-        },
-      })
-    } finally {
-      ;(Global.Path as { config: string }).config = originalGlobalConfig
-    }
-  })
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.has(path.join(globalTmp, "AGENTS.md"))).toBe(true)
+      }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
+    }),
+  )
 })

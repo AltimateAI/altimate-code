@@ -1,10 +1,14 @@
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
-import { type IPty } from "bun-pty"
+// altimate_change start — upstream moved the pty spawn backend into @opencode-ai/core
+// (#pty bun/node condition). The fork keeps its own Pty manager, so import the spawn
+// function + process type from core's bun backend instead of the dropped `bun-pty` dep.
+import { spawn as ptySpawn, type Proc as IPty } from "@opencode-ai/core/pty/pty.bun"
+// altimate_change end
 import z from "zod"
 import { Log } from "../util/log"
 import { Instance } from "../project/instance"
-import { lazy } from "@opencode-ai/util/lazy"
+import { lazy } from "@opencode-ai/core/util/lazy"
 import { Shell } from "@/shell/shell"
 import { Plugin } from "@/plugin"
 import { Global } from "@/global"
@@ -36,8 +40,7 @@ export namespace Pty {
   }
 
   const pty = lazy(async () => {
-    const { spawn } = await import("bun-pty")
-    return spawn
+    return ptySpawn
   })
 
   export const Info = z
@@ -144,12 +147,18 @@ export namespace Pty {
     const prependDirs: string[] = []
     const binDir = process.env.ALTIMATE_BIN_DIR
     if (binDir && !pathEntries.has(binDir)) prependDirs.push(binDir)
-    const projectToolsDir = path.join(Instance.directory, ".opencode", "tools")
-    if (!pathEntries.has(projectToolsDir)) prependDirs.push(projectToolsDir)
-    if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
-      const worktreeToolsDir = path.join(Instance.worktree, ".opencode", "tools")
-      if (!pathEntries.has(worktreeToolsDir)) prependDirs.push(worktreeToolsDir)
+    // altimate_change start — load project tools from .altimate-code/tools (primary) + .opencode/tools (fallback)
+    for (const variant of [".altimate-code", ".opencode"]) {
+      const projectToolsDir = path.join(Instance.directory, variant, "tools")
+      if (!pathEntries.has(projectToolsDir)) prependDirs.push(projectToolsDir)
     }
+    if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
+      for (const variant of [".altimate-code", ".opencode"]) {
+        const worktreeToolsDir = path.join(Instance.worktree, variant, "tools")
+        if (!pathEntries.has(worktreeToolsDir)) prependDirs.push(worktreeToolsDir)
+      }
+    }
+    // altimate_change end
     const globalToolsDir = path.join(Global.Path.config, "tools")
     if (!pathEntries.has(globalToolsDir)) prependDirs.push(globalToolsDir)
     if (prependDirs.length > 0) {

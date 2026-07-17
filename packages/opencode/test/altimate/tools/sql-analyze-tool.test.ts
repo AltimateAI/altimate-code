@@ -6,6 +6,7 @@
  * "unknown error" telemetry events per day.
  */
 import { describe, test, expect, spyOn, afterAll, beforeEach } from "bun:test"
+import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import { SqlAnalyzeTool } from "../../../src/altimate/tools/sql-analyze"
 import { SessionID, MessageID } from "../../../src/session/schema"
@@ -55,7 +56,7 @@ describe("SqlAnalyzeTool.execute: success semantics", () => {
       confidence_factors: ["lint"],
     })
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT * FROM t", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(true)
@@ -73,7 +74,7 @@ describe("SqlAnalyzeTool.execute: success semantics", () => {
       confidence_factors: [],
     })
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT id FROM t", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(true)
@@ -91,7 +92,7 @@ describe("SqlAnalyzeTool.execute: success semantics", () => {
       error: "syntax error near SELECT",
     })
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELEC FROM", dialect: "snowflake" }, ctx as any)
 
     expect(result.metadata.success).toBe(false)
@@ -103,7 +104,7 @@ describe("SqlAnalyzeTool.execute: success semantics", () => {
     dispatcherSpy?.mockRestore()
     dispatcherSpy = spyOn(Dispatcher, "call").mockRejectedValue(new Error("native crash"))
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "SELECT 1", dialect: "snowflake" }, ctx as any)
 
     expect(result.title).toBe("Analyze: ERROR")
@@ -131,7 +132,7 @@ describe("SqlAnalyzeTool.execute: formatAnalysis output", () => {
       confidence_factors: ["lint"],
     })
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "x", dialect: "snowflake" }, ctx as any)
 
     expect(result.output).toContain("Found 1 issue ")
@@ -163,7 +164,7 @@ describe("SqlAnalyzeTool.execute: formatAnalysis output", () => {
       confidence_factors: ["lint", "safety"],
     })
 
-    const tool = await SqlAnalyzeTool.init()
+    const tool = await initTool(SqlAnalyzeTool)
     const result = await tool.execute({ sql: "x", dialect: "snowflake" }, ctx as any)
 
     expect(result.output).toContain("2 issues")

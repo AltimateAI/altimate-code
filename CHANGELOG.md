@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-07-08
+
+This release rebases altimate-code onto **upstream OpenCode v1.17.9** (bridged up from v1.4.0 — ~165 upstream commits) behind the fork's own fixes and hardening. It is a larger-than-usual jump from 0.8.10; the upgrade is automatic and in-place (see **Upgrading from 0.8.10** below).
+
+### Security
+
+- **MCP tool calls now correctly enforce the permission check.** During the v1.17.9 re-home, the MCP tool wrapper awaited a permission `Effect` without running it, so an MCP tool could execute without going through the permission prompt. It was caught in pre-release review and never reached a published stable release; upgrading closes the gap. Users who loosened permissions expecting MCP tools to run unprompted will now see the prompt they were always meant to go through. (`e7ec6a9b29`)
+- **The `sensitive_write` guard now actually fires** on paths it previously let through by defaulting open. (#209 follow-up)
+
+### Added
+
+- **Bearer-auth remote MCP servers via `headersCommand`.** A remote MCP entry can now compute header values by running a command (argv form, run via `execFile` — no shell), re-resolved on every connect so short-lived bearer tokens refresh automatically. This unlocks token-gated servers such as **Microsoft Fabric Core MCP** and Azure Entra ID without a local proxy. When an `Authorization` header is present (statically or via `headersCommand`) and `oauth` is not explicitly configured, OAuth auto-detection is disabled so the bearer token isn't overridden; servers that return `null` tool-annotation hints (Fabric) are tolerated. See the [MCP servers docs](https://docs.altimate.ai/configure/mcp-servers). (#793, #791, #792)
+- **A `source` field on `session_start` telemetry**, so extension-spawned sessions sharing one `altimate serve` process are distinguishable. (#968)
+
+### Changed
+
+- **Upstream OpenCode v1.4.0 → v1.17.9 bridge merge.** Config validation moved from Zod to Effect `Schema`, the MCP layer was rewritten onto Effect, and session persistence moved to the core `SessionTable`. Existing config files and local databases are migrated/adapted automatically on first launch. (#964)
+- **Background auto-upgrade now only auto-applies patch releases.** A minor/major release (like this one) shows a notification instead — run `altimate upgrade` explicitly to move onto 0.9.x. This bounds exposure to large jumps.
+- **Model reasoning ("thinking") is collapsed by default.** It could previously render expanded for existing users, which risked showing pasted secrets in the reasoning trace. Toggle full visibility back on with `/thinking`. (`e695b536f4`)
+
+### Fixed
+
+- **Upgrade-path database-migration hardening.** Fixed a duplicate-column crash on legacy databases created by older binaries, a fresh-install crash, and unbounded migration-journal row growth — so a 0.8.10 database migrates cleanly and idempotently to 0.9.1. (`cf62f1f512`, `57584ed4d8`, `27c490515a`)
+- **TUI and runtime fixes carried in from the bridge**: clicking a truncated URL opens the full URL (#976); Ctrl+A/Ctrl+E and history recall restored in the prompt (#973, #975); `/mcps` autocomplete de-duplicated and the MCP auth command surfaced (#971, #972, #974); reviewer mode made usable (#978); session traces pruned by modification time rather than filename.
+
+### Upgrading from 0.8.10
+
+- **No manual steps required.** First launch on 0.9.1 runs an automatic, idempotent database migration (validated against mixed old/new-binary databases).
+- Config validation is now stricter (Effect `Schema`). If configured providers, agents, or MCP servers appear to disappear after upgrading, your global config may have failed validation and fallen back to defaults — check the logs for the offending key and report it.
+- As a precaution before a jump this large, you may back up `~/.local/share/altimate-code/opencode.db` for a rollback path.
+
+### Internal
+
+- Merge-resolution correctness: Fabric annotation-hint tolerance was folded into the gated `listTools` fallback (keyed off the Zod issue-payload shape to avoid false-positive retries), and `headersCommand` was added to the Effect-`Schema` MCP config. Conflict resolutions were verified via Codex deep-review, the full `packages/opencode` suite (10,647 pass), and a v0.9.1 adversarial suite.
+- Release infra: the release version derives from the fork package; prerelease tags publish to the npm `beta` channel; auto-generated release notes now diff against the last stable ancestor tag.
+- Deferred review findings filed as #995–#1000.
+
 ## [0.8.10] - 2026-06-22
 
 ### Fixed
@@ -118,7 +155,7 @@ A plan-mode reliability patch for the hosted gateway and other non-Anthropic mod
 ### Fixed
 
 - **Plan mode no longer refuses benign requests on `altimate-default` and other non-Anthropic models.** The root cause was *how* altimate-code delivers its own plan instructions: a `<system-reminder>`-wrapped block attached as user-role text. Claude is trained to read that tag as authoritative system guidance, but GPT-5.x, Gemini, and other non-Anthropic models pattern-matched the same block — carrying `STRICTLY FORBIDDEN` / `ZERO exceptions` / `MUST` language — as a **prompt-injection attempt** and declined, returning *"I'm sorry, but I cannot assist with that request."* for ordinary developer tasks. altimate-code now **hoists those self-injected reminders into proper `role:"system"` messages** for non-Anthropic models, so they arrive as instructions rather than suspect user input; Anthropic models are unchanged. The hoist is scoped by **provenance** to altimate-code's own reminder parts — user-supplied files, MCP-resource bodies, and `data:`-URL content can never gain system-role priority, even when they begin with `<system-reminder>`. Gateway models are routed by `model.family` (via a shared `familyVendor` classifier) so a Claude- or Gemini-backed gateway model lands on the right base prompt instead of an Anthropic-style fallback. (#887, #888)
-- **The "plan agent used no tools" warning is accurate — and no longer false-fires.** Previously the warning blamed the model's *tool-use capability* (misleading — these models are fully tool-capable) and could fire on the final text-only step of a **successful** multi-step plan session, making a working session look broken. The trip-wire now scans the conversation history for prior tool calls, so a session that already explored the codebase isn't flagged. When it does fire, the copy describes the observed symptom only ("stopped without calling any tools"), lists the likely causes, and offers concrete recoveries — ask it to investigate first, rephrase, or, if it keeps refusing, `/model` to a tier more eager to explore. The plan agent is also now instructed to **read or search the codebase before drafting** any plan, with an explicit escape hatch for trivial, fully-specified changes. See [Plan mode](https://docs.altimate.sh/data-engineering/agent-modes/#plan) and [Troubleshooting](https://docs.altimate.sh/reference/troubleshooting/). (#888)
+- **The "plan agent used no tools" warning is accurate — and no longer false-fires.** Previously the warning blamed the model's *tool-use capability* (misleading — these models are fully tool-capable) and could fire on the final text-only step of a **successful** multi-step plan session, making a working session look broken. The trip-wire now scans the conversation history for prior tool calls, so a session that already explored the codebase isn't flagged. When it does fire, the copy describes the observed symptom only ("stopped without calling any tools"), lists the likely causes, and offers concrete recoveries — ask it to investigate first, rephrase, or, if it keeps refusing, `/model` to a tier more eager to explore. The plan agent is also now instructed to **read or search the codebase before drafting** any plan, with an explicit escape hatch for trivial, fully-specified changes. See [Plan mode](https://help.altimate.ai/code/data-engineering/agent-modes/#plan) and [Troubleshooting](https://help.altimate.ai/code/reference/troubleshooting/). (#888)
 
 ## [0.8.2] - 2026-06-03
 
@@ -126,7 +163,7 @@ A small correctness patch. The dbt PR reviewer's deterministic engine never requ
 
 ### Fixed
 
-- **`dbt_pr_review` no longer implies it needs an altimate API key.** The native `altimate-core` engine behind the reviewer (column-lineage blast radius, query equivalence, PII classification, A–F grade) runs **fully offline** via the bundled napi binary — there is no `altimate_core.init` and no API-key gate in that path. Two tool descriptions (`altimate_core_column_lineage`, `altimate_core_track_lineage`) still carried a stale Python-bridge-era line claiming *"Requires `altimate_core.init()` with API key"*, so a stuck **lint-only** run was mis-diagnosed as missing auth. The descriptions now state the tools run offline with no key. **Lint-only actually means the dbt `manifest.json` didn't resolve** (wrong path, stale manifest, or wrong working directory) — the [dbt PR Review docs](https://docs.altimate.sh/usage/dbt-pr-review/) now spell out how to fix it. The only thing that ever needs a key is the optional advisory LLM lane, which can never block a verdict. (#882)
+- **`dbt_pr_review` no longer implies it needs an altimate API key.** The native `altimate-core` engine behind the reviewer (column-lineage blast radius, query equivalence, PII classification, A–F grade) runs **fully offline** via the bundled napi binary — there is no `altimate_core.init` and no API-key gate in that path. Two tool descriptions (`altimate_core_column_lineage`, `altimate_core_track_lineage`) still carried a stale Python-bridge-era line claiming *"Requires `altimate_core.init()` with API key"*, so a stuck **lint-only** run was mis-diagnosed as missing auth. The descriptions now state the tools run offline with no key. **Lint-only actually means the dbt `manifest.json` didn't resolve** (wrong path, stale manifest, or wrong working directory) — the [dbt PR Review docs](https://help.altimate.ai/code/usage/dbt-pr-review/) now spell out how to fix it. The only thing that ever needs a key is the optional advisory LLM lane, which can never block a verdict. (#882)
 
 ## [0.8.1] - 2026-06-02
 
@@ -134,7 +171,7 @@ A reliability + correctness patch on top of 0.8.0. Highlights: **8 new Snowflake
 
 ### Added
 
-- **Snowflake Cortex — 8 new selectable models.** Closes the drift between altimate-code's hardcoded Cortex model list and Snowflake's current regional-availability matrix: adds `claude-opus-4-7`, `openai-gpt-5.1`, `openai-gpt-5.2`, `llama4-scout`, `llama3.3-70b`, `snowflake-llama-3.1-405b`, `mixtral-8x7b`, and `gemini-3.1-pro` (Claude + OpenAI tool-capable; the rest chat-only, the conservative default until tool calling is verified on Cortex). When Cortex adds a model before the next release, you can now add it yourself under `provider["snowflake-cortex"].models` in `altimate-code.json` and it merges into the picker — no fork, no waiting. See [Snowflake Cortex provider docs](https://docs.altimate.sh/configure/providers/). (#866)
+- **Snowflake Cortex — 8 new selectable models.** Closes the drift between altimate-code's hardcoded Cortex model list and Snowflake's current regional-availability matrix: adds `claude-opus-4-7`, `openai-gpt-5.1`, `openai-gpt-5.2`, `llama4-scout`, `llama3.3-70b`, `snowflake-llama-3.1-405b`, `mixtral-8x7b`, and `gemini-3.1-pro` (Claude + OpenAI tool-capable; the rest chat-only, the conservative default until tool calling is verified on Cortex). When Cortex adds a model before the next release, you can now add it yourself under `provider["snowflake-cortex"].models` in `altimate-code.json` and it merges into the picker — no fork, no waiting. See [Snowflake Cortex provider docs](https://help.altimate.ai/code/configure/providers/). (#866)
 
 ### Fixed
 
@@ -145,7 +182,7 @@ Headlined by **dbt PR Review** — a Cloudflare-style, dbt/SQL-specialized code 
 
 ### Added
 
-- **dbt PR Review — signed, deterministic verdicts on dbt pull requests.** New `altimate review` CLI command and a composite GitHub Action (`github/review`). The deterministic engine (column-lineage / DAG blast radius, query equivalence on before/after model SQL, PII classification, A–F grade + anti-pattern lint) is the **only** layer that can block; an optional LLM reviewer is clamped to ≤ warning and excluded from the gate, so a `REQUEST_CHANGES` is always provable and replayable. Runs in CI with **zero warehouse access** (consumes `dbt compile` artifacts), and the verdict is HMAC-signable and tamper-evident. `comment` mode never blocks; `gate` mode fails the check on `REQUEST_CHANGES`. The advisory model/credentials are configured on the Action (hosted `altimate_api_key`, or bring-your-own `model` + `model_api_key`); omit them to run deterministic-only. See [dbt PR Review docs](https://docs.altimate.sh/usage/dbt-pr-review/) and the copy-paste workflow in `github/review/examples/`. Depends on `@altimateai/altimate-core` ≥ 0.4.0. (#856)
+- **dbt PR Review — signed, deterministic verdicts on dbt pull requests.** New `altimate review` CLI command and a composite GitHub Action (`github/review`). The deterministic engine (column-lineage / DAG blast radius, query equivalence on before/after model SQL, PII classification, A–F grade + anti-pattern lint) is the **only** layer that can block; an optional LLM reviewer is clamped to ≤ warning and excluded from the gate, so a `REQUEST_CHANGES` is always provable and replayable. Runs in CI with **zero warehouse access** (consumes `dbt compile` artifacts), and the verdict is HMAC-signable and tamper-evident. `comment` mode never blocks; `gate` mode fails the check on `REQUEST_CHANGES`. The advisory model/credentials are configured on the Action (hosted `altimate_api_key`, or bring-your-own `model` + `model_api_key`); omit them to run deterministic-only. See [dbt PR Review docs](https://help.altimate.ai/code/usage/dbt-pr-review/) and the copy-paste workflow in `github/review/examples/`. Depends on `@altimateai/altimate-core` ≥ 0.4.0. (#856)
 - **Native Trino driver.** First-class Trino support over HTTP(S) with catalog/schema introspection and None / Basic / Bearer-token auth. **Migration note:** the dbt `trino` adapter previously mapped to the PostgreSQL driver; it now uses the native driver. Existing profiles are auto-aliased (`database` → `catalog`, `token` → `access_token`) and otherwise compatible. `trino-client` is an optional dependency — install it (`npm install trino-client`) to use Trino. (#795)
 - **Completion-gate validator framework.** A new opt-in harness-side check
   that runs after the LLM declares `finish === "stop"`. Two built-in
@@ -159,7 +196,7 @@ Headlined by **dbt PR Review** — a Cloudflare-style, dbt/SQL-specialized code 
   caught" rates without blocking). Default is **off** with zero overhead.
   Two new telemetry events (`validator_check`, `validator_retries_exhausted`).
   Configuration via `ALTIMATE_VALIDATORS_{MAX_RETRIES,TIMEOUT_MS,CONCURRENCY,DEBUG}`.
-  See [Validators docs](https://docs.altimate.sh/data-engineering/validators/)
+  See [Validators docs](https://help.altimate.ai/code/data-engineering/validators/)
   for the full reference, performance characteristics, and the phased
   rollout plan. (#849)
 

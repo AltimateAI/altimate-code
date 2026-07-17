@@ -190,19 +190,25 @@ export const BashTool = Tool.define("bash", async () => {
         prependDirs.push(binDir)
       }
 
-      // 2. Project-level user tools (.opencode/tools/) — user extensions
+      // 2. Project-level user tools (.altimate-code/tools/ primary, .opencode/tools/ fallback) — user extensions
       // Anchored to Instance.directory (not cwd) so external_directory workdirs
       // can't shadow project tools. Also check worktree root for monorepos.
-      const projectToolsDir = path.join(Instance.directory, ".opencode", "tools")
-      if (!pathEntries.has(projectToolsDir)) {
-        prependDirs.push(projectToolsDir)
-      }
-      if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
-        const worktreeToolsDir = path.join(Instance.worktree, ".opencode", "tools")
-        if (!pathEntries.has(worktreeToolsDir)) {
-          prependDirs.push(worktreeToolsDir)
+      // altimate_change start — prefer .altimate-code/tools, keep .opencode/tools for back-compat
+      for (const variant of [".altimate-code", ".opencode"]) {
+        const projectToolsDir = path.join(Instance.directory, variant, "tools")
+        if (!pathEntries.has(projectToolsDir)) {
+          prependDirs.push(projectToolsDir)
         }
       }
+      if (Instance.worktree !== "/" && Instance.worktree !== Instance.directory) {
+        for (const variant of [".altimate-code", ".opencode"]) {
+          const worktreeToolsDir = path.join(Instance.worktree, variant, "tools")
+          if (!pathEntries.has(worktreeToolsDir)) {
+            prependDirs.push(worktreeToolsDir)
+          }
+        }
+      }
+      // altimate_change end
 
       // 3. Global user tools (~/.config/altimate-code/tools/) — shared across projects
       const globalToolsDir = path.join(Global.Path.config, "tools")

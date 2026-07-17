@@ -50,8 +50,8 @@ The extension uses your existing `altimate-code.json` config. No additional IDE-
 You need an LLM to power the chat. Two options:
 
 - **BYOK (Bring Your Own Key)** — Free and unlimited. Configure any of the [35+ supported providers](../configure/providers.md) (Anthropic, OpenAI, AWS Bedrock, Azure OpenAI, etc.)
-- **[Altimate LLM Gateway](https://datamates-docs.myaltimate.com/user-guide/components/llm-gateway/)** — Managed LLM access with dynamic model routing. 10M tokens free to get started — no API keys to manage
+- **[Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)** — Managed LLM access with dynamic model routing. 10M tokens free to get started — no API keys to manage
 
 ## Full Datamates Documentation
 
-The Datamates extension offers additional capabilities beyond Altimate Code Chat, including MCP server integrations, Knowledge Hub, Memory Hub, and Guardrails. See the [Datamates documentation](https://datamates-docs.myaltimate.com/) for full setup guides, integration configuration, and feature details.
+The Datamates extension offers additional capabilities beyond Altimate Code Chat, including MCP server integrations, Knowledge Hub, Memory Hub, and Guardrails. See the [Datamates documentation](https://help.altimate.ai/datamates/) for full setup guides, integration configuration, and feature details.
