@@ -52,7 +52,6 @@ export function registerPage(
 
   const body = `
     <h1>Sign Up</h1>
-    <p class="sub">One click — your instance is provisioned for you.</p>
 
     <a class="btn btn-oauth" href="/oauth/google?code=${encodeURIComponent(userCode)}">
       ${googleGMark}<span>Continue with Google</span>
@@ -71,9 +70,6 @@ export function registerPage(
       <input class="field" type="email" id="email" name="email" placeholder="name@company.com" autocomplete="email"${emailValue} />
       <div id="email-err" class="inline-err">${emailErr}</div>
 
-      <label class="field-label" for="referral">Referral code <span class="opt">(Optional)</span></label>
-      <input class="field" type="text" id="referral" name="referral" placeholder="e.g. WELCOME2026" autocomplete="off" />
-
       <label class="field-label" for="password">Password</label>
       <div class="pw-row">
         <input class="field" type="password" id="password" name="password" placeholder="Password" autocomplete="new-password" />
@@ -85,15 +81,6 @@ export function registerPage(
         <ul>${rulesHtml}</ul>
       </div>
 
-      <label class="field-label" for="source">How did you hear about us <span class="opt">(Optional)</span></label>
-      <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" />
-      ${hearAboutDatalist}
-
-      <label class="check-row">
-        <input type="checkbox" name="newsletter" value="1" checked />
-        <span>Subscribe to our newsletter &amp; stay updated</span>
-      </label>
-
       <button type="submit" class="btn btn-primary" id="create-btn" disabled style="margin-top:22px">Sign Up</button>
     </form>
 
@@ -104,7 +91,6 @@ export function registerPage(
 
   const extraCss = `
     .section-label { text-align: center; color: var(--muted); font-size: 14px; margin: 4px 0 6px; }
-    .opt { color: var(--muted); font-weight: 400; }
     .pw-row { position: relative; }
     .pw-eye { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none;
               border: none; cursor: pointer; font-size: 15px; opacity: .6; }
@@ -116,9 +102,6 @@ export function registerPage(
     .pw-panel li.ok { color: var(--success); }
     .pw-panel li .mark { font-weight: 700; width: 14px; }
     .inline-err { color: var(--error); font-size: 13px; margin-top: 8px; min-height: 0; }
-    .check-row { display: flex; align-items: center; gap: 10px; margin-top: 20px; color: var(--text);
-                 font-size: 14px; cursor: pointer; }
-    .check-row input { width: 16px; height: 16px; accent-color: var(--accent); }
     .foot-link { text-align: center; color: var(--muted); font-size: 14px; margin-top: 18px; }
     .foot-link a { color: var(--accent); text-decoration: none; }
   `
@@ -156,7 +139,7 @@ export function registerPage(
           li.querySelector('.mark').textContent = ok ? '✓' : '✗';
         });
         var status = emailStatus();
-        emailErr.textContent = status === 'consumer' ? 'Please use your work email — personal email domains aren\u2019t supported.' : '';
+        emailErr.textContent = status === 'consumer' ? 'Please use your work email. Personal email domains aren\u2019t supported.' : '';
         createBtn.disabled = !(allOk && status === 'ok' && nameInput.value.trim().length > 0);
       }
       pw.addEventListener('input', refresh);

@@ -312,16 +312,13 @@ async function handle(req: Request): Promise<Response> {
       return html(
         registerPage(code, {
           emailValue: email,
-          emailError: "Please use your work email — personal email domains aren't supported.",
+          emailError: "Please use your work email. Personal email domains aren't supported.",
         }),
       )
     }
-    // Attribution captured on the email form (Screen 1) — /instance will skip these.
+    // Referral/newsletter removed from signup; "how did you hear" moves to /instance.
     recordPendingEmail(code, email, {
       name: String(body.name ?? "").trim() || undefined,
-      referral: String(body.referral ?? "").trim() || undefined,
-      source: String(body.source ?? "").trim() || undefined,
-      newsletter: body.newsletter === "1",
     })
     logEvent("email_signup_started", { email })
     return redirect(`/verify?code=${encodeURIComponent(code)}&email=${encodeURIComponent(email)}`)
