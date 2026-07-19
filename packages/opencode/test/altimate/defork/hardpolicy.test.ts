@@ -133,6 +133,73 @@ test("A: ungoverned toolIDs are always allowed regardless of args shape", () => 
   expect(HardPolicy.check({ toolID: "read", source: "native", args: "not even an object", sessionID: "s" }).allow).toBe(true)
 })
 
+test("A: MCP-flattened governed tool id is resolved — `<client>_sql_execute` DDL is denied, not allowed via prefix bypass", () => {
+  // Real MCP tools are keyed `<sanitized-client>_<sanitized-tool>` (src/mcp/index.ts), so a
+  // warehouse server exposing `sql_execute` arrives here as `warehouse_sql_execute`. Exact
+  // rule-key match would miss it and allow DDL; resolveGovernedKey closes that bypass.
+  const sql = HardPolicy.check({
+    toolID: "warehouse_sql_execute",
+    source: "mcp",
+    args: { query: "DROP DATABASE prod" },
+    sessionID: "s",
+  })
+  expect(sql.allow).toBe(false)
+  if (!sql.allow) expect(sql.ruleID).toBe("sql_execute_ddl_v1")
+
+  const bash = HardPolicy.check({
+    toolID: "toolbox_bash",
+    source: "mcp",
+    args: { command: "DROP DATABASE prod" },
+    sessionID: "s",
+  })
+  expect(bash.allow).toBe(false)
+  if (!bash.allow) expect(bash.ruleID).toBe("bash_ddl_v1")
+
+  // The audit record retains the ORIGINAL flattened id for forensics, even though the rule
+  // was resolved via the bare suffix.
+  expect(HardPolicy.getAuditLog().at(-1)?.toolID).toBe("toolbox_bash")
+})
+
+test("A: suffix resolution is scoped to the mcp source only — a non-mcp `_sql_execute`-suffixed id stays ungoverned (exact-match)", () => {
+  // Native/plugin/batch/task ids are never client-prefixed, so suffix resolution there would be
+  // an over-broad NEW block. A hypothetical native `warehouse_sql_execute` must fall through to
+  // exact-match (no rule) and allow — proving the fix only ADDS coverage for mcp, per its scope.
+  const nativeSuffix = HardPolicy.check({
+    toolID: "warehouse_sql_execute",
+    source: "native",
+    args: { query: "DROP DATABASE prod" },
+    sessionID: "s",
+  })
+  expect(nativeSuffix.allow).toBe(true)
+
+  // And a partial (non-`_`-delimited) suffix never matches even under mcp: `mysql_execute`
+  // ends with `sql_execute` textually but not as a `_sql_execute` segment, so it stays allowed.
+  const partial = HardPolicy.check({
+    toolID: "mysql_execute",
+    source: "mcp",
+    args: { query: "DROP DATABASE prod" },
+    sessionID: "s",
+  })
+  expect(partial.allow).toBe(true)
+})
+
+test("A: audit finalArgsDigest is a non-reversible hash — no raw args plaintext retained", () => {
+  HardPolicy.clearAuditLog()
+  HardPolicy.check({
+    toolID: "bash",
+    source: "native",
+    args: { command: "DROP DATABASE prod", secret: "sk-live-abc123" },
+    sessionID: "s",
+  })
+  const digest = HardPolicy.getAuditLog().at(-1)?.finalArgsDigest ?? ""
+  // 64-hex SHA-256, and it must NOT contain any plaintext fragment of the args.
+  expect(digest).toMatch(/^[0-9a-f]{64}$/)
+  expect(digest).not.toContain("DROP DATABASE prod")
+  expect(digest).not.toContain("sk-live-abc123")
+  // But it IS a faithful digest of the exact args snapshot (correlation preserved).
+  expect(digest).toBe(HardPolicy.digestArgs({ command: "DROP DATABASE prod", secret: "sk-live-abc123" }))
+})
+
 test("A: malformed args for a governed toolID fail closed — total function, never throws", () => {
   expect(() => HardPolicy.check({ toolID: "sql_execute", source: "native", args: {}, sessionID: "s" })).not.toThrow()
   const missingQuery = HardPolicy.check({ toolID: "sql_execute", source: "native", args: {}, sessionID: "s" })
@@ -474,9 +541,14 @@ test("D3 (registry loop): tool.execute.before mutation is what HardPolicy inspec
 
   // The audit record's finalArgsDigest is the compliance oracle for "what HardPolicy actually
   // checked" — it must reflect the POST-hook (mutated, DDL) args, not the caller's pre-hook
-  // (benign) args. Catches a digest/decision divergence a decision-only assertion would miss.
-  expect(last?.finalArgsDigest).toContain("DROP DATABASE prod")
-  expect(last?.finalArgsDigest).not.toContain("ls -la")
+  // (benign) args. The digest is a non-reversible hash (no plaintext retained), so we recompute
+  // the expected digest from the known final/pre-hook args instead of substring-matching.
+  expect(last?.finalArgsDigest).toBe(
+    HardPolicy.digestArgs({ tool: "invalid", error: "sentinel-probe", command: "DROP DATABASE prod" }),
+  )
+  expect(last?.finalArgsDigest).not.toBe(
+    HardPolicy.digestArgs({ tool: "invalid", error: "sentinel-probe", command: "ls -la" }),
+  )
 })
 
 test("D3 (registry loop): audit finalArgsDigest reflects post-hook args in the ALLOW direction too — mirror of the deny-direction mutation test above, proves the digest isn't computed from the caller's pre-hook args", async () => {
@@ -555,10 +627,15 @@ test("D3 (registry loop): audit finalArgsDigest reflects post-hook args in the A
 
   const last = HardPolicy.getAuditLog().at(-1)
   expect(last?.decision.allow).toBe(true)
-  // The digest is the compliance oracle for "what HardPolicy actually checked" — it must show
-  // the post-hook benign command and must NOT show the caller's pre-hook DDL command.
-  expect(last?.finalArgsDigest).toContain("ls -la")
-  expect(last?.finalArgsDigest).not.toContain("DROP DATABASE prod")
+  // The digest is the compliance oracle for "what HardPolicy actually checked" — it must
+  // reflect the post-hook benign command, not the caller's pre-hook DDL command. Recompute
+  // from the known args (the digest is a non-reversible hash, not substring-inspectable).
+  expect(last?.finalArgsDigest).toBe(
+    HardPolicy.digestArgs({ tool: "invalid", error: "sentinel-probe", command: "ls -la" }),
+  )
+  expect(last?.finalArgsDigest).not.toBe(
+    HardPolicy.digestArgs({ tool: "invalid", error: "sentinel-probe", command: "DROP DATABASE prod" }),
+  )
 })
 
 test("D4 (MCP loop): governed stub MCP tool is denied for DDL args, mcp execute never runs", async () => {

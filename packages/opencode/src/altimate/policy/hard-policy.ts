@@ -21,6 +21,7 @@
 //   absent execute span does NOT prove enforcement. Tests must assert against the audit
 //   log and execute-not-called counters.
 
+import { createHash } from "node:crypto"
 import { Wildcard } from "@/util/wildcard"
 import { classifyAndCheck } from "@/altimate/tools/sql-classify"
 
@@ -191,6 +192,23 @@ export namespace HardPolicy {
   const rulesByTool = buildRulesByTool(RULES)
   const initError = validateRuleTable(RULES)
 
+  // MCP tools are registered with a flattened id `<sanitized-client>_<sanitized-tool>`
+  // (see src/mcp/index.ts's MCP.tools()), but RULES are keyed by the bare governed tool id
+  // (`sql_execute`, `bash`). Without this resolution an MCP server exposing its own
+  // `sql_execute` arrives as e.g. `warehouse_sql_execute`, matches no rule, and is allowed
+  // to run DDL — a silent bypass. For MCP-sourced calls, also resolve a governed key that is
+  // a full `_`-delimited suffix of the flattened id. Native/plugin/batch/task tools keep
+  // strict exact-match (their ids are not client-prefixed), so this only ever ADDS coverage
+  // for the mcp source; it never un-governs a tool that exact-match already caught.
+  function resolveGovernedKey(toolID: string, source: Source): string | undefined {
+    if (rulesByTool.has(toolID)) return toolID
+    if (source !== "mcp") return undefined
+    for (const governed of rulesByTool.keys()) {
+      if (toolID.endsWith(`_${governed}`)) return governed
+    }
+    return undefined
+  }
+
   /**
    * Must be called at the app-runtime composition seam so a broken rule table fails app
    * startup instead of silently allowing everything. Throws (does not process.exit —
@@ -247,12 +265,16 @@ export namespace HardPolicy {
   }
 
   // ---------------------------------------------------------------------------------
-  // Deterministic, bounded digest of the final args snapshot — for audit correlation in
-  // tests (e.g. "was the deny keyed off the post-hook-mutated args?"), not a
-  // cryptographic hash and not for security purposes on its own.
+  // Deterministic, non-reversible digest of the final args snapshot — for audit
+  // correlation in tests (e.g. "was the deny keyed off the post-hook-mutated args?").
+  // It is a SHA-256 over the stable-stringified args, NOT the raw args: tool arguments
+  // routinely carry secrets (a `write` of `.env` contents, a `bash` command with an auth
+  // token). The audit log is retained (up to MAX_AUDIT_LOG records, readable via
+  // getAuditLog() or an installed sink), so storing raw or truncated args would retain
+  // those secrets near the start of the payload. The hash preserves the correlation
+  // property (same args -> same digest, different args -> different digest) without
+  // retaining the plaintext. Tests recompute the expected digest via exported digestArgs().
   // ---------------------------------------------------------------------------------
-
-  const MAX_DIGEST_LENGTH = 2000
 
   function stableStringify(value: unknown): string {
     const seen = new WeakSet<object>()
@@ -277,8 +299,16 @@ export namespace HardPolicy {
   }
 
   function finalArgsDigest(args: unknown): string {
-    const str = stableStringify(args)
-    return str.length > MAX_DIGEST_LENGTH ? str.slice(0, MAX_DIGEST_LENGTH) : str
+    return createHash("sha256").update(stableStringify(args)).digest("hex")
+  }
+
+  /**
+   * Test/forensic support: the exact non-reversible digest check() records for a given
+   * args snapshot. Lets tests assert the audit digest reflects the post-hook (final) args
+   * HardPolicy actually evaluated, without exposing or reconstructing the plaintext.
+   */
+  export function digestArgs(args: unknown): string {
+    return finalArgsDigest(args)
   }
 
   // ---------------------------------------------------------------------------------
@@ -308,7 +338,7 @@ export namespace HardPolicy {
 
       assertInitialized()
 
-      const rules = rulesByTool.get(toolID)
+      const rules = rulesByTool.get(resolveGovernedKey(toolID, source) ?? "")
       if (!rules || rules.length === 0) {
         // Ungoverned toolID — HardPolicy has no rule for it, so it always allows,
         // regardless of args shape. Denying here would be a NEW block, not a relocation
