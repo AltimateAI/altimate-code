@@ -57,7 +57,7 @@ export function registerPage(
       ${googleGMark}<span>Continue with Google</span>
     </a>
 
-    <div class="divider">or</div>
+    <div class="divider"></div>
     <p class="section-label">or use email instead</p>
 
     <form id="email-form" method="POST" action="/auth/email">
@@ -322,8 +322,6 @@ export function instancePage(
       ${attributionFields}
       <button type="submit" class="btn btn-primary" id="continue-btn" style="margin-top:18px">Continue</button>
     </form>
-
-    <p class="legal">Your terminal is waiting — it will continue automatically once provisioning finishes.</p>
   `
 
   const extraCss = `
