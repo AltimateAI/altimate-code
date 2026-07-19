@@ -162,10 +162,6 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>• Debug &amp; monitor your warehouse</text>
               <text fg={theme.textMuted}>• Govern data: lineage, PII, tests</text>
             </box>
-            <text fg={theme.border}>┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</text>
-            <text fg={theme.textMuted} wrapMode="word" width="100%">
-              New here? <span style={{ fg: theme.accent }}>/discover</span> finds your stack in one scan
-            </text>
           </box>
           <Dotted />
           <box gap={1}>
