@@ -127,6 +127,25 @@ test("A: near-miss controls are allowed — proves the rule table is not trivial
   expect(HardPolicy.check({ toolID: "bash", source: "native", args: { command: "ls -la" }, sessionID: "s" }).allow).toBe(true)
 })
 
+test("A: bash DDL is denied even with leading/trailing whitespace — no `^`-anchor bypass", () => {
+  // Wildcard.match anchors patterns at `^`, so an untrimmed "  DROP DATABASE prod" would slip
+  // past "DROP DATABASE *". matchBashDdl trims first; verify the common whitespace prefixes.
+  for (const command of ["  DROP DATABASE prod", "\tDROP DATABASE prod", "\n  TRUNCATE users", "DROP SCHEMA x   "]) {
+    const d = HardPolicy.check({ toolID: "bash", source: "native", args: { command }, sessionID: "s" })
+    expect(d.allow).toBe(false)
+    if (!d.allow) expect(d.ruleID).toBe("bash_ddl_v1")
+  }
+})
+
+test("A: digest distinguishes Map/Set args instead of collapsing them to {} ", () => {
+  // Object.keys(new Map()) is [] -> different Maps would otherwise both stringify to {} and
+  // collide to the same audit digest. Serializing their contents keeps them distinct.
+  expect(HardPolicy.digestArgs({ x: new Map([["a", 1]]) })).not.toBe(HardPolicy.digestArgs({ x: new Map([["a", 2]]) }))
+  expect(HardPolicy.digestArgs({ x: new Set([1, 2]) })).not.toBe(HardPolicy.digestArgs({ x: new Set([1, 3]) }))
+  // A populated Map must not be confused with an empty plain object.
+  expect(HardPolicy.digestArgs({ x: new Map([["a", 1]]) })).not.toBe(HardPolicy.digestArgs({ x: {} }))
+})
+
 test("A: ungoverned toolIDs are always allowed regardless of args shape", () => {
   expect(HardPolicy.check({ toolID: "read", source: "native", args: { anything: true }, sessionID: "s" }).allow).toBe(true)
   expect(HardPolicy.check({ toolID: "read", source: "native", args: undefined, sessionID: "s" }).allow).toBe(true)

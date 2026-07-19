@@ -91,17 +91,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
-            const ctx = context(args, options)
             // altimate_change start — HardPolicy enforcement (S3)
             // upstream_fix: plugin.trigger's returned output was previously discarded, so a
             // tool.execute.before hook that mutated `args` had no effect on what actually
-            // ran — HardPolicy and execute must see the SAME final, post-hook args.
+            // ran — HardPolicy and execute must see the SAME final, post-hook args. The hook
+            // input uses input.session.id / options.toolCallId directly (both independent of
+            // args) so that ctx — and every ctx.metadata() tool-call record — is built from the
+            // post-hook finalArgs the tool actually ran with, not the caller's original args.
             const hookOutput = yield* plugin.trigger(
               "tool.execute.before",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+              { tool: item.id, sessionID: input.session.id, callID: options.toolCallId },
               { args },
             )
             const finalArgs = hookOutput.args
+            const ctx = context(finalArgs, options)
             const policyDecision = HardPolicy.check({
               toolID: item.id,
               source: "native",
@@ -110,6 +113,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               callID: ctx.callID,
             })
             if (!policyDecision.allow) {
+              // Intentionally short-circuit WITHOUT firing tool.execute.after: the tool never
+              // executed, so there is no result to post-process, and synthesizing an after-event
+              // from a hard deny would hand plugins something they'd treat as a real post-execute
+              // outcome. The security invariant (execute not called) holds either way.
               return {
                 title: "Blocked by policy",
                 output: policyDecision.safeReason,
@@ -166,17 +173,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     item.execute = (args, opts) =>
       run.promise(
         Effect.gen(function* () {
-          const ctx = context(args, opts)
           // altimate_change start — HardPolicy enforcement (S3)
           // upstream_fix: plugin.trigger's returned output was previously discarded, so a
           // tool.execute.before hook that mutated `args` had no effect on what actually
-          // ran — HardPolicy and execute must see the SAME final, post-hook args.
+          // ran — HardPolicy and execute must see the SAME final, post-hook args. The hook
+          // input uses input.session.id / opts.toolCallId directly (both independent of args)
+          // so that ctx — and every ctx.metadata() tool-call record — is built from the
+          // post-hook finalArgs the tool actually ran with, not the caller's original args.
           const hookOutput = yield* plugin.trigger(
             "tool.execute.before",
-            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
+            { tool: key, sessionID: input.session.id, callID: opts.toolCallId },
             { args },
           )
           const finalArgs = hookOutput.args
+          const ctx = context(finalArgs, opts)
           const policyDecision = HardPolicy.check({
             toolID: key,
             source: "mcp",
@@ -185,6 +195,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             callID: opts.toolCallId,
           })
           if (!policyDecision.allow) {
+            // Intentionally short-circuit WITHOUT firing tool.execute.after (see the native
+            // dispatch above): the tool never executed, so there is no result to post-process.
             return {
               title: "Blocked by policy",
               metadata: {

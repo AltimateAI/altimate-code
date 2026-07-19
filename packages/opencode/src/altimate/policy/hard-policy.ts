@@ -107,7 +107,11 @@ export namespace HardPolicy {
     if (!isRecord(args) || typeof args.command !== "string") {
       throw new Error("hard-policy: bash args missing string 'command' field")
     }
-    const command = args.command
+    // Trim first: Wildcard.match compiles each pattern with a leading `^` anchor, so a raw
+    // `"  DROP DATABASE prod"` (or a leading tab/newline) would slip past `"DROP DATABASE *"`
+    // and bypass the hard deny. Leading/trailing whitespace is never semantically meaningful
+    // to the shell here, so trimming closes that bypass without altering any real command.
+    const command = args.command.trim()
     return BASH_DDL_PATTERNS.some((pattern) => Wildcard.match(command, pattern))
   }
 
@@ -285,6 +289,15 @@ export namespace HardPolicy {
       if (input === null || typeof input !== "object") return input
       if (seen.has(input)) return "[circular]"
       seen.add(input)
+      // Map/Set stringify to `{}` under Object.keys(), so distinct ones would collide to the
+      // same digest (a `tool.execute.before` hook could inject one). Serialize their contents
+      // under a distinguishing tag so different collections produce different digests.
+      if (input instanceof Map) {
+        return { __map__: [...input.entries()].map(([k, v]) => [normalize(k), normalize(v)]) }
+      }
+      if (input instanceof Set) {
+        return { __set__: [...input.values()].map(normalize) }
+      }
       if (Array.isArray(input)) return input.map(normalize)
       const record = input as Record<string, unknown>
       const out: Record<string, unknown> = {}
