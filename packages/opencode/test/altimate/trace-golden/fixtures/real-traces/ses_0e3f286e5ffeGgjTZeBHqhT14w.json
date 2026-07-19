@@ -1,0 +1,126 @@
+{
+  "version": 2,
+  "traceId": "019f1c0d-7c2a-7000-97af-2d0a7ec3afdf",
+  "sessionId": "ses_0e3f286e5ffeGgjTZeBHqhT14w",
+  "startedAt": "2026-07-01T05:01:13.642Z",
+  "endedAt": "2026-07-01T05:01:21.982Z",
+  "metadata": {
+    "title": "Creating newfile.txt with BANANA",
+    "model": "opencode/big-pickle",
+    "providerId": "opencode",
+    "agent": "builder",
+    "prompt": "Create a file called newfile.txt containing the text BANANA. Use the write tool."
+  },
+  "spans": [
+    {
+      "spanId": "019f1c0d-7c3d-7000-abc2-227506bab39b",
+      "parentSpanId": null,
+      "name": "ses_0e3f286e5ffeGgjTZeBHqhT14w",
+      "kind": "session",
+      "startTime": 1782882073642,
+      "status": "ok",
+      "endTime": 1782882081982,
+      "output": "2 generations, 1 tool calls, 89098 tokens, $0.0000"
+    },
+    {
+      "spanId": "019f1c0d-7c3d-7001-a9ef-c0979f45c85a",
+      "parentSpanId": "019f1c0d-7c3d-7000-abc2-227506bab39b",
+      "name": "user-message",
+      "kind": "user-message",
+      "startTime": 1782882073661,
+      "endTime": 1782882073661,
+      "status": "ok",
+      "input": "Create a file called newfile.txt containing the text BANANA. Use the write tool."
+    },
+    {
+      "spanId": "019f1c0d-81d8-7000-a0d5-b3601a9ecdcf",
+      "parentSpanId": "019f1c0d-7c3d-7000-abc2-227506bab39b",
+      "name": "generation-prt_f1c0d81d60013oB3cJ99Cnd63m",
+      "kind": "generation",
+      "startTime": 1782882075096,
+      "status": "ok",
+      "model": {
+        "modelId": "opencode/big-pickle",
+        "providerId": "opencode"
+      },
+      "endTime": 1782882076960,
+      "output": "[tool calls: write]",
+      "finishReason": "tool-calls",
+      "cost": 0,
+      "tokens": {
+        "input": 44414,
+        "output": 100,
+        "reasoning": 25,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 44539
+      }
+    },
+    {
+      "spanId": "019f1c0d-88a9-7000-9c07-bccdd11e28d5",
+      "parentSpanId": "019f1c0d-81d8-7000-a0d5-b3601a9ecdcf",
+      "name": "write",
+      "kind": "tool",
+      "startTime": 1782882076837,
+      "endTime": 1782882076841,
+      "status": "ok",
+      "tool": {
+        "callId": "call_00_WgILI9flpTEheMYQxLGn9176",
+        "durationMs": 4
+      },
+      "input": {
+        "filePath": "/private/tmp/diffverify-CGXm/newfile.txt",
+        "content": "BANANA"
+      },
+      "output": "Wrote file successfully."
+    },
+    {
+      "spanId": "019f1c0d-8cd0-7000-afa7-6f0e32cb2c21",
+      "parentSpanId": "019f1c0d-7c3d-7000-abc2-227506bab39b",
+      "name": "generation-prt_f1c0d8ccf001UQED5QRVtMT7By",
+      "kind": "generation",
+      "startTime": 1782882077904,
+      "status": "ok",
+      "model": {
+        "modelId": "opencode/big-pickle",
+        "providerId": "opencode"
+      },
+      "input": "[write] Wrote file successfully.",
+      "endTime": 1782882079681,
+      "output": "Done! Created `newfile.txt` with the text `BANANA`.",
+      "finishReason": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 40434,
+        "output": 23,
+        "reasoning": 6,
+        "cacheRead": 4096,
+        "cacheWrite": 0,
+        "total": 44559
+      }
+    }
+  ],
+  "summary": {
+    "totalTokens": 89098,
+    "totalCost": 0,
+    "totalToolCalls": 1,
+    "totalGenerations": 2,
+    "duration": 8340,
+    "status": "completed",
+    "tokens": {
+      "input": 84848,
+      "output": 123,
+      "reasoning": 31,
+      "cacheRead": 4096,
+      "cacheWrite": 0
+    },
+    "topTools": [
+      {
+        "name": "write",
+        "count": 1,
+        "totalDuration": 4
+      }
+    ],
+    "narrative": "Completed in 8.3s. Made 2 LLM calls using 1 tools (write). Total cost: $0.0000."
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "metadata": {
+    "model": "test/test-model",
+    "prompt": "\"Read smoke.txt in the working directory and summarize its contents in one sentence.\"\n",
+    "title": "\"Read smoke.txt in the working directory and summarize its contents in one sente"
+  },
+  "sessionId": "<SID>",
+  "spans": [
+    {
+      "id": "s0",
+      "input": "\"Read smoke.txt in the working directory and summarize its contents in one sentence.\"\n",
+      "kind": "session",
+      "name": "<SID>",
+      "output": "2 generations, 1 tool calls, 0 tokens, <COST>",
+      "parentId": null,
+      "rank": 0,
+      "status": "ok"
+    },
+    {
+      "id": "s1",
+      "input": {
+        "agent": "builder",
+        "step": 1
+      },
+      "kind": "span",
+      "name": "system-prompt",
+      "output": {
+        "content": "You are powered by the model named test-model. The exact model ID is test/test-model\nHere is some useful information about the environment you are running in:\n<env>\n  Working directory: <HOME>\n  Workspace root folder: /\n  Is directory a git repo: no\n  Platform: <PLATFORM>\n  Today's date: <DATE>\n</env>\n<directories>\n  \n</directories>\n\nSkills provide specialized instructions and workflows for specific tasks.\nUse the skill tool to load a skill when a task matches its description.\n<available_skills>\n  <skill>\n    <name>customize-opencode</name>\n    <description>Use ONLY when the user is editing or creating Altimate Code's own configuration: altimate-code.json, opencode.json, opencode.jsonc, files under .altimate-code/, files under .opencode/, or files under ~/.config/altimate-code/. Also use when creating or fixing Altimate Code agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring Altimate Code itself.</description>\n    <location>file://<HOME>/%3Cbuilt-in%3E</location>\n  </skill>\n</available_skills>",
+        "parts": 2
+      },
+      "parentId": "s0",
+      "rank": 0,
+      "status": "ok"
+    },
+    {
+      "finishReason": "tool-calls",
+      "hasCost": false,
+      "hasTokens": false,
+      "id": "s2",
+      "kind": "generation",
+      "model": {
+        "modelId": "test/test-model"
+      },
+      "name": "generation",
+      "output": "[tool calls: read]",
+      "parentId": "s0",
+      "rank": 1,
+      "status": "ok"
+    },
+    {
+      "id": "s3",
+      "input": {
+        "filePath": "<HOME>/smoke.txt"
+      },
+      "kind": "tool",
+      "name": "read",
+      "output": "<path><HOME>/smoke.txt</path>\n<type>file</type>\n<content>\n1: hello from the trace-golden smoke scenario\n\n(End of file - total 1 lines)\n</content>",
+      "parentId": "s2",
+      "rank": -1,
+      "status": "ok",
+      "toolCallId": "call:s3"
+    },
+    {
+      "finishReason": "stop",
+      "hasCost": false,
+      "hasTokens": false,
+      "id": "s4",
+      "input": "[read] <path><HOME>/smoke.txt</path>\n<type>file</type>\n<content>\n1: hello from the trace-golden smoke scenario\n\n(End of file - total 1 lines)\n</content>",
+      "kind": "generation",
+      "model": {
+        "modelId": "test/test-model"
+      },
+      "name": "generation",
+      "output": "The file contains a short greeting from the trace-golden smoke scenario.",
+      "parentId": "s0",
+      "rank": 2,
+      "status": "ok"
+    }
+  ],
+  "summary": {
+    "narrative": "Completed in <DUR>. Made 2 LLM calls using 1 tools (read). Total cost: <COST>.",
+    "status": "completed",
+    "topTools": [
+      {
+        "count": 1,
+        "name": "read"
+      }
+    ],
+    "totalGenerations": 2,
+    "totalToolCalls": 1
+  },
+  "version": 2
+}
