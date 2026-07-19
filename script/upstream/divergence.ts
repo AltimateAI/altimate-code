@@ -303,7 +303,11 @@ export function buildDivergence(
 ): DivergenceEnvelope {
   const upstreamBase = resolveRefOrThrow(upstreamBaseRef, repoRoot)
   const ours = resolveRefOrThrow(oursRef, repoRoot)
-  const upstreamPaths = loadPathsAtRef(upstreamBaseRef, repoRoot)
+  // Read the taxonomy paths from the RESOLVED sha, not the (possibly movable) ref: if
+  // upstreamBaseRef is a branch that another process advances between resolution and this
+  // read, loading from the ref would attribute buckets against a newer tree than the diff
+  // (and the recorded upstreamBaseSha/Tree) used — reproducible totals, wrong byBucket.
+  const upstreamPaths = loadPathsAtRef(upstreamBase.sha, repoRoot)
 
   const numstat = parseNumstatZ(runNumstat(repoRoot, upstreamBase.sha, ours.sha))
   const { byPath: hunksByPath, total: hunkTotalFromDiff } = parseHunksByPath(runHunkDiff(repoRoot, upstreamBase.sha, ours.sha))

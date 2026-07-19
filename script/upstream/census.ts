@@ -768,10 +768,18 @@ export function computeDiffBudget(repoRoot: string, base: string, headRef: strin
   const head = resolveRefOrThrow(headRef, repoRoot)
   const baseResolved = resolveRefOrThrow(base, repoRoot)
 
-  const result = spawnSync("git", ["diff", "--numstat", "-M", "-z", baseResolved.sha, head.sha], {
-    cwd: repoRoot,
-    maxBuffer: 50 * 1024 * 1024,
-  })
+  const result = spawnSync(
+    "git",
+    // Pin diff.renameLimit so a low repo/runner config can't silently disable rename
+    // detection (`-M` falls back to no detection past the limit), which would miscount an
+    // upstream-file rename as a separate delete+add and skew the file/bucket/line budget.
+    // Mirrors divergence.ts's PINNED_DIFF_CONFIG.
+    ["-c", "diff.renameLimit=999999", "diff", "--numstat", "-M", "-z", baseResolved.sha, head.sha],
+    {
+      cwd: repoRoot,
+      maxBuffer: 50 * 1024 * 1024,
+    },
+  )
   if (result.error) {
     throw new Error(`Failed to spawn 'git diff --numstat -M -z': ${result.error.message}`)
   }

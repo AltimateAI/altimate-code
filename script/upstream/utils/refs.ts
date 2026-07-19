@@ -59,9 +59,11 @@ export function resolveRefOrThrow(ref: string, repoRoot: string, remoteHint = "u
       `Ref '${ref}' was not found locally, and this tool never fetches over the network.\n` +
         `If '${ref}' is an upstream release tag, fetch it first:\n` +
         `  git fetch ${remoteHint} tag ${ref} --no-tags\n` +
-        `If it's a branch, fetch it with:\n` +
-        `  git fetch ${remoteHint} ${ref} --no-tags\n` +
-        `Then re-run this command.`,
+        `If it's a branch, a plain fetch only updates the remote-tracking ref\n` +
+        `'${remoteHint}/${ref}' (not a local '${ref}'), so fetch and then re-run against that:\n` +
+        `  git fetch ${remoteHint} ${ref}\n` +
+        `  # then re-run this command using '${remoteHint}/${ref}' in place of '${ref}'\n` +
+        `(or fetch into a local ref explicitly: git fetch ${remoteHint} ${ref}:${ref}).`,
     )
   }
   const tree = run(["rev-parse", "--verify", `${ref}^{tree}`], repoRoot)
