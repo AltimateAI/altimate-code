@@ -11,6 +11,10 @@ import DESCRIPTION from "./batch.txt"
 const DISALLOWED = new Set(["batch"])
 const FILTERED_FROM_SUGGESTIONS = new Set(["invalid", "patch", ...DISALLOWED])
 
+// altimate_change start — HardPolicy enforcement (S3)
+import { HardPolicy } from "../altimate/policy/hard-policy"
+// altimate_change end
+
 // altimate_change start — v1.17.9: BatchTool is a legacy zod/Promise tool (adapted by tool-zod-compat).
 // Bridge the Promise-based LegacyContext back into the Effect-based Tool.Context the inner tools expect.
 function toEffectContext(ctx: LegacyContext, callID: string): Tool.Context {
@@ -100,6 +104,20 @@ export const BatchTool = Tool.define("batch", {
           },
         })
 
+        // altimate_change start — HardPolicy enforcement (S3)
+        // BatchTool's inner dispatch has no tool.execute.before hook, so validatedParams is
+        // already the final args seen by both HardPolicy and execute.
+        const policyDecision = HardPolicy.check({
+          toolID: call.tool,
+          source: "batch",
+          args: validatedParams,
+          sessionID: ctx.sessionID,
+          callID: partID,
+        })
+        if (!policyDecision.allow) {
+          throw new Error(policyDecision.safeReason)
+        }
+        // altimate_change end
         // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect; run via AppRuntime
         const result = await AppRuntime.runPromise(tool.execute(validatedParams, toEffectContext(ctx, partID)))
         // altimate_change end

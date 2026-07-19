@@ -51,6 +51,14 @@ import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { HardPolicy } from "@/altimate/policy/hard-policy"
+
+// altimate_change start — HardPolicy enforcement (S3): fail-closed at the app-runtime
+// composition seam. If the rule table is malformed, this throws at module load — the whole
+// app-runtime module (and therefore anything that imports AppRuntime) fails to compose. This
+// is a composition failure, not process.exit in library code, and not a silent implicit-allow.
+HardPolicy.assertInitialized()
+// altimate_change end
 
 // altimate_change start — Layer.suspend defers all the .defaultLayer reads past circular
 // module-init (fork Service facades participate in import cycles; eager access yields undefined).
