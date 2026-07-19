@@ -458,7 +458,6 @@ export function verifyPage(email: string): string {
       <div style="font-size:52px;margin-bottom:16px">📬</div>
       <h1 style="font-size:28px">Check your inbox</h1>
       <p class="sub" style="margin-top:12px">Click the link we sent to <b style="color:var(--text)">${email}</b>.</p>
-      <p class="sub" style="margin-top:6px">Your terminal will continue automatically.</p>
     </div>
   `
   return altimateShell({ title: "Check your inbox · Altimate AI", body })
