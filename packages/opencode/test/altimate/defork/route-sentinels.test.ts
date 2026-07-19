@@ -120,30 +120,26 @@ test("D1: resolveTools dispatch chokepoint is present and unique", () => {
 // ---------------------------------------------------------------------------
 
 test("D3/D4: SessionTools.resolve has no production caller (latent guard)", () => {
-  // If this ever finds a real call site outside src/session/tools.ts itself
-  // (not a doc-comment mentioning the name), D3/D4's classification must be
-  // revisited from `latent` to `active` and this test updated accordingly.
-  const promptSrc = readSrc("session/prompt.ts")
-  const toolSourceSrc = readSrc("altimate/tool-source.ts")
-
-  // Known, expected occurrences: doc-comments only, never a call.
-  const promptMatches = [...promptSrc.matchAll(/SessionTools/g)]
-  expect(promptMatches).toHaveLength(2)
-  for (const match of promptMatches) {
-    const lineStart = promptSrc.lastIndexOf("\n", match.index) + 1
-    const line = promptSrc.slice(lineStart, promptSrc.indexOf("\n", match.index))
-    expect(line.trim().startsWith("//")).toBe(true)
-    expect(line).not.toContain("SessionTools.resolve(")
+  // Scan the ENTIRE production src tree (not just prompt.ts + tool-source.ts):
+  // a future caller added in ANY source file must flip D3/D4 from `latent` to
+  // `active` so HardPolicy coverage there is re-verified. We look for a real
+  // `SessionTools.resolve(` CALL on a non-comment line, excluding the resolver's
+  // own definition file (session/tools.ts) where the name is declared.
+  const glob = new Bun.Glob("**/*.ts")
+  const callers: string[] = []
+  for (const rel of glob.scanSync({ cwd: SRC })) {
+    if (rel === join("session", "tools.ts")) continue // the definition itself
+    const src = readFileSync(join(SRC, rel), "utf8")
+    if (!src.includes("SessionTools.resolve(")) continue
+    src.split("\n").forEach((line, i) => {
+      const t = line.trim()
+      const isComment = t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")
+      if (!isComment && line.includes("SessionTools.resolve(")) callers.push(`${rel}:${i + 1}`)
+    })
   }
-
-  const toolSourceMatches = [...toolSourceSrc.matchAll(/SessionTools/g)]
-  expect(toolSourceMatches).toHaveLength(2)
-  for (const match of toolSourceMatches) {
-    const lineStart = toolSourceSrc.lastIndexOf("\n", match.index) + 1
-    const line = toolSourceSrc.slice(lineStart, toolSourceSrc.indexOf("\n", match.index))
-    expect(line.trim().startsWith("*")).toBe(true)
-    expect(line).not.toContain("SessionTools.resolve(")
-  }
+  // If this fails, a production caller of SessionTools.resolve appeared —
+  // D3/D4 are no longer latent and HardPolicy must be confirmed to gate them.
+  expect(callers).toEqual([])
 })
 
 test("D3/D4: SessionTools.resolve dispatches a tool when invoked directly", async () => {

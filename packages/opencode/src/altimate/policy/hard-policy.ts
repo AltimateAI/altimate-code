@@ -215,8 +215,20 @@ export namespace HardPolicy {
 
   function emitAudit(record: AuditRecord): void {
     auditLog.push(record)
-    if (auditLog.length > MAX_AUDIT_LOG) auditLog.shift()
-    if (auditSink) auditSink(record)
+    // Batched trim (O(1) amortized) instead of an O(n) shift() on every call:
+    // let the log overshoot, then splice the oldest entries once it grows past
+    // twice the cap. check() runs on the tool-execution hot path.
+    if (auditLog.length > MAX_AUDIT_LOG * 2) auditLog.splice(0, auditLog.length - MAX_AUDIT_LOG)
+    // A faulty externally-installed sink must NEVER propagate out of the
+    // enforcement chokepoint — check() is contractually total (never throws).
+    // The decision is already computed and returned regardless of audit outcome.
+    if (auditSink) {
+      try {
+        auditSink(record)
+      } catch {
+        // Intentionally swallowed: audit-side failure cannot affect enforcement.
+      }
+    }
   }
 
   /** Test support: read the in-memory audit log (oldest first). */
