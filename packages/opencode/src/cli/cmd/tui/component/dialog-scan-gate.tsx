@@ -68,20 +68,29 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
   const transparent = RGBA.fromInts(0, 0, 0, 0)
 
   return (
-    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
-      <box flexDirection="row" justifyContent="space-between">
-        <text>
-          <span style={{ fg: theme.textMuted }}>Step 2 of 2   </span>
-          <span style={{ fg: theme.text }}>
-            <b>Scan your environment?</b>
-          </span>
-        </text>
-        <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
-          esc
-        </text>
-      </box>
-      <text fg={theme.textMuted}>I'll look for your dbt project and warehouses.</text>
-      <box gap={1}>
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <box
+        border
+        borderStyle="rounded"
+        borderColor={theme.border}
+        title=" Step 2 of 2 "
+        titleAlignment="left"
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        gap={1}
+      >
+        <box flexDirection="row" justifyContent="space-between">
+          <text fg={theme.text} attributes={TextAttributes.BOLD}>
+            Scan your environment?
+          </text>
+          <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+            esc
+          </text>
+        </box>
+        <text fg={theme.textMuted}>I'll look for your dbt project and warehouses.</text>
+        <box gap={1}>
         <For each={options}>
           {(option, index) => {
             const active = () => selected() === index()
@@ -110,6 +119,7 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
             )
           }}
         </For>
+        </box>
       </box>
     </box>
   )
