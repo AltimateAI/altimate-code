@@ -74,6 +74,9 @@ import { Tracer } from "../altimate/observability/tracing"
 // altimate_change — stamp an authoritative tool source + humanized MCP title
 import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
 // altimate_change end
+// altimate_change start — HardPolicy enforcement (S3)
+import { HardPolicy } from "@/altimate/policy/hard-policy"
+// altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 
 // @ts-ignore
@@ -577,7 +580,11 @@ export namespace SessionPrompt {
           subagent_type: task.agent,
           command: task.command,
         }
-        await Plugin.trigger(
+        // altimate_change start — HardPolicy enforcement (S3)
+        // upstream_fix: Plugin.trigger's return value was previously discarded, so a
+        // tool.execute.before hook that mutated `args` had no effect on what actually
+        // ran — HardPolicy and execute must see the SAME final, post-hook args.
+        const hookInput = await Plugin.trigger(
           "tool.execute.before",
           {
             tool: "task",
@@ -586,63 +593,85 @@ export namespace SessionPrompt {
           },
           { args: taskArgs },
         )
-        let executionError: Error | undefined
-        const taskAgent = await Agent.get(task.agent)
-        const taskCtx: Tool.Context = {
-          agent: task.agent,
-          messageID: assistantMessage.id,
-          sessionID: sessionID,
-          abort,
-          callID: part.callID,
-          extra: { bypassAgentCheck: true },
-          // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
-          messages: msgs as unknown as Tool.Context["messages"],
-          metadata: (input) =>
-            // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
-            Effect.promise(async () => {
-              part = (await Session.updatePart({
-                ...part,
-                type: "tool",
-                state: {
-                  ...part.state,
-                  ...input,
-                },
-              } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
-            }),
-          ask: (req) =>
-            Effect.promise(async () => {
-              // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
-              await PermissionNext.ask({
-                ...req,
-                sessionID: sessionID,
-                ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
-              } as Parameters<typeof PermissionNext.ask>[0])
-              // altimate_change end
-            }),
-          // altimate_change end
-          // altimate_change end
-        }
-        const result = await AppRuntime.runPromise(taskTool.execute(taskArgs, taskCtx)).catch((error) => {
-          executionError = error
-          log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
-          return undefined
-        })
-        const attachments = result?.attachments?.map((attachment) => ({
-          ...attachment,
-          id: PartID.ascending(),
+        const finalTaskArgs = hookInput.args
+        const policyDecision = HardPolicy.check({
+          toolID: "task",
+          source: "task",
+          args: finalTaskArgs,
           sessionID,
-          messageID: assistantMessage.id,
-        }))
-        await Plugin.trigger(
-          "tool.execute.after",
-          {
-            tool: "task",
+          callID: part.id,
+        })
+        // On deny: do NOT call taskTool.execute and do NOT fire tool.execute.after —
+        // fall through to the same error-surfacing machinery used for a thrown
+        // execution error below (part status "error", assistantMessage still finishes).
+        const { result, executionError, attachments } = await (async () => {
+          if (!policyDecision.allow) {
+            return {
+              result: undefined,
+              executionError: new Error(policyDecision.safeReason),
+              attachments: undefined,
+            }
+          }
+          let executionError: Error | undefined
+          const taskAgent = await Agent.get(task.agent)
+          const taskCtx: Tool.Context = {
+            agent: task.agent,
+            messageID: assistantMessage.id,
+            sessionID: sessionID,
+            abort,
+            callID: part.callID,
+            extra: { bypassAgentCheck: true },
+            // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
+            messages: msgs as unknown as Tool.Context["messages"],
+            metadata: (input) =>
+              // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+              Effect.promise(async () => {
+                part = (await Session.updatePart({
+                  ...part,
+                  type: "tool",
+                  state: {
+                    ...part.state,
+                    ...input,
+                  },
+                } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
+              }),
+            ask: (req) =>
+              Effect.promise(async () => {
+                // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
+                await PermissionNext.ask({
+                  ...req,
+                  sessionID: sessionID,
+                  ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
+                } as Parameters<typeof PermissionNext.ask>[0])
+                // altimate_change end
+              }),
+            // altimate_change end
+            // altimate_change end
+          }
+          const result = await AppRuntime.runPromise(taskTool.execute(finalTaskArgs, taskCtx)).catch((error) => {
+            executionError = error
+            log.error("subtask execution failed", { error, agent: task.agent, description: task.description })
+            return undefined
+          })
+          await Plugin.trigger(
+            "tool.execute.after",
+            {
+              tool: "task",
+              sessionID,
+              callID: part.id,
+              args: finalTaskArgs,
+            },
+            result,
+          )
+          const attachments = result?.attachments?.map((attachment) => ({
+            ...attachment,
+            id: PartID.ascending(),
             sessionID,
-            callID: part.id,
-            args: taskArgs,
-          },
-          result,
-        )
+            messageID: assistantMessage.id,
+          }))
+          return { result, executionError, attachments }
+        })()
+        // altimate_change end
         assistantMessage.finish = "tool-calls"
         assistantMessage.time.completed = Date.now()
         await Session.updateMessage(assistantMessage)
@@ -1586,7 +1615,11 @@ export namespace SessionPrompt {
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           const ctx = context(args, options)
-          await Plugin.trigger(
+          // altimate_change start — HardPolicy enforcement (S3)
+          // upstream_fix: Plugin.trigger's return value was previously discarded, so a
+          // tool.execute.before hook that mutated `args` had no effect on what actually
+          // ran — HardPolicy and execute must see the SAME final, post-hook args.
+          const hookInput = await Plugin.trigger(
             "tool.execute.before",
             {
               tool: item.id,
@@ -1597,8 +1630,30 @@ export namespace SessionPrompt {
               args,
             },
           )
+          const finalArgs = hookInput.args
+          const policyDecision = HardPolicy.check({
+            toolID: item.id,
+            source: "native",
+            args: finalArgs,
+            sessionID: ctx.sessionID,
+            callID: ctx.callID,
+          })
+          if (!policyDecision.allow) {
+            return {
+              title: "Blocked by policy",
+              output: policyDecision.safeReason,
+              metadata: {
+                error: policyDecision.safeReason,
+                hard_policy_denied: true,
+                code: "hard_policy_denied",
+                ruleID: policyDecision.ruleID,
+                success: false,
+              },
+            }
+          }
+          // altimate_change end
           // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
-          const result = await AppRuntime.runPromise(item.execute(args, ctx))
+          const result = await AppRuntime.runPromise(item.execute(finalArgs, ctx))
           // altimate_change end
           const output = {
             ...result,
@@ -1618,7 +1673,9 @@ export namespace SessionPrompt {
               tool: item.id,
               sessionID: ctx.sessionID,
               callID: ctx.callID,
-              args,
+              // altimate_change start — upstream_fix: after-hook sees the post-hook final args (was `args`)
+              args: finalArgs,
+              // altimate_change end
             },
             stamped,
           )
@@ -1641,7 +1698,11 @@ export namespace SessionPrompt {
       item.execute = async (args, opts) => {
         const ctx = context(args, opts)
 
-        await Plugin.trigger(
+        // altimate_change start — HardPolicy enforcement (S3)
+        // upstream_fix: Plugin.trigger's return value was previously discarded, so a
+        // tool.execute.before hook that mutated `args` had no effect on what actually
+        // ran — HardPolicy and execute must see the SAME final, post-hook args.
+        const hookInput = await Plugin.trigger(
           "tool.execute.before",
           {
             tool: key,
@@ -1652,6 +1713,29 @@ export namespace SessionPrompt {
             args,
           },
         )
+        const finalArgs = hookInput.args
+
+        const policyDecision = HardPolicy.check({
+          toolID: key,
+          source: "mcp",
+          args: finalArgs,
+          sessionID: ctx.sessionID,
+          callID: opts.toolCallId,
+        })
+        if (!policyDecision.allow) {
+          return {
+            title: "Blocked by policy",
+            output: policyDecision.safeReason,
+            metadata: {
+              error: policyDecision.safeReason,
+              hard_policy_denied: true,
+              code: "hard_policy_denied",
+              ruleID: policyDecision.ruleID,
+              success: false,
+            },
+          }
+        }
+        // altimate_change end
 
         // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
         // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
@@ -1666,7 +1750,9 @@ export namespace SessionPrompt {
         )
         // altimate_change end
 
-        const result = await execute(args, opts)
+        // altimate_change start — upstream_fix: dispatch the post-hook final args (was `args`)
+        const result = await execute(finalArgs, opts)
+        // altimate_change end
 
         await Plugin.trigger(
           "tool.execute.after",
@@ -1674,7 +1760,9 @@ export namespace SessionPrompt {
             tool: key,
             sessionID: ctx.sessionID,
             callID: opts.toolCallId,
-            args,
+            // altimate_change start — upstream_fix: after-hook sees the post-hook final args (was `args`)
+            args: finalArgs,
+            // altimate_change end
           },
           result,
         )

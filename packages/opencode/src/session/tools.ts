@@ -23,6 +23,9 @@ import { stampRegistryToolSource, describeMcpTool } from "@/altimate/tool-source
 // altimate_change start — upstream_fix: ToolRegistry expects fork-branded model ids here
 import { ModelID } from "@/provider/schema"
 // altimate_change end
+// altimate_change start — HardPolicy enforcement (S3)
+import { HardPolicy } from "@/altimate/policy/hard-policy"
+// altimate_change end
 
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
@@ -88,13 +91,47 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
-            const ctx = context(args, options)
-            yield* plugin.trigger(
+            // altimate_change start — HardPolicy enforcement (S3)
+            // upstream_fix: plugin.trigger's returned output was previously discarded, so a
+            // tool.execute.before hook that mutated `args` had no effect on what actually
+            // ran — HardPolicy and execute must see the SAME final, post-hook args. The hook
+            // input uses input.session.id / options.toolCallId directly (both independent of
+            // args) so that ctx — and every ctx.metadata() tool-call record — is built from the
+            // post-hook finalArgs the tool actually ran with, not the caller's original args.
+            const hookOutput = yield* plugin.trigger(
               "tool.execute.before",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+              { tool: item.id, sessionID: input.session.id, callID: options.toolCallId },
               { args },
             )
-            const result = yield* item.execute(args, ctx)
+            const finalArgs = hookOutput.args
+            const ctx = context(finalArgs, options)
+            const policyDecision = HardPolicy.check({
+              toolID: item.id,
+              source: "native",
+              args: finalArgs,
+              sessionID: ctx.sessionID,
+              callID: ctx.callID,
+            })
+            if (!policyDecision.allow) {
+              // Intentionally short-circuit WITHOUT firing tool.execute.after: the tool never
+              // executed, so there is no result to post-process, and synthesizing an after-event
+              // from a hard deny would hand plugins something they'd treat as a real post-execute
+              // outcome. The security invariant (execute not called) holds either way.
+              return {
+                title: "Blocked by policy",
+                output: policyDecision.safeReason,
+                metadata: {
+                  error: policyDecision.safeReason,
+                  hard_policy_denied: true,
+                  code: "hard_policy_denied",
+                  ruleID: policyDecision.ruleID,
+                  success: false,
+                },
+              }
+            }
+            // upstream_fix: dispatch the post-hook final args (was `args`).
+            const result = yield* item.execute(finalArgs, ctx)
+            // altimate_change end
             const output = {
               ...result,
               attachments: result.attachments?.map((attachment) => ({
@@ -108,7 +145,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             const stamped = stampRegistryToolSource(output, item)
             yield* plugin.trigger(
               "tool.execute.after",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+              // altimate_change start — upstream_fix: after-hook sees the post-hook final args (was `args`)
+              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args: finalArgs },
+              // altimate_change end
               stamped,
             )
             if (options.abortSignal?.aborted) {
@@ -134,15 +173,50 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     item.execute = (args, opts) =>
       run.promise(
         Effect.gen(function* () {
-          const ctx = context(args, opts)
-          yield* plugin.trigger(
+          // altimate_change start — HardPolicy enforcement (S3)
+          // upstream_fix: plugin.trigger's returned output was previously discarded, so a
+          // tool.execute.before hook that mutated `args` had no effect on what actually
+          // ran — HardPolicy and execute must see the SAME final, post-hook args. The hook
+          // input uses input.session.id / opts.toolCallId directly (both independent of args)
+          // so that ctx — and every ctx.metadata() tool-call record — is built from the
+          // post-hook finalArgs the tool actually ran with, not the caller's original args.
+          const hookOutput = yield* plugin.trigger(
             "tool.execute.before",
-            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
+            { tool: key, sessionID: input.session.id, callID: opts.toolCallId },
             { args },
           )
+          const finalArgs = hookOutput.args
+          const ctx = context(finalArgs, opts)
+          const policyDecision = HardPolicy.check({
+            toolID: key,
+            source: "mcp",
+            args: finalArgs,
+            sessionID: ctx.sessionID,
+            callID: opts.toolCallId,
+          })
+          if (!policyDecision.allow) {
+            // Intentionally short-circuit WITHOUT firing tool.execute.after (see the native
+            // dispatch above): the tool never executed, so there is no result to post-process.
+            return {
+              title: "Blocked by policy",
+              metadata: {
+                error: policyDecision.safeReason,
+                hard_policy_denied: true,
+                code: "hard_policy_denied",
+                ruleID: policyDecision.ruleID,
+                success: false,
+              },
+              output: policyDecision.safeReason,
+              attachments: [],
+              content: [],
+            }
+          }
+          // altimate_change end
           const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
             yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-            return yield* Effect.promise(() => execute(args, opts))
+            // altimate_change start — upstream_fix: dispatch the post-hook final args (was `args`)
+            return yield* Effect.promise(() => execute(finalArgs, opts))
+            // altimate_change end
           }).pipe(
             Effect.withSpan("Tool.execute", {
               attributes: {
@@ -155,7 +229,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           )
           yield* plugin.trigger(
             "tool.execute.after",
-            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+            // altimate_change start — upstream_fix: after-hook sees the post-hook final args (was `args`)
+            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args: finalArgs },
+            // altimate_change end
             result,
           )
 
