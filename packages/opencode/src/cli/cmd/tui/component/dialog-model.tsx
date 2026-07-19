@@ -181,7 +181,7 @@ interface WelcomeRow {
   activate: () => void
 }
 
-export function DialogModelWelcome(props: { intro?: string }) {
+export function DialogModelWelcome(props: { intro?: string; onboarding?: boolean }) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
@@ -282,7 +282,7 @@ export function DialogModelWelcome(props: { intro?: string }) {
         border
         borderStyle="rounded"
         borderColor={theme.border}
-        title=" Step 1 of 2 "
+        title={props.onboarding ? " Step 1 of 2 " : " Altimate Code "}
         titleAlignment="left"
         paddingLeft={2}
         paddingRight={2}

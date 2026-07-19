@@ -491,7 +491,7 @@ function App() {
       (complete) => {
         if (!complete || firstRunPickerDone) return
         firstRunPickerDone = true
-        if (!ready()) dialog.replace(() => <DialogModelWelcome />)
+        if (!ready()) dialog.replace(() => <DialogModelWelcome onboarding />)
       },
     ),
   )

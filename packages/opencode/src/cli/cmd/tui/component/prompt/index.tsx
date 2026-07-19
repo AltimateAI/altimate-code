@@ -606,7 +606,7 @@ export function Prompt(props: PromptProps) {
     if (!ready()) {
       AltimateApi.protoEvent("model_switch_blocked_no_credentials")
       dialog.replace(() => (
-        <DialogModelWelcome intro="First, let's connect your AI model — then I'll get right on that." />
+        <DialogModelWelcome onboarding intro="First, let's connect your AI model — then I'll get right on that." />
       ))
       input.clear()
       input.extmarks.clear()
