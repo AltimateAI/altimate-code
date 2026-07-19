@@ -282,7 +282,7 @@ export function DialogModelWelcome(props: { intro?: string }) {
         border
         borderStyle="rounded"
         borderColor={theme.border}
-        title=" Altimate Code "
+        title=" Step 1 of 2 "
         titleAlignment="left"
         paddingLeft={2}
         paddingRight={2}
@@ -293,7 +293,6 @@ export function DialogModelWelcome(props: { intro?: string }) {
         {/* the "What is Altimate Code" copy renders ONCE, in the boot box behind
             this dialog — the picker stays a clean curated list */}
         <text wrapMode="none">
-          <span style={{ fg: theme.textMuted }}>Step 1 of 2   </span>
           <span style={{ fg: theme.text }}>
             <b>Select a provider</b>
           </span>
