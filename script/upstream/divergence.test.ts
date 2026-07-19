@@ -70,6 +70,21 @@ describe("parseNumstatZ", () => {
   test("empty input yields no entries", () => {
     expect(parseNumstatZ("")).toHaveLength(0)
   })
+
+  test("fails closed on a malformed record head (truncated -z stream)", () => {
+    // A field with fewer than two tabs is not a valid numstat record — throw
+    // rather than silently drop it and understate totals.
+    expect(() => parseNumstatZ("5\tnot-a-tab-record\0")).toThrow(/malformed numstat record/)
+  })
+
+  test("fails closed on a truncated rename record (missing new path)", () => {
+    // Rename head present (empty 3rd field) but the following NUL fields cut off.
+    expect(() => parseNumstatZ("1\t1\t\0only-old-path")).toThrow(/truncated rename record/)
+  })
+
+  test("fails closed on a non-numeric count field", () => {
+    expect(() => parseNumstatZ("x\t3\tsome/path\0")).toThrow(/non-numeric/)
+  })
 })
 
 describe("parseHunksByPath", () => {

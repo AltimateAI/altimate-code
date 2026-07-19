@@ -450,7 +450,10 @@ export function attributeConflictsToCensus(envelope: ReplayEnvelope, census: Cen
         `Regenerate the census at the same 'ours' ref before attributing conflicts to it (a stale census produces silently wrong bucket counts).`,
     )
   }
-  const censusFilesWithBlocks = new Set(census.blocks.map((b) => b.file))
+  // file → bucket, built once (O(1) lookup below instead of an O(n) .find()
+  // per conflicted path). A file's blocks all share one bucket, so first wins.
+  const bucketByFile = new Map<string, Bucket>()
+  for (const b of census.blocks) if (!bucketByFile.has(b.file)) bucketByFile.set(b.file, b.bucket)
   const counts = new Map<Bucket, number>()
   // Authoritative conflicted-path set = the stage-line paths (one entry per
   // conflicted path). Do NOT union in conflictMessage paths: a rename message
@@ -462,7 +465,7 @@ export function attributeConflictsToCensus(envelope: ReplayEnvelope, census: Cen
     // A conflicted path only gets attributed if it's a file the census
     // actually scanned marker blocks in; otherwise fall back to plain
     // taxonomy classification against the upstream tree.
-    const bucket = censusFilesWithBlocks.has(path) ? census.blocks.find((b) => b.file === path)!.bucket : classifyBucket(path, upstreamPaths)
+    const bucket = bucketByFile.get(path) ?? classifyBucket(path, upstreamPaths)
     counts.set(bucket, (counts.get(bucket) ?? 0) + 1)
   }
   return [...counts.entries()].map(([bucket, count]) => ({ bucket, count })).sort((a, b) => b.count - a.count)

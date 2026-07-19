@@ -154,10 +154,11 @@ export function parseNumstatZ(text: string): NumstatEntry[] {
     }
     const tab1 = field.indexOf("\t")
     const tab2 = field.indexOf("\t", tab1 + 1)
+    // Fail closed (matches census.ts's sibling parser): a malformed record head
+    // means a truncated/corrupt `-z` stream — silently skipping it would drop
+    // files and understate totals.files/added/deleted with no error.
     if (tab1 === -1 || tab2 === -1) {
-      // Not a numstat record head — skip defensively.
-      i++
-      continue
+      throw new Error(`parseNumstatZ: malformed numstat record at field ${i}: ${JSON.stringify(field)}`)
     }
     const addedRaw = field.slice(0, tab1)
     const deletedRaw = field.slice(tab1 + 1, tab2)
@@ -165,11 +166,18 @@ export function parseNumstatZ(text: string): NumstatEntry[] {
     const isBinary = addedRaw === "-" || deletedRaw === "-"
     const added = isBinary ? 0 : Number(addedRaw)
     const deleted = isBinary ? 0 : Number(deletedRaw)
+    // A non-numeric count field would poison the totals silently — fail closed.
+    if (!isBinary && (!Number.isFinite(added) || !Number.isFinite(deleted))) {
+      throw new Error(`parseNumstatZ: non-numeric added/deleted in record at field ${i}: ${JSON.stringify(field)}`)
+    }
 
     if (pathField === "") {
       // Rename/copy: next two NUL fields are oldpath, newpath.
-      const oldPath = fields[i + 1] ?? ""
-      const newPath = fields[i + 2] ?? ""
+      const oldPath = fields[i + 1]
+      const newPath = fields[i + 2]
+      if (oldPath === undefined || newPath === undefined) {
+        throw new Error(`parseNumstatZ: truncated rename record at field ${i} (missing old/new path)`)
+      }
       out.push({ path: newPath, oldPath, added, deleted, isBinary, isRename: true })
       i += 3
     } else {
