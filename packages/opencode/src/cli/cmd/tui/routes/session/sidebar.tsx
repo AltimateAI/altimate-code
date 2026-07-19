@@ -148,20 +148,18 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
           {/* altimate_change start — reference/help anchored to the bottom of the
               panel (runtime status stays up top in the scroll area). JTBD first,
               then community/docs, then branding last. */}
-          <box gap={1}>
-            <box>
-              <text fg={theme.text}>
-                <b>HERE'S WHAT YOU CAN DO</b>
-              </text>
-              <text fg={theme.textMuted}>• Build &amp; ship dbt pipelines</text>
-              <text fg={theme.textMuted}>• Migrate legacy SQL to dbt</text>
-              <text fg={theme.textMuted}>• Optimize warehouse cost &amp; speed</text>
-              <text fg={theme.textMuted}>• Debug &amp; monitor your warehouse</text>
-              <text fg={theme.textMuted}>• Govern data: lineage, PII, tests</text>
-            </box>
+          <box>
+            <text fg={theme.text}>
+              <b>HERE'S WHAT YOU CAN DO</b>
+            </text>
+            <text fg={theme.textMuted}>• Build &amp; ship dbt pipelines</text>
+            <text fg={theme.textMuted}>• Migrate legacy SQL to dbt</text>
+            <text fg={theme.textMuted}>• Optimize warehouse cost &amp; speed</text>
+            <text fg={theme.textMuted}>• Debug &amp; monitor your warehouse</text>
+            <text fg={theme.textMuted}>• Govern data: lineage, PII, tests</text>
           </box>
           <Dotted />
-          <box gap={1}>
+          <box>
             <text fg={theme.textMuted} wrapMode="word" width="100%">
               Ideas or issues? Join the community.
             </text>
