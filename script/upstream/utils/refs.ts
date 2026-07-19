@@ -130,9 +130,16 @@ export function readBlobsBatch(oids: string[], repoRoot: string): Map<string, st
   const map = new Map<string, string>()
   if (oids.length === 0) return map
 
+  // Dedup the INPUT so git emits exactly one record per unique oid. Feeding a
+  // duplicate oid makes `cat-file --batch` emit its record twice; skipping the
+  // second on the read side (without consuming its bytes) would desync `offset`
+  // and silently corrupt every subsequent object. Reading unique oids keeps the
+  // output-stream cursor exactly aligned with the loop.
+  const uniqueOids = [...new Set(oids)]
+
   const result = spawnSync("git", ["cat-file", "--batch"], {
     cwd: repoRoot,
-    input: oids.join("\n") + "\n",
+    input: uniqueOids.join("\n") + "\n",
     maxBuffer: 500 * 1024 * 1024,
   })
   if (result.error) {
@@ -145,8 +152,7 @@ export function readBlobsBatch(oids: string[], repoRoot: string): Map<string, st
   const buf: Buffer = result.stdout
   const NL = 0x0a
   let offset = 0
-  for (const oid of oids) {
-    if (map.has(oid)) continue // already read this exact oid earlier in the batch
+  for (const oid of uniqueOids) {
     const nlIdx = buf.indexOf(NL, offset)
     if (nlIdx === -1) {
       throw new Error(`git cat-file --batch: unexpected end of output while reading header for ${oid}`)

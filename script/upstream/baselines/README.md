@@ -12,8 +12,9 @@ Generated envelopes from the S1 de-fork tooling (`census.ts`, `divergence.ts`,
 ## Files
 
 - `census.json` — full marker-block inventory (`census.ts --json`). Headline:
-  1146 `upstream_shared` blocks across 244 files, 242 `fork_owned` blocks
-  across 89 files, 235 `fork_added_outside_boundary` blocks across 103 files.
+  1146 `upstream_shared` blocks across 244 files, 228 `fork_owned` blocks
+  across 84 files, 236 `fork_added_outside_boundary` blocks across 104 files
+  (matching the committed `census.json` — the machine-readable source of truth).
   This is also the **ratchet baseline** wired into CI (see
   `.github/workflows/ci.yml`'s `marker-guard` job): `census.ts --check
   --baseline` compares any future census against this file as a multiset

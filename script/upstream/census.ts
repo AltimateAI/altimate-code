@@ -158,6 +158,13 @@ export function parseMarkerBlocks(relPath: string, content: string, upstreamPath
       })
       continue
     }
+    // Orphan `altimate_change end` (no open block on the stack) is TOLERATED,
+    // not thrown on — asymmetric with unclosed starts by design. The marker-
+    // checking tooling itself and many tests contain `altimate_change end` as
+    // string literals / doc examples (e.g. analyze.ts, README.md, the
+    // unclosed-marker-allowlist), which would create false orphan ends. The
+    // load-bearing drift check is the UNCLOSED-START case, which fails closed in
+    // assembleCensus() (guarded by its own reported allowlist).
     if (END_RE.test(line) && stack.length > 0) {
       const open = stack.pop()!
       const endLine = i + 1
@@ -245,11 +252,27 @@ export interface UnclosedMarkerAllowlistEntry {
   expires?: string
 }
 
+function validateUnclosedAllowlistEntry(e: unknown, filePath: string, index: number): asserts e is UnclosedMarkerAllowlistEntry {
+  if (typeof e !== "object" || e === null) throw new Error(`${filePath}: unclosed-allowlist[${index}] is not an object`)
+  const r = e as Record<string, unknown>
+  if (typeof r.file !== "string" || r.file.length === 0) throw new Error(`${filePath}: unclosed-allowlist[${index}].file must be a non-empty string`)
+  if (typeof r.startLine !== "number" || !Number.isInteger(r.startLine) || r.startLine < 1)
+    throw new Error(`${filePath}: unclosed-allowlist[${index}].startLine must be a positive integer`)
+  if (typeof r.reason !== "string" || r.reason.length === 0) throw new Error(`${filePath}: unclosed-allowlist[${index}].reason must be a non-empty string`)
+  if (typeof r.approvedBy !== "string" || r.approvedBy.length === 0)
+    throw new Error(`${filePath}: unclosed-allowlist[${index}].approvedBy must be a non-empty string`)
+  // A malformed expires would make new Date(...).getTime() NaN and the "expired"
+  // comparison always false — i.e. a permanent, silent suppression. Reject it.
+  if (r.expires !== undefined && (typeof r.expires !== "string" || Number.isNaN(new Date(r.expires).getTime())))
+    throw new Error(`${filePath}: unclosed-allowlist[${index}].expires must be a valid ISO date string`)
+}
+
 export function loadUnclosedAllowlist(filePath: string): UnclosedMarkerAllowlistEntry[] {
   if (!fs.existsSync(filePath)) return []
   const raw = fs.readFileSync(filePath, "utf-8")
   const parsed = parseJsonc(raw)
   if (!Array.isArray(parsed)) throw new Error(`${filePath}: expected top-level JSON array`)
+  parsed.forEach((e, i) => validateUnclosedAllowlistEntry(e, filePath, i))
   return parsed as UnclosedMarkerAllowlistEntry[]
 }
 
@@ -801,13 +824,11 @@ export function computeDiffBudget(repoRoot: string, base: string, headRef: strin
 // ── CLI ──────────────────────────────────────────────────────────────────
 
 function parseArgs(argv: string[]) {
-  const args = { ...Object.fromEntries(argv.map((a, i) => [a, argv[i + 1]])) } as Record<string, string>
   const flag = (name: string) => argv.includes(name)
   const opt = (name: string, def?: string) => {
     const idx = argv.indexOf(name)
     return idx >= 0 && idx + 1 < argv.length ? argv[idx + 1] : def
   }
-  void args
   return { flag, opt }
 }
 

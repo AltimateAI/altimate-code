@@ -1,6 +1,17 @@
 import { describe, test, expect } from "bun:test"
+import { spawnSync } from "child_process"
 import { parseNumstatZ, parseHunksByPath, isTestPath, buildDivergence } from "./divergence"
 import { resolveRepoRoot } from "./utils/repo-root"
+
+// Real-repo tests need the pinned upstream base tag + fork commit resolvable
+// locally. CI fetches the upstream remote with --no-tags, so on a clean CI
+// checkout these refs may be absent — skip gracefully rather than throw during
+// ref resolution (the pure-parser tests above always run).
+function hasRefs(...refs: string[]): boolean {
+  const root = resolveRepoRoot()
+  return refs.every((r) => spawnSync("git", ["rev-parse", "--verify", "--quiet", `${r}^{commit}`], { cwd: root }).status === 0)
+}
+const REAL_REPO_REFS_AVAILABLE = hasRefs("v1.17.9", "8a50ec7f55")
 
 // The divergence tool counts added/deleted/files from `git diff --numstat -M
 // -z` (git's own plumbing), NOT by hand-counting +/- lines out of a unified
@@ -158,7 +169,7 @@ describe("isTestPath", () => {
   })
 })
 
-describe("buildDivergence (real-repo, pinned against git --shortstat ground truth)", () => {
+describe.skipIf(!REAL_REPO_REFS_AVAILABLE)("buildDivergence (real-repo, pinned against git --shortstat ground truth)", () => {
   test(
     "v1.17.9 vs the fork HEAD matches git's own shortstat exactly",
     () => {
@@ -175,10 +186,16 @@ describe("buildDivergence (real-repo, pinned against git --shortstat ground trut
       expect(envelope.upstreamBaseTree).toMatch(/^[0-9a-f]{40}$/)
       expect(envelope.oursTree).toMatch(/^[0-9a-f]{40}$/)
       expect(envelope.diffOptions.renameLimit).toBe(20000)
-      expect(envelope.files.length).toBe(envelope.totals.files)
+      // Meaningful invariants (not the tautological files.length === totals.files):
+      // every file path is unique, and the binary/rename/test sub-tallies
+      // reconcile against the per-file flags.
+      const paths = envelope.files.map((f) => f.path)
+      expect(new Set(paths).size).toBe(paths.length)
+      expect(envelope.totals.binaryFiles).toBe(envelope.files.filter((f) => f.isBinary).length)
+      expect(envelope.totals.renameFiles).toBe(envelope.files.filter((f) => f.isRename).length)
+      expect(envelope.totals.testFiles).toBe(envelope.files.filter((f) => f.isTest).length)
 
       // Codepoint-sorted (NOT localeCompare).
-      const paths = envelope.files.map((f) => f.path)
       expect(paths).toEqual([...paths].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
     },
     30_000,

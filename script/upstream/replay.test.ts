@@ -4,6 +4,16 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { parseMergeTreeOutput, buildReplay, attributeConflictsToCensus, type ReplayEnvelope } from "./replay"
+import { resolveRepoRoot } from "./utils/repo-root"
+
+// The pinned-real-repo replay needs v1.17.9 + fork commit + v1.18.3 resolvable
+// locally. CI fetches upstream --no-tags, so skip gracefully when they're
+// absent (the fixture-repo and pure-parser tests always run).
+function hasRefs(...refs: string[]): boolean {
+  const root = resolveRepoRoot()
+  return refs.every((r) => execSync(`git rev-parse --verify --quiet "${r}^{commit}" || true`, { cwd: root, encoding: "utf-8" }).trim().length > 0)
+}
+const PINNED_REFS_AVAILABLE = hasRefs("v1.17.9", "8a50ec7f55", "v1.18.3")
 
 describe("parseMergeTreeOutput", () => {
   test("clean merge with no conflicts: only a tree OID line", () => {
@@ -298,7 +308,7 @@ describe("attributeConflictsToCensus", () => {
   })
 })
 
-describe("buildReplay honest metrics (real repo, pinned)", () => {
+describe.skipIf(!PINNED_REFS_AVAILABLE)("buildReplay honest metrics (real repo, pinned)", () => {
   test(
     "v1.17.9→v1.18.3 replay reports honest regions + clean auto-merges",
     () => {

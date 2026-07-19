@@ -56,6 +56,21 @@ const PINNED_DIFF_CONFIG = [
   "diff.algorithm=myers",
   "-c",
   "diff.interHunkContext=0",
+  // Hunk-boundary tie-breaker on top of myers. Pinned to git's modern default
+  // (true) — the value the committed baseline's hunk count was computed with —
+  // so an inherited override can't perturb it either way.
+  "-c",
+  "diff.indentHeuristic=true",
+  // Whitespace-ignoring knobs default off but, if inherited on, silently change
+  // the +/- line counts — pin them all off.
+  "-c",
+  "diff.ignoreAllSpace=false",
+  "-c",
+  "diff.ignoreSpaceChange=false",
+  "-c",
+  "diff.ignoreSpaceAtEol=false",
+  "-c",
+  "diff.ignoreBlankLines=false",
   "-c",
   "core.quotepath=false",
   "-c",
@@ -70,8 +85,9 @@ const DIFF_OPTIONS = {
   renameDetection: "-M",
   algorithm: "myers",
   interHunkContext: 0,
+  indentHeuristic: true,
   quotePath: false,
-  whitespace: "default (whitespace changes counted; no -w/-b/--ignore-*)",
+  whitespace: "default (whitespace changes counted; diff.ignore* all pinned off)",
   locale: "LC_ALL=C",
   externalDiff: "disabled (--no-ext-diff --no-textconv)",
   color: "disabled (--no-color)",

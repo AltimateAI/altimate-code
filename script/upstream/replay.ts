@@ -46,6 +46,18 @@ export const SCHEMA_VERSION = 2
 // either lacks the flag or has a materially different output format.
 export const MIN_GIT_VERSION: [number, number, number] = [2, 40, 0]
 
+const RENAME_LIMIT = 20000
+
+// Env with diff/merge-affecting overrides stripped so an inherited
+// GIT_DIFF_OPTS / GIT_EXTERNAL_DIFF can't perturb merge-tree message text or
+// blob reads on a different runner. Mirrors divergence.ts's sanitizedGitEnv.
+function sanitizedGitEnv(): NodeJS.ProcessEnv {
+  const env: Record<string, string | undefined> = { ...process.env, LC_ALL: "C" }
+  delete env.GIT_DIFF_OPTS
+  delete env.GIT_EXTERNAL_DIFF
+  return env
+}
+
 export type ConflictStage = 1 | 2 | 3
 
 export interface ConflictedPathEntry {
@@ -172,14 +184,37 @@ function assertGitSupportsWriteTree(repoRoot: string): void {
  * discard stdout on a non-zero exit.
  */
 function runMergeTree(repoRoot: string, baseSha: string, oursSha: string, targetSha: string): { stdout: string; exitCode: number } {
-  const result = spawnSync("git", ["merge-tree", "--write-tree", "--merge-base", baseSha, oursSha, targetSha], {
-    cwd: repoRoot,
-    encoding: "utf-8",
-    maxBuffer: 200 * 1024 * 1024,
-    // Pin locale so CONFLICT/Auto-merging message text (which we parse) is
-    // stable across environments.
-    env: { ...process.env, LC_ALL: "C" },
-  })
+  const result = spawnSync(
+    "git",
+    // `-c core.quotepath=false`: emit raw (unquoted) conflicted paths in the
+    // stage lines / CONFLICT messages, so they match the census's raw
+    // `ls-tree -z` paths in attributeConflictsToCensus (a C-quoted path would
+    // silently miss the census lookup and mis-bucket). `-c merge.renames=true`
+    // + `renameLimit`: pin rename detection so rename/delete + file-location
+    // counts are reproducible regardless of inherited config.
+    [
+      "-c",
+      "core.quotepath=false",
+      "-c",
+      "merge.renames=true",
+      "-c",
+      `merge.renameLimit=${RENAME_LIMIT}`,
+      "merge-tree",
+      "--write-tree",
+      "--merge-base",
+      baseSha,
+      oursSha,
+      targetSha,
+    ],
+    {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      maxBuffer: 200 * 1024 * 1024,
+      // Pin locale + strip inherited GIT_DIFF_OPTS/GIT_EXTERNAL_DIFF so message
+      // text and path resolution can't be perturbed on a different runner.
+      env: sanitizedGitEnv(),
+    },
+  )
   if (result.error) {
     throw new Error(`Failed to spawn 'git merge-tree': ${result.error.message}`)
   }
@@ -221,7 +256,7 @@ export function countConflictRegions(
       cwd: repoRoot,
       encoding: "utf-8",
       maxBuffer: 100 * 1024 * 1024,
-      env: { ...process.env, LC_ALL: "C" },
+      env: sanitizedGitEnv(),
     })
     if (res.error) {
       throw new Error(`countConflictRegions: failed to spawn git cat-file for ${resultTreeOid}:${path}: ${res.error.message}`)
@@ -393,7 +428,7 @@ export function countBinaryConflictPaths(repoRoot: string, conflictedPaths: Conf
     cwd: repoRoot,
     input: oids.join("\n") + "\n",
     maxBuffer: 500 * 1024 * 1024,
-    env: { ...process.env, LC_ALL: "C" },
+    env: sanitizedGitEnv(),
   })
   if (res.error) throw new Error(`countBinaryConflictPaths: failed to spawn git cat-file --batch: ${res.error.message}`)
   if (res.status !== 0) throw new Error(`countBinaryConflictPaths: git cat-file --batch exited ${res.status}: ${res.stderr}`)
@@ -430,6 +465,8 @@ export function countBinaryConflictPaths(repoRoot: string, conflictedPaths: Conf
 
 interface CensusLike {
   oursSha: string
+  upstreamBaseSha?: string
+  taxonomyVersion?: number
   blocks: { file: string; bucket: Bucket }[]
 }
 
@@ -448,6 +485,22 @@ export function attributeConflictsToCensus(envelope: ReplayEnvelope, census: Cen
     throw new Error(
       `Census attribution rejected: census.oursSha=${census.oursSha} does not match replay oursSha=${envelope.oursSha}. ` +
         `Regenerate the census at the same 'ours' ref before attributing conflicts to it (a stale census produces silently wrong bucket counts).`,
+    )
+  }
+  // The census's block buckets were classified against ITS upstream base tree.
+  // If that differs from the replay's upstream base, the marker-bearing paths
+  // are bucketed against a different upstream path set than the rest — an
+  // internally inconsistent byBucket. Reject rather than silently mix.
+  if (census.upstreamBaseSha !== undefined && census.upstreamBaseSha !== envelope.upstreamBaseSha) {
+    throw new Error(
+      `Census attribution rejected: census.upstreamBaseSha=${census.upstreamBaseSha} does not match replay upstreamBaseSha=${envelope.upstreamBaseSha}. ` +
+        `Both must be classified against the same upstream base tree.`,
+    )
+  }
+  if (census.taxonomyVersion !== undefined && census.taxonomyVersion !== TAXONOMY_VERSION) {
+    throw new Error(
+      `Census attribution rejected: census.taxonomyVersion=${census.taxonomyVersion} does not match current TAXONOMY_VERSION=${TAXONOMY_VERSION}. ` +
+        `Regenerate the census with the current taxonomy.`,
     )
   }
   // file → bucket, built once (O(1) lookup below instead of an O(n) .find()
