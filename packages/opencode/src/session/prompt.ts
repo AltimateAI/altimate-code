@@ -2825,6 +2825,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }
 
     const templateParts = await resolvePromptParts(template)
+    // altimate_change — the onboard-connect command is fired programmatically by the
+    // Part 2 scan gate (Yes/No), not typed by the user. Its instruction template must
+    // reach the model to drive the scan/skip branches, but must NOT be echoed into the
+    // chat as a giant user message. Marking its text parts synthetic sends them to the
+    // model while the TUI transcript filters them out (see routes/session/index.tsx).
+    const visibleTemplateParts =
+      input.command === Command.Default.ONBOARD_CONNECT
+        ? templateParts.map((p) => (p.type === "text" ? { ...p, synthetic: true } : p))
+        : templateParts
     const isSubtask = (agent.mode === "subagent" && command.subtask !== false) || command.subtask === true
     const parts = isSubtask
       ? [
@@ -2841,7 +2850,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             prompt: templateParts.find((y) => y.type === "text")?.text ?? "",
           },
         ]
-      : [...templateParts, ...(input.parts ?? [])]
+      : [...visibleTemplateParts, ...(input.parts ?? [])]
 
     const userAgent = isSubtask ? (input.agent ?? (await Agent.defaultAgent())) : agentName
     const userModel = isSubtask
