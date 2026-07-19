@@ -149,9 +149,6 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               panel (runtime status stays up top in the scroll area). JTBD first,
               then community/docs, then branding last. */}
           <box gap={1}>
-            <text fg={theme.textMuted} wrapMode="word" width="100%">
-              Deterministic tools that give any LLM real context on your data stack.
-            </text>
             <box>
               <text fg={theme.text}>
                 <b>HERE'S WHAT YOU CAN DO</b>
