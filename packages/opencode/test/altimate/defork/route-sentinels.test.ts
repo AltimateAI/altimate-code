@@ -125,7 +125,9 @@ test("D3/D4: SessionTools.resolve has no production caller (latent guard)", () =
   // `active` so HardPolicy coverage there is re-verified. We look for a real
   // `SessionTools.resolve(` CALL on a non-comment line, excluding the resolver's
   // own definition file (session/tools.ts) where the name is declared.
-  const glob = new Bun.Glob("**/*.ts")
+  // Scan .ts AND .tsx: the TUI ships ~12 .tsx files under src/, and a new
+  // SessionTools.resolve( caller added in one of those must also flip D3/D4.
+  const glob = new Bun.Glob("**/*.{ts,tsx}")
   const callers: string[] = []
   for (const rel of glob.scanSync({ cwd: SRC })) {
     if (rel === join("session", "tools.ts")) continue // the definition itself

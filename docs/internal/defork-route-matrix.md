@@ -14,11 +14,37 @@ records, for every dispatcher, whether it is currently reachable in production
 (`active`), wired but with no current caller (`latent`), or intentionally
 outside HardPolicy's model-invoked boundary (`out-of-scope`).
 
-Every `active` route below has an executable sentinel test in
-`packages/opencode/test/altimate/defork/route-sentinels.test.ts` proving
-execution actually reaches the cited dispatch line. `latent` routes have a
-guard test that is designed to fail the moment the route gains a real caller
-(signalling that its classification must be revisited).
+### Coverage contract (read this before trusting the matrix)
+
+To avoid overstating HardPolicy coverage, the sentinel guarantee is stated
+precisely — it is **not** "every active route has its own dedicated
+real-execution sentinel." What actually holds:
+
+- **Dedicated executable real-execution sentinel:** **D1** and **D5** each have
+  a test in `route-sentinels.test.ts` that drives the real code path and proves
+  execution reaches the cited dispatch line.
+- **Transitively covered (documented exception): D2** (`resolveTools` MCP-tools
+  loop). D2 shares its outer function, `context()` closure, and
+  `Plugin.trigger`/`ask` wiring with D1; D1's real-execution test exercises that
+  shared machinery end to end. The only D2-specific code NOT touched is the
+  MCP-loop dispatch line (`1669`) and its wildcard `ask` branch. D2 has
+  structural pins but **no dedicated real-execution sentinel** — see the "D2
+  intentionally absent" note in the mapping section.
+- **Structural + citation only (documented exception): D6** (direct Task
+  dispatch). Covered by line-pins plus a *citation* of an existing real-execution
+  test in `prompt.test.ts` (`"failed subtask preserves metadata on error tool
+  state"`), **not** a fresh self-contained sentinel in `route-sentinels.test.ts`
+  — see the D6 mapping row.
+- **`latent` routes (D3/D4):** a guard test designed to fail the moment the route
+  gains a real caller (signalling its classification must be revisited), plus a
+  direct real-execution test of the resolver invoked by hand.
+- **`out-of-scope` routes (D7 delegate, D8 debug CLI, `shell`, direct
+  `ReadTool`):** listed for completeness; not gated by HardPolicy.
+
+So D2 and D6 are explicitly flagged exceptions, not full dedicated-sentinel
+coverage. Adding a faked-`MCP.Service` sentinel for D2 and a self-contained
+harness for D6 are the two candidate follow-ups if S3 wants every active route
+independently exercised.
 
 ## Ingress surfaces (not dispatchers)
 
