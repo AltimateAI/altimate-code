@@ -2,7 +2,6 @@ import { Prompt, type PromptRef } from "@tui/component/prompt"
 import { createEffect, createMemo, Match, on, onMount, Show, Switch } from "solid-js"
 import { useTheme } from "@tui/context/theme"
 import { useKeybind } from "@tui/context/keybind"
-import { Tips } from "../component/tips"
 import { Locale } from "@/util/locale"
 import { useSync } from "../context/sync"
 import { Toast } from "../ui/toast"
@@ -11,8 +10,6 @@ import { useDirectory } from "../context/directory"
 import { useRouteData } from "@tui/context/route"
 import { usePromptRef } from "../context/prompt"
 import { Installation } from "@/installation"
-import { useKV } from "../context/kv"
-import { useCommandDialog } from "../component/dialog-command"
 import { useLocal } from "../context/local"
 // altimate_change start — first-run guidance + shared boot box
 import { useReady } from "../component/dialog-model"
@@ -27,11 +24,9 @@ let once = false
 
 export function Home() {
   const sync = useSync()
-  const kv = useKV()
   const { theme } = useTheme()
   const route = useRouteData("home")
   const promptRef = usePromptRef()
-  const command = useCommandDialog()
   const mcp = createMemo(() => Object.keys(sync.data.mcp).length > 0)
   const mcpError = createMemo(() => {
     return Object.values(sync.data.mcp).some((x) => x.status === "failed")
@@ -40,33 +35,6 @@ export function Home() {
   const connectedMcpCount = createMemo(() => {
     return Object.values(sync.data.mcp).filter((x) => x.status === "connected").length
   })
-
-  // altimate_change start — upstream_fix: race condition shows beginner UI flash before sessions loaded
-  const isFirstTimeUser = createMemo(() => {
-    // Don't evaluate until sessions have actually loaded (avoid flash of beginner UI)
-    // Return undefined to represent "loading" state
-    if (sync.status === "loading" || sync.status === "partial") return undefined
-    return sync.data.session.length === 0
-  })
-  // altimate_change end
-  const tipsHidden = createMemo(() => kv.get("tips_hidden", false))
-  const showTips = createMemo(() => {
-    // Always show tips — first-time users need guidance the most
-    return !tipsHidden()
-  })
-
-  command.register(() => [
-    {
-      title: tipsHidden() ? "Show tips" : "Hide tips",
-      value: "tips.toggle",
-      keybind: "tips_toggle",
-      category: "System",
-      onSelect: (dialog) => {
-        kv.set("tips_hidden", !tipsHidden())
-        dialog.clear()
-      },
-    },
-  ])
 
   const Hint = (
     <Show when={connectedMcpCount() > 0}>
@@ -141,12 +109,6 @@ export function Home() {
             workspaceID={route.workspaceID}
           />
         </box>
-        {/* altimate_change — rotating tips under the input (ready users only) */}
-        <Show when={ready() && showTips()}>
-          <box height={2} minHeight={0} width="100%" alignItems="center" paddingTop={1} flexShrink={1}>
-            <Tips isFirstTime={isFirstTimeUser() === true} />
-          </box>
-        </Show>
         <Toast />
       </box>
       <box paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0} gap={2}>
