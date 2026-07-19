@@ -54,22 +54,8 @@ export function WelcomePanel() {
         paddingBottom={1}
         gap={1}
       >
-        <box gap={0}>
-          <text fg={theme.accent} attributes={TextAttributes.BOLD}>
-            Tips for getting started
-          </text>
-          {/* static copy — the picker opens by itself on first run, so no
-              "/connect" instruction is needed here */}
-          <text wrapMode="word" width="100%">
-            <span style={{ fg: theme.textMuted }}>Connect your warehouse or dbt project — run </span>
-            <span style={{ fg: theme.primary }}>/discover</span>
-            <span style={{ fg: theme.textMuted }}>
-              {" "}
-              to detect your data stack, then just say what you want to do
-            </span>
-          </text>
-        </box>
-        <box border={["top"]} borderColor={theme.border} />
+        {/* "What is Altimate Code" comes FIRST — a first-time user reads what the
+            product is before anything else. This is the ONLY place the copy renders. */}
         <box gap={0}>
           <text fg={theme.accent} attributes={TextAttributes.BOLD}>
             What is Altimate Code
@@ -86,6 +72,24 @@ export function WelcomePanel() {
             </text>
           </Show>
         </box>
+        {/* Warehouse//discover guidance is premature before a model exists —
+            it appears only once a model is connected. */}
+        <Show when={ready()}>
+          <box border={["top"]} borderColor={theme.border} />
+          <box gap={0}>
+            <text fg={theme.accent} attributes={TextAttributes.BOLD}>
+              Tips for getting started
+            </text>
+            <text wrapMode="word" width="100%">
+              <span style={{ fg: theme.textMuted }}>Connect your warehouse or dbt project — run </span>
+              <span style={{ fg: theme.primary }}>/discover</span>
+              <span style={{ fg: theme.textMuted }}>
+                {" "}
+                to detect your data stack, then just say what you want to do
+              </span>
+            </text>
+          </box>
+        </Show>
       </box>
     </box>
   )

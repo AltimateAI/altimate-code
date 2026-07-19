@@ -70,8 +70,11 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
   return (
     <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
       <box flexDirection="row" justifyContent="space-between">
-        <text attributes={TextAttributes.BOLD} fg={theme.text}>
-          Scan your environment?
+        <text>
+          <span style={{ fg: theme.textMuted }}>Step 2 of 2   </span>
+          <span style={{ fg: theme.text }}>
+            <b>Scan your environment?</b>
+          </span>
         </text>
         <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
           esc
