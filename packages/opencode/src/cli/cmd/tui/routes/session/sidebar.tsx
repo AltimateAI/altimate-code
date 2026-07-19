@@ -6,7 +6,6 @@ import { Locale } from "@/util/locale"
 import path from "path"
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Global } from "@/global"
-import { Installation } from "@/installation"
 import { useKeybind } from "../../context/keybind"
 import { TodoItem } from "../../component/todo-item"
 // altimate_change — community/docs links: plain copyable text, underlined for
@@ -182,16 +181,6 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <span style={{ fg: theme.accent, underline: true }}>help.altimate.ai/code</span>
             </text>
           </box>
-          {/* altimate_change end */}
-          <Dotted />
-          {/* altimate_change start — sidebar branding */}
-          <text fg={theme.textMuted}>
-            <span style={{ fg: theme.success }}>•</span> <b>Altimate</b>
-            <span style={{ fg: theme.text }}>
-              <b> Code</b>
-            </span>{" "}
-            <span>{Installation.VERSION}</span>
-          </text>
           {/* altimate_change end */}
         </box>
       </box>
