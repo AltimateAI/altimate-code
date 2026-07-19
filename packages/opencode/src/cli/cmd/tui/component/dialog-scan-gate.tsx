@@ -29,10 +29,7 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
     {
       label: "Yes",
       run: () => run("scan"),
-      help:
-        "Reads config files and env vars already on this machine (dbt profiles, warehouse settings) to " +
-        "find your dbt project and warehouse connections. Nothing leaves your computer; no credentials " +
-        "are entered yet.",
+      help: "Reads config files and env vars on this machine. Nothing leaves your computer; no credentials needed yet.",
     },
     {
       label: "No",
