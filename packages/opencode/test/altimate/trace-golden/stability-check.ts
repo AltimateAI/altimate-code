@@ -224,6 +224,7 @@ async function checkScenario(name: string, dir: string): Promise<boolean> {
 
 async function main() {
   if (!Number.isFinite(RUNS) || RUNS < 1) throw new Error(`stability-check: invalid RUNS=${RUNS}`)
+  if (!Number.isFinite(CONCURRENCY) || CONCURRENCY < 1) throw new Error(`stability-check: invalid CONCURRENCY=${CONCURRENCY}`)
 
   const scenarioNames = discoverScenarios(SCENARIOS_DIR)
   if (scenarioNames.length === 0) throw new Error(`stability-check: no scenario directories found under ${SCENARIOS_DIR}`)
