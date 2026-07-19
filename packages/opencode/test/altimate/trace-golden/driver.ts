@@ -86,6 +86,17 @@ export function driveScenario(
       format: "json",
     })
 
+    // KNOWN LIMITATION (script-consumption, codex review): TestLLMServer exposes
+    // `fixture.llm.pending` (queued turns never served — session exited early) and
+    // `fixture.llm.misses` (requests served by the automatic "ok" fallback — an unscripted
+    // generation). During golden CREATION/UPDATE, neither is checked, so a scenario whose
+    // model-script.json doesn't match the session's actual generations can self-approve a
+    // truncated/over-run trace. A blanket `pending === 0 && misses === []` assertion is NOT
+    // added here because a real CLI run makes auxiliary generations (title/summary) that a
+    // scenario script legitimately does not cover, so those checks belong per-scenario with an
+    // explicit expected-request profile — added WITH the first S7 continuation scenario that
+    // needs the guarantee, not as a blanket gate that would flake the existing smoke live test.
+
     const events = fixture.opencode.parseJsonEvents(result.stdout)
     const traceSaved = events.find((e) => e.type === "trace_saved")
     if (!traceSaved || typeof traceSaved.path !== "string") {

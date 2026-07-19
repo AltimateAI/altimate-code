@@ -583,14 +583,15 @@ const DURATION_PHRASE_PATTERN = /\b\d+ms\b|\b\d+\.\d+s\b|\b\d+m\d+s\b/g
 // `$${cost.toFixed(4)}`-style cost strings embedded in narrative/root-span output.
 const COST_PHRASE_PATTERN = /\$\d+(?:\.\d+)?/g
 // A tool that creates its own scratch dir directly under the OS temp root (e.g.
-// `mkdtemp` -> `$TMPDIR/diffverify-CGXm/`) leaves a per-run-random segment behind AFTER
-// the `<TMP>` root prefix has been scrubbed. The driver only knows `fixture.home` and
-// cannot enumerate temp dirs a tool creates, so canonicalize the entire first path
-// segment under `<TMP>` to a stable placeholder — any directory a tool makes directly
-// there is inherently per-run, so collapsing it keeps nested paths (`.../newfile.txt`)
-// deterministic instead of flapping on the random suffix. Runs AFTER path scrubbing has
-// produced the literal `<TMP>`, so it is a no-op on text that never carried a temp path.
-const TMP_SUBDIR_PATTERN = /(<TMP>)\/[^\/"'\s]+/g
+// `mkdtemp` -> `$TMPDIR/diffverify-CGXm4a/`) leaves a per-run-random suffix behind AFTER the
+// `<TMP>` root prefix has been scrubbed. Canonicalize ONLY that random suffix, not the whole
+// segment: `mkdtemp` appends random chars to a caller prefix that conventionally ends in a
+// delimiter (`-`/`_`/`.`), so we require `<delimiter><>=6 base62 chars>`. This preserves STABLE
+// names directly under the temp root — `<TMP>/input-a` stays distinct from `<TMP>/input-b`, so a
+// regression that swaps which fixed file a tool touches still diffs — while killing the flap on a
+// genuinely random `mkdtemp` tail. Both `/` and `\` (Windows temp root) separators are accepted.
+// Runs AFTER path scrubbing produced the literal `<TMP>`, so it is a no-op on non-temp text.
+const TMP_SUBDIR_PATTERN = /(<TMP>[/\\][^/\\"'\s]*?[-_.])[A-Za-z0-9]{6,}(?=[/\\"'\s]|$)/g
 
 /** Scrubs volatile dynamic content (ids, timestamps, dates, platform, durations, costs, temp subdirs) out of freeform text. */
 function scrubDynamicTokens(text: string): string {
@@ -603,7 +604,7 @@ function scrubDynamicTokens(text: string): string {
     .replace(PLATFORM_LINE_PATTERN, "Platform: <PLATFORM>")
     .replace(DURATION_PHRASE_PATTERN, "<DUR>")
     .replace(COST_PHRASE_PATTERN, "<COST>")
-    .replace(TMP_SUBDIR_PATTERN, "$1/<TMPDIR>")
+    .replace(TMP_SUBDIR_PATTERN, "$1<RAND>")
 }
 
 /** Recursively replaces absolute-path prefixes anywhere inside a JSON-cloneable value with placeholders. */

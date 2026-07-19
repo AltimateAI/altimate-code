@@ -85,8 +85,11 @@ async function runOnce(scenarioDir: string, index: number): Promise<RunOutcome> 
               Effect.tryPromise(() => fs.readFile(path.join(scenarioDir, "setup.json"), "utf-8")),
               Effect.tryPromise(() => fs.readFile(path.join(scenarioDir, "model-script.json"), "utf-8")),
             ])
-            const { prompt } = JSON.parse(promptRaw) as { prompt: string }
-            const setup = JSON.parse(setupRaw) as { files?: Record<string, string> }
+            // Resolve `<HOME>` across every fixture input (prompt + setup + script), matching
+            // trace-golden.test.ts — a `<HOME>` in the prompt or a setup file must reach the CLI
+            // as the real fixture home, not the literal placeholder.
+            const { prompt } = resolvePlaceholders(JSON.parse(promptRaw) as { prompt: string }, fixture.home)
+            const setup = resolvePlaceholders(JSON.parse(setupRaw) as { files?: Record<string, string> }, fixture.home)
             const script = resolvePlaceholders(JSON.parse(scriptRaw) as ScriptedTurn[], fixture.home)
 
             for (const [name, content] of Object.entries(setup.files ?? {})) {

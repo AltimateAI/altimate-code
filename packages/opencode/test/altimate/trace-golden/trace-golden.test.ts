@@ -956,9 +956,33 @@ describe("withRealpathVariants: symlink-vs-realpath home root leak (fix #7)", ()
     const normalizedB = stableStringify(normalize(buildSyntheticTrace([spanForm("Zq9T1p")])))
 
     expect(normalizedA).toBe(normalizedB)
-    expect(normalizedA).toContain("<TMP>/<TMPDIR>/newfile.txt")
-    expect(normalizedA).not.toContain("diffverify-CGXm4a")
-    expect(normalizedA).not.toContain("diffverify-Zq9T1p")
+    // Only the random tail is canonicalized; the stable `diffverify-` prefix is preserved.
+    expect(normalizedA).toContain("<TMP>/diffverify-<RAND>/newfile.txt")
+    expect(normalizedA).not.toContain("CGXm4a")
+    expect(normalizedA).not.toContain("Zq9T1p")
+  })
+
+  // Counterpart to the above: the canonicalization must NOT collapse STABLE directory names
+  // directly under the temp root, or a regression that swaps which fixed file a tool reads
+  // would silently keep matching the golden.
+  test("stable (non-random) directory names directly under the OS temp root are preserved and stay distinct", () => {
+    const spanForm = (dir: string): TraceSpan => ({
+      spanId: "s1",
+      parentSpanId: null,
+      name: "ses_synthetic",
+      kind: "session",
+      startTime: 0,
+      endTime: 1000,
+      status: "ok",
+      input: { path: path.join(os.tmpdir(), dir, "data.txt") },
+    })
+
+    const normalizedA = stableStringify(normalize(buildSyntheticTrace([spanForm("input-a")])))
+    const normalizedB = stableStringify(normalize(buildSyntheticTrace([spanForm("input-b")])))
+
+    expect(normalizedA).not.toBe(normalizedB)
+    expect(normalizedA).toContain("<TMP>/input-a/data.txt")
+    expect(normalizedB).toContain("<TMP>/input-b/data.txt")
   })
 })
 
@@ -1047,10 +1071,23 @@ describe("driver.ts: real headless session driven end-to-end (all discovered sce
 
     cliIt.live(`${scenarioName} scenario trace matches its golden`, (fixture) =>
       Effect.gen(function* () {
-        const { prompt } = yield* readJson<{ prompt: string }>(path.join(scenarioDir, "prompt.json"))
-        const setup = yield* readJson<{ files?: Record<string, string> }>(path.join(scenarioDir, "setup.json"))
-        const scriptRaw = yield* readJson<ScriptedTurn[]>(path.join(scenarioDir, "model-script.json"))
-        const script = resolvePlaceholders(scriptRaw, fixture.home)
+        // Resolve `<HOME>` placeholders across EVERY fixture input (prompt, setup files, and
+        // model script), not just the script — otherwise a scenario that puts `<HOME>` in its
+        // prompt or a setup file (e.g. a plugin path) would send the literal placeholder to the
+        // real CLI, and both this live test and stability-check.ts would reproduce the same
+        // broken setup rather than exercise the intended fixture.
+        const { prompt } = resolvePlaceholders(
+          yield* readJson<{ prompt: string }>(path.join(scenarioDir, "prompt.json")),
+          fixture.home,
+        )
+        const setup = resolvePlaceholders(
+          yield* readJson<{ files?: Record<string, string> }>(path.join(scenarioDir, "setup.json")),
+          fixture.home,
+        )
+        const script = resolvePlaceholders(
+          yield* readJson<ScriptedTurn[]>(path.join(scenarioDir, "model-script.json")),
+          fixture.home,
+        )
 
         for (const [name, content] of Object.entries(setup.files ?? {})) {
           yield* Effect.tryPromise({
