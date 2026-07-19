@@ -22,6 +22,7 @@ import path from "node:path"
 import { Effect } from "effect"
 import type { TraceFile, TraceSpan } from "@/altimate/observability/tracing"
 import { cliIt } from "../../lib/cli-process"
+import { tmpdir } from "../../fixture/fixture"
 import { driveScenario, type ScriptedTurn } from "./driver"
 import { formatDiffs, match } from "./match"
 import { normalize, stableStringify, type NormalizedTrace } from "./normalize"
@@ -168,21 +169,17 @@ describe("discoverScenarios(): scenario-directory discovery (fix #1)", () => {
     fsSync.writeFileSync(path.join(dir, "model-script.json"), "[]")
   }
 
-  test("finds all COMPLETE scenario subdirectories under a temp dir, sorted, excluding files", () => {
-    const tmp = fsSync.mkdtempSync(path.join(os.tmpdir(), "trace-golden-discover-"))
-    try {
-      makeCompleteScenario(path.join(tmp, "zeta"))
-      makeCompleteScenario(path.join(tmp, "alpha"))
-      makeCompleteScenario(path.join(tmp, "mid"))
-      fsSync.writeFileSync(path.join(tmp, "not-a-scenario.json"), "{}")
+  test("finds all COMPLETE scenario subdirectories under a temp dir, sorted, excluding files", async () => {
+    await using tmp = await tmpdir()
+    makeCompleteScenario(path.join(tmp.path, "zeta"))
+    makeCompleteScenario(path.join(tmp.path, "alpha"))
+    makeCompleteScenario(path.join(tmp.path, "mid"))
+    fsSync.writeFileSync(path.join(tmp.path, "not-a-scenario.json"), "{}")
 
-      expect(discoverScenarios(tmp)).toEqual(["alpha", "mid", "zeta"])
-    } finally {
-      fsSync.rmSync(tmp, { recursive: true, force: true })
-    }
+    expect(discoverScenarios(tmp.path)).toEqual(["alpha", "mid", "zeta"])
   })
 
-  test("excludes an INCOMPLETE scenario directory (missing driver inputs) instead of breaking discovery for its siblings", () => {
+  test("excludes an INCOMPLETE scenario directory (missing driver inputs) instead of breaking discovery for its siblings", async () => {
     // Regression test for a real failure this exact filter caught: an
     // abandoned/in-progress scenario scaffold directory (created, never
     // populated with prompt.json/setup.json/model-script.json) existed
@@ -190,15 +187,11 @@ describe("discoverScenarios(): scenario-directory discovery (fix #1)", () => {
     // existed, caused driver.ts's live test to crash with ENOENT reading its
     // missing prompt.json — taking down the whole discovered-scenario test
     // loop, not just that one entry.
-    const tmp = fsSync.mkdtempSync(path.join(os.tmpdir(), "trace-golden-discover-incomplete-"))
-    try {
-      makeCompleteScenario(path.join(tmp, "complete-one"))
-      fsSync.mkdirSync(path.join(tmp, "incomplete-scaffold")) // no files inside — simulates an abandoned scenario dir
+    await using tmp = await tmpdir()
+    makeCompleteScenario(path.join(tmp.path, "complete-one"))
+    fsSync.mkdirSync(path.join(tmp.path, "incomplete-scaffold")) // no files inside — simulates an abandoned scenario dir
 
-      expect(discoverScenarios(tmp)).toEqual(["complete-one"])
-    } finally {
-      fsSync.rmSync(tmp, { recursive: true, force: true })
-    }
+    expect(discoverScenarios(tmp.path)).toEqual(["complete-one"])
   })
 
   test("the real SCENARIOS_DIR contains at least the smoke scenario", () => {
@@ -900,51 +893,72 @@ describe("withRealpathVariants: symlink-vs-realpath home root leak (fix #7)", ()
   // symlink (so it reproduces the bug's mechanism on every platform, not
   // just macOS) rather than relying on the test runner's own OS to happen to
   // have symlinked temp dirs.
-  test("both the symlink form and its realpath form scrub to the identical <HOME> output", () => {
-    const tmpBase = fsSync.mkdtempSync(path.join(os.tmpdir(), "trace-golden-realpath-"))
-    try {
-      const realTarget = path.join(tmpBase, "real-target")
-      fsSync.mkdirSync(realTarget)
-      const symlinkHome = path.join(tmpBase, "home-symlink")
-      fsSync.symlinkSync(realTarget, symlinkHome, "dir")
-      const resolvedHome = fsSync.realpathSync(symlinkHome)
+  test("both the symlink form and its realpath form scrub to the identical <HOME> output", async () => {
+    await using tmp = await tmpdir()
+    const realTarget = path.join(tmp.path, "real-target")
+    fsSync.mkdirSync(realTarget)
+    const symlinkHome = path.join(tmp.path, "home-symlink")
+    fsSync.symlinkSync(realTarget, symlinkHome, "dir")
+    const resolvedHome = fsSync.realpathSync(symlinkHome)
 
-      // Sanity precondition: the symlink must actually resolve to a DIFFERENT
-      // literal string, or this test would pass trivially without exercising
-      // the fix at all.
-      expect(resolvedHome).not.toBe(symlinkHome)
+    // Sanity precondition: the symlink must actually resolve to a DIFFERENT
+    // literal string, or this test would pass trivially without exercising
+    // the fix at all.
+    expect(resolvedHome).not.toBe(symlinkHome)
 
-      const spanSymlinkForm: TraceSpan = {
-        spanId: "s1",
-        parentSpanId: null,
-        name: "ses_synthetic",
-        kind: "session",
-        startTime: 0,
-        endTime: 1000,
-        status: "ok",
-        input: { path: path.join(symlinkHome, "file.txt") },
-      }
-      const spanRealpathForm: TraceSpan = {
-        ...spanSymlinkForm,
-        input: { path: path.join(resolvedHome, "file.txt") },
-      }
-
-      // homeRoots mirrors how this is actually invoked (driver's `fixture.home`, or
-      // os.homedir()) — always the symlink-style form the OS reports, never the realpath.
-      const normalizedSymlink = stableStringify(
-        normalize(buildSyntheticTrace([spanSymlinkForm]), { homeRoots: [symlinkHome] }),
-      )
-      const normalizedRealpath = stableStringify(
-        normalize(buildSyntheticTrace([spanRealpathForm]), { homeRoots: [symlinkHome] }),
-      )
-
-      expect(normalizedSymlink).toBe(normalizedRealpath)
-      expect(normalizedSymlink).not.toContain(resolvedHome)
-      expect(normalizedSymlink).not.toContain(symlinkHome)
-      expect(normalizedSymlink).toContain("<HOME>")
-    } finally {
-      fsSync.rmSync(tmpBase, { recursive: true, force: true })
+    const spanSymlinkForm: TraceSpan = {
+      spanId: "s1",
+      parentSpanId: null,
+      name: "ses_synthetic",
+      kind: "session",
+      startTime: 0,
+      endTime: 1000,
+      status: "ok",
+      input: { path: path.join(symlinkHome, "file.txt") },
     }
+    const spanRealpathForm: TraceSpan = {
+      ...spanSymlinkForm,
+      input: { path: path.join(resolvedHome, "file.txt") },
+    }
+
+    // homeRoots mirrors how this is actually invoked (driver's `fixture.home`, or
+    // os.homedir()) — always the symlink-style form the OS reports, never the realpath.
+    const normalizedSymlink = stableStringify(
+      normalize(buildSyntheticTrace([spanSymlinkForm]), { homeRoots: [symlinkHome] }),
+    )
+    const normalizedRealpath = stableStringify(
+      normalize(buildSyntheticTrace([spanRealpathForm]), { homeRoots: [symlinkHome] }),
+    )
+
+    expect(normalizedSymlink).toBe(normalizedRealpath)
+    expect(normalizedSymlink).not.toContain(resolvedHome)
+    expect(normalizedSymlink).not.toContain(symlinkHome)
+    expect(normalizedSymlink).toContain("<HOME>")
+  })
+
+  // A tool that creates its OWN scratch dir directly under the OS temp root (mkdtemp) emits a
+  // per-run-random segment that survives `<TMP>` prefix scrubbing (`<TMP>/diffverify-<rand>/…`).
+  // The driver can't enumerate tool-created temp dirs, so the normalizer must canonicalize that
+  // first segment or any scenario touching such a tool would flap on the random suffix.
+  test("a tool-created mkdtemp subdir under the OS temp root canonicalizes — different random suffixes normalize identically", () => {
+    const spanForm = (suffix: string): TraceSpan => ({
+      spanId: "s1",
+      parentSpanId: null,
+      name: "ses_synthetic",
+      kind: "session",
+      startTime: 0,
+      endTime: 1000,
+      status: "ok",
+      input: { path: path.join(os.tmpdir(), `diffverify-${suffix}`, "newfile.txt") },
+    })
+
+    const normalizedA = stableStringify(normalize(buildSyntheticTrace([spanForm("CGXm4a")])))
+    const normalizedB = stableStringify(normalize(buildSyntheticTrace([spanForm("Zq9T1p")])))
+
+    expect(normalizedA).toBe(normalizedB)
+    expect(normalizedA).toContain("<TMP>/<TMPDIR>/newfile.txt")
+    expect(normalizedA).not.toContain("diffverify-CGXm4a")
+    expect(normalizedA).not.toContain("diffverify-Zq9T1p")
   })
 })
 
@@ -1017,6 +1031,17 @@ describe("driver.ts: real headless session driven end-to-end (all discovered sce
   // discoverScenarios shape) the moment its directory is added — closing the other half of
   // codex-tracegolden-code-review.md finding #1 ("both the test and stability runner hard-code
   // smoke rather than discovering scenario directories").
+  //
+  // KNOWN LIMITATION (S5 dispatcher parity): this generic runner accepts a scenario solely when its
+  // normalized trace matches the golden. For an S5 native->plugin migration that is INSUFFICIENT on
+  // its own — native and plugin routes are designed to produce identical user-visible traces (see
+  // DRIVER-NOTES.md: "not a proof that a dispatcher was executed"), so a migration that accidentally
+  // keeps invoking the OLD native implementation would still match the golden and pass its parity
+  // gate. An S5 scenario therefore MUST carry an independent route sentinel (e.g. a dispatcher
+  // execute-counter or a source-tagged span attribute the golden pins) and this loop must assert it
+  // before accepting the match. That sentinel is defined per-route, so it lands WITH the first S5
+  // scenario rather than as a speculative schema field here (there are no S5 scenarios yet — the
+  // only shipped scenario is `smoke`, a plain continuation, which has no native/plugin ambiguity).
   for (const scenarioName of discoverScenarios(SCENARIOS_DIR)) {
     const scenarioDir = path.join(SCENARIOS_DIR, scenarioName)
 

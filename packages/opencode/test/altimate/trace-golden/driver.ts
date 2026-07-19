@@ -18,7 +18,19 @@ import type { TraceFile } from "@/altimate/observability/tracing"
 export { withCliFixture }
 export type { CliFixture }
 
-/** One scripted assistant turn: either plain text (session ends) or a tool call (session continues). */
+/**
+ * One scripted assistant turn: either plain text (session ends) or a tool call (session continues).
+ *
+ * KNOWN LIMITATION (S7 concurrency, not yet exercised): this schema represents at most ONE tool
+ * call per assistant turn, and pushTurn() queues a separate `reply().tool(...)` generation for each
+ * turn. Two adjacent `tool` turns therefore become two sequential single-tool generations, NOT one
+ * generation that dispatches multiple sibling calls — so the live harness cannot yet produce the
+ * concurrent-sibling topology that the partial-order matcher (match.ts) and planned S7 concurrency
+ * scenarios are built to protect. The matcher and normalizer are already order-invariant (they were
+ * unit-tested against hand-built concurrent traces), but END-TO-END concurrent generation needs a
+ * grouped multi-tool turn (e.g. `kind: "tools"` with a `calls[]` array, all queued in one Reply).
+ * Add that alongside the first S7 concurrency scenario, not speculatively before one exists.
+ */
 export interface ScriptedTurn {
   readonly kind: "text" | "tool"
   readonly text?: string
