@@ -148,6 +148,8 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
           {/* altimate_change start — reference/help anchored to the bottom of the
               panel (runtime status stays up top in the scroll area). JTBD first,
               then community/docs, then branding last. */}
+          {/* altimate_change — white divider marking the start of the help section */}
+          <text fg={theme.text}>┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</text>
           <box>
             <text fg={theme.text}>
               <b>HERE'S WHAT YOU CAN DO</b>
