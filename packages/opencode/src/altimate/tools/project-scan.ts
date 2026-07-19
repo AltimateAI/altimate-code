@@ -7,6 +7,16 @@ import { Telemetry } from "@/telemetry"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { Skill } from "../../skill"
+// altimate_change — post-scan differentiation nudge reuses the built-in toast
+// system: fire the existing TuiEvent.ToastShow bus event (the TUI already
+// subscribes to it in app.tsx and forwards to toast.show()). No new UI.
+import { Bus } from "@/bus"
+import { TuiEvent } from "@/cli/cmd/tui/event"
+
+// altimate_change — session-scoped guard so the differentiation nudge fires at
+// most once per session, even if the environment scan re-runs (e.g. the user
+// runs /discover again after onboarding).
+const nudgedSessions = new Set<string>()
 
 // --- Types ---
 
@@ -928,6 +938,26 @@ export const ProjectScanTool = Tool.define("project_scan", {
     const toolsFound = dataTools.filter((t) => t.installed).map((t) => t.name)
 
     const degradedSuffix = degradedList.length > 0 ? ` (${degradedList.length} degraded)` : ""
+
+    // altimate_change start — one-time post-scan differentiation nudge. Fires
+    // right after the scan finishes (found something or nothing), at most once
+    // per session, via the existing toast system. A nudge must never break the
+    // scan, so any publish failure is swallowed.
+    if (!nudgedSessions.has(ctx.sessionID)) {
+      nudgedSessions.add(ctx.sessionID)
+      try {
+        await Bus.publish(TuiEvent.ToastShow, {
+          title: "What makes Altimate different?",
+          message:
+            "It parses, traces, and verifies your data work deterministically, the layer your AI agent is missing.",
+          variant: "info",
+          duration: 8000,
+        })
+      } catch {
+        // Never let the nudge toast interfere with returning scan results.
+      }
+    }
+    // altimate_change end
 
     return {
       title: `Scan: ${totalConnections} connection(s), ${dbtProject.found ? "dbt found" : "no dbt"}${degradedSuffix}`,
