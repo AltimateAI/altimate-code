@@ -141,8 +141,7 @@ export function Home() {
             workspaceID={route.workspaceID}
           />
         </box>
-        {/* altimate_change — rotating tips under the input (ready users only); the
-            panel's "Tips for getting started" covers first-run guidance */}
+        {/* altimate_change — rotating tips under the input (ready users only) */}
         <Show when={ready() && showTips()}>
           <box height={2} minHeight={0} width="100%" alignItems="center" paddingTop={1} flexShrink={1}>
             <Tips isFirstTime={isFirstTimeUser() === true} />
