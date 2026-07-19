@@ -98,6 +98,29 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <text fg={theme.textMuted}>{cost()} spent</text>
             </box>
             <Dotted />
+            {/* altimate_change start — jobs panel (replaces Trace / MCP / LSP).
+                These are JOBS, not commands — no slash commands appended. */}
+            <box gap={1}>
+              <text fg={theme.textMuted} wrapMode="word" width="100%">
+                Deterministic tools that give any LLM real context on your data stack.
+              </text>
+              <box>
+                <text fg={theme.text}>
+                  <b>HERE'S WHAT YOU CAN DO</b>
+                </text>
+                <text fg={theme.textMuted}>• Build &amp; ship dbt pipelines</text>
+                <text fg={theme.textMuted}>• Migrate legacy SQL to dbt</text>
+                <text fg={theme.textMuted}>• Optimize warehouse cost &amp; speed</text>
+                <text fg={theme.textMuted}>• Debug &amp; monitor your warehouse</text>
+                <text fg={theme.textMuted}>• Govern data: lineage, PII, tests</text>
+              </box>
+              <text fg={theme.border}>┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</text>
+              <text fg={theme.textMuted} wrapMode="word" width="100%">
+                New here? <span style={{ fg: theme.accent }}>/discover</span> finds your stack in one scan
+              </text>
+            </box>
+            {/* altimate_change end */}
+            <Dotted />
             {/* altimate_change start — slim community + docs lines (replaces the old
                 Getting-started box). URLs are plain copyable text, underlined for
                 affordance; clicking the line opens the browser as a bonus, never a
@@ -122,29 +145,6 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               >
                 <span style={{ fg: theme.textMuted }}>Docs · </span>
                 <span style={{ fg: theme.accent, underline: true }}>help.altimate.ai/code</span>
-              </text>
-            </box>
-            {/* altimate_change end */}
-            <Dotted />
-            {/* altimate_change start — jobs panel (replaces Trace / MCP / LSP).
-                These are JOBS, not commands — no slash commands appended. */}
-            <box gap={1}>
-              <text fg={theme.textMuted} wrapMode="word" width="100%">
-                Deterministic tools that give any LLM real context on your data stack.
-              </text>
-              <box>
-                <text fg={theme.text}>
-                  <b>HERE'S WHAT YOU CAN DO</b>
-                </text>
-                <text fg={theme.textMuted}>• Build &amp; ship dbt pipelines</text>
-                <text fg={theme.textMuted}>• Migrate legacy SQL to dbt</text>
-                <text fg={theme.textMuted}>• Optimize warehouse cost &amp; speed</text>
-                <text fg={theme.textMuted}>• Debug &amp; monitor your warehouse</text>
-                <text fg={theme.textMuted}>• Govern data: lineage, PII, tests</text>
-              </box>
-              <text fg={theme.border}>┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</text>
-              <text fg={theme.textMuted} wrapMode="word" width="100%">
-                New here? <span style={{ fg: theme.accent }}>/discover</span> finds your stack in one scan
               </text>
             </box>
             {/* altimate_change end */}
