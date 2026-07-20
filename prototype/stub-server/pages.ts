@@ -81,7 +81,12 @@ export function registerPage(
         <ul>${rulesHtml}</ul>
       </div>
 
-      <button type="submit" class="btn btn-primary" id="create-btn" disabled style="margin-top:22px">Sign Up</button>
+      <label class="check-row" for="newsletter">
+        <input type="checkbox" id="newsletter" name="newsletter" value="yes" />
+        <span>Stay updated via our newsletter</span>
+      </label>
+
+      <button type="submit" class="btn btn-primary" id="create-btn" disabled style="margin-top:18px">Sign Up</button>
     </form>
 
     <p class="legal">By creating an account, you agree to the
@@ -102,6 +107,8 @@ export function registerPage(
     .pw-panel li.ok { color: var(--success); }
     .pw-panel li .mark { font-weight: 700; width: 14px; }
     .inline-err { color: var(--error); font-size: 13px; margin-top: 8px; min-height: 0; }
+    .check-row { display: flex; align-items: center; gap: 9px; margin-top: 18px; font-size: 14px; color: var(--muted); cursor: pointer; }
+    .check-row input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); flex-shrink: 0; }
     .foot-link { text-align: center; color: var(--muted); font-size: 14px; margin-top: 18px; }
     .foot-link a { color: var(--accent); text-decoration: none; }
   `

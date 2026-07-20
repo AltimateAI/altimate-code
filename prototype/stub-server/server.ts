@@ -314,11 +314,13 @@ async function handle(req: Request): Promise<Response> {
         }),
       )
     }
-    // Referral/newsletter removed from signup; "how did you hear" moves to /instance.
+    // Referral removed from signup; "how did you hear" moves to /instance.
+    const newsletter = String(body.newsletter ?? "") === "yes"
     recordPendingEmail(code, email, {
       name: String(body.name ?? "").trim() || undefined,
+      newsletter: newsletter || undefined,
     })
-    logEvent("email_signup_started", { email })
+    logEvent("email_signup_started", { email, newsletter })
     return redirect(`/verify?code=${encodeURIComponent(code)}&email=${encodeURIComponent(email)}`)
   }
 
