@@ -209,7 +209,7 @@ export function DialogModelWelcome(props: { intro?: string; onboarding?: boolean
   const rows = createMemo<WelcomeRow[]>(() => [
     {
       name: "Altimate LLM Gateway",
-      note: "Recommended · best tool-calling · 10M free tokens",
+      note: "Recommended · best for data work · 10M free tokens",
       tone: "success",
       activate: () => connectProvider("altimate-backend"),
     },
@@ -218,7 +218,7 @@ export function DialogModelWelcome(props: { intro?: string; onboarding?: boolean
     { name: "Google (Gemini)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("google") },
     {
       name: "Big Pickle",
-      note: "free, no signup — slower, unreliable tool-calling",
+      note: "free, no sign-up · slower, less reliable on data work",
       tone: "warning",
       activate: chooseBigPickle,
     },
@@ -367,8 +367,8 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
         </text>
       </box>
       <text fg={theme.textMuted} wrapMode="word" width="100%">
-        Big Pickle works for chat but often fails at data tasks. The Altimate LLM Gateway is free to start (10M
-        tokens).
+        Big Pickle works for chat but is slower and less reliable on data work. The Altimate LLM Gateway is free to
+        start (10M tokens).
       </text>
       <box>
         <For each={options}>
