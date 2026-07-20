@@ -208,6 +208,13 @@ describe("fork feature presence guards (merge drop detection)", () => {
     // Shared classifier + sentinel exist at module scope (installer and list must not drift).
     expect(skill).toMatch(/classifyInstallSource/)
     expect(skill).toMatch(/INSTALL_ACTION_VALUE/)
+    // The memo block that actually MAKES the Install row exist — a filter-driven
+    // `classifyInstallSource(q)` guard within reach of the row's `value:
+    // INSTALL_ACTION_VALUE`. The 300-char bound is deliberately tight: a real
+    // deletion of the synthetic-row block collapses the gap to zero and the memo
+    // stops matching, so this guard fails loudly on merge-drop. (Verified: 200 is
+    // too tight — fails against correct source; 300 fits with room to spare.)
+    expect(skill).toMatch(/classifyInstallSource\(q\)[\s\S]{0,300}value: INSTALL_ACTION_VALUE/)
     // Enter on the synthetic row routes to the install flow with the typed filter text.
     expect(skill).toMatch(/item\.value === INSTALL_ACTION_VALUE[\s\S]{0,120}showInstall\(api, filter\(\)/)
     // Install/create sub-dialogs receive the typed text as a prefill.

@@ -4,8 +4,10 @@ import { classifyInstallSource, normalizeInstallSource } from "@/plugin/tui/alti
 // classifyInstallSource is the shared classifier for the DialogSkillList's "Install <query>"
 // affordance and installSkillDirect. Keeping the two in lockstep matters: an earlier version
 // of the list used `q.includes("/") && q.length >= 3`, which offered the Install option for
-// skill-search queries like `dbt/snowflake` — the installer then rejected them as
-// "Path not found". These tests pin the classifier's edge cases so the two can't drift.
+// three-segment paths and other shapes the installer then rejected as "Path not found".
+// A clean two-segment `owner/repo` is intentionally accepted as GitHub shorthand — skill
+// names can't contain a slash so no search result is hijacked. These tests pin the
+// classifier's edge cases so the UI's install-preview and the installer can't drift.
 describe("classifyInstallSource", () => {
   test("recognises github owner/repo shorthand", () => {
     expect(classifyInstallSource("anthropics/skills")).toBe("owner-repo")
@@ -34,11 +36,32 @@ describe("classifyInstallSource", () => {
     expect(classifyInstallSource("")).toBeNull()
   })
 
-  test("rejects multi-slash paths that aren't clean owner/repo (search terms, sub-paths)", () => {
-    // Historically `q.includes("/")` misfired on these — a skill search for "dbt/snowflake"
-    // would surface an Install option that installSkillDirect then refused.
+  test("rejects three-segment paths (sub-paths inside a repo)", () => {
+    // Historically `q.includes("/")` misfired on these — the list surfaced an Install
+    // option that installSkillDirect then refused with "Path not found".
     expect(classifyInstallSource("owner/repo/subpath")).toBeNull()
     expect(classifyInstallSource("dbt/snowflake/thing")).toBeNull()
+  })
+
+  test("clean two-segment strings are treated as owner/repo shorthand", () => {
+    // Intentional feature, not a bug: skill names can't contain a slash (see the
+    // `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` grammar enforced by createSkillDirect), so any
+    // two-segment string typed into the filter cannot collide with a real skill name
+    // and is unambiguously a GitHub `owner/repo` shorthand.
+    expect(classifyInstallSource("dbt/snowflake")).toBe("owner-repo")
+    expect(classifyInstallSource("anthropics/skills")).toBe("owner-repo")
+  })
+
+  test("owners whose name starts with `http` still classify as owner-repo, not URL", () => {
+    // Regression pin for a real bug where installSkillDirect used
+    // `cleaned.startsWith("http")` to route between "already a URL" and "build a
+    // github.com URL": that misrouted owner names literally beginning with `http`
+    // (e.g. `httpie/httpie`, `http-party/http-server`) as pre-formed URLs, then failed
+    // to clone. The fix branches on the classifier's `kind` instead of a prefix probe;
+    // this test locks in the classifier's side of the contract.
+    expect(classifyInstallSource("httpie/httpie")).toBe("owner-repo")
+    expect(classifyInstallSource("http-party/http-server")).toBe("owner-repo")
+    expect(classifyInstallSource("httpwg/http-extensions")).toBe("owner-repo")
   })
 
   test("rejects `~`-prefixed and relative paths — ambiguous with skill names", () => {

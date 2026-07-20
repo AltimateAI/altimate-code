@@ -37,10 +37,13 @@ const id = "altimate:skill-ops"
 // altimate_change start — single classifier shared by installSkillDirect and the skill-list
 // dialog's "Install <query>" affordance. Extracted so the UI's install-preview and the
 // installer can't drift (an earlier `looksInstallable` that only checked `q.includes("/")`
-// showed the Install option for skill-search queries like "dbt/snowflake" which the
-// installer then rejected as "Path not found"). Returns null for shapes the installer
-// wouldn't accept without ambiguity — search terms, relative paths, `~` — so we only
-// surface the synthetic Install row when Enter will actually try to install.
+// surfaced the Install option for shapes the installer then rejected as "Path not found",
+// e.g. `owner/repo/subpath`). A clean two-segment `owner/repo` is intentionally treated
+// as GitHub shorthand — indistinguishable from a two-token search without a network call,
+// and skill names cannot contain a slash so no real search result is hijacked. Returns
+// null for shapes the installer wouldn't accept without ambiguity — three-segment paths,
+// relative paths, `~`, bare identifiers — so we only surface the synthetic Install row
+// when Enter will actually try to install.
 export type InstallSourceKind = "github-url" | "owner-repo" | "absolute-path"
 const OWNER_REPO_REGEX = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/
 
@@ -185,12 +188,20 @@ async function installSkillDirect(
   // reach the installer without going through the UI's install-preview.
   const kind = classifyInstallSource(normalized)
   if (kind === "github-url" || kind === "owner-repo") {
-    // Build the clone URL from the *normalized* source so a `.git` suffix or trailing
-    // dot in the typed query doesn't produce `owner/repo.git.git` (bug reported by
-    // OpenCodeReview): the classifier tolerates those shapes but the raw `normalized`
-    // still carries them until stripped.
-    const cleaned = normalizeInstallSource(normalized)
-    const url = cleaned.startsWith("http") ? cleaned : `https://github.com/${cleaned}.git`
+    // Branch on the already-computed `kind`, not on a `startsWith("http")` probe of the
+    // normalized string. Two bugs are avoided that way:
+    //   1. An owner whose name literally starts with `http` (e.g. `httpie/httpie`,
+    //      `http-party/http-server`) classifies as `owner-repo` but its normalized form
+    //      also starts with `http` — a raw prefix test would treat it as an "already a
+    //      URL" and try to `git clone httpie/httpie`, which fails.
+    //   2. `normalizeInstallSource` strips a trailing `.git`; for owner-repo we want that
+    //      (so `owner/repo.git` doesn't produce `owner/repo.git.git`), but for an explicit
+    //      `github-url` we want to preserve whatever the user typed — self-hosted git
+    //      servers require the exact suffix form.
+    const url =
+      kind === "github-url"
+        ? normalized.trim().replace(/\.+$/, "")
+        : `https://github.com/${normalizeInstallSource(normalized)}.git`
     const label = url.replace(/https?:\/\/github\.com\//, "").replace(/\.git$/, "")
     onProgress?.(`Cloning ${label}...`)
     const cache = cacheDir()
