@@ -4,6 +4,10 @@ Yes/No "Scan your environment?" gate; the argument below is their answer. Act on
 it. Never end any branch on a bare report of absence — every outcome converts
 into a connection, a question, or a concrete next action.
 
+Present every menu and question as plain text in your reply, then wait for the
+user to type their answer. Do NOT use the `question` tool (or any interactive
+picker) for any step in this flow.
+
 Argument: $ARGUMENTS
 
 ── If the argument is "skip" (the user declined the scan) ──
