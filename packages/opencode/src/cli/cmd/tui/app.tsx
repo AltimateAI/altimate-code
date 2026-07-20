@@ -19,8 +19,6 @@ import { GatewayFlow } from "@tui/component/dialog-provider"
 import { AltimateApi } from "@/altimate/api/client"
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
 import { DialogScanGate } from "@tui/component/dialog-scan-gate"
-// altimate_change — interactive activation menu (shown by the activation_menu tool)
-import { DialogActivationMenu } from "@tui/component/dialog-activation-menu"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -913,33 +911,6 @@ function App() {
       type: "session",
       sessionID: evt.properties.sessionID,
     })
-  })
-
-  // altimate_change — interactive activation menu. The `activation_menu` tool
-  // publishes the options the agent composed; render them as an arrow-selectable
-  // picker and submit the chosen label as the user's next message (same effect as
-  // typing the option number, but navigable like the rest of the TUI).
-  //
-  // The server forwards every bus event over SSE generically (Bus.subscribeAll),
-  // so this event arrives at runtime, but the checked-in SDK types haven't been
-  // regenerated for this prototype event. Cast the subscription and validate the
-  // payload at runtime with the event's own zod schema.
-  sdk.event.on(TuiEvent.ActivationMenuShow.type as any, (evt: any) => {
-    const parsed = TuiEvent.ActivationMenuShow.properties.safeParse(evt?.properties)
-    if (!parsed.success) return
-    const { intro, options } = parsed.data
-    dialog.replace(() => (
-      <DialogActivationMenu
-        intro={intro}
-        options={options}
-        onChoose={(option) => {
-          const ref = promptRef.current
-          if (!ref) return
-          ref.set({ input: option, parts: [] })
-          ref.submit()
-        }}
-      />
-    ))
   })
 
   sdk.event.on(SessionApi.Event.Deleted.type, (evt) => {

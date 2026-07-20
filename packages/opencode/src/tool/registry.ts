@@ -111,8 +111,6 @@ import { AltimateCoreParseDbtTool } from "../altimate/tools/altimate-core-parse-
 import { AltimateCoreRewriteTool } from "../altimate/tools/altimate-core-rewrite"
 import { ToolLookupTool } from "../altimate/tools/tool-lookup"
 import { ProjectScanTool } from "../altimate/tools/project-scan"
-// altimate_change — interactive onboarding activation menu
-import { ActivationMenuTool } from "../altimate/tools/activation-menu"
 import { DatamateManagerTool } from "../altimate/tools/datamate"
 import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
 // altimate_change end
@@ -304,7 +302,6 @@ export namespace ToolRegistry {
       AltimateCoreParseDbtTool,
       ToolLookupTool,
       ProjectScanTool,
-      ActivationMenuTool,
       DatamateManagerTool,
       FeedbackSubmitTool,
       // altimate_change end

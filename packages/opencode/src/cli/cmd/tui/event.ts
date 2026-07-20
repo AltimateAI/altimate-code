@@ -46,15 +46,4 @@ export const TuiEvent = {
       sessionID: SessionID.zod.describe("Session ID to navigate to"),
     }),
   ),
-  // altimate_change — onboarding activation menu: the agent composes the options
-  // (per branch) and hands them to the TUI to render as an arrow-selectable picker
-  // instead of a plain-text numbered list. Selecting a row submits that label as
-  // the user's next message. Fired by the `activation_menu` tool.
-  ActivationMenuShow: BusEvent.define(
-    "tui.activation.menu.show",
-    z.object({
-      intro: z.string().optional().describe("Short lead-in line shown above the options"),
-      options: z.array(z.string()).min(2).max(6).describe("Job labels; the selected one is submitted as the next message"),
-    }),
-  ),
 }
