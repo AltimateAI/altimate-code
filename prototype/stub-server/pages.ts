@@ -313,10 +313,6 @@ export function instancePage(
   // De-dup: on the email path these were already offered on /register — don't ask twice.
   const attributionFields = opts.askAttribution
     ? `
-      <label class="field-label" for="source">How did you hear about us</label>
-      <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" required />
-      ${hearAboutDatalist}
-
       <p class="section-note">Tell us about your setup so we can tailor Altimate to you</p>
 
       <label class="field-label" for="warehouse">What's your primary warehouse? <span class="opt">(Optional)</span></label>
@@ -326,6 +322,10 @@ export function instancePage(
       <label class="field-label" for="role">What's your role? <span class="opt">(Optional)</span></label>
       <input class="field" type="text" id="role" name="role" list="role-options" placeholder="Select an option" autocomplete="off" />
       ${roleDatalist}
+
+      <label class="field-label" for="source">How did you hear about us</label>
+      <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" required />
+      ${hearAboutDatalist}
     `
     : ""
   const body = `
