@@ -218,7 +218,7 @@ export function DialogModelWelcome(props: { intro?: string; onboarding?: boolean
     { name: "Google (Gemini)", note: "bring your own API key", tone: "muted", activate: () => connectProvider("google") },
     {
       name: "Big Pickle",
-      note: "free, no sign-up · slower, less reliable on data work",
+      note: "free · less reliable for data work",
       tone: "warning",
       activate: chooseBigPickle,
     },
