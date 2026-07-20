@@ -226,13 +226,11 @@ async function handle(req: Request): Promise<Response> {
     }
     if (askAttribution) {
       session.attribution = {
-        referral: String(body.referral ?? "").trim() || undefined,
         source: String(body.source ?? "").trim() || undefined,
       }
     }
-    if (session.attribution?.referral || session.attribution?.source) {
+    if (session.attribution?.source) {
       logEvent("signup_attribution", {
-        referral: session.attribution.referral ?? null,
         source: session.attribution.source ?? null,
       })
     }

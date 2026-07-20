@@ -300,9 +300,6 @@ export function instancePage(
   // De-dup: on the email path these were already offered on /register — don't ask twice.
   const attributionFields = opts.askAttribution
     ? `
-      <label class="field-label" for="referral">Referral code <span class="opt">(Optional)</span></label>
-      <input class="field" type="text" id="referral" name="referral" placeholder="e.g. WELCOME2026" autocomplete="off" />
-
       <label class="field-label" for="source">How did you hear about us <span class="opt">(Optional)</span></label>
       <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" />
       ${hearAboutDatalist}

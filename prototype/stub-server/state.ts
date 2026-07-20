@@ -35,7 +35,6 @@ export interface Session {
 
 export interface Attribution {
   name?: string
-  referral?: string
   source?: string // "How did you hear about us"
   newsletter?: boolean
 }
