@@ -40,6 +40,12 @@ export const HEAR_ABOUT_OPTIONS = [
 
 const hearAboutDatalist = `<datalist id="hear-options">${HEAR_ABOUT_OPTIONS.map((o) => `<option value="${o}"></option>`).join("")}</datalist>`
 
+// Optional setup metadata (extracted manually for now — no formal schema).
+export const WAREHOUSE_OPTIONS = ["Snowflake", "BigQuery", "Databricks", "Redshift", "Postgres", "DuckDB", "Other"]
+export const ROLE_OPTIONS = ["Analytics Engineer", "Data Engineer", "Data Analyst", "Platform or Infra", "Leadership", "Other"]
+const warehouseDatalist = `<datalist id="warehouse-options">${WAREHOUSE_OPTIONS.map((o) => `<option value="${o}"></option>`).join("")}</datalist>`
+const roleDatalist = `<datalist id="role-options">${ROLE_OPTIONS.map((o) => `<option value="${o}"></option>`).join("")}</datalist>`
+
 export function registerPage(
   userCode: string,
   opts: { emailValue?: string; emailError?: string } = {},
@@ -310,6 +316,16 @@ export function instancePage(
       <label class="field-label" for="source">How did you hear about us</label>
       <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" required />
       ${hearAboutDatalist}
+
+      <p class="section-note">Tell us about your setup so we can tailor Altimate to you</p>
+
+      <label class="field-label" for="warehouse">What's your primary warehouse? <span class="opt">(Optional)</span></label>
+      <input class="field" type="text" id="warehouse" name="warehouse" list="warehouse-options" placeholder="Select an option" autocomplete="off" />
+      ${warehouseDatalist}
+
+      <label class="field-label" for="role">What's your role? <span class="opt">(Optional)</span></label>
+      <input class="field" type="text" id="role" name="role" list="role-options" placeholder="Select an option" autocomplete="off" />
+      ${roleDatalist}
     `
     : ""
   const body = `
@@ -337,6 +353,7 @@ export function instancePage(
                             font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
     .help-line { color: var(--muted); font-size: 13px; margin-top: 6px; }
     .opt { color: var(--muted); font-weight: 400; }
+    .section-note { color: var(--muted); font-size: 13px; font-weight: 600; margin-top: 22px; margin-bottom: 2px; }
   `
 
   const extraJs = `

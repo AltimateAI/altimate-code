@@ -227,11 +227,15 @@ async function handle(req: Request): Promise<Response> {
     if (askAttribution) {
       session.attribution = {
         source: String(body.source ?? "").trim() || undefined,
+        warehouse: String(body.warehouse ?? "").trim() || undefined,
+        role: String(body.role ?? "").trim() || undefined,
       }
     }
-    if (session.attribution?.source) {
+    if (session.attribution?.source || session.attribution?.warehouse || session.attribution?.role) {
       logEvent("signup_attribution", {
         source: session.attribution.source ?? null,
+        warehouse: session.attribution.warehouse ?? null,
+        role: session.attribution.role ?? null,
       })
     }
     startProvisioning(session, name)

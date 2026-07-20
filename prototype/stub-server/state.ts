@@ -37,6 +37,9 @@ export interface Attribution {
   name?: string
   source?: string // "How did you hear about us"
   newsletter?: boolean
+  // Optional setup metadata (extracted manually for now — no formal schema).
+  warehouse?: string // "What's your primary warehouse?"
+  role?: string // "What's your role?"
 }
 
 export interface PendingEmail {
