@@ -10,6 +10,11 @@ import { Selection } from "@tui/util/selection"
 export function Dialog(
   props: ParentProps<{
     size?: "medium" | "large" | "xlarge"
+    // altimate_change — optional vertical anchor. Default "center" keeps the
+    // existing upper-center placement for every dialog; "bottom" pins the dialog
+    // near the input (used by the onboarding activation menu, which conceptually
+    // continues the chat flow rather than interrupting it).
+    align?: "center" | "bottom"
     onClose: () => void
   }>,
 ) {
@@ -23,6 +28,7 @@ export function Dialog(
     if (props.size === "large") return 88
     return 60
   }
+  const bottom = () => props.align === "bottom"
 
   return (
     <box
@@ -39,9 +45,11 @@ export function Dialog(
       width={dimensions().width}
       height={dimensions().height}
       alignItems="center"
+      justifyContent={bottom() ? "flex-end" : "flex-start"}
       position="absolute"
       zIndex={3000}
-      paddingTop={dimensions().height / 4}
+      paddingTop={bottom() ? 0 : dimensions().height / 4}
+      paddingBottom={bottom() ? 1 : 0}
       left={0}
       top={0}
       backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
@@ -69,6 +77,8 @@ function init() {
       onClose?: () => void
     }[],
     size: "medium" as "medium" | "large" | "xlarge",
+    // altimate_change — vertical anchor for the active dialog (default center)
+    align: "center" as "center" | "bottom",
   })
 
   const renderer = useRenderer()
@@ -115,6 +125,7 @@ function init() {
       }
       batch(() => {
         setStore("size", "medium")
+        setStore("align", "center")
         setStore("stack", [])
       })
       refocus()
@@ -128,6 +139,7 @@ function init() {
         if (item.onClose) item.onClose()
       }
       setStore("size", "medium")
+      setStore("align", "center")
       setStore("stack", [
         {
           element: input,
@@ -143,6 +155,13 @@ function init() {
     },
     setSize(size: "medium" | "large" | "xlarge") {
       setStore("size", size)
+    },
+    // altimate_change — let a dialog opt into bottom placement (default center)
+    get align() {
+      return store.align
+    },
+    setAlign(align: "center" | "bottom") {
+      setStore("align", align)
     },
   }
 }
@@ -174,7 +193,7 @@ export function DialogProvider(props: ParentProps) {
         }
       >
         <Show when={value.stack.length}>
-          <Dialog onClose={() => value.clear()} size={value.size}>
+          <Dialog onClose={() => value.clear()} size={value.size} align={value.align}>
             {value.stack.at(-1)!.element}
           </Dialog>
         </Show>

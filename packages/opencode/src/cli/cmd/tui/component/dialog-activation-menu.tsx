@@ -22,7 +22,12 @@ export function DialogActivationMenu(props: {
   const dialog = useDialog()
   const [selected, setSelected] = createSignal(0)
 
-  onMount(() => dialog.setSize("large"))
+  onMount(() => {
+    dialog.setSize("large")
+    // altimate_change — anchor at the bottom (near the input) so it reads as a
+    // continuation of the chat, like the text menu it replaced, not a centered modal.
+    dialog.setAlign("bottom")
+  })
 
   function choose(option: string) {
     dialog.clear()
