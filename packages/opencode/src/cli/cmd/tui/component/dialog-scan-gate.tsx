@@ -7,8 +7,8 @@ import { useDialog } from "@tui/ui/dialog"
 // altimate_change — Part 2 scan gate. Shown once, immediately after Part 1
 // completes (a model is ready and chat is live). We do NOT auto-scan; the user
 // chooses. Yes/No each submit the hidden `/onboard-connect` command (scan|skip),
-// which starts a session and lets the agent run the branch flow. Help text is
-// verbatim from the locked spec.
+// which starts a session and lets the agent run the branch flow. Yes carries a
+// "(Recommended)" tag (theme.success, matching the model picker's house style).
 //
 // `onChoose` is injected by App (which lives inside PromptRefProvider); the dialog
 // overlay is mounted above that provider, so the gate cannot resolve the prompt
@@ -28,13 +28,15 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
   const options = [
     {
       label: "Yes",
+      recommended: true,
       run: () => run("scan"),
-      help: "Reads config files and env vars for your dbt project or warehouse — nothing leaves your computer, and no credentials are needed yet.",
+      help: "Reads local config and env vars. Nothing leaves your computer; no credentials needed.",
     },
     {
       label: "No",
+      recommended: false,
       run: () => run("skip"),
-      help: "Skip for now — tell me what you're working on and I'll help set it up when you're ready. You can run /discover anytime.",
+      help: "Skip for now. Run /discover anytime.",
     },
   ]
 
@@ -108,8 +110,9 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
                   </text>
                 </box>
                 <box flexGrow={1}>
-                  <text fg={theme.textMuted} wrapMode="word" width="100%">
-                    {option.help}
+                  <text wrapMode="word" width="100%">
+                    {option.recommended ? <span style={{ fg: theme.success }}>(Recommended) </span> : null}
+                    <span style={{ fg: theme.textMuted }}>{option.help}</span>
                   </text>
                 </box>
               </box>
