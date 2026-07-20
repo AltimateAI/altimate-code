@@ -92,6 +92,13 @@ export const VerdictEnvelope = z.object({
   idealVerdict: Verdict,
   mode: ReviewMode,
   tier: RiskTier,
+  /** G1 — reasons the classifier assigned this tier (only when --explain-tier). */
+  tierReasons: z.array(z.string()).optional(),
+  /** G2 — true when --force-tier bypassed the classifier. Included in signature so
+   *  a tampered envelope claiming natural tier can't fake a forced run. */
+  tierForced: z.boolean().optional(),
+  /** The classifier's original tier before --force-tier overrode it (G2). */
+  tierClassified: RiskTier.optional(),
   findings: z.array(Finding),
   summary: z.object({
     critical: z.number().int().nonnegative(),
@@ -127,6 +134,12 @@ export interface BuildEnvelopeInput {
   manifestHash?: string
   generatedAt?: string
   degraded?: boolean
+  /** G1 — classifier reasons for the tier (only surfaced when explainTier=true). */
+  tierReasons?: string[]
+  /** G2 — set when --force-tier was applied. */
+  tierForced?: boolean
+  /** G2 — classifier's original tier before the force override. */
+  tierClassified?: RiskTier
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -147,6 +160,9 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     idealVerdict: ideal,
     mode: input.mode,
     tier: input.tier,
+    tierReasons: input.tierReasons,
+    tierForced: input.tierForced,
+    tierClassified: input.tierClassified,
     findings: input.findings,
     summary: summarize(input.findings, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),

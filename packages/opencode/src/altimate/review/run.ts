@@ -1,5 +1,5 @@
 import path from "node:path"
-import { readFile } from "node:fs/promises"
+import { readFile, stat, access } from "node:fs/promises"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
 import { collectChangedFiles, makeContentResolver, defaultBaseRef, manifestHash } from "./git"
@@ -42,6 +42,11 @@ export interface ReviewPullRequestOptions {
   /** PR metadata for the AI reviewer's intent check. */
   prTitle?: string
   prBody?: string
+  /** G1 — surface the tier classifier's reasons on the verdict envelope. */
+  explainTier?: boolean
+  /** G2 — [EXPERIMENTAL] bypass the tier classifier with the supplied tier.
+   *  Envelope carries `tierForced: true` when used. Debug / bench only. */
+  forceTier?: "trivial" | "lite" | "full"
 }
 
 /** dbt adapter_type → core SQL dialect. Mostly identity; a few aliases. */
@@ -73,6 +78,68 @@ async function detectDialect(manifestAbs: string): Promise<string | undefined> {
   }
 }
 
+/**
+ * G3 (Round 18) — walk upward from `cwd` looking for a dbt project, then check
+ * for the compiled `target/manifest.json` next to it. Emits an absolute path
+ * only when the manifest exists AND the file is under the dbt project's parent
+ * (defensive against relative escapes and stale manifests from unrelated
+ * projects on the same filesystem). Returns undefined when nothing matches.
+ *
+ * We DO NOT re-run `dbt compile` here — that could touch a real warehouse or
+ * consume credentials. The customer is still responsible for a compiled
+ * artifact; we just find it when they compiled but didn't pass `--manifest`.
+ */
+async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projectRoot: string } | undefined> {
+  let dir = path.resolve(cwd)
+  const root = path.parse(dir).root
+  // Walk up looking for dbt_project.yml so the manifest we auto-discover is
+  // demonstrably tied to a dbt project (never `target/manifest.json` from an
+  // unrelated cwd, e.g. Airflow's `target/`).
+  while (true) {
+    for (const fn of ["dbt_project.yml", "dbt_project.yaml"]) {
+      try {
+        await access(path.join(dir, fn))
+        const candidate = path.join(dir, "target", "manifest.json")
+        try {
+          await access(candidate)
+          return { path: candidate, projectRoot: dir }
+        } catch {
+          return undefined // dbt project found but not compiled — respect that
+        }
+      } catch {
+        /* keep walking */
+      }
+    }
+    if (dir === root) return undefined
+    dir = path.dirname(dir)
+  }
+}
+
+/** Warn to stderr when the manifest looks stale relative to changed files. */
+async function warnIfStale(manifestAbs: string, changedPaths: string[], cwd: string): Promise<void> {
+  try {
+    const manifestMtime = (await stat(manifestAbs)).mtimeMs
+    for (const rel of changedPaths) {
+      // Only compare against tracked, on-disk model files (schema.yml or SQL)
+      const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel)
+      try {
+        const changedMtime = (await stat(abs)).mtimeMs
+        if (changedMtime > manifestMtime) {
+          process.stderr.write(
+            `⚠️  manifest ${manifestAbs} appears stale — ${rel} was modified after the manifest was written. ` +
+              `Re-run \`dbt compile\` (or \`dbt build\`) to refresh before reviewing.\n`,
+          )
+          return
+        }
+      } catch {
+        /* file not on disk (e.g. removed by the change) — skip */
+      }
+    }
+  } catch {
+    /* manifest unreadable → detectDialect will have already returned undefined */
+  }
+}
+
 export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise<VerdictEnvelope> {
   const config = await loadReviewConfig(opts.cwd)
   if (opts.manifestPath) config.manifestPath = opts.manifestPath
@@ -97,9 +164,37 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
   // binary's process.cwd() — otherwise a relative path silently misses when the
   // CLI is invoked from elsewhere, degrading every review to lint-only.
-  const manifestAbs = path.isAbsolute(config.manifestPath)
+  let manifestAbs = path.isAbsolute(config.manifestPath)
     ? config.manifestPath
     : path.join(opts.cwd, config.manifestPath)
+  // G3 (Round 18) — auto-discovery when the caller didn't pass `--manifest` and
+  // the config-relative resolve above doesn't point at an existing file. Walk
+  // upward for the dbt project root and use its `target/manifest.json`. Explicit
+  // `--manifest` always wins (see run.ts opts.manifestPath override at the top).
+  if (!opts.manifestPath) {
+    let manifestExists = false
+    try {
+      await access(manifestAbs)
+      manifestExists = true
+    } catch {
+      /* fall through to auto-discovery */
+    }
+    if (!manifestExists) {
+      const discovered = await autoDiscoverManifest(opts.cwd)
+      if (discovered) {
+        manifestAbs = discovered.path
+        process.stderr.write(
+          `ℹ️  auto-discovered dbt manifest at ${discovered.path} ` +
+            `(dbt project root: ${discovered.projectRoot}). Pass --manifest to override.\n`,
+        )
+      }
+    }
+  }
+  // Freshness check: warn (don't fail) when the manifest predates changed files.
+  // Skip when we're diffing against the working tree (mtime signal is noisy
+  // during active edits) — only warn when the caller explicitly pinned a head
+  // ref, which is the CI / bench shape where a stale manifest is a real risk.
+  if (opts.head) await warnIfStale(manifestAbs, changedFiles.map((f) => f.path), opts.cwd)
 
   // Resolve the SQL dialect: explicit config wins; otherwise auto-detect from
   // the dbt manifest's `adapter_type` (so a BigQuery/Redshift project isn't
@@ -135,5 +230,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
+    explainTier: opts.explainTier,
+    forceTier: opts.forceTier,
   })
 }

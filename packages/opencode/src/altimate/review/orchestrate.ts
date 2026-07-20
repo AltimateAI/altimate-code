@@ -190,6 +190,10 @@ export interface OrchestrateInput {
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
+  /** G1 — attach the classifier's reason list to the envelope. */
+  explainTier?: boolean
+  /** G2 — override the classifier's tier decision. Envelope carries tierForced:true. */
+  forceTier?: "trivial" | "lite" | "full"
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -1088,14 +1092,24 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A run is degraded when model files exist but none resolved against a manifest.
   const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
 
-  const tier = classifyPR(reviewable, {
+  const tierResult = classifyPR(reviewable, {
     blastRadiusOf: (p) => {
       const c = ctxByPath.get(p)
       return c ? c.impact.directCount + c.impact.transitiveCount : 0
     },
     touchesPiiOf: (f) => (ctxByPath.get(f.path)?.pii.length ?? 0) > 0,
     isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
-  }).tier
+  })
+  const classifiedTier = tierResult.tier
+  // G2 — --force-tier overrides the classifier. Envelope records both the forced
+  // tier and the original classification so audits can see the bypass; the
+  // reasons list gets a leading "forced" marker so downstream doesn't confuse
+  // the forced tier for a natural one.
+  const tier = input.forceTier ?? classifiedTier
+  const tierForced = input.forceTier !== undefined && input.forceTier !== classifiedTier
+  const tierReasons = tierForced
+    ? [`forced via --force-tier (classifier said ${classifiedTier})`, ...tierResult.reasons]
+    : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
 
@@ -1349,6 +1363,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     manifestHash: input.manifestHash,
     generatedAt: input.generatedAt,
     degraded,
+    tierReasons: input.explainTier || tierForced ? tierReasons : undefined,
+    tierForced: tierForced ? true : undefined,
+    tierClassified: tierForced ? classifiedTier : undefined,
   })
   return signEnvelope(envelope)
 }

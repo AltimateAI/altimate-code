@@ -28,7 +28,8 @@ export function verdictHeadline(env: VerdictEnvelope): string {
     [critical && `${critical} critical`, warning && `${warning} warning`, suggestion && `${suggestion} suggestion`]
       .filter(Boolean)
       .join(", ") || "no findings"
-  return `${VERDICT_LABEL[env.verdict]} — ${counts} (${env.tier} tier)`
+  const tierLabel = env.tierForced ? `${env.tier} tier — forced (was ${env.tierClassified})` : `${env.tier} tier`
+  return `${VERDICT_LABEL[env.verdict]} — ${counts} (${tierLabel})`
 }
 
 /** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
@@ -39,6 +40,16 @@ export function renderSummary(env: VerdictEnvelope): string {
     lines.push(
       "> ⚙️ **Lint-only run** — no dbt manifest/warehouse was available, so lineage, equivalence and",
       "> data-impact checks were skipped. Wire `manifest_path` (and optionally warehouse creds) for the full verdict.",
+      "",
+    )
+  }
+
+  // G1 (Round 18) — surface classifier reasons when --explain-tier populated
+  // them, so a customer can see why the review ran at this tier. Also surfaces
+  // when --force-tier bypassed the classifier (tierReasons is auto-populated).
+  if (env.tierReasons && env.tierReasons.length) {
+    lines.push(
+      `> 🧭 **Tier: ${env.tier}** — ${env.tierReasons.map((r) => `\`${r}\``).join(", ")}`,
       "",
     )
   }
