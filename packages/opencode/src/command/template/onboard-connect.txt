@@ -63,29 +63,34 @@ Then take the FIRST matching branch:
      SQL you paste, or scaffold a project — want to try one?
 
 ── Activation menu (ALWAYS — after every branch above, both scan and skip) ──
-End your reply with a short numbered "What would you like to do?" menu in JOB
-language (never slash commands in the labels). Compose it for what the CURRENT
-environment can actually do:
+Do NOT print the menu as text. Instead call the `activation_menu` tool exactly
+once so the user gets an arrow-selectable picker, then END your turn and wait for
+their selection (it arrives as their next message). Pass job-language labels
+(never slash commands). Compose the tool call for what the CURRENT environment
+can actually do:
 
 If a REAL warehouse is connected (found by the scan, or just added):
-  Personalize the lead-in from the scan results (e.g. "You've got 12 dbt models
-  and a Snowflake connection. Want to:"), then offer:
-  1. See what breaks downstream before you change a model
-  2. Review a SQL PR with every finding explained
-  3. Find what's driving warehouse cost
-  4. Something else — describe it
+  intro: personalize from the scan results (e.g. "You've got 12 dbt models and a
+  Snowflake connection.")
+  options:
+  - See what breaks downstream before you change a model
+  - Review a SQL PR with every finding explained
+  - Find what's driving warehouse cost
+  - Something else — describe it
 
 If NOTHING usable was found, or the user declined the scan:
-  Lead with the sample, then the stack-agnostic jobs:
-  1. Try Altimate on a sample dbt project (spins up a small jaffle-shop DuckDB —
-     real data, real dbt models, nothing touches your warehouse)
-  2. See what breaks downstream before you change a model
-  3. Review a SQL PR with every finding explained
-  4. Something else — describe it
+  intro: a brief neutral lead-in.
+  options (lead with the sample, then the stack-agnostic jobs):
+  - Try Altimate on a sample dbt project (spins up a small jaffle-shop DuckDB —
+    real data, real dbt models, nothing touches your warehouse)
+  - See what breaks downstream before you change a model
+  - Review a SQL PR with every finding explained
+  - Something else — describe it
 
 If a dbt project exists but no warehouse yet (branch 2): ask the warehouse
-question first as instructed above, then append this same no-data menu (the
-sample option included) so declining the warehouse still leaves a next step.
+question first as instructed above, then call `activation_menu` with the same
+no-data options (the sample option included) so declining the warehouse still
+leaves a next step.
 
 Routing — selecting a job STARTS the job (this is the user's first activation
 moment, not another menu):
