@@ -910,6 +910,11 @@ export function detectSchemaYmlPatterns(file: ChangedFile, rubric: Rubric): Find
     // Uniqueness OR not_null on an id/key column = warning (silent-dup / null-PK
     // risk); other not_null / relationships removals = suggestion.
     const sev: Severity = isUniquenessSignal || notNullOnLikelyPK ? "warning" : "suggestion"
+    // Detect layer from file path so the finding body doesn't misattribute
+    // (Codex-R18-review noted the previous copy said "mart-layer key" on
+    // every unique removal regardless of the schema.yml's actual layer).
+    const isMartLayer = /(^|\/)(marts?|reporting)\//.test(file.path)
+    const layerLabel = isMartLayer ? "mart-layer" : "declared"
     const key = `${r.model}.${r.column}`
     const isFirstForModel = !seenModel.has(r.model)
     seenModel.add(r.model)
@@ -921,7 +926,7 @@ export function detectSchemaYmlPatterns(file: ChangedFile, rubric: Rubric): Find
         body:
           `The \`${r.test}\` data test was removed from column \`${r.column}\` on model \`${r.model}\`. ` +
           (isUniquenessSignal
-            ? `Removing a \`unique\` test on a mart-layer key is how silent duplicate rows ship — ` +
+            ? `Removing a \`unique\` test on a ${layerLabel} key is how silent duplicate rows ship — ` +
               `downstream joins fan out, aggregates double-count, and no test catches it. Restore ` +
               `the test, or explicitly document why the grain no longer needs to be unique on this column.`
             : notNullOnLikelyPK

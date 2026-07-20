@@ -1101,14 +1101,21 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
   })
   const classifiedTier = tierResult.tier
-  // G2 — --force-tier overrides the classifier. Envelope records both the forced
-  // tier and the original classification so audits can see the bypass; the
-  // reasons list gets a leading "forced" marker so downstream doesn't confuse
-  // the forced tier for a natural one.
+  // G2 — --force-tier overrides the classifier. Envelope records both the
+  // forced tier and the original classification whenever the flag is passed
+  // (regardless of whether the forced value happens to match the classifier),
+  // so audits can see the bypass every time the flag was used. The reasons
+  // list gets a leading "forced" marker so downstream doesn't confuse the
+  // forced tier for a natural one. Codex-R18-review fix — the earlier
+  // `!== classifiedTier` gate silently hid the bypass when the forced tier
+  // matched the classifier's result.
   const tier = input.forceTier ?? classifiedTier
-  const tierForced = input.forceTier !== undefined && input.forceTier !== classifiedTier
+  const tierForced = input.forceTier !== undefined
   const tierReasons = tierForced
-    ? [`forced via --force-tier (classifier said ${classifiedTier})`, ...tierResult.reasons]
+    ? [
+        `forced via --force-tier=${input.forceTier} (classifier said ${classifiedTier})`,
+        ...tierResult.reasons,
+      ]
     : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
