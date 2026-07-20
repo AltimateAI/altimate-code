@@ -372,6 +372,79 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   })
 
   // -------------------------------------------------------------------------
+  // Prompt caching (issue #1009)
+  // -------------------------------------------------------------------------
+  describe("Prompt Caching", () => {
+    // ~1,400 tokens of deterministic filler — above the 1,024-token minimum
+    // for claude-3-5-sonnet cache entries (Opus/Haiku models need 4,096).
+    const filler = Array.from({ length: 700 }, (_, i) => `fact-${i}: the answer to sub-question ${i} is ${i * 7}.`).join(" ")
+
+    test("block-level cache_control on system message produces cache activity", async () => {
+      const request = () =>
+        fetch(`${cortexBaseURL(CORTEX_ACCOUNT!)}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            model: "claude-3-5-sonnet",
+            messages: [
+              {
+                role: "system",
+                content: [{ type: "text", text: `You are terse. Reference data: ${filler}`, cache_control: { type: "ephemeral" } }],
+              },
+              { role: "user", content: "What is fact-3? One word." },
+            ],
+            max_completion_tokens: 32,
+            stream: false,
+          }),
+        })
+
+      const first = await request()
+      expect(first.status).toBe(200)
+      const second = await request()
+      expect(second.status).toBe(200)
+      const usage = ((await second.json()) as any).usage
+      // For Claude, `cached_tokens` covers cache reads AND writes combined, so
+      // this proves the markers activate caching but not prefix reuse per se —
+      // verify reads specifically via `cache_read_input` in TOKENS_GRANULAR.
+      expect(usage?.prompt_tokens_details?.cached_tokens ?? 0).toBeGreaterThan(0)
+    }, 60000)
+
+    test("tool message with array content and cache_control is accepted", async () => {
+      const resp = await fetch(`${cortexBaseURL(CORTEX_ACCOUNT!)}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          model: "claude-3-5-sonnet",
+          messages: [
+            { role: "user", content: "Run the lookup tool for fact-3." },
+            {
+              role: "assistant",
+              content: "",
+              tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }],
+            },
+            {
+              role: "tool",
+              tool_call_id: "call_1",
+              content: [{ type: "text", text: `lookup result: ${filler}`, cache_control: { type: "ephemeral" } }],
+            },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: { name: "lookup", description: "look up facts", parameters: { type: "object", properties: {} } },
+            },
+          ],
+          max_completion_tokens: 32,
+          stream: false,
+        }),
+      })
+      // This is the exact shape the plugin emits after relocating markers on
+      // tool results — the request must not be rejected.
+      expect(resp.status).toBe(200)
+    }, 30000)
+  })
+
+  // -------------------------------------------------------------------------
   // Request transforms (unit-level, no network)
   // -------------------------------------------------------------------------
   describe("Request Transforms", () => {

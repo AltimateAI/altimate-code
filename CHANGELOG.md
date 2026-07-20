@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Snowflake Cortex prompt caching now activates for Claude models.** Cortex only honors caching markers placed inside content blocks (`messages[].content[].cache_control`), but requests carried them as message-level fields — so every request billed the full input rate (`cache_read_input`/`cache_write_input` stayed NULL in `TOKENS_GRANULAR`). The provider now relocates the markers into content blocks (system prompt + trailing messages, max 4 breakpoints), cutting repeated-prefix input cost by up to 90% on long agent sessions. If a Cortex account rejects the marked shape, the request is retried once without markers and caching is disabled for the session. (#1009)
+
 ## [0.9.1] - 2026-07-08
 
 This release rebases altimate-code onto **upstream OpenCode v1.17.9** (bridged up from v1.4.0 — ~165 upstream commits) behind the fork's own fixes and hardening. It is a larger-than-usual jump from 0.8.10; the upgrade is automatic and in-place (see **Upgrading from 0.8.10** below).
