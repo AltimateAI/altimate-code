@@ -315,7 +315,6 @@ export function instancePage(
   const body = `
     <h1>Name your instance</h1>
     <p class="sub">This becomes your custom Altimate URL (e.g. yourname.app.getaltimate.com).</p>
-    <p class="sub">Almost done — confirm the name and we'll provision it for you.</p>
 
     <form id="instance-form" method="POST" action="/web/instance">
       <input type="hidden" name="code" value="${escapeAttr(userCode)}" />
