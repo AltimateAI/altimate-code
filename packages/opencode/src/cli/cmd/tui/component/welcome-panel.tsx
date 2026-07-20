@@ -54,20 +54,25 @@ export function WelcomePanel() {
         gap={1}
       >
         {/* The only text in the boot box: what Altimate Code is. Rendered brighter
-            (full text color, not muted) and split into paragraphs with line spacing
-            so it reads as the prominent, primary content. No tips here. */}
+            (full text color, not muted) as the prominent, primary content. The two
+            description sentences share one inner box (no gap) so they stay uniformly
+            single-spaced; if the second sentence wraps, its continuation lines up with
+            the rest instead of looking cramped against a blank-line-separated sibling.
+            The outer gap keeps the heading and CTA spaced. No tips here. */}
         <box gap={1}>
           <text fg={theme.accent} attributes={TextAttributes.BOLD}>
             What is Altimate Code
           </text>
-          <text fg={theme.text} wrapMode="word" width="100%">
-            Altimate Code is a specialized data engineering harness that sits between any LLM and your entire data
-            stack.
-          </text>
-          <text fg={theme.text} wrapMode="word" width="100%">
-            It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse metadata — so it
-            reasons about your data instead of guessing.
-          </text>
+          <box>
+            <text fg={theme.text} wrapMode="word" width="100%">
+              Altimate Code is a specialized data engineering harness that sits between any LLM and your entire data
+              stack.
+            </text>
+            <text fg={theme.text} wrapMode="word" width="100%">
+              It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse metadata — so
+              it reasons about your data instead of guessing.
+            </text>
+          </box>
           {/* CTA only until a model is connected — stale afterwards */}
           <Show when={!ready()}>
             <text fg={theme.primary} wrapMode="word" width="100%">
