@@ -33,7 +33,7 @@ import {
 // Production builds this set from `provider.models` at loader time; mirror
 // the same shape here for the transform-only e2e checks.
 const TOOLCAPABLE_E2E_FIXTURE: ReadonlySet<string> = new Set([
-  "claude-3-5-sonnet", "claude-sonnet-4-6", "claude-opus-4-7",
+  "claude-sonnet-5", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-8",
   "openai-gpt-4.1", "openai-gpt-5",
 ])
 
@@ -239,17 +239,15 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
     // All models registered in provider.ts — availability depends on region/cross-region config
     const allModels = [
       // Claude
-      "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5",
-      "claude-haiku-4-5", "claude-4-sonnet", "claude-4-opus", "claude-3-7-sonnet", "claude-3-5-sonnet",
+      "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6",
+      "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-4-sonnet",
       // OpenAI
       "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5-mini", "openai-gpt-5-nano",
-      "openai-gpt-5-chat",
+      "openai-gpt-5.4",
       // Meta Llama
-      "llama4-maverick", "snowflake-llama-3.3-70b", "llama3.1-70b", "llama3.1-405b", "llama3.1-8b",
+      "llama4-maverick", "llama3.3-70b", "llama3.1-70b", "llama3.1-8b",
       // Mistral
-      "mistral-large", "mistral-large2", "mistral-7b",
-      // DeepSeek
-      "deepseek-r1",
+      "mistral-large2", "mistral-7b",
     ]
 
     for (const model of allModels) {

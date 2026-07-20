@@ -50,7 +50,7 @@ function provideProviderTestInstance<R>(input: {
 // Production code derives the equivalent set from `provider.models` at loader
 // time; this fixture exists so unit tests of the pure transform stay simple.
 const TOOLCAPABLE_FIXTURE: ReadonlySet<string> = new Set([
-  "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5",
+  "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5",
   "claude-opus-4-5", "claude-haiku-4-5", "claude-4-sonnet", "claude-3-7-sonnet",
   "claude-3-5-sonnet",
   "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5.1", "openai-gpt-5.2",
@@ -955,9 +955,10 @@ describe("snowflake-cortex provider", () => {
           const providers = await Provider.list()
           const models = providers["snowflake-cortex"].models
           // Claude
+          expect(models["claude-sonnet-5"].capabilities.toolcall).toBe(true)
+          expect(models["claude-opus-4-8"].capabilities.toolcall).toBe(true)
           expect(models["claude-sonnet-4-6"].capabilities.toolcall).toBe(true)
           expect(models["claude-haiku-4-5"].capabilities.toolcall).toBe(true)
-          expect(models["claude-3-5-sonnet"].capabilities.toolcall).toBe(true)
           // OpenAI
           expect(models["openai-gpt-4.1"].capabilities.toolcall).toBe(true)
           expect(models["openai-gpt-5"].capabilities.toolcall).toBe(true)
@@ -968,7 +969,7 @@ describe("snowflake-cortex provider", () => {
     }
   })
 
-  test("Llama, Mistral, and DeepSeek models have toolcall: false", async () => {
+  test("Llama and Mistral models have toolcall: false", async () => {
     await setupOAuth()
     try {
       await using tmp = await tmpdir({
@@ -982,9 +983,8 @@ describe("snowflake-cortex provider", () => {
           const providers = await Provider.list()
           const models = providers["snowflake-cortex"].models
           expect(models["mistral-large2"].capabilities.toolcall).toBe(false)
-          expect(models["snowflake-llama-3.3-70b"].capabilities.toolcall).toBe(false)
+          expect(models["llama3.3-70b"].capabilities.toolcall).toBe(false)
           expect(models["llama3.1-70b"].capabilities.toolcall).toBe(false)
-          expect(models["deepseek-r1"].capabilities.toolcall).toBe(false)
           expect(models["llama4-maverick"].capabilities.toolcall).toBe(false)
         },
       })
@@ -1036,11 +1036,10 @@ describe("snowflake-cortex provider", () => {
     }
   })
 
-  test("models added per Snowflake regional availability docs (issue #851)", async () => {
-    // Regression: PR for issue #851 added 8 models that Snowflake Cortex
-    // supports but were missing from the hardcoded list. Lock in identity,
-    // toolcall capability, AND limits (the limits were corrected in the
-    // consensus-review follow-up after an initial drift was caught).
+  test("model catalog matches the live-verified Snowflake availability (2026-07-20)", async () => {
+    // Lock in identity, toolcall capability, AND limits for models verified
+    // live against Cortex (originally issue #851; catalog refreshed alongside
+    // the prompt-caching fix for issue #1009).
     await setupOAuth()
     try {
       await using tmp = await tmpdir({ config: {} })
@@ -1053,20 +1052,26 @@ describe("snowflake-cortex provider", () => {
           // Each entry: [id, expected toolcall, expected context, expected output]
           // Values sourced from
           // https://docs.snowflake.com/en/user-guide/snowflake-cortex/aisql-regional-availability
-          // (openai-gpt-5.2 is not in the restrictions table; using gpt-5 family defaults.)
+          // (openai-gpt-5.4/5.2/5.1 plain are not in the restrictions table;
+          // using gpt-5 family defaults.)
           const expectations: Array<[string, boolean, number, number]> = [
+            ["claude-sonnet-5", true, 1000000, 64000],
+            ["claude-opus-4-8", true, 1000000, 128000],
             ["claude-opus-4-7", true, 1000000, 128000],
             ["openai-gpt-5.1", true, 272000, 8192],
             ["openai-gpt-5.2", true, 272000, 8192],
-            ["llama4-scout", false, 128000, 8192],
+            ["openai-gpt-5.4", true, 272000, 8192],
+            ["openai-gpt-5.4-mini", true, 400000, 128000],
+            ["openai-gpt-5.4-nano", true, 400000, 128000],
             ["llama3.3-70b", false, 128000, 8192],
-            // Snowflake docs list output=8192 for this model, but its context
-            // is only 8000 — capped at 4096 (sibling default) so prompt+output
-            // always fit. See provider.ts comment for the rationale.
-            ["snowflake-llama-3.1-405b", false, 8000, 4096],
-            ["mixtral-8x7b", false, 32000, 8192],
-            ["gemini-3.1-pro", false, 1000000, 64000],
           ]
+
+          // Delisted or Snowflake-deprecated models must be gone from the picker
+          for (const id of ["claude-3-5-sonnet", "claude-3-7-sonnet", "openai-gpt-5-chat", "llama4-scout",
+            "snowflake-llama-3.1-405b", "snowflake-llama-3.3-70b", "llama3.1-405b", "mixtral-8x7b",
+            "mistral-large", "deepseek-r1", "gemini-3.1-pro"]) {
+            expect(models[id], `model ${id} should be removed`).toBeUndefined()
+          }
 
           for (const [id, toolcall, context, output] of expectations) {
             expect(models[id], `model ${id} should be defined`).toBeDefined()
@@ -1288,7 +1293,7 @@ describe("snowflake-cortex provider", () => {
     }
   })
 
-  test("claude-3-5-sonnet output limit is 8192", async () => {
+  test("claude-sonnet-5 limits match Snowflake's restrictions table", async () => {
     await setupOAuth()
     try {
       await using tmp = await tmpdir({
@@ -1300,7 +1305,8 @@ describe("snowflake-cortex provider", () => {
         directory: tmp.path,
         fn: async () => {
           const providers = await Provider.list()
-          expect(providers["snowflake-cortex"].models["claude-3-5-sonnet"].limit.output).toBe(8192)
+          expect(providers["snowflake-cortex"].models["claude-sonnet-5"].limit.context).toBe(1000000)
+          expect(providers["snowflake-cortex"].models["claude-sonnet-5"].limit.output).toBe(64000)
         },
       })
     } finally {
@@ -1355,7 +1361,7 @@ describe("Provider.all() discoverability", () => {
         const models = allProviders["snowflake-cortex"]?.models
         expect(models).toBeDefined()
         expect(models["claude-sonnet-4-6"]).toBeDefined()
-        expect(models["deepseek-r1"]).toBeDefined()
+        expect(models["llama4-maverick"]).toBeDefined()
       },
     })
   })
