@@ -133,7 +133,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   describe("Authentication", () => {
     test("valid credentials succeed", async () => {
       const resp = await cortexChat({
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-4-5",
         messages: [{ role: "user", content: "Reply with exactly: hello" }],
         stream: false,
         max_tokens: 32,
@@ -154,7 +154,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
           "X-Snowflake-Authorization-Token-Type": "PROGRAMMATIC_ACCESS_TOKEN",
         },
         body: JSON.stringify({
-          model: "claude-3-5-sonnet",
+          model: "claude-sonnet-4-5",
           messages: [{ role: "user", content: "test" }],
           max_completion_tokens: 16,
           stream: false,
@@ -170,7 +170,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   describe("Non-Streaming Completions", () => {
     test("returns valid JSON completion", async () => {
       const resp = await cortexChat({
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-4-5",
         messages: [{ role: "user", content: "What is 2+2? Reply with just the number." }],
         stream: false,
         max_tokens: 16,
@@ -189,7 +189,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
           ...authHeaders(),
         },
         body: JSON.stringify({
-          model: "claude-3-5-sonnet",
+          model: "claude-sonnet-4-5",
           messages: [{ role: "user", content: "Say hello" }],
           max_completion_tokens: 16,
           stream: false,
@@ -200,7 +200,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
 
     test("reports token usage", async () => {
       const resp = await cortexChat({
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-4-5",
         messages: [{ role: "user", content: "Say hi" }],
         stream: false,
         max_tokens: 16,
@@ -218,7 +218,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   describe("Streaming Completions", () => {
     test("returns SSE stream with chunked deltas", async () => {
       const resp = await cortexChat({
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-4-5",
         messages: [{ role: "user", content: "Count from 1 to 3." }],
         stream: true,
         max_tokens: 64,
@@ -278,7 +278,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   // Tool calling — only Claude models support it on Cortex
   // -------------------------------------------------------------------------
   describe("Tool Calling", () => {
-    const claudeModel = "claude-3-5-sonnet"
+    const claudeModel = "claude-sonnet-4-5"
     const nonClaudeModel = "mistral-large2"
 
     test(`${claudeModel} supports tool calls`, async () => {
@@ -354,7 +354,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
           ...authHeaders(),
         },
         body: JSON.stringify({
-          model: "claude-3-5-sonnet",
+          model: "claude-sonnet-4-5",
           messages: [
             { role: "user", content: "hello" },
             { role: "assistant", content: "I'm here" },
@@ -376,7 +376,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   // -------------------------------------------------------------------------
   describe("Prompt Caching", () => {
     // ~1,400 tokens of deterministic filler — above the 1,024-token minimum
-    // for claude-3-5-sonnet cache entries (Opus/Haiku models need 4,096).
+    // for claude-sonnet-4-5 cache entries (Opus/Haiku models need 4,096).
     const filler = Array.from({ length: 700 }, (_, i) => `fact-${i}: the answer to sub-question ${i} is ${i * 7}.`).join(" ")
 
     test("block-level cache_control on system message produces cache activity", async () => {
@@ -385,7 +385,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders() },
           body: JSON.stringify({
-            model: "claude-3-5-sonnet",
+            model: "claude-sonnet-4-5",
             messages: [
               {
                 role: "system",
@@ -414,7 +414,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({
-          model: "claude-3-5-sonnet",
+          model: "claude-sonnet-4-5",
           messages: [
             { role: "user", content: "Run the lookup tool for fact-3." },
             {
@@ -438,9 +438,52 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
           stream: false,
         }),
       })
-      // This is the exact shape the plugin emits after relocating markers on
-      // tool results — the request must not be rejected.
+      // Cortex accepts array content on role:"tool" but IGNORES its cache
+      // markers (verified live: cached_tokens stays 0) — which is why the
+      // plugin walks tool-message markers back to the nearest cacheable
+      // message instead. This test guards the acceptance half: the shape
+      // must never 400.
       expect(resp.status).toBe(200)
+    }, 30000)
+
+    test("agent-loop shape: marker on assistant text block with tool_calls caches", async () => {
+      // The exact shape the plugin emits mid-agent-loop: system breakpoint plus
+      // a trailing breakpoint on the assistant message (walked back from the
+      // tool result), while the tool result stays a plain string.
+      const request = () =>
+        fetch(`${cortexBaseURL(CORTEX_ACCOUNT!)}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-5",
+            messages: [
+              {
+                role: "system",
+                content: [{ type: "text", text: "You are terse.", cache_control: { type: "ephemeral" } }],
+              },
+              { role: "user", content: "Run the lookup tool, then answer." },
+              {
+                role: "assistant",
+                content: [{ type: "text", text: `Looking it up. Notes: ${filler}`, cache_control: { type: "ephemeral" } }],
+                tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }],
+              },
+              { role: "tool", tool_call_id: "call_1", content: "lookup result: 21" },
+            ],
+            tools: [
+              {
+                type: "function",
+                function: { name: "lookup", description: "look up facts", parameters: { type: "object", properties: {} } },
+              },
+            ],
+            max_completion_tokens: 32,
+            stream: false,
+          }),
+        })
+
+      const first = await request()
+      expect(first.status).toBe(200)
+      const usage = ((await first.json()) as any).usage
+      expect(usage?.prompt_tokens_details?.cached_tokens ?? 0).toBeGreaterThan(0)
     }, 30000)
   })
 
@@ -450,7 +493,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   describe("Request Transforms", () => {
     test("max_tokens renamed to max_completion_tokens", () => {
       const input = JSON.stringify({
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-4-5",
         messages: [{ role: "user", content: "test" }],
         max_tokens: 100,
         stream: true,
@@ -476,7 +519,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
 
     test("synthetic stop skipped for non-streaming", () => {
       const input = JSON.stringify({
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-4-5",
         stream: false,
         messages: [
           { role: "user", content: "test" },
@@ -489,7 +532,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
 
     test("synthetic stop triggered for streaming with trailing assistant", () => {
       const input = JSON.stringify({
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-4-5",
         stream: true,
         messages: [
           { role: "user", content: "test" },

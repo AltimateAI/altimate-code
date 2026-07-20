@@ -423,14 +423,59 @@ describe("relocateCacheControl", () => {
     expect("cache_control" in parsed.messages[0]).toBe(false)
   })
 
-  test("converts tool message string content with marker into a text block", () => {
+  test("tool message marker walks back to the nearest cacheable message", () => {
+    // Cortex accepts but silently ignores markers on role:"tool" — so the
+    // breakpoint moves to the closest earlier system/user/assistant message.
+    const parsed: Record<string, any> = {
+      model: "claude-opus-4-7",
+      messages: [
+        { role: "user", content: "run the tool" },
+        { role: "assistant", content: "On it.", tool_calls: [{ id: "call_1", type: "function", function: { name: "f", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "call_1", content: "tool output", cache_control: EPHEMERAL },
+      ],
+    }
+    expect(relocateCacheControl(parsed)).toBe(true)
+    // Tool message keeps plain string content, no marker
+    expect(parsed.messages[2].content).toBe("tool output")
+    expect("cache_control" in parsed.messages[2]).toBe(false)
+    // Marker lands on the assistant message's text, now as a block
+    expect(parsed.messages[1].content).toEqual([{ type: "text", text: "On it.", cache_control: EPHEMERAL }])
+  })
+
+  test("tool marker skips an empty assistant message and lands on the user message", () => {
+    const parsed: Record<string, any> = {
+      model: "claude-opus-4-7",
+      messages: [
+        { role: "user", content: "run the tool" },
+        { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "f", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "call_1", content: "tool output", cache_control: EPHEMERAL },
+      ],
+    }
+    expect(relocateCacheControl(parsed)).toBe(true)
+    expect(parsed.messages[1].content).toBe("")
+    expect(parsed.messages[0].content).toEqual([{ type: "text", text: "run the tool", cache_control: EPHEMERAL }])
+  })
+
+  test("tool marker with no preceding cacheable message is dropped", () => {
     const parsed: Record<string, any> = {
       model: "claude-opus-4-7",
       messages: [{ role: "tool", tool_call_id: "call_1", content: "tool output", cache_control: EPHEMERAL }],
     }
-    expect(relocateCacheControl(parsed)).toBe(true)
-    expect(parsed.messages[0].content).toEqual([{ type: "text", text: "tool output", cache_control: EPHEMERAL }])
-    expect(parsed.messages[0].tool_call_id).toBe("call_1")
+    expect(relocateCacheControl(parsed)).toBe(false)
+    expect(parsed.messages[0].content).toBe("tool output")
+    expect("cache_control" in parsed.messages[0]).toBe(false)
+  })
+
+  test("pre-existing block-level markers on tool messages are stripped", () => {
+    const parsed: Record<string, any> = {
+      model: "claude-opus-4-7",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "tool", tool_call_id: "call_1", content: [{ type: "text", text: "out", cache_control: EPHEMERAL }] },
+      ],
+    }
+    expect(relocateCacheControl(parsed)).toBe(false)
+    expect("cache_control" in parsed.messages[1].content[0]).toBe(false)
   })
 
   test("strips stray markers from assistant tool_calls entries", () => {
@@ -642,8 +687,12 @@ describe("relocateCacheControl", () => {
     const sys = fixed.messages.find((m: any) => m.role === "system")
     expect(sys.content).toEqual([{ type: "text", text: "You are a data engineer.", cache_control: EPHEMERAL }])
     expect("cache_control" in sys).toBe(false)
+    // Tool markers walk back past the empty assistant message to the user message
     const tool = fixed.messages.find((m: any) => m.role === "tool")
-    expect(tool.content).toEqual([{ type: "text", text: "42 rows", cache_control: EPHEMERAL }])
+    expect(tool.content).toBe("42 rows")
+    expect("cache_control" in tool).toBe(false)
+    const usr = fixed.messages.find((m: any) => m.role === "user")
+    expect(usr.content).toEqual([{ type: "text", text: "optimize my query", cache_control: EPHEMERAL }])
     for (const call of fixed.messages.find((m: any) => m.role === "assistant").tool_calls ?? []) {
       expect("cache_control" in call).toBe(false)
     }

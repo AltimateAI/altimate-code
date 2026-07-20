@@ -47,23 +47,57 @@ function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+/** Roles whose content-block cache markers Cortex honors (verified live 2026-07-20). */
+const CACHEABLE_ROLES = new Set(["system", "user", "assistant"])
+
+/**
+ * Attach a cache marker to the last non-empty content block of a message.
+ * String content is wrapped into a text block. Returns false when the message
+ * has no block that can carry a marker (e.g. empty content).
+ */
+function attachMarker(msg: Record<string, any>, marker: Record<string, any>): boolean {
+  if (typeof msg.content === "string") {
+    if (msg.content.length === 0) return false
+    msg.content = [{ type: "text", text: msg.content, cache_control: marker }]
+    return true
+  }
+  if (!Array.isArray(msg.content)) return false
+  for (let i = msg.content.length - 1; i >= 0; i--) {
+    const block = msg.content[i]
+    if (!isRecord(block)) continue
+    if (block.type === "text" && (typeof block.text !== "string" || block.text.length === 0)) continue
+    if (!isRecord(block.cache_control)) block.cache_control = marker
+    return true
+  }
+  return false
+}
+
 /**
  * Relocate prompt-cache markers into content blocks for Claude models.
  *
  * Cortex only honors caching via `messages[].content[].cache_control`
- * (ephemeral, max 4 breakpoints). The OpenAI-compatible AI SDK serializes our
- * cache providerOptions as message-level fields — on system messages, on
- * single-text-part user messages (collapsed to string content), on tool
- * messages, and into assistant `tool_calls` entries — all of which Cortex
- * silently ignores, so every request bills the full input rate.
+ * (ephemeral, max 4 breakpoints) — and only on system/user/assistant messages;
+ * markers on `role:"tool"` messages are accepted but silently ignored
+ * (verified against a live Cortex account). The OpenAI-compatible AI SDK
+ * serializes our cache providerOptions as message-level fields — on system
+ * messages, on single-text-part user messages (collapsed to string content),
+ * on tool messages, and into assistant `tool_calls` entries — all of which
+ * Cortex ignores, so every request bills the full input rate.
+ *
+ * Message-level markers move into that message's content blocks; a marker on
+ * a tool message (or a message with no attachable block) walks back to the
+ * nearest earlier cacheable message, keeping the breakpoint as close to the
+ * end of the conversation as Cortex allows.
  *
  * Returns true when the request carries block-level markers after relocation.
  */
 export function relocateCacheControl(parsed: Record<string, any>): boolean {
   if (typeof parsed.model !== "string" || !parsed.model.includes("claude")) return false
   if (!Array.isArray(parsed.messages)) return false
+  const messages = parsed.messages
 
-  for (const msg of parsed.messages) {
+  for (let idx = 0; idx < messages.length; idx++) {
+    const msg = messages[idx]
     if (!isRecord(msg)) continue
 
     // The SDK spreads part metadata into tool_calls entries — invalid location.
@@ -77,30 +111,25 @@ export function relocateCacheControl(parsed: Record<string, any>): boolean {
     delete msg.cache_control
     if (!marker) continue
 
-    if (typeof msg.content === "string") {
-      if (msg.content.length === 0) continue
-      msg.content = [{ type: "text", text: msg.content, cache_control: marker }]
-      continue
-    }
-
-    if (!Array.isArray(msg.content)) continue
-
-    // Attach to the last block; skip empty text blocks (markers there are rejected).
-    for (let i = msg.content.length - 1; i >= 0; i--) {
-      const block = msg.content[i]
-      if (!isRecord(block)) continue
-      if (block.type === "text" && (typeof block.text !== "string" || block.text.length === 0)) continue
-      if (!isRecord(block.cache_control)) block.cache_control = marker
-      break
+    for (let t = idx; t >= 0; t--) {
+      const target = messages[t]
+      if (!isRecord(target) || !CACHEABLE_ROLES.has(target.role)) continue
+      if (attachMarker(target, marker)) break
     }
   }
 
   // Enforce the breakpoint limit, keeping the last markers (longest prefixes).
+  // Markers on non-cacheable roles are dead weight against the limit — drop them.
   const marked: Record<string, any>[] = []
-  for (const msg of parsed.messages) {
+  for (const msg of messages) {
     if (!isRecord(msg) || !Array.isArray(msg.content)) continue
     for (const block of msg.content) {
-      if (isRecord(block) && block.cache_control) marked.push(block)
+      if (!isRecord(block) || !block.cache_control) continue
+      if (!CACHEABLE_ROLES.has(msg.role)) {
+        delete block.cache_control
+        continue
+      }
+      marked.push(block)
     }
   }
   for (const block of marked.slice(0, Math.max(0, marked.length - CACHE_BREAKPOINT_LIMIT))) {
