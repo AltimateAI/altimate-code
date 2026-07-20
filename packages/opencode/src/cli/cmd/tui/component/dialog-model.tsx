@@ -326,8 +326,8 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
     markSetupComplete()
   }
   const options = [
-    { label: "No — pick something else", hint: "(default)", run: no },
-    { label: "Yes — continue with Big Pickle", hint: "", run: yes },
+    { label: "No", hint: "Pick something else (default)", run: no },
+    { label: "Yes", hint: "Continue with Big Pickle", run: yes },
   ]
 
   useKeyboard((evt) => {
@@ -367,8 +367,8 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
         </text>
       </box>
       <text fg={theme.textMuted} wrapMode="word" width="100%">
-        Big Pickle works for chat but often fails at data tasks. The Gateway is free to start (10M tokens). Continue?
-        [y/N]
+        Big Pickle works for chat but often fails at data tasks. The Altimate LLM Gateway is free to start (10M
+        tokens).
       </text>
       <box>
         <For each={options}>
@@ -383,6 +383,8 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
                 {selected() === index() ? "›" : " "}
               </text>
               <box
+                width={6}
+                flexShrink={0}
                 paddingLeft={1}
                 paddingRight={1}
                 backgroundColor={selected() === index() ? theme.primary : transparent}
