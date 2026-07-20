@@ -307,13 +307,14 @@ export function instancePage(
   // De-dup: on the email path these were already offered on /register — don't ask twice.
   const attributionFields = opts.askAttribution
     ? `
-      <label class="field-label" for="source">How did you hear about us <span class="opt">(Optional)</span></label>
-      <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" />
+      <label class="field-label" for="source">How did you hear about us</label>
+      <input class="field" type="text" id="source" name="source" list="hear-options" placeholder="Select an option" autocomplete="off" required />
       ${hearAboutDatalist}
     `
     : ""
   const body = `
     <h1>Name your instance</h1>
+    <p class="sub">This becomes your custom Altimate URL (e.g. yourname.app.getaltimate.com).</p>
     <p class="sub">Almost done — confirm the name and we'll provision it for you.</p>
 
     <form id="instance-form" method="POST" action="/web/instance">
@@ -322,9 +323,9 @@ export function instancePage(
       <input class="field" type="text" id="name" name="name" value="${escapeAttr(suggested)}"
              autocomplete="off" autocapitalize="none" spellcheck="false" autofocus />
       <div id="status" class="status-line">${opts.error ? `<span class="err">${escapeHtml(opts.error)}</span>` : ""}</div>
-      <p class="help-line">This names your Altimate instance. You can rename it later.</p>
+      <p class="help-line">This names your Altimate instance.</p>
       ${attributionFields}
-      <button type="submit" class="btn btn-primary" id="continue-btn" style="margin-top:18px">Continue</button>
+      <button type="submit" class="btn btn-primary" id="continue-btn" disabled style="margin-top:18px">Continue</button>
     </form>
   `
 
@@ -344,37 +345,44 @@ export function instancePage(
       var input = document.getElementById('name');
       var status = document.getElementById('status');
       var btn = document.getElementById('continue-btn');
+      var source = document.getElementById('source'); // present only when we ask attribution
       var timer = null;
+      var nameOk = false;
 
-      function render(html, disabled) {
-        status.innerHTML = html;
-        btn.disabled = !!disabled;
-      }
+      // "How did you hear about us" is required when shown; gate Continue on BOTH
+      // a valid/available instance name AND a non-empty source selection.
+      function sourceOk() { return !source || source.value.trim() !== ''; }
+      function updateButton() { btn.disabled = !(nameOk && sourceOk()); }
 
       function check() {
         var v = input.value.trim();
-        if (!v) { render('', true); return; }
+        if (!v) { nameOk = false; status.innerHTML = ''; updateButton(); return; }
         fetch('/api/instance/check?name=' + encodeURIComponent(v))
           .then(function (r) { return r.json(); })
           .then(function (d) {
             if (input.value.trim() !== v) return; // stale response
             if (!d.valid) {
-              render('<span class="err">' + d.error + '</span>', true);
+              nameOk = false;
+              status.innerHTML = '<span class="err">' + d.error + '</span>';
             } else if (!d.available) {
-              render('<span class="warn">taken — try <button type="button" class="use-btn" id="use-suggestion">' + d.suggestion + '</button></span>', true);
+              nameOk = false;
+              status.innerHTML = '<span class="warn">taken — try <button type="button" class="use-btn" id="use-suggestion">' + d.suggestion + '</button></span>';
               var use = document.getElementById('use-suggestion');
               if (use) use.addEventListener('click', function () { input.value = d.suggestion; check(); });
             } else {
-              render('<span class="ok">✓ available</span>', false);
+              nameOk = true;
+              status.innerHTML = '<span class="ok">✓ available</span>';
             }
+            updateButton();
           })
-          .catch(function () { render('', false); });
+          .catch(function () { nameOk = true; status.innerHTML = ''; updateButton(); });
       }
 
       input.addEventListener('input', function () {
         clearTimeout(timer);
         timer = setTimeout(check, 350);
       });
+      if (source) source.addEventListener('input', updateButton);
       check(); // initial pre-fill check
     })();
   `
