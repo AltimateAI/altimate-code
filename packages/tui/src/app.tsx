@@ -24,6 +24,7 @@ import {
   onCleanup,
   batch,
   Show,
+  on,
 } from "solid-js"
 import { TuiPathsProvider, TuiStartupProvider, TuiTerminalEnvironmentProvider, useTuiStartup } from "./context/runtime"
 import { DialogProvider, useDialog } from "./ui/dialog"
@@ -32,6 +33,8 @@ import { DialogProvider, useDialog } from "./ui/dialog"
 import { DialogAltimateAuth } from "./component/dialog-provider"
 import { DialogModelWelcome, useReady, resetSetupComplete } from "./component/altimate-onboarding"
 // altimate_change end
+// altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
+import { DialogScanGate } from "./component/dialog-scan-gate"
 import { ErrorComponent } from "./component/error-component"
 import { PluginRouteMissing } from "./component/plugin-route-missing"
 import { ProjectProvider, useProject } from "./context/project"
@@ -549,6 +552,32 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // component/altimate-onboarding.tsx. Named distinctly from the plugin-host `ready`
   // signal above (line ~408), which tracks TUI plugin startup, not onboarding state.
   const onboardingReady = useReady()
+  // altimate_change start — Part 2 scan gate: fire EXACTLY once, on the first time
+  // this session reaches "ready" from a not-ready start (i.e. the user just finished
+  // Part 1 in a fresh onboarding). `prev === false` guarantees a genuine false→true
+  // transition, so a returning user (ready from launch, prev === undefined) never
+  // sees it, and a later /model change (ready stays true, no transition) never
+  // re-triggers it. We do NOT auto-scan — the gate just asks.
+  let scanGateShown = false
+  createEffect(
+    on(onboardingReady, (isReady, prev) => {
+      if (scanGateShown) return
+      if (isReady && prev === false) {
+        scanGateShown = true
+        dialog.replace(() => (
+          <DialogScanGate
+            onChoose={(arg) => {
+              const ref = promptRef.current
+              if (!ref) return
+              ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
+              ref.submit()
+            }}
+          />
+        ))
+      }
+    }),
+  )
+  // altimate_change end
   const currentWorktreeWorkspace = createMemo(() => {
     const workspaceID = project.workspace.current()
     if (!workspaceID) return

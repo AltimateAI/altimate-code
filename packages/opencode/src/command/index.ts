@@ -21,6 +21,10 @@ import PROMPT_CONFIGURE_CODEX from "./template/configure-codex.txt"
 import PROMPT_DISCOVER_MCPS from "./template/discover-and-add-mcps.txt"
 import PROMPT_FEEDBACK from "./template/feedback.txt"
 // altimate_change end
+// altimate_change start — Part 2 onboarding: scan-gate orchestration (invokes the
+// existing /discover flow on the found path; discover.txt is unchanged)
+import PROMPT_ONBOARD_CONNECT from "./template/onboard-connect.txt"
+// altimate_change end
 
 type State = {
   commands: Record<string, Info>
@@ -77,6 +81,7 @@ export const Default = {
   CONFIGURE_CODEX: "configure-codex",
   DISCOVER_MCPS: "discover-and-add-mcps",
   MCPS: "mcps",
+  ONBOARD_CONNECT: "onboard-connect",
   // altimate_change end
 } as const
 
@@ -119,6 +124,19 @@ export const layer = Layer.effect(
           return PROMPT_DISCOVER
         },
         hints: hints(PROMPT_DISCOVER),
+      }
+      // altimate_change end
+      // altimate_change start — Part 2 scan gate (invoked programmatically by the
+      // TUI gate with "scan"/"skip"; hidden from the slash menu in autocomplete)
+      commands[Default.ONBOARD_CONNECT] = {
+        name: Default.ONBOARD_CONNECT,
+        description: "onboarding: scan environment and connect (scan|skip)",
+        source: "command",
+        subtask: false,
+        get template() {
+          return PROMPT_ONBOARD_CONNECT
+        },
+        hints: hints(PROMPT_ONBOARD_CONNECT),
       }
       // altimate_change end
       commands[Default.REVIEW] = {
