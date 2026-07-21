@@ -205,6 +205,9 @@ export function transformSnowflakeBody(
   cacheControl = true,
 ): { body: string; syntheticStop?: Response; cacheApplied?: boolean } {
   const parsed = JSON.parse(bodyText)
+  // Valid-JSON scalar/array roots (not request objects) pass through untouched —
+  // the interceptor's catch only forgives SyntaxError, so guard here.
+  if (!isRecord(parsed)) return { body: bodyText, cacheApplied: false }
 
   // Snowflake uses max_completion_tokens instead of max_tokens
   if ("max_tokens" in parsed) {
