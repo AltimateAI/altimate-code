@@ -696,6 +696,16 @@ describe("relocateCacheControl", () => {
     }
   })
 
+  test("disabled mode leaves non-claude payloads untouched", () => {
+    const input = JSON.stringify({
+      model: "llama4-maverick",
+      messages: [{ role: "system", content: [{ type: "text", text: "sys", cache_control: EPHEMERAL }] }],
+    })
+    const result = transformSnowflakeBody(input, TOOLCAPABLE_FIXTURE, false)
+    const parsed = JSON.parse(result.body)
+    expect(parsed.messages[0].content[0].cache_control).toEqual(EPHEMERAL)
+  })
+
   test("prefix gate: model containing but not starting with 'claude' is untouched", () => {
     const parsed: Record<string, any> = {
       model: "my-claude-finetune",
@@ -861,6 +871,35 @@ describe("SnowflakeCortexAuthPlugin fetch interceptor", () => {
       await pluginFetch(url, { method: "POST", body: cacheMarkedBody() })
       expect(bodies[2]).toContain("cache_control")
       expect(JSON.parse(bodies[2]).messages[0].content[0].cache_control).toEqual({ type: "ephemeral" })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test("returns the original 400 and keeps caching enabled when the retry fetch throws", async () => {
+    const pluginFetch = await makeLoaderFetch()
+    const bodies: string[] = []
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = (async (_input: any, init?: RequestInit) => {
+      bodies.push(String(init?.body))
+      calls += 1
+      if (calls === 2) throw new TypeError("network down")
+      if (calls === 1) return new Response("{}", { status: 400 })
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+
+    try {
+      const url = "https://myorg-myaccount.snowflakecomputing.com/api/v2/cortex/v1/chat/completions"
+      // Transport failure on the probe retry surfaces the original Cortex 400
+      const first = await pluginFetch(url, { method: "POST", body: cacheMarkedBody() })
+      expect(first.status).toBe(400)
+      expect(bodies).toHaveLength(2)
+
+      // The eager cooldown was rolled back — markers keep flowing
+      const second = await pluginFetch(url, { method: "POST", body: cacheMarkedBody() })
+      expect(second.status).toBe(200)
+      expect(bodies[2]).toContain("cache_control")
     } finally {
       globalThis.fetch = originalFetch
     }

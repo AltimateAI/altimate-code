@@ -56,6 +56,8 @@ const CACHE_BREAKPOINT_LIMIT = 4
  */
 const CACHE_DISABLE_COOLDOWN_MS = 5 * 60 * 1000
 
+// `any` is deliberate: these guards navigate arbitrary request-body JSON whose
+// message/block properties are read and mutated without a fixed schema.
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -211,8 +213,13 @@ export function transformSnowflakeBody(
   }
 
   let cacheApplied = false
-  if (cacheControl) cacheApplied = relocateCacheControl(parsed)
-  else stripParsedCacheControl(parsed)
+  if (cacheControl) {
+    cacheApplied = relocateCacheControl(parsed)
+  } else if (typeof parsed.model === "string" && parsed.model.startsWith("claude-")) {
+    // Disabled mode only unwinds what relocation would have produced — keep
+    // non-Claude payloads untouched (Cortex ignores their markers anyway).
+    stripParsedCacheControl(parsed)
+  }
 
   // Strip tools for models that don't support tool calling on Snowflake Cortex.
   // Also remove orphaned tool_calls from messages to avoid Snowflake API errors.
@@ -350,9 +357,20 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
             if (response.status === 400 && cacheApplied) {
               const stripped = transformSnowflakeBody(text, toolCapable, false).body
               if (stripped !== body) {
-                const retry = await fetch(requestInput, { ...init, headers, body: stripped })
+                // Pause markers eagerly so concurrent in-flight requests stop
+                // sending the rejected shape while this probe retry runs;
+                // restored below if the retry shows markers weren't the cause.
+                const previousDisabledUntil = cacheDisabledUntil
+                cacheDisabledUntil = Date.now() + CACHE_DISABLE_COOLDOWN_MS
+                let retry: Response
+                try {
+                  retry = await fetch(requestInput, { ...init, headers, body: stripped })
+                } catch {
+                  // Transport failure on the probe — surface the original 400.
+                  cacheDisabledUntil = previousDisabledUntil
+                  return response
+                }
                 if (retry.ok) {
-                  cacheDisabledUntil = Date.now() + CACHE_DISABLE_COOLDOWN_MS
                   log.warn("Cortex rejected cache-marked request; pausing prompt caching", {
                     status: response.status,
                     cooldownMs: CACHE_DISABLE_COOLDOWN_MS,
@@ -360,6 +378,8 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
                   void response.body?.cancel().catch(() => {})
                   return retry
                 }
+                // Retry failed too — the 400 wasn't the markers; resume injection.
+                cacheDisabledUntil = previousDisabledUntil
                 void retry.body?.cancel().catch(() => {})
                 return response
               }

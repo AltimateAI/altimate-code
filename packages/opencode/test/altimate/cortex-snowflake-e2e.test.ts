@@ -397,6 +397,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
 
       const first = await request()
       expect(first.status).toBe(200)
+      await first.text()
       const second = await request()
       expect(second.status).toBe(200)
       const usage = ((await second.json()) as any).usage
