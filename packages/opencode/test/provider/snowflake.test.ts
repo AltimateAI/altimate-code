@@ -14,7 +14,6 @@ import {
   parseSnowflakePAT,
   relocateCacheControl,
   SnowflakeCortexAuthPlugin,
-  stripCacheControl,
   transformSnowflakeBody,
 } from "../../src/altimate/plugin/snowflake"
 
@@ -50,11 +49,10 @@ function provideProviderTestInstance<R>(input: {
 // Production code derives the equivalent set from `provider.models` at loader
 // time; this fixture exists so unit tests of the pure transform stay simple.
 const TOOLCAPABLE_FIXTURE: ReadonlySet<string> = new Set([
-  "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5",
-  "claude-opus-4-5", "claude-haiku-4-5", "claude-4-sonnet", "claude-3-7-sonnet",
-  "claude-3-5-sonnet",
-  "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5.1", "openai-gpt-5.2",
-  "openai-gpt-5-mini", "openai-gpt-5-nano", "openai-gpt-5-chat",
+  "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6",
+  "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-4-sonnet",
+  "openai-gpt-4.1", "openai-gpt-5.4", "openai-gpt-5.4-mini", "openai-gpt-5.4-nano",
+  "openai-gpt-5.2", "openai-gpt-5.1", "openai-gpt-5", "openai-gpt-5-mini", "openai-gpt-5-nano",
 ])
 
 // ---------------------------------------------------------------------------
@@ -166,9 +164,9 @@ describe("transformSnowflakeBody", () => {
     expect(parsed.tools).toBeUndefined()
   })
 
-  test("strips tools for deepseek-r1", () => {
+  test("strips tools for mistral-7b", () => {
     const input = JSON.stringify({
-      model: "deepseek-r1",
+      model: "mistral-7b",
       messages: [{ role: "user", content: "hello" }],
       tools: [{ type: "function", function: { name: "read_file" } }],
     })
@@ -698,17 +696,33 @@ describe("relocateCacheControl", () => {
     }
   })
 
-  test("stripCacheControl removes every marker from the body", () => {
-    const body = JSON.stringify({
+  test("prefix gate: model containing but not starting with 'claude' is untouched", () => {
+    const parsed: Record<string, any> = {
+      model: "my-claude-finetune",
+      messages: [{ role: "system", content: "sys", cache_control: EPHEMERAL }],
+    }
+    expect(relocateCacheControl(parsed)).toBe(false)
+    expect(parsed.messages[0].cache_control).toEqual(EPHEMERAL)
+  })
+
+  test("message-level marker attaches to a trailing non-text block", () => {
+    // Locks current behavior: relocation targets the last non-empty block
+    // regardless of type (live verification only covered text blocks).
+    const parsed: Record<string, any> = {
       model: "claude-opus-4-7",
       messages: [
-        { role: "system", content: [{ type: "text", text: "sys", cache_control: EPHEMERAL }] },
-        { role: "user", content: "hi", cache_control: EPHEMERAL },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe this" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
+          ],
+          cache_control: EPHEMERAL,
+        },
       ],
-    })
-    const parsed = JSON.parse(stripCacheControl(body))
-    expect("cache_control" in parsed.messages[0].content[0]).toBe(false)
-    expect("cache_control" in parsed.messages[1]).toBe(false)
+    }
+    expect(relocateCacheControl(parsed)).toBe(true)
+    expect(parsed.messages[0].content[1].cache_control).toEqual(EPHEMERAL)
   })
 })
 

@@ -1,5 +1,8 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Auth, OAUTH_DUMMY_KEY } from "@/auth"
+import { Log } from "@/altimate/util/log"
+
+const log = Log.create({ service: "snowflake-cortex" })
 
 /**
  * Build the set of Snowflake Cortex model IDs that support tool calling.
@@ -92,7 +95,10 @@ function attachMarker(msg: Record<string, any>, marker: Record<string, any>): bo
  * Returns true when the request carries block-level markers after relocation.
  */
 export function relocateCacheControl(parsed: Record<string, any>): boolean {
-  if (typeof parsed.model !== "string" || !parsed.model.includes("claude")) return false
+  // Every Claude model Cortex serves uses a `claude-` prefixed ID; a prefix
+  // match avoids false positives on user-registered aliases that merely
+  // contain the substring.
+  if (typeof parsed.model !== "string" || !parsed.model.startsWith("claude-")) return false
   if (!Array.isArray(parsed.messages)) return false
   const messages = parsed.messages
 
@@ -156,17 +162,6 @@ function stripParsedCacheControl(parsed: Record<string, any>) {
   }
 }
 
-/** Remove every cache marker from a request body (fallback when Cortex rejects them). */
-export function stripCacheControl(bodyText: string): string {
-  try {
-    const parsed = JSON.parse(bodyText)
-    stripParsedCacheControl(parsed)
-    return JSON.stringify(parsed)
-  } catch {
-    return bodyText
-  }
-}
-
 /** Parse a `account::token` PAT credential string. */
 export function parseSnowflakePAT(code: string): { account: string; token: string } | null {
   const sep = code.indexOf("::")
@@ -180,7 +175,6 @@ export function parseSnowflakePAT(code: string): { account: string; token: strin
 
 /**
  * Transform a Snowflake Cortex request body string.
- * Returns a Response to short-circuit the fetch (synthetic stop), or undefined to continue normally.
  *
  * @param toolCapable Model IDs that should retain `tools` / `tool_choice` / tool messages.
  *                    Build via `buildToolCapableSet(provider.models)` at loader time so
@@ -188,6 +182,10 @@ export function parseSnowflakePAT(code: string): { account: string; token: strin
  * @param cacheControl When false, strip every cache marker instead of relocating
  *                     them into content blocks (set after Cortex rejected a
  *                     cache-marked request).
+ * @returns `body` — the rewritten request body; `syntheticStop` — a Response that
+ *          short-circuits the fetch entirely (trailing-assistant continuation);
+ *          `cacheApplied` — true when the body carries block-level cache markers.
+ * @throws SyntaxError when `bodyText` is not valid JSON.
  */
 export function transformSnowflakeBody(
   bodyText: string,
@@ -303,27 +301,30 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
             headers.set("X-Snowflake-Authorization-Token-Type", "PROGRAMMATIC_ACCESS_TOKEN")
 
             let body = init?.body
+            let text = ""
             let cacheApplied = false
             if (body) {
-              try {
-                let text: string
-                if (typeof body === "string") {
-                  text = body
-                } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
-                  text = new TextDecoder().decode(body)
-                } else {
-                  // ReadableStream, Blob, FormData — pass through untransformed
-                  text = ""
+              if (typeof body === "string") {
+                text = body
+              } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+                text = new TextDecoder().decode(body)
+              }
+              // ReadableStream, Blob, FormData — pass through untransformed
+              if (text) {
+                let result
+                try {
+                  result = transformSnowflakeBody(text, toolCapable, cacheControlSupported)
+                } catch (error) {
+                  // Non-JSON body — pass through untransformed. Anything else
+                  // is a transform bug and must surface, not degrade silently.
+                  if (!(error instanceof SyntaxError)) throw error
                 }
-                if (text) {
-                  const result = transformSnowflakeBody(text, toolCapable, cacheControlSupported)
+                if (result) {
                   if (result.syntheticStop) return result.syntheticStop
                   body = result.body
                   cacheApplied = result.cacheApplied === true
                   headers.delete("content-length")
                 }
-              } catch {
-                // JSON parse error — pass original body through untransformed
               }
             }
 
@@ -331,13 +332,20 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
 
             // If Cortex rejects a cache-marked request, retry once without the
             // markers; when the stripped retry succeeds, the markers were the
-            // problem — disable caching for the rest of the session.
-            if (response.status === 400 && cacheApplied && typeof body === "string") {
-              const stripped = stripCacheControl(body)
+            // problem — disable caching for the rest of the session. The retry
+            // fires on any 400 (Cortex's marker-rejection error text is
+            // undocumented, so there is no reliable signal to scope on); a
+            // deterministic non-marker 400 recurs identically on the retry and
+            // never flips the flag.
+            if (response.status === 400 && cacheApplied) {
+              const stripped = transformSnowflakeBody(text, toolCapable, false).body
               if (stripped !== body) {
                 const retry = await fetch(requestInput, { ...init, headers, body: stripped })
                 if (retry.ok) {
                   cacheControlSupported = false
+                  log.warn("Cortex rejected cache-marked request; disabling prompt caching for this session", {
+                    status: response.status,
+                  })
                   void response.body?.cancel().catch(() => {})
                   return retry
                 }

@@ -243,7 +243,7 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
       "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-4-sonnet",
       // OpenAI
       "openai-gpt-4.1", "openai-gpt-5", "openai-gpt-5-mini", "openai-gpt-5-nano",
-      "openai-gpt-5.4",
+      "openai-gpt-5.4", "openai-gpt-5.4-mini", "openai-gpt-5.4-nano",
       // Meta Llama
       "llama4-maverick", "llama3.3-70b", "llama3.1-70b", "llama3.1-8b",
       // Mistral
@@ -322,21 +322,20 @@ describe.skipIf(!HAS_CORTEX)("Snowflake Cortex E2E", () => {
   })
 
   // -------------------------------------------------------------------------
-  // DeepSeek R1 reasoning format
+  // Removed models must stay removed
   // -------------------------------------------------------------------------
-  describe("DeepSeek R1 Reasoning", () => {
-    test("deepseek-r1 returns <think> tags in content", async () => {
+  describe("Removed Models", () => {
+    test("deprecated deepseek-r1 is rejected by Cortex", async () => {
+      // Snowflake deprecated deepseek-r1 on July 8, 2026 and it was removed
+      // from the catalog. If this test ever sees a 200, Cortex reinstated the
+      // model and the catalog should be revisited.
       const resp = await cortexChat({
         model: "deepseek-r1",
         messages: [{ role: "user", content: "What is 2+2?" }],
         stream: false,
-        max_tokens: 64,
+        max_tokens: 16,
       })
-      if (resp.status === 200) {
-        const json = await resp.json()
-        const content = json.choices[0].message.content
-        expect(content).toContain("<think>")
-      }
+      expect([400, 403]).toContain(resp.status)
     }, 30000)
   })
 
