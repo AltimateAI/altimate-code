@@ -276,7 +276,7 @@ Create a PAT in Snowsight: **Admin > Security > Programmatic Access Tokens**.
 
 Billing flows through your Snowflake credits — no per-token costs.
 
-Prompt caching is applied automatically for Claude models: cache markers are placed on the system prompt and trailing messages, so repeated context in long sessions is billed at Snowflake's cached-input rate (a 90% discount on cache reads, 5-minute TTL). Cache activity appears as `cache_read_input`/`cache_write_input` in Snowflake's `CORTEX_FUNCTIONS_QUERY_USAGE_HISTORY`/`TOKENS_GRANULAR` telemetry. OpenAI models are cached automatically by Cortex itself; other model families don't support caching.
+Prompt caching is applied automatically for Claude models: cache markers are placed on the system prompt and trailing messages, so repeated context in long sessions is billed at Snowflake's reduced cached-input rate (5-minute TTL; exact cache-read and cache-write rates vary by model — see Snowflake's Cortex pricing). Savings are workload-dependent: long agent sessions with large stable prefixes benefit most, while very short sessions may see little change — monitor `cache_read_input`/`cache_write_input` in Snowflake's `CORTEX_FUNCTIONS_QUERY_USAGE_HISTORY`/`TOKENS_GRANULAR` telemetry after upgrading (these columns were previously always NULL for altimate-code workloads and now populate). OpenAI models are cached automatically by Cortex itself; other model families don't support caching.
 
 **Available models** (catalog verified live against Cortex on 2026-07-20):
 
