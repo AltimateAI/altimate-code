@@ -501,6 +501,155 @@ describe("risk-tier", () => {
     expect(r.tier).toBe("full")
     expect(r.reasons.join(" ")).toContain("source")
   })
+
+  // R20 S4 — triage-tier promotion for the two auto-approval failure modes
+  // exposed by the 5-PR internal corpus study. Historical baseline auto-
+  // approved PRs D (test-only YAML on contracted marts, 8 missed findings)
+  // and E (cost-anchor redesign, 11 missed findings). These tests lock in
+  // the "never auto-approve risk-bearing dbt metadata changes" contract.
+  test("R20 S4: full: schema.yml adds data_tests: [not_null] on a mart (PR D shape)", () => {
+    const diff =
+      "@@ -1,3 +1,6 @@\n" +
+      " models:\n" +
+      "   - name: mrt_column_lineage\n" +
+      "     columns:\n" +
+      "       - name: record_id\n" +
+      "+        data_tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/marts/mrt_column_lineage.yml", diff)])
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("data_tests")
+    // Marts context flag surfaces so the customer sees where the promotion came from.
+    expect(r.reasons.join(" ")).toContain("mart-API surface")
+  })
+
+  test("R20 S4: full: schema.yml adds constraints: block on a contracted model", () => {
+    const diff =
+      "@@ -1,3 +1,5 @@\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "+        constraints:\n" +
+      "+          - type: not_null\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("data_tests/constraints/contract")
+  })
+
+  test("R20 S4: full: schema.yml adds unique_combination_of_columns test", () => {
+    const diff =
+      "@@ -1,3 +1,7 @@\n" +
+      "     data_tests:\n" +
+      "+      - dbt_utils.unique_combination_of_columns:\n" +
+      "+          combination_of_columns:\n" +
+      "+            - metastore_id\n" +
+      "+            - sku_name\n"
+    const r = classifyPR([file("models/marts/mrt_billing_account_prices.yml", diff)])
+    expect(r.tier).toBe("full")
+  })
+
+  test("R20 S4: full: FinOps keyword in path (PR E shape — anchor cost redesign)", () => {
+    // Small SQL change on a cost-savings mart should NOT auto-approve at
+    // lite tier just because it's within the line limit — the corpus study
+    // showed these are the highest-severity blockers.
+    const r = classifyPR([file("models/marts/mrt_jobs_cost_savings.sql", "+select 1 as a\n")], {
+      blastRadiusOf: () => 1,
+    })
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("FinOps keyword")
+  })
+
+  test("R20 S4: full: FinOps keyword variants (billing/dbu/savings/spend) all promote", () => {
+    for (const path of [
+      "models/marts/mrt_billing_daily.sql",
+      "models/marts/mrt_dbu_by_workspace.sql",
+      "models/marts/mrt_credit_savings.sql",
+      "models/intermediate/int_query_cost.sql",
+      "models/staging/stg_warehouse_spend.sql",
+      "models/marts/mrt_list_price.sql",
+      "models/marts/mrt_daily_rate.sql",
+    ]) {
+      const r = classifyPR([file(path, "+select 1\n")], { blastRadiusOf: () => 0 })
+      expect(r.tier).toBe("full")
+      expect(r.reasons.join(" ")).toContain("FinOps keyword")
+    }
+  })
+
+  test("R20 S4: FinOps token does NOT over-fire on incidental substrings", () => {
+    // False-positive guard: the token regex requires path/word boundaries so
+    // words like `broadcaster.py` (has `caste`) or `precast_table.sql` (has
+    // `cast`) don't fire the cost/dbu/etc. rules.
+    const r1 = classifyPR([file("models/staging/stg_broadcaster.sql", "+select 1\n")], {
+      blastRadiusOf: () => 0,
+    })
+    expect(r1.tier).toBe("lite")
+
+    const r2 = classifyPR([file("models/marts/mrt_precast_table.sql", "+select 1\n")], {
+      blastRadiusOf: () => 0,
+    })
+    expect(r2.tier).toBe("lite")
+  })
+
+  test("R20 S4: trivial: description-only edits under models/marts/ still trivial (no risk keys)", () => {
+    // A schema.yml under marts that only changes descriptions/docs should
+    // stay trivial — the promotion requires diff-level risk signals, not
+    // just path membership. Precision guard against over-firing on doc PRs.
+    const r = classifyPR([file("models/marts/_m.yml", "+    description: better docs\n+    meta:\n+      owner: alice\n")])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges does NOT fire outside schema.yml (kind gate)", () => {
+    // The token `data_tests:` appearing in a .sql or .md file shouldn't
+    // promote — the rule keys off schema.yml kind + diff-level regex, not
+    // the token appearing in arbitrary text.
+    const r = classifyPR([file("models/intermediate/int_x.sql", "+-- note: data_tests: not_null on grain\n")], {
+      blastRadiusOf: () => 0,
+    })
+    expect(r.tier).toBe("lite")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges does NOT fire on yml comment lines mentioning the key", () => {
+    // Comment lines starting with `#` (with or without diff `+`/`-` prefix)
+    // must not promote — a reviewer explaining `constraints:` in a schema.yml
+    // comment shouldn't trigger a full-tier run.
+    const diff =
+      "@@ -1,3 +1,4 @@\n" +
+      " models:\n" +
+      "   - name: foo\n" +
+      "+    # note: constraints: are handled at the mart layer\n" +
+      "+    description: foo model\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges does NOT fire on description strings mentioning the key", () => {
+    // A `description:` string containing the substring `data_tests:` or
+    // `constraints:` must not promote — the regex anchors to key position.
+    // Note: `contract:` in a description would trip the pre-existing
+    // `touchesContract` hard-floor rule (diff-filter.ts:139), which is out
+    // of S4 scope; keep this negative test on `data_tests` / `constraints`.
+    const diff =
+      "@@ -1,2 +1,3 @@\n" +
+      " models:\n" +
+      "   - name: foo\n" +
+      '+    description: "grain-key columns get data_tests: not_null via dbt_utils.unique_combination_of_columns"\n'
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges fires on YAML key at nested indent (production shape)", () => {
+    // Sanity: the tightened regex still fires on realistic dbt YAML shapes
+    // where `data_tests:` sits under `columns:` at 8-space indent.
+    const diff =
+      "@@ -1,5 +1,7 @@\n" +
+      " models:\n" +
+      "   - name: mrt_order\n" +
+      "     columns:\n" +
+      "       - name: order_id\n" +
+      "+        data_tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/marts/mrt_order.yml", diff)])
+    expect(r.tier).toBe("full")
+  })
 })
 
 // ---------------------------------------------------------------------------
