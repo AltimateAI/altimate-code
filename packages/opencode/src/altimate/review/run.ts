@@ -118,12 +118,26 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
   }
 }
 
-/** Warn to stderr when the manifest looks stale relative to changed files. */
+/** Warn to stderr when the manifest looks stale relative to changed files.
+ *  Only considers dbt-relevant files (SQL, YAML, Python models, seed CSV,
+ *  docs markdown) — changes to `README.md` at repo root, `.github/`,
+ *  `package.json`, etc. don't affect whether the compiled manifest is still
+ *  valid, so their mtimes shouldn't trigger a stale warning. */
+/** Exported for tests — see review-run-stale.test.ts. */
+export function isManifestAffecting(rel: string): boolean {
+  // dbt source directories — code (sql/py), schema (yml), seeds (csv), and
+  // docs blocks (md files under models/ / snapshots/ / analyses/ / etc.).
+  if (/(^|\/)(models|seeds|snapshots|macros|tests|analyses)\/.*\.(sql|py|yml|yaml|csv|md)$/i.test(rel)) return true
+  // Top-level dbt project config files.
+  if (/(^|\/)(dbt_project|packages|profiles|dependencies)\.ya?ml$/i.test(rel)) return true
+  return false
+}
+
 async function warnIfStale(manifestAbs: string, changedPaths: string[], cwd: string): Promise<void> {
   try {
     const manifestMtime = (await stat(manifestAbs)).mtimeMs
     for (const rel of changedPaths) {
-      // Only compare against tracked, on-disk model files (schema.yml or SQL)
+      if (!isManifestAffecting(rel)) continue
       const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel)
       try {
         const changedMtime = (await stat(abs)).mtimeMs

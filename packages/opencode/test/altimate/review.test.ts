@@ -366,6 +366,10 @@ describe("diff-filter", () => {
     expect(classifyDbtFile("models/marts/_marts.yml")).toBe("schema_yml")
     expect(classifyDbtFile("macros/x.sql")).toBe("macro")
     expect(classifyDbtFile("snapshots/s.sql")).toBe("snapshot")
+    // Snapshot YAML property files carry column/test declarations and route
+    // to the schema_yml detector, not the snapshot catalog rules.
+    expect(classifyDbtFile("snapshots/orders_snapshot.yml")).toBe("schema_yml")
+    expect(classifyDbtFile("snapshots/orders_snapshot.yaml")).toBe("schema_yml")
     expect(classifyDbtFile("seeds/c.csv")).toBe("seed")
     expect(classifyDbtFile("dbt_project.yml")).toBe("project_config")
     expect(classifyDbtFile("models/marts/m.py")).toBe("python_model")

@@ -1222,14 +1222,27 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // (which loses context when the model header is outside the -U3 window and
   // silently drops sibling-column edge cases). Falls back to diff-only line
   // detection when a content resolver isn't wired (e.g. unit-test callers).
-  for (const file of reviewable) {
-    if (file.kind !== "schema_yml") continue
-    const oldRef = file.oldPath ?? file.path
-    const [oldContent, newContent] = await Promise.all([
-      file.status === "modified" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
-      file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
-    ])
-    all.push(detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }))
+  //
+  // `oldContent` is fetched for anything that has an old side — MODIFIED and
+  // RENAMED. A schema.yml being renamed (e.g. moved to a new subdir) that
+  // also drops a `unique`/`not_null` guardrail must still surface as a finding;
+  // the earlier `status === "modified"` gate silently skipped renames.
+  //
+  // Fetches run in parallel across schema files (a schema-heavy PR could touch
+  // dozens of yml files; serial `git show` per file adds up).
+  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  if (schemaFiles.length) {
+    const schemaFindingSets = await Promise.all(
+      schemaFiles.map(async (file) => {
+        const oldRef = file.oldPath ?? file.path
+        const [oldContent, newContent] = await Promise.all([
+          file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
+          file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
+        ])
+        return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
+      }),
+    )
+    for (const findings of schemaFindingSets) all.push(findings)
   }
 
   // Architectural dedup: the regex `dbt-patterns`/`rule-catalog` layer is a

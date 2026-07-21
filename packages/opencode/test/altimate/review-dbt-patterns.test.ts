@@ -5,6 +5,7 @@ import {
   DEFAULT_RUBRIC,
   type ChangedFile,
 } from "../../src/altimate/review"
+import { dedupe } from "../../src/altimate/review/finding"
 
 // Build a modified-model ChangedFile from a new-SQL body + a synthetic diff
 // where the given lines are "added" (prefixed with +).
@@ -313,7 +314,7 @@ sources:
     expect(f.some((x) => (x.title || "").includes("raw.users.id"))).toBe(true)
   })
 
-  test("schema.yml (structural): added file (no oldContent) surfaces no removal findings", () => {
+  test("schema.yml (structural): added file (status=added, no oldContent) surfaces no removal findings", () => {
     const newContent = `version: 2
 models:
   - name: customers
@@ -322,11 +323,60 @@ models:
         tests: [unique, not_null]
 `
     const f = detectSchemaYmlPatterns(
-      { path: "models/schema.yml", status: "modified", diff: undefined },
+      { path: "models/schema.yml", status: "added", diff: undefined },
       DEFAULT_RUBRIC,
       { oldContent: undefined, newContent },
     )
     expect(f.length).toBe(0)
+  })
+
+  test("schema.yml (structural): renamed file with removed test still surfaces finding", () => {
+    // Regression guard: earlier code only fetched oldContent when
+    // status === "modified", so a rename that also dropped a guardrail test
+    // silently bypassed the detector.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "renamed",
+        oldPath: "models/_models.yml",
+        diff: undefined,
+      },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml (structural): modified file with oldContent=undefined falls back to diff detection", () => {
+    // When the content resolver couldn't read the old side (e.g. transient
+    // git failure) on a MODIFIED file, we must NOT treat the situation as
+    // "added file, nothing removed" — the diff still contains real removed
+    // lines. Fall back to line-based detection instead of silently dropping.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent: "version: 2\nmodels: []\n" },
+    )
+    expect(has(f, "test_coverage")).toBe(true)
   })
 
   test("schema.yml (fallback): diff-only path still surfaces removal (existing test's shape)", () => {
@@ -343,6 +393,160 @@ models:
     // At least one test_coverage finding surfaces so a customer isn't blind to
     // removed guardrails just because the content resolver wasn't wired.
     expect(has(f, "test_coverage")).toBe(true)
+  })
+
+  test("schema.yml (fallback): distinct removals of same test type on different columns each surface", () => {
+    // Regression guard for the earlier dedup bug: (model="", column="", test)
+    // key reduced to just `test` and silently collapsed distinct removals of
+    // the same test type on different columns. The fallback path now emits
+    // one finding per removed test-line.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        // Two `- unique` removed lines representing two different columns
+        // losing the `unique` test in the same PR.
+        diff: "-          - unique\n-          - not_null\n-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    // 4 removed test-lines → 4 findings (fallback preserves per-line detail).
+    expect(f.length).toBe(4)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml (fallback): distinct removals survive the global fingerprint dedupe", () => {
+    // Integration-shape guard: the detector-level test above returns 4
+    // findings, but `runReview` runs a global `dedupe(findings)` step that
+    // fingerprints by (category, file, model, column, ruleKey). If ruleKey
+    // only varies by test-name for the fallback path, two `- unique`
+    // removals share a fingerprint and get merged post-detector. This test
+    // pipes the detector's output through `dedupe` to prove distinct
+    // removals actually reach the user.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null\n-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    const deduped = dedupe(f)
+    expect(deduped.length).toBe(4)
+    // All 4 must be test_coverage findings; `unique` removals are `warning`,
+    // and fallback `not_null` (no column attribution) is `suggestion` because
+    // we can't tell if it was on an id/key column.
+    expect(deduped.every((x) => x.category === "test_coverage")).toBe(true)
+    // The 4 fingerprints must be distinct (was the exact regression: without
+    // an occurrence-index discriminator in ruleKey, the two `- unique` and
+    // two `- not_null` removals collapse to 2 findings after dedupe).
+    expect(new Set(deduped.map((x) => x.id)).size).toBe(4)
+    // 2 `- unique` (warning) + 2 `- not_null` (suggestion) — the exact split.
+    expect(deduped.filter((x) => x.severity === "warning").length).toBe(2)
+    expect(deduped.filter((x) => x.severity === "suggestion").length).toBe(2)
+  })
+
+  test("schema.yml (structural): distinct column removals also survive global dedupe", () => {
+    // Structural attribution provides (model.column.test) uniqueness natively,
+    // but the guard is worth codifying so future rule-key changes don't
+    // silently regress into the fingerprint-collision failure mode.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique]
+      - name: email
+        tests: [unique]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+      - name: email
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    const deduped = dedupe(f)
+    expect(deduped.length).toBe(2)
+    expect(new Set(deduped.map((x) => x.id)).size).toBe(2)
+  })
+
+  test("snapshot yml property file (structural): removed test surfaces finding", () => {
+    // Regression: snapshot YAML property files were previously classified as
+    // `snapshot` kind (blocking the `schema_yml` gate in the orchestrator).
+    // Now `.yml` files under snapshots/ classify as `schema_yml` while `.sql`
+    // snapshots stay `snapshot` (tier-forcing catalog rules unchanged).
+    const oldContent = `version: 2
+snapshots:
+  - name: orders_snapshot
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+snapshots:
+  - name: orders_snapshot
+    columns:
+      - name: order_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "snapshots/orders_snapshot.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml summary: multi-model removals emit ONE aggregate summary line", () => {
+    // Regression guard: the aggregate "This PR removes N tests total on
+    // model(s) X, Y" summary was previously appended once per model, so a
+    // diff touching two models produced two copies of the same summary in
+    // separate findings. Now emitted once per FILE on the first finding.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+  - name: orders
+    columns:
+      - name: order_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    // Only ONE finding body should contain the "removes N data tests in total"
+    // aggregate summary line; the other should be plain.
+    const summaryCount = f.filter((x) => (x.body || "").includes("data tests in total")).length
+    expect(summaryCount).toBe(1)
+    // And the mentioned model list should include BOTH models it touched.
+    const withSummary = f.find((x) => (x.body || "").includes("data tests in total"))!
+    expect(withSummary.body).toContain("`customers`")
+    expect(withSummary.body).toContain("`orders`")
   })
 
   test("benign additive column produces NO dbt-pattern finding (precision)", () => {

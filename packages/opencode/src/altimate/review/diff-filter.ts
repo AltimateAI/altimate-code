@@ -61,7 +61,11 @@ export function classifyDbtFile(path: string): DbtFileKind {
   const isYaml = p.endsWith(".yml") || p.endsWith(".yaml")
   if (/(^|\/)(dbt_project|profiles|packages|dependencies)\.ya?ml$/.test(p)) return "project_config"
   if (/(^|\/)macros\//.test(p)) return "macro"
-  if (/(^|\/)snapshots\//.test(p)) return "snapshot"
+  // Snapshots split by extension: `.sql` files are snapshot definitions
+  // (tier-forcing, catalog-scoped), YAML property files under `snapshots/`
+  // are schema files (declared tests + column metadata) and should route to
+  // `schema_yml` so the test-removal detector runs on them.
+  if (/(^|\/)snapshots\//.test(p) && p.endsWith(".sql")) return "snapshot"
   if (/(^|\/)seeds\//.test(p) && p.endsWith(".csv")) return "seed"
   if (/(^|\/)tests\//.test(p) && p.endsWith(".sql")) return "test"
   if (/(^|\/)analyses\//.test(p)) return "analysis"

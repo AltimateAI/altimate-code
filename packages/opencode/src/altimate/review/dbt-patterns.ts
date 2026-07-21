@@ -1,5 +1,6 @@
 import path from "node:path"
 import YAML from "yaml"
+import { Log } from "@/altimate/util/log"
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
 import { type ChangedFile, classifyDbtFile } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
@@ -948,27 +949,57 @@ export function detectSchemaYmlPatterns(
   const kind = classifyDbtFile(file.path)
   if (kind !== "schema_yml" || file.status === "deleted") return []
 
-  let removals: Array<{ model: string; column: string; test: string }> = []
+  const removals: Array<{ model: string; column: string; test: string }> = []
   let usedStructural = false
 
   // PREFERRED: structural YAML diff when we have both sides' content.
-  if (opts.newContent !== undefined) {
+  //
+  // "Added" file case (no `oldContent` supplied AND status marks the file as
+  // newly-added upstream) — the old side is empty, so there's nothing to
+  // remove; using the structural path with an empty old set is correct.
+  //
+  // "Modified but resolver returned undefined" case (`oldContent === undefined`
+  // for a file whose status is `modified` or `renamed`) — the resolver couldn't
+  // read the old side. Do NOT treat this as an added file (would silently drop
+  // real removals). Fall through to the diff-only fallback below.
+  const isAddedFile = file.status === "added"
+  const canUseStructural =
+    opts.newContent !== undefined &&
+    // For a real modification/rename we require both sides; without oldContent
+    // fall back to diff parsing so removals in the diff still surface.
+    (isAddedFile || opts.oldContent !== undefined)
+
+  if (canUseStructural) {
     let oldDoc: unknown = undefined
     let newDoc: unknown = undefined
     try {
-      newDoc = YAML.parse(opts.newContent)
-    } catch {
+      newDoc = YAML.parse(opts.newContent as string)
+    } catch (err) {
+      // Debug telemetry: YAML parsers can trip on Jinja injected into a
+      // schema.yml or on non-ASCII quirks; log so failures are diagnosable
+      // rather than silently demoting to the fallback path.
+      Log.create({ service: "review", tag: "detectSchemaYmlPatterns" }).warn(
+        `YAML.parse failed on new content of ${file.path}; falling back to diff-only detection`,
+        err instanceof Error ? { error: err.message } : undefined,
+      )
       newDoc = undefined
     }
     if (opts.oldContent !== undefined) {
       try {
         oldDoc = YAML.parse(opts.oldContent)
-      } catch {
+      } catch (err) {
+        Log.create({ service: "review", tag: "detectSchemaYmlPatterns" }).warn(
+          `YAML.parse failed on old content of ${file.path}; falling back to diff-only detection`,
+          err instanceof Error ? { error: err.message } : undefined,
+        )
         oldDoc = undefined
       }
     }
-    // For an added file the "old" side is empty (nothing removed).
-    if (newDoc !== undefined && (opts.oldContent === undefined || oldDoc !== undefined)) {
+    // Only commit to the structural path when we have a parseable new side
+    // AND (we're on an added file OR the old side also parsed). This preserves
+    // "unparseable old YAML" → fallback, not "structural with empty old = every
+    // removed test looks like a genuine removal".
+    if (newDoc !== undefined && (isAddedFile || oldDoc !== undefined)) {
       const oldSet = extractTestOccurrences(oldDoc ?? {})
       const newSet = extractTestOccurrences(newDoc)
       for (const key of oldSet) {
@@ -980,34 +1011,44 @@ export function detectSchemaYmlPatterns(
     }
   }
 
-  // FALLBACK: line-based detection for diff-only callers.
+  // FALLBACK: line-based detection for diff-only callers (unit tests, offline
+  // CI diffs) OR when the structural path couldn't parse both sides.
+  //
+  // No local deduplication: each entry in `removedLines` is already one match
+  // per raw removed line, and model/column are always empty on this path — a
+  // (model, column, test) dedup key would collapse to just `test` and silently
+  // merge distinct removals of the same test type on different columns.
+  //
+  // Downstream, `runReview` runs a global `dedupe` step that fingerprints
+  // findings by (category, file, model, column, ruleKey). Two fallback
+  // findings that share `file`, empty `model`, empty `column`, and a
+  // test-name-only `ruleKey` would still collapse there. We tag each fallback
+  // finding with a stable occurrence-index discriminator (`#0`, `#1`, …) so
+  // distinct removals in the same diff survive the global dedupe. The index
+  // is per-diff, not per-file-history — sufficient for one review pass and
+  // stable across dry-repeats of the same diff.
+  const fallbackDiscriminators: string[] = []
   if (!usedStructural) {
     const removedLines = fallbackRemovedTestLines(file.diff)
-    // Represent as unattributed tuples (model + column unknown) so the
-    // finding still surfaces with the correct severity but names the file
-    // rather than a specific column.
+    let idx = 0
     for (const l of removedLines) {
       const m = /^\s*-\s*(unique|not_null|relationships)\b/i.exec(l)
       if (!m) continue
       removals.push({ model: "", column: "", test: m[1].toLowerCase() })
+      fallbackDiscriminators.push(`#${idx++}`)
     }
-    // Deduplicate identical (model, column, test) triples so the fallback
-    // path emits at most one finding per removed test-line pattern.
-    const seen = new Set<string>()
-    removals = removals.filter((r) => {
-      const k = `${r.model}\x00${r.column}\x00${r.test}`
-      if (seen.has(k)) return false
-      seen.add(k)
-      return true
-    })
   }
 
   if (!removals.length) return []
 
   const findings: Finding[] = []
-  const seenModel = new Set<string>()
   const isMartLayer = /(^|\/)(marts?|reporting)\//.test(file.path)
   const layerLabel = isMartLayer ? "mart-layer" : "declared"
+  // Emit the "N removals across models A/B/C" summary line ONCE per file
+  // (on the first finding), not once per distinct model — otherwise a diff
+  // that removes tests from three models produces three copies of the same
+  // global summary. A single boolean guard is enough.
+  let summaryEmitted = false
 
   for (const r of removals) {
     const isUniquenessSignal = r.test === "unique"
@@ -1052,14 +1093,27 @@ export function detectSchemaYmlPatterns(
         `Removing an existing data test is a silent-regression risk. Confirm the test is genuinely ` +
         `obsolete, not dropped to make CI green.`
     }
-    const isFirstForModel = !!r.model && !seenModel.has(r.model)
-    if (r.model) seenModel.add(r.model)
-    const bodyTail =
-      isFirstForModel && removals.length > 1
-        ? `\n\n_This PR removes ${removals.length} data tests in total on model(s) ` +
-          `${[...new Set(removals.map((x) => x.model).filter(Boolean))].map((m) => `\`${m}\``).join(", ")}._`
-        : ""
+    // Emit the aggregate summary once per file, on the first finding, and
+    // only when there are multiple removals to summarise. Uses the file-scoped
+    // `summaryEmitted` flag rather than a per-model guard so a diff touching
+    // three models emits ONE summary, not three.
+    const shouldEmitSummary = !summaryEmitted && removals.length > 1
+    if (shouldEmitSummary) summaryEmitted = true
+    const distinctModels = [...new Set(removals.map((x) => x.model).filter(Boolean))]
+    const modelClause = distinctModels.length
+      ? ` on model(s) ${distinctModels.map((m) => `\`${m}\``).join(", ")}`
+      : ""
+    const bodyTail = shouldEmitSummary
+      ? `\n\n_This PR removes ${removals.length} data tests in total${modelClause}._`
+      : ""
 
+    // ruleKey feeds the finding fingerprint (finding.ts:107). For attributed
+    // (structural) findings, `(model.column.test)` is unique per removal in
+    // the file. For unattributed fallback findings, `(?.?.test)` collapses
+    // distinct removals of the same test type — we append the fallback
+    // discriminator so each removed line becomes a distinct finding
+    // downstream of the global dedupe.
+    const discriminator = attributed || modelLevel ? "" : `.${fallbackDiscriminators.shift() ?? "#?"}`
     findings.push(
       makeFinding({
         severity: clampSeverity("test_coverage", sev, "high"),
@@ -1078,7 +1132,7 @@ export function detectSchemaYmlPatterns(
             attribution: attributed ? "column" : modelLevel ? "model-level" : "diff-only",
           },
         },
-        ruleKey: `test_coverage:removed-tests:${r.model || "?"}.${r.column || "?"}.${r.test}`,
+        ruleKey: `test_coverage:removed-tests:${r.model || "?"}.${r.column || "?"}.${r.test}${discriminator}`,
       }),
     )
   }
