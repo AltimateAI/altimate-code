@@ -46,6 +46,16 @@ export const VALID_ACCOUNT_RE = /^[a-zA-Z0-9._-]+$/
 /** Snowflake Cortex accepts at most 4 cache breakpoints per request (Anthropic limit). */
 const CACHE_BREAKPOINT_LIMIT = 4
 
+/**
+ * How long to stop injecting cache markers after Cortex rejects a cache-marked
+ * request. Matches Cortex's 5-minute ephemeral cache TTL: by the time the
+ * cooldown expires the cache would be cold anyway, so re-trying markers costs
+ * almost nothing — while a false trip (transient 400 whose stripped retry
+ * happened to succeed) self-heals instead of silently billing the whole
+ * session at the uncached rate.
+ */
+const CACHE_DISABLE_COOLDOWN_MS = 5 * 60 * 1000
+
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -273,8 +283,8 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
 
         // Cortex documents block-level cache_control for Claude models, but not
         // for every message role. If an account rejects a cache-marked request,
-        // fall back once and stop injecting markers for the rest of the session.
-        let cacheControlSupported = true
+        // fall back once and pause marker injection for a cooldown period.
+        let cacheDisabledUntil = 0
 
         return {
           apiKey: OAUTH_DUMMY_KEY,
@@ -313,7 +323,7 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
               if (text) {
                 let result
                 try {
-                  result = transformSnowflakeBody(text, toolCapable, cacheControlSupported)
+                  result = transformSnowflakeBody(text, toolCapable, Date.now() >= cacheDisabledUntil)
                 } catch (error) {
                   // Non-JSON body — pass through untransformed. Anything else
                   // is a transform bug and must surface, not degrade silently.
@@ -332,19 +342,20 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
 
             // If Cortex rejects a cache-marked request, retry once without the
             // markers; when the stripped retry succeeds, the markers were the
-            // problem — disable caching for the rest of the session. The retry
+            // problem — pause marker injection for a cooldown period. The retry
             // fires on any 400 (Cortex's marker-rejection error text is
             // undocumented, so there is no reliable signal to scope on); a
             // deterministic non-marker 400 recurs identically on the retry and
-            // never flips the flag.
+            // never trips the cooldown.
             if (response.status === 400 && cacheApplied) {
               const stripped = transformSnowflakeBody(text, toolCapable, false).body
               if (stripped !== body) {
                 const retry = await fetch(requestInput, { ...init, headers, body: stripped })
                 if (retry.ok) {
-                  cacheControlSupported = false
-                  log.warn("Cortex rejected cache-marked request; disabling prompt caching for this session", {
+                  cacheDisabledUntil = Date.now() + CACHE_DISABLE_COOLDOWN_MS
+                  log.warn("Cortex rejected cache-marked request; pausing prompt caching", {
                     status: response.status,
+                    cooldownMs: CACHE_DISABLE_COOLDOWN_MS,
                   })
                   void response.body?.cancel().catch(() => {})
                   return retry

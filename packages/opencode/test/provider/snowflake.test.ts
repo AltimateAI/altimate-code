@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setSystemTime, test } from "bun:test"
 import path from "path"
 import { generateText, type ModelMessage } from "ai"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
@@ -801,7 +801,7 @@ describe("SnowflakeCortexAuthPlugin fetch interceptor", () => {
       ],
     })
 
-  test("retries once without cache markers on 400 and disables caching for the session", async () => {
+  test("retries once without cache markers on 400 and pauses caching for a cooldown", async () => {
     const pluginFetch = await makeLoaderFetch()
     const bodies: string[] = []
     const originalFetch = globalThis.fetch
@@ -824,12 +824,20 @@ describe("SnowflakeCortexAuthPlugin fetch interceptor", () => {
       expect(hasBlockMarkers(bodies[0])).toBe(true)
       expect(hasBlockMarkers(bodies[1])).toBe(false)
 
-      // Sticky disable: the next request carries no markers at all
+      // Within the cooldown: the next request carries no markers at all
       const second = await pluginFetch(url, { method: "POST", body: cacheMarkedBody() })
       expect(second.status).toBe(200)
       expect(bodies).toHaveLength(3)
       expect(bodies[2]).not.toContain("cache_control")
+
+      // After the cooldown (5 min) elapses, marker injection resumes —
+      // a false trip self-heals instead of running the whole session uncached
+      setSystemTime(new Date(Date.now() + 5 * 60 * 1000 + 1000))
+      const third = await pluginFetch(url, { method: "POST", body: cacheMarkedBody() })
+      expect(third.status).toBe(200)
+      expect(hasBlockMarkers(bodies[3])).toBe(true)
     } finally {
+      setSystemTime()
       globalThis.fetch = originalFetch
     }
   })
