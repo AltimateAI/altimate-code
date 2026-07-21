@@ -7,8 +7,11 @@ describe("tui command", () => {
   test("resolves network options through the config-aware resolver", async () => {
     const source = await tuiCommandSource()
 
-    expect(source).toContain('import { withNetworkOptions, resolveNetworkOptions } from "@/cli/network"')
-    expect(source).toContain('import { AppRuntime } from "@/effect/app-runtime"')
+    // Assertions use regex (not string literals) so Bun's transpiler doesn't
+    // statically resolve `@/cli/network` into `file:///…/network.ts` in the
+    // expected value — a CI-only cache quirk that inverts the comparison.
+    expect(source).toMatch(/import \{ withNetworkOptions, resolveNetworkOptions \} from "@\/cli\/network"/)
+    expect(source).toMatch(/import \{ AppRuntime \} from "@\/effect\/app-runtime"/)
     expect(source).toContain("await AppRuntime.runPromise(resolveNetworkOptions(args))")
     expect(source).not.toContain("resolveNetworkOptionsNoConfig(args)")
   })

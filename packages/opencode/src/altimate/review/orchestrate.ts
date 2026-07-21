@@ -1223,26 +1223,27 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // silently drops sibling-column edge cases). Falls back to diff-only line
   // detection when a content resolver isn't wired (e.g. unit-test callers).
   //
-  // `oldContent` is fetched for anything that has an old side — MODIFIED and
-  // RENAMED. A schema.yml being renamed (e.g. moved to a new subdir) that
-  // also drops a `unique`/`not_null` guardrail must still surface as a finding;
-  // the earlier `status === "modified"` gate silently skipped renames.
+  // `oldContent` is fetched for anything that has an old side — MODIFIED,
+  // RENAMED, and DELETED. A schema.yml being renamed (e.g. moved to a new
+  // subdir) that also drops a `unique`/`not_null` guardrail must still surface
+  // as a finding; the earlier `status === "modified"` gate silently skipped
+  // renames. A whole schema.yml being DELETED removes every test declared in
+  // it — an even bigger removal — so the detector runs against `oldContent`
+  // vs an empty new document (cubic-review P2).
+  //
+  // `newContent` fetch is skipped for deleted files (nothing at HEAD to read;
+  // git-show would fail).
   //
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
-  //
-  // DELETED schema files are filtered upfront because `detectSchemaYmlPatterns`
-  // early-returns `[]` for `status === "deleted"` anyway; not filtering here
-  // would trigger an unnecessary `getContent(oldRef, "old")` fetch (a git-show
-  // round-trip) whose result is thrown away by the detector.
-  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml" && f.status !== "deleted")
+  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {
         const oldRef = file.oldPath ?? file.path
         const [oldContent, newContent] = await Promise.all([
           file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
-          getContent?.(file.path, "new"),
+          file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
         ])
         return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
       }),

@@ -947,10 +947,16 @@ export function detectSchemaYmlPatterns(
   opts: SchemaYmlDetectContent = {},
 ): Finding[] {
   const kind = classifyDbtFile(file.path)
-  if (kind !== "schema_yml" || file.status === "deleted") return []
+  if (kind !== "schema_yml") return []
 
   const removals: Array<{ model: string; column: string; test: string }> = []
   let usedStructural = false
+
+  // Deleting a whole schema.yml removes every test declared in it — arguably
+  // a bigger removal than dropping a single test. Treat the new side as empty
+  // and diff the old document against `{}` so every prior test surfaces as a
+  // removal (cubic-review P2). Requires `oldContent` from the caller.
+  const isDeletedFile = file.status === "deleted"
 
   // PREFERRED: structural YAML diff when we have both sides' content.
   //
@@ -958,31 +964,38 @@ export function detectSchemaYmlPatterns(
   // newly-added upstream) — the old side is empty, so there's nothing to
   // remove; using the structural path with an empty old set is correct.
   //
+  // "Deleted" file case — the new side is empty; use the structural path
+  // with an empty new set so every old test surfaces as a removal.
+  //
   // "Modified but resolver returned undefined" case (`oldContent === undefined`
   // for a file whose status is `modified` or `renamed`) — the resolver couldn't
   // read the old side. Do NOT treat this as an added file (would silently drop
   // real removals). Fall through to the diff-only fallback below.
   const isAddedFile = file.status === "added"
   const canUseStructural =
-    opts.newContent !== undefined &&
-    // For a real modification/rename we require both sides; without oldContent
-    // fall back to diff parsing so removals in the diff still surface.
-    (isAddedFile || opts.oldContent !== undefined)
+    (isDeletedFile
+      ? opts.oldContent !== undefined
+      : opts.newContent !== undefined &&
+        // For a real modification/rename we require both sides; without oldContent
+        // fall back to diff parsing so removals in the diff still surface.
+        (isAddedFile || opts.oldContent !== undefined))
 
   if (canUseStructural) {
     let oldDoc: unknown = undefined
     let newDoc: unknown = undefined
-    try {
-      newDoc = YAML.parse(opts.newContent as string)
-    } catch (err) {
-      // Debug telemetry: YAML parsers can trip on Jinja injected into a
-      // schema.yml or on non-ASCII quirks; log so failures are diagnosable
-      // rather than silently demoting to the fallback path.
-      Log.create({ service: "review", tag: "detectSchemaYmlPatterns" }).warn(
-        `YAML.parse failed on new content of ${file.path}; falling back to diff-only detection`,
-        err instanceof Error ? { error: err.message } : undefined,
-      )
-      newDoc = undefined
+    if (opts.newContent !== undefined) {
+      try {
+        newDoc = YAML.parse(opts.newContent)
+      } catch (err) {
+        // Debug telemetry: YAML parsers can trip on Jinja injected into a
+        // schema.yml or on non-ASCII quirks; log so failures are diagnosable
+        // rather than silently demoting to the fallback path.
+        Log.create({ service: "review", tag: "detectSchemaYmlPatterns" }).warn(
+          `YAML.parse failed on new content of ${file.path}; falling back to diff-only detection`,
+          err instanceof Error ? { error: err.message } : undefined,
+        )
+        newDoc = undefined
+      }
     }
     if (opts.oldContent !== undefined) {
       try {
@@ -995,13 +1008,18 @@ export function detectSchemaYmlPatterns(
         oldDoc = undefined
       }
     }
-    // Only commit to the structural path when we have a parseable new side
-    // AND (we're on an added file OR the old side also parsed). This preserves
-    // "unparseable old YAML" → fallback, not "structural with empty old = every
-    // removed test looks like a genuine removal".
-    if (newDoc !== undefined && (isAddedFile || oldDoc !== undefined)) {
+    // Only commit to the structural path when the appropriate sides parsed:
+    //  - deleted → old must parse; new is treated as `{}`
+    //  - added   → new must parse; old is treated as `{}`
+    //  - modified/renamed → both must parse
+    // This preserves "unparseable YAML" → fallback rather than
+    // "structural with empty side = every test looks removed/added".
+    const canCommit = isDeletedFile
+      ? oldDoc !== undefined
+      : newDoc !== undefined && (isAddedFile || oldDoc !== undefined)
+    if (canCommit) {
       const oldSet = extractTestOccurrences(oldDoc ?? {})
-      const newSet = extractTestOccurrences(newDoc)
+      const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc)
       for (const key of oldSet) {
         if (newSet.has(key)) continue
         const [model, column, test] = key.split("\x00")
@@ -1129,6 +1147,11 @@ export function detectSchemaYmlPatterns(
         title,
         body: bodyLead + bodyRationale + bodyTail,
         file: file.path,
+        // Surface the extracted attribution on the top-level Finding so
+        // downstream consumers (dedupe, formatting, telemetry) see it —
+        // not just inside `evidence.result` (cubic-review P3).
+        model: r.model || undefined,
+        column: r.column || undefined,
         confidence: "high",
         evidence: {
           tool: "dbt-patterns",

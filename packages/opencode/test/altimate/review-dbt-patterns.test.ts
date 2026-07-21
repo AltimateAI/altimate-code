@@ -549,6 +549,107 @@ models:
     expect(withSummary.body).toContain("`orders`")
   })
 
+  test("deleted schema.yml: every prior test surfaces as a removal finding (cubic-review P2)", () => {
+    // Regression: deleting a whole schema.yml removes every test declared in
+    // it — arguably a bigger removal than dropping a single test. Previously
+    // the detector early-returned `[]` for `status === "deleted"`, so the
+    // deletion went unnoticed. Now the detector diffs the old document against
+    // an empty new document.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      // Only oldContent is available for a deleted file; newContent is undefined
+      // because git-show at HEAD would fail.
+      { oldContent, newContent: undefined },
+    )
+    // 4 removals: customers.customer_id.unique, customers.customer_id.not_null,
+    // customers.email.not_null, orders.order_id.unique
+    expect(f.length).toBe(4)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+    // Structured attribution surfaces on the top-level Finding, not just in
+    // evidence.result (cubic-review P3).
+    const byModel = f.filter((x) => x.model === "customers")
+    expect(byModel.length).toBe(3)
+    const byColumn = f.filter((x) => x.column === "email")
+    expect(byColumn.length).toBe(1)
+  })
+
+  test("deleted schema.yml without oldContent: no findings (safe degrade)", () => {
+    // Without the old side, we can't know what tests to flag as removed.
+    // The detector should degrade to `[]` rather than fabricating findings.
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent: undefined },
+    )
+    expect(f.length).toBe(0)
+  })
+
+  test("deleted schema.yml with unparsable oldContent + deletion diff → fallback surfaces removals", () => {
+    // Structural path can't commit (old YAML fails to parse), so the diff-only
+    // fallback runs. Confirms: unparsable-old → fallback, not silent drop.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null   # <-- unterminated block below causes parse failure
+    tests: [
+`
+    // Diff uses the block-list shape the fallback regex targets
+    // (`-      - unique` / `-      - not_null`).
+    const diff = `--- a/models/marts/_models.yml
++++ /dev/null
+@@ -1,8 +0,0 @@
+-version: 2
+-models:
+-  - name: customers
+-    columns:
+-      - name: customer_id
+-        tests:
+-          - unique
+-          - not_null
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
+    )
+    // Diff-only fallback picks up the removed `- unique` and `- not_null`
+    // lines, so we still emit at least one removal finding rather than silently
+    // dropping when the structural path couldn't commit.
+    expect(f.length).toBeGreaterThan(0)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("deleted empty schema.yml: no fabricated findings (locks in precision)", () => {
+    // Old side parses cleanly but declares no tests. Ensures the structural
+    // loop doesn't fabricate findings when oldSet is empty.
+    const oldContent = `version: 2
+models: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
+    )
+    expect(f.length).toBe(0)
+  })
+
   test("benign additive column produces NO dbt-pattern finding (precision)", () => {
     const sql = `select id, upper(status) as status_upper from {{ ref('x') }}`
     const f = detectModelPatterns(

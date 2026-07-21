@@ -57,7 +57,21 @@ export function renderSummary(env: VerdictEnvelope): string {
   // the signed envelope's tierReasons[]; the summary shows the first 8.
   if (env.tierReasons && env.tierReasons.length) {
     const RENDER_CAP = 8
-    const shown = env.tierReasons.slice(0, RENDER_CAP).map((r) => `\`${r}\``).join(", ")
+    // Pick an inline-code-span fence longer than any backtick run inside `r`
+    // so a path like `packages/…/foo`bar`.sql` cannot terminate the span
+    // (cubic-review P3).
+    const shown = env.tierReasons
+      .slice(0, RENDER_CAP)
+      .map((r) => {
+        const runs = r.match(/`+/g)
+        const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
+        const fence = "`".repeat(maxRun + 1)
+        // If the reason itself starts/ends with a backtick, pad with a space so
+        // the leading/trailing backtick isn't glued to the fence.
+        const pad = /^`|`$/.test(r) ? " " : ""
+        return `${fence}${pad}${r}${pad}${fence}`
+      })
+      .join(", ")
     const overflow =
       env.tierReasons.length > RENDER_CAP
         ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`

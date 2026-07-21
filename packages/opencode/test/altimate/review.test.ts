@@ -1881,6 +1881,42 @@ describe("orchestrate", () => {
     expect(env.summary.degraded).toBe(true)
   })
 
+  test("renderSummary escapes backticks in tierReasons (cubic-review P3)", async () => {
+    // Regression: a fixed single-backtick fence around each tier reason meant a
+    // path like `weird`path`.sql` would terminate the code span mid-way and
+    // inject Markdown into the summary. Fence now sizes to max(backtick-run)+1
+    // and pads leading/trailing backticks with a space.
+    const env = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      generatedAt: "2026-05-29T00:00:00Z",
+      tierReasons: [
+        "models/x.sql", // plain path — one-backtick fence still fine
+        "path with `single` inside", // needs 2-backtick fence
+        "path with ``double`` inside", // needs 3-backtick fence
+        "`starts-with-backtick",
+        "ends-with-backtick`",
+        "`both-ends`", // both leading + trailing backticks — symmetric padding
+      ],
+    })
+    const summary = renderSummary(env)
+    // Sanity: the tier line exists
+    expect(summary).toContain("Tier: full")
+    // A path with `single` inside must be wrapped by a fence longer than the
+    // longest backtick run inside it. Two-backtick fence sees `single` as a
+    // single-backtick run inside the code span → renders correctly.
+    expect(summary).toContain("``path with `single` inside``")
+    // Three-backtick fence for two-backtick run inside.
+    expect(summary).toContain("```path with ``double`` inside```")
+    // Leading/trailing backticks get space padding so the fence doesn't fuse
+    // with the reason text.
+    expect(summary).toContain("`` `starts-with-backtick ``")
+    expect(summary).toContain("`` ends-with-backtick` ``")
+    // Both ends have backticks — same single pad wraps both sides symmetrically.
+    expect(summary).toContain("`` `both-ends` ``")
+  })
+
   test("renderSummary + inlineComments produce marker + structured output", async () => {
     const env = buildEnvelope({
       findings: [
