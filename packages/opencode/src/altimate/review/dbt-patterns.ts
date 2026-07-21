@@ -925,6 +925,108 @@ export interface GrainKeyGap {
   contractEnforced: boolean
 }
 
+/**
+ * R20 S6-lite — `data_tests: [not_null]` → `constraints:` on contracted models.
+ *
+ * When a model declares `contract: {enforced: true}`, the schema-first
+ * pattern is to declare column-level constraints. A column carrying
+ * `data_tests: [not_null]` without the corresponding
+ * `constraints: [{type: not_null}]` misses the contract's write-time
+ * enforcement — CI catches it, but the DB doesn't. Largest single-rule
+ * signal in the R20 corpus (PR D×6 comments).
+ *
+ * Skips `materialized: view` — views can't carry constraints on most
+ * adapters (Trino especially), so keeping the data_test is correct.
+ */
+export interface DataTestToConstraintGap {
+  model: string
+  column: string
+  /** The specific test name on the column that should become a constraint.
+   *  Currently only `not_null` — other test types don't have direct constraint
+   *  equivalents in every adapter. */
+  testName: "not_null"
+}
+
+function extractDataTestToConstraintGaps(doc: unknown): DataTestToConstraintGap[] {
+  const gaps: DataTestToConstraintGap[] = []
+  if (!doc || typeof doc !== "object") return gaps
+  const d = doc as Record<string, unknown>
+  if (!Array.isArray(d.models)) return gaps
+
+  const testName = (t: unknown): string | undefined => {
+    if (typeof t === "string") return t.toLowerCase()
+    if (t && typeof t === "object") {
+      const k = Object.keys(t as Record<string, unknown>)[0]
+      return k ? k.toLowerCase() : undefined
+    }
+    return undefined
+  }
+
+  for (const m of d.models) {
+    if (!m || typeof m !== "object") continue
+    const mm = m as Record<string, unknown>
+    const mname = typeof mm.name === "string" ? mm.name : undefined
+    if (!mname) continue
+
+    // Contract enforcement (same shape as extractGrainKeyGaps).
+    const cfg = mm.config && typeof mm.config === "object" ? (mm.config as Record<string, unknown>) : {}
+    const contractCfg =
+      cfg.contract && typeof cfg.contract === "object"
+        ? (cfg.contract as Record<string, unknown>)
+        : mm.contract && typeof mm.contract === "object"
+          ? (mm.contract as Record<string, unknown>)
+          : {}
+    if (contractCfg.enforced !== true) continue
+
+    // View gate: on most adapters (Trino especially), views can't carry
+    // column constraints — keeping data_tests is the correct pattern.
+    const materialized = (cfg.materialized as unknown) ?? (mm.materialized as unknown) ?? undefined
+    if (typeof materialized === "string" && materialized.toLowerCase() === "view") continue
+
+    if (!Array.isArray(mm.columns)) continue
+    for (const col of mm.columns) {
+      if (!col || typeof col !== "object") continue
+      const c = col as Record<string, unknown>
+      const cname = typeof c.name === "string" ? c.name : undefined
+      if (!cname) continue
+
+      // Does this column have `not_null` via data_tests / tests?
+      let hasNotNullTest = false
+      for (const testsKey of ["tests", "data_tests"] as const) {
+        const tests = c[testsKey]
+        if (!Array.isArray(tests)) continue
+        for (const t of tests) {
+          if (testName(t) === "not_null") {
+            hasNotNullTest = true
+            break
+          }
+        }
+        if (hasNotNullTest) break
+      }
+      if (!hasNotNullTest) continue
+
+      // Already has the constraint → no gap (redundant declaration is a
+      // different finding shape, out of S6-lite scope).
+      let hasNotNullConstraint = false
+      if (Array.isArray(c.constraints)) {
+        for (const cn of c.constraints) {
+          if (cn && typeof cn === "object") {
+            const type = (cn as Record<string, unknown>).type
+            if (typeof type === "string" && type.toLowerCase() === "not_null") {
+              hasNotNullConstraint = true
+              break
+            }
+          }
+        }
+      }
+      if (hasNotNullConstraint) continue
+
+      gaps.push({ model: mname, column: cname, testName: "not_null" })
+    }
+  }
+  return gaps
+}
+
 function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
   const gaps: GrainKeyGap[] = []
   if (!doc || typeof doc !== "object") return gaps
@@ -1109,6 +1211,8 @@ export function detectSchemaYmlPatterns(
   let usedStructural = false
   // R20 S1 — populated from the structural NEW-side parse below.
   let grainGaps: GrainKeyGap[] = []
+  // R20 S6-lite — populated from the same NEW-side parse.
+  let constraintGaps: DataTestToConstraintGap[] = []
 
   // Deleting a whole schema.yml removes every test declared in it — arguably
   // a bigger removal than dropping a single test. Treat the new side as empty
@@ -1193,6 +1297,10 @@ export function detectSchemaYmlPatterns(
       // design). Uses the `not_null-missing` gap emitted below.
       if (!isDeletedFile && newDoc !== undefined) {
         grainGaps = extractGrainKeyGaps(newDoc)
+        // R20 S6-lite — same guardrail (skip deleted files, need parseable
+        // new side). Detector is a no-op on models that aren't contract-
+        // enforced (so uncontracted views + intermediates cost nothing).
+        constraintGaps = extractDataTestToConstraintGaps(newDoc)
       }
     }
   }
@@ -1225,7 +1333,7 @@ export function detectSchemaYmlPatterns(
     }
   }
 
-  if (!removals.length && !grainGaps.length) return []
+  if (!removals.length && !grainGaps.length && !constraintGaps.length) return []
 
   const findings: Finding[] = []
   const isMartLayer = /(^|\/)(marts?|reporting)\//.test(file.path)
@@ -1374,6 +1482,49 @@ export function detectSchemaYmlPatterns(
         // Per-column ruleKey so the global fingerprint dedupe keeps distinct
         // grain-column gaps on the same model as separate findings.
         ruleKey: `test_coverage:grain-key-not-null:${g.model}.${g.column}`,
+      }),
+    )
+  }
+
+  // R20 S6-lite — data_test → constraint conversion on contracted models.
+  // Only fires when the model has `contract: {enforced: true}` AND the column
+  // has `data_tests: [not_null]` but not the corresponding constraint. Rule
+  // is view-gated (skipped when materialized: view) since views can't carry
+  // constraints on most adapters.
+  for (const g of constraintGaps) {
+    const filename = file.path.split("/").pop()
+    findings.push(
+      makeFinding({
+        severity: clampSeverity("test_coverage", "suggestion", "high"),
+        category: "test_coverage",
+        title: `${filename}: on \`${g.model}\`, column \`${g.column}\` has \`data_tests: [not_null]\` but no matching \`constraints:\` entry`,
+        body:
+          `The model \`${g.model}\` has \`contract: {enforced: true}\` — the schema-first pattern is to ` +
+          `declare column constraints so the database enforces them at write time. Column \`${g.column}\` carries ` +
+          `\`data_tests: [not_null]\` (CI-time enforcement) without the matching \`constraints: [{type: not_null}]\` ` +
+          `(write-time enforcement). Add the constraint so a bad write is rejected before it lands rather than only ` +
+          `caught on the next test run:\n\n` +
+          "```yaml\n" +
+          `columns:\n` +
+          `  - name: ${g.column}\n` +
+          `    constraints:\n` +
+          `      - type: not_null\n` +
+          "```\n\n" +
+          `Keep the data_test if you also want redundant CI enforcement, or drop it once the constraint lands.`,
+        file: file.path,
+        model: g.model,
+        column: g.column,
+        confidence: "high",
+        evidence: {
+          tool: "dbt-patterns",
+          result: {
+            rule: "data_test_should_be_constraint",
+            model: g.model,
+            column: g.column,
+            testName: g.testName,
+          },
+        },
+        ruleKey: `test_coverage:data-test-to-constraint:${g.model}.${g.column}`,
       }),
     )
   }

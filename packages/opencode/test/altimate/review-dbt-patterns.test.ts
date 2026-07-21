@@ -980,6 +980,159 @@ models:
     expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
   })
 
+  // R20 S6-lite — on contracted models, `data_tests: [not_null]` on a column
+  // without the matching `constraints: [{type: not_null}]` should be flagged
+  // as a suggestion to convert. Largest single-rule signal in the R20 corpus
+  // (PR D×6 comments). View-gated: keeping the data_test is correct on views.
+  test("R20 S6-lite: contracted mart with data_tests: [not_null] but no constraint → suggestion", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_column_lineage
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: record_id
+        data_tests:
+          - not_null
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_column_lineage.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "data_test_should_be_constraint")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].severity).toBe("suggestion")
+    expect(gaps[0].model).toBe("mrt_column_lineage")
+    expect(gaps[0].column).toBe("record_id")
+    expect(gaps[0].body).toContain("constraints:")
+    expect(gaps[0].body).toContain("- type: not_null")
+  })
+
+  test("R20 S6-lite: view-materialized model does NOT fire (constraints inert on views)", () => {
+    const newContent = `version: 2
+models:
+  - name: stg_x
+    config:
+      contract:
+        enforced: true
+      materialized: view
+    columns:
+      - name: record_id
+        data_tests:
+          - not_null
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/staging/stg_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "data_test_should_be_constraint").length).toBe(0)
+  })
+
+  test("R20 S6-lite: non-contracted model does NOT fire", () => {
+    const newContent = `version: 2
+models:
+  - name: int_x
+    columns:
+      - name: record_id
+        data_tests:
+          - not_null
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/intermediate/int_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "data_test_should_be_constraint").length).toBe(0)
+  })
+
+  test("R20 S6-lite: column with BOTH data_test AND constraint does NOT fire (already covered)", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: record_id
+        constraints:
+          - type: not_null
+        data_tests:
+          - not_null
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "data_test_should_be_constraint").length).toBe(0)
+  })
+
+  test("R20 S6-lite: top-level `contract:` (not nested under config:) also triggers rule", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    contract:
+      enforced: true
+    columns:
+      - name: id
+        data_tests: [not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "data_test_should_be_constraint").length).toBe(1)
+  })
+
+  test("R20 S6-lite: multiple columns → one finding per uncovered column", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: a
+        data_tests: [not_null]
+      - name: b
+        constraints: [{type: not_null}]
+        data_tests: [not_null]   # already covered by constraint
+      - name: c
+        tests: [not_null]        # dbt <1.8 alias
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "data_test_should_be_constraint")
+    expect(gaps.length).toBe(2)
+    expect(gaps.map((g) => g.column).sort()).toEqual(["a", "c"])
+  })
+
+  test("R20 S6-lite: does not fire on deleted schema.yml", () => {
+    const oldContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        data_tests: [not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "data_test_should_be_constraint").length).toBe(0)
+  })
+
   test("benign additive column produces NO dbt-pattern finding (precision)", () => {
     const sql = `select id, upper(status) as status_upper from {{ ref('x') }}`
     const f = detectModelPatterns(
