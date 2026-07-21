@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Snowflake Cortex: `claude-sonnet-5`, `claude-opus-4-8`, and OpenAI GPT-5.4 (`openai-gpt-5.4`, `-mini`, `-nano`) in the model picker.** All verified live against Cortex, including prompt caching and tool calling on the new Claude models.
+
+### Changed
+
+- **Snowflake Cortex model catalog refreshed against the live service (2026-07-20).** Removed models Snowflake has deprecated (July 8, 2026: `deepseek-r1`, `mistral-large`, `llama3.1-405b`, `snowflake-llama-3.3-70b`) or delisted (`claude-3-7-sonnet`, `claude-3-5-sonnet`, `openai-gpt-5-chat`, `llama4-scout`, `mixtral-8x7b`, `snowflake-llama-3.1-405b`, `gemini-3.1-pro`) — requests to these now hard-fail on Cortex. Locally registered models via `altimate-code.json` are unaffected.
+
+### Fixed
+
+- **Snowflake Cortex prompt caching now activates for Claude models.** Cortex only honors caching markers placed inside content blocks (`messages[].content[].cache_control`), but requests carried them as message-level fields — so every request billed the full input rate (`cache_read_input`/`cache_write_input` stayed NULL in `TOKENS_GRANULAR`). The provider now relocates the markers into content blocks (system prompt + trailing messages, max 4 breakpoints), cutting repeated-prefix input cost by up to 90% on long agent sessions. If a Cortex account rejects the marked shape, the request is retried once without markers and marker injection pauses for a 5-minute cooldown. (#1009)
+
 ## [0.9.1] - 2026-07-08
 
 This release rebases altimate-code onto **upstream OpenCode v1.17.9** (bridged up from v1.4.0 — ~165 upstream commits) behind the fork's own fixes and hardening. It is a larger-than-usual jump from 0.8.10; the upgrade is automatic and in-place (see **Upgrading from 0.8.10** below).

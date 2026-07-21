@@ -1213,7 +1213,19 @@ export namespace Provider {
       env: [],
       options: {},
       models: {
+        // Catalog verified live against a Cortex account on 2026-07-20 (each ID
+        // probed via /chat/completions). Removed IDs returned "unknown model"
+        // (delisted: claude-3-7-sonnet, claude-3-5-sonnet, openai-gpt-5-chat,
+        // openai-gpt-oss-120b, llama4-scout, snowflake-llama-3.1-405b,
+        // mixtral-8x7b, gemini-3.1-pro) or an explicit "deprecated on
+        // July 8, 2026" error (deepseek-r1, mistral-large, llama3.1-405b,
+        // snowflake-llama-3.3-70b).
         // Claude models — tool calling supported
+        "claude-sonnet-5": makeSnowflakeModel("claude-sonnet-5", "Claude Sonnet 5", {
+          context: 1000000,
+          output: 64000,
+        }),
+        "claude-opus-4-8": makeSnowflakeModel("claude-opus-4-8", "Claude Opus 4.8", { context: 1000000, output: 128000 }),
         "claude-opus-4-7": makeSnowflakeModel("claude-opus-4-7", "Claude Opus 4.7", { context: 1000000, output: 128000 }),
         "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", {
           context: 200000,
@@ -1231,17 +1243,25 @@ export namespace Provider {
         }),
         "claude-4-sonnet": makeSnowflakeModel("claude-4-sonnet", "Claude 4 Sonnet", { context: 200000, output: 64000 }),
         // claude-4-opus: documented but gated (403 "account not allowed" on tested accounts)
-        "claude-3-7-sonnet": makeSnowflakeModel("claude-3-7-sonnet", "Claude 3.7 Sonnet", {
-          context: 200000,
-          output: 16000,
-        }),
-        "claude-3-5-sonnet": makeSnowflakeModel("claude-3-5-sonnet", "Claude 3.5 Sonnet", {
-          context: 200000,
-          output: 8192,
-        }),
+        // claude-fable-5: ID recognized (maps to claude-fable-5-global) but
+        // "unavailable" on tested accounts — likely gated; add once it opens up.
         // OpenAI models — tool calling supported
         "openai-gpt-4.1": makeSnowflakeModel("openai-gpt-4.1", "OpenAI GPT-4.1", { context: 1047576, output: 32768 }),
-        // openai-gpt-5.2: not in Snowflake's per-model restrictions table; using
+        // openai-gpt-5.4 (plain): responds live but not yet in Snowflake's
+        // restrictions table; gpt-5 family defaults as best-effort.
+        "openai-gpt-5.4": makeSnowflakeModel("openai-gpt-5.4", "OpenAI GPT-5.4", {
+          context: 272000,
+          output: 8192,
+        }),
+        "openai-gpt-5.4-mini": makeSnowflakeModel("openai-gpt-5.4-mini", "OpenAI GPT-5.4 Mini", {
+          context: 400000,
+          output: 128000,
+        }),
+        "openai-gpt-5.4-nano": makeSnowflakeModel("openai-gpt-5.4-nano", "OpenAI GPT-5.4 Nano", {
+          context: 400000,
+          output: 128000,
+        }),
+        // openai-gpt-5.2 / 5.1: not in Snowflake's per-model restrictions table;
         // gpt-5 family defaults as best-effort until docs publish exact limits.
         "openai-gpt-5.2": makeSnowflakeModel("openai-gpt-5.2", "OpenAI GPT-5.2", {
           context: 272000,
@@ -1260,11 +1280,6 @@ export namespace Provider {
           context: 1047576,
           output: 32768,
         }),
-        "openai-gpt-5-chat": makeSnowflakeModel("openai-gpt-5-chat", "OpenAI GPT-5 Chat", {
-          context: 1047576,
-          output: 32768,
-        }),
-        // openai-gpt-oss-120b: documented but returns 500 (not yet stable)
         // Meta Llama — no tool calling
         "llama4-maverick": makeSnowflakeModel(
           "llama4-maverick",
@@ -1272,46 +1287,17 @@ export namespace Provider {
           { context: 1048576, output: 4096 },
           { toolcall: false },
         ),
-        "llama4-scout": makeSnowflakeModel(
-          "llama4-scout",
-          "Llama 4 Scout",
-          { context: 128000, output: 8192 },
-          { toolcall: false },
-        ),
-        // llama3.3-70b: upstream Meta-hosted variant.
+        // llama3.3-70b: region-gated ("enable cross region inference" error on
+        // out-of-region accounts) but still a live catalog entry — keep.
         "llama3.3-70b": makeSnowflakeModel(
           "llama3.3-70b",
           "Llama 3.3 70B",
           { context: 128000, output: 8192 },
           { toolcall: false },
         ),
-        // snowflake-llama-3.3-70b: Snowflake-hosted variant (different routing /
-        // region pinning vs the upstream `llama3.3-70b` above).
-        "snowflake-llama-3.3-70b": makeSnowflakeModel(
-          "snowflake-llama-3.3-70b",
-          "Snowflake Llama 3.3 70B",
-          { context: 128000, output: 8192 },
-          { toolcall: false },
-        ),
-        // snowflake-llama-3.1-405b: 8k context per Snowflake docs (much smaller
-        // than the upstream Meta model's window). Snowflake's table lists
-        // output=8192, but output cannot exceed the total token budget — cap
-        // at 4096 (the original sibling default) so prompt+output always fit.
-        "snowflake-llama-3.1-405b": makeSnowflakeModel(
-          "snowflake-llama-3.1-405b",
-          "Snowflake Llama 3.1 405B",
-          { context: 8000, output: 4096 },
-          { toolcall: false },
-        ),
         "llama3.1-70b": makeSnowflakeModel(
           "llama3.1-70b",
           "Llama 3.1 70B",
-          { context: 128000, output: 4096 },
-          { toolcall: false },
-        ),
-        "llama3.1-405b": makeSnowflakeModel(
-          "llama3.1-405b",
-          "Llama 3.1 405B",
           { context: 128000, output: 4096 },
           { toolcall: false },
         ),
@@ -1322,12 +1308,6 @@ export namespace Provider {
           { toolcall: false },
         ),
         // Mistral — no tool calling
-        "mistral-large": makeSnowflakeModel(
-          "mistral-large",
-          "Mistral Large",
-          { context: 131000, output: 4096 },
-          { toolcall: false },
-        ),
         "mistral-large2": makeSnowflakeModel(
           "mistral-large2",
           "Mistral Large 2",
@@ -1338,26 +1318,6 @@ export namespace Provider {
           "mistral-7b",
           "Mistral 7B",
           { context: 32000, output: 4096 },
-          { toolcall: false },
-        ),
-        "mixtral-8x7b": makeSnowflakeModel(
-          "mixtral-8x7b",
-          "Mixtral 8x7B",
-          { context: 32000, output: 8192 },
-          { toolcall: false },
-        ),
-        // DeepSeek — no tool calling
-        "deepseek-r1": makeSnowflakeModel(
-          "deepseek-r1",
-          "DeepSeek R1",
-          { context: 64000, output: 32000 },
-          { reasoning: true, toolcall: false },
-        ),
-        // Gemini — tool calling not verified on Cortex; default to off until confirmed
-        "gemini-3.1-pro": makeSnowflakeModel(
-          "gemini-3.1-pro",
-          "Gemini 3.1 Pro",
-          { context: 1000000, output: 64000 },
           { toolcall: false },
         ),
       },
