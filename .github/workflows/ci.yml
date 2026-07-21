@@ -530,9 +530,9 @@ jobs:
             fi
           elif [[ "${{ github.head_ref }}" == merge-upstream-* ]] || [[ "${{ github.head_ref }}" == upstream/merge-* ]]; then
             echo "Upstream merge PR detected — running marker check in non-strict mode"
-            bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }}
+            bun run script/upstream/analyze.ts --markers --base origin/${{ github.event.pull_request.base.ref }}
           else
-            bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }} --strict
+            bun run script/upstream/analyze.ts --markers --base origin/${{ github.event.pull_request.base.ref }} --strict
           fi
 
       - name: Branding leak audit (broadened scan, see analyze.ts LEAK_PATTERNS)
