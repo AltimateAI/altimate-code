@@ -1050,6 +1050,11 @@ export function detectSchemaYmlPatterns(
   // global summary. A single boolean guard is enough.
   let summaryEmitted = false
 
+  // Consumed in lock-step with the removals loop below (fallback path only).
+  // Using an index avoids `shift()`, which would be O(N) per call on the
+  // discriminator array — negligible on 2-3 removals but O(N²) on a large
+  // schema.yml PR that drops many tests.
+  let fallbackIdx = 0
   for (const r of removals) {
     const isUniquenessSignal = r.test === "unique"
     const notNullOnLikelyPK =
@@ -1096,16 +1101,19 @@ export function detectSchemaYmlPatterns(
     // Emit the aggregate summary once per file, on the first finding, and
     // only when there are multiple removals to summarise. Uses the file-scoped
     // `summaryEmitted` flag rather than a per-model guard so a diff touching
-    // three models emits ONE summary, not three.
+    // three models emits ONE summary, not three. Distinct-models computation
+    // is gated inside the branch so we don't pay for the Set/spread/map on
+    // every loop iteration when the summary won't be attached.
     const shouldEmitSummary = !summaryEmitted && removals.length > 1
-    if (shouldEmitSummary) summaryEmitted = true
-    const distinctModels = [...new Set(removals.map((x) => x.model).filter(Boolean))]
-    const modelClause = distinctModels.length
-      ? ` on model(s) ${distinctModels.map((m) => `\`${m}\``).join(", ")}`
-      : ""
-    const bodyTail = shouldEmitSummary
-      ? `\n\n_This PR removes ${removals.length} data tests in total${modelClause}._`
-      : ""
+    let bodyTail = ""
+    if (shouldEmitSummary) {
+      summaryEmitted = true
+      const distinctModels = [...new Set(removals.map((x) => x.model).filter(Boolean))]
+      const modelClause = distinctModels.length
+        ? ` on model(s) ${distinctModels.map((m) => `\`${m}\``).join(", ")}`
+        : ""
+      bodyTail = `\n\n_This PR removes ${removals.length} data tests in total${modelClause}._`
+    }
 
     // ruleKey feeds the finding fingerprint (finding.ts:107). For attributed
     // (structural) findings, `(model.column.test)` is unique per removal in
@@ -1113,7 +1121,7 @@ export function detectSchemaYmlPatterns(
     // distinct removals of the same test type — we append the fallback
     // discriminator so each removed line becomes a distinct finding
     // downstream of the global dedupe.
-    const discriminator = attributed || modelLevel ? "" : `.${fallbackDiscriminators.shift() ?? "#?"}`
+    const discriminator = attributed || modelLevel ? "" : `.${fallbackDiscriminators[fallbackIdx++] ?? "#?"}`
     findings.push(
       makeFinding({
         severity: clampSeverity("test_coverage", sev, "high"),

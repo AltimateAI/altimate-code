@@ -1230,14 +1230,19 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   //
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
-  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  //
+  // DELETED schema files are filtered upfront because `detectSchemaYmlPatterns`
+  // early-returns `[]` for `status === "deleted"` anyway; not filtering here
+  // would trigger an unnecessary `getContent(oldRef, "old")` fetch (a git-show
+  // round-trip) whose result is thrown away by the detector.
+  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml" && f.status !== "deleted")
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {
         const oldRef = file.oldPath ?? file.path
         const [oldContent, newContent] = await Promise.all([
           file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
-          file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
+          getContent?.(file.path, "new"),
         ])
         return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
       }),
