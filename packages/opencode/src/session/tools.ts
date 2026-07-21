@@ -18,8 +18,9 @@ import { Session } from "./session"
 import { SessionProcessor } from "./processor"
 import { PartID } from "./schema"
 import { EffectBridge } from "@/effect/bridge"
-// altimate_change — shared tool-source stamping so this resolver can't drift from prompt.ts
+// altimate_change start — shared tool-source stamping so this resolver can't drift from prompt.ts
 import { stampRegistryToolSource, describeMcpTool } from "@/altimate/tool-source"
+// altimate_change end
 // altimate_change start — upstream_fix: ToolRegistry expects fork-branded model ids here
 import { ModelID } from "@/provider/schema"
 // altimate_change end
@@ -104,27 +105,33 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 messageID: input.processor.message.id,
               })),
             }
-            // altimate_change — stamp authoritative tool source (shared with prompt.ts resolveTools)
+            // altimate_change start — stamp authoritative tool source (shared with prompt.ts resolveTools)
             const stamped = stampRegistryToolSource(output, item)
+            // altimate_change end
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+              // altimate_change start — plugins observe the source-stamped output
               stamped,
+              // altimate_change end
             )
+            // altimate_change start — propagate the source-stamped output
             if (options.abortSignal?.aborted) {
               yield* input.processor.completeToolCall(options.toolCallId, stamped)
             }
             return stamped
+            // altimate_change end
           }),
         )
       },
     })
   }
 
+  // altimate_change start — split the original client name off the model-facing tool object so
+  // it's used only for source classification and never leaks into the schema sent to the model.
   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
-    // altimate_change — split the original client name off the model-facing tool object so it's
-    // used only for source classification and never leaks into the tool schema sent to the model.
     const { client: clientName, ...item } = entry
+    // altimate_change end
     const execute = item.execute
     if (!execute) continue
 
@@ -184,18 +191,23 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           }
 
           const truncated = yield* truncate.output(textParts.join("\n\n"), {}, input.agent)
-          // altimate_change — authoritative source + readable title from the original client name,
-          // shared with prompt.ts resolveTools so the two resolvers can't drift.
+          // altimate_change start — authoritative source + readable title from the original client
+          // name, shared with prompt.ts resolveTools so the two resolvers can't drift.
           const described = describeMcpTool(key, clientName)
+          // altimate_change end
           const metadata = {
             ...result.metadata,
             truncated: truncated.truncated,
             ...(truncated.truncated && { outputPath: truncated.outputPath }),
+            // altimate_change start — stamp the authoritative source badge
             source: described.source,
+            // altimate_change end
           }
 
           const output = {
+            // altimate_change start — MCP tools have no native title; give a readable label
             title: described.title,
+            // altimate_change end
             metadata,
             output: truncated.content,
             attachments: attachments.map((attachment) => ({

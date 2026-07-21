@@ -71,8 +71,9 @@ import { registerAltimateValidators } from "../altimate/validators"
 registerAltimateValidators()
 import { Config } from "../config/config"
 import { Tracer } from "../altimate/observability/tracing"
-// altimate_change — stamp an authoritative tool source + humanized MCP title
+// altimate_change start — stamp an authoritative tool source + humanized MCP title
 import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
+// altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 
@@ -1609,9 +1610,10 @@ export namespace SessionPrompt {
               messageID: input.processor.message.id,
             })),
           }
-          // altimate_change — stamp authoritative tool source so clients render the right badge.
-          // Shared with SessionTools.resolve (session/tools.ts) so the two resolvers can't drift.
+          // altimate_change start — stamp authoritative tool source so clients render the right
+          // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
           const stamped = stampRegistryToolSource(output, item)
+          // altimate_change end
           await Plugin.trigger(
             "tool.execute.after",
             {
@@ -1620,17 +1622,22 @@ export namespace SessionPrompt {
               callID: ctx.callID,
               args,
             },
+            // altimate_change start — plugins observe the source-stamped output
             stamped,
+            // altimate_change end
           )
+          // altimate_change start — return the source-stamped output
           return stamped
+          // altimate_change end
         },
       })
     }
 
+    // altimate_change start — split the original client name off the model-facing tool object so
+    // it's used only for source classification and never leaks into the schema sent to the model.
     for (const [key, entry] of Object.entries(await MCP.tools())) {
-      // altimate_change — split the original client name off the model-facing tool object so it's
-      // used only for source classification and never leaks into the tool schema sent to the model.
       const { client: clientName, ...item } = entry
+      // altimate_change end
       const execute = item.execute
       if (!execute) continue
 
@@ -1708,19 +1715,23 @@ export namespace SessionPrompt {
         }
 
         const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
-        // altimate_change — authoritative source + readable title from the original client name,
-        // shared with SessionTools.resolve (session/tools.ts) so the two resolvers can't drift.
+        // altimate_change start — authoritative source + readable title from the original client
+        // name, shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
         const described = describeMcpTool(key, clientName)
+        // altimate_change end
         const metadata = {
           ...(result.metadata ?? {}),
           truncated: truncated.truncated,
           ...(truncated.truncated && { outputPath: truncated.outputPath }),
+          // altimate_change start — stamp the authoritative source badge
           source: described.source,
+          // altimate_change end
         }
 
         return {
-          // altimate_change — MCP tools have no native title; give a readable label
+          // altimate_change start — MCP tools have no native title; give a readable label
           title: described.title,
+          // altimate_change end
           metadata,
           output: truncated.content,
           attachments: attachments.map((attachment) => ({

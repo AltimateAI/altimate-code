@@ -204,8 +204,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         metadata: {
           name: skill.name,
           dir,
-          // altimate_change — origin drives the source badge (see altimate/tool-source.ts skillToolSource)
+          // altimate_change start — origin drives the source badge (see altimate/tool-source.ts skillToolSource)
           skillOrigin,
+          // altimate_change end
         },
       }
       // altimate_change end
