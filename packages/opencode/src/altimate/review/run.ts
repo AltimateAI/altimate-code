@@ -79,15 +79,18 @@ async function detectDialect(manifestAbs: string): Promise<string | undefined> {
 }
 
 /**
- * G3 (Round 18) — walk upward from `cwd` looking for a dbt project, then check
- * for the compiled `target/manifest.json` next to it. Emits an absolute path
- * only when the manifest exists AND the file is under the dbt project's parent
- * (defensive against relative escapes and stale manifests from unrelated
- * projects on the same filesystem). Returns undefined when nothing matches.
+ * G3 (Round 18) — walk upward from `cwd` looking for the nearest
+ * `dbt_project.yml`; if found, return the adjacent `target/manifest.json`
+ * (when it exists). Anchored on `dbt_project.yml` so we never pick up a
+ * `target/` from an unrelated tool (e.g. an Airflow project) that happens
+ * to live above us on the filesystem.
  *
  * We DO NOT re-run `dbt compile` here — that could touch a real warehouse or
- * consume credentials. The customer is still responsible for a compiled
- * artifact; we just find it when they compiled but didn't pass `--manifest`.
+ * consume credentials. The customer is still responsible for compiling; we
+ * just find the existing artifact when they didn't pass `--manifest`.
+ *
+ * Returns undefined when no dbt project is found upward, or when the found
+ * project has no compiled manifest.
  */
 async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projectRoot: string } | undefined> {
   let dir = path.resolve(cwd)
@@ -167,6 +170,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   let manifestAbs = path.isAbsolute(config.manifestPath)
     ? config.manifestPath
     : path.join(opts.cwd, config.manifestPath)
+  // The "effective dbt project root" for downstream lookups (dbtProjectName,
+  // compiled-SQL resolver). Starts as opts.cwd — G3 auto-discovery updates it
+  // when it finds a dbt_project.yml in an ancestor directory, so the compiled
+  // resolver and project-name lookups target the discovered project rather
+  // than the CLI's working directory (which may be a subdir).
+  let dbtRoot = opts.cwd
   // G3 (Round 18) — auto-discovery when the caller didn't pass `--manifest` and
   // the config-relative resolve above doesn't point at an existing file. Walk
   // upward for the dbt project root and use its `target/manifest.json`. Explicit
@@ -183,6 +192,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       const discovered = await autoDiscoverManifest(opts.cwd)
       if (discovered) {
         manifestAbs = discovered.path
+        dbtRoot = discovered.projectRoot
         process.stderr.write(
           `ℹ️  auto-discovered dbt manifest at ${discovered.path} ` +
             `(dbt project root: ${discovered.projectRoot}). Pass --manifest to override.\n`,
@@ -212,8 +222,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
 
   // Prefer dbt's COMPILED SQL (target/compiled) for the engine lanes — the clean
   // approach (Datafold/Recce/Fusion all render-then-analyze rather than parse Jinja).
-  const projectName = await dbtProjectName(opts.cwd)
-  const getCompiled = opts.getContent ? undefined : makeCompiledResolver({ cwd: opts.cwd, projectName })
+  // Use `dbtRoot` (the discovered project root when G3 auto-discovery fired,
+  // else opts.cwd) so a subdir invocation still finds `target/compiled/…`
+  // next to the discovered manifest instead of falling back to raw Jinja.
+  const projectName = await dbtProjectName(dbtRoot)
+  const getCompiled = opts.getContent ? undefined : makeCompiledResolver({ cwd: dbtRoot, projectName })
 
   return runReview({
     changedFiles,

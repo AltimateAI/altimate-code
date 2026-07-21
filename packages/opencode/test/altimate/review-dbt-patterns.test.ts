@@ -158,6 +158,193 @@ describe("dbt-patterns detectors", () => {
     expect(f.length).toBe(0)
   })
 
+  // ------------------------------------------------------------------------
+  // Post-R18 review follow-ups: structural YAML path + sibling-column edge case
+  // + model-level tests + fallback shape. The rewritten detector prefers full
+  // old/new file content; these tests validate both paths.
+  // ------------------------------------------------------------------------
+
+  test("schema.yml (structural): unique removed from one column while sibling keeps it → 1 finding on the affected column", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // 2 removals on customers.customer_id (unique + not_null), 0 on orders/email
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+    // At least one finding names customers.customer_id specifically
+    expect(f.some((x) => (x.title || "").includes("customers.customer_id"))).toBe(true)
+    // No finding attributed to orders.order_id (sibling still has `unique`)
+    expect(f.some((x) => (x.title || "").includes("orders.order_id"))).toBe(false)
+  })
+
+  test("schema.yml (structural): model-level unique test removed → 1 finding with model-level attribution", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    tests:
+      - unique
+    columns:
+      - name: customer_id
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect(f[0].category).toBe("test_coverage")
+    expect(f[0].severity).toBe("warning")
+    expect((f[0].title || "").includes("model-level")).toBe(true)
+    // Attribution flag in evidence lets downstream see it wasn't column-scoped
+    const evResult = (f[0].evidence?.result || {}) as Record<string, unknown>
+    expect(evResult.attribution).toBe("model-level")
+  })
+
+  test("schema.yml (structural): block-form relationships removal is detected", () => {
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect((f[0].title || "").includes("relationships")).toBe(true)
+  })
+
+  test("schema.yml (structural): data_tests (dbt 1.8+ alias) is recognized", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        data_tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+  })
+
+  test("schema.yml (structural): source column test removal is detected", () => {
+    const oldContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: users
+        columns:
+          - name: id
+            tests: [unique, not_null]
+`
+    const newContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: users
+        columns:
+          - name: id
+            tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/sources.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    // Source table gets qualified as `source.table` in the model field
+    expect(f.some((x) => (x.title || "").includes("raw.users.id"))).toBe(true)
+  })
+
+  test("schema.yml (structural): added file (no oldContent) surfaces no removal findings", () => {
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.length).toBe(0)
+  })
+
+  test("schema.yml (fallback): diff-only path still surfaces removal (existing test's shape)", () => {
+    // Exercises the fallback line-based detection when the orchestrator can't
+    // supply file content (e.g. offline CI diffs).
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    // At least one test_coverage finding surfaces so a customer isn't blind to
+    // removed guardrails just because the content resolver wasn't wired.
+    expect(has(f, "test_coverage")).toBe(true)
+  })
+
   test("benign additive column produces NO dbt-pattern finding (precision)", () => {
     const sql = `select id, upper(status) as status_upper from {{ ref('x') }}`
     const f = detectModelPatterns(

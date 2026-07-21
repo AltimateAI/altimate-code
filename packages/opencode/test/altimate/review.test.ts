@@ -265,6 +265,59 @@ describe("verdict", () => {
     expect(verifyEnvelope(tampered, "test-key")).toBe(false)
   })
 
+  test("--force-tier audit fields are set whenever the flag is passed (even when forced == classified)", () => {
+    // Simulates orchestrate.ts's audit-envelope construction for the two
+    // --force-tier cases. Ensures we never silently bypass the audit trail
+    // just because the forced value happens to match the classifier's tier.
+    // Regression guard for the post-R18 review finding.
+    const withForcedDifferent = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      tierForced: true,
+      tierClassified: "trivial",
+      tierReasons: ["forced via --force-tier=full (classifier said trivial)"],
+    })
+    expect(withForcedDifferent.tierForced).toBe(true)
+    expect(withForcedDifferent.tierClassified).toBe("trivial")
+
+    const withForcedSame = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      tierForced: true,
+      tierClassified: "full",
+      tierReasons: ["forced via --force-tier=full (classifier said full)"],
+    })
+    expect(withForcedSame.tierForced).toBe(true)
+    expect(withForcedSame.tierClassified).toBe("full")
+
+    const notForced = buildEnvelope({ findings: [], tier: "lite", mode: "comment" })
+    expect(notForced.tierForced).toBeUndefined()
+    expect(notForced.tierClassified).toBeUndefined()
+  })
+
+  test("tierForced + tierClassified are covered by the signature (tampering detected)", () => {
+    // Confirms the audit fields live inside the signed canonical body — a
+    // tampered envelope claiming a natural tier when a bypass ran can't slip
+    // past verifyEnvelope.
+    const signed = signEnvelope(
+      buildEnvelope({
+        findings: [],
+        tier: "full",
+        mode: "comment",
+        tierForced: true,
+        tierClassified: "trivial",
+        tierReasons: ["forced via --force-tier=full (classifier said trivial)"],
+        generatedAt: "2026-05-29T00:00:00Z",
+      }),
+      "k",
+    )
+    expect(verifyEnvelope(signed, "k")).toBe(true)
+    const strippedForce = { ...signed, tierForced: undefined, tierClassified: undefined, tierReasons: undefined }
+    expect(verifyEnvelope(strippedForce, "k")).toBe(false)
+  })
+
   test("tampering a NESTED finding field is detected (signature covers findings)", () => {
     const f = makeFinding({
       severity: "warning",

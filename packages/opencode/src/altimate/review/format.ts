@@ -28,7 +28,11 @@ export function verdictHeadline(env: VerdictEnvelope): string {
     [critical && `${critical} critical`, warning && `${warning} warning`, suggestion && `${suggestion} suggestion`]
       .filter(Boolean)
       .join(", ") || "no findings"
-  const tierLabel = env.tierForced ? `${env.tier} tier — forced (was ${env.tierClassified})` : `${env.tier} tier`
+  // tierClassified is optional in the schema — guard against externally-built
+  // envelopes that mark tierForced without threading the original classification.
+  const tierLabel = env.tierForced
+    ? `${env.tier} tier — forced (was ${env.tierClassified ?? "unknown"})`
+    : `${env.tier} tier`
   return `${VERDICT_LABEL[env.verdict]} — ${counts} (${tierLabel})`
 }
 
@@ -47,11 +51,18 @@ export function renderSummary(env: VerdictEnvelope): string {
   // G1 (Round 18) — surface classifier reasons when --explain-tier populated
   // them, so a customer can see why the review ran at this tier. Also surfaces
   // when --force-tier bypassed the classifier (tierReasons is auto-populated).
+  // Truncate the rendered summary on very large diffs: classifyPR appends one
+  // reason per file forcing FULL tier (e.g. every touched schema.yml or every
+  // PII column), which bloats the comment on wide PRs. The full list stays in
+  // the signed envelope's tierReasons[]; the summary shows the first 8.
   if (env.tierReasons && env.tierReasons.length) {
-    lines.push(
-      `> 🧭 **Tier: ${env.tier}** — ${env.tierReasons.map((r) => `\`${r}\``).join(", ")}`,
-      "",
-    )
+    const RENDER_CAP = 8
+    const shown = env.tierReasons.slice(0, RENDER_CAP).map((r) => `\`${r}\``).join(", ")
+    const overflow =
+      env.tierReasons.length > RENDER_CAP
+        ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`
+        : ""
+    lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
   }
 
   if (!env.findings.length) {

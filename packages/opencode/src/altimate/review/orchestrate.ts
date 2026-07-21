@@ -1217,8 +1217,19 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
 
   // schema.yml-level detectors (test removal) — run on changed YAML files
   // regardless of tier, since deleting a guardrail test is always worth flagging.
+  // Pass old + new content when available so the detector diffs structural YAML
+  // (per-(entity, column, test) tuples) instead of walking the unified diff
+  // (which loses context when the model header is outside the -U3 window and
+  // silently drops sibling-column edge cases). Falls back to diff-only line
+  // detection when a content resolver isn't wired (e.g. unit-test callers).
   for (const file of reviewable) {
-    if (file.kind === "schema_yml") all.push(detectSchemaYmlPatterns(file, input.rubric))
+    if (file.kind !== "schema_yml") continue
+    const oldRef = file.oldPath ?? file.path
+    const [oldContent, newContent] = await Promise.all([
+      file.status === "modified" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
+      file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
+    ])
+    all.push(detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }))
   }
 
   // Architectural dedup: the regex `dbt-patterns`/`rule-catalog` layer is a

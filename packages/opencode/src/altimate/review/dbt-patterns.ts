@@ -1,4 +1,5 @@
 import path from "node:path"
+import YAML from "yaml"
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
 import { type ChangedFile, classifyDbtFile } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
@@ -790,162 +791,294 @@ export function detectModelPatterns(file: ChangedFile, newSql: string | undefine
  * Detect removal of `unique` / `not_null` / `relationships` tests in a schema.yml
  * diff — the guardrail that catches fan-out/dupes is the thing being deleted.
  */
-/** Walk a unified diff and, for each removed test-line, reconstruct which
- *  `(model, column)` context it belonged to on the OLD side. Uses hunk headers
- *  to reset line counters and tracks the nearest `- name:` header preceding
- *  each line. Yields `{ model, column, test }` tuples for every removed
- *  `unique | not_null | relationships` — including bare `- <test>` lines and
- *  block-form `- <test>:` lines (relationships with args). Round-18 G6. */
-function collectTestOccurrencesFromDiff(diff: string | undefined, side: "-" | "+"): Set<string> {
-  // Returned as a Set of canonical `${model}\x00${column}\x00${test}` keys so
-  // callers can compare removed vs added sets without re-parsing.
+/**
+ * Structural extraction of `(model, column?, test)` tuples from a parsed
+ * schema.yml document. Handles:
+ *  - Column-level tests under `models[*].columns[*].tests` / `.data_tests`
+ *  - Model-level tests directly under `models[*].tests` / `.data_tests`
+ *    (surrogate-key `unique`, etc. — no column)
+ *  - Sources (`sources[*].tables[*].(columns[*].)tests`) since dbt supports
+ *    the same test grammar there
+ *  - Snapshots (`snapshots[*].(columns[*].)tests`)
+ *  - Both bare (`- unique`) and block-form (`- relationships: {...}`)
+ *  - Both `tests` and `data_tests` (dbt 1.8+ alias)
+ *
+ * Returns a Set of canonical `${modelOrSource}\x00${column}\x00${test}` keys
+ * (column is empty string for model-level tests). Yields nothing when the
+ * document isn't shaped like a schema.yml.
+ */
+function extractTestOccurrences(doc: unknown): Set<string> {
   const out = new Set<string>()
-  if (!diff) return out
-  let currentModel = ""
-  let currentColumn = ""
-  // Track indentation depth of the CURRENT model/column so we can pop when we
-  // dedent past them. A `- name: X` at indent I claims all lines at indent > I.
-  let modelIndent = -1
-  let columnIndent = -1
-  const modelRe = /^(\s*)-\s*name:\s*([A-Za-z0-9_.\-]+)\s*$/
-  const testRe = /^(\s*)-\s*(unique|not_null|relationships)\b(?::)?/i
-  for (const raw of diff.split("\n")) {
-    // Diff hunk header — reset context; don't try to interpret hunk offsets.
-    if (raw.startsWith("@@")) {
-      currentModel = ""
-      currentColumn = ""
-      modelIndent = -1
-      columnIndent = -1
-      continue
-    }
-    // We consider both context and same-side lines for STRUCTURE (they define
-    // the model/column context) but only same-side lines for TEST detection.
-    let payload: string
-    let onOurSide: boolean
-    if (raw.startsWith(side)) {
-      // remove +/- prefix
-      payload = raw.slice(1)
-      onOurSide = true
-    } else if (raw.startsWith(side === "-" ? "+" : "-") || raw.startsWith("+++") || raw.startsWith("---")) {
-      // The other side's insertion/deletion — don't read structure from it,
-      // don't produce test occurrences from it.
-      continue
-    } else {
-      // Context line (leading space or none).
-      payload = raw.startsWith(" ") ? raw.slice(1) : raw
-      onOurSide = false
-    }
-    // Pop column/model when we've dedented past them.
-    const leadingWs = payload.match(/^(\s*)/)![1].length
-    // Only pop for non-empty payload lines (blank lines carry no indent info).
-    if (payload.trim()) {
-      if (columnIndent >= 0 && leadingWs <= columnIndent) {
-        currentColumn = ""
-        columnIndent = -1
-      }
-      if (modelIndent >= 0 && leadingWs <= modelIndent) {
-        currentModel = ""
-        modelIndent = -1
+  if (!doc || typeof doc !== "object") return out
+  const d = doc as Record<string, unknown>
+
+  const emitTests = (entity: string, column: string, tests: unknown): void => {
+    if (!Array.isArray(tests)) return
+    for (const t of tests) {
+      const name =
+        typeof t === "string"
+          ? t
+          : t && typeof t === "object"
+            ? Object.keys(t as Record<string, unknown>)[0]
+            : undefined
+      if (!name) continue
+      const n = name.toLowerCase()
+      // Restrict to the guardrail tests the detector cares about; a bespoke
+      // custom test being removed is not a signal at this level.
+      if (n === "unique" || n === "not_null" || n === "relationships") {
+        out.add(`${entity}\x00${column}\x00${n}`)
       }
     }
-    // Detect `- name: X` — could be either a model header or a column header;
-    // disambiguate by whether we already have a model in scope.
-    const nameMatch = payload.match(modelRe)
-    if (nameMatch) {
-      const wsLen = nameMatch[1].length
-      const name = nameMatch[2]
-      // If we have no model, or this header is at the same/less indent than
-      // the current model header, treat as a new model.
-      if (currentModel === "" || wsLen <= modelIndent) {
-        currentModel = name
-        modelIndent = wsLen
-        currentColumn = ""
-        columnIndent = -1
-      } else {
-        // Deeper than the model header → column of the current model.
-        currentColumn = name
-        columnIndent = wsLen
+  }
+
+  const walkEntityWithColumns = (entityName: string | undefined, node: unknown): void => {
+    if (!entityName || !node || typeof node !== "object") return
+    const n = node as Record<string, unknown>
+    // Model/source/snapshot-level tests: `tests:` or `data_tests:` right under the entity.
+    emitTests(entityName, "", n.tests)
+    emitTests(entityName, "", n.data_tests)
+    if (Array.isArray(n.columns)) {
+      for (const col of n.columns) {
+        if (!col || typeof col !== "object") continue
+        const c = col as Record<string, unknown>
+        const cname = typeof c.name === "string" ? c.name : undefined
+        if (!cname) continue
+        emitTests(entityName, cname, c.tests)
+        emitTests(entityName, cname, c.data_tests)
       }
-      continue
     }
-    // Detect a test on OUR side and within a column context.
-    if (onOurSide && currentModel && currentColumn) {
-      const t = payload.match(testRe)
-      if (t) {
-        const test = t[2].toLowerCase()
-        out.add(`${currentModel}\x00${currentColumn}\x00${test}`)
+  }
+
+  // `models:` — array of `{ name, columns?, tests? }`
+  if (Array.isArray(d.models)) {
+    for (const m of d.models) {
+      if (!m || typeof m !== "object") continue
+      const mm = m as Record<string, unknown>
+      const mname = typeof mm.name === "string" ? mm.name : undefined
+      walkEntityWithColumns(mname, mm)
+    }
+  }
+  // `snapshots:` — same shape as models
+  if (Array.isArray(d.snapshots)) {
+    for (const s of d.snapshots) {
+      if (!s || typeof s !== "object") continue
+      const ss = s as Record<string, unknown>
+      const sname = typeof ss.name === "string" ? ss.name : undefined
+      walkEntityWithColumns(sname, ss)
+    }
+  }
+  // `sources:` — `[{ name, tables: [{ name, columns?, tests? }] }]`
+  if (Array.isArray(d.sources)) {
+    for (const src of d.sources) {
+      if (!src || typeof src !== "object") continue
+      const srcObj = src as Record<string, unknown>
+      const srcName = typeof srcObj.name === "string" ? srcObj.name : undefined
+      if (!Array.isArray(srcObj.tables)) continue
+      for (const t of srcObj.tables) {
+        if (!t || typeof t !== "object") continue
+        const tt = t as Record<string, unknown>
+        const tname = typeof tt.name === "string" ? tt.name : undefined
+        const qualified = srcName && tname ? `${srcName}.${tname}` : tname || undefined
+        walkEntityWithColumns(qualified, tt)
       }
+    }
+  }
+  // `seeds:` — leaf entity, same test grammar
+  if (Array.isArray(d.seeds)) {
+    for (const s of d.seeds) {
+      if (!s || typeof s !== "object") continue
+      const ss = s as Record<string, unknown>
+      const sname = typeof ss.name === "string" ? ss.name : undefined
+      walkEntityWithColumns(sname, ss)
     }
   }
   return out
 }
 
-export function detectSchemaYmlPatterns(file: ChangedFile, rubric: Rubric): Finding[] {
+/**
+ * Fallback removed-test detector for callers that supply only the diff
+ * (no old/new content). Kept intentionally conservative: matches removed
+ * lines that look like `- unique | not_null | relationships`, subtracts any
+ * added line with the same trimmed text. Cannot distinguish "moved to
+ * another column" from "removed from this column" — that requires content.
+ * The old-string dedup false-negative on sibling columns is inherent to
+ * diff-only input; when structural content is available we use the
+ * structural path (`extractTestOccurrences` diff of old vs new).
+ */
+function fallbackRemovedTestLines(diff: string | undefined): string[] {
+  if (!diff) return []
+  const added: string[] = []
+  const removed: string[] = []
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("+") && !raw.startsWith("+++")) added.push(raw.slice(1))
+    else if (raw.startsWith("-") && !raw.startsWith("---")) removed.push(raw.slice(1))
+  }
+  const testLine = /^\s*-\s*(unique|not_null|relationships)\b/i
+  const removedTests = removed.filter((l) => testLine.test(l))
+  const addedTrim = new Set(added.map((l) => l.trim()))
+  return removedTests.filter((l) => !addedTrim.has(l.trim()))
+}
+
+export interface SchemaYmlDetectContent {
+  oldContent?: string
+  newContent?: string
+}
+
+/**
+ * Detect removed data tests in a schema.yml diff.
+ *
+ * PREFERRED path (production, via orchestrator): pass full old/new content in
+ * `opts` — the detector parses both YAML documents, diffs by
+ * `(entity, column, test)` tuples, and emits one finding per genuine removal.
+ * This captures model-level tests (no column), sibling-column edge cases
+ * (unique removed from column X while column Y still declares it), quoted /
+ * commented YAML names, and any layout / indent style the parser accepts.
+ *
+ * FALLBACK path (callers that only have the raw diff, e.g. unit tests or
+ * pre-collected CI diffs without a content resolver): use the string-based
+ * removed-line detection preserved from the pre-R18 detector. It cannot
+ * tell "removed" from "moved to another column" for the same test type on
+ * a sibling column — that limitation is inherent to diff-only input.
+ */
+export function detectSchemaYmlPatterns(
+  file: ChangedFile,
+  rubric: Rubric,
+  opts: SchemaYmlDetectContent = {},
+): Finding[] {
   const kind = classifyDbtFile(file.path)
   if (kind !== "schema_yml" || file.status === "deleted") return []
 
-  // COLUMN-AWARE test-removal detection (G6 fix, Round 18). The previous
-  // string-set dedup collapsed `- unique` on ANY column into the "still
-  // present" bucket, hiding a genuine removal from column X whenever a
-  // sibling column Y still had `- unique`. This walks the diff with model/
-  // column context so a removal is only cancelled by re-appearance on the
-  // SAME `(model, column, test)` tuple.
-  const removedByCtx = collectTestOccurrencesFromDiff(file.diff, "-")
-  const addedByCtx = collectTestOccurrencesFromDiff(file.diff, "+")
-  const genuinelyRemoved: Array<{ model: string; column: string; test: string }> = []
-  for (const key of removedByCtx) {
-    if (addedByCtx.has(key)) continue
-    const [model, column, test] = key.split("\x00")
-    genuinelyRemoved.push({ model, column, test })
-  }
-  if (!genuinelyRemoved.length) return []
+  let removals: Array<{ model: string; column: string; test: string }> = []
+  let usedStructural = false
 
-  // Emit ONE finding per (column, test) removal for precision — customers
-  // can see exactly which guardrail was dropped, not just a total count.
+  // PREFERRED: structural YAML diff when we have both sides' content.
+  if (opts.newContent !== undefined) {
+    let oldDoc: unknown = undefined
+    let newDoc: unknown = undefined
+    try {
+      newDoc = YAML.parse(opts.newContent)
+    } catch {
+      newDoc = undefined
+    }
+    if (opts.oldContent !== undefined) {
+      try {
+        oldDoc = YAML.parse(opts.oldContent)
+      } catch {
+        oldDoc = undefined
+      }
+    }
+    // For an added file the "old" side is empty (nothing removed).
+    if (newDoc !== undefined && (opts.oldContent === undefined || oldDoc !== undefined)) {
+      const oldSet = extractTestOccurrences(oldDoc ?? {})
+      const newSet = extractTestOccurrences(newDoc)
+      for (const key of oldSet) {
+        if (newSet.has(key)) continue
+        const [model, column, test] = key.split("\x00")
+        removals.push({ model, column, test })
+      }
+      usedStructural = true
+    }
+  }
+
+  // FALLBACK: line-based detection for diff-only callers.
+  if (!usedStructural) {
+    const removedLines = fallbackRemovedTestLines(file.diff)
+    // Represent as unattributed tuples (model + column unknown) so the
+    // finding still surfaces with the correct severity but names the file
+    // rather than a specific column.
+    for (const l of removedLines) {
+      const m = /^\s*-\s*(unique|not_null|relationships)\b/i.exec(l)
+      if (!m) continue
+      removals.push({ model: "", column: "", test: m[1].toLowerCase() })
+    }
+    // Deduplicate identical (model, column, test) triples so the fallback
+    // path emits at most one finding per removed test-line pattern.
+    const seen = new Set<string>()
+    removals = removals.filter((r) => {
+      const k = `${r.model}\x00${r.column}\x00${r.test}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+  }
+
+  if (!removals.length) return []
+
   const findings: Finding[] = []
   const seenModel = new Set<string>()
-  for (const r of genuinelyRemoved) {
+  const isMartLayer = /(^|\/)(marts?|reporting)\//.test(file.path)
+  const layerLabel = isMartLayer ? "mart-layer" : "declared"
+
+  for (const r of removals) {
     const isUniquenessSignal = r.test === "unique"
-    const notNullOnLikelyPK = r.test === "not_null" && /(_id$|^id$|_key$)/i.test(r.column)
+    const notNullOnLikelyPK =
+      r.test === "not_null" && !!r.column && /(_id$|^id$|_key$)/i.test(r.column)
     // Uniqueness OR not_null on an id/key column = warning (silent-dup / null-PK
     // risk); other not_null / relationships removals = suggestion.
     const sev: Severity = isUniquenessSignal || notNullOnLikelyPK ? "warning" : "suggestion"
-    // Detect layer from file path so the finding body doesn't misattribute
-    // (Codex-R18-review noted the previous copy said "mart-layer key" on
-    // every unique removal regardless of the schema.yml's actual layer).
-    const isMartLayer = /(^|\/)(marts?|reporting)\//.test(file.path)
-    const layerLabel = isMartLayer ? "mart-layer" : "declared"
-    const key = `${r.model}.${r.column}`
-    const isFirstForModel = !seenModel.has(r.model)
-    seenModel.add(r.model)
+
+    // Title / body vary based on whether structural attribution is available.
+    const attributed = !!r.model && !!r.column
+    const modelLevel = !!r.model && !r.column
+    const filename = file.path.split("/").pop()
+    const locKey = attributed ? `${r.model}.${r.column}` : modelLevel ? `${r.model} (model-level)` : "(unknown location)"
+    const title = attributed
+      ? `${filename}: ${r.test} test removed from ${locKey}`
+      : modelLevel
+        ? `${filename}: model-level ${r.test} test removed from \`${r.model}\``
+        : `${filename}: ${r.test} data test removed`
+
+    let bodyLead: string
+    if (attributed) {
+      bodyLead = `The \`${r.test}\` data test was removed from column \`${r.column}\` on model \`${r.model}\`. `
+    } else if (modelLevel) {
+      bodyLead = `A model-level \`${r.test}\` test was removed from \`${r.model}\`. `
+    } else {
+      bodyLead = `A \`${r.test}\` data test was removed from this schema file. `
+    }
+    let bodyRationale: string
+    if (isUniquenessSignal) {
+      bodyRationale =
+        `Removing a \`unique\` test on a ${layerLabel} key is how silent duplicate rows ship — ` +
+        `downstream joins fan out, aggregates double-count, and no test catches it. Restore ` +
+        `the test, or explicitly document why the grain no longer needs to be unique on this column.`
+    } else if (notNullOnLikelyPK) {
+      bodyRationale =
+        `Removing \`not_null\` on what looks like an identifier column (\`${r.column}\`) means nulls ` +
+        `will slip through into downstream joins and aggregates. Restore the test unless the column ` +
+        `is genuinely nullable now.`
+    } else {
+      bodyRationale =
+        `Removing an existing data test is a silent-regression risk. Confirm the test is genuinely ` +
+        `obsolete, not dropped to make CI green.`
+    }
+    const isFirstForModel = !!r.model && !seenModel.has(r.model)
+    if (r.model) seenModel.add(r.model)
+    const bodyTail =
+      isFirstForModel && removals.length > 1
+        ? `\n\n_This PR removes ${removals.length} data tests in total on model(s) ` +
+          `${[...new Set(removals.map((x) => x.model).filter(Boolean))].map((m) => `\`${m}\``).join(", ")}._`
+        : ""
+
     findings.push(
       makeFinding({
         severity: clampSeverity("test_coverage", sev, "high"),
         category: "test_coverage",
-        title: `${file.path.split("/").pop()}: ${r.test} test removed from ${key}`,
-        body:
-          `The \`${r.test}\` data test was removed from column \`${r.column}\` on model \`${r.model}\`. ` +
-          (isUniquenessSignal
-            ? `Removing a \`unique\` test on a ${layerLabel} key is how silent duplicate rows ship — ` +
-              `downstream joins fan out, aggregates double-count, and no test catches it. Restore ` +
-              `the test, or explicitly document why the grain no longer needs to be unique on this column.`
-            : notNullOnLikelyPK
-            ? `Removing \`not_null\` on what looks like an identifier column (\`${r.column}\`) means nulls ` +
-              `will slip through into downstream joins and aggregates. Restore the test unless the column ` +
-              `is genuinely nullable now.`
-            : `Removing an existing data test is a silent-regression risk. Confirm the test is genuinely ` +
-              `obsolete, not dropped to make CI green.`) +
-          (isFirstForModel && genuinelyRemoved.length > 1
-            ? `\n\n_This PR removes ${genuinelyRemoved.length} data tests in total on model(s) ` +
-              `${[...new Set(genuinelyRemoved.map((x) => x.model))].map((m) => `\`${m}\``).join(", ")}._`
-            : ""),
+        title,
+        body: bodyLead + bodyRationale + bodyTail,
         file: file.path,
         confidence: "high",
         evidence: {
           tool: "dbt-patterns",
-          result: { rule: "removed_tests", model: r.model, column: r.column, test: r.test },
+          result: {
+            rule: "removed_tests",
+            model: r.model || undefined,
+            column: r.column || undefined,
+            test: r.test,
+            attribution: attributed ? "column" : modelLevel ? "model-level" : "diff-only",
+          },
         },
-        ruleKey: `test_coverage:removed-tests:${r.model}.${r.column}.${r.test}`,
+        ruleKey: `test_coverage:removed-tests:${r.model || "?"}.${r.column || "?"}.${r.test}`,
       }),
     )
   }
