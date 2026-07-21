@@ -93,6 +93,50 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
+  // altimate_change start (AI-7519) — first-answer latency instrumentation +
+  // user-facing phase label.
+  //
+  // Wraps an awaited operation with a Tracer span so bootstrap sub-steps are
+  // visible in session traces. Every wrapped await opens a discrete span so a
+  // future regression that adds a slow await also shows up automatically.
+  //
+  // On top of the tracing, publish a session.phase event (start on entry, end
+  // on exit) so the TUI can render an honest label like "Discovering
+  // warehouse tools..." during the pre-first-visible-response window. This is
+  // the SLO half of AI-7519 — target <10s to first *visible* response. The
+  // instrumentation names double as user-facing signal.
+  //
+  // The trace span is a sibling of the root (tracing.ts:1009 assigns
+  // parentSpanId to rootSpanId), not a nested child — good enough for
+  // waterfall correlation via timestamps, and no schema change is required.
+  async function traceSpan<T>(
+    name: string,
+    fn: () => Promise<T>,
+    input?: unknown,
+    sessionID?: SessionID,
+  ): Promise<T> {
+    const startTime = Date.now()
+    if (sessionID) void SessionStatus.publishPhase(sessionID, name, true)
+    try {
+      const result = await fn()
+      Tracer.active?.logSpan({ name, startTime, endTime: Date.now(), input })
+      return result
+    } catch (e) {
+      Tracer.active?.logSpan({
+        name,
+        startTime,
+        endTime: Date.now(),
+        status: "error",
+        input,
+        output: { error: String(e) },
+      })
+      throw e
+    } finally {
+      if (sessionID) void SessionStatus.publishPhase(sessionID, name, false)
+    }
+  }
+  // altimate_change end
+
   // altimate_change start — single source of truth for legacy agent-name normalization
   //
   // The "build" agent was renamed to "builder" but some persisted sessions and
@@ -362,17 +406,61 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
-    const session = await Session.get(sessionID)
-    // altimate_change start - detect environment fingerprint at session start
-    const altCfg = await Config.get()
-    if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
-      await Fingerprint.detect(Instance.directory, Instance.worktree).catch((e) => {
-        log.warn("fingerprint detection failed", { error: e })
-      })
+    // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
+    // single "bootstrap" span right before the first processor.process call so
+    // the pre-first-generation region has a visible parent duration in traces.
+    const bootstrapStart = Date.now()
+    // Enter busy state BEFORE the first bootstrap traceSpan fires so the
+    // phase labels the TUI renders are actually visible during
+    // session-get / config-get / fingerprint-detect / telemetry-init. The
+    // TUI's status renderer gates on `status.type === "busy"`; without
+    // this early set only `bootstrap.resolve-tools` (which fires inside
+    // the while-loop after the existing busy set at line 506) would show
+    // a label. The while-loop re-set below is now a no-op busy → busy
+    // transition, preserved for legacy call sites that may enter the
+    // loop from elsewhere.
+    await SessionStatus.set(sessionID, { type: "busy" })
+    // altimate_change end
+    // altimate_change start (AI-7519) — discharge the busy status if a bootstrap
+    // await throws. cancel() (prompt.ts:364) deliberately does NOT set idle
+    // when the state entry still exists — it relies on the processor's catch
+    // block for that. But during bootstrap the processor hasn't taken over
+    // yet, so a throw here (Session.get / Config.get / Fingerprint.detect /
+    // Telemetry.init) would leave the session permanently `busy` with no
+    // idle/error transition. Reset to idle on any bootstrap failure and
+    // re-throw so callers still see the error.
+    let session: Awaited<ReturnType<typeof Session.get>>
+    let altCfg: Awaited<ReturnType<typeof Config.get>>
+    try {
+      session = await traceSpan(
+        "bootstrap.session-get",
+        () => Session.get(sessionID),
+        { sessionID },
+        sessionID,
+      )
+      // altimate_change start - detect environment fingerprint at session start
+      altCfg = await traceSpan("bootstrap.config-get", () => Config.get(), undefined, sessionID)
+      if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
+        await traceSpan(
+          "bootstrap.fingerprint-detect",
+          () => Fingerprint.detect(Instance.directory, Instance.worktree),
+          undefined,
+          sessionID,
+        ).catch((e) => {
+          log.warn("fingerprint detection failed", { error: e })
+        })
+      }
+      // altimate_change end
+      // altimate_change start — session telemetry tracking
+      await traceSpan("bootstrap.telemetry-init", () => Telemetry.init(), undefined, sessionID)
+    } catch (e) {
+      // Best-effort transition to idle so the TUI spinner + any busy-gated
+      // callers don't stay stuck. Swallow inner failure so the original
+      // bootstrap error is what bubbles out.
+      await SessionStatus.set(sessionID, { type: "idle" }).catch(() => {})
+      throw e
     }
     // altimate_change end
-    // altimate_change start — session telemetry tracking
-    await Telemetry.init()
     Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
     const sessionStartTime = Date.now()
     let sessionTotalCost = 0
@@ -916,15 +1004,28 @@ export namespace SessionPrompt {
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
-      const tools = await resolveTools({
-        agent,
-        session,
-        model,
-        tools: lastUser.tools,
-        processor,
-        bypassAgentCheck,
-        messages: msgs,
-      })
+      // altimate_change start (AI-7519) — trace resolveTools per step.
+      // Included in the parent `bootstrap` span on step===1; on later steps
+      // this measures the per-turn tool-listing overhead (MCP.tools connect
+      // cost etc.). Distinct span name per phase so telemetry doesn't
+      // double-count non-bootstrap turns under "bootstrap.*", and the TUI
+      // falls back to the safe "Thinking..." label on later turns.
+      const tools = await traceSpan(
+        step === 1 ? "bootstrap.resolve-tools" : "turn.resolve-tools",
+        () =>
+          resolveTools({
+            agent,
+            session,
+            model,
+            tools: lastUser.tools,
+            processor,
+            bypassAgentCheck,
+            messages: msgs,
+          }),
+        { step, agent: agent.name },
+        sessionID,
+      )
+      // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled
       if (lastUser.format?.type === "json_schema") {
@@ -1073,6 +1174,25 @@ export namespace SessionPrompt {
           input: { agent: agent.name, step },
           output: { parts: system.length, content: system.join("\n\n") },
         })
+        // altimate_change start (AI-7519) — emit the parent bootstrap span
+        // covering everything from loop() entry to just-before-first-generation.
+        // Companion sub-spans (bootstrap.session-get, bootstrap.config-get,
+        // bootstrap.resolve-tools, etc.) are already emitted; this span gives
+        // the waterfall a single top-level duration to render + gate against.
+        // Capture endTime once so duration_ms is guaranteed to match — two
+        // Date.now() calls can straddle a clock tick.
+        const bootstrapEnd = Date.now()
+        Tracer.active?.logSpan({
+          name: "bootstrap",
+          startTime: bootstrapStart,
+          endTime: bootstrapEnd,
+          input: { agent: agent.name, sessionID },
+          output: {
+            duration_ms: bootstrapEnd - bootstrapStart,
+            system_parts: system.length,
+          },
+        })
+        // altimate_change end
       }
       // altimate_change end
 
