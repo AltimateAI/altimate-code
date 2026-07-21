@@ -1,0 +1,82 @@
+// Pre-existing "unclosed altimate_change start" false positives.
+//
+// census.ts's parseMarkerBlocks() flags any `altimate_change start` line with
+// no matching `altimate_change end` before EOF. As of the 2026-07-18 S1
+// hardening pass, buildCensus()/assembleCensus() THROWS if any unclosed
+// block is found and not covered by an entry here (Codex review finding #1).
+//
+// 56 entries below, hand-verified: every one is a doc/test file that mentions
+// the `altimate_change start`/`altimate_change end` marker syntax literally
+// (as example text, a string literal in a test fixture, or documentation
+// prose) rather than an actual unmatched marker wrapping real code. New
+// genuinely-unclosed markers must NOT be added here — fix the marker (add a
+// matching `altimate_change end`) instead.
+//
+// NOTE: the `script/upstream/` package itself (including this file) is
+// currently untracked in git, so a `census.ts --json` run against `--ours
+// HEAD` (the tool's only supported mode) cannot see these files at all and
+// will report every entry below whose `file` lives under `script/upstream/`,
+// `docs/internal/census/`, or `.claude/commands/consolidate-test-prs.md` as
+// "did not match any unclosed block this run" — that is expected while these
+// files are uncommitted, not a sign of a stale line number. Entries for
+// those paths were instead verified directly by importing `parseMarkerBlocks`
+// and running it against the real working-tree file content. Re-verify them
+// against a live `census.ts --json` run once this package is committed.
+[
+  { "file": ".claude/commands/bridge-guard.md", "startLine": 107, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": ".claude/commands/bridge-guard.md", "startLine": 152, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": ".claude/commands/bridge-guard.md", "startLine": 175, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": ".claude/commands/bridge-guard.md", "startLine": 233, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": ".claude/commands/consolidate-test-prs.md", "startLine": 166, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "docs/internal/census/census.ts", "startLine": 111, "reason": "docs snapshot of census.ts source, not live code", "approvedBy": "codex-s1-review" },
+  { "file": "packages/drivers/ADDING_A_DRIVER.md", "startLine": 164, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/branding/upstream-merge-guard.test.ts", "startLine": 508, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/plugin/internal-providers.test.ts", "startLine": 32, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/provider/provider.test.ts", "startLine": 2406, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/share/share-next-error-handling.test.ts", "startLine": 33, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/skill/release-v0.7.2-adversarial.test.ts", "startLine": 241, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/skill/release-v0.7.2-adversarial.test.ts", "startLine": 249, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/skill/release-v0.7.2-adversarial.test.ts", "startLine": 253, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/altimate-features.test.ts", "startLine": 478, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/altimate-features.test.ts", "startLine": 480, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/bridge-merge-e2e.test.ts", "startLine": 589, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/bridge-merge.test.ts", "startLine": 230, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/bridge-merge.test.ts", "startLine": 311, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/v140-merge-adversarial.test.ts", "startLine": 392, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/v140-merge-adversarial.test.ts", "startLine": 394, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "packages/opencode/test/upstream/v140-merge-adversarial.test.ts", "startLine": 404, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/analyze.test.ts", "startLine": 101, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/analyze.test.ts", "startLine": 135, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/analyze.test.ts", "startLine": 306, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/analyze.test.ts", "startLine": 337, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/analyze.ts", "startLine": 199, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/analyze.ts", "startLine": 740, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/audit-unwrapped.ts", "startLine": 183, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/bridge-merge.ts", "startLine": 154, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/bridge-merge.ts", "startLine": 371, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/bridge-merge.ts", "startLine": 395, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/bridge-merge.ts", "startLine": 401, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/bridge-merge.ts", "startLine": 428, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 84, "reason": "test fixture string literal containing marker syntax (closed-block-on-one-line case)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 121, "reason": "test fixture string literal containing marker syntax (parseMarkerBlocks unclosed-block test)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 131, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 140, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 531, "reason": "test fixture string literal containing marker syntax (assembleCensus fixture)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 532, "reason": "test fixture string literal containing marker syntax (assembleCensus fixture)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 543, "reason": "test fixture string literal containing marker syntax (unclosed-block throw test)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 544, "reason": "test assertion string containing marker syntax regex", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 548, "reason": "test fixture string literal containing marker syntax (unclosed-block throw test)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 559, "reason": "test fixture string literal containing marker syntax (two-dangling-markers test)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 565, "reason": "test assertion string containing marker syntax regex", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 569, "reason": "test fixture string literal containing marker syntax (unclosed-block throw test)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 577, "reason": "test assertion string containing marker syntax regex", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 588, "reason": "test fixture string literal containing marker syntax (multi-file census fixture)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.test.ts", "startLine": 589, "reason": "test fixture string literal containing marker syntax (multi-file census fixture)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.ts", "startLine": 15, "reason": "doc comment prose mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/census.ts", "startLine": 143, "reason": "regex/string literal mentioning marker syntax, not a real marker", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/README.md", "startLine": 251, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/README.md", "startLine": 252, "reason": "doc example of marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/taxonomy.test.ts", "startLine": 162, "reason": "test fixture string literal containing marker syntax (isUpstreamFixLine tests)", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/taxonomy.test.ts", "startLine": 163, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" },
+  { "file": "script/upstream/taxonomy.test.ts", "startLine": 167, "reason": "test fixture string literal containing marker syntax", "approvedBy": "codex-s1-review" }
+]

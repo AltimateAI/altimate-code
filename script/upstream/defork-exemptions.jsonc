@@ -1,0 +1,33 @@
+// defork-exemptions.jsonc
+//
+// Quantity-scoped exemptions for census.ts's `--check` ratchet
+// (see census.ts#ratchetCheck). The ratchet compares the current census
+// against a baseline as a multiset keyed by {file, contentHash}: any
+// net-new instance of an existing {file, contentHash} pair, or any brand
+// new {file, contentHash} pair, in the "upstream_shared" or
+// "fork_added_outside_boundary" buckets is flagged UNLESS covered by an
+// entry here.
+//
+// Top-level shape: a JSON array of exemption objects. Comments (// and
+// /* */) are stripped before parsing — this file is not strict JSON.
+//
+// Schema (see census.ts's `Exemption` interface, the source of truth):
+//   {
+//     "blockRef": { "file": "<path relative to repo root>", "contentHash": "<sha256 hex, from Block.contentHash>" },
+//     "allowedCount": <integer>,      // how many net-new instances of this exact block this entry covers
+//     "reason": "<why this is allowed to ratchet up>",
+//     "approvedBy": "<reviewer name/handle>",
+//     "expires": "<YYYY-MM-DD>"       // optional; omit for an indefinite exemption
+//   }
+//
+// Example (commented out — delete the block comment markers to activate):
+// [
+//   {
+//     "blockRef": { "file": "packages/opencode/src/session/index.ts", "contentHash": "deadbeef..." },
+//     "allowedCount": 1,
+//     "reason": "tracked in AI-9999, scheduled for upstreaming next release",
+//     "approvedBy": "team-lead",
+//     "expires": "2026-12-31"
+//   }
+// ]
+[]

@@ -500,6 +500,10 @@ jobs:
         run: |
           git remote add upstream https://github.com/anomalyco/opencode.git || true
           git fetch upstream --quiet --no-tags
+          # The branch fetch above deliberately excludes tags (scope/speed).
+          # census.ts defaults --upstream-base to v1.17.9, which is not on our
+          # own `origin` remote, so it needs its own explicit tag fetch here.
+          git fetch upstream tag v1.17.9 --no-tags
 
       - name: Install merge tooling deps
         run: bun install
@@ -508,6 +512,7 @@ jobs:
       - name: Run marker parser tests
         run: bun test
         working-directory: script/upstream
+
 
       - name: Check for missing altimate_change markers
         run: |
