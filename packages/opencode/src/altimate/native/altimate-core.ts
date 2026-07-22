@@ -267,6 +267,15 @@ export function registerAll(): void {
       return fail(e)
     }
   })
+  // dbt project health checks — reads the dbt project files directly (no manifest required).
+  register("altimate_core.dbt_project_health", async (params) => {
+    try {
+      const json = core.dbtProjectHealth(params.project_dir, params.config_json, params.catalog_path)
+      return ok(true, { findings: JSON.parse(json) })
+    } catch (e) {
+      return fail(e)
+    }
+  })
   // altimate_change end
 
   // 7. altimate_core.fix
