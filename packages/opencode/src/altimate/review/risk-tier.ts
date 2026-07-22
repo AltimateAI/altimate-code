@@ -138,7 +138,15 @@ function changedLinesForScan(diff: string | undefined): string {
   const lines = diff.split("\n")
   const out: string[] = []
   let scalarIndent = -1
-  const blockScalarStart = /^[ \t]*[^\s#:][^:]*:[ \t]*[|>][+-]?[ \t]*$/
+  // YAML block-scalar header. The optional trailing tail covers:
+  //  - explicit indentation indicator (1-9) either before or after the
+  //    chomping indicator: `|2`, `|+2`, `|2+`, `>2-`
+  //  - trailing comment: `description: | # legacy`
+  // kilo-code-bot suggestion — the earlier form matched only `|`/`>`
+  // with an optional `+`/`-` chomp, so `|2` and `| # comment` skipped the
+  // opener → body lines beginning with a risk keyword false-positive
+  // promoted (safe-direction over-tiering, but still wrong).
+  const blockScalarStart = /^[ \t]*[^\s#:][^:]*:[ \t]*[|>](?:[+-]?[1-9]?|[1-9]?[+-]?)[ \t]*(?:#.*)?$/
   for (const raw of lines) {
     // Skip hunk headers entirely — they aren't code and would confuse the
     // block-scalar tracker.

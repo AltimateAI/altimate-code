@@ -590,6 +590,25 @@ describe("risk-tier", () => {
     expect(r.tier).toBe("trivial")
   })
 
+  test("R20 S4: block-scalar header with explicit indentation indicator or trailing comment (kilo-bot review)", () => {
+    // kilo-code-bot suggestion — `blockScalarStart` earlier accepted only
+    // `|`/`>` with an optional `+`/`-` chomp, so `description: |2`,
+    // `description: |+2`, and `description: | # legacy` were skipped and
+    // their body lines could false-positive promote. All three shapes
+    // must now open a scalar so the body is masked.
+    for (const opener of ["description: |2", "description: |+2", "description: | # legacy comment"]) {
+      const diff =
+        "@@ -1,3 +1,7 @@\n" +
+        " models:\n" +
+        "   - name: mrt_x\n" +
+        `+    ${opener}\n` +
+        "+      data_tests: are declared in the sibling schema.yml\n" +
+        "+      constraints: are managed via the contract there.\n"
+      const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+      expect(r.tier).toBe("trivial")
+    }
+  })
+
   test("R20 S4: block-scalar OPENED IN CONTEXT (not changed) still suppresses body (codex round-6 HIGH)", () => {
     // Codex R20 round-6 HIGH — an earlier version stripped only the
     // filtered +/- slice, so a pre-existing `description: |` in the
