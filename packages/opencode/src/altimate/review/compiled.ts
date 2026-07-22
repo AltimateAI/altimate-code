@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs"
 import path from "node:path"
 import YAML from "yaml"
+import { safeReadInside } from "./git"
 
 /**
  * Resolve dbt's COMPILED SQL for static analysis.
@@ -80,17 +81,9 @@ export function makeCompiledResolver(opts: CompiledResolverOptions) {
     const rel = prefix && (file === prefix || file.startsWith(prefix + "/")) ? file.slice(prefix.length + 1) : file
     const root = side === "new" ? headDir : baseDir
     const compiledRoot = path.join(opts.cwd, root, project)
-    // Containment check via realpath — matches makeContentResolver's
-    // symlink-safe read (coderabbit + cubic security review). A symlinked
-    // compiled artifact pointing outside `compiledRoot` is not read.
-    try {
-      const rootReal = await fs.realpath(compiledRoot)
-      const targetReal = await fs.realpath(path.join(compiledRoot, rel))
-      const sep = path.sep
-      if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) return undefined
-      return await fs.readFile(targetReal, "utf8")
-    } catch {
-      return undefined
-    }
+    // Shared realpath containment check — matches makeContentResolver's
+    // symlink-safe read so a future tweak to the containment logic can't
+    // leave one call site behind (cubic + kilo suggestion).
+    return await safeReadInside(compiledRoot, rel)
   }
 }

@@ -63,11 +63,17 @@ export async function collectChangedFiles(opts: CollectOptions): Promise<Changed
 }
 
 /** Read the given file only when its realpath sits inside the resolved root.
- *  Blocks the "tracked symlink escapes the repo" class of attack — e.g. a
+ *  Blocks the "tracked symlink escapes the root" class of attack — e.g. a
  *  `models/evil.sql → /etc/passwd` symlink that would otherwise leak external
  *  files into the review pipeline (coderabbit + cubic security review).
- *  Returns undefined when the target escapes, is missing, or realpath fails. */
-async function safeReadInside(root: string, rel: string): Promise<string | undefined> {
+ *  Returns undefined when the target escapes, is missing, or realpath fails.
+ *
+ *  Exported for the compiled-SQL resolver in compiled.ts so both content
+ *  paths go through the same containment check — cubic + kilo suggested
+ *  extracting the shared helper so a future security tweak (Windows
+ *  case-sensitivity, trailing separator) can't leave one call site
+ *  behind. */
+export async function safeReadInside(root: string, rel: string): Promise<string | undefined> {
   try {
     // Realpath both sides so a symlink IN the repo, or a repo checked out
     // under a symlinked path (`/var` → `/private/var` on macOS), still
