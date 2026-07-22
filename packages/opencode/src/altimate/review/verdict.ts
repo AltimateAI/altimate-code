@@ -122,6 +122,32 @@ export const VerdictEnvelope = z.object({
     .optional(),
   /** HMAC-SHA256 over the canonical body (added by signEnvelope). */
   signature: z.string().optional(),
+}).superRefine((env, ctx) => {
+  // G2 audit invariant — enforced at the envelope boundary so a hand-built
+  // envelope (bypassing runReview) can't sign inconsistent forced-tier
+  // metadata. When --force-tier is used, BOTH tierForced=true AND
+  // tierClassified must be present (per PR #1027 consensus MINOR #2).
+  const hasForced = env.tierForced === true
+  const hasClassified = env.tierClassified !== undefined
+  if (hasForced !== hasClassified) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "tierForced and tierClassified must both be present or both absent: " +
+        `tierForced=${env.tierForced}, tierClassified=${env.tierClassified ?? "undefined"}`,
+      path: ["tierForced"],
+    })
+  }
+  // tierForced: false is not a legitimate state — the flag records
+  // "was --force-tier used?" as a positive marker; false is indistinguishable
+  // from a natural (unforced) run and only adds noise to the canonical body.
+  if (env.tierForced === false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "tierForced must be true or undefined, not false",
+      path: ["tierForced"],
+    })
+  }
 })
 export type VerdictEnvelope = z.infer<typeof VerdictEnvelope>
 

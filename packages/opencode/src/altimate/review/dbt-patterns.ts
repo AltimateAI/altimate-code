@@ -827,7 +827,33 @@ function extractTestOccurrences(doc: unknown): Set<string> {
       // Restrict to the guardrail tests the detector cares about; a bespoke
       // custom test being removed is not a signal at this level.
       if (n === "unique" || n === "not_null" || n === "relationships") {
-        out.add(`${entity}\x00${column}\x00${n}`)
+        // PR #1027 consensus MINOR #4 — a column can carry MULTIPLE
+        // `relationships` tests pointing at different parents (e.g. one to
+        // dim_customers, one to legacy.dim_customers during a migration).
+        // Keying on `(entity, column, test)` alone collapses them into a
+        // single set entry, so dropping one silently doesn't surface.
+        // `unique` / `not_null` are single-instance semantically (a repeat is
+        // a no-op), so this discriminator only affects `relationships`.
+        // Block-form: `- relationships: {to: ..., field: ...}` → append the
+        // (to, field) tuple to the key. Bare string form: no discriminator
+        // (the block-form is the shape dbt requires for `relationships`
+        // anyway; a bare `- relationships` isn't a legal declaration).
+        let discriminator = ""
+        if (n === "relationships" && t && typeof t === "object") {
+          const args = (t as Record<string, unknown>)[name]
+          // dbt 1.9+ nests test args under `arguments:`; earlier versions
+          // put them at the top level of the test's value map.
+          const argsObj =
+            args && typeof args === "object" ? (args as Record<string, unknown>) : undefined
+          const nested =
+            argsObj?.arguments && typeof argsObj.arguments === "object"
+              ? (argsObj.arguments as Record<string, unknown>)
+              : undefined
+          const to = String((nested ?? argsObj)?.to ?? "")
+          const field = String((nested ?? argsObj)?.field ?? "")
+          if (to || field) discriminator = `\x01${to}\x02${field}`
+        }
+        out.add(`${entity}\x00${column}\x00${n}${discriminator}`)
       }
     }
   }
@@ -949,7 +975,15 @@ export function detectSchemaYmlPatterns(
   const kind = classifyDbtFile(file.path)
   if (kind !== "schema_yml") return []
 
-  const removals: Array<{ model: string; column: string; test: string }> = []
+  const removals: Array<{
+    model: string
+    column: string
+    test: string
+    /** Extra discriminator (e.g. `to:field` for a `relationships` test) so
+     *  multiple same-named tests on one column don't collapse via ruleKey.
+     *  Empty for `unique` / `not_null` and for fallback (diff-only) findings. */
+    testTag?: string
+  }> = []
   let usedStructural = false
 
   // Deleting a whole schema.yml removes every test declared in it — arguably
@@ -1022,8 +1056,17 @@ export function detectSchemaYmlPatterns(
       const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc)
       for (const key of oldSet) {
         if (newSet.has(key)) continue
-        const [model, column, test] = key.split("\x00")
-        removals.push({ model, column, test })
+        const [model, column, testField] = key.split("\x00")
+        // `testField` may carry a `\x01<to>\x02<field>` discriminator for
+        // `relationships` tests so multiple relationships on the same column
+        // don't collapse to one removal (MINOR #4). Strip it for display;
+        // retain the internal `\x02` separator in `testTag` for the ruleKey
+        // — a colon-joined form would collide when either arg contains `:`
+        // (e.g. `to='a:b'` vs `field='b:c'`, codex R20 review minor).
+        // ruleKey is hashed for fingerprinting; control chars survive.
+        const [test, tagPayload] = testField.split("\x01")
+        const testTag = tagPayload ?? ""
+        removals.push({ model, column, test, testTag })
       }
       usedStructural = true
     }
@@ -1130,7 +1173,12 @@ export function detectSchemaYmlPatterns(
       const modelClause = distinctModels.length
         ? ` on model(s) ${distinctModels.map((m) => `\`${m}\``).join(", ")}`
         : ""
-      bodyTail = `\n\n_This PR removes ${removals.length} data tests in total${modelClause}._`
+      // Scoped to THIS schema file — the removals loop counts the current
+      // file's removals only, not the PR's aggregate. Wording was previously
+      // "This PR removes N data tests in total" which misled reviewers on
+      // multi-file diffs (per PR #1027 consensus MINOR #3). A global-PR
+      // summary would need to move to orchestrate.ts.
+      bodyTail = `\n\n_This schema file drops ${removals.length} data tests${modelClause}._`
     }
 
     // ruleKey feeds the finding fingerprint (finding.ts:107). For attributed
@@ -1163,7 +1211,12 @@ export function detectSchemaYmlPatterns(
             attribution: attributed ? "column" : modelLevel ? "model-level" : "diff-only",
           },
         },
-        ruleKey: `test_coverage:removed-tests:${r.model || "?"}.${r.column || "?"}.${r.test}${discriminator}`,
+        // testTag suffix (`:to:field` for `relationships`) survives the global
+        // finding fingerprint dedupe so multiple relationships on the same
+        // column emit distinct findings (MINOR #4).
+        ruleKey: `test_coverage:removed-tests:${r.model || "?"}.${r.column || "?"}.${r.test}${
+          r.testTag ? `.${r.testTag}` : ""
+        }${discriminator}`,
       }),
     )
   }

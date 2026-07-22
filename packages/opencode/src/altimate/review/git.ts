@@ -64,8 +64,11 @@ export async function collectChangedFiles(opts: CollectOptions): Promise<Changed
 
 /** Build a getContent(path, side) resolver over git refs / the working tree.
  *  `renames` maps a new path → its old path so the "old" side of a renamed file
- *  resolves from where it actually lived at `base` (not the post-rename path). */
-export function makeContentResolver(opts: CollectOptions & { renames?: Map<string, string> }) {
+ *  resolves from where it actually lived at `base` (not the post-rename path).
+ *  `gitRoot` is the repository top-level (from `git rev-parse --show-toplevel`).
+ *  When omitted, working-tree reads fall back to `opts.cwd`, which is only
+ *  correct when the CLI is invoked from the repo root. */
+export function makeContentResolver(opts: CollectOptions & { renames?: Map<string, string>; gitRoot?: string }) {
   return async (file: string, side: "old" | "new"): Promise<string | undefined> => {
     try {
       if (side === "old") {
@@ -75,10 +78,30 @@ export function makeContentResolver(opts: CollectOptions & { renames?: Map<strin
       if (opts.head) {
         return await git(["show", `${opts.head}:${file}`], opts.cwd)
       }
-      return await fs.readFile(path.join(opts.cwd, file), "utf8")
+      // File paths from `git diff --name-status` are repo-root relative,
+      // NOT `opts.cwd` relative. When the CLI is invoked from a subdirectory
+      // the naive `path.join(opts.cwd, file)` double-joins and fails ENOENT,
+      // returning undefined and silently demoting downstream detectors to
+      // the diff-only fallback. Root at the resolved git top-level when
+      // supplied by the caller; fall back to `opts.cwd` when we couldn't
+      // resolve it (non-git or bare-repo contexts).
+      const root = opts.gitRoot ?? opts.cwd
+      return await fs.readFile(path.join(root, file), "utf8")
     } catch {
       return undefined
     }
+  }
+}
+
+/** Resolve the repository top-level (`git rev-parse --show-toplevel`).
+ *  Used to root working-tree FS reads and existence checks at the repo root
+ *  regardless of the caller's cwd. Returns undefined outside a git repo. */
+export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
+  try {
+    const out = await git(["rev-parse", "--show-toplevel"], cwd)
+    return out.trim() || undefined
+  } catch {
+    return undefined
   }
 }
 

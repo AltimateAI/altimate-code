@@ -235,6 +235,133 @@ models:
     expect(evResult.attribution).toBe("model-level")
   })
 
+  test("schema.yml (structural): dropping BOTH of two relationships on one column emits TWO findings (PR #1027 consensus MINOR #4)", () => {
+    // Regression: with `(entity, column, test)` keying alone, two
+    // `relationships` tests on the same column collapsed to a single set
+    // entry — dropping both produced ONE finding, and dropping either one
+    // in isolation produced ZERO (because the surviving one still matched
+    // the collapsed key). The extractor now discriminates by (to, field)
+    // so distinct relationships on one column stay distinct.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+          - relationships:
+              to: ref('legacy_customers')
+              field: id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // Both relationships removals surface separately.
+    expect(f.length).toBe(2)
+    // Distinct fingerprint ids so the global dedupe keeps them.
+    expect(new Set(f.map((x) => x.id)).size).toBe(2)
+    // Display copy stays clean — no raw discriminator control chars leak.
+    for (const finding of f) {
+      expect(finding.title).toContain("relationships")
+      expect(finding.title).not.toContain("\x01")
+      expect(finding.title).not.toContain("\x02")
+      expect(finding.body).not.toContain("\x01")
+      expect(finding.body).not.toContain("\x02")
+    }
+  })
+
+  test("schema.yml (structural): relationships discriminator survives colons in `to`/`field` args (codex round-5 minor)", () => {
+    // Codex flagged that a `:`-joined discriminator would collide when
+    // either arg contains `:` (e.g. `to='a:b', field='c'` vs `to='a',
+    // field='b:c'`). Discriminator now retains the internal `\x02`
+    // separator inside ruleKey (hashed, not displayed) so distinct
+    // (to, field) tuples never share a fingerprint.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: "ref('a:b')"
+              field: c
+          - relationships:
+              to: ref('a')
+              field: "b:c"
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // Two distinct removals, distinct fingerprints (would collide on a
+    // colon-joined tag).
+    expect(f.length).toBe(2)
+    expect(new Set(f.map((x) => x.id)).size).toBe(2)
+    // Display copy still stripped of raw control chars.
+    for (const finding of f) {
+      expect(finding.title).not.toContain("\x01")
+      expect(finding.body).not.toContain("\x02")
+    }
+  })
+
+  test("schema.yml (structural): dropping ONE of TWO relationships on one column surfaces (PR #1027 consensus MINOR #4 companion)", () => {
+    // Companion regression: with pre-fix keying, dropping one relationship
+    // while keeping the other left the collapsed key still in newSet, so
+    // no removal was reported. Now the (to, field) discriminator makes the
+    // dropped one distinct — a finding surfaces.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+          - relationships:
+              to: ref('legacy_customers')
+              field: id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect(f[0].title).toContain("relationships")
+    expect(f[0].title).not.toContain("\x01")
+    expect(f[0].body).not.toContain("\x01")
+  })
+
   test("schema.yml (structural): block-form relationships removal is detected", () => {
     const oldContent = `version: 2
 models:
@@ -539,12 +666,18 @@ models:
       { oldContent, newContent },
     )
     expect(f.length).toBe(2)
-    // Only ONE finding body should contain the "removes N data tests in total"
-    // aggregate summary line; the other should be plain.
-    const summaryCount = f.filter((x) => (x.body || "").includes("data tests in total")).length
+    // Only ONE finding body should contain the aggregate "N data tests"
+    // summary line; the other should be plain. Wording is per-schema-file
+    // scoped (PR #1027 consensus MINOR #3): "This schema file drops N data
+    // tests" so reviewers don't misread it as a PR-wide total on multi-file
+    // diffs.
+    const summaryCount = f.filter((x) => (x.body || "").includes("This schema file drops")).length
     expect(summaryCount).toBe(1)
+    const withSummary = f.find((x) => (x.body || "").includes("This schema file drops"))!
+    // Explicitly reject the old ambiguous PR-wide wording.
+    expect(withSummary.body).not.toContain("This PR removes")
+    expect(withSummary.body).not.toContain("in total")
     // And the mentioned model list should include BOTH models it touched.
-    const withSummary = f.find((x) => (x.body || "").includes("data tests in total"))!
     expect(withSummary.body).toContain("`customers`")
     expect(withSummary.body).toContain("`orders`")
   })

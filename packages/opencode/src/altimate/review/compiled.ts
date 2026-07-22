@@ -36,12 +36,20 @@ export async function dbtProjectName(cwd: string): Promise<string | undefined> {
 }
 
 export interface CompiledResolverOptions {
+  /** dbt project root (the dir containing `dbt_project.yml`). */
   cwd: string
   projectName?: string
   /** Directory holding HEAD-side compiled SQL (relative to cwd). */
   headDir?: string
   /** Directory holding BASE-side compiled SQL (relative to cwd). */
   baseDir?: string
+  /** Prefix within the repo-relative file path that maps to `cwd`.
+   *  For a monorepo where the dbt project lives at `packages/dbt/`, callers
+   *  pass `pathPrefix: "packages/dbt"` so a repo-relative path like
+   *  `packages/dbt/models/foo.sql` resolves inside the dbt project root as
+   *  `models/foo.sql` before joining with `target/compiled/<project>/`.
+   *  Omit when `cwd` IS the repo root. */
+  pathPrefix?: string
 }
 
 /**
@@ -52,11 +60,26 @@ export function makeCompiledResolver(opts: CompiledResolverOptions) {
   const project = opts.projectName
   const headDir = opts.headDir ?? "target/compiled"
   const baseDir = opts.baseDir ?? "target-base/compiled"
+  // Normalise the prefix so both "" and "." mean "no prefix". Match against
+  // git-style forward slashes because `git diff --name-status` always emits
+  // POSIX separators regardless of platform. `path.relative()` on Windows
+  // returns backslashes, so callers passing that verbatim would produce a
+  // prefix that never matches — normalise here (codex R20 review HIGH).
+  const prefix =
+    opts.pathPrefix && opts.pathPrefix !== "."
+      ? opts.pathPrefix.replace(/\\/g, "/").replace(/\/+$/, "")
+      : ""
 
   return async (file: string, side: "old" | "new"): Promise<string | undefined> => {
     if (!project) return undefined
+    // When the dbt project sits inside a subdir of the repo, `file` (from
+    // `git diff --name-status`) is repo-root relative and always uses
+    // POSIX separators. Strip the mapped prefix so it becomes dbt-root
+    // relative before joining with `cwd` (which IS the dbt root). Without
+    // this the compiled resolver silently misses in monorepo layouts.
+    const rel = prefix && (file === prefix || file.startsWith(prefix + "/")) ? file.slice(prefix.length + 1) : file
     const root = side === "new" ? headDir : baseDir
-    const full = path.join(opts.cwd, root, project, file)
+    const full = path.join(opts.cwd, root, project, rel)
     try {
       return await fs.readFile(full, "utf8")
     } catch {

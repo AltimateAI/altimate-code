@@ -297,6 +297,85 @@ describe("verdict", () => {
     expect(notForced.tierClassified).toBeUndefined()
   })
 
+  test("envelope schema rejects inconsistent tierForced / tierClassified (PR #1027 consensus MINOR #2)", async () => {
+    // Direct-parse invariants at the envelope boundary. `runReview` never
+    // builds an inconsistent envelope, but a hand-built envelope with
+    // `tierForced: true` and no `tierClassified` (or vice versa) is a
+    // silent audit-metadata break — the signed body claims a bypass but
+    // records no origin tier, or vice versa. The zod `superRefine`
+    // makes both states unparseable and unsignable.
+    const { VerdictEnvelope: EnvelopeSchema } = await import("../../src/altimate/review/verdict")
+
+    const goodBothPresent = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      tierForced: true,
+      tierClassified: "trivial",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(goodBothPresent.success).toBe(true)
+
+    const goodBothAbsent = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "lite",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(goodBothAbsent.success).toBe(true)
+
+    const badForcedOnly = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      tierForced: true,
+      // tierClassified missing — inconsistent audit metadata
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badForcedOnly.success).toBe(false)
+
+    const badClassifiedOnly = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      // tierForced missing but tierClassified claims an origin
+      tierClassified: "trivial",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badClassifiedOnly.success).toBe(false)
+
+    const badForcedFalse = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "lite",
+      // `tierForced: false` is not a legitimate state — the marker exists to
+      // record forced runs; unforced runs must omit it entirely.
+      tierForced: false,
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badForcedFalse.success).toBe(false)
+  })
+
   test("tierForced + tierClassified are covered by the signature (tampering detected)", () => {
     // Confirms the audit fields live inside the signed canonical body — a
     // tampered envelope claiming a natural tier when a bypass ran can't slip
