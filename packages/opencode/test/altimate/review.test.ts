@@ -532,19 +532,157 @@ describe("risk-tier", () => {
       "+          - type: not_null\n"
     const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
     expect(r.tier).toBe("full")
-    expect(r.reasons.join(" ")).toContain("data_tests/constraints/contract")
+    // Reason names the specific key that fired (consensus MINOR #4).
+    expect(r.reasons.join(" ")).toContain("constraints")
   })
 
-  test("R20 S4: full: schema.yml adds unique_combination_of_columns test", () => {
+  test("R20 S4: full: legacy `tests:` key (pre-dbt-1.8) also promotes (consensus MAJOR #1)", () => {
+    // Consensus MAJOR #1 — the original DBT_RISK_KEY_RE covered `data_tests`
+    // but not the pre-1.8 `tests:` alias. Projects on dbt <1.8 or mid-
+    // migration could add `tests: [- unique / - not_null]` under
+    // `models/marts/` and slip past the trivial gate.
+    const diff =
+      "@@ -1,3 +1,6 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "+        tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/marts/mrt_x.yml", diff)])
+    expect(r.tier).toBe("full")
+    // The specific key must be named — consensus MINOR #4.
+    expect(r.reasons.join(" ")).toContain("tests")
+    expect(r.reasons.join(" ")).toContain("mart-API surface")
+  })
+
+  test("R20 S4: legacy `tests:` outside marts still promotes (kind gate isn't marts-only)", () => {
+    // The rule fires on any schema_yml, not just marts — promoting an int_
+    // yml adding `tests: [not_null]` on a grain key is still risk-worthy
+    // even without the marts-API-surface context.
+    const diff =
+      "@@ -1,3 +1,6 @@\n" +
+      " models:\n" +
+      "   - name: int_x\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "+        tests:\n" +
+      "+          - unique\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+  })
+
+  test("R20 S4: block-scalar description containing `data_tests:` does NOT promote (consensus MINOR #6)", () => {
+    // Consensus MINOR #6 — the `(?!#)` guard only excluded `#` comments,
+    // not YAML block-scalar bodies (`description: |` or `description: >`).
+    // A long-form description that happens to contain the substring
+    // `data_tests:` on its own line would trigger a promotion that had
+    // nothing to do with actual risk changes.
+    const diff =
+      "@@ -1,3 +1,8 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "+    description: |\n" +
+      "+      This mart is the source of truth for X.\n" +
+      "+      data_tests: are declared in the sibling schema.yml.\n" +
+      "+      constraints: are managed via the contract there.\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: block-scalar OPENED IN CONTEXT (not changed) still suppresses body (codex round-6 HIGH)", () => {
+    // Codex R20 round-6 HIGH — an earlier version stripped only the
+    // filtered +/- slice, so a pre-existing `description: |` in the
+    // context would be invisible and a `+      data_tests: ...` line
+    // inside its body would wrongly promote. The scan now walks the
+    // whole diff for scalar state and only masks output on changed lines.
+    const diff =
+      "@@ -1,7 +1,8 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     description: |\n" +
+      "       This mart is the source of truth for X.\n" +
+      "-      Some prior description body.\n" +
+      "+      data_tests: are declared in the sibling schema.yml.\n" +
+      "+      constraints: are managed via the contract there.\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: block-scalar closes at ≤ start-indent (subsequent risk keys still fire)", () => {
+    // Precision guard for the block-scalar strip — when the block scalar
+    // ENDS and a subsequent line at ≤ its start indent adds a real risk
+    // key, the promotion must still fire. Otherwise the strip could
+    // silently suppress genuine risk changes.
+    const diff =
+      "@@ -1,3 +1,9 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "+    description: |\n" +
+      "+      Body: mentions data_tests: only inside prose.\n" +
+      "+    columns:\n" +
+      "+      - name: id\n" +
+      "+        data_tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("data_tests")
+  })
+
+  test("R20 S4: removing a `data_tests:` block also promotes (consensus NIT #9)", () => {
+    // Consensus NIT #9 — the risk-key regex matches BOTH `+` and `-`
+    // prefixes because `changedLines()` includes both. Removing a
+    // guardrail is at least as risk-worthy as adding one; this locks in
+    // that behavior with an explicit test.
+    const diff =
+      "@@ -1,7 +1,3 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "-        data_tests:\n" +
+      "-          - not_null\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+  })
+
+  test("R20 S4: bare `tests` (no colon) does NOT match the risk-key regex (word-boundary guard)", () => {
+    // FP guard — a description line like `# tests explanation`, or a
+    // yml value containing the string `tests` without a following colon,
+    // must not promote. The regex requires `[ \t]*:`.
+    const diff =
+      "@@ -1,3 +1,4 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      '+    description: "See tests documentation for the grain policy"\n'
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: full: schema.yml adds unique_combination_of_columns test (consensus MAJOR #3 tightened)", () => {
+    // Locked-down test for the DBT_UNIQUE_COMBO_RE regex specifically.
+    // Original path (`models/marts/mrt_billing_account_prices.yml`) also
+    // matched `MARTS_DIR_RE` AND `FINOPS_TOKEN_RE` (via `billing` / `prices`)
+    // → the assertion passed on `finopsPathToken` even if the combo regex
+    // were deleted (consensus MAJOR #3). Path moved to non-mart, non-FinOps
+    // territory so `DBT_UNIQUE_COMBO_RE` is the sole possible promoter, and
+    // the reason string is asserted to confirm which signal fired.
     const diff =
       "@@ -1,3 +1,7 @@\n" +
       "     data_tests:\n" +
       "+      - dbt_utils.unique_combination_of_columns:\n" +
       "+          combination_of_columns:\n" +
-      "+            - metastore_id\n" +
-      "+            - sku_name\n"
-    const r = classifyPR([file("models/marts/mrt_billing_account_prices.yml", diff)])
+      "+            - a\n" +
+      "+            - b\n"
+    const r = classifyPR([file("models/intermediate/int_grain.yml", diff)])
     expect(r.tier).toBe("full")
+    // The reason must name the exact triggering signal (consensus MINOR #4).
+    // Both `data_tests:` (the key) and `unique_combination_of_columns` (the
+    // test name inside the list) fire on this diff.
+    expect(r.reasons.join(" ")).toContain("unique_combination_of_columns")
+    // Explicit FP guard — no other promotion signal should fire on this path.
+    expect(r.reasons.join(" ")).not.toContain("FinOps")
+    expect(r.reasons.join(" ")).not.toContain("mart-API surface")
   })
 
   test("R20 S4: full: FinOps keyword in path (PR E shape — anchor cost redesign)", () => {
@@ -587,6 +725,34 @@ describe("risk-tier", () => {
       blastRadiusOf: () => 0,
     })
     expect(r2.tier).toBe("lite")
+  })
+
+  test("R20 S4: `dbus` (D-Bus IPC) does NOT fire the FinOps rule (consensus MINOR #2)", () => {
+    // Consensus MINOR #2 — `dbus` in the token list matched D-Bus (IPC)
+    // paths (`stg_dbus_connector.sql`) that have nothing to do with
+    // Databricks Units. `dbu` singular is enough for the FinOps signal;
+    // `dbus` was removed from the token list.
+    const r = classifyPR([file("models/staging/stg_dbus_connector.sql", "+select 1\n")], {
+      blastRadiusOf: () => 0,
+    })
+    expect(r.tier).toBe("lite")
+  })
+
+  test("R20 S4: FinOps boundary matches digit suffixes (consensus MINOR #7)", () => {
+    // Consensus MINOR #7 — the boundary class previously included only
+    // `[/_.-]`, so `mrt_cost2024.sql`, `stg_billing2.sql`, `dbu1_usage.sql`
+    // slipped through (the char after the keyword is a digit, not in the
+    // boundary class). Adding `\d` catches these versioned / iteration-
+    // suffixed paths.
+    for (const p of [
+      "models/marts/mrt_cost2024.sql",
+      "models/staging/stg_billing2.sql",
+      "models/intermediate/dbu1_usage.sql",
+    ]) {
+      const r = classifyPR([file(p, "+select 1\n")], { blastRadiusOf: () => 0 })
+      expect(r.tier).toBe("full")
+      expect(r.reasons.join(" ")).toContain("FinOps keyword")
+    }
   })
 
   test("R20 S4: trivial: description-only edits under models/marts/ still trivial (no risk keys)", () => {
