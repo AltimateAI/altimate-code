@@ -957,13 +957,30 @@ function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
   const d = doc as Record<string, unknown>
   if (!Array.isArray(d.models)) return gaps
 
-  // Small local helper: pull the string test-name from a YAML test entry.
-  // Bare form: `- not_null`, block form: `- not_null: {config: {severity: warn}}`.
+  // Normalise column names for coverage comparison. dbt YAML often uses
+  // adapter-cased column names (Snowflake folds unquoted identifiers to
+  // uppercase; other adapters differ). Lowercase both sides so `WORKSPACE_ID`
+  // in `combination_of_columns` matches `workspace_id` in `columns:`. Hoisted
+  // to function scope per consensus NIT #7 (was redeclared per-model).
+  const norm = (s: string): string => s.toLowerCase()
+
+  // Pull the string test-name from a YAML test entry. Consensus fixes:
+  //  - MINOR #6: dbt's documented alternative object form is
+  //    `{name: <alias>, test_name: not_null, ...}`. `Object.keys(t)[0]`
+  //    would return `name`, missing the underlying test type. Prefer
+  //    `test_name` when present.
+  //  - MINOR #4: dbt 1.8+ allows namespaced names like `dbt.not_null`;
+  //    strip a leading `dbt.` prefix so `dbt.not_null` matches `not_null`.
+  // Bare form: `- not_null`. Block form: `- not_null: {config: ...}`.
   const testName = (t: unknown): string | undefined => {
-    if (typeof t === "string") return t.toLowerCase()
+    if (typeof t === "string") return t.toLowerCase().replace(/^dbt\./, "")
     if (t && typeof t === "object") {
-      const k = Object.keys(t as Record<string, unknown>)[0]
-      return k ? k.toLowerCase() : undefined
+      const obj = t as Record<string, unknown>
+      // Alternative form: `{name: <alias>, test_name: <macro>, ...}`.
+      // If both `name` and `test_name` are present, `test_name` wins.
+      if (typeof obj.test_name === "string") return obj.test_name.toLowerCase().replace(/^dbt\./, "")
+      const k = Object.keys(obj)[0]
+      return k ? k.toLowerCase().replace(/^dbt\./, "") : undefined
     }
     return undefined
   }
@@ -975,23 +992,18 @@ function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
     if (!mname) continue
 
     // Contract enforcement: either at model-level `config.contract.enforced`
-    // OR at top-level `contract:` (dbt supports both shapes).
+    // OR at top-level `contract:` (dbt supports both shapes). Consensus
+    // MINOR #3 — earlier ternary short-circuited on `cfg.contract` being
+    // an object (e.g. `config: {contract: {alias: ...}}` with no
+    // `enforced` key), masking a top-level `contract: {enforced: true}`.
+    // Evaluate `enforced === true` at both locations independently and OR
+    // them so either declaration counts.
     const cfg = mm.config && typeof mm.config === "object" ? (mm.config as Record<string, unknown>) : {}
-    const contractCfg =
-      cfg.contract && typeof cfg.contract === "object"
-        ? (cfg.contract as Record<string, unknown>)
-        : mm.contract && typeof mm.contract === "object"
-          ? (mm.contract as Record<string, unknown>)
-          : {}
-    const contractEnforced = contractCfg.enforced === true
-
-    // Normalize column names for coverage comparison. dbt YAML often uses
-    // adapter-cased column names (Snowflake folds unquoted identifiers to
-    // uppercase; other adapters differ). Lowercase both sides so
-    // `WORKSPACE_ID` in `combination_of_columns` matches `workspace_id`
-    // in `columns:`. Original spelling is preserved for display in findings
-    // (populated below from the grain-combo entry).
-    const norm = (s: string): string => s.toLowerCase()
+    const cfgContract =
+      cfg.contract && typeof cfg.contract === "object" ? (cfg.contract as Record<string, unknown>) : undefined
+    const topContract =
+      mm.contract && typeof mm.contract === "object" ? (mm.contract as Record<string, unknown>) : undefined
+    const contractEnforced = cfgContract?.enforced === true || topContract?.enforced === true
 
     // Coverage per column, split by mechanism (per codex R20 S1 review):
     //  - constraint coverage counts ONLY when `contract.enforced == true`.
@@ -1000,8 +1012,38 @@ function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
     //    contract-enforced means we don't miss a real gap on views.
     //  - test coverage (`tests:` / `data_tests: [not_null]`) always counts,
     //    since dbt's test runner enforces it independent of contract state.
+    //
+    // Consensus MAJOR #1 — also count MODEL-LEVEL constraints:
+    //  - `constraints: [{type: primary_key, columns: [a, b]}]` (dbt 1.5+)
+    //    inherently enforces NOT NULL on every named column on
+    //    Postgres/Snowflake/BigQuery/Databricks, so grain columns declared
+    //    via a model-level PK are already covered.
+    //  - `constraints: [{type: not_null, columns: [...]}]` (dbt's model-
+    //    level form) — same coverage, just spelled out.
+    //  - Column-level `constraints: [{type: primary_key}]` — same rationale
+    //    at column granularity.
     const coveredByConstraint = new Set<string>()
     const coveredByTest = new Set<string>()
+
+    // Model-level constraints — dbt allows a `constraints:` list under
+    // the model itself (not per-column) that names one or more columns.
+    if (Array.isArray(mm.constraints)) {
+      for (const cn of mm.constraints) {
+        if (!cn || typeof cn !== "object") continue
+        const cnRec = cn as Record<string, unknown>
+        const type = typeof cnRec.type === "string" ? cnRec.type.toLowerCase() : ""
+        // `primary_key` implies NOT NULL on every listed column across the
+        // adapters dbt supports for enforced contracts; `not_null` at
+        // model level is the explicit multi-column variant of the column
+        // form.
+        if (type !== "not_null" && type !== "primary_key") continue
+        const cols = Array.isArray(cnRec.columns) ? (cnRec.columns as unknown[]) : []
+        for (const c of cols) {
+          if (typeof c === "string") coveredByConstraint.add(norm(c))
+        }
+      }
+    }
+
     if (Array.isArray(mm.columns)) {
       for (const col of mm.columns) {
         if (!col || typeof col !== "object") continue
@@ -1013,7 +1055,10 @@ function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
           for (const cn of c.constraints) {
             if (cn && typeof cn === "object") {
               const type = (cn as Record<string, unknown>).type
-              if (typeof type === "string" && type.toLowerCase() === "not_null") {
+              const t = typeof type === "string" ? type.toLowerCase() : ""
+              // Column-level `not_null` OR `primary_key` — the latter
+              // inherently enforces NOT NULL (consensus MAJOR #1).
+              if (t === "not_null" || t === "primary_key") {
                 coveredByConstraint.add(key)
               }
             }

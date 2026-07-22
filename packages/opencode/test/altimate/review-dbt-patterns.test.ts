@@ -1050,6 +1050,229 @@ models:
     expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
   })
 
+  test("R20 S1: MODEL-level primary_key constraint covers every listed grain column (consensus MAJOR #1)", () => {
+    // Consensus MAJOR #1 — dbt 1.5+ supports model-level constraints via
+    // `constraints: [{type: primary_key, columns: [a, b]}]`. A primary key
+    // inherently enforces NOT NULL on Postgres/Snowflake/BigQuery/
+    // Databricks. Grain columns declared via a model-level PK constraint
+    // must not be flagged as missing not_null.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [metastore_id, sku_name, price_start_time]
+    columns:
+      - name: metastore_id
+      - name: sku_name
+      - name: price_start_time
+      - name: currency
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [metastore_id, sku_name, price_start_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: MODEL-level not_null constraint with `columns:` list covers each named column", () => {
+    // Explicit multi-column form of the model-level constraint. Same
+    // coverage effect as the primary_key case.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: not_null
+        columns: [a, b]
+    columns:
+      - name: a
+      - name: b
+      - name: c
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: COLUMN-level primary_key constraint also counts as not_null coverage", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: primary_key
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: model-level primary_key still misses columns NOT in its list", () => {
+    // Precision guard — a PK that names only some grain cols must still
+    // leave the OTHER grain cols flagged.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [a]   # only covers a
+    columns:
+      - name: a
+      - name: b
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("b")
+  })
+
+  test("R20 S1: model-level constraints on NON-CONTRACTED model do NOT count as coverage (documentation-only)", () => {
+    // Consistent with column-level rule — model-level constraints without
+    // contract enforcement are documentation, not enforcement, on most
+    // adapters.
+    const newContent = `version: 2
+models:
+  - name: stg_x
+    constraints:
+      - type: primary_key
+        columns: [a, b]
+    columns:
+      - name: a
+      - name: b
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/staging/stg_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    // Both columns flagged (no test-level not_null, no contract).
+    expect(gaps.length).toBe(2)
+  })
+
+  test("R20 S1: `config.contract` object without `enforced` does NOT mask a top-level `contract: {enforced: true}` (MINOR #3)", () => {
+    // Consensus MINOR #3 — an earlier ternary short-circuited when
+    // `cfg.contract` was any object. `config: {contract: {alias: X}}`
+    // with no `enforced` key hid a top-level `contract: {enforced: true}`.
+    // Now both locations are OR'd; either declaration counts.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        alias: SOMETHING_ELSE   # no enforced key here
+    contract:
+      enforced: true            # ← must still count as contracted
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+      - name: change_time       # ← grain col, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id, change_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("change_time")
+    // Contract IS enforced — recommendation must point at constraints.
+    expect(gaps[0].body).toContain("constraints: [{type: not_null}]")
+  })
+
+  test("R20 S1: `dbt.not_null` namespaced test alias counts as coverage (MINOR #4)", () => {
+    // Consensus MINOR #4 — dbt 1.8+ allows namespaced test names. Column
+    // covered by `data_tests: [dbt.not_null]` must not be flagged.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+        data_tests: [dbt.not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: `{name:, test_name: not_null}` alternative test form counts as coverage (MINOR #6)", () => {
+    // Consensus MINOR #6 — dbt's documented alternative object form is
+    // `{name: my_test, test_name: not_null, ...}`. Reading only the first
+    // key returns `name` (an alias), missing the underlying test type. The
+    // `test_name` field is authoritative when present.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+        data_tests:
+          - name: id_never_null
+            test_name: not_null
+    data_tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
   test("R20 S1: dbt 1.9+ `arguments:` nesting is recognised (real corpus shape)", () => {
     // The real internal corpus PRs use the dbt 1.9+ shape:
     // `- dbt_utils.unique_combination_of_columns: {arguments: {combination_of_columns: [...]}}`
