@@ -1,3 +1,4 @@
+import YAML from "yaml"
 import { type Finding, type Severity } from "./finding"
 import { type VerdictEnvelope } from "./verdict"
 
@@ -34,6 +35,8 @@ export function verdictHeadline(env: VerdictEnvelope): string {
 /** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
 export function renderSummary(env: VerdictEnvelope): string {
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
+  const proposedTests = env.findings.filter(isProposedTest)
+  const regularFindings = env.findings.filter((f) => !isProposedTest(f))
 
   if (env.summary.degraded) {
     lines.push(
@@ -42,11 +45,15 @@ export function renderSummary(env: VerdictEnvelope): string {
       "",
     )
   }
+  if (env.summary.enforcedConstraints) {
+    const c = env.summary.enforcedConstraints
+    lines.push(`**Spec coverage:** ${c.executed} executed / ${c.passed} passed / ${c.failed} failed.`, "")
+  }
 
   if (!env.findings.length) {
     lines.push("No issues found in the changed dbt models. 🎉", "")
   } else {
-    const grouped = groupBySeverity(env.findings)
+    const grouped = groupBySeverity(regularFindings)
     for (const sev of ["critical", "warning", "suggestion"] as const) {
       const items = grouped[sev]
       if (!items.length) continue
@@ -59,6 +66,7 @@ export function renderSummary(env: VerdictEnvelope): string {
       }
       lines.push("")
     }
+    if (proposedTests.length) renderProposedTests(lines, proposedTests)
   }
 
   if (env.override) {
@@ -110,4 +118,81 @@ function capitalize(s: string): string {
 
 function oneLine(s: string): string {
   return s.replace(/\s*\n\s*/g, " ").trim()
+}
+
+function isProposedTest(f: Finding): boolean {
+  return f.evidence?.tool === "altimate.spec_test.proposed"
+}
+
+function renderProposedTests(lines: string[], findings: Finding[]): void {
+  lines.push("### Proposed tests", "")
+  lines.push("Candidate tests to consider adding; this review did not execute them.", "")
+  for (const f of findings) {
+    const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
+    const ref = String((f.evidence?.result as any)?.proposal?.derivedFrom?.ref ?? "")
+    lines.push(
+      `- **${f.title}**  \n  ${oneLine(stripYamlFence(f.body))}  \n  <sub>\`${loc}\`${ref ? ` · \`${ref}\`` : ""}</sub>`,
+    )
+  }
+  const patch = proposedTestsPatch(findings)
+  if (patch) {
+    lines.push("", "```yaml", patch, "```")
+  }
+  lines.push("")
+}
+
+function stripYamlFence(body: string): string {
+  return body.replace(/```yaml[\s\S]*?```/g, "").trim()
+}
+
+function proposedTestsPatch(findings: Finding[]): string {
+  const merged = new Map<string, any>()
+  for (const f of findings) {
+    const yaml = (f.evidence?.result as any)?.yaml
+    if (typeof yaml !== "string" || !yaml.trim()) continue
+    try {
+      const doc = YAML.parse(yaml)
+      for (const rawModel of Array.isArray(doc?.models) ? doc.models : []) {
+        const modelName = typeof rawModel?.name === "string" ? rawModel.name : ""
+        if (!modelName) continue
+        const target = merged.get(modelName) ?? { name: modelName }
+        mergeTests(target, rawModel)
+        mergeColumns(target, rawModel)
+        merged.set(modelName, target)
+      }
+    } catch {
+      // The aggregate patch is built only from locally generated evidence YAML.
+      // If one snippet is malformed, omit it instead of breaking summary rendering.
+    }
+  }
+  if (!merged.size) return ""
+  return YAML.stringify({ version: 2, models: [...merged.values()] }).trim()
+}
+
+function mergeTests(target: any, source: any): void {
+  if (!Array.isArray(source?.tests)) return
+  target.tests = target.tests ?? []
+  for (const test of source.tests) pushUnique(target.tests, test)
+}
+
+function mergeColumns(target: any, source: any): void {
+  if (!Array.isArray(source?.columns)) return
+  target.columns = target.columns ?? []
+  for (const rawColumn of source.columns) {
+    const name = typeof rawColumn?.name === "string" ? rawColumn.name : ""
+    if (!name) continue
+    let column = target.columns.find((c: any) => c.name === name)
+    if (!column) {
+      column = { name }
+      target.columns.push(column)
+    }
+    if (!Array.isArray(rawColumn.tests)) continue
+    column.tests = column.tests ?? []
+    for (const test of rawColumn.tests) pushUnique(column.tests, test)
+  }
+}
+
+function pushUnique(items: any[], value: any): void {
+  const key = JSON.stringify(value)
+  if (!items.some((item) => JSON.stringify(item) === key)) items.push(value)
 }

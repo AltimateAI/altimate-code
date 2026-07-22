@@ -209,6 +209,7 @@ describe("Registration", () => {
     "altimate_core.parse_dbt",
     "altimate_core.is_safe",
     "altimate_core.review_ai_prompt",
+    "altimate_core.review_spec_test_prompt",
     "altimate_core.review_ai_parse",
     "altimate_core.review_lexical_scan",
     "altimate_core.grain",

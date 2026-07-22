@@ -1,7 +1,19 @@
 import { Dispatcher } from "../native"
 import { parseManifest } from "../native/dbt/manifest"
-import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
+import { loadRawManifest } from "../native/dbt/helpers"
+import type {
+  CheckResult,
+  DeclaredConstraint,
+  EquivalenceResult,
+  GeneratedTestExecutionOptions,
+  GradeResult,
+  ImpactResult,
+  ReviewRunner,
+} from "./orchestrate"
+import type { GeneratedTest, GeneratedTestResult } from "./spec-test-gen"
+import { sanitizeAssertionSql } from "./spec-test-sandbox"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
+import { stableJson } from "./stable-json"
 
 /**
  * Production ReviewRunner backed by the native Dispatcher (the Rust core).
@@ -17,16 +29,38 @@ interface ManifestModel {
   name: string
   depends_on: string[]
   path?: string
+  database?: string
+  schema_name?: string
+  relation_name?: string
+  alias?: string
+  raw?: any
+}
+
+interface ManifestSource {
+  unique_id: string
+  name: string
+  source_name: string
+  database?: string
+  schema_name?: string
+  identifier?: string
+  relation_name?: string
+  raw?: any
 }
 
 interface CachedManifest {
   models: Map<string, ManifestModel> // unique_id -> model
   byName: Map<string, ManifestModel>
+  sources: Map<string, ManifestSource> // unique_id -> source
+  sourcesByName: Map<string, ManifestSource> // source_name.name -> source
   children: Map<string, string[]> // unique_id -> direct child unique_ids
   testDeps: Map<string, Set<string>> // model unique_id -> set of test unique_ids depending on it
+  testNodes: any[]
   schemaContext?: SchemaContext // model/source columns for equivalence resolution
   ok: boolean
 }
+
+const SPEC_TEST_SQL_TIMEOUT_MS = 30_000
+const TRACK_B_ACCEPTED_VALUES_LIMIT = 100
 
 function asArray<T = any>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : []
@@ -65,6 +99,322 @@ function bandConfidence(c: unknown): "high" | "medium" | "low" {
   }
   const n = typeof c === "number" ? c : 0.5
   return n >= 0.8 ? "high" : n >= 0.5 ? "medium" : "low"
+}
+
+function boolish(value: unknown): boolean {
+  return value === true || value === "true"
+}
+
+function normalizeConstraintKind(value: unknown): DeclaredConstraint["kind"] | undefined {
+  const kind = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+  if (kind === "not_null" || kind === "unique" || kind === "accepted_values" || kind === "relationships")
+    return kind
+  return undefined
+}
+
+function testKind(node: any): DeclaredConstraint["kind"] | undefined {
+  const name = String(node?.test_metadata?.name ?? node?.name ?? "")
+    .trim()
+    .toLowerCase()
+  if (name === "unique_combination_of_columns") return "unique"
+  return normalizeConstraintKind(name)
+}
+
+function testColumn(node: any): string | undefined {
+  const kwargs = node?.test_metadata?.kwargs ?? {}
+  const col = kwargs.column_name ?? node?.column_name
+  return typeof col === "string" && col.trim() ? col.trim() : undefined
+}
+
+function testArgs(node: any): Record<string, unknown> | undefined {
+  const kwargs = node?.test_metadata?.kwargs
+  if (!kwargs || typeof kwargs !== "object" || Array.isArray(kwargs)) return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(kwargs)) {
+    if (key === "model" || key === "column_name") continue
+    out[key] = value
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+function constraintColumns(args?: Record<string, unknown>): string[] {
+  const cols = args?.["columns"] ?? args?.["combination_of_columns"] ?? args?.["column_names"] ?? args?.["fields"]
+  return Array.isArray(cols) ? cols.map(String).filter(Boolean) : []
+}
+
+function normalizedConstraintArgs(
+  kind: DeclaredConstraint["kind"],
+  args?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (kind !== "accepted_values" && kind !== "relationships") return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(args ?? {})) {
+    if (key === "type" || key === "name") continue
+    if (key === "values" && Array.isArray(value)) {
+      out[key] = [...value].map((v) => (typeof v === "string" ? v.trim() : v)).sort((a, b) => String(a).localeCompare(String(b)))
+    } else if ((key === "to" || key === "field") && typeof value === "string") {
+      out[key] = value.trim().replace(/\s+/g, " ")
+    } else {
+      out[key] = value
+    }
+  }
+  return out
+}
+
+function constraintKey(kind: DeclaredConstraint["kind"], column?: string, args?: Record<string, unknown>): string {
+  const columns = constraintColumns(args)
+    .map((c) => c.toLowerCase())
+    .sort()
+    .join(",")
+  const argKey = normalizedConstraintArgs(kind, args)
+  return `${kind}:${(column ?? "").toLowerCase()}:${columns}:${argKey ? stableJson(argKey) : ""}`
+}
+
+function declaredConstraintKey(c: DeclaredConstraint): string {
+  return `${constraintKey(c.kind, c.column, c.args)}:${c.uniqueId ?? c.sourceRef}`
+}
+
+function sourceRef(model: string, kind: DeclaredConstraint["kind"], column?: string): string {
+  return column ? `schema.yml:${model}.${column}:${kind}` : `schema.yml:${model}:${kind}`
+}
+
+function sqlIdent(name: string): string {
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name
+  return `"${name.replace(/"/g, '""')}"`
+}
+
+function sqlTableRef(name: string): string {
+  if (/["`\[]/.test(name)) return name
+  return name
+    .split(".")
+    .filter(Boolean)
+    .map(sqlIdent)
+    .join(".")
+}
+
+function sqlLiteral(value: unknown): string {
+  if (value === null || value === undefined) return "NULL"
+  if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE"
+  return "'" + String(value).replace(/'/g, "''") + "'"
+}
+
+function relationForModel(model: ManifestModel): string {
+  if (model.relation_name) return model.relation_name
+  const parts = [model.database, model.schema_name, model.alias || model.name].filter((p): p is string => !!p)
+  return sqlTableRef(parts.join("."))
+}
+
+function relationForSource(source: ManifestSource): string {
+  if (source.relation_name) return source.relation_name
+  const parts = [source.database, source.schema_name, source.identifier || source.name].filter((p): p is string => !!p)
+  return sqlTableRef(parts.join("."))
+}
+
+function findModel(manifest: CachedManifest, model: string | undefined): ManifestModel | undefined {
+  if (!model) return undefined
+  return manifest.byName.get(model) ?? [...manifest.models.values()].find((m) => m.name.endsWith(`.${model}`))
+}
+
+function findSource(manifest: CachedManifest, sourceName: string | undefined, tableName: string | undefined): ManifestSource | undefined {
+  if (!sourceName || !tableName) return undefined
+  return manifest.sourcesByName.get(`${sourceName}.${tableName}`.toLowerCase())
+}
+
+function addRelationVariants(out: Set<string>, relation: string | undefined): void {
+  if (!relation) return
+  const trimmed = relation.trim()
+  if (!trimmed) return
+  out.add(trimmed)
+  const parts = trimmed
+    .replace(/[`"\[\]]/g, "")
+    .split(".")
+    .map((p) => p.trim())
+    .filter(Boolean)
+  if (parts.length) out.add(parts[parts.length - 1]!)
+  if (parts.length >= 2) out.add(parts.slice(-2).join("."))
+}
+
+function addAllowedModelDeps(out: Set<string>, manifest: CachedManifest, modelName: string | undefined): void {
+  const model = findModel(manifest, modelName)
+  if (!model) return
+  for (const dep of model.depends_on) {
+    const depModel = manifest.models.get(dep)
+    if (depModel) {
+      addRelationVariants(out, depModel.name)
+      addRelationVariants(out, depModel.alias)
+      addRelationVariants(out, relationForModel(depModel))
+      continue
+    }
+    const depSource = manifest.sources.get(dep)
+    if (depSource) {
+      addRelationVariants(out, `${depSource.source_name}.${depSource.name}`)
+      addRelationVariants(out, depSource.name)
+      addRelationVariants(out, depSource.identifier)
+      addRelationVariants(out, relationForSource(depSource))
+    }
+  }
+}
+
+function expandedAllowedRelations(manifest: CachedManifest, options?: GeneratedTestExecutionOptions): string[] {
+  const out = new Set<string>()
+  const seed = [...(options?.allowedRelations ?? []), options?.model].filter((v): v is string => !!v)
+  for (const relation of seed) {
+    addRelationVariants(out, relation)
+    const model = findModel(manifest, relation)
+    if (model) {
+      addRelationVariants(out, model.name)
+      addRelationVariants(out, model.alias)
+      addRelationVariants(out, relationForModel(model))
+    }
+    const sourceParts = relation.split(".")
+    if (sourceParts.length === 2) {
+      const source = findSource(manifest, sourceParts[0], sourceParts[1])
+      if (source) addRelationVariants(out, relationForSource(source))
+    }
+  }
+  addAllowedModelDeps(out, manifest, options?.model)
+  return [...out]
+}
+
+function modelNameFromSourceRef(ref: string): string | undefined {
+  const match = /^schema\.yml:([^.:]+)(?:[.:]|$)/.exec(ref)
+  return match?.[1]
+}
+
+function columnsForUnique(test: GeneratedTest): string[] {
+  const args = test.dbtTest?.args ?? {}
+  const cols =
+    args["columns"] ??
+    args["combination_of_columns"] ??
+    args["column_names"] ??
+    args["fields"] ??
+    (test.dbtTest?.column ? [test.dbtTest.column] : undefined)
+  return Array.isArray(cols) ? cols.map(String).filter(Boolean) : []
+}
+
+function relationshipTarget(raw: unknown, manifest: CachedManifest): { relation?: string; detail?: string } {
+  if (typeof raw !== "string" || !raw.trim()) return { detail: "relationships test is missing target relation" }
+  const ref = /\bref\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(raw)?.[1]
+  if (ref) {
+    const model = manifest.byName.get(ref)
+    return { relation: model ? relationForModel(model) : sqlTableRef(ref) }
+  }
+  const source = /\bsource\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/.exec(raw)
+  if (source) {
+    const resolved = findSource(manifest, source[1], source[2])
+    return resolved
+      ? { relation: relationForSource(resolved) }
+      : { detail: `relationships source target ${source[1]}.${source[2]} was not found in the manifest` }
+  }
+  return { relation: sqlTableRef(raw) }
+}
+
+function buildGeneratedTestSql(
+  test: GeneratedTest,
+  manifest: CachedManifest,
+  options?: GeneratedTestExecutionOptions,
+): { sql?: string; detail?: string } {
+  if (!test.dbtTest && test.assertionSql) {
+    const sanitized = sanitizeAssertionSql(test.assertionSql, expandedAllowedRelations(manifest, options))
+    return sanitized.ok ? { sql: sanitized.sql } : { detail: `assertionSql rejected by sandbox: ${sanitized.reason}` }
+  }
+
+  const modelName = modelNameFromSourceRef(test.derivedFrom.ref) ?? options?.model
+  const model = findModel(manifest, modelName)
+  if (!model) return { detail: `model not found for ${test.derivedFrom.ref}` }
+  const relation = relationForModel(model)
+  const column = test.dbtTest?.column
+  const trackB = test.derivedFrom.origin === "inferred_context"
+  const sandboxAssertionSql = (sql: string): { sql?: string; detail?: string } => {
+    const sanitized = sanitizeAssertionSql(sql, expandedAllowedRelations(manifest, options))
+    return sanitized.ok ? { sql: sanitized.sql } : { detail: `dbtTest rejected by sandbox: ${sanitized.reason}` }
+  }
+
+  if (test.kind === "not_null") {
+    if (!column) return { detail: "not_null test is missing column" }
+    const assertionSql = `select ${sqlIdent(column)} from ${relation} where ${sqlIdent(column)} is null`
+    return trackB ? sandboxAssertionSql(assertionSql) : { sql: `select count(*) as violating_rows from (${assertionSql}) _nn` }
+  }
+
+  if (test.kind === "unique") {
+    const columns = columnsForUnique(test)
+    if (!columns.length) return { detail: "unique test is missing columns" }
+    const selectCols = columns.map(sqlIdent).join(", ")
+    const nonNull = columns.map((c) => `${sqlIdent(c)} is not null`).join(" and ")
+    const assertionSql = `select ${selectCols} from ${relation} where ${nonNull} group by ${selectCols} having count(*) > 1`
+    return trackB
+      ? sandboxAssertionSql(assertionSql)
+      : { sql: `select count(*) as violating_rows from (${assertionSql}) as altimate_unique_violations` }
+  }
+
+  if (test.kind === "accepted_values") {
+    if (!column) return { detail: "accepted_values test is missing column" }
+    const values = test.dbtTest?.args?.["values"]
+    if (!Array.isArray(values) || values.length === 0) return { detail: "accepted_values test is missing values" }
+    if (trackB && values.length > TRACK_B_ACCEPTED_VALUES_LIMIT) {
+      return { detail: `accepted_values test has too many values (${values.length})` }
+    }
+    const assertionSql =
+      `select ${sqlIdent(column)} from ${relation} ` +
+      `where ${sqlIdent(column)} is not null and ${sqlIdent(column)} not in (${values.map(sqlLiteral).join(", ")})`
+    return trackB
+      ? sandboxAssertionSql(assertionSql)
+      : { sql: `select count(*) as violating_rows from (${assertionSql}) as altimate_accepted_value_violations` }
+  }
+
+  if (test.kind === "relationships") {
+    if (!column) return { detail: "relationships test is missing column" }
+    const args = test.dbtTest?.args ?? {}
+    const resolvedTarget = relationshipTarget(args["to"], manifest)
+    const target = resolvedTarget.relation
+    const field = typeof args["field"] === "string" && args["field"].trim() ? args["field"].trim() : undefined
+    if (!target || !field) return { detail: resolvedTarget.detail ?? "relationships test is missing target relation or field" }
+    const targetCheck = sanitizeAssertionSql(`select 1 from ${target}`, expandedAllowedRelations(manifest, options))
+    if (!targetCheck.ok) return { detail: `relationships target rejected by sandbox: ${targetCheck.reason}` }
+    const assertionSql =
+      `select child.${sqlIdent(column)} from ${relation} as child ` +
+      `left join ${target} as parent on child.${sqlIdent(column)} = parent.${sqlIdent(field)} ` +
+      `where child.${sqlIdent(column)} is not null and parent.${sqlIdent(field)} is null`
+    return trackB
+      ? sandboxAssertionSql(assertionSql)
+      : { sql: `select count(*) as violating_rows from (${assertionSql}) as altimate_relationship_violations` }
+  }
+
+  return { detail: `${test.kind} execution is not supported by a row-count assertion` }
+}
+
+function resultCount(res: any): number | undefined {
+  const row = Array.isArray(res?.rows) ? res.rows[0] : undefined
+  if (Array.isArray(row)) {
+    const n = Number(row[0])
+    return Number.isFinite(n) ? n : undefined
+  }
+  if (row && typeof row === "object") {
+    const value = row.violating_rows ?? Object.values(row)[0]
+    const n = Number(value)
+    return Number.isFinite(n) ? n : undefined
+  }
+  return undefined
+}
+
+function isNoWarehouseError(message: string): boolean {
+  return /no warehouse configured|connection .*not found|warehouse .*not found|driver .*not found|not configured/i.test(message)
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error(`spec-test SQL timed out after ${ms}ms`)), ms)
+    }),
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout)
+  })
 }
 
 /**
@@ -121,13 +471,39 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           // native dispatcher registration path so a core-loading failure
           // cannot incorrectly downgrade a valid dbt run to lint-only.
           const res = await parseManifest({ path: opts.manifestPath })
+          const rawManifest = loadRawManifest(opts.manifestPath)
+          const rawNodes = (rawManifest?.nodes ?? {}) as Record<string, any>
           const models = new Map<string, ManifestModel>()
           const byName = new Map<string, ManifestModel>()
+          const sources = new Map<string, ManifestSource>()
+          const sourcesByName = new Map<string, ManifestSource>()
           const children = new Map<string, string[]>()
           const nodes = [...asArray<ManifestModel>(res.models), ...asArray<ManifestModel>((res as any).snapshots)]
           for (const m of nodes) {
-            models.set(m.unique_id, m)
-            byName.set(m.name, m)
+            const raw = rawNodes[m.unique_id]
+            const enriched = {
+              ...m,
+              database: (m as any).database,
+              schema_name: (m as any).schema_name,
+              relation_name: raw?.relation_name,
+              alias: raw?.alias,
+              raw,
+            }
+            models.set(enriched.unique_id, enriched)
+            byName.set(enriched.name, enriched)
+          }
+          for (const source of asArray<ManifestSource>(res.sources)) {
+            const raw = (rawManifest?.sources ?? {})[source.unique_id]
+            const enriched = {
+              ...source,
+              database: (source as any).database,
+              schema_name: (source as any).schema_name,
+              identifier: raw?.identifier,
+              relation_name: raw?.relation_name,
+              raw,
+            }
+            sources.set(enriched.unique_id, enriched)
+            sourcesByName.set(`${enriched.source_name}.${enriched.name}`.toLowerCase(), enriched)
           }
           // Invert depends_on (upstream) into children (downstream).
           for (const m of nodes) {
@@ -139,6 +515,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           // Map each model to the SET of tests depending on it (by test
           // unique_id), so a multi-model test isn't counted more than once.
           const testDeps = new Map<string, Set<string>>()
+          const testNodes = Object.values<any>(rawNodes).filter((n) => n?.resource_type === "test")
           for (const t of asArray<{ unique_id: string; depends_on: string[] }>(res.tests)) {
             for (const dep of asArray<string>(t.depends_on)) {
               if (!testDeps.has(dep)) testDeps.set(dep, new Set())
@@ -152,13 +529,16 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
             asArray(res.seeds),
             asArray((res as any).snapshots),
           )
-          return { models, byName, children, testDeps, schemaContext, ok: models.size > 0 }
+          return { models, byName, sources, sourcesByName, children, testDeps, testNodes, schemaContext, ok: models.size > 0 }
         } catch {
           return {
             models: new Map(),
             byName: new Map(),
+            sources: new Map(),
+            sourcesByName: new Map(),
             children: new Map(),
             testDeps: new Map(),
+            testNodes: [],
             ok: false,
           }
         }
@@ -362,6 +742,125 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       return Array.isArray(pk) && pk.length ? pk.map((c: string) => String(c)) : undefined
     },
 
+    async declaredConstraints(model: string): Promise<DeclaredConstraint[]> {
+      try {
+        const mf = await loadManifest()
+        const target = mf.byName.get(model) ?? [...mf.models.values()].find((m) => m.name.endsWith(`.${model}`))
+        if (!target?.raw) return []
+
+        const enforcing = new Set<string>()
+        const testConstraints: DeclaredConstraint[] = []
+        for (const test of mf.testNodes) {
+          const deps = asArray<string>(test?.depends_on?.nodes)
+          if (test?.attached_node !== target.unique_id && !deps.includes(target.unique_id)) continue
+          const kind = testKind(test)
+          if (!kind) continue
+          const column = testColumn(test)
+          const args = testArgs(test)
+          enforcing.add(constraintKey(kind, column, args))
+          testConstraints.push({
+            kind,
+            column,
+            args,
+            hasEnforcingTest: true,
+            uniqueId: test.unique_id,
+            sourceRef: sourceRef(target.name, kind, column),
+          })
+        }
+
+        const out: DeclaredConstraint[] = [...testConstraints]
+        const seen = new Set(out.map(declaredConstraintKey))
+        const add = (c: DeclaredConstraint) => {
+          const key = declaredConstraintKey(c)
+          if (seen.has(key)) return
+          seen.add(key)
+          out.push(c)
+        }
+
+        const raw = target.raw
+        const contract = raw?.config?.contract ?? raw?.contract
+        if (boolish(contract?.enforced)) {
+          for (const [key, rawColumn] of Object.entries<any>(raw?.columns ?? {})) {
+            const column = String(rawColumn?.name ?? key)
+            const dataType = String(rawColumn?.data_type ?? rawColumn?.type ?? "").trim()
+            if (dataType) {
+              const kind: DeclaredConstraint["kind"] = "column_type"
+              add({
+                kind,
+                column,
+                args: { data_type: dataType },
+                hasEnforcingTest: enforcing.has(constraintKey(kind, column)),
+                uniqueId: target.unique_id,
+                sourceRef: sourceRef(target.name, kind, column),
+              })
+            }
+            for (const rawConstraint of asArray<any>(rawColumn?.constraints)) {
+              const normalized = String(rawConstraint?.type ?? rawConstraint)
+                .trim()
+                .toLowerCase()
+                .replace(/[\s-]+/g, "_")
+              const kinds: DeclaredConstraint["kind"][] =
+                normalized === "primary_key"
+                  ? ["not_null", "unique"]
+                  : normalizeConstraintKind(normalized)
+                    ? [normalizeConstraintKind(normalized)!]
+                    : []
+              for (const kind of kinds) {
+                const args =
+                  kind === "accepted_values" || kind === "relationships"
+                    ? typeof rawConstraint === "object" && rawConstraint
+                      ? rawConstraint
+                      : undefined
+                    : undefined
+                add({
+                  kind,
+                  column,
+                  args,
+                  hasEnforcingTest: enforcing.has(constraintKey(kind, column, args)),
+                  uniqueId: target.unique_id,
+                  sourceRef: sourceRef(target.name, kind, column),
+                })
+              }
+            }
+          }
+
+          for (const rawConstraint of asArray<any>(raw?.constraints)) {
+            const normalized = String(rawConstraint?.type ?? rawConstraint)
+              .trim()
+              .toLowerCase()
+              .replace(/[\s-]+/g, "_")
+            if (normalized !== "primary_key" && normalized !== "unique") continue
+            const columns = asArray(rawConstraint?.columns).map(String).filter(Boolean)
+            if (!columns.length) continue
+            const kind: DeclaredConstraint["kind"] = "unique"
+            const args = { columns }
+            add({
+              kind,
+              args,
+              hasEnforcingTest: enforcing.has(constraintKey(kind, undefined, args)),
+              uniqueId: target.unique_id,
+              sourceRef: sourceRef(target.name, kind),
+            })
+            if (normalized === "primary_key") {
+              for (const column of columns) {
+                add({
+                  kind: "not_null",
+                  column,
+                  hasEnforcingTest: enforcing.has(constraintKey("not_null", column)),
+                  uniqueId: target.unique_id,
+                  sourceRef: sourceRef(target.name, "not_null", column),
+                })
+              }
+            }
+          }
+        }
+
+        return out
+      } catch {
+        return []
+      }
+    },
+
     async downstreamModels(model: string): Promise<Array<{ name: string; path: string }>> {
       const m = await loadManifest()
       const node = m.byName.get(model)
@@ -434,6 +933,46 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       } catch {
         return null
       }
+    },
+
+    async runGeneratedTests(
+      tests: GeneratedTest[],
+      warehouse?: string,
+      options?: GeneratedTestExecutionOptions,
+    ): Promise<Record<string, GeneratedTestResult> | null> {
+      if (!tests.length) return {}
+      const mf = await loadManifest()
+      const out: Record<string, GeneratedTestResult> = {}
+      for (const test of tests) {
+        const built = buildGeneratedTestSql(test, mf, options)
+        if (!built.sql) {
+          out[test.id] = { status: "error", detail: built.detail }
+          continue
+        }
+        try {
+          const res = await withTimeout(
+            Dispatcher.call("sql.execute", { sql: built.sql, warehouse: warehouse || undefined, limit: 1 }),
+            SPEC_TEST_SQL_TIMEOUT_MS,
+          )
+          const error = String((res as any)?.error ?? "")
+          if (error) {
+            if (isNoWarehouseError(error)) return null
+            out[test.id] = { status: "error", detail: error }
+            continue
+          }
+          const violatingRows = resultCount(res)
+          if (violatingRows === undefined) {
+            out[test.id] = { status: "error", detail: "could not read violating row count" }
+            continue
+          }
+          out[test.id] = violatingRows === 0 ? { status: "pass", violatingRows } : { status: "fail", violatingRows }
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err)
+          if (isNoWarehouseError(detail)) return null
+          out[test.id] = { status: "error", detail }
+        }
+      }
+      return out
     },
 
     async columnLineage(sql: string, dialect?: string): Promise<Array<{ source: string; target: string }>> {

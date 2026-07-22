@@ -49,10 +49,28 @@ export const VCS_EVENT: Record<Verdict, "COMMENT" | "REQUEST_CHANGES"> = {
  *  - any finding at all                          → COMMENT
  *  - nothing                                     → APPROVE
  */
+/**
+ * Defense in depth for the spec-test synthesis lane: a spec-test finding may
+ * only reach a blocking verdict when it was actually EXECUTED against a
+ * constraint the author DECLARED (track A). An advisory/unexecuted proposal
+ * (track B, or any P0 output) can never block, regardless of the severity or
+ * category the lane assigned it — the verdict does not trust the lane. Findings
+ * from every other tool are unaffected (return true).
+ */
+function specTestMayBlock(f: Finding): boolean {
+  const tool = f.evidence?.tool ?? ""
+  if (!tool.startsWith("altimate.spec_test")) return true
+  if (tool !== "altimate.spec_test.executed") return false
+  const result = (f.evidence?.result ?? {}) as Record<string, unknown>
+  return result["executed"] === true && result["origin"] === "declared_constraint"
+}
+
 export function computeIdealVerdict(findings: Finding[], rubric: Rubric = DEFAULT_RUBRIC): Verdict {
   if (findings.length === 0) return "APPROVE"
   const blockers = blockingCategories(rubric)
-  const hasBlockingCritical = findings.some((f) => f.severity === "critical" && blockers.has(f.category))
+  const hasBlockingCritical = findings.some(
+    (f) => f.severity === "critical" && blockers.has(f.category) && specTestMayBlock(f),
+  )
   if (hasBlockingCritical) return "REQUEST_CHANGES"
   // Count only confidently-warned findings toward the risk pattern. Undecidable
   // ("unknown") warnings — e.g. equivalence that couldn't be proven — must not
@@ -60,8 +78,15 @@ export function computeIdealVerdict(findings: Finding[], rubric: Rubric = DEFAUL
   // Advisory LLM findings (layer 3) are EXCLUDED: the lane is advisory-only and must
   // never influence the verdict, so its warnings cannot accumulate into a block
   // (otherwise a chatty or prompt-injected AI review could force REQUEST_CHANGES).
+  // Spec-test proposals/candidates are also advisory-only; exclude their
+  // evidence tools so a future warning cannot leak into the blocking path.
   const warningCount = findings.filter(
-    (f) => f.severity === "warning" && f.confidence !== "unknown" && f.evidence?.tool !== "ai-review",
+    (f) =>
+      f.severity === "warning" &&
+      f.confidence !== "unknown" &&
+      f.evidence?.tool !== "ai-review" &&
+      f.evidence?.tool !== "altimate.spec_test.proposed" &&
+      f.evidence?.tool !== "altimate.spec_test.candidate",
   ).length
   if (warningCount >= rubric.warningPatternThreshold) return "REQUEST_CHANGES"
   return "COMMENT"
@@ -99,6 +124,13 @@ export const VerdictEnvelope = z.object({
     suggestion: z.number().int().nonnegative(),
     /** True when the review ran without a manifest/warehouse (lint-only). */
     degraded: z.boolean(),
+    enforcedConstraints: z
+      .object({
+        executed: z.number().int().nonnegative(),
+        passed: z.number().int().nonnegative(),
+        failed: z.number().int().nonnegative(),
+      })
+      .optional(),
   }),
   engine: EngineVersions,
   /** Hash of the dbt manifest the verdict was computed against, when present. */
@@ -127,12 +159,23 @@ export interface BuildEnvelopeInput {
   manifestHash?: string
   generatedAt?: string
   degraded?: boolean
+  enforcedConstraints?: { executed: number; passed: number; failed: number }
 }
 
-function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
+function summarize(
+  findings: Finding[],
+  degraded: boolean,
+  enforcedConstraints?: BuildEnvelopeInput["enforcedConstraints"],
+): VerdictEnvelope["summary"] {
   const tally: Record<Severity, number> = { critical: 0, warning: 0, suggestion: 0 }
   for (const f of findings) tally[f.severity]++
-  return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
+  return {
+    critical: tally.critical,
+    warning: tally.warning,
+    suggestion: tally.suggestion,
+    degraded,
+    enforcedConstraints,
+  }
 }
 
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
@@ -148,7 +191,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     mode: input.mode,
     tier: input.tier,
     findings: input.findings,
-    summary: summarize(input.findings, degraded),
+    summary: summarize(input.findings, degraded, input.enforcedConstraints),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     generatedAt: input.generatedAt,
