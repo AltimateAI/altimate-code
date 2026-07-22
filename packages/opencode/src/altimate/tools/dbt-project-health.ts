@@ -33,10 +33,22 @@ export const DbtProjectHealthTool = Tool.define("dbt_project_health", {
       .describe("Optional path to a dbt catalog.json to power column-aware checks"),
   }),
   async execute(args, _ctx) {
+    // Explicit config_path wins; otherwise auto-discover a per-project inferred config
+    // at <project_dir>/.altimate/dbt-health.{yml,yaml,json} (YAML or JSON both parse).
     let config_json: string | undefined
-    if (args.config_path) {
-      const file = Bun.file(args.config_path)
-      if (await file.exists()) config_json = await file.text()
+    const candidates = args.config_path
+      ? [args.config_path]
+      : [
+          `${args.project_dir.replace(/\/+$/, "")}/.altimate/dbt-health.yml`,
+          `${args.project_dir.replace(/\/+$/, "")}/.altimate/dbt-health.yaml`,
+          `${args.project_dir.replace(/\/+$/, "")}/.altimate/dbt-health.json`,
+        ]
+    for (const candidate of candidates) {
+      const file = Bun.file(candidate)
+      if (await file.exists()) {
+        config_json = await file.text()
+        break
+      }
     }
 
     const result = await Dispatcher.call("altimate_core.dbt_project_health", {

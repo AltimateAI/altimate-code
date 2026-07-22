@@ -276,6 +276,14 @@ export function registerAll(): void {
       return fail(e)
     }
   })
+  // Deterministically infer a dbt health-check config (YAML) from a project's conventions.
+  register("altimate_core.dbt_health_infer_config", async (params) => {
+    try {
+      return ok(true, { config: core.dbtHealthInferConfig(params.project_dir) })
+    } catch (e) {
+      return fail(e)
+    }
+  })
   // altimate_change end
 
   // 7. altimate_core.fix
