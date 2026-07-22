@@ -153,8 +153,13 @@ function changedLinesForScan(diff: string | undefined): string {
     if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("@@")) continue
     // Distinguish added / removed / context so we can update scalar state
     // from context lines too but only include +/- in the output.
-    const marker = raw.startsWith("+") || raw.startsWith("-") ? raw[0] : " "
-    const stripped = marker === " " ? raw : raw.slice(1)
+    // Unified-diff context lines start with a leading SPACE (the diff
+    // marker), so we must strip that space too — otherwise a context line
+    // like " description: |1" is measured as 1-deeper indent than an
+    // otherwise-equivalent "+   data_tests: ..." changed line, and the
+    // scalar body fails the `indent > scalarIndent` check (cubic P2).
+    const marker = raw.startsWith("+") || raw.startsWith("-") ? raw[0] : raw.startsWith(" ") ? " " : ""
+    const stripped = marker === "" ? raw : raw.slice(1)
     const indent = stripped.length - stripped.replace(/^[ \t]+/, "").length
     const contentEmpty = stripped.trim() === ""
     // Close the current scalar when we hit a non-empty line at ≤ scalarIndent.

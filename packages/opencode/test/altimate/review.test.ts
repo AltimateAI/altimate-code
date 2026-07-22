@@ -609,6 +609,27 @@ describe("risk-tier", () => {
     }
   })
 
+  test("R20 S4: `|1` block scalar in context — body indent measured consistently (cubic P2 bot review)", () => {
+    // Cubic P2 — the diff-marker vs indentation calculation was
+    // inconsistent between context lines (retained their leading space)
+    // and changed lines (whose `+`/`-` marker was stripped). A valid `|1`
+    // block scalar opened in context with a body indented exactly one
+    // space beyond the header wasn't masked because the context
+    // scalarIndent counted one extra space. Now BOTH context and changed
+    // lines have their leading diff marker stripped before indent
+    // measurement.
+    const diff =
+      "@@ -1,8 +1,9 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     description: |1\n" +
+      "       Existing body line stays put.\n" +
+      "+      data_tests: are still in the sibling schema.yml, not here.\n" +
+      "+      constraints: too.\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
   test("R20 S4: block-scalar OPENED IN CONTEXT (not changed) still suppresses body (codex round-6 HIGH)", () => {
     // Codex R20 round-6 HIGH — an earlier version stripped only the
     // filtered +/- slice, so a pre-existing `description: |` in the
