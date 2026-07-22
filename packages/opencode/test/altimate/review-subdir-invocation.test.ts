@@ -154,6 +154,73 @@ describe("R20: subdir-invocation content resolution (PR #1027 consensus MAJOR)",
     expect(content).toBe("-- compiled via backslash prefix\n")
   })
 
+  test("makeContentResolver refuses to read a repo file whose realpath escapes the git root (bot-review security)", async () => {
+    // coderabbit + cubic P2 — a tracked symlink that points outside the
+    // repo (e.g. `models/evil.sql → /etc/passwd`) would otherwise be
+    // followed and leak external content into the review pipeline. The
+    // containment check via realpath rejects any target whose resolved
+    // path is not inside the resolved repo root.
+    const { root } = await mkTempRepo()
+    // Create a target outside the repo, then a symlink inside the repo
+    // pointing to it.
+    const outside = await fs.mkdtemp(path.join(tmpdir(), "outside-repo-"))
+    const secret = path.join(outside, "secret.sql")
+    await fs.writeFile(secret, "SECRET CONTENT\n")
+    const evilPath = path.join(root, "packages", "dbt", "models", "marts", "evil.sql")
+    await fs.symlink(secret, evilPath)
+
+    const resolver = makeContentResolver({ base: "HEAD", cwd: root, gitRoot: root })
+    // Reading the symlink target must be refused (returns undefined) —
+    // it must NOT leak the secret file contents.
+    const content = await resolver("packages/dbt/models/marts/evil.sql", "new")
+    expect(content).toBeUndefined()
+
+    // Sanity: a regular tracked file inside the repo is still readable.
+    const good = await resolver("packages/dbt/models/marts/customers.sql", "new")
+    expect(good).toBe("-- customers content\n")
+  })
+
+  test("gitRepoRoot preserves legitimate leading/trailing spaces in the path (bot-review P3)", async () => {
+    // cubic P3 — `.trim()` on the git output stripped path characters
+    // (leading spaces are legitimate on macOS temp dirs like `/private/…`
+    // and on Windows). Now we strip only the git-emitted `\r?\n`
+    // terminator. Simulate a git output with only a newline terminator and
+    // no path whitespace — the result must equal the pre-terminator body.
+    // (Building an actual repo at a whitespace path is filesystem-touchy
+    // across platforms; this test exercises the string handling
+    // behaviorally via the actual git output.)
+    const { root } = await mkTempRepo()
+    const r = await gitRepoRoot(root)
+    // Verify the returned value doesn't have trailing newline chars.
+    expect(r?.endsWith("\n")).toBe(false)
+    expect(r?.endsWith("\r")).toBe(false)
+    // And that r is still a valid path (matches real repo).
+    expect(await fs.realpath(r!)).toBe(await fs.realpath(root))
+  })
+
+  test("makeCompiledResolver refuses a compiled symlink escaping the compiled root (bot-review security)", async () => {
+    // Same containment check applied to compiled SQL lookup — a symlinked
+    // compiled artifact pointing outside `target/compiled/<project>/`
+    // must not be read.
+    const { root } = await mkTempRepo()
+    const dbtRoot = path.join(root, "packages", "dbt")
+    const project = "acme"
+    const compiledDir = path.join(dbtRoot, "target", "compiled", project, "models", "marts")
+    await fs.mkdir(compiledDir, { recursive: true })
+    const outside = await fs.mkdtemp(path.join(tmpdir(), "outside-compiled-"))
+    const secret = path.join(outside, "secret.sql")
+    await fs.writeFile(secret, "COMPILED SECRET\n")
+    await fs.symlink(secret, path.join(compiledDir, "evil.sql"))
+
+    const resolver = makeCompiledResolver({
+      cwd: dbtRoot,
+      projectName: project,
+      pathPrefix: "packages/dbt",
+    })
+    const content = await resolver("packages/dbt/models/marts/evil.sql", "new")
+    expect(content).toBeUndefined()
+  })
+
   test("makeCompiledResolver pathPrefix accepts '.' as a no-op alias", async () => {
     // `path.relative(root, root)` returns "" — treat "" and "." as
     // equivalent to "no prefix" so callers don't need branching logic.

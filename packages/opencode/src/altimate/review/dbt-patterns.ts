@@ -841,8 +841,8 @@ function extractTestOccurrences(doc: unknown): Set<string> {
         let discriminator = ""
         if (n === "relationships" && t && typeof t === "object") {
           const args = (t as Record<string, unknown>)[name]
-          // dbt 1.9+ nests test args under `arguments:`; earlier versions
-          // put them at the top level of the test's value map.
+          // dbt 1.10.5+ nests test args under `arguments:`; earlier versions
+          // put them at the top level of the test's value map (cubic-review P3).
           const argsObj =
             args && typeof args === "object" ? (args as Record<string, unknown>) : undefined
           const nested =

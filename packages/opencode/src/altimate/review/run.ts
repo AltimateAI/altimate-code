@@ -1,5 +1,5 @@
 import path from "node:path"
-import { readFile, stat, access } from "node:fs/promises"
+import { readFile, realpath, stat, access } from "node:fs/promises"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
 import { collectChangedFiles, makeContentResolver, defaultBaseRef, gitRepoRoot, manifestHash } from "./git"
@@ -255,8 +255,27 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // dbt project. `path.relative` returns "" when dbtRoot === gitRoot (the
   // repo-root-invoked case) — makeCompiledResolver's `pathPrefix` treats
   // that as a no-op.
-  const pathPrefix = path.relative(gitRoot, dbtRoot)
-  const getCompiled = opts.getContent ? undefined : makeCompiledResolver({ cwd: dbtRoot, projectName, pathPrefix })
+  //
+  // Canonicalise both roots via `fs.realpath` before computing the relative
+  // path. `gitRoot` from `git rev-parse --show-toplevel` is already
+  // symlink-resolved; `dbtRoot` is not, so on macOS (`/var` → `/private/var`)
+  // or any other symlinked-parent layout the `path.relative` result was a
+  // meaningless climb path (`../../var/...`) that never matched incoming
+  // repo-relative paths, and compiled SQL was silently missed
+  // (cubic-review P2 + kilo suggestion). Falls back gracefully when the
+  // realpath call fails (e.g. path deleted mid-run).
+  let gitRootReal = gitRoot
+  let dbtRootReal = dbtRoot
+  try {
+    gitRootReal = await realpath(gitRoot)
+    dbtRootReal = await realpath(dbtRoot)
+  } catch {
+    /* keep original values on realpath failure */
+  }
+  const pathPrefix = path.relative(gitRootReal, dbtRootReal)
+  const getCompiled = opts.getContent
+    ? undefined
+    : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
 
   return runReview({
     changedFiles,

@@ -79,9 +79,16 @@ export function makeCompiledResolver(opts: CompiledResolverOptions) {
     // this the compiled resolver silently misses in monorepo layouts.
     const rel = prefix && (file === prefix || file.startsWith(prefix + "/")) ? file.slice(prefix.length + 1) : file
     const root = side === "new" ? headDir : baseDir
-    const full = path.join(opts.cwd, root, project, rel)
+    const compiledRoot = path.join(opts.cwd, root, project)
+    // Containment check via realpath — matches makeContentResolver's
+    // symlink-safe read (coderabbit + cubic security review). A symlinked
+    // compiled artifact pointing outside `compiledRoot` is not read.
     try {
-      return await fs.readFile(full, "utf8")
+      const rootReal = await fs.realpath(compiledRoot)
+      const targetReal = await fs.realpath(path.join(compiledRoot, rel))
+      const sep = path.sep
+      if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) return undefined
+      return await fs.readFile(targetReal, "utf8")
     } catch {
       return undefined
     }

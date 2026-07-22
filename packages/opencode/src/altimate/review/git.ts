@@ -62,6 +62,29 @@ export async function collectChangedFiles(opts: CollectOptions): Promise<Changed
   )
 }
 
+/** Read the given file only when its realpath sits inside the resolved root.
+ *  Blocks the "tracked symlink escapes the repo" class of attack — e.g. a
+ *  `models/evil.sql → /etc/passwd` symlink that would otherwise leak external
+ *  files into the review pipeline (coderabbit + cubic security review).
+ *  Returns undefined when the target escapes, is missing, or realpath fails. */
+async function safeReadInside(root: string, rel: string): Promise<string | undefined> {
+  try {
+    // Realpath both sides so a symlink IN the repo, or a repo checked out
+    // under a symlinked path (`/var` → `/private/var` on macOS), still
+    // compares apples to apples. Missing realpath calls on the target fail
+    // fast into the catch (no read attempted).
+    const rootReal = await fs.realpath(root)
+    const targetReal = await fs.realpath(path.join(root, rel))
+    // Ensure `targetReal` is inside `rootReal` using a separator-aware
+    // startsWith check so `/repo-backup` doesn't count as inside `/repo`.
+    const sep = path.sep
+    if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) return undefined
+    return await fs.readFile(targetReal, "utf8")
+  } catch {
+    return undefined
+  }
+}
+
 /** Build a getContent(path, side) resolver over git refs / the working tree.
  *  `renames` maps a new path → its old path so the "old" side of a renamed file
  *  resolves from where it actually lived at `base` (not the post-rename path).
@@ -84,9 +107,10 @@ export function makeContentResolver(opts: CollectOptions & { renames?: Map<strin
       // returning undefined and silently demoting downstream detectors to
       // the diff-only fallback. Root at the resolved git top-level when
       // supplied by the caller; fall back to `opts.cwd` when we couldn't
-      // resolve it (non-git or bare-repo contexts).
+      // resolve it (non-git or bare-repo contexts). Reads are containment-
+      // checked (symlink-safe) — see safeReadInside.
       const root = opts.gitRoot ?? opts.cwd
-      return await fs.readFile(path.join(root, file), "utf8")
+      return await safeReadInside(root, file)
     } catch {
       return undefined
     }
@@ -95,11 +119,15 @@ export function makeContentResolver(opts: CollectOptions & { renames?: Map<strin
 
 /** Resolve the repository top-level (`git rev-parse --show-toplevel`).
  *  Used to root working-tree FS reads and existence checks at the repo root
- *  regardless of the caller's cwd. Returns undefined outside a git repo. */
+ *  regardless of the caller's cwd. Returns undefined outside a git repo.
+ *  Strips only the git-emitted terminator (`\r\n` or `\n`) rather than
+ *  `trim()` — a path with legitimate leading/trailing whitespace stays
+ *  intact (cubic-review P3). */
 export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
   try {
     const out = await git(["rev-parse", "--show-toplevel"], cwd)
-    return out.trim() || undefined
+    const root = out.replace(/[\r\n]+$/, "")
+    return root || undefined
   } catch {
     return undefined
   }
