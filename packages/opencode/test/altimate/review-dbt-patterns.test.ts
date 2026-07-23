@@ -957,8 +957,49 @@ sources:
     )
     const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
     expect(gaps.length).toBe(1)
-    expect(gaps[0].model).toBe("orders")
+    // Source-table entity is qualified as `<source>.<table>` so two
+    // sources with same-named tables don't conflate (cubic-review P2).
+    expect(gaps[0].model).toBe("raw.orders")
     expect(gaps[0].column).toBe("event_ts")
+  })
+
+  test("R20 S1: same source-table name in two sources does NOT conflate (cubic-review P2)", () => {
+    // Two sources both containing a table named `orders`. A grain gap on
+    // one must not surface / suppress gaps on the other, and the finding
+    // fingerprint must distinguish them.
+    const newContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_tests: [not_null]
+          - name: event_ts   # ← grain col, no not_null
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [order_id, event_ts]
+  - name: legacy
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_tests: [not_null]
+          - name: event_ts   # ← same shape, same grain gap in the OTHER source
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [order_id, event_ts]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/sources.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    // Two distinct entities → two distinct gaps.
+    expect(gaps.length).toBe(2)
+    const models = new Set(gaps.map((g) => g.model))
+    expect(models).toEqual(new Set(["raw.orders", "legacy.orders"]))
   })
 
   test("R20 S1: grain detector also covers seeds", () => {

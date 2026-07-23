@@ -962,25 +962,37 @@ export interface GrainKeyGap {
  * are rare but legal (altimate-harness-bot review, PR #1029
  * dbt-patterns.ts:963).
  */
-function iterateGrainEntities(d: Record<string, unknown>): Array<Record<string, unknown>> {
-  const out: Array<Record<string, unknown>> = []
+function iterateGrainEntities(d: Record<string, unknown>): Array<{ name: string; body: Record<string, unknown> }> {
+  const out: Array<{ name: string; body: Record<string, unknown> }> = []
   for (const key of ["models", "snapshots", "seeds"] as const) {
     const arr = d[key]
     if (!Array.isArray(arr)) continue
     for (const e of arr) {
-      if (e && typeof e === "object") out.push(e as Record<string, unknown>)
+      if (!e || typeof e !== "object") continue
+      const body = e as Record<string, unknown>
+      const name = typeof body.name === "string" ? body.name : undefined
+      if (name) out.push({ name, body })
     }
   }
   // sources nest per-table entities under `.tables[]`; each table has its own
   // `name` + `columns` + `tests`/`data_tests`, matching the model shape.
+  // Qualify with the enclosing source name (`<source>.<table>`) so two
+  // sources with a table of the same name don't conflate in change-scoping
+  // OR finding fingerprint (cubic-review P2 on PR #1029).
   const sources = d.sources
   if (Array.isArray(sources)) {
     for (const s of sources) {
       if (!s || typeof s !== "object") continue
-      const tables = (s as Record<string, unknown>).tables
+      const src = s as Record<string, unknown>
+      const srcName = typeof src.name === "string" ? src.name : undefined
+      if (!srcName) continue
+      const tables = src.tables
       if (!Array.isArray(tables)) continue
       for (const t of tables) {
-        if (t && typeof t === "object") out.push(t as Record<string, unknown>)
+        if (!t || typeof t !== "object") continue
+        const body = t as Record<string, unknown>
+        const tblName = typeof body.name === "string" ? body.name : undefined
+        if (tblName) out.push({ name: `${srcName}.${tblName}`, body })
       }
     }
   }
@@ -999,9 +1011,7 @@ function extractGrainDeclarations(doc: unknown): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>()
   if (!doc || typeof doc !== "object") return out
   const d = doc as Record<string, unknown>
-  for (const mm of iterateGrainEntities(d)) {
-    const name = typeof mm.name === "string" ? mm.name : undefined
-    if (!name) continue
+  for (const { name, body: mm } of iterateGrainEntities(d)) {
     const cols = new Set<string>()
     for (const testsKey of ["tests", "data_tests"] as const) {
       const tests = mm[testsKey]
@@ -1087,9 +1097,7 @@ function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
     return undefined
   }
 
-  for (const mm of entities) {
-    const mname = typeof mm.name === "string" ? mm.name : undefined
-    if (!mname) continue
+  for (const { name: mname, body: mm } of entities) {
 
     // Contract enforcement: either at model-level `config.contract.enforced`
     // OR at top-level `contract:` (dbt supports both shapes). Consensus
