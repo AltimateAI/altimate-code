@@ -36,18 +36,25 @@ npm info @altimateai/altimate-code version
 
 Confirm with user: "Releasing **v{NEXT_VERSION}** (current: v{CURRENT_VERSION}). Proceed?"
 
-## Step 2: Ensure on Main and Clean
+## Step 2: Deterministic Preflight
+
+Run the preflight script — it is the gate, not a suggestion:
 
 ```bash
-git branch --show-current
-git status --short
-git fetch origin main
-git log HEAD..origin/main --oneline
+bun script/release-preflight.ts --version {NEXT_VERSION} --stage pre
 ```
 
-- Must be on `main`. If not, stop.
-- Working tree must be clean. If dirty, stop.
-- Must be up to date with remote. If behind, stop.
+It verifies, fail-closed:
+- clean worktree (untracked files are only a warning — they must NOT be staged later)
+- **HEAD equals freshly fetched `origin/main`** — this is the invariant, not "on branch main". Releasing from a worktree or a branch whose HEAD equals `origin/main` is fine; push via `HEAD:main`. If HEAD diverges, STOP.
+- no local or remote tag `v{NEXT_VERSION}` already exists (stale fork-inherited tags nearly shipped a wrong artifact in v0.9.1)
+- version is valid SemVer, greater than npm `latest`, not already published
+- every prerelease tag on the target line (`v{X.Y}.*-*`) is an ancestor of `origin/main`
+- no open PRs labeled `release-blocker`
+- which previous tag the auto-generated release notes will compare against (sanity-check it: for v0.9.1 the old logic would have diffed against a stray divergent tag and omitted a 165-commit merge)
+- marker guard clean
+
+**If preflight fails: STOP and report.** Do not improvise fixes for structural problems (diverged beta line, unmerged prerequisite PR, tag collision) inside this skill — resolve them as their own task, then re-invoke `/release`. Never auto-delete a colliding tag. If the user resolves a prerequisite by admin-merging a PR (bypassing branch protection), record that fact for the Step 12 summary.
 
 ## Step 3: Identify What Changed
 
@@ -76,7 +83,7 @@ Gather:
 
 ### 4b: Launch the five-member evaluation team
 
-Spawn **five agents in parallel**. Each agent MUST read the actual source code diffs — not just the summary. Each reviews from their unique perspective:
+Spawn **five agents in parallel**, each with `model: "sonnet"` (a full-weight model per persona once exhausted the account's weekly usage budget mid-release). Each agent MUST read the actual source code diffs — not just the summary. Each reviews from their unique perspective:
 
 1. **CTO** — Technical risk, security exposure, breaking changes, operational readiness. "Would I deploy this on a Friday?"
 
@@ -87,6 +94,8 @@ Spawn **five agents in parallel**. Each agent MUST read the actual source code d
 4. **Tech Lead** — Code quality, test coverage, maintainability, marker guard, CI health. "Will we regret this in two weeks?"
 
 5. **Chaos Gremlin** — Random adversarial perspective (security auditor, support engineer, new hire, compliance officer, etc.). Different each release. Asks the uncomfortable question nobody else thought of.
+
+Each persona prompt MUST end with: "Send your complete review via SendMessage to main as your FINAL action before going idle." (In the v0.9.2 release, 3 of 5 reviewers went idle without delivering and needed manual nudges.)
 
 Each agent produces:
 
@@ -135,6 +144,7 @@ After all five agents complete:
 ### 4d: Gate
 
 - **Any P0** → Release blocked. Fix first, re-run from Step 3.
+- **P0-candidate that can't be immediately confirmed** → it must be either empirically verified (build the repro, however awkward) or explicitly downgraded with written rationale that the user reviews. A suspected P0 never ships on indirect reasoning alone (v0.9.1 shipped a Chaos-Gremlin config-loss P0-candidate after two failed verification attempts — that's the one place a real P0 could have hidden).
 - **3+ HOLD verdicts** → Release blocked.
 - **Actionable P1s exist** → Proceed to Step 5 (fix them).
 - **No actionable items** → Skip Step 5, proceed to Step 6.
@@ -157,9 +167,9 @@ echo "fix: {description}" > .github/meta/commit.txt
 git commit -F .github/meta/commit.txt
 ```
 
-### 5b: File issues for deferred items
+### 5b: File issues for deferred items — mechanically enforced
 
-For each deferred item, create a GitHub issue:
+Every deferred item needs a **durable disposition** before the ship gate: a link to a GitHub issue (newly created, or an existing one that already covers it), or an explicit user opt-out recorded in the summary. Chat prose does not count — the v0.8.10 release deferred 3 findings that now exist only in a transcript nobody will reread.
 
 ```bash
 gh issue create --repo AltimateAI/altimate-code \
@@ -169,11 +179,11 @@ gh issue create --repo AltimateAI/altimate-code \
 
 ### 5c: Re-verify after fixes
 
-Run typecheck and marker guard to confirm fixes are clean:
+Run typecheck and marker guard to confirm fixes are clean. Capture the marker guard's FULL output and fix ALL flagged sites in one pass, then re-run once to confirm zero — do not fix one hunk per run (v0.9.2 burned 7 serial guard rounds this way):
 
 ```bash
 bun turbo typecheck
-bun run script/upstream/analyze.ts --markers --base main --strict
+bun run script/upstream/analyze.ts --markers --base origin/main --strict
 ```
 
 **If fixes introduced new issues,** fix those too. Loop until clean.
@@ -207,6 +217,8 @@ cd packages/opencode && bun test --timeout 30000 test/skill/release-v{NEXT_VERSI
 cd packages/opencode && bun test --timeout 30000
 ```
 
+When running the full suite in the background, tee complete output to a file (`bun test ... 2>&1 | tee /tmp/release-tests.log`) — a truncated background tail once forced re-running an 11,551-test suite just to learn which test failed.
+
 ### 6c: Gate
 
 - **All pass** → Continue
@@ -215,11 +227,15 @@ cd packages/opencode && bun test --timeout 30000
 
 ## Step 7: UX Verification
 
-### 7a: Smoke test
+### 7a: Smoke test the ACTUAL release candidate
+
+Never smoke-test the `$PATH`-resolved `altimate` — in v0.9.2 it silently validated a stale globally-installed 0.7.3. Build with the target version injected (otherwise the binary reports a `0.0.0-…` preview version and no assertion is possible), then assert the exact version. Run from the repo root; use a subshell for the `cd` so later paths still resolve:
 
 ```bash
-altimate --version
-altimate --help
+(cd packages/opencode && OPENCODE_VERSION={NEXT_VERSION} bun run pre-release)
+BINARY=$(find packages/opencode/dist -path '*bin/altimate*' -type f | head -1)
+test "$("$BINARY" --version)" = "{NEXT_VERSION}" || { echo "SMOKE VERSION MISMATCH — STOP"; exit 1; }
+"$BINARY" --help
 ```
 
 ### 7b: Run feature-specific tests
@@ -250,7 +266,7 @@ git log v{CURRENT_VERSION}..HEAD --oneline --no-merges
 
 ### 8b: Write the changelog entry
 
-Categorize into **Added**, **Fixed**, **Changed**. Use bold title + em-dash description matching existing style. Incorporate release notes feedback from the Step 4 persona reviews.
+Read `CHANGELOG.md` first, then edit (an Edit without a prior Read fails and wastes a round-trip). Categorize into **Added**, **Fixed**, **Changed**. Use bold title + em-dash description matching existing style. Incorporate release notes feedback from the Step 4 persona reviews.
 
 ### 8c: Review with user
 
@@ -260,15 +276,16 @@ Wait for approval.
 
 ## Step 9: Pre-Release Checks
 
-Run all mandatory checks:
+Run all mandatory checks from the repo root:
 
 ```bash
-# Pre-release sanity (binary builds and starts)
-cd packages/opencode && bun run pre-release
-
-# Marker guard
-bun run script/upstream/analyze.ts --markers --base main --strict
+# Pre-release sanity (binary builds and starts) — if not already run in Step 7a
+(cd packages/opencode && OPENCODE_VERSION={NEXT_VERSION} bun run pre-release)
 ```
+
+(The stage-`tag` preflight runs in Step 10, AFTER the release commit — running it here would fail its clean-worktree check on the just-edited CHANGELOG.)
+
+**Exit-status integrity rule:** never background a gate command with a trailing status echo (`cmd > log; echo "exit: $?"` — the echo always exits 0 and once turned a FAILED pre-release build into a reported pass). Preserve the real exit code: run in foreground, or `cmd 2>&1 | tee log` and check `$pipestatus[1]`/`PIPESTATUS[0]`, and ALWAYS read the tool's own verdict line from the log.
 
 **Gate: ALL CHECKS MUST PASS.** Stop on failure.
 
@@ -282,21 +299,41 @@ docker compose -f test/sanity/docker-compose.verdaccio.yml up \
   --build --abort-on-container-exit --exit-code-from sanity
 ```
 
-If Docker unavailable, skip — CI will catch it.
+If Docker unavailable, skip — but mark it ⏭️ in the Step 12 summary (it was once skipped silently). CI will catch it.
 
-## Step 10: Commit, Tag, Push
+## Step 10: Commit, Preflight, Tag, Push — verified steps, one atomic push
+
+Do NOT chain these with `&&` into one command (a mid-chain tag failure once committed but silently never pushed). Run each from the repo root and verify each stage:
 
 ```bash
-# Stage changelog + any adversarial tests
+# 1. Commit (targeted staging only — never `git add -A`, worktrees carry scratch files)
 git add CHANGELOG.md packages/opencode/test/skill/release-v{NEXT_VERSION}-adversarial.test.ts
-
-# Commit
 echo "release: v{NEXT_VERSION}" > .github/meta/commit.txt
 git commit -F .github/meta/commit.txt
+git log -1 --oneline   # verify the release commit is HEAD
 
-# Tag and push
+# 2. Full preflight — now that the tree is clean again and HEAD carries the
+#    release commit. Stage `tag` allows local commits ahead of origin/main.
+bun script/release-preflight.ts --version {NEXT_VERSION} --stage tag
+# MUST print "Preflight PASSED" and exit 0. On FAIL: stop.
+
+# 3. Tag — then VERIFY before pushing (a silently no-op'd `git tag` once pushed a
+#    stale tag pointing 2641 commits away from main; the push itself triggers publish,
+#    so post-push verification is too late). The `exit 1` is load-bearing —
+#    a bare echo would print the warning and keep going.
 git tag v{NEXT_VERSION}
-git push origin main v{NEXT_VERSION}
+test "$(git rev-parse v{NEXT_VERSION})" = "$(git rev-parse HEAD)" || { echo "TAG MISMATCH — STOP"; exit 1; }
+
+# 4. Push branch + tag atomically — both land or neither does
+git push --atomic origin HEAD:main v{NEXT_VERSION}
+```
+
+If `git tag` reports the tag already exists: **STOP. Never delete-and-recreate.** Report what the existing tag points to (`git log -1 v{NEXT_VERSION}`) and let the user resolve. (Preflight should have caught this; if it didn't, something changed underneath you.)
+
+After the push, confirm the remote agrees:
+
+```bash
+git ls-remote origin refs/tags/v{NEXT_VERSION}   # must equal the release commit SHA
 ```
 
 ## Step 11: Monitor CI
@@ -306,7 +343,11 @@ gh run list --workflow=release.yml --repo AltimateAI/altimate-code --limit 1
 gh run watch --repo AltimateAI/altimate-code
 ```
 
-If fails: `gh run view --repo AltimateAI/altimate-code --log-failed`
+Post a one-line status update to the user on every CI state change (job started/failed/passed) — do not go silent until the user asks "done?" (this happened in two of the last three releases).
+
+If a job fails: `gh run view --repo AltimateAI/altimate-code --log-failed`.
+
+**Flaky re-runs need a paper trail.** If you re-run a failed job without a code change and it passes, link a tracking issue (existing or new) with the run URL before declaring the release done — the v0.9.2 Verdaccio "no internet" flake was waved through with zero tracking and will cost the next release the same diagnosis time.
 
 ## Step 12: Verify and Close Issues
 
@@ -314,6 +355,7 @@ If fails: `gh run view --repo AltimateAI/altimate-code --log-failed`
 
 ```bash
 npm info @altimateai/altimate-code version
+npm view @altimateai/altimate-code dist-tags   # `latest` must be this release; `beta` untouched
 gh release view v{NEXT_VERSION} --repo AltimateAI/altimate-code --json tagName,publishedAt,assets
 ```
 
@@ -332,7 +374,8 @@ For each PR, also check:
 gh pr view {PR_NUMBER} --repo AltimateAI/altimate-code --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
 ```
 
-For each open issue found, comment and close:
+For each open issue found, comment and close. For originating bug reports that were **already closed** by a PR merge, still post a resolution comment naming the release (users watching the issue don't see PR merges):
+
 ```bash
 gh issue comment {N} --repo AltimateAI/altimate-code \
   --body "Resolved in [v{NEXT_VERSION}](https://github.com/AltimateAI/altimate-code/releases/tag/v{NEXT_VERSION})."
@@ -341,24 +384,32 @@ gh issue close {N} --repo AltimateAI/altimate-code
 
 ### 12c: Release summary
 
+Every step gets a row — a skipped step must show as ⏭️ with a reason, never silently disappear:
+
 ```
 ## Release Summary: v{NEXT_VERSION}
 
 | Check | Status | Details |
 |-------|--------|---------|
 | RELEASING.md | ✅ Read | |
+| Preflight (pre) | ✅ | |
 | Code review | ✅ | {N} SHIP, {N} HOLD — {N} P0, {N} P1, {N} P2 |
+| P0-candidates verified | ✅ / n/a | {how verified, or downgrade rationale} |
 | Issues fixed pre-release | {N} | {descriptions} |
-| Issues deferred | {N} | Filed as #{numbers} |
+| Deferred → filed | {N}/{N} | #{numbers} (every deferred item has an issue link or recorded opt-out) |
 | Adversarial tests | ✅ | {N}/{N} passed |
-| UX verification | ✅ | {N} scenarios passed |
+| UX verification (Step 7) | ✅ | smoke-tested dist binary, version {V} |
+| Changelog approved | ✅ | |
 | Pre-release check | ✅ | |
+| Preflight (tag) | ✅ | |
 | Verdaccio | ✅ / ⏭️ | |
 | Marker guard | ✅ | |
-| CI workflow | ✅ | |
-| npm | ✅ | v{NEXT_VERSION} |
+| Tag verified (local+remote SHA) | ✅ | |
+| CI workflow | ✅ | {flaky re-runs: issue links} |
+| npm | ✅ | v{NEXT_VERSION}, dist-tags checked |
 | GitHub Release | ✅ | {link} |
-| Issues closed | ✅ | {N} issues |
+| Issues closed/commented | ✅ | {N} issues |
+| Governance notes | — | {e.g. "prerequisite PR #964 admin-merged, branch protection bypassed"} |
 
 v{NEXT_VERSION} is live! No follow-up PRs needed.
 ```
@@ -369,17 +420,23 @@ v{NEXT_VERSION} is live! No follow-up PRs needed.
 
 1. **Always read RELEASING.md first.** It is the source of truth for the process.
 2. **Always confirm version with user.** Never auto-release without approval.
-3. **Review BEFORE testing.** The multi-persona review finds design issues (stale docs, missing timeouts, naming problems). Adversarial tests find code bugs. Different tools for different problems. Review first, then test the reviewed code.
-4. **Fix actionable issues before tagging.** The whole point of reviewing early is to ship clean. If the review finds a stale doc or missing timeout, fix it on main before the tag. No follow-up PRs for things that could have been fixed in 10 minutes.
-5. **Only defer what truly can't be fixed quickly.** New features, large refactors, and design decisions get deferred. Missing timeouts, stale docs, wording fixes, and small guards get fixed now.
-6. **Adversarial tests cover the FINAL code.** Tests run after Step 5 fixes, so they test the code that actually ships.
-7. **Never skip pre-release check.** Last gate before a broken binary ships.
-8. **Always use `--repo AltimateAI/altimate-code`** with `gh` commands.
-9. **Only release from main.** Feature branches should not be tagged.
-10. **Changelog entries must match existing style.** Bold titles with em-dash descriptions.
-11. **If CI fails after push, do NOT delete the tag.** Investigate first.
-12. **npm is the source of truth for versions.**
-13. **PR template is mandatory.** PRs without exact headings get auto-closed. Create issue first, then PR with `Closes #N`.
-14. **No `mock.module()` in adversarial tests.** Use `Dispatcher.register()`/`reset()` or `spyOn()`.
-15. **Multi-persona evaluation is not optional.** The Chaos Gremlin persona must be different each release.
-16. **The release is done when the summary says "No follow-up PRs needed."** If it can't say that, something was missed.
+3. **The preflight script is the gate.** If `script/release-preflight.ts` fails, stop — structural problems (diverged beta line, tag collisions, unmerged prerequisites) get resolved as their own task, never improvised inside the release.
+4. **Review BEFORE testing.** The multi-persona review finds design issues (stale docs, missing timeouts, naming problems). Adversarial tests find code bugs. Different tools for different problems. Review first, then test the reviewed code.
+5. **Fix actionable issues before tagging.** If the review finds a stale doc or missing timeout, fix it before the tag. No follow-up PRs for things that could have been fixed in 10 minutes.
+6. **Only defer what truly can't be fixed quickly** — and every deferred item gets a durable issue link (or recorded user opt-out) before the ship gate. Chat prose is not tracking.
+7. **A P0-candidate is verified or explicitly downgraded with rationale — never shipped on indirect reasoning.**
+8. **Adversarial tests cover the FINAL code.** Tests run after Step 5 fixes, so they test the code that actually ships.
+9. **Never skip pre-release check.** Last gate before a broken binary ships. Smoke-test the freshly built dist binary by path — never the `$PATH`-resolved command.
+10. **Never trust a wrapper exit code.** No trailing status echoes on gate commands; preserve real exit codes and read the tool's own verdict line.
+11. **Tags fail closed.** Verify the tag doesn't exist (local AND remote) before creating; verify it points at HEAD before pushing; push branch + tag with `--atomic`; never delete-and-recreate a colliding tag.
+12. **Targeted `git add` only.** Never `git add -A` — release worktrees carry scratch files.
+13. **Always use `--repo AltimateAI/altimate-code`** with `gh` commands.
+14. **Release from HEAD == fresh `origin/main`.** Being literally "on main" is not required (worktrees); HEAD equality after `git fetch` is. Push via `HEAD:main`.
+15. **Changelog entries must match existing style.** Bold titles with em-dash descriptions. Read the file before editing it.
+16. **If CI fails after push, do NOT delete the tag.** Investigate first. Flaky re-runs get a tracking-issue link.
+17. **npm is the source of truth for versions.**
+18. **PR template is mandatory.** PRs without exact headings get auto-closed. Create issue first, then PR with `Closes #N`.
+19. **No `mock.module()` in adversarial tests.** Use `Dispatcher.register()`/`reset()` or `spyOn()`.
+20. **Multi-persona evaluation is not optional.** Personas run on `model: "sonnet"`; the Chaos Gremlin persona must be different each release; every persona delivers its review via SendMessage before idling.
+21. **Keep the user informed during waits.** Status update on every CI state change; long background reviews ping every ~20-30 minutes.
+22. **The release is done when the summary says "No follow-up PRs needed."** If it can't say that, something was missed — and every table row above must be filled in, including the skipped ones.

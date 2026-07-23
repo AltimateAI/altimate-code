@@ -181,13 +181,57 @@ jobs:
 
   publish-npm:
     name: Publish to npm
-    needs: [build, sanity-verdaccio]
+    # altimate_change — gate publishing on the test job. Previously publish-npm only
+    # needed [build, sanity-verdaccio], so npm could publish while typecheck/tests
+    # were red (found in the 2026-07-22 release retro).
+    needs: [test, build, sanity-verdaccio]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # altimate_change — validate the tag BEFORE any publish work. Tag-format
+      # validation previously lived in github-release, which runs AFTER publish-npm,
+      # so a malformed tag could publish to npm and only fail afterwards.
+      - name: Validate release tag
+        run: |
+          # Strict SemVer: no leading zeros in numeric identifiers, no empty
+          # prerelease identifiers (rejects v01.2.3, v1.2.3-01, v1.2.3-a..b).
+          SEMVER_ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          if ! echo "$CURRENT_TAG" | grep -qE "^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${SEMVER_ID}(\.${SEMVER_ID})*)?$"; then
+            echo "::error::Invalid tag format: $CURRENT_TAG — refusing to publish"
+            exit 1
+          fi
+          # Ask origin directly what the tag points to — the event payload and
+          # the checkout's local tag ref are both stale if the tag was force-moved
+          # between the push event and this job. An unforced `git fetch` would
+          # refuse to clobber the local tag, so ls-remote is the authority.
+          LS=$(git ls-remote origin "refs/tags/$CURRENT_TAG" "refs/tags/$CURRENT_TAG^{}") || {
+            echo "::error::Could not query origin for tag $CURRENT_TAG"
+            exit 1
+          }
+          # Annotated tags list a peeled ^{} line pointing at the commit; prefer it.
+          TAG_SHA=$(echo "$LS" | grep '\^{}' | cut -f1 | head -1)
+          [ -z "$TAG_SHA" ] && TAG_SHA=$(echo "$LS" | cut -f1 | head -1)
+          if [ -z "$TAG_SHA" ]; then
+            echo "::error::Tag $CURRENT_TAG no longer exists on origin — refusing to publish"
+            exit 1
+          fi
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Tag $CURRENT_TAG points at $TAG_SHA on origin but workflow checked out $HEAD_SHA (tag moved since the push event?)"
+            exit 1
+          fi
+          VERSION="${CURRENT_TAG#v}"
+          if ! grep -q "\[$VERSION\]" CHANGELOG.md && [ "${CURRENT_TAG#*-}" = "$CURRENT_TAG" ]; then
+            echo "::error::CHANGELOG.md has no entry for $VERSION — stable releases require a changelog entry"
+            exit 1
+          fi
+          echo "Tag validation passed: $CURRENT_TAG @ $TAG_SHA"
+        env:
+          CURRENT_TAG: ${{ github.ref_name }}
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
@@ -276,9 +320,19 @@ jobs:
             # comment for why this matters. The binary must start without
             # walking the workspace for node_modules.
             cd "${RUNNER_TEMP:-/tmp}"
-            env -u NODE_PATH "$BINARY" --version
-            echo "Pre-publish smoke test passed"
+            # altimate_change — assert the EXACT version, not just "it starts".
+            # The 2026-07-22 release retro found a smoke test once validated a
+            # stale binary (0.7.3) while releasing 0.9.2.
+            REPORTED=$(env -u NODE_PATH "$BINARY" --version)
+            EXPECTED="${CURRENT_TAG#v}"
+            if [ "$REPORTED" != "$EXPECTED" ]; then
+              echo "::error::Binary reports version '$REPORTED' but tag says '$EXPECTED'"
+              exit 1
+            fi
+            echo "Pre-publish smoke test passed ($REPORTED)"
           fi
+        env:
+          CURRENT_TAG: ${{ github.ref_name }}
 
       - name: Publish to npm
         run: bun run packages/opencode/script/publish.ts
@@ -321,15 +375,18 @@ jobs:
 
           # Get the previous tag.
           # altimate_change — pick the newest STABLE tag that is an ANCESTOR of this
-          # commit, excluding the current tag and any prerelease (-beta etc). Plain
-          # `--sort=-version:refname | head -2 | tail -1` picked the 2nd-highest tag by
-          # name, which for a stable release lands on a prerelease or a stray/divergent
-          # tag (e.g. a dangling v0.9.0), producing a bogus compare range. Restricting to
-          # `--merged HEAD` non-prerelease tags yields the real previous release.
-          PREV_TAG=$(git tag --merged HEAD --sort=-version:refname \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | grep -vx "$CURRENT_TAG" \
-            | head -1)
+          # commit AND strictly LOWER than the current tag. Excluding only equality is
+          # not enough: if upstream history is ever merged, fork-inherited tags (e.g.
+          # v1.18.3) would beat the real previous release for a v0.9.x target and the
+          # compare range would silently omit history.
+          PREV_TAG=""
+          for t in $(git tag --merged HEAD --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'); do
+            if [ "$t" != "$CURRENT_TAG" ] && \
+               [ "$(printf '%s\n%s\n' "$t" "$CURRENT_TAG" | sort -V | head -1)" = "$t" ]; then
+              PREV_TAG="$t"
+              break
+            fi
+          done
 
           # Generate changelog from commits between tags
           echo "## What's Changed" > notes.md
