@@ -68,7 +68,12 @@ export const ReviewConfig = z.object({
    * inside `broadcaster.sql` or `precast_table.sql`. The `preset:<name>`
    * marker expands to the current shipped list at reviewer startup.
    */
-  riskTierPathTokens: z.record(z.string(), z.array(z.string())).default({}),
+  // Tokens must be non-empty. An empty string here compiles into a regex
+  // alternative that matches everywhere between two boundary characters
+  // (`(?:|foo)` matches the empty string), silently over-promoting paths
+  // like `stg__orders.sql` where two boundary chars are adjacent.
+  // Cubic-review P2 on PR #1028.
+  riskTierPathTokens: z.record(z.string(), z.array(z.string().min(1))).default({}),
 })
 export type ReviewConfig = z.infer<typeof ReviewConfig>
 

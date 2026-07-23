@@ -884,6 +884,19 @@ describe("config", () => {
     const rubric = resolveRubric(cfg)
     expect(rubric.exclusions.excludeGlobs).toContain("legacy/old.sql")
   })
+
+  test("riskTierPathTokens rejects empty-string tokens (cubic-review P2)", () => {
+    // An empty token would compile to a `(?:|foo)` alternative that
+    // matches the empty string between two boundary chars — e.g.
+    // `stg__orders.sql` would silently over-promote. Zod schema
+    // requires non-empty tokens.
+    expect(() =>
+      parseReviewConfig("riskTierPathTokens:\n  finops:\n    - ''\n    - cost\n"),
+    ).toThrow()
+    // Legit non-empty tokens still parse.
+    const ok = parseReviewConfig("riskTierPathTokens:\n  finops:\n    - cost\n    - preset:finops\n")
+    expect(ok.riskTierPathTokens.finops).toEqual(["cost", "preset:finops"])
+  })
 })
 
 // ---------------------------------------------------------------------------
