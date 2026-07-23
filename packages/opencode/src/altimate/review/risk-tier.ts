@@ -241,9 +241,16 @@ function changedLinesForScan(diff: string | undefined): string {
       scalarIndent = indent
     }
     // Only added/removed lines are candidates for regex scanning; context
-    // lines only feed scalar-state tracking. When the changed line lives
-    // inside a scalar, emit a blank so the regex has nothing to match.
-    if (marker === " ") continue
+    // lines only feed scalar-state tracking. Anything without a `+`/`-`
+    // marker (context lines, or free-form headers like `diff --git`,
+    // `index abc..def`, `Author:`, `Date:` from a raw `git diff -p`
+    // output) is not a changed line and must not reach the scanner —
+    // the earlier `+++`/`---`/`@@` guard covers unified-diff headers,
+    // but this closes the gap for anything else (altimate-harness-bot
+    // review, PR #1028 risk-tier.ts:251). In-production `file.diff`
+    // comes from the GitHub PR files API and hunks start at `@@`, so
+    // this is defensive parity, not a live bug.
+    if (marker !== "+" && marker !== "-") continue
     out.push(insideScalar ? "" : raw)
   }
   return out.join("\n")

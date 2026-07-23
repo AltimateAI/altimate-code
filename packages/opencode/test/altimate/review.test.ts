@@ -688,6 +688,31 @@ describe("risk-tier", () => {
     expect(r.tier).toBe("full")
   })
 
+  test("R20 S4: raw `git diff -p` free-form headers do NOT reach the scanner (harness-bot review)", () => {
+    // altimate-harness-bot review, PR #1028 risk-tier.ts:251. The earlier
+    // guard skipped only `+++`/`---`/`@@` unified-diff headers and
+    // context (space-prefixed) lines; free-form lines from a raw
+    // `git diff -p` output (`diff --git`, `index abc..def`, `Author:`,
+    // `Date:`) fell through with a `""` marker and reached
+    // `dbtRiskYmlKeyMatches`. In-production `file.diff` never carries
+    // these — the GitHub PR files API strips them — so the risk was
+    // defensive parity only, but exercise it here so a future caller
+    // passing a raw diff can't silently over-promote.
+    const diff =
+      "diff --git a/models/intermediate/int_x.yml b/models/intermediate/int_x.yml\n" +
+      "index abcdef1..1234567 100644\n" +
+      "--- a/models/intermediate/int_x.yml\n" +
+      "+++ b/models/intermediate/int_x.yml\n" +
+      "@@ -1,3 +1,4 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      '+    description: "See tests documentation for the grain policy"\n'
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    // Same content as the bare-`tests`-word test below; must stay trivial
+    // regardless of whether the caller included raw diff headers.
+    expect(r.tier).toBe("trivial")
+  })
+
   test("R20 S4: bare `tests` (no colon) does NOT match the risk-key regex (word-boundary guard)", () => {
     // FP guard — a description line like `# tests explanation`, or a
     // yml value containing the string `tests` without a following colon,
