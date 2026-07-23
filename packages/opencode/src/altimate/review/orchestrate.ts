@@ -9,7 +9,7 @@ import {
   SEVERITY_ORDER,
 } from "./finding"
 import { type ChangedFile, filterChangedFiles } from "./diff-filter"
-import { classifyPR, TIER_LANES } from "./risk-tier"
+import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
@@ -1092,6 +1092,29 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A run is degraded when model files exist but none resolved against a manifest.
   const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
 
+  // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
+  // the reviewer core carries no default list. `undefined` when no
+  // categories are configured, which keeps `highRiskPathTokenCategory`
+  // undefined per file and no promotion fires.
+  //
+  // `compilePathTokenResolver` throws on an unknown `preset:<name>` (typo
+  // guard, cubic + harness-bot P2). Catch that here so a single config
+  // typo in `.altimate/review.yml` doesn't crash every review run in the
+  // project's CI — surface the error to stderr AND propagate a
+  // `configError` reason into the envelope so the reader can see what
+  // broke. The review continues with no path-token promotion (the
+  // conservative safe fallback), so users notice their opt-in is dead
+  // rather than getting silent auto-approve on billing/PCI/etc. paths
+  // (cubic-review P2 on PR #1028 risk-tier.ts:134).
+  let pathTokenCategoryOf: ((p: string) => string | undefined) | undefined
+  let pathTokenConfigError: string | undefined
+  try {
+    pathTokenCategoryOf = compilePathTokenResolver(input.config.riskTierPathTokens)
+  } catch (e: any) {
+    pathTokenConfigError = `riskTierPathTokens config invalid: ${e?.message ?? String(e)}`
+    process.stderr.write(`⚠️  ${pathTokenConfigError}\n   Review continuing without path-token promotion.\n`)
+    pathTokenCategoryOf = undefined
+  }
   const tierResult = classifyPR(reviewable, {
     blastRadiusOf: (p) => {
       const c = ctxByPath.get(p)
@@ -1099,7 +1122,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     },
     touchesPiiOf: (f) => (ctxByPath.get(f.path)?.pii.length ?? 0) > 0,
     isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
+    pathTokenCategoryOf,
   })
+  // Surface config errors in the tier-reasons stream so a reader of the
+  // envelope (or PR comment) sees WHY their opt-in didn't fire.
+  if (pathTokenConfigError) tierResult.reasons.unshift(pathTokenConfigError)
   const classifiedTier = tierResult.tier
   // G2 — --force-tier overrides the classifier. Envelope records both the
   // forced tier and the original classification whenever the flag is passed
@@ -1400,7 +1427,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     manifestHash: input.manifestHash,
     generatedAt: input.generatedAt,
     degraded,
-    tierReasons: input.explainTier || tierForced ? tierReasons : undefined,
+    // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
+    // OR when a riskTierPathTokens config error was caught above — the error
+    // must surface in the envelope (and downstream PR comment) even in a
+    // normal `comment`/`gate` run, otherwise a config typo silently kills
+    // the user's opt-in with only a stderr trace they'll never see
+    // (coderabbit review, PR #1028 orchestrate.ts:1129).
+    tierReasons: input.explainTier || tierForced || pathTokenConfigError ? tierReasons : undefined,
     tierForced: tierForced ? true : undefined,
     tierClassified: tierForced ? classifiedTier : undefined,
   })
