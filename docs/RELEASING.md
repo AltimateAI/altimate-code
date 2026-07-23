@@ -34,7 +34,22 @@ The version is injected into the binary via esbuild defines at compile time.
 
 ## Release Process
 
-### 1. Update CHANGELOG.md
+### 1. Run preflight (before touching anything)
+
+**MANDATORY** — the deterministic gate. Run it while the tree is still clean;
+it fails on a dirty worktree by design:
+
+```bash
+# Checks: clean tree, HEAD == fresh origin/main, no tag collisions (local OR
+# remote), version sanity vs npm, prerelease-line ancestry, release-blocker
+# PRs, PREV_TAG dry-run, marker guard.
+bun script/release-preflight.ts --version 0.5.0 --stage pre
+```
+
+Do NOT proceed if any check fails. If it reports a tag collision, resolve it
+explicitly — never delete-and-recreate a tag blind.
+
+### 2. Update CHANGELOG.md
 
 Add a new section at the top of `CHANGELOG.md`:
 
@@ -48,18 +63,12 @@ Add a new section at the top of `CHANGELOG.md`:
 - ...
 ```
 
-### 2. Run pre-release sanity checks
+### 3. Run pre-release sanity check
 
-**MANDATORY** — these catch broken releases before they reach users:
+**MANDATORY** — this catches broken binaries before they reach users:
 
 ```bash
-# Deterministic preflight: clean tree, HEAD == fresh origin/main, no tag
-# collisions (local OR remote), version sanity vs npm, prerelease-line
-# ancestry, release-blocker PRs, PREV_TAG dry-run, marker guard.
-bun script/release-preflight.ts --version 0.5.0 --stage pre
-
-cd packages/opencode
-bun run pre-release
+(cd packages/opencode && OPENCODE_VERSION=0.5.0 bun run pre-release)
 ```
 
 `pre-release` verifies:
@@ -67,10 +76,9 @@ bun run pre-release
 - They're installed in `node_modules`
 - A local build produces a binary that actually starts
 
-Do NOT proceed if any check fails. If the preflight reports a tag collision,
-resolve it explicitly — never delete-and-recreate a tag blind.
+Do NOT proceed if any check fails.
 
-### 3. Commit and tag
+### 4. Commit, re-preflight, tag, push
 
 Stage files **individually** — never `git add -A` (release worktrees carry
 scratch files that must not ship in the release commit). Releasing does not
@@ -80,15 +88,20 @@ HEAD equals freshly fetched `origin/main` (worktrees push via `HEAD:main`).
 ```bash
 git add CHANGELOG.md <other release files>
 git commit -m "release: v0.5.0"
+
+# Re-run preflight now that the release commit exists. Stage `tag` allows
+# local commits ahead of origin/main (the tree must be clean again).
+bun script/release-preflight.ts --version 0.5.0 --stage tag || exit 1
+
 git tag v0.5.0
 # Verify the tag points at HEAD BEFORE pushing — a pre-existing tag makes
-# `git tag` fail, and pushing a stale tag triggers a publish of old code.
-test "$(git rev-parse v0.5.0)" = "$(git rev-parse HEAD)"
+# `git tag` silently fail, and pushing a stale tag publishes old code.
+test "$(git rev-parse v0.5.0)" = "$(git rev-parse HEAD)" || exit 1
 # Atomic: branch and tag land together or not at all.
 git push --atomic origin HEAD:main v0.5.0
 ```
 
-### 4. What happens automatically
+### 5. What happens automatically
 
 The `v*` tag triggers `.github/workflows/release.yml` which:
 
@@ -100,7 +113,7 @@ The `v*` tag triggers `.github/workflows/release.yml` which:
 6. **Publishes Docker image (best-effort)** — to `ghcr.io/altimateai/altimate-code`; failures are logged but do NOT fail the release, so verify manually if you need the image
 7. ~~Updates AUR~~ — currently **disabled** (the workflow step is commented out; see `publish.ts` for setup steps to re-enable)
 
-### 5. Verify
+### 6. Verify
 
 After the workflow completes:
 

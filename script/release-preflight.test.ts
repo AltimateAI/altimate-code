@@ -86,8 +86,17 @@ describe("compareSemver", () => {
     expect(compareSemver(v("0.9.2-beta.1"), v("0.9.2-beta.1"))).toBe(0)
   })
 
-  test("prerelease strings compare lexically", () => {
-    expect(compareSemver(v("0.9.2-beta.2"), v("0.9.2-beta.10"))).toBeGreaterThan(0) // "beta.2" > "beta.10" lexically
+  test("prerelease identifiers compare numerically per SemVer (beta.10 > beta.2)", () => {
+    expect(compareSemver(v("0.9.2-beta.10"), v("0.9.2-beta.2"))).toBeGreaterThan(0)
+    expect(compareSemver(v("0.9.2-beta.2"), v("0.9.2-beta.10"))).toBeLessThan(0)
+  })
+
+  test("numeric prerelease identifiers rank below alphanumeric ones", () => {
+    expect(compareSemver(v("0.9.2-1"), v("0.9.2-alpha"))).toBeLessThan(0)
+  })
+
+  test("a prerelease identifier prefix ranks below its longer form", () => {
+    expect(compareSemver(v("0.9.2-beta"), v("0.9.2-beta.1"))).toBeLessThan(0)
   })
 
   test("major/minor/patch precedence beats prerelease presence", () => {
@@ -150,6 +159,18 @@ describe("selectPrevTag", () => {
     // wrong direction people expect — this asserts we sort numerically.
     const tags = ["v0.9.0", "v0.10.0", "v0.2.0"]
     expect(selectPrevTag(tags, "v0.11.0")).toBe("v0.10.0")
+  })
+
+  test("ignores merged tags HIGHER than the target (fork-inherited upstream tags)", () => {
+    // If upstream history is ever merged, tags like v1.18.3 become ancestors
+    // of HEAD. They must not become PREV_TAG for a v0.9.x release — the
+    // compare range would silently omit history.
+    const tags = ["v1.18.3", "v1.17.13", "v0.9.2", "v0.9.1"]
+    expect(selectPrevTag(tags, "v0.9.3")).toBe("v0.9.2")
+  })
+
+  test("returns null when only higher tags are merged", () => {
+    expect(selectPrevTag(["v1.18.3"], "v0.9.3")).toBeNull()
   })
 })
 

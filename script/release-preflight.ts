@@ -60,11 +60,34 @@ export function parseSemver(version: string): Semver | null {
 }
 
 /**
+ * Compare two dot-separated prerelease strings per SemVer precedence:
+ * numeric identifiers compare numerically (so beta.10 > beta.2), numeric <
+ * alphanumeric, and a shorter identifier list is lower when it's a prefix.
+ */
+function comparePrerelease(a: string, b: string): number {
+  const as = a.split(".")
+  const bs = b.split(".")
+  const len = Math.min(as.length, bs.length)
+  for (let i = 0; i < len; i++) {
+    const an = /^\d+$/.test(as[i])
+    const bn = /^\d+$/.test(bs[i])
+    if (an && bn) {
+      const diff = Number(as[i]) - Number(bs[i])
+      if (diff !== 0) return diff
+    } else if (an !== bn) {
+      return an ? -1 : 1 // numeric < alphanumeric
+    } else if (as[i] !== bs[i]) {
+      return as[i] < bs[i] ? -1 : 1
+    }
+  }
+  return as.length - bs.length
+}
+
+/**
  * Compare two parsed SemVer values. Returns <0 if a<b, 0 if equal, >0 if a>b.
  * A stable version is always greater than any prerelease of the same
- * major.minor.patch (per SemVer precedence rules), and prerelease strings
- * compare lexically (good enough for our `-beta.N` convention; we don't need
- * full dot-identifier numeric-vs-alphanumeric precedence for this repo).
+ * major.minor.patch, and prerelease identifiers follow SemVer precedence
+ * (numeric-aware, so `beta.10` > `beta.2`).
  */
 export function compareSemver(a: Semver, b: Semver): number {
   if (a.major !== b.major) return a.major - b.major
@@ -73,7 +96,7 @@ export function compareSemver(a: Semver, b: Semver): number {
   if (a.prerelease === b.prerelease) return 0
   if (a.prerelease === null) return 1 // stable > prerelease
   if (b.prerelease === null) return -1
-  return a.prerelease < b.prerelease ? -1 : a.prerelease > b.prerelease ? 1 : 0
+  return comparePrerelease(a.prerelease, b.prerelease)
 }
 
 /** True if the tag name matches a stable release tag: v<major>.<minor>.<patch>. */
@@ -90,14 +113,18 @@ export function isStableTagName(tag: string): boolean {
  *
  * Takes the raw (unsorted, unfiltered) list of tags already known to be
  * merged into HEAD — the git call that produces that list belongs in main(),
- * not here — and does the stable-filter + version-sort + exclude-current +
- * take-first purely, so it's testable without git.
+ * not here — and picks the greatest stable tag STRICTLY LOWER than the
+ * target. Excluding only equality is not enough: if upstream history is ever
+ * merged, fork-inherited tags like v1.18.3 would otherwise beat the real
+ * previous release for a v0.9.x target.
  */
 export function selectPrevTag(mergedTags: string[], currentTag: string): string | null {
-  const stable = mergedTags.filter((t) => isStableTagName(t) && t !== currentTag)
-  const parsed = stable
+  const target = parseSemver(normalizeVersion(currentTag))
+  const parsed = mergedTags
+    .filter((t) => isStableTagName(t) && t !== currentTag)
     .map((tag) => ({ tag, v: parseSemver(normalizeVersion(tag)) }))
     .filter((x): x is { tag: string; v: Semver } => x.v !== null)
+    .filter((x) => target === null || compareSemver(x.v, target) < 0)
   parsed.sort((a, b) => compareSemver(b.v, a.v)) // descending
   return parsed.length > 0 ? parsed[0].tag : null
 }
@@ -129,15 +156,20 @@ function repoRoot(): string {
 
 /** Run a command, never throwing — callers inspect `.code`. */
 function run(cmd: string[]): RunResult {
-  const proc = Bun.spawnSync(cmd, {
-    cwd: repoRoot(),
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  return {
-    code: proc.exitCode ?? 1,
-    stdout: proc.stdout ? proc.stdout.toString("utf-8").trim() : "",
-    stderr: proc.stderr ? proc.stderr.toString("utf-8").trim() : "",
+  try {
+    const proc = Bun.spawnSync(cmd, {
+      cwd: repoRoot(),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    return {
+      code: proc.exitCode ?? 1,
+      stdout: proc.stdout ? proc.stdout.toString("utf-8").trim() : "",
+      stderr: proc.stderr ? proc.stderr.toString("utf-8").trim() : "",
+    }
+  } catch (e) {
+    // Missing binary (ENOENT) and similar spawn failures land here.
+    return { code: 127, stdout: "", stderr: `${cmd[0]}: not found (${e instanceof Error ? e.message : String(e)})` }
   }
 }
 
@@ -358,8 +390,19 @@ async function main(): Promise<void> {
         const currentParsed = parseSemver(normalizeVersion(currentLatest))
         const alreadyPublished = run(["npm", "view", `@altimateai/altimate-code@${version}`, "version"])
         const isPublished = alreadyPublished.code === 0 && alreadyPublished.stdout.trim().length > 0
+        // Fail closed: a non-zero exit only means "not published" when npm
+        // says so (E404). The first `npm view` succeeded, so the registry is
+        // reachable — any other error here is unknown state, not a green light.
+        const publishCheckInconclusive =
+          alreadyPublished.code !== 0 && !/E404|404 Not Found/i.test(alreadyPublished.stderr + alreadyPublished.stdout)
 
-        if (isPublished) {
+        if (publishCheckInconclusive) {
+          add({
+            name: "version sanity",
+            status: "FAIL",
+            detail: `could not determine whether @altimateai/altimate-code@${version} is already published (npm error was not E404):\n${alreadyPublished.stderr || alreadyPublished.stdout}`,
+          })
+        } else if (isPublished) {
           add({
             name: "version sanity",
             status: "FAIL",
@@ -442,17 +485,23 @@ async function main(): Promise<void> {
       "--json",
       "number,title",
     ])
-    if (gh.code !== 0) {
-      add({ name: "release-blocker PRs", status: "WARN", detail: `gh unavailable or errored:\n${gh.stderr || gh.stdout}` })
+    const ghMissing = gh.code !== 0 && /not found|ENOENT|no such file/i.test(gh.stderr)
+    if (ghMissing) {
+      add({ name: "release-blocker PRs", status: "WARN", detail: `gh CLI not installed — cannot check release-blocker PRs:\n${gh.stderr}` })
+    } else if (gh.code !== 0) {
+      // gh exists but errored (auth, network, bad label…) — fail closed, we
+      // cannot claim there are no blockers.
+      add({ name: "release-blocker PRs", status: "FAIL", detail: `gh errored — blocker state unknown:\n${gh.stderr || gh.stdout}` })
     } else {
-      let prs: { number: number; title: string }[] = []
+      let prs: { number: number; title: string }[] | null = null
       try {
         prs = JSON.parse(gh.stdout || "[]")
       } catch {
-        add({ name: "release-blocker PRs", status: "WARN", detail: `could not parse gh output:\n${gh.stdout}` })
-        prs = []
+        prs = null
       }
-      if (prs.length > 0) {
+      if (prs === null) {
+        add({ name: "release-blocker PRs", status: "FAIL", detail: `could not parse gh output — blocker state unknown:\n${gh.stdout}` })
+      } else if (prs.length > 0) {
         add({
           name: "release-blocker PRs",
           status: "FAIL",

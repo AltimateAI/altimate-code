@@ -229,12 +229,12 @@ When running the full suite in the background, tee complete output to a file (`b
 
 ### 7a: Smoke test the ACTUAL release candidate
 
-Never smoke-test the `$PATH`-resolved `altimate` — in v0.9.2 it silently validated a stale globally-installed 0.7.3. Build and run the real artifact:
+Never smoke-test the `$PATH`-resolved `altimate` — in v0.9.2 it silently validated a stale globally-installed 0.7.3. Build with the target version injected (otherwise the binary reports a `0.0.0-…` preview version and no assertion is possible), then assert the exact version. Run from the repo root; use a subshell for the `cd` so later paths still resolve:
 
 ```bash
-cd packages/opencode && bun run pre-release   # builds dist + checks NAPI externals + binary starts
+(cd packages/opencode && OPENCODE_VERSION={NEXT_VERSION} bun run pre-release)
 BINARY=$(find packages/opencode/dist -path '*bin/altimate*' -type f | head -1)
-"$BINARY" --version   # MUST print a version consistent with this release, not a stale install
+test "$("$BINARY" --version)" = "{NEXT_VERSION}" || { echo "SMOKE VERSION MISMATCH — STOP"; exit 1; }
 "$BINARY" --help
 ```
 
@@ -276,15 +276,14 @@ Wait for approval.
 
 ## Step 9: Pre-Release Checks
 
-Run all mandatory checks:
+Run all mandatory checks from the repo root:
 
 ```bash
 # Pre-release sanity (binary builds and starts) — if not already run in Step 7a
-cd packages/opencode && bun run pre-release
-
-# Full preflight again, now tolerating local release commits ahead of origin/main
-bun script/release-preflight.ts --version {NEXT_VERSION} --stage tag
+(cd packages/opencode && OPENCODE_VERSION={NEXT_VERSION} bun run pre-release)
 ```
+
+(The stage-`tag` preflight runs in Step 10, AFTER the release commit — running it here would fail its clean-worktree check on the just-edited CHANGELOG.)
 
 **Exit-status integrity rule:** never background a gate command with a trailing status echo (`cmd > log; echo "exit: $?"` — the echo always exits 0 and once turned a FAILED pre-release build into a reported pass). Preserve the real exit code: run in foreground, or `cmd 2>&1 | tee log` and check `$pipestatus[1]`/`PIPESTATUS[0]`, and ALWAYS read the tool's own verdict line from the log.
 
@@ -302,9 +301,9 @@ docker compose -f test/sanity/docker-compose.verdaccio.yml up \
 
 If Docker unavailable, skip — but mark it ⏭️ in the Step 12 summary (it was once skipped silently). CI will catch it.
 
-## Step 10: Commit, Tag, Push — three verified steps, one atomic push
+## Step 10: Commit, Preflight, Tag, Push — verified steps, one atomic push
 
-Do NOT chain these with `&&` into one command (a mid-chain tag failure once committed but silently never pushed). Verify each stage:
+Do NOT chain these with `&&` into one command (a mid-chain tag failure once committed but silently never pushed). Run each from the repo root and verify each stage:
 
 ```bash
 # 1. Commit (targeted staging only — never `git add -A`, worktrees carry scratch files)
@@ -313,13 +312,19 @@ echo "release: v{NEXT_VERSION}" > .github/meta/commit.txt
 git commit -F .github/meta/commit.txt
 git log -1 --oneline   # verify the release commit is HEAD
 
-# 2. Tag — then VERIFY before pushing (a silently no-op'd `git tag` once pushed a
-#    stale tag pointing 2641 commits away from main; the push itself triggers publish,
-#    so post-push verification is too late)
-git tag v{NEXT_VERSION}
-test "$(git rev-parse v{NEXT_VERSION})" = "$(git rev-parse HEAD)" || { echo "TAG MISMATCH — STOP"; }
+# 2. Full preflight — now that the tree is clean again and HEAD carries the
+#    release commit. Stage `tag` allows local commits ahead of origin/main.
+bun script/release-preflight.ts --version {NEXT_VERSION} --stage tag
+# MUST print "Preflight PASSED" and exit 0. On FAIL: stop.
 
-# 3. Push branch + tag atomically — both land or neither does
+# 3. Tag — then VERIFY before pushing (a silently no-op'd `git tag` once pushed a
+#    stale tag pointing 2641 commits away from main; the push itself triggers publish,
+#    so post-push verification is too late). The `exit 1` is load-bearing —
+#    a bare echo would print the warning and keep going.
+git tag v{NEXT_VERSION}
+test "$(git rev-parse v{NEXT_VERSION})" = "$(git rev-parse HEAD)" || { echo "TAG MISMATCH — STOP"; exit 1; }
+
+# 4. Push branch + tag atomically — both land or neither does
 git push --atomic origin HEAD:main v{NEXT_VERSION}
 ```
 
