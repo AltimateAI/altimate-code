@@ -123,7 +123,23 @@ export function compilePathTokenResolver(
       if (entry.startsWith("preset:")) {
         const name = entry.slice("preset:".length)
         const preset = RISK_TOKEN_PRESETS[name]
-        if (preset) tokens.push(...preset)
+        // Unknown preset name is almost certainly a typo (e.g.
+        // `preset:finop` instead of `preset:finops`); the shipped list is
+        // small and stable. Silently dropping the entry means the user's
+        // opt-in for a risk-promotion category quietly does nothing —
+        // the exact safety invariant this PR exists to guarantee. Fail
+        // loud instead so the misconfiguration is caught at review
+        // start, not discovered when a real high-risk PR slips through
+        // (cubic-review P2 + altimate-harness-bot on PR #1028).
+        if (!preset) {
+          const known = Object.keys(RISK_TOKEN_PRESETS).sort().join(", ") || "(none shipped)"
+          throw new Error(
+            `riskTierPathTokens.${category}: unknown preset '${name}'. ` +
+              `Known presets: ${known}. Configure a bare token list (e.g. ` +
+              `['card', 'pan']) instead if you want a custom category.`,
+          )
+        }
+        tokens.push(...preset)
       } else {
         tokens.push(entry)
       }

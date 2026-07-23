@@ -812,6 +812,29 @@ describe("risk-tier", () => {
     expect(r.reasons.join(" ")).toContain("high-risk token category 'finops'")
   })
 
+  test("R20 S4: high-risk token — unknown preset name throws with the known-list in the message", () => {
+    // cubic-review P2 + altimate-harness-bot on PR #1028 — a typo in a
+    // `preset:<name>` entry (e.g. `preset:finop` instead of `preset:finops`)
+    // must not silently no-op the category. Fail loud at resolver-build so
+    // the misconfiguration is caught before any diff is scanned.
+    expect(() => compilePathTokenResolver({ finops: ["preset:finop"] })).toThrow(/unknown preset 'finop'/)
+    // The error message lists the known presets so the reader gets a
+    // fix pointer rather than "unknown, good luck".
+    try {
+      compilePathTokenResolver({ finops: ["preset:finop"] })
+      throw new Error("expected throw")
+    } catch (e: any) {
+      expect(String(e.message)).toContain("finops")
+    }
+    // A category can mix a typo with valid tokens — the typo still fails,
+    // and the resolver-build never returns a partially-broken resolver.
+    expect(() => compilePathTokenResolver({ finops: ["cost", "preset:finop", "billing"] })).toThrow(/preset 'finop'/)
+    // A known preset still works.
+    const ok = compilePathTokenResolver({ finops: ["preset:finops"] })
+    expect(ok).toBeDefined()
+    expect(ok!("models/marts/mrt_cost_daily.sql")).toBe("finops")
+  })
+
   test("R20 S4: high-risk token — no promotion when no resolver is configured (core is neutral)", () => {
     // Same paths that fire above must stay lite when the caller doesn't
     // supply a resolver — the reviewer core has zero opinion about which
