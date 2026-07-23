@@ -190,6 +190,10 @@ export interface OrchestrateInput {
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
+  /** G1 — attach the classifier's reason list to the envelope. */
+  explainTier?: boolean
+  /** G2 — override the classifier's tier decision. Envelope carries tierForced:true. */
+  forceTier?: "trivial" | "lite" | "full"
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -1088,14 +1092,31 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A run is degraded when model files exist but none resolved against a manifest.
   const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
 
-  const tier = classifyPR(reviewable, {
+  const tierResult = classifyPR(reviewable, {
     blastRadiusOf: (p) => {
       const c = ctxByPath.get(p)
       return c ? c.impact.directCount + c.impact.transitiveCount : 0
     },
     touchesPiiOf: (f) => (ctxByPath.get(f.path)?.pii.length ?? 0) > 0,
     isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
-  }).tier
+  })
+  const classifiedTier = tierResult.tier
+  // G2 — --force-tier overrides the classifier. Envelope records both the
+  // forced tier and the original classification whenever the flag is passed
+  // (regardless of whether the forced value happens to match the classifier),
+  // so audits can see the bypass every time the flag was used. The reasons
+  // list gets a leading "forced" marker so downstream doesn't confuse the
+  // forced tier for a natural one. Codex-R18-review fix — the earlier
+  // `!== classifiedTier` gate silently hid the bypass when the forced tier
+  // matched the classifier's result.
+  const tier = input.forceTier ?? classifiedTier
+  const tierForced = input.forceTier !== undefined
+  const tierReasons = tierForced
+    ? [
+        `forced via --force-tier=${input.forceTier} (classifier said ${classifiedTier})`,
+        ...tierResult.reasons,
+      ]
+    : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
 
@@ -1196,8 +1217,38 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
 
   // schema.yml-level detectors (test removal) — run on changed YAML files
   // regardless of tier, since deleting a guardrail test is always worth flagging.
-  for (const file of reviewable) {
-    if (file.kind === "schema_yml") all.push(detectSchemaYmlPatterns(file, input.rubric))
+  // Pass old + new content when available so the detector diffs structural YAML
+  // (per-(entity, column, test) tuples) instead of walking the unified diff
+  // (which loses context when the model header is outside the -U3 window and
+  // silently drops sibling-column edge cases). Falls back to diff-only line
+  // detection when a content resolver isn't wired (e.g. unit-test callers).
+  //
+  // `oldContent` is fetched for anything that has an old side — MODIFIED,
+  // RENAMED, and DELETED. A schema.yml being renamed (e.g. moved to a new
+  // subdir) that also drops a `unique`/`not_null` guardrail must still surface
+  // as a finding; the earlier `status === "modified"` gate silently skipped
+  // renames. A whole schema.yml being DELETED removes every test declared in
+  // it — an even bigger removal — so the detector runs against `oldContent`
+  // vs an empty new document (cubic-review P2).
+  //
+  // `newContent` fetch is skipped for deleted files (nothing at HEAD to read;
+  // git-show would fail).
+  //
+  // Fetches run in parallel across schema files (a schema-heavy PR could touch
+  // dozens of yml files; serial `git show` per file adds up).
+  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  if (schemaFiles.length) {
+    const schemaFindingSets = await Promise.all(
+      schemaFiles.map(async (file) => {
+        const oldRef = file.oldPath ?? file.path
+        const [oldContent, newContent] = await Promise.all([
+          file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
+          file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
+        ])
+        return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
+      }),
+    )
+    for (const findings of schemaFindingSets) all.push(findings)
   }
 
   // Architectural dedup: the regex `dbt-patterns`/`rule-catalog` layer is a
@@ -1349,6 +1400,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     manifestHash: input.manifestHash,
     generatedAt: input.generatedAt,
     degraded,
+    tierReasons: input.explainTier || tierForced ? tierReasons : undefined,
+    tierForced: tierForced ? true : undefined,
+    tierClassified: tierForced ? classifiedTier : undefined,
   })
   return signEnvelope(envelope)
 }

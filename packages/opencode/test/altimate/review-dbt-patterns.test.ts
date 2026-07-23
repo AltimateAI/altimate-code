@@ -5,6 +5,7 @@ import {
   DEFAULT_RUBRIC,
   type ChangedFile,
 } from "../../src/altimate/review"
+import { dedupe } from "../../src/altimate/review/finding"
 
 // Build a modified-model ChangedFile from a new-SQL body + a synthetic diff
 // where the given lines are "added" (prefixed with +).
@@ -154,6 +155,630 @@ describe("dbt-patterns detectors", () => {
         diff: "-          - name: order_id\n-            description: One row per order",
       },
       DEFAULT_RUBRIC,
+    )
+    expect(f.length).toBe(0)
+  })
+
+  // ------------------------------------------------------------------------
+  // Post-R18 review follow-ups: structural YAML path + sibling-column edge case
+  // + model-level tests + fallback shape. The rewritten detector prefers full
+  // old/new file content; these tests validate both paths.
+  // ------------------------------------------------------------------------
+
+  test("schema.yml (structural): unique removed from one column while sibling keeps it → 1 finding on the affected column", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // 2 removals on customers.customer_id (unique + not_null), 0 on orders/email
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+    // At least one finding names customers.customer_id specifically
+    expect(f.some((x) => (x.title || "").includes("customers.customer_id"))).toBe(true)
+    // No finding attributed to orders.order_id (sibling still has `unique`)
+    expect(f.some((x) => (x.title || "").includes("orders.order_id"))).toBe(false)
+  })
+
+  test("schema.yml (structural): model-level unique test removed → 1 finding with model-level attribution", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    tests:
+      - unique
+    columns:
+      - name: customer_id
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect(f[0].category).toBe("test_coverage")
+    expect(f[0].severity).toBe("warning")
+    expect((f[0].title || "").includes("model-level")).toBe(true)
+    // Attribution flag in evidence lets downstream see it wasn't column-scoped
+    const evResult = (f[0].evidence?.result || {}) as Record<string, unknown>
+    expect(evResult.attribution).toBe("model-level")
+  })
+
+  test("schema.yml (structural): dropping BOTH of two relationships on one column emits TWO findings (PR #1027 consensus MINOR #4)", () => {
+    // Regression: with `(entity, column, test)` keying alone, two
+    // `relationships` tests on the same column collapsed to a single set
+    // entry — dropping both produced ONE finding, and dropping either one
+    // in isolation produced ZERO (because the surviving one still matched
+    // the collapsed key). The extractor now discriminates by (to, field)
+    // so distinct relationships on one column stay distinct.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+          - relationships:
+              to: ref('legacy_customers')
+              field: id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // Both relationships removals surface separately.
+    expect(f.length).toBe(2)
+    // Distinct fingerprint ids so the global dedupe keeps them.
+    expect(new Set(f.map((x) => x.id)).size).toBe(2)
+    // Display copy stays clean — no raw discriminator control chars leak.
+    for (const finding of f) {
+      expect(finding.title).toContain("relationships")
+      expect(finding.title).not.toContain("\x01")
+      expect(finding.title).not.toContain("\x02")
+      expect(finding.body).not.toContain("\x01")
+      expect(finding.body).not.toContain("\x02")
+    }
+  })
+
+  test("schema.yml (structural): relationships discriminator survives colons in `to`/`field` args (codex round-5 minor)", () => {
+    // Codex flagged that a `:`-joined discriminator would collide when
+    // either arg contains `:` (e.g. `to='a:b', field='c'` vs `to='a',
+    // field='b:c'`). Discriminator now retains the internal `\x02`
+    // separator inside ruleKey (hashed, not displayed) so distinct
+    // (to, field) tuples never share a fingerprint.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: "ref('a:b')"
+              field: c
+          - relationships:
+              to: ref('a')
+              field: "b:c"
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // Two distinct removals, distinct fingerprints (would collide on a
+    // colon-joined tag).
+    expect(f.length).toBe(2)
+    expect(new Set(f.map((x) => x.id)).size).toBe(2)
+    // Display copy still stripped of raw control chars.
+    for (const finding of f) {
+      expect(finding.title).not.toContain("\x01")
+      expect(finding.body).not.toContain("\x02")
+    }
+  })
+
+  test("schema.yml (structural): dropping ONE of TWO relationships on one column surfaces (PR #1027 consensus MINOR #4 companion)", () => {
+    // Companion regression: with pre-fix keying, dropping one relationship
+    // while keeping the other left the collapsed key still in newSet, so
+    // no removal was reported. Now the (to, field) discriminator makes the
+    // dropped one distinct — a finding surfaces.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+          - relationships:
+              to: ref('legacy_customers')
+              field: id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect(f[0].title).toContain("relationships")
+    expect(f[0].title).not.toContain("\x01")
+    expect(f[0].body).not.toContain("\x01")
+  })
+
+  test("schema.yml (structural): block-form relationships removal is detected", () => {
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect((f[0].title || "").includes("relationships")).toBe(true)
+  })
+
+  test("schema.yml (structural): data_tests (dbt 1.8+ alias) is recognized", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        data_tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+  })
+
+  test("schema.yml (structural): source column test removal is detected", () => {
+    const oldContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: users
+        columns:
+          - name: id
+            tests: [unique, not_null]
+`
+    const newContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: users
+        columns:
+          - name: id
+            tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/sources.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    // Source table gets qualified as `source.table` in the model field
+    expect(f.some((x) => (x.title || "").includes("raw.users.id"))).toBe(true)
+  })
+
+  test("schema.yml (structural): added file (status=added, no oldContent) surfaces no removal findings", () => {
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.length).toBe(0)
+  })
+
+  test("schema.yml (structural): renamed file with removed test still surfaces finding", () => {
+    // Regression guard: earlier code only fetched oldContent when
+    // status === "modified", so a rename that also dropped a guardrail test
+    // silently bypassed the detector.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "renamed",
+        oldPath: "models/_models.yml",
+        diff: undefined,
+      },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml (structural): modified file with oldContent=undefined falls back to diff detection", () => {
+    // When the content resolver couldn't read the old side (e.g. transient
+    // git failure) on a MODIFIED file, we must NOT treat the situation as
+    // "added file, nothing removed" — the diff still contains real removed
+    // lines. Fall back to line-based detection instead of silently dropping.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent: "version: 2\nmodels: []\n" },
+    )
+    expect(has(f, "test_coverage")).toBe(true)
+  })
+
+  test("schema.yml (fallback): diff-only path still surfaces removal (existing test's shape)", () => {
+    // Exercises the fallback line-based detection when the orchestrator can't
+    // supply file content (e.g. offline CI diffs).
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    // At least one test_coverage finding surfaces so a customer isn't blind to
+    // removed guardrails just because the content resolver wasn't wired.
+    expect(has(f, "test_coverage")).toBe(true)
+  })
+
+  test("schema.yml (fallback): distinct removals of same test type on different columns each surface", () => {
+    // Regression guard for the earlier dedup bug: (model="", column="", test)
+    // key reduced to just `test` and silently collapsed distinct removals of
+    // the same test type on different columns. The fallback path now emits
+    // one finding per removed test-line.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        // Two `- unique` removed lines representing two different columns
+        // losing the `unique` test in the same PR.
+        diff: "-          - unique\n-          - not_null\n-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    // 4 removed test-lines → 4 findings (fallback preserves per-line detail).
+    expect(f.length).toBe(4)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml (fallback): distinct removals survive the global fingerprint dedupe", () => {
+    // Integration-shape guard: the detector-level test above returns 4
+    // findings, but `runReview` runs a global `dedupe(findings)` step that
+    // fingerprints by (category, file, model, column, ruleKey). If ruleKey
+    // only varies by test-name for the fallback path, two `- unique`
+    // removals share a fingerprint and get merged post-detector. This test
+    // pipes the detector's output through `dedupe` to prove distinct
+    // removals actually reach the user.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null\n-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    const deduped = dedupe(f)
+    expect(deduped.length).toBe(4)
+    // All 4 must be test_coverage findings; `unique` removals are `warning`,
+    // and fallback `not_null` (no column attribution) is `suggestion` because
+    // we can't tell if it was on an id/key column.
+    expect(deduped.every((x) => x.category === "test_coverage")).toBe(true)
+    // The 4 fingerprints must be distinct (was the exact regression: without
+    // an occurrence-index discriminator in ruleKey, the two `- unique` and
+    // two `- not_null` removals collapse to 2 findings after dedupe).
+    expect(new Set(deduped.map((x) => x.id)).size).toBe(4)
+    // 2 `- unique` (warning) + 2 `- not_null` (suggestion) — the exact split.
+    expect(deduped.filter((x) => x.severity === "warning").length).toBe(2)
+    expect(deduped.filter((x) => x.severity === "suggestion").length).toBe(2)
+  })
+
+  test("schema.yml (structural): distinct column removals also survive global dedupe", () => {
+    // Structural attribution provides (model.column.test) uniqueness natively,
+    // but the guard is worth codifying so future rule-key changes don't
+    // silently regress into the fingerprint-collision failure mode.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique]
+      - name: email
+        tests: [unique]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+      - name: email
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    const deduped = dedupe(f)
+    expect(deduped.length).toBe(2)
+    expect(new Set(deduped.map((x) => x.id)).size).toBe(2)
+  })
+
+  test("snapshot yml property file (structural): removed test surfaces finding", () => {
+    // Regression: snapshot YAML property files were previously classified as
+    // `snapshot` kind (blocking the `schema_yml` gate in the orchestrator).
+    // Now `.yml` files under snapshots/ classify as `schema_yml` while `.sql`
+    // snapshots stay `snapshot` (tier-forcing catalog rules unchanged).
+    const oldContent = `version: 2
+snapshots:
+  - name: orders_snapshot
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+snapshots:
+  - name: orders_snapshot
+    columns:
+      - name: order_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "snapshots/orders_snapshot.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml summary: multi-model removals emit ONE aggregate summary line", () => {
+    // Regression guard: the aggregate "This PR removes N tests total on
+    // model(s) X, Y" summary was previously appended once per model, so a
+    // diff touching two models produced two copies of the same summary in
+    // separate findings. Now emitted once per FILE on the first finding.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+  - name: orders
+    columns:
+      - name: order_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    // Only ONE finding body should contain the aggregate "N data tests"
+    // summary line; the other should be plain. Wording is per-schema-file
+    // scoped (PR #1027 consensus MINOR #3): "This schema file drops N data
+    // tests" so reviewers don't misread it as a PR-wide total on multi-file
+    // diffs.
+    const summaryCount = f.filter((x) => (x.body || "").includes("This schema file drops")).length
+    expect(summaryCount).toBe(1)
+    const withSummary = f.find((x) => (x.body || "").includes("This schema file drops"))!
+    // Explicitly reject the old ambiguous PR-wide wording.
+    expect(withSummary.body).not.toContain("This PR removes")
+    expect(withSummary.body).not.toContain("in total")
+    // And the mentioned model list should include BOTH models it touched.
+    expect(withSummary.body).toContain("`customers`")
+    expect(withSummary.body).toContain("`orders`")
+  })
+
+  test("deleted schema.yml: every prior test surfaces as a removal finding (cubic-review P2)", () => {
+    // Regression: deleting a whole schema.yml removes every test declared in
+    // it — arguably a bigger removal than dropping a single test. Previously
+    // the detector early-returned `[]` for `status === "deleted"`, so the
+    // deletion went unnoticed. Now the detector diffs the old document against
+    // an empty new document.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      // Only oldContent is available for a deleted file; newContent is undefined
+      // because git-show at HEAD would fail.
+      { oldContent, newContent: undefined },
+    )
+    // 4 removals: customers.customer_id.unique, customers.customer_id.not_null,
+    // customers.email.not_null, orders.order_id.unique
+    expect(f.length).toBe(4)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+    // Structured attribution surfaces on the top-level Finding, not just in
+    // evidence.result (cubic-review P3).
+    const byModel = f.filter((x) => x.model === "customers")
+    expect(byModel.length).toBe(3)
+    const byColumn = f.filter((x) => x.column === "email")
+    expect(byColumn.length).toBe(1)
+  })
+
+  test("deleted schema.yml without oldContent: no findings (safe degrade)", () => {
+    // Without the old side, we can't know what tests to flag as removed.
+    // The detector should degrade to `[]` rather than fabricating findings.
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent: undefined },
+    )
+    expect(f.length).toBe(0)
+  })
+
+  test("deleted schema.yml with unparsable oldContent + deletion diff → fallback surfaces removals", () => {
+    // Structural path can't commit (old YAML fails to parse), so the diff-only
+    // fallback runs. Confirms: unparsable-old → fallback, not silent drop.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null   # <-- unterminated block below causes parse failure
+    tests: [
+`
+    // Diff uses the block-list shape the fallback regex targets
+    // (`-      - unique` / `-      - not_null`).
+    const diff = `--- a/models/marts/_models.yml
++++ /dev/null
+@@ -1,8 +0,0 @@
+-version: 2
+-models:
+-  - name: customers
+-    columns:
+-      - name: customer_id
+-        tests:
+-          - unique
+-          - not_null
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
+    )
+    // Diff-only fallback picks up the removed `- unique` and `- not_null`
+    // lines, so we still emit at least one removal finding rather than silently
+    // dropping when the structural path couldn't commit.
+    expect(f.length).toBeGreaterThan(0)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("deleted empty schema.yml: no fabricated findings (locks in precision)", () => {
+    // Old side parses cleanly but declares no tests. Ensures the structural
+    // loop doesn't fabricate findings when oldSet is empty.
+    const oldContent = `version: 2
+models: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
     )
     expect(f.length).toBe(0)
   })

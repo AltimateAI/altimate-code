@@ -265,6 +265,138 @@ describe("verdict", () => {
     expect(verifyEnvelope(tampered, "test-key")).toBe(false)
   })
 
+  test("--force-tier audit fields are set whenever the flag is passed (even when forced == classified)", () => {
+    // Simulates orchestrate.ts's audit-envelope construction for the two
+    // --force-tier cases. Ensures we never silently bypass the audit trail
+    // just because the forced value happens to match the classifier's tier.
+    // Regression guard for the post-R18 review finding.
+    const withForcedDifferent = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      tierForced: true,
+      tierClassified: "trivial",
+      tierReasons: ["forced via --force-tier=full (classifier said trivial)"],
+    })
+    expect(withForcedDifferent.tierForced).toBe(true)
+    expect(withForcedDifferent.tierClassified).toBe("trivial")
+
+    const withForcedSame = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      tierForced: true,
+      tierClassified: "full",
+      tierReasons: ["forced via --force-tier=full (classifier said full)"],
+    })
+    expect(withForcedSame.tierForced).toBe(true)
+    expect(withForcedSame.tierClassified).toBe("full")
+
+    const notForced = buildEnvelope({ findings: [], tier: "lite", mode: "comment" })
+    expect(notForced.tierForced).toBeUndefined()
+    expect(notForced.tierClassified).toBeUndefined()
+  })
+
+  test("envelope schema rejects inconsistent tierForced / tierClassified (PR #1027 consensus MINOR #2)", async () => {
+    // Direct-parse invariants at the envelope boundary. `runReview` never
+    // builds an inconsistent envelope, but a hand-built envelope with
+    // `tierForced: true` and no `tierClassified` (or vice versa) is a
+    // silent audit-metadata break — the signed body claims a bypass but
+    // records no origin tier, or vice versa. The zod `superRefine`
+    // makes both states unparseable and unsignable.
+    const { VerdictEnvelope: EnvelopeSchema } = await import("../../src/altimate/review/verdict")
+
+    const goodBothPresent = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      tierForced: true,
+      tierClassified: "trivial",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(goodBothPresent.success).toBe(true)
+
+    const goodBothAbsent = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "lite",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(goodBothAbsent.success).toBe(true)
+
+    const badForcedOnly = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      tierForced: true,
+      // tierClassified missing — inconsistent audit metadata
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badForcedOnly.success).toBe(false)
+
+    const badClassifiedOnly = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      // tierForced missing but tierClassified claims an origin
+      tierClassified: "trivial",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badClassifiedOnly.success).toBe(false)
+
+    const badForcedFalse = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "lite",
+      // `tierForced: false` is not a legitimate state — the marker exists to
+      // record forced runs; unforced runs must omit it entirely.
+      tierForced: false,
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badForcedFalse.success).toBe(false)
+  })
+
+  test("tierForced + tierClassified are covered by the signature (tampering detected)", () => {
+    // Confirms the audit fields live inside the signed canonical body — a
+    // tampered envelope claiming a natural tier when a bypass ran can't slip
+    // past verifyEnvelope.
+    const signed = signEnvelope(
+      buildEnvelope({
+        findings: [],
+        tier: "full",
+        mode: "comment",
+        tierForced: true,
+        tierClassified: "trivial",
+        tierReasons: ["forced via --force-tier=full (classifier said trivial)"],
+        generatedAt: "2026-05-29T00:00:00Z",
+      }),
+      "k",
+    )
+    expect(verifyEnvelope(signed, "k")).toBe(true)
+    const strippedForce = { ...signed, tierForced: undefined, tierClassified: undefined, tierReasons: undefined }
+    expect(verifyEnvelope(strippedForce, "k")).toBe(false)
+  })
+
   test("tampering a NESTED finding field is detected (signature covers findings)", () => {
     const f = makeFinding({
       severity: "warning",
@@ -313,6 +445,10 @@ describe("diff-filter", () => {
     expect(classifyDbtFile("models/marts/_marts.yml")).toBe("schema_yml")
     expect(classifyDbtFile("macros/x.sql")).toBe("macro")
     expect(classifyDbtFile("snapshots/s.sql")).toBe("snapshot")
+    // Snapshot YAML property files carry column/test declarations and route
+    // to the schema_yml detector, not the snapshot catalog rules.
+    expect(classifyDbtFile("snapshots/orders_snapshot.yml")).toBe("schema_yml")
+    expect(classifyDbtFile("snapshots/orders_snapshot.yaml")).toBe("schema_yml")
     expect(classifyDbtFile("seeds/c.csv")).toBe("seed")
     expect(classifyDbtFile("dbt_project.yml")).toBe("project_config")
     expect(classifyDbtFile("models/marts/m.py")).toBe("python_model")
@@ -1822,6 +1958,42 @@ describe("orchestrate", () => {
       getContent: content("select 1 as value"),
     })
     expect(env.summary.degraded).toBe(true)
+  })
+
+  test("renderSummary escapes backticks in tierReasons (cubic-review P3)", async () => {
+    // Regression: a fixed single-backtick fence around each tier reason meant a
+    // path like `weird`path`.sql` would terminate the code span mid-way and
+    // inject Markdown into the summary. Fence now sizes to max(backtick-run)+1
+    // and pads leading/trailing backticks with a space.
+    const env = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      generatedAt: "2026-05-29T00:00:00Z",
+      tierReasons: [
+        "models/x.sql", // plain path — one-backtick fence still fine
+        "path with `single` inside", // needs 2-backtick fence
+        "path with ``double`` inside", // needs 3-backtick fence
+        "`starts-with-backtick",
+        "ends-with-backtick`",
+        "`both-ends`", // both leading + trailing backticks — symmetric padding
+      ],
+    })
+    const summary = renderSummary(env)
+    // Sanity: the tier line exists
+    expect(summary).toContain("Tier: full")
+    // A path with `single` inside must be wrapped by a fence longer than the
+    // longest backtick run inside it. Two-backtick fence sees `single` as a
+    // single-backtick run inside the code span → renders correctly.
+    expect(summary).toContain("``path with `single` inside``")
+    // Three-backtick fence for two-backtick run inside.
+    expect(summary).toContain("```path with ``double`` inside```")
+    // Leading/trailing backticks get space padding so the fence doesn't fuse
+    // with the reason text.
+    expect(summary).toContain("`` `starts-with-backtick ``")
+    expect(summary).toContain("`` ends-with-backtick` ``")
+    // Both ends have backticks — same single pad wraps both sides symmetrically.
+    expect(summary).toContain("`` `both-ends` ``")
   })
 
   test("renderSummary + inlineComments produce marker + structured output", async () => {

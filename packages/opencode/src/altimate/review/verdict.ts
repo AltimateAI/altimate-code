@@ -92,6 +92,13 @@ export const VerdictEnvelope = z.object({
   idealVerdict: Verdict,
   mode: ReviewMode,
   tier: RiskTier,
+  /** G1 — reasons the classifier assigned this tier (only when --explain-tier). */
+  tierReasons: z.array(z.string()).optional(),
+  /** G2 — true when --force-tier bypassed the classifier. Included in signature so
+   *  a tampered envelope claiming natural tier can't fake a forced run. */
+  tierForced: z.boolean().optional(),
+  /** The classifier's original tier before --force-tier overrode it (G2). */
+  tierClassified: RiskTier.optional(),
   findings: z.array(Finding),
   summary: z.object({
     critical: z.number().int().nonnegative(),
@@ -115,6 +122,32 @@ export const VerdictEnvelope = z.object({
     .optional(),
   /** HMAC-SHA256 over the canonical body (added by signEnvelope). */
   signature: z.string().optional(),
+}).superRefine((env, ctx) => {
+  // G2 audit invariant — enforced at the envelope boundary so a hand-built
+  // envelope (bypassing runReview) can't sign inconsistent forced-tier
+  // metadata. When --force-tier is used, BOTH tierForced=true AND
+  // tierClassified must be present (per PR #1027 consensus MINOR #2).
+  const hasForced = env.tierForced === true
+  const hasClassified = env.tierClassified !== undefined
+  if (hasForced !== hasClassified) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "tierForced and tierClassified must both be present or both absent: " +
+        `tierForced=${env.tierForced}, tierClassified=${env.tierClassified ?? "undefined"}`,
+      path: ["tierForced"],
+    })
+  }
+  // tierForced: false is not a legitimate state — the flag records
+  // "was --force-tier used?" as a positive marker; false is indistinguishable
+  // from a natural (unforced) run and only adds noise to the canonical body.
+  if (env.tierForced === false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "tierForced must be true or undefined, not false",
+      path: ["tierForced"],
+    })
+  }
 })
 export type VerdictEnvelope = z.infer<typeof VerdictEnvelope>
 
@@ -127,6 +160,12 @@ export interface BuildEnvelopeInput {
   manifestHash?: string
   generatedAt?: string
   degraded?: boolean
+  /** G1 — classifier reasons for the tier (only surfaced when explainTier=true). */
+  tierReasons?: string[]
+  /** G2 — set when --force-tier was applied. */
+  tierForced?: boolean
+  /** G2 — classifier's original tier before the force override. */
+  tierClassified?: RiskTier
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -147,6 +186,9 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     idealVerdict: ideal,
     mode: input.mode,
     tier: input.tier,
+    tierReasons: input.tierReasons,
+    tierForced: input.tierForced,
+    tierClassified: input.tierClassified,
     findings: input.findings,
     summary: summarize(input.findings, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),
