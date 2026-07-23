@@ -835,6 +835,56 @@ describe("risk-tier", () => {
     expect(ok!("models/marts/mrt_cost_daily.sql")).toBe("finops")
   })
 
+  test("R20 S4: runReview does NOT crash on an unknown-preset config typo — degrades gracefully (cubic P2)", async () => {
+    // cubic-review P2 on PR #1028 — a typo like `preset:finop` in
+    // `.altimate/review.yml` would make `compilePathTokenResolver` throw
+    // and, previously, take the entire review run down with it. Catch
+    // in orchestrate.ts, log to stderr, and continue with no path-token
+    // promotion; surface the error in `tierReasons` so a reader of the
+    // envelope (or PR comment) sees why their opt-in didn't fire.
+    const files: ChangedFile[] = [{ path: "models/marts/m.sql", status: "modified", diff: "+select 1\n" }]
+    // Minimal runner — this test only needs runReview to reach the
+    // resolver-build path and back out with an envelope.
+    const runner: ReviewRunner = {
+      async check() { return { issues: [], ran: false } },
+      async detectPii() { return { columns: [] } },
+      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
+      async grade() { return { grade: "A", decided: true } },
+    }
+    // Silence stderr for the expected warning during the test run.
+    const origWrite = process.stderr.write.bind(process.stderr)
+    let stderrCaptured = ""
+    process.stderr.write = ((s: string) => {
+      stderrCaptured += String(s)
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const env = await runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG, riskTierPathTokens: { finops: ["preset:finop"] } } as any,
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        getContent: async () => "select 1",
+        generatedAt: "2026-05-29T00:00:00Z",
+        explainTier: true,
+      })
+      // Envelope was still produced — no crash.
+      expect(env.verdict).toBeDefined()
+      // stderr got the diagnostic + the fallback banner.
+      expect(stderrCaptured).toContain("riskTierPathTokens config invalid")
+      expect(stderrCaptured).toContain("Review continuing without path-token promotion")
+      // Envelope's tier-reasons stream carries the config error so a
+      // reader who never sees stderr still knows why promotion didn't fire.
+      const reasons = (env.tierReasons ?? []).join(" ")
+      expect(reasons).toContain("riskTierPathTokens config invalid")
+      expect(reasons).toContain("unknown preset 'finop'")
+    } finally {
+      process.stderr.write = origWrite
+    }
+  })
+
   test("R20 S4: high-risk token — no promotion when no resolver is configured (core is neutral)", () => {
     // Same paths that fire above must stay lite when the caller doesn't
     // supply a resolver — the reviewer core has zero opinion about which

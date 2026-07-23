@@ -1096,7 +1096,25 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // the reviewer core carries no default list. `undefined` when no
   // categories are configured, which keeps `highRiskPathTokenCategory`
   // undefined per file and no promotion fires.
-  const pathTokenCategoryOf = compilePathTokenResolver(input.config.riskTierPathTokens)
+  //
+  // `compilePathTokenResolver` throws on an unknown `preset:<name>` (typo
+  // guard, cubic + harness-bot P2). Catch that here so a single config
+  // typo in `.altimate/review.yml` doesn't crash every review run in the
+  // project's CI — surface the error to stderr AND propagate a
+  // `configError` reason into the envelope so the reader can see what
+  // broke. The review continues with no path-token promotion (the
+  // conservative safe fallback), so users notice their opt-in is dead
+  // rather than getting silent auto-approve on billing/PCI/etc. paths
+  // (cubic-review P2 on PR #1028 risk-tier.ts:134).
+  let pathTokenCategoryOf: ((p: string) => string | undefined) | undefined
+  let pathTokenConfigError: string | undefined
+  try {
+    pathTokenCategoryOf = compilePathTokenResolver(input.config.riskTierPathTokens)
+  } catch (e: any) {
+    pathTokenConfigError = `riskTierPathTokens config invalid: ${e?.message ?? String(e)}`
+    process.stderr.write(`⚠️  ${pathTokenConfigError}\n   Review continuing without path-token promotion.\n`)
+    pathTokenCategoryOf = undefined
+  }
   const tierResult = classifyPR(reviewable, {
     blastRadiusOf: (p) => {
       const c = ctxByPath.get(p)
@@ -1106,6 +1124,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
     pathTokenCategoryOf,
   })
+  // Surface config errors in the tier-reasons stream so a reader of the
+  // envelope (or PR comment) sees WHY their opt-in didn't fire.
+  if (pathTokenConfigError) tierResult.reasons.unshift(pathTokenConfigError)
   const classifiedTier = tierResult.tier
   // G2 — --force-tier overrides the classifier. Envelope records both the
   // forced tier and the original classification whenever the flag is passed
