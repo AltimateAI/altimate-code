@@ -606,7 +606,7 @@ async function main(): Promise<void> {
       add({
         name: "marker guard",
         status: "FAIL",
-        detail: `upstream remote unavailable — guard ran in degraded pattern-only mode, coverage incomplete.\nAdd it: git remote add upstream https://github.com/anomalyco/opencode.git && git fetch upstream --no-tags\n${fullOutput}`,
+        detail: `upstream remote unavailable — guard ran in degraded pattern-only mode, coverage incomplete.\nAdd the 'upstream' remote (URL: see the marker-guard job in .github/workflows/ci.yml) and fetch it, then re-run.\n${fullOutput}`,
       })
     } else {
       add({ name: "marker guard", status: "PASS", detail: fullOutput || "no unmarked upstream-shared changes" })
