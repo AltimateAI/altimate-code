@@ -959,8 +959,8 @@ function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
 
   // Normalise column names for coverage comparison. dbt YAML often uses
   // adapter-cased column names (Snowflake folds unquoted identifiers to
-  // uppercase; other adapters differ). Lowercase both sides so `WORKSPACE_ID`
-  // in `combination_of_columns` matches `workspace_id` in `columns:`. Hoisted
+  // uppercase; other adapters differ). Lowercase both sides so `ORDER_ID`
+  // in `combination_of_columns` matches `order_id` in `columns:`. Hoisted
   // to function scope per consensus NIT #7 (was redeclared per-model).
   const norm = (s: string): string => s.toLowerCase()
 
@@ -1440,7 +1440,7 @@ export function detectSchemaYmlPatterns(
   // Recommendation flips between `constraints:` (contracted model) and
   // `data_tests:` (view / non-contracted model) based on the model's
   // contract state — matches the adapter-semantics discussion in the
-  // corpus study (PR D×2, PR A×2).
+  // corpus study (four instances across the sample).
   for (const g of grainGaps) {
     const filename = file.path.split("/").pop()
     const recommendation = g.contractEnforced
