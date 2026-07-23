@@ -21,6 +21,8 @@ import {
   shouldReview,
   classifyPR,
   classifyFile,
+  compilePathTokenResolver,
+  RISK_TOKEN_PRESETS,
   type ChangedFile,
   runReview,
   modelNameFromPath,
@@ -701,12 +703,9 @@ describe("risk-tier", () => {
 
   test("R20 S4: full: schema.yml adds unique_combination_of_columns test (consensus MAJOR #3 tightened)", () => {
     // Locked-down test for the DBT_UNIQUE_COMBO_RE regex specifically.
-    // Original path (`models/marts/mrt_billing_account_prices.yml`) also
-    // matched `MARTS_DIR_RE` AND `FINOPS_TOKEN_RE` (via `billing` / `prices`)
-    // → the assertion passed on `finopsPathToken` even if the combo regex
-    // were deleted (consensus MAJOR #3). Path moved to non-mart, non-FinOps
-    // territory so `DBT_UNIQUE_COMBO_RE` is the sole possible promoter, and
-    // the reason string is asserted to confirm which signal fired.
+    // Path chosen so `DBT_UNIQUE_COMBO_RE` is the sole possible promoter
+    // (non-mart, no configured high-risk tokens by default), and the reason
+    // string is asserted to confirm which signal fired.
     const diff =
       "@@ -1,3 +1,7 @@\n" +
       "     data_tests:\n" +
@@ -721,77 +720,84 @@ describe("risk-tier", () => {
     // test name inside the list) fire on this diff.
     expect(r.reasons.join(" ")).toContain("unique_combination_of_columns")
     // Explicit FP guard — no other promotion signal should fire on this path.
-    expect(r.reasons.join(" ")).not.toContain("FinOps")
+    expect(r.reasons.join(" ")).not.toContain("high-risk token")
     expect(r.reasons.join(" ")).not.toContain("mart-API surface")
   })
 
-  test("R20 S4: full: FinOps keyword in path (PR E shape — anchor cost redesign)", () => {
-    // Small SQL change on a cost-savings mart should NOT auto-approve at
-    // lite tier just because it's within the line limit — the corpus study
-    // showed these are the highest-severity blockers.
-    const r = classifyPR([file("models/marts/mrt_jobs_cost_savings.sql", "+select 1 as a\n")], {
+  // The path-token promotion is USER-CONFIGURED, not baked into the core.
+  // These tests exercise the resolver + tier plumbing with an explicit
+  // finops preset opt-in. A project that doesn't set `riskTierPathTokens`
+  // gets no path-token promotion at all — verified by the default-classifier
+  // paths tested above.
+  const finopsResolver = compilePathTokenResolver({ finops: ["preset:finops"] })
+
+  test("R20 S4: full: high-risk path-token category matches when the finops preset is enabled", () => {
+    // Small SQL change on a mart whose path contains a preset token should
+    // NOT auto-approve at lite tier just because it's within the line limit.
+    const r = classifyPR([file("models/marts/mrt_cost_daily.sql", "+select 1 as a\n")], {
       blastRadiusOf: () => 1,
+      pathTokenCategoryOf: (p) => finopsResolver!(p),
     })
     expect(r.tier).toBe("full")
-    expect(r.reasons.join(" ")).toContain("FinOps keyword")
+    expect(r.reasons.join(" ")).toContain("high-risk token category 'finops'")
   })
 
-  test("R20 S4: full: FinOps keyword variants (billing/dbu/savings/spend) all promote", () => {
-    for (const path of [
-      "models/marts/mrt_billing_daily.sql",
-      "models/marts/mrt_dbu_by_workspace.sql",
-      "models/marts/mrt_credit_savings.sql",
-      "models/intermediate/int_query_cost.sql",
-      "models/staging/stg_warehouse_spend.sql",
-      "models/marts/mrt_list_price.sql",
-      "models/marts/mrt_daily_rate.sql",
-    ]) {
-      const r = classifyPR([file(path, "+select 1\n")], { blastRadiusOf: () => 0 })
+  test("R20 S4: high-risk token category — every preset token fires at a boundary", () => {
+    // Property-based: iterate the shipped preset and assert each token
+    // promotes when placed at a path boundary. Adding a preset token
+    // extends coverage automatically; a regression that broke the
+    // boundary character class shows up as multiple simultaneous test
+    // failures.
+    for (const tok of RISK_TOKEN_PRESETS.finops) {
+      const p = `models/marts/mrt_${tok}_summary.sql`
+      const r = classifyPR([file(p, "+select 1\n")], {
+        blastRadiusOf: () => 0,
+        pathTokenCategoryOf: (x) => finopsResolver!(x),
+      })
       expect(r.tier).toBe("full")
-      expect(r.reasons.join(" ")).toContain("FinOps keyword")
+      expect(r.reasons.join(" ")).toContain("high-risk token category 'finops'")
     }
   })
 
-  test("R20 S4: FinOps token does NOT over-fire on incidental substrings", () => {
-    // False-positive guard: the token regex requires path/word boundaries so
-    // words like `broadcaster.py` (has `caste`) or `precast_table.sql` (has
-    // `cast`) don't fire the cost/dbu/etc. rules.
-    const r1 = classifyPR([file("models/staging/stg_broadcaster.sql", "+select 1\n")], {
-      blastRadiusOf: () => 0,
-    })
-    expect(r1.tier).toBe("lite")
-
-    const r2 = classifyPR([file("models/marts/mrt_precast_table.sql", "+select 1\n")], {
-      blastRadiusOf: () => 0,
-    })
-    expect(r2.tier).toBe("lite")
+  test("R20 S4: high-risk token — interior substring does NOT fire (boundary anchors exercised)", () => {
+    // Property-based FP guard. For every preset token, wrap it in
+    // ASCII-letter padding on both sides so the token IS present in the
+    // path as an interior substring. The alternation matches; only the
+    // boundary anchors (path/word/digit) block promotion. If someone
+    // weakens the boundary class, every one of these fails.
+    for (const tok of RISK_TOKEN_PRESETS.finops) {
+      const p = `models/staging/stg_x${tok}y.sql`
+      const r = classifyPR([file(p, "+select 1\n")], {
+        blastRadiusOf: () => 0,
+        pathTokenCategoryOf: (x) => finopsResolver!(x),
+      })
+      expect(r.tier).toBe("lite")
+    }
   })
 
-  test("R20 S4: `dbus` (D-Bus IPC) does NOT fire the FinOps rule (consensus MINOR #2)", () => {
-    // Consensus MINOR #2 — `dbus` in the token list matched D-Bus (IPC)
-    // paths (`stg_dbus_connector.sql`) that have nothing to do with
-    // Databricks Units. `dbu` singular is enough for the FinOps signal;
-    // `dbus` was removed from the token list.
-    const r = classifyPR([file("models/staging/stg_dbus_connector.sql", "+select 1\n")], {
+  test("R20 S4: high-risk token — boundary matches digit suffixes (consensus MINOR #7)", () => {
+    // The boundary class includes `\d` so digit-suffixed names still fire.
+    // A single named case is enough — the property tests above cover the
+    // full alternation.
+    const r = classifyPR([file("models/marts/mrt_cost2024.sql", "+select 1\n")], {
       blastRadiusOf: () => 0,
+      pathTokenCategoryOf: (p) => finopsResolver!(p),
     })
-    expect(r.tier).toBe("lite")
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("high-risk token category 'finops'")
   })
 
-  test("R20 S4: FinOps boundary matches digit suffixes (consensus MINOR #7)", () => {
-    // Consensus MINOR #7 — the boundary class previously included only
-    // `[/_.-]`, so `mrt_cost2024.sql`, `stg_billing2.sql`, `dbu1_usage.sql`
-    // slipped through (the char after the keyword is a digit, not in the
-    // boundary class). Adding `\d` catches these versioned / iteration-
-    // suffixed paths.
+  test("R20 S4: high-risk token — no promotion when no resolver is configured (core is neutral)", () => {
+    // Same paths that fire above must stay lite when the caller doesn't
+    // supply a resolver — the reviewer core has zero opinion about which
+    // paths are high-risk, all of which comes from user config.
     for (const p of [
+      "models/marts/mrt_daily_totals.sql",
       "models/marts/mrt_cost2024.sql",
       "models/staging/stg_billing2.sql",
-      "models/intermediate/dbu1_usage.sql",
     ]) {
       const r = classifyPR([file(p, "+select 1\n")], { blastRadiusOf: () => 0 })
-      expect(r.tier).toBe("full")
-      expect(r.reasons.join(" ")).toContain("FinOps keyword")
+      expect(r.tier).toBe("lite")
     }
   })
 

@@ -46,6 +46,29 @@ export const ReviewConfig = z.object({
   rubric: Rubric.partial().default({}),
   /** Extra path suffixes to exclude from review. */
   exclude: z.array(z.string()).default([]),
+  /**
+   * Path-token categories that promote a change to `full` when a token
+   * appears at a path/word boundary. This is business-vertical opinion
+   * (billing, PII-adjacent, safety-critical) — hardcoding it into the
+   * reviewer core would leak one team's naming convention onto every
+   * consumer. Empty by default; teams opt in by naming categories and
+   * listing tokens.
+   *
+   * Example — enable the shipped `finops` preset (billing/cost/etc.):
+   *   riskTierPathTokens:
+   *     finops: [preset:finops]
+   *
+   * Or a custom category:
+   *   riskTierPathTokens:
+   *     pci: [card, pan, cvv]
+   *     patient: [phi, mrn, diagnosis]
+   *
+   * Matching is case-insensitive at path/word/digit boundaries — a token
+   * `cost` fires on `mrt_cost_daily.sql` and `mrt_cost2024.sql` but not
+   * inside `broadcaster.sql` or `precast_table.sql`. The `preset:<name>`
+   * marker expands to the current shipped list at reviewer startup.
+   */
+  riskTierPathTokens: z.record(z.string(), z.array(z.string())).default({}),
 })
 export type ReviewConfig = z.infer<typeof ReviewConfig>
 

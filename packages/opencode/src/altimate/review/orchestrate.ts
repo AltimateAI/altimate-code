@@ -9,7 +9,7 @@ import {
   SEVERITY_ORDER,
 } from "./finding"
 import { type ChangedFile, filterChangedFiles } from "./diff-filter"
-import { classifyPR, TIER_LANES } from "./risk-tier"
+import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
@@ -1092,6 +1092,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A run is degraded when model files exist but none resolved against a manifest.
   const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
 
+  // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
+  // the reviewer core carries no default list. `undefined` when no
+  // categories are configured, which keeps `highRiskPathTokenCategory`
+  // undefined per file and no promotion fires.
+  const pathTokenCategoryOf = compilePathTokenResolver(input.config.riskTierPathTokens)
   const tierResult = classifyPR(reviewable, {
     blastRadiusOf: (p) => {
       const c = ctxByPath.get(p)
@@ -1099,6 +1104,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     },
     touchesPiiOf: (f) => (ctxByPath.get(f.path)?.pii.length ?? 0) > 0,
     isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
+    pathTokenCategoryOf,
   })
   const classifiedTier = tierResult.tier
   // G2 — --force-tier overrides the classifier. Envelope records both the

@@ -36,10 +36,11 @@ export interface FileChangeClass {
   incrementalLogicChange: boolean
   /** Structurally complex SQL (window/subquery/large plan) — never `trivial`. */
   complex: boolean
-  // R20 S4 — risk-signal promotion. Grounded in the 5-PR internal corpus study
-  // (see data-engineering-skills/docs/pr-review-corpus-findings-r20.md) where
-  // PRs D (test-only YAML on contracted marts) and E (cost-anchor redesign)
-  // both auto-approved despite each having 8+ substantive human findings.
+  // R20 S4 — risk-signal promotion. Grounded in an internal corpus study of
+  // real reviewer comments on dbt PRs; two failure classes drove the promotion
+  // gate: (a) test-only YAML edits on contracted marts, (b) cost-anchor logic
+  // redesigns landing in a business-critical vertical. Both had auto-approved
+  // despite each having 8+ substantive human findings.
   /** schema.yml diff introduces or edits `data_tests:`, `constraints:`,
    *  `unique_combination_of_columns`, `contract:`, or the pre-1.8 `tests:`
    *  alias — grain / constraint territory reviewers repeatedly flagged as
@@ -53,11 +54,11 @@ export interface FileChangeClass {
   /** File lives under `models/marts/` or `models/mart/` — mart-layer changes
    *  land in the API surface downstream consumers depend on. */
   martLayerChange: boolean
-  /** Path or filename contains a FinOps keyword
-   *  (`cost|saving|billing|credit|dbu|spend|revenue|price|rate`). The
-   *  highest-severity blockers in the corpus (cross-model rate asymmetry,
-   *  DBU savings > DBU cost, misanchored billing units) landed here. */
-  finopsPathToken: boolean
+  /** The user-configured risk-token category that matched this path (e.g.
+   *  `finops`, `pci`, `patient`), or undefined when no configured token
+   *  matched. Categories are supplied via `riskTierPathTokens` in
+   *  `.altimate/review.yml`; the reviewer core is neutral. */
+  highRiskPathTokenCategory: string | undefined
 }
 
 export interface ClassifyOptions {
@@ -67,6 +68,82 @@ export interface ClassifyOptions {
   touchesPiiOf?: (file: ChangedFile) => boolean
   /** Mark a path as a structurally complex change (window/subquery/large plan). */
   isComplexOf?: (file: ChangedFile) => boolean
+  /** Resolve a path to a user-configured risk-token category (e.g. "finops",
+   *  "pci"), or undefined when no category matches. Injected from
+   *  `.altimate/review.yml`'s `riskTierPathTokens`; the reviewer core carries
+   *  no default token list. */
+  pathTokenCategoryOf?: (path: string) => string | undefined
+}
+
+/**
+ * Shipped path-token presets that a user can opt into by putting
+ * `[preset:finops]` in their `riskTierPathTokens.<category>` array. The
+ * lists are mined from real reviewer comments across dbt PRs in the
+ * billing / cost-attribution vertical; a project that doesn't care about
+ * that vertical simply doesn't enable the preset. Adding a new preset is
+ * a matter of shipping a new entry here.
+ */
+export const RISK_TOKEN_PRESETS: Record<string, string[]> = {
+  finops: [
+    "cost",
+    "costs",
+    "saving",
+    "savings",
+    "billing",
+    "credit",
+    "credits",
+    "dbu",
+    "spend",
+    "revenue",
+    "price",
+    "prices",
+    "rate",
+    "rates",
+    "pricing",
+    "invoice",
+    "invoices",
+  ],
+}
+
+/**
+ * Compile a `riskTierPathTokens` config record into a `pathTokenCategoryOf`
+ * resolver — used by orchestration to inject the callback into `classifyPR`.
+ * Handles `preset:<name>` expansion. Tokens match at path/word/digit
+ * boundaries: `mrt_cost.sql` fires, `broadcaster.sql` doesn't. Returns
+ * undefined (no resolver) when no categories are configured, so the
+ * `highRiskPathTokenCategory` field stays undefined and no promotion fires.
+ */
+export function compilePathTokenResolver(
+  cfg: Record<string, string[]>,
+): ((path: string) => string | undefined) | undefined {
+  const compiled: Array<{ category: string; re: RegExp }> = []
+  for (const [category, entries] of Object.entries(cfg)) {
+    const tokens: string[] = []
+    for (const entry of entries) {
+      if (entry.startsWith("preset:")) {
+        const name = entry.slice("preset:".length)
+        const preset = RISK_TOKEN_PRESETS[name]
+        if (preset) tokens.push(...preset)
+      } else {
+        tokens.push(entry)
+      }
+    }
+    if (tokens.length === 0) continue
+    // Anchor tokens at path/word/digit boundaries so incidental substrings
+    // don't fire (e.g. `broadcaster` should not match token `cast`).
+    const escaped = tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    compiled.push({
+      category,
+      re: new RegExp(`(?:^|[\\/_.\\-\\d])(?:${escaped.join("|")})(?:$|[\\/_.\\-\\d])`, "i"),
+    })
+  }
+  if (compiled.length === 0) return undefined
+  return (path: string) => {
+    for (const { category, re } of compiled) {
+      if (re.test(path)) return category
+    }
+    return undefined
+  }
 }
 
 const MATERIALIZATION_RE = /[+]?materialized\s*[:=]|config\s*\(\s*[^)]*materialized/i
@@ -101,16 +178,6 @@ const DBT_RISK_KEY_PATTERNS: Array<{ key: string; re: RegExp }> = [
 const DBT_UNIQUE_COMBO_RE =
   /^[+-]?[ \t]*(?!#)(?:-[ \t]+)?(?:[\w.]+\.)?unique_combination_of_columns[ \t]*:/im
 const MARTS_DIR_RE = /(?:^|\/)models\/marts?\//i
-// FinOps keyword must sit at a path or filename boundary so we don't fire on
-// arbitrary substrings (e.g. `broadcaster` matching `caste` never triggers
-// `cost`, but `_backups_of_cost_config.sql` still catches via the `_` boundary).
-// The boundary class includes `\d` so digit-suffixed names (`mrt_cost2024`,
-// `dbu1_usage`) still match — consensus MINOR #7. `dbus` was removed from
-// the token list because it collides with D-Bus (IPC) file names on paths
-// like `stg_dbus_connector.sql` — the singular `dbu` is sufficient
-// (consensus MINOR #2).
-const FINOPS_TOKEN_RE =
-  /(?:^|[\/_.\-\d])(?:cost|costs|saving|savings|billing|credit|credits|dbu|spend|revenue|price|prices|rate|rates|pricing|invoice|invoices)(?:$|[\/_.\-\d])/i
 
 /** The ADDED/REMOVED lines of a unified diff (excludes context + hunk headers),
  *  so signal detection fires on what actually changed, not surrounding context. */
@@ -223,7 +290,7 @@ export function classifyFile(file: ChangedFile, opts: ClassifyOptions = {}): Fil
     dbtRiskYmlChanges: dbtRiskYmlKeys.length > 0,
     dbtRiskYmlKeys,
     martLayerChange: MARTS_DIR_RE.test(file.path),
-    finopsPathToken: FINOPS_TOKEN_RE.test(file.path),
+    highRiskPathTokenCategory: opts.pathTokenCategoryOf?.(file.path),
   }
 }
 
@@ -239,7 +306,7 @@ export function fullTierReasons(c: FileChangeClass): string[] {
   if (c.materializationChange) reasons.push("materialization changed")
   if (c.incrementalLogicChange) reasons.push("incremental logic changed")
   if (c.blastRadius > 5) reasons.push(`${c.blastRadius} downstream models`)
-  // R20 S4 — trivial/lite promotion for signals the 5-PR corpus proved are
+  // R20 S4 — trivial/lite promotion for signals the corpus study proved are
   // reviewer-critical. Each reason surfaces in the signed envelope's
   // `tierReasons`, so a customer can see WHY a nominally-tiny YAML-only diff
   // ran at full tier.
@@ -247,11 +314,11 @@ export function fullTierReasons(c: FileChangeClass): string[] {
   // Path-based `martLayerChange` on its own is intentionally NOT a promotion
   // reason — description-only edits under `models/marts/` are legitimately
   // trivial. Promotion here requires diff-level evidence (`dbtRiskYmlChanges`)
-  // or a FinOps path token, either of which correlates with real reviewer
-  // blockers in the corpus. `martLayerChange` enriches the reason string
-  // (adds the mart-API-surface context) but doesn't fire on its own — the
-  // tier is already `full` when `dbtRiskYmlChanges` is true; there's no
-  // additional weighting or ordering effect (consensus MINOR #5 clarified).
+  // or a user-configured high-risk path-token match, either of which
+  // correlates with real reviewer blockers. `martLayerChange` enriches the
+  // reason string (adds the mart-API-surface context) but doesn't fire on its
+  // own — the tier is already `full` when `dbtRiskYmlChanges` is true; there's
+  // no additional weighting or ordering effect (consensus MINOR #5 clarified).
   if (c.dbtRiskYmlChanges) {
     // Name the exact triggering YAML keys rather than a fixed umbrella string
     // — consensus MINOR #4. Falls back to the umbrella when we can't
@@ -260,7 +327,9 @@ export function fullTierReasons(c: FileChangeClass): string[] {
     const loc = c.martLayerChange ? " under models/marts/ (mart-API surface)" : ""
     reasons.push(`schema.yml diff touches ${keys}${loc}`)
   }
-  if (c.finopsPathToken) reasons.push("path contains FinOps keyword (cost/saving/billing/dbu/etc.)")
+  if (c.highRiskPathTokenCategory) {
+    reasons.push(`path matches high-risk token category '${c.highRiskPathTokenCategory}'`)
+  }
   return reasons
 }
 
