@@ -603,11 +603,18 @@ async function main(): Promise<void> {
       // it only pattern-matches packages/opencode/src/ and can miss unmarked
       // changes in other upstream-owned packages. A release machine must have
       // the real remote — fail closed.
+      // altimate_change start — the operator instruction below names the
+      // upstream repo URL so a release engineer can wire the remote up. The
+      // branding-audit LEAK_PATTERNS flag this as an upstream reference; it
+      // is legitimate operational text (an actionable fix hint for the
+      // failing check), not accidental branding drift. Contained in an
+      // altimate_change block so the audit skips it.
       add({
         name: "marker guard",
         status: "FAIL",
         detail: `upstream remote unavailable — guard ran in degraded pattern-only mode, coverage incomplete.\nAdd it: git remote add upstream https://github.com/anomalyco/opencode.git && git fetch upstream --no-tags\n${fullOutput}`,
       })
+      // altimate_change end
     } else {
       add({ name: "marker guard", status: "PASS", detail: fullOutput || "no unmarked upstream-shared changes" })
     }

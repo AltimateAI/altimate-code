@@ -1,5 +1,6 @@
 import path from "node:path"
 import { readFile, realpath, stat, access } from "node:fs/promises"
+import { Installation } from "../../installation"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
 import { collectChangedFiles, makeContentResolver, defaultBaseRef, gitRepoRoot, manifestHash } from "./git"
@@ -152,28 +153,51 @@ export function isManifestAffecting(rel: string): boolean {
  *  the review proceeds against the (possibly stale) manifest and the
  *  caller mirrors the flag onto the signed envelope so a downstream
  *  auditor can distinguish stale-manifest verdicts from clean ones
- *  (stderr alone is easy for CI to swallow). */
-async function detectStaleManifest(manifestAbs: string, changedPaths: string[], fsRoot: string): Promise<boolean> {
+ *  (stderr alone is easy for CI to swallow).
+ *
+ *  A deleted or renamed manifest-affecting file is treated as unconditionally
+ *  stale: the file's mtime cannot be checked (the path is gone) but the
+ *  manifest still references it, so the metadata is by definition out of date
+ *  (cubic-review PR #1041 — the prior path-only signature silently reported
+ *  clean for deletions and could false-certify verdicts against ghost models). */
+async function detectStaleManifest(manifestAbs: string, changed: ChangedFile[], fsRoot: string): Promise<boolean> {
   try {
     const manifestMtime = (await stat(manifestAbs)).mtimeMs
-    for (const rel of changedPaths) {
-      if (!isManifestAffecting(rel)) continue
-      // `changedPaths` are repo-root relative (from `git diff --name-status`),
+    for (const f of changed) {
+      // For renamed files, the OLD path is what the manifest still knows about;
+      // check both sides so both a rename-away and a rename-to a
+      // manifest-affecting shape trigger the signal.
+      const paths: string[] = [f.path]
+      if (f.status === "renamed" && f.oldPath) paths.push(f.oldPath)
+      if (!paths.some(isManifestAffecting)) continue
+
+      // Deleted / renamed files no longer exist at their old path on disk, so
+      // stat would fail. The manifest still references them though, so the
+      // metadata is stale by definition — fire immediately.
+      if (f.status === "deleted" || f.status === "renamed") {
+        process.stderr.write(
+          `⚠️  manifest ${manifestAbs} appears stale — ${f.status} \`${f.path}\` is a manifest-affecting path. ` +
+            `Re-run \`dbt compile\` (or \`dbt build\`) to refresh before reviewing.\n`,
+        )
+        return true
+      }
+
+      // `changed` paths are repo-root relative (from `git diff --name-status`),
       // so root at the git top-level rather than the caller's cwd. When the
       // CLI is invoked from a subdir the naive path.join(cwd, rel) points at
       // a non-existent path and the stale check silently no-ops.
-      const abs = path.isAbsolute(rel) ? rel : path.join(fsRoot, rel)
+      const abs = path.isAbsolute(f.path) ? f.path : path.join(fsRoot, f.path)
       try {
         const changedMtime = (await stat(abs)).mtimeMs
         if (changedMtime > manifestMtime) {
           process.stderr.write(
-            `⚠️  manifest ${manifestAbs} appears stale — ${rel} was modified after the manifest was written. ` +
+            `⚠️  manifest ${manifestAbs} appears stale — ${f.path} was modified after the manifest was written. ` +
               `Re-run \`dbt compile\` (or \`dbt build\`) to refresh before reviewing.\n`,
           )
           return true
         }
       } catch {
-        /* file not on disk (e.g. removed by the change) — skip */
+        /* file not on disk for an added/modified entry — skip (rare race) */
       }
     }
   } catch {
@@ -256,7 +280,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // is limited to files that would materially change the manifest
   // (`isManifestAffecting`), so noise is bounded. Return value is stamped
   // into the signed envelope so downstream auditors see it too.
-  const staleManifest = await detectStaleManifest(manifestAbs, changedFiles.map((f) => f.path), gitRoot)
+  const staleManifest = await detectStaleManifest(manifestAbs, changedFiles, gitRoot)
 
   // Resolve the SQL dialect: explicit config wins; otherwise auto-detect from
   // the dbt manifest's `adapter_type` (so a BigQuery/Redshift project isn't
@@ -317,7 +341,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     manifestHash: mhash,
     modelVersion: opts.modelVersion,
     coreVersion: opts.coreVersion,
-    cliVersion: opts.cliVersion,
+    // Default cliVersion so agent-invoked callers (dbt_pr_review tool) that
+    // don't thread the version get the audit-trail field populated too.
+    // Only the CLI command explicitly forwards Installation.VERSION today,
+    // so a missing default silently regresses envelope provenance for tool-
+    // path verdicts (cubic-review PR #1041).
+    cliVersion: opts.cliVersion ?? Installation.VERSION,
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
     prTitle: opts.prTitle,
     prBody: opts.prBody,

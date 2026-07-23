@@ -251,12 +251,16 @@ rubric:
 
 Named categories under `riskTierPathTokens` promote any diff touching a matching
 path to `full` review tier, so those areas never auto-approve on `trivial`
-classification. Values are case-insensitive substrings; the `preset:finops` marker
-expands to the built-in FinOps keyword list (cost, billing, spend, revenue, etc.).
-Prior to v0.9.3 the FinOps list was hardcoded and always on; it is now opt-in via
-this config. When a category value is invalid the CLI logs a stderr warning AND
-surfaces the error in the verdict envelope's `tierReasons[]` (and in the PR
-comment), so a typo can't silently kill your opt-in.
+classification. Tokens are matched **case-insensitively at path, word, or digit
+boundaries** — not as arbitrary substrings. For example, the token `cost` fires
+on `models/marts/mrt_cost_daily.sql` (bounded by `_` and `_`) but **not** on
+`models/broadcaster.sql` (the substring lives inside a longer word). The
+`preset:finops` marker expands to the built-in FinOps keyword list (cost,
+billing, spend, revenue, etc.). Before v0.9.3 the FinOps list was hardcoded and
+always on; it is now opt-in via this config. When a category value is invalid
+the CLI logs a stderr warning AND surfaces the error in the verdict envelope's
+`tierReasons[]` (and in the PR comment), so a typo can't silently kill your
+opt-in.
 
 ## Data-diff in CI
 
