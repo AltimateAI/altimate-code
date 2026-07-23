@@ -3,7 +3,7 @@
  * Release Preflight — deterministic gate for `/release` and `/release-beta`.
  *
  * Replaces LLM-improvised release judgment calls with objective, scriptable
- * checks. Born from `.github/meta/release-retro-2026-07-22.md`: three straight
+ * checks. Born from the 2026-07-22 release retro: three straight
  * releases (v0.8.10, v0.9.1, v0.9.2) each hit at least one of these failure
  * modes live — a stale local tag that nearly published a 2641-commit-divergent
  * artifact, releasing with HEAD behind origin/main, an unmerged prerelease line
