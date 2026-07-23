@@ -885,6 +885,47 @@ describe("risk-tier", () => {
     }
   })
 
+  test("R20 S4: config error surfaces in envelope even WITHOUT --explain-tier (coderabbit review)", async () => {
+    // coderabbit review on PR #1028 orchestrate.ts:1129 — a normal
+    // `comment` / `gate` run does NOT set `explainTier`, so the envelope's
+    // `tierReasons` field is dropped. That silently strips the config
+    // error, and a user with a typoed `.altimate/review.yml` sees no
+    // reason WHY their opt-in didn't fire in the PR comment — the whole
+    // point of the earlier fail-loud fix. The envelope gate now includes
+    // tierReasons whenever a config error was caught, regardless of
+    // explain-tier.
+    const files: ChangedFile[] = [{ path: "models/marts/m.sql", status: "modified", diff: "+select 1\n" }]
+    const runner: ReviewRunner = {
+      async check() { return { issues: [], ran: false } },
+      async detectPii() { return { columns: [] } },
+      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
+      async grade() { return { grade: "A", decided: true } },
+    }
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      // NOTE: explainTier is intentionally NOT set here (default false).
+      const env = await runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG, riskTierPathTokens: { finops: ["preset:finop"] } } as any,
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        getContent: async () => "select 1",
+        generatedAt: "2026-05-29T00:00:00Z",
+      })
+      // Envelope was still produced.
+      expect(env.verdict).toBeDefined()
+      // Config error surfaces in tierReasons DESPITE explainTier being unset.
+      const reasons = (env.tierReasons ?? []).join(" ")
+      expect(reasons).toContain("riskTierPathTokens config invalid")
+      expect(reasons).toContain("unknown preset 'finop'")
+    } finally {
+      process.stderr.write = origWrite
+    }
+  })
+
   test("R20 S4: high-risk token — no promotion when no resolver is configured (core is neutral)", () => {
     // Same paths that fire above must stay lite when the caller doesn't
     // supply a resolver — the reviewer core has zero opinion about which

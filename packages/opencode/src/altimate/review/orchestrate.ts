@@ -1427,7 +1427,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     manifestHash: input.manifestHash,
     generatedAt: input.generatedAt,
     degraded,
-    tierReasons: input.explainTier || tierForced ? tierReasons : undefined,
+    // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
+    // OR when a riskTierPathTokens config error was caught above — the error
+    // must surface in the envelope (and downstream PR comment) even in a
+    // normal `comment`/`gate` run, otherwise a config typo silently kills
+    // the user's opt-in with only a stderr trace they'll never see
+    // (coderabbit review, PR #1028 orchestrate.ts:1129).
+    tierReasons: input.explainTier || tierForced || pathTokenConfigError ? tierReasons : undefined,
     tierForced: tierForced ? true : undefined,
     tierClassified: tierForced ? classifiedTier : undefined,
   })
