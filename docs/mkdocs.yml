@@ -75,8 +75,7 @@ markdown_extensions:
 nav:
   - Getting Started:
       - Overview: getting-started/index.md
-      - Quickstart: getting-started/quickstart-new.md
-      - Setup: getting-started/quickstart.md
+      - Quickstart: getting-started/quickstart.md
   - Examples:
       - Showcase: examples/index.md
   - Use:

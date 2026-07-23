@@ -21,7 +21,7 @@ hide:
 
 <p class="hero-actions" markdown>
 
-[Get Started](quickstart.md){ .md-button .md-button--primary }
+[Quickstart](quickstart.md){ .md-button .md-button--primary }
 [See Examples](../examples/index.md){ .md-button }
 [View on GitHub :material-github:](https://github.com/AltimateAI/altimate-code){ .md-button }
 

@@ -138,7 +138,7 @@ Skills are loaded from these locations (in priority order):
 
 ## Built-in Data Engineering Skills
 
-altimate ships with built-in skills for common data engineering tasks. Type `/` in the TUI to browse what's available and get autocomplete on skill names.
+altimate ships with built-in skills for common data engineering tasks. Run `/skills` in the TUI to list what's available.
 
 | Skill | Description |
 |-------|-------------|

@@ -1,204 +1,114 @@
 ---
-description: "Install altimate-code, connect your warehouse and LLM, configure agent modes, skills, and permissions."
+title: "Quickstart"
+description: "Install Altimate Code, connect an LLM and your warehouse, and build your first data pipeline. For data engineers who know dbt, Snowflake, and SQL."
 ---
+# Quickstart
 
-# Setup
+Welcome to Altimate Code!
 
-> **You need:** npm 8+. An API key for any supported LLM provider.
+This guide takes you from install to a working data engineering agent. By the end, you'll have Altimate Code connected to an LLM and building a complete dbt pipeline from a single prompt.
 
----
+## Before you begin
+
+Make sure you have:
+
+- A terminal open. The npm install needs Node.js 18+; the [standalone installer](#step-1-install) needs no Node.js at all
+- A way to talk to an LLM: your own provider key, or a free Altimate API key ([Step 2](#step-2-select-your-llm-provider) covers both, including the free 10M-token route)
+- Optionally, a dbt project for Altimate Code to work on. You don't need one: the [pipeline example in Step 5](#step-5-build-your-first-data-pipeline) builds everything from scratch.
 
 ## Step 1: Install
 
-```bash
+```bash title="Terminal"
 npm install -g altimate-code
 ```
 
-> **Zero additional setup.** One command install.
+The install runs a postinstall script that links the platform-specific binary onto your PATH, sets up the bundled dbt tooling, and copies the built-in skills into `~/.altimate/builtin`.
 
----
+??? note "Does your org restrict npm install scripts?"
+    If your org blocks npm lifecycle scripts (for example with `--ignore-scripts` or a script-approval gate like `@lavamoat/allow-scripts`), that postinstall step won't run, and the CLI may not function correctly. To let it run those postinstall scripts, run this and reinstall:
 
-## Step 2: Configure Your LLM
+    ```bash title="Terminal"
+    npm config set allow-scripts=altimate-code --location=user
+    ```
 
-```bash
+    Otherwise, you can use the standalone installers below, which don't depend on npm so they aren't affected by any postinstall-script blocker:
+
+    ```bash title="Terminal (macOS/Linux)"
+    curl -fsSL https://www.altimate.sh/install | bash
+    ```
+
+    ```powershell title="Terminal (Windows PowerShell)"
+    powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
+    ```
+
+    These drop a single self-contained `altimate` binary and need no Node.js. Not currently supported on Alpine Linux (musl) or Windows on ARM64; use `apk add gcompat` on Alpine, or WSL on Windows ARM.
+
+## Step 2: Select your LLM provider
+
+Start an interactive session with the `altimate` command, then run `/connect`:
+
+```bash title="Terminal"
 altimate        # Launch the TUI
-/connect        # Choose your provider and enter your API key
 ```
 
-Or set an environment variable:
-
-```bash
-export ANTHROPIC_API_KEY=your-key-here   # Anthropic Claude (recommended)
-export OPENAI_API_KEY=your-key-here      # OpenAI
+```text title="In the TUI"
+/connect        # Interactive setup
 ```
 
-Minimal config file option (`altimate-code.json` in your project root):
+!!! tip "We recommend connecting with your Altimate API key"
+    Select **Altimate AI** in the `/connect` provider list. You use one credential, your Altimate API key, instead of a separate Anthropic, OpenAI, or other provider key. This connects through the [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/): new accounts get 10M tokens free, and the Gateway dynamically routes each request to whichever model fits the task across Sonnet, Opus, GPT, and more, with no manual model switching. Find your instance name and API key under Settings → API Keys in your Altimate dashboard, formatted as `instance-name::api-key`.
 
-```json
+You can also choose any provider you already have a key for, such as Anthropic Claude, OpenAI, or Google Gemini. To use it right away, set the environment variable in your shell with the command below. To make it permanent, add the same line to your shell profile (`~/.zshrc` or `~/.bashrc`).
+
+```bash title="Terminal"
+export ANTHROPIC_API_KEY=sk-ant-...
+altimate
+```
+
+Prefer a config file? Add the provider to `altimate-code.json` in your project root:
+
+```json title="altimate-code.json"
 {
   "provider": {
     "anthropic": {
-      "apiKey": "{env:ANTHROPIC_API_KEY}"
+      "options": {
+        "apiKey": "{env:ANTHROPIC_API_KEY}"
+      }
     }
   },
   "model": "anthropic/claude-sonnet-4-6"
 }
 ```
 
-### Changing your LLM provider
+For every other provider (Amazon Bedrock, Azure OpenAI, Google Gemini, Ollama, LM Studio, OpenRouter, and more) and for switching providers later, see the [Providers reference](../configure/providers.md).
 
-Switch providers at any time by updating the `provider` and `model` fields in `altimate-code.json`:
+## Step 3: Connect your warehouse
 
-=== "Anthropic"
+No dbt project or warehouse of your own yet? Skip ahead to [Step 5](#step-5-build-your-first-data-pipeline), it's a self-contained example that needs neither. Or clone a sample dbt project such as [jaffle_shop_duckdb](https://github.com/dbt-labs/jaffle_shop_duckdb) and run `/discover` inside it: it ships a `profiles.yml` on DuckDB, so there are no cloud credentials to set up.
 
-    ```json
-    {
-      "provider": {
-        "anthropic": {
-          "apiKey": "{env:ANTHROPIC_API_KEY}"
-        }
-      },
-      "model": "anthropic/claude-sonnet-4-6"
-    }
-    ```
+### Option A: Auto-detect from dbt profiles
 
-=== "OpenAI"
+If you have a `profiles.yml`, either in your home directory's `.dbt/` folder, in your project repo, or pointed to by `DBT_PROFILES_DIR`:
 
-    ```json
-    {
-      "provider": {
-        "openai": {
-          "apiKey": "{env:OPENAI_API_KEY}"
-        }
-      },
-      "model": "openai/gpt-4o"
-    }
-    ```
-
-=== "Amazon Bedrock"
-
-    ```json
-    {
-      "provider": {
-        "amazon-bedrock": {
-          "options": {
-            "region": "us-east-1"
-          }
-        }
-      },
-      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6-v1"
-    }
-    ```
-
-    Uses the standard AWS credential chain (`AWS_PROFILE`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, IAM roles, SSO).
-    For custom API gateways, see [Bedrock Custom Endpoints](../configure/bedrock-custom-endpoints.md).
-
-=== "Azure OpenAI"
-
-    ```json
-    {
-      "provider": {
-        "azure": {
-          "apiKey": "{env:AZURE_OPENAI_API_KEY}",
-          "baseURL": "https://your-resource.openai.azure.com/openai/deployments/your-deployment"
-        }
-      },
-      "model": "azure/gpt-4o"
-    }
-    ```
-
-=== "Google Gemini"
-
-    ```json
-    {
-      "provider": {
-        "google": {
-          "apiKey": "{env:GOOGLE_API_KEY}"
-        }
-      },
-      "model": "google/gemini-2.5-pro"
-    }
-    ```
-
-=== "Ollama (Local)"
-
-    ```json
-    {
-      "provider": {
-        "ollama": {
-          "baseURL": "http://localhost:11434"
-        }
-      },
-      "model": "ollama/llama3.1"
-    }
-    ```
-
-=== "LM Studio (Local)"
-
-    ```json
-    {
-      "provider": {
-        "lmstudio": {
-          "name": "LM Studio",
-          "npm": "@ai-sdk/openai-compatible",
-          "options": {
-            "apiKey": "lm-studio",
-            "baseURL": "http://localhost:1234/v1"
-          },
-          "models": {
-            "qwen2.5-7b-instruct": {
-              "name": "Qwen 2.5 7B Instruct",
-              "tool_call": true,
-              "limit": { "context": 131072, "output": 8192 }
-            }
-          }
-        }
-      },
-      "model": "lmstudio/qwen2.5-7b-instruct"
-    }
-    ```
-
-=== "OpenRouter"
-
-    ```json
-    {
-      "provider": {
-        "openrouter": {
-          "apiKey": "{env:OPENROUTER_API_KEY}"
-        }
-      },
-      "model": "openrouter/anthropic/claude-sonnet-4-6"
-    }
-    ```
-
-You can also set a smaller model for lightweight tasks like summarization:
-
-```json
-{
-  "model": "anthropic/claude-sonnet-4-6",
-  "small_model": "anthropic/claude-haiku-4-5-20251001"
-}
+```text title="In the TUI"
+/discover
 ```
 
----
+Altimate Code searches for `profiles.yml` in this order: `DBT_PROFILES_DIR` env var → project root (next to `dbt_project.yml`) → `<home>/.dbt/profiles.yml`. It reads your dbt profiles and creates warehouse connections automatically. You'll see output like:
 
-## Step 3: Connect Your Warehouse
-
-### Auto-discover with `/discover`
-
-> Skip this step if you want to work locally. You can always run `/discover` later.
-
-```bash
-altimate /discover
+```
+Found dbt project: jaffle_shop (dbt-snowflake)
+Found profile: snowflake_prod → Added connection 'snowflake_prod'
+Indexing schema... 142 tables, 1,847 columns indexed
 ```
 
-Auto-detects your dbt projects, warehouse credentials from `profiles.yml` (checks `DBT_PROFILES_DIR`, then your project directory, then the default `<home>/.dbt/profiles.yml`), running Docker containers, and environment variables (`SNOWFLAKE_ACCOUNT`, `PGHOST`, `DATABASE_URL`, etc.).
+### Option B: Manual configuration
 
-### Manual configuration
+Config lives at two levels: `.altimate-code/` in a project root (shared with your team, checked into the repo) and `~/.altimate-code/` in your home directory (your own defaults, applied everywhere). Project config wins when both exist.
 
-Add a warehouse connection to `.altimate-code/connections.json`:
+Add to `.altimate-code/connections.json` in your project root:
 
-=== "Snowflake"
+=== ":simple-snowflake: Snowflake"
 
     ```json
     {
@@ -215,19 +125,21 @@ Add a warehouse connection to `.altimate-code/connections.json`:
     }
     ```
 
-=== "BigQuery"
+=== ":simple-googlebigquery: BigQuery"
 
     ```json
     {
       "bigquery": {
         "type": "bigquery",
         "project": "my-project-id",
-        "credentials_path": "~/.config/gcloud/application_default_credentials.json"
+        "credentials_path": "/path/to/service-account.json"
       }
     }
     ```
 
-=== "Databricks"
+    Already authenticated via `gcloud`? Omit `credentials_path` to use Application Default Credentials instead.
+
+=== ":simple-databricks: Databricks"
 
     ```json
     {
@@ -242,7 +154,7 @@ Add a warehouse connection to `.altimate-code/connections.json`:
     }
     ```
 
-=== "PostgreSQL"
+=== ":simple-postgresql: PostgreSQL"
 
     ```json
     {
@@ -257,7 +169,7 @@ Add a warehouse connection to `.altimate-code/connections.json`:
     }
     ```
 
-=== "DuckDB"
+=== ":simple-duckdb: DuckDB (local)"
 
     ```json
     {
@@ -283,135 +195,42 @@ Add a warehouse connection to `.altimate-code/connections.json`:
     }
     ```
 
-All warehouse types support SSH tunneling for bastion hosts. See the [Warehouses reference](../configure/warehouses.md) for full options including key-pair auth, IAM roles, and ADC.
+All warehouse types support SSH tunneling for bastion hosts. See [Warehouse Connections](../configure/warehouses.md) for more warehouse types and advanced options such as key-pair auth, IAM roles, and ADC.
 
-Verify your connection:
+Verify the connection, then index the schema for autocomplete and analysis:
 
+```text title="In the TUI"
+warehouse_test snowflake
 ```
-> warehouse_test snowflake
-✓ Connected successfully
+
+```text title="In the TUI"
+schema_index snowflake
 ```
 
----
+## Step 4: Select an agent mode
 
-## Step 4: Choose an Agent Mode
+Altimate Code runs in one of four modes, with permissions enforced at the harness level rather than left to the prompt:
 
-altimate ships with specialized agent modes, each with its own tool permissions:
-
-| Mode | Access | Use when you want to... |
+| Mode | Access | Use it for |
 |---|---|---|
-| **Builder** | Read/Write | Create and modify SQL, dbt models, pipelines. SQL writes prompt for approval. |
-| **Analyst** | Read-only | Explore production data safely, run cost analysis. SQL writes denied entirely. |
-| **Plan** | Minimal | Plan an approach before switching to builder to execute it |
+| Builder | Read/write | Scaffolding and editing dbt models and SQL. Writes prompt for approval. |
+| Analyst | Read-only | Safe exploration of production data. SQL writes denied entirely. |
+| Reviewer | Read-only | Grading a SQL/dbt change and returning an approve, comment, or request-changes verdict. |
+| Plan | Minimal | Sketching an approach before switching to Builder to execute it. |
 
-Switch modes in the TUI:
+Run `/agents` in the TUI to open the agent picker, or start in a specific mode from your terminal:
 
-```
-/agent analyst
-```
-
-Or from the CLI:
-
-```bash
-altimate --agent analyst
+```bash title="Terminal"
+altimate --agent builder
 ```
 
-The **Analyst** mode is production-safe — it blocks INSERT, UPDATE, DELETE, and DROP statements at the harness level. The **Builder** mode has full read/write access for creating and editing SQL and dbt files.
-
----
-
-## Step 5: Select Skills
-
-Skills are reusable prompt templates for common workflows. Type `/` in the TUI to browse all available skills:
-
-| Skill | Purpose |
-|---|---|
-| `/query-optimize` | Optimize slow queries with anti-pattern detection |
-| `/sql-review` | SQL quality gate with grading |
-| `/sql-translate` | Cross-dialect SQL translation |
-| `/cost-report` | Snowflake/Databricks cost analysis |
-| `/pii-audit` | Scan for PII exposure |
-| `/dbt-develop` | Scaffold new dbt models |
-| `/dbt-test` | Generate dbt tests |
-| `/dbt-docs` | Generate dbt documentation |
-| `/dbt-analyze` | Column-level lineage and impact analysis |
-| `/dbt-troubleshoot` | Debug dbt errors |
-| `/data-viz` | Interactive dashboards and visualizations |
-| `/teach` | Teach patterns from example files |
-| `/train` | Load standards from documents |
-
-You don't need to memorize these — describe what you want in plain English and the agent routes to the right skill automatically.
-
-### Custom skills
-
-Add your own skills as Markdown files in `.altimate-code/skill/`:
-
-```markdown
----
-name: cost-review
-description: Review SQL queries for cost optimization
----
-
-Analyze the SQL query for cost optimization opportunities.
-Focus on: $ARGUMENTS
-```
-
-Skills are loaded from these paths (highest priority first):
-
-1. `.altimate-code/skill/` (project)
-2. `~/.altimate-code/skills/` (global)
-3. Custom paths via config:
-
-```json
-{
-  "skills": {
-    "paths": ["./my-skills", "~/shared-skills"]
-  }
-}
-```
-
----
-
-## Step 6: Configure Permissions
-
-Governance is enforced at the harness level, not via prompts. Every tool has a permission level: `allow`, `ask`, or `deny`.
-
-### Per-agent permissions
-
-Set tool permissions for each agent mode in `altimate-code.json`:
-
-```json
-{
-  "agent": {
-    "analyst": {
-      "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "bash": {
-          "dbt docs generate": "allow",
-          "*": "deny"
-        }
-      }
-    },
-    "builder": {
-      "permission": {
-        "write": "allow",
-        "edit": "allow",
-        "bash": {
-          "dbt *": "allow",
-          "rm -rf *": "deny"
-        }
-      }
-    }
-  }
-}
-```
+See [Agent Modes](../data-engineering/agent-modes.md) for the full permission model, and [Permissions](../configure/permissions.md) to tune tool access per agent.
 
 ### Project rules with AGENTS.md
 
-Define project-wide conventions in an `AGENTS.md` file at your project root. These rules are automatically loaded into every agent's system prompt:
+Define team conventions in an `AGENTS.md` file at your project root. Every agent loads these rules into its system prompt automatically:
 
-```markdown
+```markdown title="AGENTS.md"
 # Project Rules
 
 - All staging models must be prefixed with `stg_`
@@ -420,34 +239,96 @@ Define project-wide conventions in an `AGENTS.md` file at your project root. The
 - All new models require at least one unique test and one not_null test
 ```
 
-### Default permissions by agent mode
+See [Rules](../configure/rules.md) for details.
 
-| Agent | File writes | SQL writes | Bash | Training |
-|---|---|---|---|---|
-| Builder | allow | ask (prompts for approval) | ask | allow |
-| Analyst | deny | deny (blocked entirely) | deny (safe commands auto-allowed) | allow |
-| Plan | deny | deny | deny | deny |
+## Step 5: Build your first data pipeline
 
----
+Try this end-to-end example. It creates files and runs dbt, so start in Builder mode (`altimate --agent builder`, or switch with `/agents` once you're in), then paste this prompt into the TUI:
 
-## Step 7: Build Your First Artifact
-
-In the TUI, paste this prompt:
-
-```
-Build a NYC taxi analytics dashboard using BigQuery public data and dbt
-for transformations. Include geographic demand analysis with
-pickup/dropoff hotspots, top routes, airport traffic, and borough
-comparisons. Add revenue analytics with fare breakdowns, fare
-distribution, tip analysis, payment trends, and revenue-per-mile
-by route.
+```text title="In the TUI"
+Take the New York City taxi cab public dataset, bring up a DuckDB instance,
+and build a dashboard showing areas of maximum coverage and lowest coverage.
+Set up a complete dbt project with staging, intermediate, and mart layers,
+and create an Airflow DAG to orchestrate the pipeline.
 ```
 
----
+**What Altimate Code does:**
+
+1. **Downloads the NYC TLC trip data** into a local DuckDB instance
+2. **Scaffolds a full dbt project** with proper directory structure:
+    ```
+    nyc_taxi/
+      models/
+        staging/
+          stg_yellow_trips.sql
+          stg_taxi_zones.sql
+        intermediate/
+          int_trips_by_zone.sql
+          int_zone_coverage_stats.sql
+        marts/
+          fct_zone_coverage.sql
+          dim_zones.sql
+      seeds/
+        taxi_zone_lookup.csv
+      dbt_project.yml
+      profiles.yml              # points to DuckDB
+    ```
+3. **Generates mart models** that aggregate pickup/dropoff counts per zone, rank zones by trip volume, and classify them as high-coverage or low-coverage
+4. **Creates an Airflow DAG** (`dags/nyc_taxi_pipeline.py`) with tasks for data ingestion, `dbt run`, `dbt test`, and dashboard generation
+5. **Builds an interactive dashboard** visualizing zone coverage across NYC: top zones, bottom zones, and geographic distribution
+
+This prompt exercises warehouse connections, dbt scaffolding, SQL generation, orchestration wiring, and visualization: the full Altimate Code toolkit.
+
+## Step 6: Explore skills
+
+Run `/skills` in the TUI to list all available skills. Here's a quick reference for common tasks:
+
+!!! tip
+    You don't need to memorize these. Just describe what you want in plain English, and the agent routes to the right skill automatically.
+
+| I want to...              | Skill               | Example                                                  |
+| ------------------------- | ------------------- | -------------------------------------------------------- |
+| Optimize a slow query     | `/query-optimize`   | `/query-optimize SELECT * FROM big_table`                |
+| Review SQL before merging | `/sql-review`       | `/sql-review models/staging/stg_orders.sql`              |
+| Check Snowflake costs     | `/cost-report`      | `/cost-report` (last 30 days)                            |
+| Scan for PII exposure     | `/pii-audit`        | `/pii-audit` (full schema) or `/pii-audit models/marts/` |
+| Debug a dbt error         | `/dbt-troubleshoot` | Paste the error message                                  |
+| Add tests to a model      | `/dbt-test`         | `/dbt-test models/staging/stg_orders.sql`                |
+| Document a model          | `/dbt-docs`         | `/dbt-docs models/marts/fct_revenue.sql`                 |
+| Analyze downstream impact | `/dbt-analyze`      | `/dbt-analyze stg_orders` (before refactoring)           |
+| Create a new dbt model    | `/dbt-develop`      | `Create a staging model for the raw_orders source`       |
+| Translate SQL dialects    | `/sql-translate`    | `/sql-translate snowflake bigquery SELECT DATEADD(...)`  |
+| Check migration safety    | `/schema-migration` | `/schema-migration migrations/V003__alter_orders.sql`    |
+| Teach a pattern           | `/teach`            | `/teach @models/staging/stg_orders.sql`                  |
+
+You can also write your own skills as Markdown files in `.altimate-code/skill/`. See [Skills](../configure/skills.md) for the format and load paths.
+
+## Essential commands
+
+Terminal commands run `altimate` from your shell. TUI commands run inside an interactive session.
+
+**In your terminal**
+
+| Command | What it does |
+|---|---|
+| `altimate` | Start the TUI in the current directory |
+| `altimate run "task"` | Run `altimate` with a one-off message |
+| `altimate --agent analyst` | Start in a specific agent mode |
+| `altimate --continue` | Continue your last session |
+| `altimate check models/` | Run deterministic SQL checks (lint, safety), no LLM required |
+| `altimate stats` | Show token usage and cost statistics |
+
+**Inside the TUI**
+
+| Command | What it does |
+|---|---|
+| `/connect` | Choose and authenticate an LLM provider |
+| `/discover` | Auto-detect dbt projects and warehouse connections |
+| `/skills` | List all available skills |
+| `/agents` | Open the agent picker to switch modes |
 
 ## What's Next
 
-- [Agent Modes](../data-engineering/agent-modes.md): Deep dive into each mode's capabilities
-- [Warehouses Reference](../configure/warehouses.md): All warehouse types, auth methods, SSH tunneling
-- [Config Reference](../configure/config.md): Full config file schema
-- [CI & Automation](../data-engineering/guides/ci-headless.md): Run altimate in automated pipelines
+- **[Configure](../configure/index.md):** Warehouses, LLM providers, permissions, skills, and the full config file schema
+- **[Examples](../examples/index.md):** End-to-end walkthroughs for common data engineering tasks
+- **[Interfaces](../usage/tui.md):** TUI, CLI, CI, IDE, and GitHub/GitLab integrations
