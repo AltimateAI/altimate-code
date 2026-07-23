@@ -16,7 +16,8 @@ describe("isManifestAffecting", () => {
     "models/staging/stg_orders.sql",
     "models/schema.yml",
     "models/marts/_models.yml",
-    "models/customers.md", // dbt docs block
+    "models/customers.md", // dbt docs block under models/
+    "analyses/gross_margin.md", // dbt docs block under analyses/
     "seeds/lookup.csv",
     "snapshots/orders_snapshot.sql",
     "snapshots/orders_snapshot.yml",
@@ -45,6 +46,14 @@ describe("isManifestAffecting", () => {
     "target/manifest.json", // the manifest itself
     "target/compiled/foo.sql", // compiled artifacts
     "tests/e2e/setup.ts",
+    // dbt docs blocks are canonically parsed only from `models/` and
+    // `analyses/`. README.md files elsewhere under dbt directories are
+    // package documentation, not manifest input (altimate-harness-bot
+    // review, PR #1027 run.ts:133).
+    "macros/README.md",
+    "tests/README.md",
+    "seeds/README.md",
+    "snapshots/README.md",
   ])("rejects: %s", (rel) => {
     expect(isManifestAffecting(rel)).toBe(false)
   })

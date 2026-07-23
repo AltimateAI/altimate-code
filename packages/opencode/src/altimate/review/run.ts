@@ -107,7 +107,14 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
           await access(candidate)
           return { path: candidate, projectRoot: dir }
         } catch {
-          return undefined // dbt project found but not compiled — respect that
+          // dbt project found at this dir but no compiled artifact. Do
+          // NOT walk further — a grandparent's `target/manifest.json`
+          // belongs to that grandparent's project, not to this one, and
+          // reviewing against it would compile the wrong DAG. Deliberate:
+          // "found a project, it just hasn't been compiled" — silent
+          // fallback to a sibling project would surprise the caller
+          // (altimate-harness-bot review, PR #1027 run.ts:114).
+          return undefined
         }
       } catch {
         /* keep walking */
@@ -117,21 +124,31 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
   }
 }
 
-/** Warn to stderr when the manifest looks stale relative to changed files.
- *  Only considers dbt-relevant files (SQL, YAML, Python models, seed CSV,
- *  docs markdown) — changes to `README.md` at repo root, `.github/`,
- *  `package.json`, etc. don't affect whether the compiled manifest is still
- *  valid, so their mtimes shouldn't trigger a stale warning. */
-/** Exported for tests — see review-run-stale.test.ts. */
+/** Whether a repo-relative path is one whose modification could invalidate
+ *  the compiled manifest — dbt source (SQL, YAML, Python models, seed CSV,
+ *  docs markdown blocks) or top-level dbt config. `README.md` at repo root,
+ *  `.github/`, `package.json`, etc. are excluded so their mtimes don't
+ *  trigger a stale warning. Exported for tests — see review-run-stale.test.ts.
+ *  Referenced by `warnIfStale`. */
 export function isManifestAffecting(rel: string): boolean {
-  // dbt source directories — code (sql/py), schema (yml), seeds (csv), and
-  // docs blocks (md files under models/ / snapshots/ / analyses/ / etc.).
-  if (/(^|\/)(models|seeds|snapshots|macros|tests|analyses)\/.*\.(sql|py|yml|yaml|csv|md)$/i.test(rel)) return true
+  // Code / schema / seed CSV live under any dbt source directory.
+  if (/(^|\/)(models|seeds|snapshots|macros|tests|analyses)\/.*\.(sql|py|yml|yaml|csv)$/i.test(rel)) return true
+  // dbt docs blocks (`.md`) are only manifest-affecting under `models/` and
+  // `analyses/` — where `{% docs %}` blocks are canonically parsed. A
+  // `macros/README.md` / `tests/README.md` / `seeds/README.md` is package
+  // documentation, not manifest input (altimate-harness-bot review,
+  // PR #1027 run.ts:133).
+  if (/(^|\/)(models|analyses)\/.*\.md$/i.test(rel)) return true
   // Top-level dbt project config files.
   if (/(^|\/)(dbt_project|packages|profiles|dependencies)\.ya?ml$/i.test(rel)) return true
   return false
 }
 
+/** Warn to stderr when the manifest looks stale relative to changed files.
+ *  Compares the manifest's mtime against every change-affecting path (per
+ *  `isManifestAffecting`); a single change newer than the manifest is
+ *  enough to fire the warning once and return. Non-fatal — the review
+ *  proceeds against the (possibly stale) manifest. */
 async function warnIfStale(manifestAbs: string, changedPaths: string[], fsRoot: string): Promise<void> {
   try {
     const manifestMtime = (await stat(manifestAbs)).mtimeMs
