@@ -22,7 +22,7 @@
  */
 
 import { describe, test, expect } from "bun:test"
-import { mkdtemp, mkdir, writeFile, symlink, utimes } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile, utimes } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import {
@@ -81,6 +81,33 @@ describe("v0.9.3 release: envelope audit fields (Compliance P0/P1)", () => {
     // A tampered version must break the signature.
     const tampered = { ...signed, engine: { ...signed.engine, cliVersion: "0.9.2" } }
     expect(verifyEnvelope(tampered, "k")).toBe(false)
+  })
+
+  test("reviewPullRequest defaults cliVersion so the dbt_pr_review tool path gets audit provenance too", async () => {
+    // Regression pin for cubic-review PR #1041: only the CLI command explicitly
+    // forwarded Installation.VERSION, and the dbt_pr_review tool wrapper
+    // never did — so agent-invoked verdicts silently dropped engine.cliVersion
+    // and defeated the audit-trail promise of the field. The fix defaults the
+    // field to Installation.VERSION inside reviewPullRequest so BOTH entry
+    // points get it. This test invokes reviewPullRequest WITHOUT passing
+    // cliVersion and asserts the field is populated on the returned envelope.
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "v093-clivers-"))
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      const env = await reviewPullRequest({
+        cwd: tmp,
+        head: undefined,
+        // opts.cliVersion INTENTIONALLY OMITTED — simulates the tool-path caller.
+        changedFiles: [{ path: "models/x.sql", status: "modified", diff: "+select 1\n" }],
+        getContent: async () => "select 1",
+      })
+      expect(env.engine.cliVersion).toBeDefined()
+      expect(typeof env.engine.cliVersion).toBe("string")
+      expect(env.engine.cliVersion!.length).toBeGreaterThan(0)
+    } finally {
+      process.stderr.write = origWrite
+    }
   })
 
   test("staleManifest true is signed; verify fails if flipped after signing", () => {
@@ -240,6 +267,36 @@ describe("v0.9.3 release: stale-manifest signal on envelope (DE/Compliance P1)",
     }
   })
 
+  test("deleted manifest-affecting file trips staleness even though it can't be stat'd (cubic PR #1041)", async () => {
+    // Bug caught by cubic on PR #1041: the pre-fix detectStaleManifest took
+    // `changedPaths: string[]` and tried to `stat(deletedFile)` which throws
+    // silently, so a deleted `models/orders.sql` reported CLEAN even though
+    // the manifest still references it — a false-negative that would
+    // signed-envelope-certify a verdict against ghost models. This test
+    // pins the fixed semantic: a deletion of a manifest-affecting path
+    // must fire the stale signal AND land on the envelope.
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "v093-stale-del-"))
+    await mkdir(path.join(tmp, "target"), { recursive: true })
+    const manifestPath = path.join(tmp, "target", "manifest.json")
+    await writeFile(manifestPath, JSON.stringify({ metadata: { adapter_type: "duckdb" } }))
+    // NOTE: no `models/orders.sql` on disk — it was DELETED by this diff.
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      const env = await reviewPullRequest({
+        cwd: tmp,
+        head: undefined,
+        manifestPath,
+        changedFiles: [{ path: "models/orders.sql", status: "deleted", diff: "-select 1\n" }],
+        getContent: async () => "",
+        cliVersion: "0.9.3",
+      })
+      expect(env.staleManifest).toBe(true)
+    } finally {
+      process.stderr.write = origWrite
+    }
+  })
+
   test("touching a non-manifest-affecting file (README.md) must NOT trip the stale signal", async () => {
     // Guard on `isManifestAffecting` — the mtime check MUST skip repo-wide
     // paths (README, package.json, .github/) or every unrelated commit
@@ -295,73 +352,73 @@ describe("v0.9.3 release: manifest auto-discovery hostile-shape resilience", () 
     }
   })
 
-  test("dbt_project.yml present but no target/manifest.json → no walk-past, returns undefined manifest", async () => {
+  test("dbt_project.yml present but no target/manifest.json → no walk-past to grandparent's compiled DAG", async () => {
     // The auto-discovery walk was hardened in PR #1027 to NOT climb into a
     // grandparent's `target/` when the current dbt project just hasn't been
     // compiled. Reviewing against the wrong project's DAG would be worse
     // than lint-only. Guard against a regression that re-introduces the
     // silent fallback.
-    const tmp = await mkdtemp(path.join(os.tmpdir(), "v093-uncompiled-"))
-    await writeFile(path.join(tmp, "dbt_project.yml"), "name: test\nversion: 1.0.0\n")
-    // Also fake a grandparent with a `target/manifest.json` — the walk must
-    // NOT reach for it.
-    const grandTarget = path.join(tmp, "..", "grandparent-target-fake")
-    // Skip the grandparent poison if the tmpdir parent isn't writable
-    // (some CI sandboxes) — the primary assertion still holds.
-    try {
-      await mkdir(grandTarget, { recursive: true })
-    } catch {
-      /* ignore */
-    }
-    const nested = path.join(tmp, "subdir")
-    await mkdir(nested, { recursive: true })
+    //
+    // Fixture layout to actually exercise the walk-past guard (cubic-review
+    // PR #1041 — the prior test only planted an unrelated sibling directory,
+    // never a real grandparent manifest, so the walker never had one to
+    // even consider skipping):
+    //
+    //   grand/
+    //     dbt_project.yml         ← poisoned grandparent project
+    //     target/manifest.json    ← poisoned grandparent manifest
+    //     inner/
+    //       dbt_project.yml       ← the project the reviewer should stop at
+    //       (no target/manifest.json — the guarded case)
+    //       subdir/               ← cwd
+    const grand = await mkdtemp(path.join(os.tmpdir(), "v093-grand-"))
+    await writeFile(path.join(grand, "dbt_project.yml"), "name: grand\nversion: 1.0.0\n")
+    await mkdir(path.join(grand, "target"), { recursive: true })
+    await writeFile(
+      path.join(grand, "target", "manifest.json"),
+      JSON.stringify({ metadata: { adapter_type: "duckdb" }, nodes: {} }),
+    )
+    const inner = path.join(grand, "inner")
+    await mkdir(inner, { recursive: true })
+    await writeFile(path.join(inner, "dbt_project.yml"), "name: inner\nversion: 1.0.0\n")
+    const cwd = path.join(inner, "subdir")
+    await mkdir(cwd, { recursive: true })
+
     const origWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = (() => true) as typeof process.stderr.write
+    let stderrBuf = ""
+    process.stderr.write = ((s: string) => {
+      stderrBuf += String(s)
+      return true
+    }) as typeof process.stderr.write
     try {
       const env = await reviewPullRequest({
-        cwd: nested,
+        cwd,
         head: undefined,
-        // No --manifest → auto-discovery from subdir.
+        // No --manifest → auto-discovery from cwd.
         changedFiles: [{ path: "models/x.sql", status: "modified", diff: "+select 1\n" }],
         getContent: async () => "select 1",
         cliVersion: "0.9.3",
       })
       expect(env.verdict).toBeDefined()
-      // Silent fallback to a grandparent's target/ would leave manifestHash
+      // The auto-discovery must have stopped at `inner`'s dbt_project.yml
+      // and refused to reach for `grand/target/manifest.json`. Silent
+      // fallback to the grandparent's target/ would leave manifestHash
       // populated with someone else's DAG.
       expect(env.manifestHash).toBeUndefined()
+      // And the stderr "auto-discovered dbt manifest at ..." breadcrumb
+      // must NOT reference the grandparent path — a regressed walker
+      // would announce a hit there.
+      expect(stderrBuf).not.toContain(path.join(grand, "target", "manifest.json"))
     } finally {
       process.stderr.write = origWrite
     }
   })
 
-  test("symlink loop in cwd path resolves via realpath and does not hang", async () => {
-    // Guard against a regression in the realpath handling around the
-    // dbtRoot / gitRoot canonicalization — a symlink loop would either
-    // throw or (in a naive walker) infinite-loop. reviewPullRequest must
-    // reach a defined verdict either way.
-    const tmp = await mkdtemp(path.join(os.tmpdir(), "v093-symlink-"))
-    // Point `looped` at itself's parent — realpath call must not spin.
-    const looped = path.join(tmp, "looped")
-    try {
-      await symlink(tmp, looped)
-    } catch {
-      // Some filesystems reject same-dir loops; skip if so.
-      return
-    }
-    const origWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = (() => true) as typeof process.stderr.write
-    try {
-      const env = await reviewPullRequest({
-        cwd: looped,
-        head: undefined,
-        changedFiles: [{ path: "models/x.sql", status: "modified", diff: "+select 1\n" }],
-        getContent: async () => "select 1",
-        cliVersion: "0.9.3",
-      })
-      expect(env.verdict).toBeDefined()
-    } finally {
-      process.stderr.write = origWrite
-    }
-  })
+  // NOTE: the "symlink loop" test that lived here previously created a
+  // single-hop parent alias (`looped -> tmp`) which `fs.realpath` resolves
+  // in one step — not a cycle. It therefore proved nothing about the
+  // realpath try/catch fallback in run.ts and was removed rather than
+  // rewritten (a real ELOOP fixture is filesystem-dependent, and the
+  // realpath fallback pattern is a straight try/catch obvious from a code
+  // read). Removed on cubic-review PR #1041 feedback.
 })
