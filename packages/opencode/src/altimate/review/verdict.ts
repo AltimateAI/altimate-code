@@ -82,6 +82,10 @@ export const EngineVersions = z.object({
   reviewer: z.string().default("dbt-pr-review/1"),
   core: z.string().optional(),
   model: z.string().optional(),
+  /** The altimate-code CLI release that generated this verdict — lets an
+   *  auditor reconstruct which policy version applied months later, when
+   *  the verdict envelope has outlived the running binary. */
+  cliVersion: z.string().optional(),
 })
 export type EngineVersions = z.infer<typeof EngineVersions>
 
@@ -110,6 +114,12 @@ export const VerdictEnvelope = z.object({
   engine: EngineVersions,
   /** Hash of the dbt manifest the verdict was computed against, when present. */
   manifestHash: z.string().optional(),
+  /** True when a change-affecting source file was modified after the manifest
+   *  was written (checked via mtime; see run.ts::detectStaleManifest). Durably
+   *  records in the signed envelope that the verdict may have been computed
+   *  against out-of-date metadata — a stderr warning alone is easy for CI to
+   *  swallow. */
+  staleManifest: z.boolean().optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -166,6 +176,8 @@ export interface BuildEnvelopeInput {
   tierForced?: boolean
   /** G2 — classifier's original tier before the force override. */
   tierClassified?: RiskTier
+  /** True when mtime signals the manifest predates a change-affecting file. */
+  staleManifest?: boolean
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -193,6 +205,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     summary: summarize(input.findings, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
+    staleManifest: input.staleManifest ? true : undefined,
     generatedAt: input.generatedAt,
   })
 }

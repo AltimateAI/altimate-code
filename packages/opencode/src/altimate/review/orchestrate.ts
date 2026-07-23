@@ -180,6 +180,8 @@ export interface OrchestrateInput {
   manifestHash?: string
   coreVersion?: string
   modelVersion?: string
+  /** altimate-code CLI release recorded in engine.cliVersion for audit reconstruction. */
+  cliVersion?: string
   /**
    * Optional LLM reviewer lane. Injected (not imported) so the orchestrator
    * stays pure/unit-testable: production wires `runAiReview` (harness LLM);
@@ -194,6 +196,8 @@ export interface OrchestrateInput {
   explainTier?: boolean
   /** G2 — override the classifier's tier decision. Envelope carries tierForced:true. */
   forceTier?: "trivial" | "lite" | "full"
+  /** Manifest was stale relative to change-affecting files (see run.ts::detectStaleManifest). */
+  staleManifest?: boolean
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -1423,17 +1427,19 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     tier,
     mode: input.mode,
     rubric: input.rubric,
-    engine: { core: input.coreVersion, model: input.modelVersion },
+    engine: { core: input.coreVersion, model: input.modelVersion, cliVersion: input.cliVersion },
     manifestHash: input.manifestHash,
+    staleManifest: input.staleManifest,
     generatedAt: input.generatedAt,
     degraded,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
-    // OR when a riskTierPathTokens config error was caught above — the error
-    // must surface in the envelope (and downstream PR comment) even in a
-    // normal `comment`/`gate` run, otherwise a config typo silently kills
-    // the user's opt-in with only a stderr trace they'll never see
-    // (coderabbit review, PR #1028 orchestrate.ts:1129).
-    tierReasons: input.explainTier || tierForced || pathTokenConfigError ? tierReasons : undefined,
+    // when a riskTierPathTokens config error was caught above, OR when the
+    // classifier lands on `full` tier — a naturally-full run is a customer-
+    // visible policy call ("why did my YAML-only diff get REQUEST_CHANGES?")
+    // and the reason list is what makes the verdict debuggable without the
+    // customer having to re-run with --explain-tier. `trivial`/`lite` runs
+    // stay silent to avoid noise on approvals.
+    tierReasons: input.explainTier || tierForced || pathTokenConfigError || tier === "full" ? tierReasons : undefined,
     tierForced: tierForced ? true : undefined,
     tierClassified: tierForced ? classifiedTier : undefined,
   })
