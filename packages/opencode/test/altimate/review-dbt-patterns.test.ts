@@ -791,10 +791,12 @@ models: []
   test("R20 S1: unique_combination_of_columns with grain col missing not_null → warning finding", () => {
     // `price_start_time` is grain but has no not_null coverage → gap.
     // `metastore_id` / `sku_name` have not_null via constraints on the
-    // contracted model → covered.
+    // contracted model → covered. Test scoped as a newly-added model to
+    // trigger the change-scoped gate (see the steady-state test below for
+    // the no-change precision guarantee).
     const newContent = `version: 2
 models:
-  - name: mrt_billing_account_prices
+  - name: mrt_x
     config:
       contract:
         enforced: true
@@ -813,21 +815,175 @@ models:
             - sku_name
             - price_start_time
 `
-    const oldContent = newContent // steady-state (grain already present) — still fires
+    // Grain declaration didn't exist on the old side — the model itself is new.
+    const oldContent = "version: 2\nmodels: []\n"
     const f = detectSchemaYmlPatterns(
-      { path: "models/marts/mrt_billing_account_prices.yml", status: "modified", diff: undefined },
+      { path: "models/marts/mrt_x.yml", status: "modified", diff: undefined },
       DEFAULT_RUBRIC,
       { oldContent, newContent },
     )
     const gap = f.find((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
     expect(gap).toBeDefined()
     expect(gap!.severity).toBe("warning")
-    expect(gap!.model).toBe("mrt_billing_account_prices")
+    expect(gap!.model).toBe("mrt_x")
     expect(gap!.column).toBe("price_start_time")
     // Contract is enforced → recommendation should point at `constraints:`.
     expect(gap!.body).toContain("constraints: [{type: not_null}]")
     // Non-gap columns must not appear as findings.
     expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(1)
+  })
+
+  test("R20 S1: steady-state grain gap on unchanged model is NOT re-surfaced (change-scoped precision)", () => {
+    // altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099. A
+    // housekeeping edit (description bump, meta tag) on a file whose grain
+    // declarations are identical old→new must not surface pre-existing
+    // gaps on unrelated models. Otherwise reviewers suppress the rule.
+    const yml = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+      - name: change_time   # ← pre-existing gap on a grain column
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id, change_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: yml, newContent: yml },
+    )
+    // Same grain declaration old→new → grain-key gap should NOT fire even
+    // though the not_null coverage is incomplete. Removals detector still
+    // covers the case where coverage was dropped in this diff.
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: grain declaration changed (column added to combination_of_columns) does fire gap", () => {
+    // Same file, but the PR ADDS `change_time` to `combination_of_columns`
+    // without adding not_null coverage. This is a real regression the
+    // reviewer must catch even though the model existed before this PR.
+    const oldContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+      - name: change_time   # ← added, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id, change_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("change_time")
+  })
+
+  test("R20 S1: grain detector also covers snapshots (SCD-2 grain declaration)", () => {
+    // altimate-harness-bot review, PR #1029 dbt-patterns.ts:963.
+    // Snapshots carry `unique_combination_of_columns` for SCD-2 unique_key
+    // semantics — a legitimate grain-declaration site the previous
+    // models-only iteration silently skipped.
+    const newContent = `version: 2
+snapshots:
+  - name: dim_customer_snapshot
+    columns:
+      - name: customer_id
+        data_tests: [not_null]
+      - name: valid_from   # ← grain col, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [customer_id, valid_from]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "snapshots/dim_customer_snapshot.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].model).toBe("dim_customer_snapshot")
+    expect(gaps[0].column).toBe("valid_from")
+  })
+
+  test("R20 S1: grain detector also covers source tables (per-table `columns:` + tests)", () => {
+    // Source tables declare `columns:` + `tests:` at the table level;
+    // grain declarations there are legitimate and were previously missed.
+    const newContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_tests: [not_null]
+          - name: event_ts   # ← grain col, no not_null
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [order_id, event_ts]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/sources.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].model).toBe("orders")
+    expect(gaps[0].column).toBe("event_ts")
+  })
+
+  test("R20 S1: grain detector also covers seeds", () => {
+    // Grain-key tests on seeds are rare but legal — coverage for symmetry
+    // with `extractTestOccurrences` which iterates all four entity types.
+    const newContent = `version: 2
+seeds:
+  - name: lookup
+    columns:
+      - name: region_id
+        data_tests: [not_null]
+      - name: effective_from   # ← grain col, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [region_id, effective_from]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "seeds/lookup.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].model).toBe("lookup")
+    expect(gaps[0].column).toBe("effective_from")
   })
 
   test("R20 S1: non-contracted (view) model recommends data_tests: not_null", () => {

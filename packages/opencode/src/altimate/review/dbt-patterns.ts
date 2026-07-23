@@ -951,11 +951,113 @@ export interface GrainKeyGap {
   contractEnforced: boolean
 }
 
+/**
+ * Iterate every dbt entity in a schema.yml that can carry
+ * `unique_combination_of_columns` + `columns:` + `constraints:` — the shape
+ * checked for grain-key not_null coverage. Models are the primary case;
+ * snapshots also declare grain (SCD-2 unique_key semantics) and are a real
+ * miss vector when omitted. Sources declare table-level `columns:` + tests
+ * on their `tables[]` entries, so we descend one level. Seeds are covered
+ * for symmetry with `extractTestOccurrences` — grain-key tests on a seed
+ * are rare but legal (altimate-harness-bot review, PR #1029
+ * dbt-patterns.ts:963).
+ */
+function iterateGrainEntities(d: Record<string, unknown>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  for (const key of ["models", "snapshots", "seeds"] as const) {
+    const arr = d[key]
+    if (!Array.isArray(arr)) continue
+    for (const e of arr) {
+      if (e && typeof e === "object") out.push(e as Record<string, unknown>)
+    }
+  }
+  // sources nest per-table entities under `.tables[]`; each table has its own
+  // `name` + `columns` + `tests`/`data_tests`, matching the model shape.
+  const sources = d.sources
+  if (Array.isArray(sources)) {
+    for (const s of sources) {
+      if (!s || typeof s !== "object") continue
+      const tables = (s as Record<string, unknown>).tables
+      if (!Array.isArray(tables)) continue
+      for (const t of tables) {
+        if (t && typeof t === "object") out.push(t as Record<string, unknown>)
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * Extract the `combination_of_columns` set for each entity in a doc. Used to
+ * scope grain-gap findings to entities whose grain declaration actually
+ * changed between the base and head of the PR — otherwise a housekeeping
+ * edit (adding a description, bumping a meta tag) surfaces every
+ * pre-existing gap in the file and trains reviewers to suppress the rule
+ * (altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099).
+ */
+function extractGrainDeclarations(doc: unknown): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  if (!doc || typeof doc !== "object") return out
+  const d = doc as Record<string, unknown>
+  for (const mm of iterateGrainEntities(d)) {
+    const name = typeof mm.name === "string" ? mm.name : undefined
+    if (!name) continue
+    const cols = new Set<string>()
+    for (const testsKey of ["tests", "data_tests"] as const) {
+      const tests = mm[testsKey]
+      if (!Array.isArray(tests)) continue
+      for (const t of tests) {
+        if (!t || typeof t !== "object") continue
+        for (const [k, args] of Object.entries(t as Record<string, unknown>)) {
+          const bare = k.toLowerCase().replace(/^dbt_utils\./, "")
+          if (bare !== "unique_combination_of_columns") continue
+          if (!args || typeof args !== "object") continue
+          const argsObj = args as Record<string, unknown>
+          const nested =
+            argsObj.arguments && typeof argsObj.arguments === "object"
+              ? (argsObj.arguments as Record<string, unknown>)
+              : undefined
+          const combo =
+            (nested?.combination_of_columns as unknown) ?? (argsObj.combination_of_columns as unknown)
+          if (!Array.isArray(combo)) continue
+          for (const c of combo) if (typeof c === "string") cols.add(c.toLowerCase())
+        }
+      }
+    }
+    if (cols.size) out.set(name, cols)
+  }
+  return out
+}
+
+/**
+ * Entities whose grain declaration differs from old → new (added, removed,
+ * or column set changed). Emit gap findings only for these entities so a
+ * PR that doesn't touch grain declarations doesn't surface every
+ * pre-existing gap.
+ */
+function grainDeclChangedEntities(oldDoc: unknown, newDoc: unknown): Set<string> {
+  const oldMap = extractGrainDeclarations(oldDoc)
+  const newMap = extractGrainDeclarations(newDoc)
+  const changed = new Set<string>()
+  for (const [name, cols] of newMap) {
+    const prior = oldMap.get(name)
+    if (!prior || prior.size !== cols.size || [...cols].some((c) => !prior.has(c))) changed.add(name)
+  }
+  return changed
+}
+
+/**
+ * Grain-key not_null completeness gaps for every entity (model, snapshot,
+ * source table, seed) in a schema.yml document. Callers filter by
+ * `grainDeclChangedEntities` before emitting findings, so this returns the
+ * full population and change-scoping happens above.
+ */
 function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
   const gaps: GrainKeyGap[] = []
   if (!doc || typeof doc !== "object") return gaps
   const d = doc as Record<string, unknown>
-  if (!Array.isArray(d.models)) return gaps
+  const entities = iterateGrainEntities(d)
+  if (!entities.length) return gaps
 
   // Normalise column names for coverage comparison. dbt YAML often uses
   // adapter-cased column names (Snowflake folds unquoted identifiers to
@@ -985,9 +1087,7 @@ function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
     return undefined
   }
 
-  for (const m of d.models) {
-    if (!m || typeof m !== "object") continue
-    const mm = m as Record<string, unknown>
+  for (const mm of entities) {
     const mname = typeof mm.name === "string" ? mm.name : undefined
     if (!mname) continue
 
@@ -1274,13 +1374,18 @@ export function detectSchemaYmlPatterns(
       usedStructural = true
       // R20 S1 — grain-key `not_null` completeness. Only fire on
       // non-deleted files: a deleted schema.yml has no current grain to
-      // guard. Extract from the NEW side so we flag the current state of
-      // the file, whether the grain declaration was newly added in this
-      // PR or pre-existing (a broken grain-guard is a real risk either
-      // way, and reviewers can suppress if the pre-existing case is by
-      // design). Uses the `not_null-missing` gap emitted below.
+      // guard. Change-scoped: only emit gaps for entities (models,
+      // snapshots, source tables, seeds) whose grain declaration
+      // (`combination_of_columns` set) actually changed between the base
+      // and head of this PR. A housekeeping edit — adding a description,
+      // bumping a meta tag — must not surface pre-existing gaps on
+      // unrelated entities; that trains reviewers to suppress the rule
+      // (altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099).
+      // When there's no old side (added file), every entity counts as
+      // changed and every gap surfaces.
       if (!isDeletedFile && newDoc !== undefined) {
-        grainGaps = extractGrainKeyGaps(newDoc)
+        const changedEntities = grainDeclChangedEntities(oldDoc, newDoc)
+        grainGaps = extractGrainKeyGaps(newDoc).filter((g) => changedEntities.has(g.model))
       }
     }
   }
