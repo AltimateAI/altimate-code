@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
+import { Installation } from "../../installation"
 import { reviewPullRequest } from "../../altimate/review/run"
 import { renderSummary } from "../../altimate/review/format"
 import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/post-github"
@@ -85,6 +86,10 @@ export const ReviewCommand = cmd({
         noAi: args.noAi === true || args.ai === false,
         explainTier: args.explainTier === true,
         forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
+        // Stamp the CLI version into engine.cliVersion so an auditor can
+        // reconstruct which policy version generated a stored verdict long
+        // after the binary that ran it is gone.
+        cliVersion: Installation.VERSION,
       })
 
       if (args.output) await fs.writeFile(args.output as string, JSON.stringify(env, null, 2))

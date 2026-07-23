@@ -37,6 +37,8 @@ export interface ReviewPullRequestOptions {
   /** Model identifier recorded in the envelope. */
   modelVersion?: string
   coreVersion?: string
+  /** altimate-code CLI release recorded in engine.cliVersion for audit reconstruction. */
+  cliVersion?: string
   /** Disable the LLM reviewer lane (default: enabled; self-degrades if no model). */
   noAi?: boolean
   /** PR metadata for the AI reviewer's intent check. */
@@ -129,7 +131,7 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
  *  docs markdown blocks) or top-level dbt config. `README.md` at repo root,
  *  `.github/`, `package.json`, etc. are excluded so their mtimes don't
  *  trigger a stale warning. Exported for tests — see review-run-stale.test.ts.
- *  Referenced by `warnIfStale`. */
+ *  Referenced by `detectStaleManifest`. */
 export function isManifestAffecting(rel: string): boolean {
   // Code / schema / seed CSV live under any dbt source directory.
   if (/(^|\/)(models|seeds|snapshots|macros|tests|analyses)\/.*\.(sql|py|yml|yaml|csv)$/i.test(rel)) return true
@@ -144,12 +146,14 @@ export function isManifestAffecting(rel: string): boolean {
   return false
 }
 
-/** Warn to stderr when the manifest looks stale relative to changed files.
- *  Compares the manifest's mtime against every change-affecting path (per
- *  `isManifestAffecting`); a single change newer than the manifest is
- *  enough to fire the warning once and return. Non-fatal — the review
- *  proceeds against the (possibly stale) manifest. */
-async function warnIfStale(manifestAbs: string, changedPaths: string[], fsRoot: string): Promise<void> {
+/** Detect a stale manifest and warn to stderr. Returns `true` when a
+ *  change-affecting file was modified after the manifest — signalling the
+ *  verdict may have been computed against out-of-date metadata. Non-fatal;
+ *  the review proceeds against the (possibly stale) manifest and the
+ *  caller mirrors the flag onto the signed envelope so a downstream
+ *  auditor can distinguish stale-manifest verdicts from clean ones
+ *  (stderr alone is easy for CI to swallow). */
+async function detectStaleManifest(manifestAbs: string, changedPaths: string[], fsRoot: string): Promise<boolean> {
   try {
     const manifestMtime = (await stat(manifestAbs)).mtimeMs
     for (const rel of changedPaths) {
@@ -166,7 +170,7 @@ async function warnIfStale(manifestAbs: string, changedPaths: string[], fsRoot: 
             `⚠️  manifest ${manifestAbs} appears stale — ${rel} was modified after the manifest was written. ` +
               `Re-run \`dbt compile\` (or \`dbt build\`) to refresh before reviewing.\n`,
           )
-          return
+          return true
         }
       } catch {
         /* file not on disk (e.g. removed by the change) — skip */
@@ -175,6 +179,7 @@ async function warnIfStale(manifestAbs: string, changedPaths: string[], fsRoot: 
   } catch {
     /* manifest unreadable → detectDialect will have already returned undefined */
   }
+  return false
 }
 
 export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise<VerdictEnvelope> {
@@ -241,11 +246,17 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       }
     }
   }
-  // Freshness check: warn (don't fail) when the manifest predates changed files.
-  // Skip when we're diffing against the working tree (mtime signal is noisy
-  // during active edits) — only warn when the caller explicitly pinned a head
-  // ref, which is the CI / bench shape where a stale manifest is a real risk.
-  if (opts.head) await warnIfStale(manifestAbs, changedFiles.map((f) => f.path), gitRoot)
+  // Freshness check: detect (and warn — non-fatal) when the manifest predates
+  // change-affecting files. Runs for both the pinned-head CI shape AND the
+  // working-tree local shape — the local scenario "dbt compile once, edit for
+  // an hour, then altimate review" is where staleness actually bites in
+  // practice, so gating this behind `--head` (the prior behavior) silently
+  // under-warned the most common developer workflow. mtime granularity on
+  // the working tree can be noisy during a live edit session, but the check
+  // is limited to files that would materially change the manifest
+  // (`isManifestAffecting`), so noise is bounded. Return value is stamped
+  // into the signed envelope so downstream auditors see it too.
+  const staleManifest = await detectStaleManifest(manifestAbs, changedFiles.map((f) => f.path), gitRoot)
 
   // Resolve the SQL dialect: explicit config wins; otherwise auto-detect from
   // the dbt manifest's `adapter_type` (so a BigQuery/Redshift project isn't
@@ -306,10 +317,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     manifestHash: mhash,
     modelVersion: opts.modelVersion,
     coreVersion: opts.coreVersion,
+    cliVersion: opts.cliVersion,
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,
     forceTier: opts.forceTier,
+    staleManifest,
   })
 }

@@ -106,11 +106,13 @@ Options:
 |------|-------------|
 | `--base <ref>` | Base git ref. Defaults to the merge-base with `origin/main`. |
 | `--head <ref>` | Head git ref. Omit to review the working tree. |
-| `--manifest <path>` | Path to the compiled `manifest.json` (default `target/manifest.json`). |
+| `--manifest <path>` | Path to the compiled `manifest.json`. When omitted, the reviewer walks up from the current directory to find the nearest `dbt_project.yml` and uses its adjacent `target/manifest.json`; the discovered path is logged to stderr. |
 | `--mode comment\|gate` | `comment` never blocks; `gate` exits non-zero on `REQUEST_CHANGES`. |
 | `--severity <level>` | Minimum severity to surface: `critical`, `warning`, `suggestion`. |
 | `--post` | Post the verdict to the GitHub PR (uses `GITHUB_TOKEN` + the Actions event). |
 | `--no-ai` | Disable the advisory LLM reviewer lane (no model calls / cost) — deterministic-only. |
+| `--explain-tier` | Emit the classifier's tier-reason list on the verdict envelope so you can see why a diff was rated `trivial`, `lite`, or `full`. Reasons already surface in the PR comment for `full`-tier runs — this flag adds them to `trivial`/`lite` for debugging. |
+| `--force-tier <tier>` | **[EXPERIMENTAL / bench debug]** Bypass the classifier and force `trivial` / `lite` / `full`. The verdict envelope carries `tierForced: true` and the classifier's original decision for audit. |
 | `--json` / `--output <file>` | Emit the verdict envelope as JSON. |
 
 > **Full vs lint-only.** With a compiled `manifest.json` present, the reviewer
@@ -232,6 +234,9 @@ dataDiff:                     # OFF by default — see "Data-diff in CI" below
   warehouse: ""               # connection name; empty = default connection
 exclude:
   - models/legacy/**
+riskTierPathTokens:           # OFF by default — see "Risk-tier path tokens" below
+  finops: [preset:finops]     # promote any FinOps-named path to `full` tier
+  pii: [ssn, email, phone]    # or supply your own case-insensitive tokens
 rubric:
   blockOn: [lineage_breakage, contract_violation, pii_exposure, semantic_change]
   warningPatternThreshold: 3
@@ -241,6 +246,17 @@ rubric:
     allowSelectStarInStaging: true
     skipNonProdModels: true
 ```
+
+### Risk-tier path tokens
+
+Named categories under `riskTierPathTokens` promote any diff touching a matching
+path to `full` review tier, so those areas never auto-approve on `trivial`
+classification. Values are case-insensitive substrings; the `preset:finops` marker
+expands to the built-in FinOps keyword list (cost, billing, spend, revenue, etc.).
+Prior to v0.9.3 the FinOps list was hardcoded and always on; it is now opt-in via
+this config. When a category value is invalid the CLI logs a stderr warning AND
+surfaces the error in the verdict envelope's `tierReasons[]` (and in the PR
+comment), so a typo can't silently kill your opt-in.
 
 ## Data-diff in CI
 
