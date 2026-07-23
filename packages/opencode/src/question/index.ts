@@ -10,6 +10,7 @@ import { makeRuntime } from "@/effect/run-service"
 import { registerDisposer } from "@/effect/instance-registry"
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
+import { zod } from "@/util/effect-zod"
 import z from "zod"
 // altimate_change end
 
@@ -105,29 +106,31 @@ export const Event = {
 // never reached the webview → `pendingQuestions` stayed empty → the mcp-add
 // question card had no request id to reply with → "submit does nothing".
 // Publish these via `Bus.publish` too so they reach /event like every other
-// webview-visible event. (Schemas are loose — Bus.publish does not re-validate;
-// they exist for the `type` string and typing.)
-const BusAsked = BusEvent.define(
-  "question.asked",
-  z.object({
-    id: QuestionID.zod,
-    sessionID: SessionID.zod,
-    questions: z.array(z.any()),
-    tool: z.object({ messageID: MessageID.zod, callID: z.string() }).optional(),
-  }),
-)
-const BusReplied = BusEvent.define(
-  "question.replied",
-  z.object({
-    sessionID: SessionID.zod,
-    requestID: QuestionID.zod,
-    answers: z.array(z.array(z.string())),
-  }),
-)
-const BusRejected = BusEvent.define(
-  "question.rejected",
-  z.object({ sessionID: SessionID.zod, requestID: QuestionID.zod }),
-)
+// webview-visible event.
+//
+// Reuse the structured Effect schemas (via the `zod` adapter) so the generated
+// `/event` OpenAPI payloads match the SDK's typed shapes rather than `any`.
+//
+// Note: `EventV2Bridge.listen` already forwards these EventV2 events to GlobalBus
+// and `Bus.publish` re-emits to GlobalBus too, so `/global/event` consumers see
+// each question event twice (different top-level ids). This is intentional and
+// verified harmless in-repo — TUI `sync.tsx` reconciles by request id,
+// `notifications.ts` dedupes by id, and the trace consumer ignores question
+// events. External subscribers that don't dedupe are the only residual concern.
+const BusAsked = BusEvent.define("question.asked", zod(Request))
+const BusReplied = BusEvent.define("question.replied", zod(Replied))
+const BusRejected = BusEvent.define("question.rejected", zod(Rejected))
+
+// Best-effort Bus mirror. A fire-and-forget /event notification must NEVER be
+// able to abort core question settlement: `Effect.promise` turns a promise
+// rejection into an unrecoverable fiber defect, and on the Deferred critical
+// path that would skip `Deferred.succeed`/`Deferred.fail` and re-hang the tool
+// on "Thinking…" — the exact failure this PR fixes. Recover any cause to a
+// logged warning so publication can never block settlement.
+const mirror = <D extends BusEvent.Definition>(def: D, properties: z.output<D["properties"]>) =>
+  Effect.promise(() => Bus.publish(def, properties)).pipe(
+    Effect.catchCause((cause) => Effect.logWarning("question bus mirror failed", { type: def.type, cause })),
+  )
 // altimate_change end
 
 export class RejectedError extends Schema.TaggedErrorClass<RejectedError>()("QuestionRejectedError", {}) {
@@ -202,7 +205,11 @@ export const layer = Layer.effect(
       if (!map) return
       pendingByDir.delete(directory)
       for (const { deferred } of map.values()) {
-        await Effect.runPromise(Deferred.fail(deferred, new RejectedError())).catch(() => {})
+        await Effect.runPromise(
+          Deferred.fail(deferred, new RejectedError()).pipe(
+            Effect.catchCause((cause) => Effect.logWarning("question cleanup failed on dispose", { cause })),
+          ),
+        )
       }
     })
     yield* Effect.addFinalizer(() => Effect.sync(off))
@@ -229,11 +236,16 @@ export const layer = Layer.effect(
       }
       pending.set(id, { info, deferred })
       yield* events.publish(Event.Asked, info)
-      // altimate_change start — also publish on the Bus wildcard so the IDE webview
+      // altimate_change start — also mirror on the Bus wildcard so the IDE webview
       // (subscribed to /event) receives question.asked and can answer the card.
-      yield* Effect.promise(() =>
-        Bus.publish(BusAsked, { id, sessionID: input.sessionID, questions: [...input.questions], tool: input.tool }),
-      )
+      // Best-effort: a publish failure must not abort ask() before it registers
+      // the cleanup finalizer below (see `mirror`).
+      yield* mirror(BusAsked, {
+        id,
+        sessionID: input.sessionID,
+        questions: [...input.questions],
+        tool: input.tool,
+      })
       // altimate_change end
 
       return yield* Effect.ensuring(
@@ -263,16 +275,15 @@ export const layer = Layer.effect(
         requestID: existing.info.id,
         answers: input.answers.map((a) => [...a]),
       })
-      // altimate_change start — mirror on the Bus wildcard for /event (webview) clients.
-      yield* Effect.promise(() =>
-        Bus.publish(BusReplied, {
-          sessionID: existing.info.sessionID,
-          requestID: existing.info.id,
-          answers: input.answers.map((a) => [...a]),
-        }),
-      )
-      // altimate_change end
       yield* Deferred.succeed(existing.deferred, input.answers)
+      // altimate_change start — mirror on the Bus wildcard for /event (webview) clients,
+      // AFTER settling the Deferred and best-effort so a publish failure can't re-hang ask().
+      yield* mirror(BusReplied, {
+        sessionID: existing.info.sessionID,
+        requestID: existing.info.id,
+        answers: input.answers.map((a) => [...a]),
+      })
+      // altimate_change end
     })
 
     const reject = Effect.fn("Question.reject")(function* (requestID: QuestionID) {
@@ -290,12 +301,11 @@ export const layer = Layer.effect(
         sessionID: existing.info.sessionID,
         requestID: existing.info.id,
       })
-      // altimate_change start — mirror on the Bus wildcard for /event (webview) clients.
-      yield* Effect.promise(() =>
-        Bus.publish(BusRejected, { sessionID: existing.info.sessionID, requestID: existing.info.id }),
-      )
-      // altimate_change end
       yield* Deferred.fail(existing.deferred, new RejectedError())
+      // altimate_change start — mirror on the Bus wildcard for /event (webview) clients,
+      // AFTER settling the Deferred and best-effort so a publish failure can't strand it.
+      yield* mirror(BusRejected, { sessionID: existing.info.sessionID, requestID: existing.info.id })
+      // altimate_change end
     })
 
     const list = Effect.fn("Question.list")(function* () {
