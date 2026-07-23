@@ -48,40 +48,57 @@ Add a new section at the top of `CHANGELOG.md`:
 - ...
 ```
 
-### 2. Run pre-release sanity check
+### 2. Run pre-release sanity checks
 
-**MANDATORY** — this catches broken binaries before they reach users:
+**MANDATORY** — these catch broken releases before they reach users:
 
 ```bash
+# Deterministic preflight: clean tree, HEAD == fresh origin/main, no tag
+# collisions (local OR remote), version sanity vs npm, prerelease-line
+# ancestry, release-blocker PRs, PREV_TAG dry-run, marker guard.
+bun script/release-preflight.ts --version 0.5.0 --stage pre
+
 cd packages/opencode
 bun run pre-release
 ```
 
-This verifies:
+`pre-release` verifies:
 - All required NAPI externals are in `package.json` dependencies
 - They're installed in `node_modules`
 - A local build produces a binary that actually starts
 
-Do NOT proceed if any check fails.
+Do NOT proceed if any check fails. If the preflight reports a tag collision,
+resolve it explicitly — never delete-and-recreate a tag blind.
 
 ### 3. Commit and tag
 
+Stage files **individually** — never `git add -A` (release worktrees carry
+scratch files that must not ship in the release commit). Releasing does not
+require being literally on the `main` branch: the invariant is that a clean
+HEAD equals freshly fetched `origin/main` (worktrees push via `HEAD:main`).
+
 ```bash
-git add -A
+git add CHANGELOG.md <other release files>
 git commit -m "release: v0.5.0"
 git tag v0.5.0
-git push origin main v0.5.0
+# Verify the tag points at HEAD BEFORE pushing — a pre-existing tag makes
+# `git tag` fail, and pushing a stale tag triggers a publish of old code.
+test "$(git rev-parse v0.5.0)" = "$(git rev-parse HEAD)"
+# Atomic: branch and tag land together or not at all.
+git push --atomic origin HEAD:main v0.5.0
 ```
 
 ### 4. What happens automatically
 
 The `v*` tag triggers `.github/workflows/release.yml` which:
 
-1. **Builds** all platform binaries (linux/darwin/windows, x64/arm64)
-2. **Publishes to npm** — platform-specific binary packages + wrapper package
-3. **Creates GitHub Release** — with auto-generated release notes and binary attachments
-4. **Updates AUR** — pushes PKGBUILD update to `altimate-code-bin`
-5. **Publishes Docker image** — to `ghcr.io/altimateai/altimate-code`
+1. **Runs release-critical tests** — typecheck + branding/install tests (gates npm publish)
+2. **Builds** all platform binaries (linux/darwin/windows, x64/arm64)
+3. **Validates the tag** — format, tag-SHA == checked-out SHA, CHANGELOG entry present (before any publish)
+4. **Publishes to npm** — platform-specific binary packages + wrapper package
+5. **Creates GitHub Release** — with auto-generated release notes and binary attachments
+6. **Publishes Docker image (best-effort)** — to `ghcr.io/altimateai/altimate-code`; failures are logged but do NOT fail the release, so verify manually if you need the image
+7. ~~Updates AUR~~ — currently **disabled** (the workflow step is commented out; see `publish.ts` for setup steps to re-enable)
 
 ### 5. Verify
 

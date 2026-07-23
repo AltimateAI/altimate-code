@@ -181,13 +181,43 @@ jobs:
 
   publish-npm:
     name: Publish to npm
-    needs: [build, sanity-verdaccio]
+    # altimate_change — gate publishing on the test job. Previously publish-npm only
+    # needed [build, sanity-verdaccio], so npm could publish while typecheck/tests
+    # were red (found in the 2026-07-22 release retro).
+    needs: [test, build, sanity-verdaccio]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # altimate_change — validate the tag BEFORE any publish work. Tag-format
+      # validation previously lived in github-release, which runs AFTER publish-npm,
+      # so a malformed tag could publish to npm and only fail afterwards.
+      - name: Validate release tag
+        run: |
+          if ! echo "$CURRENT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$'; then
+            echo "::error::Invalid tag format: $CURRENT_TAG — refusing to publish"
+            exit 1
+          fi
+          # Shallow checkouts may not carry the tag ref locally — fetch it so the
+          # comparison runs against what origin actually has.
+          git fetch --no-tags --depth 1 origin "refs/tags/$CURRENT_TAG:refs/tags/$CURRENT_TAG" 2>/dev/null || true
+          TAG_SHA=$(git rev-parse "refs/tags/$CURRENT_TAG^{commit}")
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Tag $CURRENT_TAG points at $TAG_SHA but workflow checked out $HEAD_SHA"
+            exit 1
+          fi
+          VERSION="${CURRENT_TAG#v}"
+          if ! grep -q "\[$VERSION\]" CHANGELOG.md && [ "${CURRENT_TAG#*-}" = "$CURRENT_TAG" ]; then
+            echo "::error::CHANGELOG.md has no entry for $VERSION — stable releases require a changelog entry"
+            exit 1
+          fi
+          echo "Tag validation passed: $CURRENT_TAG @ $TAG_SHA"
+        env:
+          CURRENT_TAG: ${{ github.ref_name }}
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
@@ -276,9 +306,19 @@ jobs:
             # comment for why this matters. The binary must start without
             # walking the workspace for node_modules.
             cd "${RUNNER_TEMP:-/tmp}"
-            env -u NODE_PATH "$BINARY" --version
-            echo "Pre-publish smoke test passed"
+            # altimate_change — assert the EXACT version, not just "it starts".
+            # The 2026-07-22 release retro found a smoke test once validated a
+            # stale binary (0.7.3) while releasing 0.9.2.
+            REPORTED=$(env -u NODE_PATH "$BINARY" --version)
+            EXPECTED="${CURRENT_TAG#v}"
+            if [ "$REPORTED" != "$EXPECTED" ]; then
+              echo "::error::Binary reports version '$REPORTED' but tag says '$EXPECTED'"
+              exit 1
+            fi
+            echo "Pre-publish smoke test passed ($REPORTED)"
           fi
+        env:
+          CURRENT_TAG: ${{ github.ref_name }}
 
       - name: Publish to npm
         run: bun run packages/opencode/script/publish.ts
