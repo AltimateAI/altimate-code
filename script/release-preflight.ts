@@ -46,10 +46,15 @@ export function normalizeVersion(input: string): string {
 
 /**
  * Parse a normalized (no leading "v") SemVer string into its components.
- * Returns null if the string isn't valid SemVer (major.minor.patch[-prerelease]).
+ * Follows semver.org rules (minus build metadata): no leading zeros in
+ * numeric identifiers, no empty prerelease identifiers. Returns null if the
+ * string isn't valid SemVer (major.minor.patch[-prerelease]).
  */
+const SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?$/
+
 export function parseSemver(version: string): Semver | null {
-  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-.]+))?$/.exec(version)
+  const m = SEMVER_RE.exec(version)
   if (!m) return null
   return {
     major: Number(m[1]),
@@ -380,10 +385,13 @@ async function main(): Promise<void> {
     } else {
       const npmView = run(["npm", "view", "@altimateai/altimate-code", "version"])
       if (npmView.code !== 0) {
+        // Fail closed: without the registry we cannot verify monotonicity or
+        // that the version is unpublished — deferring that failure to the
+        // irreversible release workflow is exactly the wrong place for it.
         add({
           name: "version sanity",
-          status: "WARN",
-          detail: `could not reach npm to check current 'latest' version:\n${npmView.stderr || npmView.stdout}`,
+          status: "FAIL",
+          detail: `could not reach npm to verify version state — retry when the registry is reachable:\n${npmView.stderr || npmView.stdout}`,
         })
       } else {
         const currentLatest = npmView.stdout.trim()
@@ -411,8 +419,8 @@ async function main(): Promise<void> {
         } else if (!currentParsed) {
           add({
             name: "version sanity",
-            status: "WARN",
-            detail: `could not parse current npm 'latest' version "${currentLatest}" to compare`,
+            status: "FAIL",
+            detail: `could not parse current npm 'latest' version "${currentLatest}" — cannot verify monotonicity`,
           })
         } else if (compareSemver(parsed, currentParsed) <= 0) {
           add({
@@ -420,11 +428,45 @@ async function main(): Promise<void> {
             status: "FAIL",
             detail: `${version} is not strictly greater than current npm latest (${currentLatest})`,
           })
+        } else if (parsed.prerelease) {
+          // A prerelease target must also move the `beta` dist-tag forward —
+          // being greater than stable `latest` is not enough. Publishing
+          // 0.10.0-beta.4 while `beta` points at 0.10.0-beta.5 would move new
+          // beta installs BACKWARD.
+          const distTags = run(["npm", "view", "@altimateai/altimate-code", "dist-tags", "--json"])
+          let betaCurrent: string | null = null
+          if (distTags.code === 0) {
+            try {
+              betaCurrent = (JSON.parse(distTags.stdout) as Record<string, string>).beta ?? null
+            } catch {
+              betaCurrent = null
+            }
+          }
+          const betaParsed = betaCurrent ? parseSemver(normalizeVersion(betaCurrent)) : null
+          if (distTags.code !== 0) {
+            add({
+              name: "version sanity",
+              status: "FAIL",
+              detail: `could not read npm dist-tags to compare against the current beta channel:\n${distTags.stderr || distTags.stdout}`,
+            })
+          } else if (betaParsed && compareSemver(parsed, betaParsed) <= 0) {
+            add({
+              name: "version sanity",
+              status: "FAIL",
+              detail: `${version} is not strictly greater than the current beta dist-tag (${betaCurrent}) — new beta installs would move backward`,
+            })
+          } else {
+            add({
+              name: "version sanity",
+              status: "PASS",
+              detail: `${version} > latest (${currentLatest})${betaCurrent ? ` and > beta (${betaCurrent})` : "; no beta dist-tag"}; not yet published; prerelease allowed`,
+            })
+          }
         } else {
           add({
             name: "version sanity",
             status: "PASS",
-            detail: `${version} > current latest (${currentLatest}); not yet published; ${parsed.prerelease ? "prerelease allowed" : "stable"}`,
+            detail: `${version} > current latest (${currentLatest}); not yet published; stable`,
           })
         }
       }
@@ -448,22 +490,27 @@ async function main(): Promise<void> {
           detail: `no v${parsed.major}.${parsed.minor}.*-* prerelease tags exist for this release line`,
         })
       } else {
+        // Check ancestry against HEAD (the release candidate), not origin/main:
+        // for /release, HEAD equals or descends from origin/main so the result
+        // is the same, and for /release-beta cutting beta.N+1 from a branch,
+        // the beta.N tag is an ancestor of HEAD but not of origin/main —
+        // checking origin/main would wrongly block every branch beta.
         const offenders: string[] = []
         for (const tag of lineTags) {
-          const ancestor = git(["merge-base", "--is-ancestor", tag, "origin/main"])
+          const ancestor = git(["merge-base", "--is-ancestor", tag, "HEAD"])
           if (ancestor.code !== 0) offenders.push(tag)
         }
         if (offenders.length === 0) {
           add({
             name: "prerelease ancestry",
             status: "PASS",
-            detail: `all ${lineTags.length} prerelease tag(s) for v${parsed.major}.${parsed.minor}.* are merged into origin/main:\n${lineTags.join(", ")}`,
+            detail: `all ${lineTags.length} prerelease tag(s) for v${parsed.major}.${parsed.minor}.* are ancestors of HEAD:\n${lineTags.join(", ")}`,
           })
         } else {
           add({
             name: "prerelease ancestry",
             status: "FAIL",
-            detail: `prerelease tag(s) NOT merged into origin/main — merge before releasing this line:\n${offenders.join("\n")}`,
+            detail: `prerelease tag(s) NOT in this release candidate's history — merge before releasing this line:\n${offenders.join("\n")}`,
           })
         }
       }
@@ -551,6 +598,16 @@ async function main(): Promise<void> {
     const fullOutput = [guard.stdout, guard.stderr].filter((s) => s.length > 0).join("\n")
     if (guard.code !== 0) {
       add({ name: "marker guard", status: "FAIL", detail: fullOutput || `exited ${guard.code} with no output` })
+    } else if (/falling back to pattern-based detection/i.test(fullOutput)) {
+      // analyze.ts exits 0 on this fallback, but without the upstream remote
+      // it only pattern-matches packages/opencode/src/ and can miss unmarked
+      // changes in other upstream-owned packages. A release machine must have
+      // the real remote — fail closed.
+      add({
+        name: "marker guard",
+        status: "FAIL",
+        detail: `upstream remote unavailable — guard ran in degraded pattern-only mode, coverage incomplete.\nAdd it: git remote add upstream https://github.com/anomalyco/opencode.git && git fetch upstream --no-tags\n${fullOutput}`,
+      })
     } else {
       add({ name: "marker guard", status: "PASS", detail: fullOutput || "no unmarked upstream-shared changes" })
     }

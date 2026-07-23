@@ -509,6 +509,12 @@ jobs:
         run: bun test
         working-directory: script/upstream
 
+      - name: Run release preflight tests
+        # Root bunfig.toml pins `bun test` away from the repo root, so run from
+        # script/ — same pattern as the marker parser tests above.
+        run: bun test release-preflight.test.ts
+        working-directory: script
+
       - name: Check for missing altimate_change markers
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then

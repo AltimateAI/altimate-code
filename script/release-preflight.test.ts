@@ -55,6 +55,24 @@ describe("parseSemver", () => {
     expect(parseSemver("not-a-version")).toBeNull()
     expect(parseSemver("")).toBeNull()
   })
+
+  test("rejects leading zeros in numeric identifiers (SemVer rule)", () => {
+    expect(parseSemver("01.2.3")).toBeNull()
+    expect(parseSemver("1.02.3")).toBeNull()
+    expect(parseSemver("1.2.03")).toBeNull()
+    expect(parseSemver("1.2.3-01")).toBeNull()
+  })
+
+  test("rejects empty prerelease identifiers", () => {
+    expect(parseSemver("1.2.3-")).toBeNull()
+    expect(parseSemver("1.2.3-alpha..1")).toBeNull()
+    expect(parseSemver("1.2.3-alpha.")).toBeNull()
+  })
+
+  test("accepts zero and alphanumeric prerelease identifiers", () => {
+    expect(parseSemver("1.2.3-0")).toEqual({ major: 1, minor: 2, patch: 3, prerelease: "0" })
+    expect(parseSemver("1.2.3-0a.1")).toEqual({ major: 1, minor: 2, patch: 3, prerelease: "0a.1" })
+  })
 })
 
 describe("compareSemver", () => {

@@ -197,17 +197,31 @@ jobs:
       # so a malformed tag could publish to npm and only fail afterwards.
       - name: Validate release tag
         run: |
-          if ! echo "$CURRENT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$'; then
+          # Strict SemVer: no leading zeros in numeric identifiers, no empty
+          # prerelease identifiers (rejects v01.2.3, v1.2.3-01, v1.2.3-a..b).
+          SEMVER_ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          if ! echo "$CURRENT_TAG" | grep -qE "^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${SEMVER_ID}(\.${SEMVER_ID})*)?$"; then
             echo "::error::Invalid tag format: $CURRENT_TAG — refusing to publish"
             exit 1
           fi
-          # Shallow checkouts may not carry the tag ref locally — fetch it so the
-          # comparison runs against what origin actually has.
-          git fetch --no-tags --depth 1 origin "refs/tags/$CURRENT_TAG:refs/tags/$CURRENT_TAG" 2>/dev/null || true
-          TAG_SHA=$(git rev-parse "refs/tags/$CURRENT_TAG^{commit}")
+          # Ask origin directly what the tag points to — the event payload and
+          # the checkout's local tag ref are both stale if the tag was force-moved
+          # between the push event and this job. An unforced `git fetch` would
+          # refuse to clobber the local tag, so ls-remote is the authority.
+          LS=$(git ls-remote origin "refs/tags/$CURRENT_TAG" "refs/tags/$CURRENT_TAG^{}") || {
+            echo "::error::Could not query origin for tag $CURRENT_TAG"
+            exit 1
+          }
+          # Annotated tags list a peeled ^{} line pointing at the commit; prefer it.
+          TAG_SHA=$(echo "$LS" | grep '\^{}' | cut -f1 | head -1)
+          [ -z "$TAG_SHA" ] && TAG_SHA=$(echo "$LS" | cut -f1 | head -1)
+          if [ -z "$TAG_SHA" ]; then
+            echo "::error::Tag $CURRENT_TAG no longer exists on origin — refusing to publish"
+            exit 1
+          fi
           HEAD_SHA=$(git rev-parse HEAD)
           if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
-            echo "::error::Tag $CURRENT_TAG points at $TAG_SHA but workflow checked out $HEAD_SHA"
+            echo "::error::Tag $CURRENT_TAG points at $TAG_SHA on origin but workflow checked out $HEAD_SHA (tag moved since the push event?)"
             exit 1
           fi
           VERSION="${CURRENT_TAG#v}"
