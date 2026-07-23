@@ -541,17 +541,28 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     })
   })
 
-  // altimate_change — first run is now a welcoming home-screen panel (see
-  // component/welcome-panel.tsx, wired in routes/home.tsx), not an auto-opened modal.
-  // The panel's readiness-aware tips guide the user to run /connect, which opens the
-  // curated DialogModelWelcome picker.
-
   const connected = useConnected()
   // altimate_change — onboarding readiness (real credentials OR a completed first-run
   // setup pick, e.g. Big Pickle) gates first-run chat/tips; see
   // component/altimate-onboarding.tsx. Named distinctly from the plugin-host `ready`
   // signal above (line ~408), which tracks TUI plugin startup, not onboarding state.
   const onboardingReady = useReady()
+
+  // altimate_change start — AI-7774: first-run onboarding gate. On a fresh launch
+  // with no usable model, open the curated provider picker as the entry point (chat
+  // input stays visible; submit is gated in the prompt until setup completes). Fire
+  // EXACTLY once, and only after startup has settled (`ready()` = plugin host +
+  // sync bootstrap done), so a returning user with valid credentials never sees it.
+  let firstRunPickerHandled = false
+  createEffect(() => {
+    if (firstRunPickerHandled) return
+    if (!ready()) return // wait until providers are loaded before deciding
+    firstRunPickerHandled = true
+    if (onboardingReady()) return // already set up — no gate
+    dialog.replace(() => <DialogModelWelcome />)
+  })
+  // altimate_change end
+
   // altimate_change start — Part 2 scan gate: fire EXACTLY once, on the first time
   // this session reaches "ready" from a not-ready start (i.e. the user just finished
   // Part 1 in a fresh onboarding). `prev === false` guarantees a genuine false→true
