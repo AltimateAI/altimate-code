@@ -923,6 +923,315 @@ function extractTestOccurrences(doc: unknown): Set<string> {
 }
 
 /**
+ * R20 S1 — grain-key `not_null` completeness.
+ *
+ * A `dbt_utils.unique_combination_of_columns` test names N columns as the
+ * declared grain. If any grain column lacks `not_null` coverage, a NULL
+ * grain-key silently passes the uniqueness test — the guardrail is toothless.
+ * `DBT_GUIDELINES.md` in the corpus repo states this as a hard rule; kilo
+ * catches it, we didn't.
+ *
+ * Coverage sources (either counts):
+ *  - `constraints: [{type: not_null}]` on the column — enforced by the
+ *    database when the model has `contract: {enforced: true}` on Trino /
+ *    Databricks-with-contracts / Postgres / Snowflake.
+ *  - `data_tests: [not_null]` / `tests: [not_null]` on the column —
+ *    enforced by dbt test runner regardless of contract.
+ *
+ * Returns one gap per uncovered column per grain declaration.
+ */
+export interface GrainKeyGap {
+  /** Model / entity name. */
+  model: string
+  /** Column name in the uncovered `combination_of_columns`. */
+  column: string
+  /** True when `config.contract.enforced == true` — coverage should be a
+   *  `constraints:` entry rather than a `data_tests:` entry, since the
+   *  constraint enforces at write-time and the test enforces at CI-time. */
+  contractEnforced: boolean
+}
+
+/**
+ * Iterate every dbt entity in a schema.yml that can carry
+ * `unique_combination_of_columns` + `columns:` + `constraints:` — the shape
+ * checked for grain-key not_null coverage. Models are the primary case;
+ * snapshots also declare grain (SCD-2 unique_key semantics) and are a real
+ * miss vector when omitted. Sources declare table-level `columns:` + tests
+ * on their `tables[]` entries, so we descend one level. Seeds are covered
+ * for symmetry with `extractTestOccurrences` — grain-key tests on a seed
+ * are rare but legal (altimate-harness-bot review, PR #1029
+ * dbt-patterns.ts:963).
+ */
+function iterateGrainEntities(d: Record<string, unknown>): Array<{ name: string; body: Record<string, unknown> }> {
+  const out: Array<{ name: string; body: Record<string, unknown> }> = []
+  for (const key of ["models", "snapshots", "seeds"] as const) {
+    const arr = d[key]
+    if (!Array.isArray(arr)) continue
+    for (const e of arr) {
+      if (!e || typeof e !== "object") continue
+      const body = e as Record<string, unknown>
+      const name = typeof body.name === "string" ? body.name : undefined
+      if (name) out.push({ name, body })
+    }
+  }
+  // sources nest per-table entities under `.tables[]`; each table has its own
+  // `name` + `columns` + `tests`/`data_tests`, matching the model shape.
+  // Qualify with the enclosing source name (`<source>.<table>`) so two
+  // sources with a table of the same name don't conflate in change-scoping
+  // OR finding fingerprint (cubic-review P2 on PR #1029).
+  const sources = d.sources
+  if (Array.isArray(sources)) {
+    for (const s of sources) {
+      if (!s || typeof s !== "object") continue
+      const src = s as Record<string, unknown>
+      const srcName = typeof src.name === "string" ? src.name : undefined
+      if (!srcName) continue
+      const tables = src.tables
+      if (!Array.isArray(tables)) continue
+      for (const t of tables) {
+        if (!t || typeof t !== "object") continue
+        const body = t as Record<string, unknown>
+        const tblName = typeof body.name === "string" ? body.name : undefined
+        if (tblName) out.push({ name: `${srcName}.${tblName}`, body })
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * Extract the `combination_of_columns` set for each entity in a doc. Used to
+ * scope grain-gap findings to entities whose grain declaration actually
+ * changed between the base and head of the PR — otherwise a housekeeping
+ * edit (adding a description, bumping a meta tag) surfaces every
+ * pre-existing gap in the file and trains reviewers to suppress the rule
+ * (altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099).
+ */
+function extractGrainDeclarations(doc: unknown): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  if (!doc || typeof doc !== "object") return out
+  const d = doc as Record<string, unknown>
+  for (const { name, body: mm } of iterateGrainEntities(d)) {
+    const cols = new Set<string>()
+    for (const testsKey of ["tests", "data_tests"] as const) {
+      const tests = mm[testsKey]
+      if (!Array.isArray(tests)) continue
+      for (const t of tests) {
+        if (!t || typeof t !== "object") continue
+        for (const [k, args] of Object.entries(t as Record<string, unknown>)) {
+          const bare = k.toLowerCase().replace(/^dbt_utils\./, "")
+          if (bare !== "unique_combination_of_columns") continue
+          if (!args || typeof args !== "object") continue
+          const argsObj = args as Record<string, unknown>
+          const nested =
+            argsObj.arguments && typeof argsObj.arguments === "object"
+              ? (argsObj.arguments as Record<string, unknown>)
+              : undefined
+          const combo =
+            (nested?.combination_of_columns as unknown) ?? (argsObj.combination_of_columns as unknown)
+          if (!Array.isArray(combo)) continue
+          for (const c of combo) if (typeof c === "string") cols.add(c.toLowerCase())
+        }
+      }
+    }
+    if (cols.size) out.set(name, cols)
+  }
+  return out
+}
+
+/**
+ * Entities whose grain declaration differs from old → new (added, removed,
+ * or column set changed). Emit gap findings only for these entities so a
+ * PR that doesn't touch grain declarations doesn't surface every
+ * pre-existing gap.
+ */
+function grainDeclChangedEntities(oldDoc: unknown, newDoc: unknown): Set<string> {
+  const oldMap = extractGrainDeclarations(oldDoc)
+  const newMap = extractGrainDeclarations(newDoc)
+  const changed = new Set<string>()
+  for (const [name, cols] of newMap) {
+    const prior = oldMap.get(name)
+    if (!prior || prior.size !== cols.size || [...cols].some((c) => !prior.has(c))) changed.add(name)
+  }
+  return changed
+}
+
+/**
+ * Grain-key not_null completeness gaps for every entity (model, snapshot,
+ * source table, seed) in a schema.yml document. Callers filter by
+ * `grainDeclChangedEntities` before emitting findings, so this returns the
+ * full population and change-scoping happens above.
+ */
+function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
+  const gaps: GrainKeyGap[] = []
+  if (!doc || typeof doc !== "object") return gaps
+  const d = doc as Record<string, unknown>
+  const entities = iterateGrainEntities(d)
+  if (!entities.length) return gaps
+
+  // Normalise column names for coverage comparison. dbt YAML often uses
+  // adapter-cased column names (Snowflake folds unquoted identifiers to
+  // uppercase; other adapters differ). Lowercase both sides so `ORDER_ID`
+  // in `combination_of_columns` matches `order_id` in `columns:`. Hoisted
+  // to function scope per consensus NIT #7 (was redeclared per-model).
+  const norm = (s: string): string => s.toLowerCase()
+
+  // Pull the string test-name from a YAML test entry. Consensus fixes:
+  //  - MINOR #6: dbt's documented alternative object form is
+  //    `{name: <alias>, test_name: not_null, ...}`. `Object.keys(t)[0]`
+  //    would return `name`, missing the underlying test type. Prefer
+  //    `test_name` when present.
+  //  - MINOR #4: dbt 1.8+ allows namespaced names like `dbt.not_null`;
+  //    strip a leading `dbt.` prefix so `dbt.not_null` matches `not_null`.
+  // Bare form: `- not_null`. Block form: `- not_null: {config: ...}`.
+  const testName = (t: unknown): string | undefined => {
+    if (typeof t === "string") return t.toLowerCase().replace(/^dbt\./, "")
+    if (t && typeof t === "object") {
+      const obj = t as Record<string, unknown>
+      // Alternative form: `{name: <alias>, test_name: <macro>, ...}`.
+      // If both `name` and `test_name` are present, `test_name` wins.
+      if (typeof obj.test_name === "string") return obj.test_name.toLowerCase().replace(/^dbt\./, "")
+      const k = Object.keys(obj)[0]
+      return k ? k.toLowerCase().replace(/^dbt\./, "") : undefined
+    }
+    return undefined
+  }
+
+  for (const { name: mname, body: mm } of entities) {
+
+    // Contract enforcement: either at model-level `config.contract.enforced`
+    // OR at top-level `contract:` (dbt supports both shapes). Consensus
+    // MINOR #3 — earlier ternary short-circuited on `cfg.contract` being
+    // an object (e.g. `config: {contract: {alias: ...}}` with no
+    // `enforced` key), masking a top-level `contract: {enforced: true}`.
+    // Evaluate `enforced === true` at both locations independently and OR
+    // them so either declaration counts.
+    const cfg = mm.config && typeof mm.config === "object" ? (mm.config as Record<string, unknown>) : {}
+    const cfgContract =
+      cfg.contract && typeof cfg.contract === "object" ? (cfg.contract as Record<string, unknown>) : undefined
+    const topContract =
+      mm.contract && typeof mm.contract === "object" ? (mm.contract as Record<string, unknown>) : undefined
+    const contractEnforced = cfgContract?.enforced === true || topContract?.enforced === true
+
+    // Coverage per column, split by mechanism (per codex R20 S1 review):
+    //  - constraint coverage counts ONLY when `contract.enforced == true`.
+    //    On non-contracted models, `constraints: [{type: not_null}]` is
+    //    documentation-only and not enforced by the database. Requiring
+    //    contract-enforced means we don't miss a real gap on views.
+    //  - test coverage (`tests:` / `data_tests: [not_null]`) always counts,
+    //    since dbt's test runner enforces it independent of contract state.
+    //
+    // Consensus MAJOR #1 — also count MODEL-LEVEL constraints:
+    //  - `constraints: [{type: primary_key, columns: [a, b]}]` (dbt 1.5+)
+    //    inherently enforces NOT NULL on every named column on
+    //    Postgres/Snowflake/BigQuery/Databricks, so grain columns declared
+    //    via a model-level PK are already covered.
+    //  - `constraints: [{type: not_null, columns: [...]}]` (dbt's model-
+    //    level form) — same coverage, just spelled out.
+    //  - Column-level `constraints: [{type: primary_key}]` — same rationale
+    //    at column granularity.
+    const coveredByConstraint = new Set<string>()
+    const coveredByTest = new Set<string>()
+
+    // Model-level constraints — dbt allows a `constraints:` list under
+    // the model itself (not per-column) that names one or more columns.
+    if (Array.isArray(mm.constraints)) {
+      for (const cn of mm.constraints) {
+        if (!cn || typeof cn !== "object") continue
+        const cnRec = cn as Record<string, unknown>
+        const type = typeof cnRec.type === "string" ? cnRec.type.toLowerCase() : ""
+        // `primary_key` implies NOT NULL on every listed column across the
+        // adapters dbt supports for enforced contracts; `not_null` at
+        // model level is the explicit multi-column variant of the column
+        // form.
+        if (type !== "not_null" && type !== "primary_key") continue
+        const cols = Array.isArray(cnRec.columns) ? (cnRec.columns as unknown[]) : []
+        for (const c of cols) {
+          if (typeof c === "string") coveredByConstraint.add(norm(c))
+        }
+      }
+    }
+
+    if (Array.isArray(mm.columns)) {
+      for (const col of mm.columns) {
+        if (!col || typeof col !== "object") continue
+        const c = col as Record<string, unknown>
+        const cname = typeof c.name === "string" ? c.name : undefined
+        if (!cname) continue
+        const key = norm(cname)
+        if (Array.isArray(c.constraints)) {
+          for (const cn of c.constraints) {
+            if (cn && typeof cn === "object") {
+              const type = (cn as Record<string, unknown>).type
+              const t = typeof type === "string" ? type.toLowerCase() : ""
+              // Column-level `not_null` OR `primary_key` — the latter
+              // inherently enforces NOT NULL (consensus MAJOR #1).
+              if (t === "not_null" || t === "primary_key") {
+                coveredByConstraint.add(key)
+              }
+            }
+          }
+        }
+        for (const testsKey of ["tests", "data_tests"] as const) {
+          const tests = c[testsKey]
+          if (!Array.isArray(tests)) continue
+          for (const t of tests) {
+            if (testName(t) === "not_null") coveredByTest.add(key)
+          }
+        }
+      }
+    }
+    const hasCoverage = (col: string): boolean => {
+      const k = norm(col)
+      return coveredByTest.has(k) || (contractEnforced && coveredByConstraint.has(k))
+    }
+
+    // Find grain declarations in this model's model-level tests / data_tests.
+    // Restrict to `unique_combination_of_columns` and
+    // `dbt_utils.unique_combination_of_columns` exactly (per codex R20 S1
+    // review) — `endsWith` would over-match `not_unique_combination_of_columns`
+    // and third-party macros that share the suffix.
+    // Supports both dbt shapes:
+    //   pre-1.9: `- dbt_utils.unique_combination_of_columns: {combination_of_columns: [...]}`
+    //   1.9+:    `- dbt_utils.unique_combination_of_columns: {arguments: {combination_of_columns: [...]}}`
+    const isGrainTestName = (name: string): boolean => {
+      const n = name.toLowerCase()
+      return n === "unique_combination_of_columns" || n === "dbt_utils.unique_combination_of_columns"
+    }
+    for (const testsKey of ["tests", "data_tests"] as const) {
+      const tests = mm[testsKey]
+      if (!Array.isArray(tests)) continue
+      for (const t of tests) {
+        if (!t || typeof t !== "object") continue
+        const entry = t as Record<string, unknown>
+        for (const k of Object.keys(entry)) {
+          if (!isGrainTestName(k)) continue
+          const args = entry[k]
+          if (!args || typeof args !== "object") continue
+          const argsObj = args as Record<string, unknown>
+          const nested =
+            argsObj.arguments && typeof argsObj.arguments === "object"
+              ? (argsObj.arguments as Record<string, unknown>)
+              : undefined
+          const combo =
+            (nested?.combination_of_columns as unknown) ?? (argsObj.combination_of_columns as unknown)
+          if (!Array.isArray(combo)) continue
+          for (const col of combo) {
+            if (typeof col !== "string") continue
+            if (!hasCoverage(col)) {
+              // Preserve original grain-column spelling in the finding.
+              gaps.push({ model: mname, column: col, contractEnforced })
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return gaps
+}
+
+/**
  * Fallback removed-test detector for callers that supply only the diff
  * (no old/new content). Kept intentionally conservative: matches removed
  * lines that look like `- unique | not_null | relationships`, subtracts any
@@ -985,6 +1294,8 @@ export function detectSchemaYmlPatterns(
     testTag?: string
   }> = []
   let usedStructural = false
+  // R20 S1 — populated from the structural NEW-side parse below.
+  let grainGaps: GrainKeyGap[] = []
 
   // Deleting a whole schema.yml removes every test declared in it — arguably
   // a bigger removal than dropping a single test. Treat the new side as empty
@@ -1069,6 +1380,21 @@ export function detectSchemaYmlPatterns(
         removals.push({ model, column, test, testTag })
       }
       usedStructural = true
+      // R20 S1 — grain-key `not_null` completeness. Only fire on
+      // non-deleted files: a deleted schema.yml has no current grain to
+      // guard. Change-scoped: only emit gaps for entities (models,
+      // snapshots, source tables, seeds) whose grain declaration
+      // (`combination_of_columns` set) actually changed between the base
+      // and head of this PR. A housekeeping edit — adding a description,
+      // bumping a meta tag — must not surface pre-existing gaps on
+      // unrelated entities; that trains reviewers to suppress the rule
+      // (altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099).
+      // When there's no old side (added file), every entity counts as
+      // changed and every gap surfaces.
+      if (!isDeletedFile && newDoc !== undefined) {
+        const changedEntities = grainDeclChangedEntities(oldDoc, newDoc)
+        grainGaps = extractGrainKeyGaps(newDoc).filter((g) => changedEntities.has(g.model))
+      }
     }
   }
 
@@ -1100,7 +1426,7 @@ export function detectSchemaYmlPatterns(
     }
   }
 
-  if (!removals.length) return []
+  if (!removals.length && !grainGaps.length) return []
 
   const findings: Finding[] = []
   const isMartLayer = /(^|\/)(marts?|reporting)\//.test(file.path)
@@ -1220,5 +1546,48 @@ export function detectSchemaYmlPatterns(
       }),
     )
   }
+
+  // R20 S1 — grain-key `not_null` completeness. For every column in a
+  // `unique_combination_of_columns` test's `combination_of_columns` that
+  // lacks `not_null` coverage on the same model, emit one finding.
+  // Recommendation flips between `constraints:` (contracted model) and
+  // `data_tests:` (view / non-contracted model) based on the model's
+  // contract state — matches the adapter-semantics discussion in the
+  // corpus study (four instances across the sample).
+  for (const g of grainGaps) {
+    const filename = file.path.split("/").pop()
+    const recommendation = g.contractEnforced
+      ? `Add \`constraints: [{type: not_null}]\` to \`${g.column}\` on \`${g.model}\` (contract is \`enforced: true\` so the constraint is enforced at write-time).`
+      : `Add \`not_null\` to \`${g.column}\`'s \`data_tests:\` on \`${g.model}\` (contract is not enforced, so a \`constraints:\` entry would be inert — use a data_test).`
+    findings.push(
+      makeFinding({
+        severity: clampSeverity("test_coverage", "warning", "high"),
+        category: "test_coverage",
+        title: `${filename}: grain column \`${g.column}\` in unique_combination_of_columns lacks \`not_null\` on \`${g.model}\``,
+        body:
+          `The \`unique_combination_of_columns\` test on \`${g.model}\` names \`${g.column}\` as a grain key, but no \`not_null\` ` +
+          `coverage is declared for it (either as a \`constraints:\` entry on a contracted model, or as a \`data_tests: [not_null]\` ` +
+          `on a view). A NULL grain-key value silently passes the uniqueness test, so a fan-out or duplicate bug can ship without ` +
+          `any test catching it. ${recommendation}`,
+        file: file.path,
+        model: g.model,
+        column: g.column,
+        confidence: "high",
+        evidence: {
+          tool: "dbt-patterns",
+          result: {
+            rule: "grain_key_not_null_missing",
+            model: g.model,
+            column: g.column,
+            contractEnforced: g.contractEnforced,
+          },
+        },
+        // Per-column ruleKey so the global fingerprint dedupe keeps distinct
+        // grain-column gaps on the same model as separate findings.
+        ruleKey: `test_coverage:grain-key-not-null:${g.model}.${g.column}`,
+      }),
+    )
+  }
+
   return findings.filter((x) => !exclusionReason(x, rubric))
 }
