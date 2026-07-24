@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -116,24 +117,59 @@ export function classifyTarget(dir: string, expectedVersion: string): TargetStat
   return { kind: "our-sample-different-version", marker, path: dir }
 }
 
+/** Verify the parent dir is writable BEFORE we start hunting candidates —
+ *  gives the caller a specific "target parent unwritable" error instead of
+ *  a raw `EACCES` from `mkdirSync` deep in the materialize step.
+ *  Returns undefined when writable; a message string when not. */
+export function checkParentWritable(parentDir: string): string | undefined {
+  try {
+    fs.accessSync(parentDir, fs.constants.W_OK)
+    return undefined
+  } catch (err) {
+    return `Target parent directory ${parentDir} is not writable: ${err instanceof Error ? err.message : String(err)}`
+  }
+}
+
 /** Given a base directory (parent) and preferred name, find the first
- *  candidate path that isn't blocked by unknown-dir content. Adds `-2`,
- *  `-3`, … suffix if `<base>/<name>/` is an unrelated dir.
- *  Caps at attemptLimit to avoid infinite loops in adversarial layouts. */
+ *  candidate path that isn't blocked by unknown-dir content.
+ *
+ *  Attempts, in order:
+ *   1. `<parentDir>/<preferredName>/`
+ *   2. `<parentDir>/<preferredName>-2/`, `-3/`, …, up to `attemptLimit`
+ *   3. If ALL of the numbered slots are held by unrelated content, one
+ *      final randomized fallback `<preferredName>-<6-hex-chars>/` — this
+ *      keeps activation working for the pathological case where a user
+ *      has 100 unrelated altimate-sample-dbt-N/ dirs (retries, support
+ *      copies, benchmark runs). Better a weird name than a hard failure.
+ *   4. If even the randomized slot collides (statistical near-impossible
+ *      given 16.7M random values), THEN throw.
+ *
+ *  Bumped attemptLimit from 10 → 100 after cubic feedback that 10 is easy
+ *  to blow past in real environments.
+ */
 export function findSafeTarget(
   parentDir: string,
   preferredName: string,
   expectedVersion: string,
-  attemptLimit: number = 10,
-): { path: string; state: TargetState; suffix: number } {
+  attemptLimit: number = 100,
+): { path: string; state: TargetState; suffix: number | string } {
   for (let i = 0; i < attemptLimit; i++) {
     const name = i === 0 ? preferredName : `${preferredName}-${i + 1}`
     const candidate = path.join(parentDir, name)
     const state = classifyTarget(candidate, expectedVersion)
     if (state.kind !== "unknown-dir") return { path: candidate, state, suffix: i }
   }
+  // Randomized fallback — 6 hex chars is ~16.7M values; if it collides we
+  // give up (the environment is genuinely hostile).
+  const randomTag = randomBytes(3).toString("hex")
+  const randomName = `${preferredName}-${randomTag}`
+  const randomCandidate = path.join(parentDir, randomName)
+  const state = classifyTarget(randomCandidate, expectedVersion)
+  if (state.kind !== "unknown-dir") {
+    return { path: randomCandidate, state, suffix: randomTag }
+  }
   throw new Error(
-    `No safe target found under ${parentDir} — first ${attemptLimit} candidates all held unrelated content`,
+    `No safe target found under ${parentDir} — first ${attemptLimit} numbered candidates AND a randomized fallback ${randomName} all held unrelated content`,
   )
 }
 

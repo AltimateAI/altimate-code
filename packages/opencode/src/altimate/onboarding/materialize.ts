@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { MARKER_KIND, findSafeTarget, writeMarker, type SampleMarker, type TargetState } from "./marker"
+import { MARKER_KIND, checkParentWritable, findSafeTarget, writeMarker, type TargetState } from "./marker"
 import { DEFAULT_SAMPLE_NAME, resolveSampleSource } from "./sample-source-resolver"
 
 /**
@@ -30,6 +30,7 @@ import { DEFAULT_SAMPLE_NAME, resolveSampleSource } from "./sample-source-resolv
  *  user's target dir. Explicitly enumerated (no glob) so future changes
  *  to the sample layout are a deliberate opt-in edit here. */
 const MATERIALIZE_ENTRIES: ReadonlyArray<{ from: string; kind: "file" | "dir" }> = [
+  { from: "README.md", kind: "file" },
   { from: "dbt_project.yml", kind: "file" },
   { from: "profiles.yml", kind: "file" },
   { from: "sample-manifest.json", kind: "file" },
@@ -66,8 +67,9 @@ export interface MaterializeResult {
   /** true when the target already held our sample at the requested version
    *  (no write was performed except possibly a marker-timestamp refresh). */
   reused: boolean
-  /** Suffix index used (0 for the preferred name, 1 for `-2`, …). */
-  suffixIndex: number
+  /** Which slot was used: 0 for the preferred name, N for `-<N+1>`,
+   *  a hex string for the randomized fallback slot. */
+  suffix: number | string
   /** Debug-worthy note about the state classification at write time. */
   note: string
 }
@@ -103,6 +105,14 @@ export async function materializeSample(opts: MaterializeOptions): Promise<Mater
     throw new Error(homeReject)
   }
 
+  // Fail loudly on unwritable parents (read-only home, NFS glitch, container
+  // mount) BEFORE we start hunting candidate names — gives the caller a
+  // clean error instead of a raw EACCES from mkdirSync mid-copy.
+  const writableError = checkParentWritable(targetParent)
+  if (writableError) {
+    throw new Error(writableError)
+  }
+
   const source = resolveSampleSource(sampleName)
   if (!source) {
     throw new Error(
@@ -119,7 +129,7 @@ export async function materializeSample(opts: MaterializeOptions): Promise<Mater
     return {
       targetPath,
       reused: true,
-      suffixIndex: suffix,
+      suffix,
       note: `reused ${targetPath} (marker version ${state.marker.version} matches)`,
     }
   }
@@ -129,7 +139,7 @@ export async function materializeSample(opts: MaterializeOptions): Promise<Mater
     return {
       targetPath,
       reused: true,
-      suffixIndex: suffix,
+      suffix,
       note: `found existing sample at ${targetPath} version ${state.marker.version}, but current version is ${opts.sampleVersion}. Caller must prompt user before allowInPlaceUpgrade=true.`,
     }
   }
@@ -146,7 +156,7 @@ export async function materializeSample(opts: MaterializeOptions): Promise<Mater
   return {
     targetPath,
     reused: false,
-    suffixIndex: suffix,
+    suffix,
     note: buildNote(state, targetPath, suffix),
   }
 }
@@ -166,10 +176,12 @@ function copySampleTree(source: string, target: string): void {
   }
 }
 
-function buildNote(state: TargetState, target: string, suffix: number): string {
+function buildNote(state: TargetState, target: string, suffix: number | string): string {
   if (state.kind === "empty" && suffix === 0) return `fresh materialize into ${target}`
-  if (state.kind === "empty" && suffix > 0)
-    return `fresh materialize into ${target} (preferred name was taken by unrelated content — used suffix -${suffix + 1})`
+  if (state.kind === "empty" && typeof suffix === "number" && suffix > 0)
+    return `fresh materialize into ${target} (preferred name was taken by unrelated content — used numeric suffix -${suffix + 1})`
+  if (state.kind === "empty" && typeof suffix === "string")
+    return `fresh materialize into ${target} (all numeric slots were taken — used randomized suffix)`
   if (state.kind === "our-sample-different-version")
     return `in-place upgrade of ${target} from version ${state.marker.version} to current`
   return `materialized into ${target}`

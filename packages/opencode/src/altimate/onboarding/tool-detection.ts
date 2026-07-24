@@ -34,7 +34,17 @@ export interface DbtRuntime {
 
 /** Cache the probe result for the process lifetime — dbt install state
  *  can't change while the CLI is running, and the probe adds a subprocess
- *  fork we don't want to pay on every activation-dialog render. */
+ *  fork we don't want to pay on every activation-dialog render.
+ *
+ *  Callers that need up-to-date state MUST pass `{ force: true }`:
+ *   - AFTER materialization (a user might have just run
+ *     `pip install dbt-duckdb` in another terminal and then picked
+ *     "sample project" — cache says `hasDbtDuckdb=false` but reality
+ *     changed since the dialog first rendered).
+ *   - BEFORE actually running any dbt-dependent workflow — even a
+ *     force-refreshed probe here is cheap compared to a subprocess run
+ *     that would silently fail.
+ *  Cached path is used for the activation-dialog first-render only. */
 let cached: Promise<DbtRuntime> | undefined
 
 export function detectDbtRuntime(opts?: { force?: boolean }): Promise<DbtRuntime> {

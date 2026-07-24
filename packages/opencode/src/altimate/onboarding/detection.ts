@@ -107,11 +107,27 @@ export async function detectUsableSetup(cwd: string): Promise<UsableSetup> {
  *   2. `$DBT_PROFILES_DIR/profiles.yml`
  *   3. `~/.dbt/profiles.yml`
  *
- * We do NOT parse the whole YAML — a targeted line-based check for
- * `^<profileName>:` at column 0 is enough to answer "is this profile
- * defined here". Wrong-column matches (nested keys) are filtered out.
- * Cheap, dependency-free, and correct for the "does the profile exist"
- * question we're actually asking.
+ * We do NOT parse the whole YAML — a broadened line-based check is enough
+ * to answer "is this profile defined here" without pulling in a YAML +
+ * Jinja stack. The regex accepts:
+ *   - Optional single or double quotes around the key.
+ *   - Optional trailing content after the colon (inline mapping, value,
+ *     comment, anchor) — dbt's schema requires the value to be a mapping,
+ *     but from the presence-check standpoint any of those shapes means
+ *     "the profile is declared".
+ *
+ * Known false-NEGATIVE cases we accept for v1:
+ *   - Jinja `{% if %}`-wrapped profile blocks (rare — dbt renders Jinja
+ *     before parsing profiles, so a real YAML+Jinja pass would resolve
+ *     them; we don't).
+ *   - Profile names embedded in YAML anchors that reference an earlier
+ *     definition.
+ *
+ * Impact of a false-negative is bounded: verdict downgrades from "usable"
+ * to "detected-not-usable" → the activation dialog leads with "sample"
+ * instead of "connect data". User can still pick either option; nothing
+ * breaks. Erring on the side of showing the sample is the safer bias when
+ * detection is uncertain.
  */
 function findProfileFor(profileName: string, projectDir: string): string | undefined {
   const candidates: string[] = []
@@ -120,7 +136,12 @@ function findProfileFor(profileName: string, projectDir: string): string | undef
   if (envDir) candidates.push(path.join(envDir, "profiles.yml"))
   candidates.push(path.join(os.homedir(), ".dbt", "profiles.yml"))
 
-  const nameRe = new RegExp(`^${escapeForRegExp(profileName)}\\s*:\\s*$`, "m")
+  // Top-level key (no leading whitespace) with optional matching quotes
+  // and anything-or-nothing after the colon. `m` flag makes ^ match at
+  // line starts, not just string start.
+  const escName = escapeForRegExp(profileName)
+  const nameRe = new RegExp(`^(["']?)${escName}\\1\\s*:(?:\\s.*)?$`, "m")
+
   for (const candidate of candidates) {
     try {
       const content = fs.readFileSync(candidate, "utf8")

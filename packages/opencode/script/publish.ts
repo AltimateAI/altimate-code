@@ -84,7 +84,8 @@ async function copyAssets(targetDir: string) {
   // production. Excludes target/ except the pre-compiled manifest.json
   // (source of truth for /discover + /review on the shipped sample).
   await $`mkdir -p ${targetDir}/sample-projects/jaffle-shop-duckdb/target`
-  await $`cp -r ./sample-projects/jaffle-shop-duckdb/dbt_project.yml \
+  await $`cp -r ./sample-projects/jaffle-shop-duckdb/README.md \
+                ./sample-projects/jaffle-shop-duckdb/dbt_project.yml \
                 ./sample-projects/jaffle-shop-duckdb/profiles.yml \
                 ./sample-projects/jaffle-shop-duckdb/sample-manifest.json \
                 ./sample-projects/jaffle-shop-duckdb/models \
