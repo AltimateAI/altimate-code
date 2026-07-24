@@ -1092,9 +1092,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // altimate_change start — upstream_fix: persist update availability for footer indicator
     kv.set(UPGRADE_KV_KEY, version)
     // altimate_change end
-    // altimate_change — don't cover the first-run welcome panel with the update confirm
-    // dialog; the footer upgrade indicator still surfaces it. Prompt once a model is ready.
+    // altimate_change start — don't cover the first-run welcome panel with the update
+    // confirm dialog; the footer upgrade indicator still surfaces it. Prompt once ready.
     if (!onboardingReady()) return
+    // altimate_change end
 
     const skipped = kv.get("skipped_version")
     if (skipped && !isVersionGreater(version, skipped)) return

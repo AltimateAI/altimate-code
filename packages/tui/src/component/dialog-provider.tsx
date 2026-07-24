@@ -340,7 +340,9 @@ function AutoMethod(props: AutoMethodProps) {
   const sdk = useSDK()
   const dialog = useDialog()
   const sync = useSync()
+  // altimate_change start — `local` sets the connected model as the default post-connect
   const local = useLocal()
+  // altimate_change end
   const toast = useToast()
   const clipboard = useClipboard()
   // altimate_change — success state: confirm inline (green) below the "waiting" line,
