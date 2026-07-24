@@ -780,19 +780,20 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           local.agent.move(-1)
         },
       },
+      // altimate_change start — /connect opens the curated welcome picker (Gateway + top
+      // BYOK providers + Big Pickle) instead of the full provider list; "Search all
+      // providers…" still hands off to the full DialogModel catalog.
       {
         name: "provider.connect",
         title: "Connect to your AI model provider",
         suggested: !connected(),
         slashName: "connect",
         run: () => {
-          // altimate_change — curated welcome picker (Gateway + top BYOK providers +
-          // Big Pickle) instead of the full provider list; "Search all providers…"
-          // still hands off to the full DialogModel catalog.
           dialog.replace(() => <DialogModelWelcome />)
         },
         category: "Provider",
       },
+      // altimate_change end
       // altimate_change start — /auth: sign in to the Altimate LLM Gateway directly;
       // /logout: clear the stored gateway credential and disconnect.
       {

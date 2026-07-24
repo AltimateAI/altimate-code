@@ -1,0 +1,24 @@
+Merge origin/main into feat/AI-7520-social-signup-authorize
+
+Resolve conflicts from upstream's TUI extraction (packages/opencode/src/cli/cmd/tui
+→ packages/tui) and fork-features-as-plugins re-architecture, re-applying the
+AI-7520 CLI onboarding onto the new structure:
+
+- dialog-provider: export/reorder PROVIDER_PRIORITY (Altimate LLM Gateway first),
+  brand the gateway option, add WARNLIST + DialogAltimateAuth, harden the OAuth
+  authorize/AutoMethod UX (try/catch → toast, inline green success + auto-close)
+- dialog-model: keep the READY / NEEDS-SETUP restructure + Big Pickle, wired through
+  upstream's new DialogVariant flow; gateway leads the full list
+- use-connected + home tips: fix undefined-cost mislabeling OpenCode as connected
+- app.tsx: /connect (welcome picker), /auth (gateway), /logout (plugin command +
+  resetSetupComplete); gate the update-available dialog on onboarding readiness
+- home.tsx: render the WelcomePanel in the home_logo slot
+- provider-credentials plugin: add altimate.provider.logout
+- providers.ts: Altimate LLM Gateway first in the login picker
+- relocate altimate-onboarding + welcome-panel into packages/tui with relative imports
+
+Verified: `bun run typecheck` green in packages/tui and packages/opencode; the
+onboarding/provider/model/app-lifecycle tests pass. Pre-existing sync*.test.tsx
+failures come from origin/main's own merge (files untouched here).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

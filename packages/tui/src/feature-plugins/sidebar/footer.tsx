@@ -58,9 +58,11 @@ const tui: TuiPlugin = async (api) => {
   api.slots.register({
     order: 100,
     slots: {
+      // altimate_change start — footer slot renders the help/JTBD panel (no sessionID)
       sidebar_footer() {
         return <View api={api} />
       },
+      // altimate_change end
     },
   })
 }

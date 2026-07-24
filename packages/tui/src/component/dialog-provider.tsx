@@ -207,9 +207,9 @@ export function createDialogProviderOptions() {
                 inputs = value
               }
 
-              // altimate_change — guard the authorize (e.g. loopback port busy) so the
-              // recommended /connect path surfaces the error instead of failing silently
-              // (parity with DialogAltimateAuth).
+              // altimate_change start — guard the authorize (e.g. loopback port busy) so
+              // the recommended /connect path surfaces the error instead of failing
+              // silently (parity with DialogAltimateAuth).
               try {
                 const result = await sdk.client.provider.oauth.authorize({
                   providerID,
@@ -249,6 +249,7 @@ export function createDialogProviderOptions() {
                 toast.error(err instanceof Error ? err : new Error("Failed to start sign-in"))
                 dialog.clear()
               }
+              // altimate_change end
             }
             if (method.type === "api") {
               // altimate_change start — restore Altimate credential validation/save/model-picker

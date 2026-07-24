@@ -454,7 +454,7 @@ export function Autocomplete(props: {
     )
     // altimate_change end
 
-    // altimate_change — first run: hide server-defined commands (/discover etc.)
+    // altimate_change start — first run: hide server-defined commands (/discover etc.)
     // until a model is ready; local slash actions (e.g. /connect) above stay visible.
     if (ready()) {
       for (const serverCommand of sync.data.command) {
@@ -479,6 +479,7 @@ export function Autocomplete(props: {
         })
       }
     }
+    // altimate_change end
 
     results.sort((a, b) => a.display.localeCompare(b.display))
 
