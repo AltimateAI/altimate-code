@@ -345,8 +345,8 @@ function AutoMethod(props: AutoMethodProps) {
   // altimate_change end
   const toast = useToast()
   const clipboard = useClipboard()
-  // altimate_change — success state: confirm inline (green) below the "waiting" line,
-  // then auto-close, instead of jumping into the model picker.
+  // altimate_change start — success state: confirm inline (green) below the "waiting"
+  // line, then auto-close, instead of jumping into the model picker.
   const [connected, setConnected] = createSignal(false)
   // Guard against a late callback / auto-close firing after the dialog is dismissed.
   let disposed = false
@@ -468,6 +468,7 @@ function AutoMethod(props: AutoMethodProps) {
     </box>
   )
 }
+// altimate_change end
 
 interface CodeMethodProps {
   index: number
