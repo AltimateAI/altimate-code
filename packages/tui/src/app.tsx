@@ -595,10 +595,18 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         ref.submit()
         break
       case "describe_use_case":
-        // Prefill a starter hint into the prompt — do NOT auto-submit; the
-        // user finishes the sentence with their real use case.
+        // Prefill a clearer hint into the prompt buffer — do NOT auto-submit;
+        // the user finishes with their real use case. Wording is a
+        // colon-terminated preamble rather than a fragment ("I'd like to ")
+        // so that if a user accidentally hits Enter on it, the LLM still
+        // sees a coherent question rather than a broken sentence.
+        //
+        // NOTE: `ref.set({..., parts: []})` clears any existing draft or
+        // attached parts. Low-risk in the fresh-user flow (nothing drafted
+        // yet) and in the explicit /activation re-entry (user just typed
+        // the command). Documented for future recovery-flow work.
         ref.set({
-          input: "I'd like to ",
+          input: "Describe what you're trying to do: ",
           parts: [],
         })
         break

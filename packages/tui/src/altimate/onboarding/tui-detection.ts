@@ -3,14 +3,30 @@ import os from "node:os"
 import path from "node:path"
 
 /**
- * Walk up to 5 levels from `startDir` looking for a `dbt_project.yml`.
- * Returns the found project's path, name, and profile name (or undefined
- * when nothing is found in the walk).
+ * TUI-side detection for DISPLAY ORDER ONLY.
  *
- * Duplicates the shape of `packages/opencode/src/altimate/tools/project-scan.ts::detectDbtProject`
- * so this module stays TUI-consumable (TUI can't import from
- * `packages/opencode`). Kept in-sync manually; if the opencode version
- * grows a warehouse-creds check, mirror it here.
+ * `detectUsableSetup()` decides which activation-dialog option to lead
+ * with — nothing more. It is intentionally decoupled from any
+ * authoritative "is this project usable" logic that server-side
+ * consumers (agents, tools, /discover flows) might depend on.
+ *
+ * Why split from opencode-side detection:
+ *   - packages/tui cannot import from packages/opencode (workspace dep
+ *     is `@opencode-ai/core` only). The dialog needs a lightweight
+ *     probe it can run in-process before render.
+ *   - Ordering is an ephemeral UX signal — it does not need to agree
+ *     with opencode's server-side "usable" verdict when one exists.
+ *     Ambiguity here downgrades to "sample first" ordering, which is
+ *     harmless (the user still sees every option).
+ *
+ * If opencode later grows an authoritative detection surface, this
+ * module stays a TUI-only display shim. Do NOT wire it into slash
+ * commands or tools — use the opencode side for that.
+ *
+ * `detectDbtProject()` below duplicates the shape of
+ * `packages/opencode/src/altimate/tools/project-scan.ts::detectDbtProject`.
+ * Kept in-sync manually. If the opencode version grows a warehouse-creds
+ * check, mirror it here.
  */
 interface DbtProjectInfo {
   found: boolean

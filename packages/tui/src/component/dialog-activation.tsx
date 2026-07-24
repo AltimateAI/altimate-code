@@ -3,8 +3,9 @@ import { TextAttributes, RGBA } from "@opentui/core"
 import { useKeyboard } from "@opentui/solid"
 // Detection + KV constants live TUI-side (this file's siblings under
 // `../altimate/onboarding/`). TUI can't import from `packages/opencode`,
-// so detection is self-contained here.
-import { detectUsableSetup, type UsableSetupVerdict } from "../altimate/onboarding/detection"
+// so a TUI-only "display-order" detection lives here — see
+// tui-detection.ts docstring for the ownership split.
+import { detectUsableSetup, type UsableSetupVerdict } from "../altimate/onboarding/tui-detection"
 import {
   ACTIVATION_CHOICES,
   KV_ACTIVATION_COMPLETED_CHOICE,
@@ -46,19 +47,33 @@ export function DialogActivation(props: { onChoose: (choice: ActivationChoice) =
   const { theme } = useTheme()
   const dialog = useDialog()
   const kv = useKV()
-  const [selected, setSelected] = createSignal(0)
-  // Verdict starts undefined ("still detecting"); we render the fallback
-  // "sample first" order and update once detection completes. Detection is
-  // an fs walk — typically <100ms — so a spinner isn't warranted.
+  // `selected` starts at -1 while detection is pending so an Enter press
+  // BEFORE detection resolves does nothing — otherwise a user with a
+  // detected-usable dbt project could hit Enter on the sample-first
+  // fallback ordering and end up running /starter when "Connect data"
+  // was the intended default. Detection typically finishes in <100ms
+  // (fs walk + regex); the render impact is a single frame of "checking…".
+  const [selected, setSelected] = createSignal<number>(-1)
   const [verdict, setVerdict] = createSignal<UsableSetupVerdict | undefined>(undefined)
 
   onMount(() => {
     dialog.setSize("large")
+    // We probe `process.cwd()` — the shell dir the user launched
+    // altimate-code from. For normal launches this is what we want. If a
+    // wrapper (Codespaces launcher, custom shim) calls `process.chdir`
+    // before invoking us, cwd could point at the wrapper's install path
+    // instead of the user's dbt project — verdict downgrades to
+    // "nothing", ordering leads with sample. Not catastrophic; user can
+    // still pick "Connect data" manually. Documented Phase 5 e2e check.
     void detectUsableSetup(process.cwd())
-      .then((r) => setVerdict(r.verdict))
+      .then((r) => {
+        setVerdict(r.verdict)
+        setSelected(0) // now safe to enable Enter
+      })
       .catch(() => {
         // Detection failure is not fatal — fall back to "sample first" order.
         setVerdict("nothing")
+        setSelected(0)
       })
   })
 
@@ -98,6 +113,17 @@ export function DialogActivation(props: { onChoose: (choice: ActivationChoice) =
   }
 
   useKeyboard((evt) => {
+    // Escape works even while detection is still resolving — the user
+    // should never feel trapped by a "checking..." state.
+    if (evt.name === "escape") {
+      evt.preventDefault()
+      run("dismissed")
+      return
+    }
+    // All other keys are gated on detection having resolved (selected != -1).
+    // Prevents Enter from firing the fallback ordering when the real
+    // verdict is still ~100ms away.
+    if (selected() < 0) return
     if (evt.name === "up") {
       setSelected((prev) => (prev - 1 + options().length) % options().length)
       evt.preventDefault()
@@ -122,15 +148,7 @@ export function DialogActivation(props: { onChoose: (choice: ActivationChoice) =
       if (Number.isInteger(asNumber) && asNumber >= 1 && asNumber <= options().length) {
         evt.preventDefault()
         run(options()[asNumber - 1]!.key)
-        return
       }
-    }
-    // Escape → treat as dismissed. Matches how DialogScanGate handles esc
-    // (there it's implicit — the dialog just clears without a callback).
-    // Here we explicitly persist "dismissed" so the dialog doesn't re-fire.
-    if (evt.name === "escape") {
-      evt.preventDefault()
-      run("dismissed")
     }
   })
 
@@ -153,7 +171,7 @@ export function DialogActivation(props: { onChoose: (choice: ActivationChoice) =
       >
         <box flexDirection="row" justifyContent="space-between">
           <text fg={theme.text} attributes={TextAttributes.BOLD}>
-            Pick one — or press esc to skip
+            {selected() < 0 ? "Checking local project…" : "Pick one — or press esc to skip"}
           </text>
           <text fg={theme.textMuted} onMouseUp={() => run("dismissed")}>
             esc

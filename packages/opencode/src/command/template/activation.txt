@@ -1,14 +1,26 @@
-The user typed `/activation` to re-open the first-run activation prompt.
-The dialog is already open (the TUI intercepts `/activation` at the palette
-layer). You do NOT need to render options yourself — just say:
+The user typed `/activation`. In the interactive TUI this command is
+intercepted at the palette layer and directly reopens the activation
+dialog — you would never see this template fire in that context. If you
+ARE seeing it, the invocation happened through a non-TUI surface
+(`altimate run`, ACP client, headless server, `--print` mode, an
+automation runner) where the dialog cannot render.
 
-  I've reopened the "What's next?" picker. Pick one of the three options
-  in the dialog above.
+Handle it as a plain-text choice: present the three activation options
+and ask the user to pick one, then continue from their answer.
 
-If the user immediately types a follow-up before picking, treat their
-message as a "describe your own use case" answer and continue conversation
-normally — the dialog will auto-dismiss on the next Enter.
+Say exactly this:
 
-Keep the response to one line. This template is a placeholder — the real
-UX happens in the TUI dialog opened by the slash command handler in
-`packages/tui/src/app.tsx`.
+  I've reopened the activation prompt. Since there's no interactive
+  dialog here, pick one of the three by name and I'll take it from
+  there:
+
+  1. Connect data — point me at your dbt project, or run
+     `/onboard-connect scan` for a full environment scan.
+  2. Open sample project — run `/starter` and I'll materialize a
+     jaffle-shop DuckDB starter you can explore locally.
+  3. Describe your own use case — just tell me what you're trying to
+     do in your next message.
+
+Then stop and wait for the user's response. Do NOT auto-run any slash
+command — the user pays for the choice with a keystroke here, same as
+the TUI dialog.
