@@ -34,29 +34,46 @@ rm -rf target dbt_packages
 dbt compile --project-dir "$SAMPLE_DIR" --profiles-dir "$SAMPLE_DIR"
 
 # Sanitize the manifest so no committed bytes are host-specific:
-#   1. Replace the absolute sample path with the {{SAMPLE_ROOT}} sentinel.
-#      Sample-project loader in altimate-code substitutes this back to the
-#      user's materialized target path at load time.
-#   2. Zero out `generated_at` and `invocation_id` so the committed diff
-#      only changes when source changes, not when a maintainer re-runs.
+#   1. Replace the absolute sample path with the {{SAMPLE_ROOT}} sentinel
+#      ONLY inside JSON string values — never in object keys and never at
+#      the raw-text level. A raw text.replace() would silently mangle any
+#      legitimate string in the manifest that happens to contain the
+#      maintainer's home directory (e.g. a model description or a compiled
+#      SQL literal referencing a real path).
+#   2. Zero `invocation_id` and pin `generated_at` to a fixed "release day"
+#      timestamp so committed diffs only change when source changes. Zero
+#      epoch is avoided because some downstream freshness-check tools may
+#      treat it as pathological — a plausible past date is safer.
 python3 - "$SAMPLE_DIR/target/manifest.json" "$SAMPLE_DIR" <<'PY'
-import json, sys, re
-path, sample_dir = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    text = f.read()
-# Replace the resolved absolute path (host-specific) with a sentinel.
-text = text.replace(sample_dir, "{{SAMPLE_ROOT}}")
-# Some dbt implementations also embed the parent packages/opencode/sample-projects
-# path prefix in a couple of metadata fields — strip anything above the sample.
-parent = sample_dir.rsplit("/", 1)[0]
-text = text.replace(parent, "{{SAMPLE_ROOT_PARENT}}")
-obj = json.loads(text)
+import json, sys, os
+manifest_path, sample_dir = sys.argv[1], sys.argv[2]
+sample_dir = os.path.abspath(sample_dir)
+parent_dir = os.path.dirname(sample_dir)
+SENTINEL_ROOT = "{{SAMPLE_ROOT}}"
+SENTINEL_PARENT = "{{SAMPLE_ROOT_PARENT}}"
+
+def replace_paths(v):
+    if isinstance(v, str):
+        if sample_dir in v or parent_dir in v:
+            return v.replace(sample_dir, SENTINEL_ROOT).replace(parent_dir, SENTINEL_PARENT)
+        return v
+    if isinstance(v, list):
+        return [replace_paths(x) for x in v]
+    if isinstance(v, dict):
+        return {k: replace_paths(x) for k, x in v.items()}
+    return v
+
+with open(manifest_path) as f:
+    obj = json.load(f)
+obj = replace_paths(obj)
 if isinstance(obj.get("metadata"), dict):
-    obj["metadata"]["generated_at"] = "1970-01-01T00:00:00Z"
+    # Fixed sentinel timestamp — updated only when a maintainer wants to
+    # signal a manifest-shape refresh; source changes alone don't bump it.
+    obj["metadata"]["generated_at"] = "2026-07-24T00:00:00Z"
     obj["metadata"]["invocation_id"] = "00000000-0000-0000-0000-000000000000"
     # env can carry USER, PWD, HOME — strip it entirely.
     obj["metadata"].pop("env", None)
-with open(path, "w") as f:
+with open(manifest_path, "w") as f:
     json.dump(obj, f, indent=2, sort_keys=True)
     f.write("\n")
 PY

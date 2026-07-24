@@ -52,9 +52,18 @@ export function resolveSampleSource(
     if (hasSampleShape(candidate)) return { path: path.resolve(candidate), origin: "env" }
   }
 
-  const execDir = path.dirname(process.execPath)
-  // Handles: this file's dirname, which after Bun compile lives inside the
-  // baked filesystem — falls back to __dirname when unavailable.
+  // `process.execPath` is often a symlink or shim under package managers
+  // (npm global `/usr/local/bin/altimate-code -> .../lib/node_modules/...`,
+  // Homebrew `bin/altimate-code -> ../libexec/bin/altimate-code`, pnpm .bin
+  // shims). Resolve it so the candidate hunt walks from the real binary
+  // location, not the shim's directory.
+  let realExec: string
+  try {
+    realExec = fs.realpathSync(process.execPath)
+  } catch {
+    realExec = process.execPath
+  }
+  const execDir = path.dirname(realExec)
   const selfDir = import.meta.dirname ?? (typeof __dirname === "string" ? __dirname : "")
 
   const candidates: Array<{ path: string; origin: SampleSourceLocation["origin"] }> = [
@@ -65,6 +74,8 @@ export function resolveSampleSource(
       path: path.join(selfDir, "..", "..", "..", "..", "sample-projects", name),
       origin: "dev-source-tree",
     },
+    // Some layouts (pnpm content-addressable, custom Homebrew brews) put the
+    // exe two levels beneath the wrapper root.
     {
       path: path.join(execDir, "..", "..", "sample-projects", name),
       origin: "wrapper-bin-grandparent",
@@ -91,6 +102,12 @@ function hasSampleShape(dir: string): boolean {
  * workflows (/discover, /review) read this without needing dbt installed on
  * the user's machine.
  *
+ * The rehydration parses JSON FIRST and walks the tree replacing sentinels
+ * only inside string values. A prior naive text-level replace would corrupt
+ * the manifest if the user's target path contained JSON-significant
+ * characters like `"` or `\` (concrete failure: `/tmp/a"b` produces invalid
+ * JSON; Windows `C:\Users\...` produces invalid escape sequences).
+ *
  * Throws if the sample source is missing or the manifest is malformed —
  * callers should catch and fall back to an actionable message.
  */
@@ -100,10 +117,34 @@ export function loadShippedManifest(
 ): Record<string, unknown> {
   const manifestPath = path.join(sampleSource, "target", "manifest.json")
   const raw = fs.readFileSync(manifestPath, "utf8")
-  const rehydrated = raw
-    .split(SAMPLE_ROOT_SENTINEL)
-    .join(materializedTarget)
-    .split(SAMPLE_ROOT_PARENT_SENTINEL)
-    .join(path.dirname(materializedTarget))
-  return JSON.parse(rehydrated) as Record<string, unknown>
+  const parsed = JSON.parse(raw) as unknown
+  const parentTarget = path.dirname(materializedTarget)
+  return rehydrateSentinels(parsed, materializedTarget, parentTarget) as Record<string, unknown>
+}
+
+/**
+ * Walk a parsed JSON tree and replace sentinel occurrences inside STRING
+ * values only. Object keys, numbers, booleans, and nulls are untouched.
+ * Exported for the freshness test to exercise the round-trip directly.
+ */
+export function rehydrateSentinels(value: unknown, sampleRoot: string, sampleRootParent: string): unknown {
+  if (typeof value === "string") {
+    if (value.indexOf(SAMPLE_ROOT_SENTINEL) === -1 && value.indexOf(SAMPLE_ROOT_PARENT_SENTINEL) === -1) {
+      return value
+    }
+    // Replace both sentinels, longest-first so SAMPLE_ROOT never matches
+    // inside a preceding SAMPLE_ROOT_PARENT hit.
+    return value.split(SAMPLE_ROOT_PARENT_SENTINEL).join(sampleRootParent).split(SAMPLE_ROOT_SENTINEL).join(sampleRoot)
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => rehydrateSentinels(item, sampleRoot, sampleRootParent))
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = rehydrateSentinels(v, sampleRoot, sampleRootParent)
+    }
+    return out
+  }
+  return value
 }
