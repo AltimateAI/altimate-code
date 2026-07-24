@@ -69,9 +69,10 @@ export function resolveSampleSource(
   const candidates: Array<{ path: string; origin: SampleSourceLocation["origin"] }> = [
     { path: path.join(execDir, "..", "sample-projects", name), origin: "wrapper-bin-parent" },
     // Dev / test: <repo>/packages/opencode/src/altimate/onboarding/*.ts
-    // → 4 hops up to packages/opencode/, then into sample-projects/.
+    // → 3 hops up to packages/opencode/, then into sample-projects/.
+    // (../onboarding → ../altimate → ../src → packages/opencode)
     {
-      path: path.join(selfDir, "..", "..", "..", "..", "sample-projects", name),
+      path: path.join(selfDir, "..", "..", "..", "sample-projects", name),
       origin: "dev-source-tree",
     },
     // Some layouts (pnpm content-addressable, custom Homebrew brews) put the
