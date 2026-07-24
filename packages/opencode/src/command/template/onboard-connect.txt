@@ -41,9 +41,13 @@ Then take the FIRST matching branch:
 4. hasDbt is false AND hasWarehouse is false AND isRepo is false — genuinely nothing yet:
    Say:
 
-     Nothing to connect here yet. When you've got a dbt project or warehouse handy,
-     run /discover and I'll pick it up. Meanwhile I can explain a concept, review
-     SQL you paste, or scaffold a project — want to try one?
+     Nothing to connect here yet. Three options:
+     - Run /starter to try a preloaded jaffle-shop DuckDB sample project (works
+       offline, no credentials — the fastest way to see the review + lineage
+       flows on a real DAG).
+     - When you've got your own dbt project or warehouse handy, cd into it and
+       run /discover — I'll pick it up.
+     - Or paste some SQL / describe your use case and I'll take it from there.
 
 Keep the tone calm and honest: the scan only reads local files the user already
 has; the real credential ask comes later, only when connecting a specific warehouse.

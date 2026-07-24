@@ -35,6 +35,9 @@ import { DialogModelWelcome, useReady, resetSetupComplete } from "./component/al
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
 import { DialogScanGate } from "./component/dialog-scan-gate"
+// altimate_change — Part 2b activation prompt (fires on scan-gate "No" +
+// via the /activation slash command).
+import { DialogActivation, type ActivationChoice } from "./component/dialog-activation"
 import { ErrorComponent } from "./component/error-component"
 import { PluginRouteMissing } from "./component/plugin-route-missing"
 import { ProjectProvider, useProject } from "./context/project"
@@ -572,6 +575,38 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // sees it, and a later /model change (ready stays true, no transition) never
   // re-triggers it. We do NOT auto-scan — the gate just asks.
   let scanGateShown = false
+  // Shared "user picked an option in the activation dialog" handler. Dispatches
+  // the right follow-up slash command based on choice. Also invoked from the
+  // /activation slash command (which re-opens the dialog after dismissal).
+  const dispatchActivationChoice = (choice: ActivationChoice) => {
+    const ref = promptRef.current
+    if (!ref) return
+    switch (choice) {
+      case "connect_data":
+        // Same flow the scan-gate "Yes" path uses — /onboard-connect scan runs
+        // project_scan and branches into the discovery UX.
+        ref.set({ input: `/onboard-connect scan`, parts: [] })
+        ref.submit()
+        break
+      case "sample_project":
+        // /starter materializes ~/altimate-sample-dbt/ and reports back the
+        // shipped-sample workflow suggestions.
+        ref.set({ input: `/starter`, parts: [] })
+        ref.submit()
+        break
+      case "describe_use_case":
+        // Prefill a starter hint into the prompt — do NOT auto-submit; the
+        // user finishes the sentence with their real use case.
+        ref.set({
+          input: "I'd like to ",
+          parts: [],
+        })
+        break
+      case "dismissed":
+        // Nothing else — dialog cleared, empty prompt.
+        break
+    }
+  }
   createEffect(
     on(onboardingReady, (isReady, prev) => {
       if (scanGateShown) return
@@ -580,13 +615,19 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         dialog.replace(() => (
           <DialogScanGate
             onChoose={(arg) => {
-              // No → the gate already cleared itself; just drop the user into the
-              // empty chat input. Only Yes kicks off the scan flow.
-              if (arg === "skip") return
-              const ref = promptRef.current
-              if (!ref) return
-              ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
-              ref.submit()
+              if (arg === "scan") {
+                // Yes → dispatch the existing /onboard-connect scan flow.
+                const ref = promptRef.current
+                if (!ref) return
+                ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
+                ref.submit()
+                return
+              }
+              // No → open the activation prompt with three next-action options,
+              // instead of dropping the user into an empty chat with no
+              // continuation. Persisted choice + dismissal timestamp live in KV
+              // so the dialog does not re-fire on future launches.
+              dialog.replace(() => <DialogActivation onChoose={dispatchActivationChoice} />)
             }}
           />
         ))
@@ -792,6 +833,20 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           dialog.replace(() => <DialogModelWelcome />)
         },
         category: "Provider",
+      },
+      // altimate_change end
+      // altimate_change start — /activation re-opens the first-run activation
+      // prompt. Escape hatch for users who dismissed the dialog too early;
+      // keeps `/starter` reachable and prevents the "I clicked away and now
+      // there's nothing" failure mode codex flagged in the design consult.
+      {
+        name: "onboarding.activation",
+        title: "Re-open the first-run activation prompt",
+        slashName: "activation",
+        run: () => {
+          dialog.replace(() => <DialogActivation onChoose={dispatchActivationChoice} />)
+        },
+        category: "Onboarding",
       },
       // altimate_change end
       // altimate_change start — /auth: sign in to the Altimate LLM Gateway directly;

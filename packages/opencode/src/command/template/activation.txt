@@ -1,0 +1,14 @@
+The user typed `/activation` to re-open the first-run activation prompt.
+The dialog is already open (the TUI intercepts `/activation` at the palette
+layer). You do NOT need to render options yourself — just say:
+
+  I've reopened the "What's next?" picker. Pick one of the three options
+  in the dialog above.
+
+If the user immediately types a follow-up before picking, treat their
+message as a "describe your own use case" answer and continue conversation
+normally — the dialog will auto-dismiss on the next Enter.
+
+Keep the response to one line. This template is a placeholder — the real
+UX happens in the TUI dialog opened by the slash command handler in
+`packages/tui/src/app.tsx`.

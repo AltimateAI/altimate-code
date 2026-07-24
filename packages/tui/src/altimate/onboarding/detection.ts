@@ -1,7 +1,48 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { detectDbtProject } from "../tools/project-scan"
+
+/**
+ * Walk up to 5 levels from `startDir` looking for a `dbt_project.yml`.
+ * Returns the found project's path, name, and profile name (or undefined
+ * when nothing is found in the walk).
+ *
+ * Duplicates the shape of `packages/opencode/src/altimate/tools/project-scan.ts::detectDbtProject`
+ * so this module stays TUI-consumable (TUI can't import from
+ * `packages/opencode`). Kept in-sync manually; if the opencode version
+ * grows a warehouse-creds check, mirror it here.
+ */
+interface DbtProjectInfo {
+  found: boolean
+  path?: string
+  name?: string
+  profile?: string
+}
+
+async function detectDbtProject(startDir: string): Promise<DbtProjectInfo> {
+  let dir = startDir
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, "dbt_project.yml")
+    if (fs.existsSync(candidate)) {
+      let name: string | undefined
+      let profile: string | undefined
+      try {
+        const content = fs.readFileSync(candidate, "utf-8")
+        const nameMatch = content.match(/^name:\s*['"]?([^\s'"]+)['"]?/m)
+        if (nameMatch) name = nameMatch[1]
+        const profileMatch = content.match(/^profile:\s*['"]?([^\s'"]+)['"]?/m)
+        if (profileMatch) profile = profileMatch[1]
+      } catch {
+        // ignore read errors — we still have a positive found signal
+      }
+      return { found: true, path: dir, name, profile }
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return { found: false }
+}
 
 /**
  * Decide whether the user "already has a usable dbt setup" strongly enough
