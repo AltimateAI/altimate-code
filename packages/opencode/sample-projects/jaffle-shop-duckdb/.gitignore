@@ -1,0 +1,10 @@
+# Build/run artifacts that must NOT be committed. The pre-compiled artifact
+# that IS committed (target/manifest.json) is force-added by the regenerate
+# script — it is deliberately excluded here so a `dbt build` on a materialized
+# sample can't accidentally get staged.
+target/
+!target/manifest.json
+
+dbt_packages/
+logs/
+.user.yml

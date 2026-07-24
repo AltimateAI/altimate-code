@@ -1,0 +1,11 @@
+# DuckDB profile — everything runs locally against a single file at
+# `target/jaffle.duckdb` (created on first `dbt build`). No cloud credentials.
+# Path is project-relative, so this profile works from any directory the
+# reviewer materializes the sample into.
+jaffle_shop:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "target/jaffle.duckdb"
+      threads: 1
