@@ -92,8 +92,9 @@ export function Autocomplete(props: {
   const project = useProject()
   const slashes = useCommandSlashes()
   const modeStack = useOpencodeModeStack()
-  // altimate_change — readiness gate for first-run slash filtering
+  // altimate_change start — readiness gate for first-run slash filtering
   const ready = useReady()
+  // altimate_change end
   const { theme } = useTheme()
   const dimensions = useTerminalDimensions()
   const frecency = useFrecency()

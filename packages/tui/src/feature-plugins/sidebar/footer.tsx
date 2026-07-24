@@ -7,10 +7,12 @@ import open from "open"
 
 const id = "internal:sidebar-footer"
 
+// altimate_change start — sidebar footer rewritten as a help/JTBD panel: the View
+// signature drops `sessionID`, and a dotted-divider helper feeds the section below.
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
-  // altimate_change — light dotted divider between sidebar sections
   const Dotted = () => <text fg={theme().border}>┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</text>
+  // altimate_change end
 
   return (
     <box gap={1}>

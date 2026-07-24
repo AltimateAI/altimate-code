@@ -45,8 +45,8 @@ const tui: TuiPlugin = async (api) => {
         // altimate_change start — upstream_fix: wait for synced session count before first-run onboarding
         const first = createMemo(() => api.state.ready && api.state.session.count() === 0)
         // altimate_change end
-        // altimate_change — treat undefined cost as "not paid" (upstream `!== 0` was
-        // true for undefined, mislabeling OpenCode as connected without a Zen key).
+        // altimate_change start — treat undefined cost as "not paid" (upstream `!== 0`
+        // was true for undefined, mislabeling OpenCode as connected without a Zen key).
         const connected = createMemo(() =>
           api.state.provider.some(
             (item) =>
@@ -54,6 +54,7 @@ const tui: TuiPlugin = async (api) => {
               Object.values(item.models).some((model) => model.cost?.input != null && model.cost.input !== 0),
           ),
         )
+        // altimate_change end
         // altimate_change start — upstream_fix: restore first-run onboarding state
         const isFirstTime = createMemo(() => first() && !connected())
         // altimate_change end

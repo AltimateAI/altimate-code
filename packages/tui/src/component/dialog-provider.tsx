@@ -33,8 +33,8 @@ export const PROVIDER_PRIORITY: Record<string, number> = {
   opencode: 5,
   "opencode-go": 6,
   "github-copilot": 7,
-  // altimate_change end
 }
+// altimate_change end
 
 // altimate_change start — known-bad tool-callers, surfaced inline in the model picker
 // (imported by dialog-model's READY/NEEDS-SETUP list).

@@ -248,11 +248,12 @@ export function Prompt(props: PromptProps) {
   const [cursorVersion, setCursorVersion] = createSignal(0)
   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
   const hasRightContent = createMemo(() => Boolean(props.right))
-  // altimate_change — readiness gate: guide (don't block) when no provider is set up
+  // altimate_change start — readiness gate: guide (don't block) when no provider is set
+  // up; and flag known-bad tool-callers with a persistent "⚠ unreliable model" chip in
+  // the prompt meta row (same WARNLIST the model picker warns with).
   const ready = useReady()
-  // altimate_change — known-bad tool-callers get a persistent "⚠ unreliable model" chip
-  // in the prompt meta row (same WARNLIST the model picker warns with).
   const unreliableModel = createMemo(() => Boolean(WARNLIST[local.model.parsed().model]))
+  // altimate_change end
 
   function promptModelWarning() {
     toast.show({

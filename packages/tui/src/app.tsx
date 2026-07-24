@@ -541,12 +541,14 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     })
   })
 
+  // altimate_change start — connection + onboarding readiness. `connected` tracks a
+  // paid/BYOK provider; `onboardingReady` also counts a completed first-run setup pick
+  // (e.g. Big Pickle) and gates first-run chat/tips (see component/altimate-onboarding.tsx).
+  // Distinct from the plugin-host `ready` signal above (line ~408), which tracks TUI
+  // plugin startup, not onboarding state.
   const connected = useConnected()
-  // altimate_change — onboarding readiness (real credentials OR a completed first-run
-  // setup pick, e.g. Big Pickle) gates first-run chat/tips; see
-  // component/altimate-onboarding.tsx. Named distinctly from the plugin-host `ready`
-  // signal above (line ~408), which tracks TUI plugin startup, not onboarding state.
   const onboardingReady = useReady()
+  // altimate_change end
 
   // altimate_change start — AI-7774: first-run onboarding gate. On a fresh launch
   // with no usable model, open the curated provider picker as the entry point (chat
