@@ -578,6 +578,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         dialog.replace(() => (
           <DialogScanGate
             onChoose={(arg) => {
+              // No → the gate already cleared itself; just drop the user into the
+              // empty chat input. Only Yes kicks off the scan flow.
+              if (arg === "skip") return
               const ref = promptRef.current
               if (!ref) return
               ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
