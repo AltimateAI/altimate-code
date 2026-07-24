@@ -78,6 +78,21 @@ async function copyAssets(targetDir: string) {
   if (fs.existsSync("../dbt-tools/dist/altimate_python_packages")) {
     await $`cp -r ../dbt-tools/dist/altimate_python_packages ${targetDir}/dbt-tools/dist/`
   }
+  // altimate_change start — ship the starter sample dbt project alongside
+  // the wrapper package. Runtime resolver in
+  // src/altimate/onboarding/sample-source-resolver.ts finds it here in
+  // production. Excludes target/ except the pre-compiled manifest.json
+  // (source of truth for /discover + /review on the shipped sample).
+  await $`mkdir -p ${targetDir}/sample-projects/jaffle-shop-duckdb/target`
+  await $`cp -r ./sample-projects/jaffle-shop-duckdb/dbt_project.yml \
+                ./sample-projects/jaffle-shop-duckdb/profiles.yml \
+                ./sample-projects/jaffle-shop-duckdb/sample-manifest.json \
+                ./sample-projects/jaffle-shop-duckdb/models \
+                ./sample-projects/jaffle-shop-duckdb/seeds \
+                ${targetDir}/sample-projects/jaffle-shop-duckdb/`
+  await $`cp ./sample-projects/jaffle-shop-duckdb/target/manifest.json \
+             ${targetDir}/sample-projects/jaffle-shop-duckdb/target/manifest.json`
+  // altimate_change end
   await Bun.file(`${targetDir}/LICENSE`).write(await Bun.file("../../LICENSE").text())
   await Bun.file(`${targetDir}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
 }
