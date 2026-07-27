@@ -7,18 +7,21 @@ import { materializeSample } from "../onboarding/materialize"
 import { DEFAULT_SAMPLE_NAME, resolveSampleSource } from "../onboarding/sample-source-resolver"
 
 /**
- * `starter_materialize` — LLM-invoked tool that copies the shipped
- * jaffle-shop DuckDB starter sample onto the user's filesystem and
- * returns a structured summary the `/starter` template branches on.
+ * `sample_setup` — LLM-invoked tool that copies the shipped jaffle-shop
+ * DuckDB sample onto the user's filesystem and returns a structured
+ * summary the `/onboard-connect` template branches on.
  *
  * Contract with the template
- * (`packages/opencode/src/command/template/starter.txt`):
+ * (`packages/opencode/src/command/template/onboard-connect.txt`, sample
+ * routing block):
  *
  *   Success: `{title, metadata: {targetPath, reused, suffix, note}, output}`
- *     - reused=true  → template branch 1 ("already set up at ...")
- *     - reused=false, suffix=0 → branch 2 ("Sample project created at ...")
- *     - reused=false, suffix=number>0 OR suffix=string → branch 3
- *       (preferred name was taken, used a suffixed variant)
+ *     - reused=true, note contains "Caller must prompt" → template
+ *       prompts before overwriting (different sample version on disk)
+ *     - reused=true, no such note → "already set up at <path>"
+ *     - reused=false, suffix=0 → "Sample project created at <path>"
+ *     - reused=false, suffix>0 → preferred name was taken, used a
+ *       suffixed variant (`<name>-2`, `<name>-3`, …)
  *   Failure: `{title, metadata: {error}, output}` — `output` carries a
  *     verbatim actionable message ("Target parent directory X is not
  *     writable", "HOME=/root but this process is not running as root",
@@ -33,13 +36,13 @@ import { DEFAULT_SAMPLE_NAME, resolveSampleSource } from "../onboarding/sample-s
  * automatically bumps the version stamped into the marker without a
  * code change here.
  */
-export const StarterMaterializeTool = Tool.define("starter_materialize", {
+export const SampleSetupTool = Tool.define("sample_setup", {
   description:
-    "Materialize the shipped jaffle-shop DuckDB starter sample onto the user's disk. " +
-    "Called by the `/starter` slash command flow after the user picks 'Open sample project' " +
-    "from the first-run activation dialog. Idempotent — a second call reuses the existing " +
-    "materialized directory without re-copying. Never overwrites an unrelated user directory: " +
-    "if the preferred path holds unknown content, materializes into a suffixed variant " +
+    "Materialize the shipped jaffle-shop DuckDB sample dbt project onto the user's disk. " +
+    "Called by the /onboard-connect activation menu when the user picks 'Try Altimate on a " +
+    "sample dbt project'. Idempotent — a second call reuses the existing materialized " +
+    "directory without re-copying. Never overwrites an unrelated user directory: if the " +
+    "preferred path holds unknown content, materializes into a suffixed variant " +
     "(`<name>-2`, `<name>-3`, ...) instead.",
   parameters: z.object({
     preferred_target_name: z
@@ -49,8 +52,8 @@ export const StarterMaterializeTool = Tool.define("starter_materialize", {
       .optional()
       .describe(
         "Directory name (relative to the target parent) to materialize into. Defaults to " +
-          "`altimate-sample-dbt`. Rarely overridden — the default matches what the /starter " +
-          "template documents.",
+          "`altimate-sample-dbt`. Rarely overridden — the default matches what the activation " +
+          "menu documents.",
       ),
     target_parent: z
       .string()

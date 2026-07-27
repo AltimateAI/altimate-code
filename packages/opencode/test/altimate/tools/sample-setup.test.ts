@@ -1,23 +1,23 @@
 /**
- * starter_materialize tool — LLM-invoked wrapper around materializeSample().
+ * sample_setup tool — LLM-invoked wrapper around materializeSample().
  *
- * The template at packages/opencode/src/command/template/starter.txt asks
- * the LLM to call this tool and branches on the returned metadata.
- * These tests pin the return shape for the three success branches + the
- * error passthrough contract.
+ * The template at packages/opencode/src/command/template/onboard-connect.txt
+ * asks the LLM to call this tool from the activation-menu sample branch
+ * and branches on the returned metadata. These tests pin the return
+ * shape for the three success branches + the error passthrough contract.
  */
 
 import { beforeAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { StarterMaterializeTool } from "../../../src/altimate/tools/starter-materialize"
+import { SampleSetupTool } from "../../../src/altimate/tools/sample-setup"
 import { MARKER_KIND, readMarker, writeMarker } from "../../../src/altimate/onboarding/marker"
 import { initTool, type TestTool } from "../tool-fixture"
 
-let tool: TestTool<typeof StarterMaterializeTool>
+let tool: TestTool<typeof SampleSetupTool>
 beforeAll(async () => {
-  tool = await initTool(StarterMaterializeTool)
+  tool = await initTool(SampleSetupTool)
 })
 
 function makeTmp(prefix: string): string {
@@ -28,9 +28,9 @@ function makeTmp(prefix: string): string {
 // ctx is unused by this tool, so we pass a minimal stub.
 const CTX: any = { sessionID: "test-session" }
 
-describe("starter_materialize tool — LLM-facing contract", () => {
+describe("sample_setup tool — LLM-facing contract", () => {
   test("fresh materialize → metadata.reused=false, suffix=0, targetPath set, no error", async () => {
-    const parent = makeTmp("starter-tool-fresh-")
+    const parent = makeTmp("sample-setup-fresh-")
     const result = await tool.execute(
       { preferred_target_name: "sample", target_parent: parent, allow_in_place_upgrade: false },
       CTX,
@@ -44,7 +44,7 @@ describe("starter_materialize tool — LLM-facing contract", () => {
   })
 
   test("second call to same target → metadata.reused=true (template branch 1)", async () => {
-    const parent = makeTmp("starter-tool-reuse-")
+    const parent = makeTmp("sample-setup-reuse-")
     await tool.execute(
       { preferred_target_name: "sample", target_parent: parent, allow_in_place_upgrade: false },
       CTX,
@@ -58,7 +58,7 @@ describe("starter_materialize tool — LLM-facing contract", () => {
   })
 
   test("preferred name taken by unrelated content → metadata.suffix>0 (template branch 3)", async () => {
-    const parent = makeTmp("starter-tool-collide-")
+    const parent = makeTmp("sample-setup-collide-")
     const preferred = path.join(parent, "sample")
     fs.mkdirSync(preferred)
     fs.writeFileSync(path.join(preferred, "user-file.txt"), "important")
@@ -83,7 +83,7 @@ describe("starter_materialize tool — LLM-facing contract", () => {
   })
 
   test("existing our-sample at different version, no allow_in_place_upgrade → reused=true with 'Caller must prompt' hint", async () => {
-    const parent = makeTmp("starter-tool-diffver-")
+    const parent = makeTmp("sample-setup-diffver-")
     // Pre-seed with our sample at an older version.
     const preferred = path.join(parent, "sample")
     fs.mkdirSync(preferred)
