@@ -128,6 +128,7 @@ import { ToolLookupTool } from "../altimate/tools/tool-lookup"
 import { ProjectScanTool } from "../altimate/tools/project-scan"
 import { DatamateManagerTool } from "../altimate/tools/datamate"
 import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
+import { StarterMaterializeTool } from "../altimate/tools/starter-materialize"
 // altimate_change end
 
 // altimate_change start - import altimate persistent memory tools
@@ -460,6 +461,7 @@ export namespace ToolRegistry {
       ProjectScanTool,
       DatamateManagerTool,
       FeedbackSubmitTool,
+      StarterMaterializeTool,
       // altimate_change end
       // altimate_change start - register altimate persistent memory tools
       ...(!Flag.ALTIMATE_DISABLE_MEMORY
