@@ -45,6 +45,17 @@ This opens the Altimate Code chat panel where you can interact with altimate age
 
 The extension uses your existing `altimate-code.json` config. No additional IDE-specific configuration is required. Warehouse connections, LLM providers, permissions, and agent settings all carry over.
 
+### Extension settings
+
+The extension contributes these VS Code settings (Settings → search "altimate"):
+
+| Setting | Default | Description |
+|---|---|---|
+| `altimate.codeRequireConsent` | `false` | Ask before downloading and installing the altimate-code CLI. By default the extension installs the CLI automatically the first time chat opens. When enabled, chat shows an install prompt instead — nothing is downloaded until you confirm, and declining shows manual install instructions. |
+| `altimate.codeAutoUpdate` | `true` | Keep the CLI up to date automatically in the background. Checked at most once a day, and only runs when the CLI is already installed. |
+
+The extension installs the CLI natively: the release archive is fetched over HTTPS from [GitHub releases](https://github.com/AltimateAI/altimate-code/releases), verified against the release's `checksums.txt` (SHA-256), and placed in `~/.altimate/bin` — no shell scripts are executed and nothing outside your home directory is modified. Environments that prefer full control can enable `altimate.codeRequireConsent` via managed settings, or pre-install the CLI themselves (the extension uses any `altimate` found on `PATH` or in `~/.altimate/bin`).
+
 ## LLM Access
 
 You need an LLM to power the chat. Two options:
