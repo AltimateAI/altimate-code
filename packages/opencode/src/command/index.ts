@@ -25,10 +25,6 @@ import PROMPT_FEEDBACK from "./template/feedback.txt"
 // existing /discover flow on the found path; discover.txt is unchanged)
 import PROMPT_ONBOARD_CONNECT from "./template/onboard-connect.txt"
 // altimate_change end
-// altimate_change start — first-run activation follow-ups
-import PROMPT_STARTER from "./template/starter.txt"
-import PROMPT_ACTIVATION from "./template/activation.txt"
-// altimate_change end
 
 type State = {
   commands: Record<string, Info>
@@ -87,10 +83,6 @@ export const Default = {
   MCPS: "mcps",
   ONBOARD_CONNECT: "onboard-connect",
   // altimate_change end
-  // altimate_change start — first-run activation follow-ups
-  STARTER: "starter",
-  ACTIVATION: "activation",
-  // altimate_change end
 } as const
 
 export interface Interface {
@@ -145,31 +137,6 @@ export const layer = Layer.effect(
           return PROMPT_ONBOARD_CONNECT
         },
         hints: hints(PROMPT_ONBOARD_CONNECT),
-      }
-      // altimate_change end
-      // altimate_change start — first-run activation follow-ups: /starter
-      // materializes the shipped sample dbt project onto the user's disk;
-      // /activation re-opens the activation dialog (which auto-dismissed
-      // after the user made their first pick).
-      commands[Default.STARTER] = {
-        name: Default.STARTER,
-        description: "materialize + open the shipped jaffle-shop sample dbt project",
-        source: "command",
-        subtask: false,
-        get template() {
-          return PROMPT_STARTER
-        },
-        hints: hints(PROMPT_STARTER),
-      }
-      commands[Default.ACTIVATION] = {
-        name: Default.ACTIVATION,
-        description: "re-open the first-run activation prompt",
-        source: "command",
-        subtask: false,
-        get template() {
-          return PROMPT_ACTIVATION
-        },
-        hints: hints(PROMPT_ACTIVATION),
       }
       // altimate_change end
       commands[Default.REVIEW] = {

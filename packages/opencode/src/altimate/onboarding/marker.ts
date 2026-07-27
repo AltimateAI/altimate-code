@@ -8,14 +8,12 @@ import path from "node:path"
  * consulted before any subsequent write to decide reuse / reset / suffix /
  * refuse.
  *
- * The marker is authoritative for filesystem safety. The KV entry
- * `KV_SAMPLE_PROJECT_PATH` is a convenience index; if KV and marker
- * disagree, the marker wins (KV gets rewritten on reconciliation).
+ * The marker is authoritative for filesystem safety.
  *
- * Codex's earlier concern: "looks like our sample" heuristic folder-sniffing
- * (files present, right names) can mis-classify a user's real dbt project
- * that happens to have the same layout. A dedicated JSON marker with a
- * required `kind` field avoids that entire failure mode.
+ * A "looks like our sample" heuristic (files present, right names) would
+ * mis-classify a user's real dbt project that happens to have the same
+ * layout. A dedicated JSON marker with a required `kind` field avoids
+ * that entire failure mode.
  */
 
 export const MARKER_FILE_NAME = ".altimate-sample.json"
