@@ -1,7 +1,9 @@
+import { Show } from "solid-js"
 import { TextAttributes } from "@opentui/core"
 import { useTheme } from "../context/theme"
 import { Logo } from "./logo"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { useReady } from "./altimate-onboarding"
 
 // altimate_change — Claude-Code-style full-width boot box: big block wordmark on
 // the left and a single "What is Altimate Code" section on the right. Shared
@@ -10,6 +12,7 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 // transient top toasts (update/MCP) that would otherwise blank its top rows.
 export function WelcomePanel() {
   const { theme } = useTheme()
+  const ready = useReady()
   return (
     <box
       border
@@ -54,11 +57,20 @@ export function WelcomePanel() {
           <text fg={theme.accent} attributes={TextAttributes.BOLD}>
             What is Altimate Code
           </text>
-          <text fg={theme.textMuted} wrapMode="word" width="100%">
+          <text fg={theme.text} wrapMode="word" width="100%">
             Altimate Code is a specialized data engineering harness that sits between any LLM and your entire data
-            stack. It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse
-            metadata — so it reasons about your data instead of guessing.
+            stack.
           </text>
+          <text fg={theme.text} wrapMode="word" width="100%">
+            It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse metadata — so it
+            reasons about your data instead of guessing.
+          </text>
+          {/* CTA only until a model is connected — stale afterwards */}
+          <Show when={!ready()}>
+            <text fg={theme.primary} wrapMode="word" width="100%">
+              Connect your AI model to start.
+            </text>
+          </Show>
         </box>
       </box>
     </box>

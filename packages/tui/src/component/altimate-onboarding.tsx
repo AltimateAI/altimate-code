@@ -78,7 +78,7 @@ export function DialogModelWelcome(props: { intro?: string }) {
   const rows = createMemo<WelcomeRow[]>(() => [
     {
       name: "Altimate LLM Gateway",
-      note: "Recommended · best tool-calling · 10M free tokens",
+      note: "Recommended · best for data work · 10M free tokens",
       tone: "success",
       providerID: "altimate-backend",
       activate: () => connectProvider("altimate-backend"),
@@ -106,7 +106,7 @@ export function DialogModelWelcome(props: { intro?: string }) {
     },
     {
       name: "Big Pickle",
-      note: "free, no signup — slower, unreliable tool-calling",
+      note: "free · less reliable for data work",
       tone: "warning",
       providerID: "opencode",
       modelID: "big-pickle",
