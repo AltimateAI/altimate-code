@@ -48,12 +48,16 @@ export const SampleSetupTool = Tool.define("sample_setup", {
     preferred_target_name: z
       .string()
       .trim()
-      .min(1)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, {
+        message:
+          "must be a plain directory name (letters/digits/dot/dash/underscore only, no path separators, no leading dot)",
+      })
       .optional()
       .describe(
         "Directory name (relative to the target parent) to materialize into. Defaults to " +
           "`altimate-sample-dbt`. Rarely overridden — the default matches what the activation " +
-          "menu documents.",
+          "menu documents. Must be a single path segment: letters, digits, dot, dash, " +
+          "underscore only. Not a full path. Do not include `/` or `..`.",
       ),
     target_parent: z
       .string()
@@ -63,7 +67,8 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       .describe(
         "Parent directory that holds the materialized copy. Defaults to `os.homedir()` after " +
           "a safety check against unsafe HOME values (/root, /tmp/*, /). Pass explicitly only " +
-          "if the user asked for a specific location.",
+          "if the user asked for a specific location. The final target is always contained " +
+          "within this parent — path traversal in `preferred_target_name` is rejected.",
       ),
     allow_in_place_upgrade: z
       .boolean()

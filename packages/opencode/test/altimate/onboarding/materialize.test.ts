@@ -220,3 +220,108 @@ describe("materializeSample — failure modes", () => {
     ).rejects.toThrow(/not writable/)
   })
 })
+
+/**
+ * Path-traversal / adversarial-input guards for `preferredTargetName`.
+ * `sample_setup` accepts this from the LLM; a prompt-injected model turn
+ * (or a compromised template) could try to steer materialization outside
+ * `targetParent`. The name-regex + post-resolve containment check should
+ * refuse before any fs write happens.
+ */
+describe("materializeSample — preferredTargetName input hardening", () => {
+  const REJECTED = [
+    "../escape",
+    "..",
+    "../../etc/passwd",
+    "a/b",
+    "/absolute",
+    ".hidden",
+    "with space",
+    "with\ttab",
+    "with\nnewline",
+    "quote'char",
+    "back\\slash",
+    "", // empty — no valid segment
+  ]
+  for (const name of REJECTED) {
+    test(`refuses preferredTargetName ${JSON.stringify(name)} before any fs write`, async () => {
+      const parent = makeTmpParent("materialize-traversal-")
+      await expect(
+        materializeSample({
+          targetParent: parent,
+          preferredTargetName: name,
+          sampleVersion: SAMPLE_VERSION,
+          cliVersion: CLI_VERSION,
+        }),
+      ).rejects.toThrow(/not a plain directory name|refusing to materialize/)
+      // Parent still exists, but nothing was materialized inside it.
+      expect(fs.readdirSync(parent)).toEqual([])
+    })
+  }
+
+  const ACCEPTED = ["starter", "altimate-sample-dbt", "a", "A1", "with.dot", "with-dash", "with_underscore"]
+  for (const name of ACCEPTED) {
+    test(`accepts preferredTargetName ${JSON.stringify(name)}`, async () => {
+      const parent = makeTmpParent("materialize-accept-")
+      const result = await materializeSample({
+        targetParent: parent,
+        preferredTargetName: name,
+        sampleVersion: SAMPLE_VERSION,
+        cliVersion: CLI_VERSION,
+      })
+      expect(result.targetPath).toBe(path.join(parent, name))
+    })
+  }
+})
+
+/**
+ * Interrupt-safety: a prior killed materialize leaves a `.<name>.tmp-<hex>`
+ * staging dir. The next run must (a) not classify it as unknown-dir and
+ * escalate to a suffix, and (b) sweep the orphan.
+ */
+describe("materializeSample — orphan staging cleanup", () => {
+  test("prior killed run left a .starter.tmp-* orphan → next run sweeps it AND materializes starter/", async () => {
+    const parent = makeTmpParent("materialize-orphan-")
+    const orphan1 = path.join(parent, ".starter.tmp-deadbeef")
+    const orphan2 = path.join(parent, ".starter.tmp-cafebabe")
+    fs.mkdirSync(orphan1, { recursive: true })
+    fs.writeFileSync(path.join(orphan1, "partial.txt"), "leftover from crash")
+    fs.mkdirSync(orphan2, { recursive: true })
+
+    const result = await materializeSample({
+      targetParent: parent,
+      preferredTargetName: "starter",
+      sampleVersion: SAMPLE_VERSION,
+      cliVersion: CLI_VERSION,
+    })
+
+    // Fresh materialize into starter/ (not starter-2/).
+    expect(result.suffix).toBe(0)
+    expect(result.targetPath).toBe(path.join(parent, "starter"))
+    // Marker present → fully atomic.
+    expect(fs.existsSync(path.join(result.targetPath, MARKER_FILE_NAME))).toBe(true)
+    // Both orphans gone.
+    expect(fs.existsSync(orphan1)).toBe(false)
+    expect(fs.existsSync(orphan2)).toBe(false)
+    // No stray staging dir for THIS run.
+    const staging = fs.readdirSync(parent).filter((n) => n.startsWith(".starter.tmp-"))
+    expect(staging).toEqual([])
+  })
+
+  test("orphan for a DIFFERENT preferredName is left alone (different sweep prefix)", async () => {
+    const parent = makeTmpParent("materialize-orphan-scoped-")
+    const otherOrphan = path.join(parent, ".other-sample.tmp-abcdef")
+    fs.mkdirSync(otherOrphan, { recursive: true })
+
+    await materializeSample({
+      targetParent: parent,
+      preferredTargetName: "starter",
+      sampleVersion: SAMPLE_VERSION,
+      cliVersion: CLI_VERSION,
+    })
+
+    // Only starter's orphans get swept; another sample's staging is not our
+    // business.
+    expect(fs.existsSync(otherOrphan)).toBe(true)
+  })
+})

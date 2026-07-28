@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -95,9 +96,32 @@ export function rejectUnsafeHome(home: string | undefined): string | undefined {
   return undefined
 }
 
+/**
+ * Directory names permitted for `preferredTargetName`. Deliberately restrictive:
+ * one path segment, no traversal characters, no leading dot (which would create
+ * a hidden dir the user might not notice).
+ *
+ * Path traversal guard: the LLM-facing sample_setup tool exposes
+ * `preferredTargetName` as a caller-controlled string. Without a strict
+ * allowlist a caller (or a prompt-injected model turn) could pass
+ * `preferredTargetName: "../somewhere"` and escape `targetParent`. The
+ * secondary containment check in `materializeSample` catches anything the
+ * regex misses.
+ */
+const SAFE_TARGET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
 export async function materializeSample(opts: MaterializeOptions): Promise<MaterializeResult> {
   const sampleName = opts.sampleName ?? DEFAULT_SAMPLE_NAME
   const preferredName = opts.preferredTargetName ?? "altimate-sample-dbt"
+
+  // Fail loudly on caller-supplied names that could escape `targetParent` or
+  // create surprising layouts (hidden dirs, absolute paths, `..` segments).
+  if (!SAFE_TARGET_NAME_RE.test(preferredName)) {
+    throw new Error(
+      `preferredTargetName '${preferredName}' is not a plain directory name. ` +
+        `Expected letters, digits, dot, dash, underscore only; no path separators or leading dot.`,
+    )
+  }
 
   const targetParent = opts.targetParent ?? os.homedir()
   const homeReject = opts.targetParent ? undefined : rejectUnsafeHome(targetParent)
@@ -122,6 +146,17 @@ export async function materializeSample(opts: MaterializeOptions): Promise<Mater
 
   const { path: targetPath, state, suffix } = findSafeTarget(targetParent, preferredName, opts.sampleVersion)
 
+  // Belt-and-suspenders containment check. The name-regex above should already
+  // guarantee this, but findSafeTarget also joins a numeric/hex suffix and any
+  // future edit to that logic must not sneak the target outside targetParent.
+  const resolvedParent = path.resolve(targetParent)
+  const resolvedTarget = path.resolve(targetPath)
+  if (resolvedTarget !== resolvedParent && !resolvedTarget.startsWith(resolvedParent + path.sep)) {
+    throw new Error(
+      `refusing to materialize outside targetParent: resolved '${resolvedTarget}' is not under '${resolvedParent}'`,
+    )
+  }
+
   // If we found our sample at the requested version, we're done — no
   // write. The user's existing edits (SQL tweaks, seed additions) are
   // preserved intact.
@@ -144,20 +179,75 @@ export async function materializeSample(opts: MaterializeOptions): Promise<Mater
     }
   }
 
-  copySampleTree(source.path, targetPath)
-  writeMarker(targetPath, {
-    kind: MARKER_KIND,
-    sampleName,
-    version: opts.sampleVersion,
-    materializedAt: new Date().toISOString(),
-    cliVersion: opts.cliVersion,
-  })
+  // Atomic materialize: copy to a staging dir, write the marker there, then
+  // rename to the final target. If the process dies mid-copy the user is left
+  // with a `.<name>.tmp-<hex>` orphan (harmless — different name; swept below)
+  // instead of a partially-written targetPath that would look "unknown" to
+  // findSafeTarget on the next run and get shunted into `<name>-2` while the
+  // original stays broken forever.
+  //
+  // For the in-place-upgrade path (state.kind === "our-sample-different-version"
+  // + allowInPlaceUpgrade) we still need to overwrite an existing dir; do it
+  // by removing the old target AFTER the staging dir is fully written, right
+  // before the rename. Users' edits to the sample were already going to be
+  // overwritten by this branch; the atomic-vs-non-atomic distinction is
+  // "briefly no dir at all" vs "briefly a half-written dir" — atomic wins.
+
+  const stagingName = `.${preferredName}.tmp-${randomBytes(6).toString("hex")}`
+  const stagingPath = path.join(targetParent, stagingName)
+  // Best-effort cleanup of any prior tmp dirs left over from a killed run.
+  sweepOrphanStaging(targetParent, preferredName)
+  try {
+    copySampleTree(source.path, stagingPath)
+    writeMarker(stagingPath, {
+      kind: MARKER_KIND,
+      sampleName,
+      version: opts.sampleVersion,
+      materializedAt: new Date().toISOString(),
+      cliVersion: opts.cliVersion,
+    })
+    // Overwrite path: remove the (fully-written-but-outdated) old target so
+    // rename can land. Never do this before the staging tree is complete.
+    if (fs.existsSync(targetPath)) {
+      fs.rmSync(targetPath, { recursive: true, force: true })
+    }
+    fs.renameSync(stagingPath, targetPath)
+  } catch (err) {
+    // Leave the staging dir on error so a debug pass can inspect it, but do
+    // not surface a raw ENOENT/EACCES to the caller — repackage.
+    throw new Error(
+      `materialize failed for ${targetPath} (staging left at ${stagingPath}): ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
 
   return {
     targetPath,
     reused: false,
     suffix,
     note: buildNote(state, targetPath, suffix),
+  }
+}
+
+/**
+ * Delete any `.<preferredName>.tmp-*` directories left over from a prior
+ * killed materialize. Best-effort — swallow errors so a permission-denied
+ * on one orphan doesn't block a fresh materialize.
+ */
+function sweepOrphanStaging(targetParent: string, preferredName: string): void {
+  const prefix = `.${preferredName}.tmp-`
+  let entries: string[]
+  try {
+    entries = fs.readdirSync(targetParent)
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue
+    try {
+      fs.rmSync(path.join(targetParent, entry), { recursive: true, force: true })
+    } catch {
+      // orphan we can't remove — skip, don't fail the fresh materialize
+    }
   }
 }
 
