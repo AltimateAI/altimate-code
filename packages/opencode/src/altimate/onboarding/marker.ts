@@ -80,11 +80,20 @@ export function writeMarker(dir: string, marker: SampleMarker): void {
  *                              suffix `-2`, `-3` etc. or refuse)
  */
 export function classifyTarget(dir: string, expectedVersion: string): TargetState {
+  // lstatSync (not statSync) so a symlinked target is classified as
+  // unknown-dir rather than by what it points at. If a user has
+  // ~/altimate-sample-dbt -> /somewhere-else, we must not "reuse" the
+  // symlink target through the link (that would place downstream operations
+  // outside the parent our containment check validated) and must not
+  // silently unlink the symlink when overwriting an "empty" directory.
   let stat: fs.Stats | undefined
   try {
-    stat = fs.statSync(dir)
+    stat = fs.lstatSync(dir)
   } catch {
     return { kind: "empty" }
+  }
+  if (stat.isSymbolicLink()) {
+    return { kind: "unknown-dir", path: dir, reason: "target is a symlink — refusing to follow" }
   }
   if (!stat.isDirectory()) {
     return { kind: "unknown-dir", path: dir, reason: "target exists but is not a directory" }
@@ -145,17 +154,45 @@ export function checkParentWritable(parentDir: string): string | undefined {
  *  Bumped attemptLimit from 10 → 100 after cubic feedback that 10 is easy
  *  to blow past in real environments.
  */
+/** After this many consecutive UNRELATED-content hits, findSafeTarget stops
+ *  scanning numbered slots and jumps straight to the randomized fallback.
+ *  A user with 5+ contiguous unknown dirs under their preferred name is in
+ *  a genuinely crowded parent; scanning the rest of the 100 numbered slots
+ *  would burn ~95 unnecessary stat syscalls to arrive at the same answer.
+ *  Kept generous enough to survive the common "installer created 2-3
+ *  numbered copies during retries" pattern without escalating to hex. */
+const CONSECUTIVE_UNKNOWN_LIMIT = 10
+
 export function findSafeTarget(
   parentDir: string,
   preferredName: string,
   expectedVersion: string,
   attemptLimit: number = 100,
+  opts: {
+    /** When true, treat `our-sample-different-version` the same as `unknown-dir`
+     *  during slot scanning — skip it and try the next slot. Used by the
+     *  install-alongside upgrade flow so a user with slot 0 holding an
+     *  older-version sample can materialize the new version into slot 1
+     *  (`<name>-2`) without touching the old one. Without this option,
+     *  findSafeTarget stops at a version-mismatched slot 0 and returns —
+     *  which is the right default for reuse detection, but blocks the
+     *  "install the new version alongside" UX. */
+    skipVersionMismatch?: boolean
+  } = {},
 ): { path: string; state: TargetState; suffix: number | string } {
+  const skippable = (kind: TargetState["kind"]): boolean =>
+    kind === "unknown-dir" || (Boolean(opts.skipVersionMismatch) && kind === "our-sample-different-version")
+  let consecutiveSkipped = 0
   for (let i = 0; i < attemptLimit; i++) {
     const name = i === 0 ? preferredName : `${preferredName}-${i + 1}`
     const candidate = path.join(parentDir, name)
     const state = classifyTarget(candidate, expectedVersion)
-    if (state.kind !== "unknown-dir") return { path: candidate, state, suffix: i }
+    if (!skippable(state.kind)) return { path: candidate, state, suffix: i }
+    consecutiveSkipped++
+    // The parent has enough unrelated content that continuing the numeric
+    // scan is unlikely to find a free slot. Skip to the hex fallback which
+    // has a ~16.7M-value collision space and will resolve in one syscall.
+    if (consecutiveSkipped >= CONSECUTIVE_UNKNOWN_LIMIT) break
   }
   // Randomized fallback — 6 hex chars is ~16.7M values; if it collides we
   // give up (the environment is genuinely hostile).
@@ -163,11 +200,11 @@ export function findSafeTarget(
   const randomName = `${preferredName}-${randomTag}`
   const randomCandidate = path.join(parentDir, randomName)
   const state = classifyTarget(randomCandidate, expectedVersion)
-  if (state.kind !== "unknown-dir") {
+  if (!skippable(state.kind)) {
     return { path: randomCandidate, state, suffix: randomTag }
   }
   throw new Error(
-    `No safe target found under ${parentDir} — first ${attemptLimit} numbered candidates AND a randomized fallback ${randomName} all held unrelated content`,
+    `No safe target found under ${parentDir} — numbered candidates AND a randomized fallback ${randomName} all held unrelated content`,
   )
 }
 

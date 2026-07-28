@@ -40,7 +40,12 @@ export interface SampleSourceLocation {
   /** Absolute path to the sample source directory. */
   path: string
   /** Which candidate matched — surfaced in logs for debugging install-layout issues. */
-  origin: "env" | "wrapper-bin-parent" | "dev-source-tree" | "wrapper-bin-grandparent"
+  origin:
+    | "env"
+    | "wrapper-bin-dir"
+    | "wrapper-bin-parent"
+    | "dev-source-tree"
+    | "wrapper-bin-grandparent"
 }
 
 export function resolveSampleSource(
@@ -51,6 +56,18 @@ export function resolveSampleSource(
     const candidate = path.join(envOverride, name)
     if (hasSampleShape(candidate)) return { path: path.resolve(candidate), origin: "env" }
   }
+
+  // The wrapper's bin script (`packages/opencode/bin/altimate-code:40`) sets
+  // ALTIMATE_BIN_DIR to its own scriptDir before spawning the platform
+  // binary. Use it as the FIRST post-env candidate: it survives every install
+  // scenario the exec-path chain doesn't — Windows (postinstall.mjs exits
+  // early on win32, so the hardlink from wrapper/bin/.altimate-code back to
+  // the platform binary never happens), `--ignore-scripts` installs (common
+  // in CI / corporate registries; same hardlink never runs), and
+  // ALTIMATE_CODE_BIN_PATH overrides (the wrapper honors this at
+  // bin/altimate-code:72 and runs the binary from an arbitrary location that
+  // has no relationship to the wrapper package).
+  const binDir = process.env["ALTIMATE_BIN_DIR"]
 
   // `process.execPath` is often a symlink or shim under package managers
   // (npm global `/usr/local/bin/altimate-code -> .../lib/node_modules/...`,
@@ -66,7 +83,14 @@ export function resolveSampleSource(
   const execDir = path.dirname(realExec)
   const selfDir = import.meta.dirname ?? (typeof __dirname === "string" ? __dirname : "")
 
-  const candidates: Array<{ path: string; origin: SampleSourceLocation["origin"] }> = [
+  const candidates: Array<{ path: string; origin: SampleSourceLocation["origin"] }> = []
+  if (binDir) {
+    candidates.push({
+      path: path.join(binDir, "..", "sample-projects", name),
+      origin: "wrapper-bin-dir",
+    })
+  }
+  candidates.push(
     { path: path.join(execDir, "..", "sample-projects", name), origin: "wrapper-bin-parent" },
     // Dev / test: <repo>/packages/opencode/src/altimate/onboarding/*.ts
     // → 3 hops up to packages/opencode/, then into sample-projects/.
@@ -81,7 +105,7 @@ export function resolveSampleSource(
       path: path.join(execDir, "..", "..", "sample-projects", name),
       origin: "wrapper-bin-grandparent",
     },
-  ]
+  )
 
   for (const c of candidates) {
     if (hasSampleShape(c.path)) return { path: path.resolve(c.path), origin: c.origin }

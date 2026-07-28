@@ -40,7 +40,15 @@ dbt compile --project-dir "$SAMPLE_DIR" --profiles-dir "$SAMPLE_DIR"
 #      legitimate string in the manifest that happens to contain the
 #      maintainer's home directory (e.g. a model description or a compiled
 #      SQL literal referencing a real path).
-#   2. Zero `invocation_id` and pin `generated_at` to a fixed "release day"
+#   2. Wipe the maintainer's identity + all wall-clock timestamps. dbt
+#      writes `user_id` from ~/.dbt/.user.yml (a persistent UUID that
+#      identifies whoever compiled the manifest) and every node/macro
+#      carries a real `created_at` epoch. Ship none of it. Set
+#      send_anonymous_usage_stats to false so an installer's dbt is not
+#      steered toward opt-in telemetry that the sample author already
+#      accepted upstream.
+#   3. Pin `generated_at`, `invocation_started_at`, `run_started_at`, and
+#      every node/macro `created_at` to the same fixed release-day
 #      timestamp so committed diffs only change when source changes. Zero
 #      epoch is avoided because some downstream freshness-check tools may
 #      treat it as pathological — a plausible past date is safer.
@@ -51,6 +59,9 @@ sample_dir = os.path.abspath(sample_dir)
 parent_dir = os.path.dirname(sample_dir)
 SENTINEL_ROOT = "{{SAMPLE_ROOT}}"
 SENTINEL_PARENT = "{{SAMPLE_ROOT_PARENT}}"
+FIXED_ISO = "2026-07-24T00:00:00Z"
+FIXED_EPOCH = 1785000000.0  # 2026-07-24 near midnight UTC; matches FIXED_ISO closely enough
+ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
 def replace_paths(v):
     if isinstance(v, str):
@@ -63,16 +74,39 @@ def replace_paths(v):
         return {k: replace_paths(x) for k, x in v.items()}
     return v
 
+def scrub_created_at(v):
+    """Every node + macro carries a `created_at` epoch float. Walk the
+    tree and pin every one of them so regeneration doesn't rewrite ~500
+    timestamps just because the wall clock moved."""
+    if isinstance(v, dict):
+        if "created_at" in v and isinstance(v["created_at"], (int, float)):
+            v["created_at"] = FIXED_EPOCH
+        for value in v.values():
+            scrub_created_at(value)
+    elif isinstance(v, list):
+        for item in v:
+            scrub_created_at(item)
+
 with open(manifest_path) as f:
     obj = json.load(f)
 obj = replace_paths(obj)
+scrub_created_at(obj)
 if isinstance(obj.get("metadata"), dict):
-    # Fixed sentinel timestamp — updated only when a maintainer wants to
-    # signal a manifest-shape refresh; source changes alone don't bump it.
-    obj["metadata"]["generated_at"] = "2026-07-24T00:00:00Z"
-    obj["metadata"]["invocation_id"] = "00000000-0000-0000-0000-000000000000"
+    md = obj["metadata"]
+    # Identity — persistent UUIDs from the compiler's ~/.dbt/.user.yml
+    # and dbt-internal project fingerprint. Neither should ship.
+    md["user_id"] = ZERO_UUID
+    md["project_id"] = ZERO_UUID
+    md["invocation_id"] = ZERO_UUID
+    # Every wall-clock timestamp in metadata.
+    md["generated_at"] = FIXED_ISO
+    md["invocation_started_at"] = FIXED_ISO
+    md["run_started_at"] = FIXED_ISO
+    # Do not steer the installer's dbt toward "yes I accepted telemetry" —
+    # the compilation author's preference is not the installer's preference.
+    md["send_anonymous_usage_stats"] = False
     # env can carry USER, PWD, HOME — strip it entirely.
-    obj["metadata"].pop("env", None)
+    md.pop("env", None)
 with open(manifest_path, "w") as f:
     json.dump(obj, f, indent=2, sort_keys=True)
     f.write("\n")

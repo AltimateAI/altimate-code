@@ -84,7 +84,14 @@ async function copyAssets(targetDir: string) {
   // production. Excludes target/ except the pre-compiled manifest.json
   // (source of truth for /discover + /review on the shipped sample).
   await $`mkdir -p ${targetDir}/sample-projects/jaffle-shop-duckdb/target`
-  await $`cp -r ./sample-projects/jaffle-shop-duckdb/README.md \
+  // Keep this list in sync with MATERIALIZE_ENTRIES in
+  // packages/opencode/src/altimate/onboarding/materialize.ts — if publish
+  // omits a file the materializer expects, dev works but prod ships without
+  // it. `.gitignore` is intentionally shipped: the materialized sample
+  // becomes a working dbt project in the user's home and needs it to
+  // ignore compiled artifacts.
+  await $`cp -r ./sample-projects/jaffle-shop-duckdb/.gitignore \
+                ./sample-projects/jaffle-shop-duckdb/README.md \
                 ./sample-projects/jaffle-shop-duckdb/dbt_project.yml \
                 ./sample-projects/jaffle-shop-duckdb/profiles.yml \
                 ./sample-projects/jaffle-shop-duckdb/sample-manifest.json \
