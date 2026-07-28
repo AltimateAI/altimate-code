@@ -31,15 +31,20 @@ import { DEFAULT_SAMPLE_NAME, loadShippedManifest, resolveSampleSource, type Sam
 /** Files/dirs relative to the sample source that get materialized to the
  *  user's target dir. Explicitly enumerated (no glob) so future changes
  *  to the sample layout are a deliberate opt-in edit here. */
-const MATERIALIZE_ENTRIES: ReadonlyArray<{ from: string; kind: "file" | "dir" }> = [
-  { from: "README.md", kind: "file" },
-  { from: "dbt_project.yml", kind: "file" },
-  { from: "profiles.yml", kind: "file" },
-  { from: "sample-manifest.json", kind: "file" },
-  { from: ".gitignore", kind: "file" },
-  { from: "models", kind: "dir" },
-  { from: "seeds", kind: "dir" },
-  { from: "target/manifest.json", kind: "file" },
+const MATERIALIZE_ENTRIES: ReadonlyArray<{ from: string; kind: "file" | "dir"; required: boolean }> = [
+  { from: "README.md", kind: "file", required: true },
+  { from: "dbt_project.yml", kind: "file", required: true },
+  { from: "profiles.yml", kind: "file", required: true },
+  { from: "sample-manifest.json", kind: "file", required: true },
+  // .gitignore is the ONLY optional entry — dev checkouts may lack it and
+  // materialize should not fail. Every other entry is load-bearing for
+  // /discover, /review, or the "Build & query it" flow; missing any of
+  // them means a broken package and we must fail loudly rather than mark
+  // the incomplete copy as reused-forever.
+  { from: ".gitignore", kind: "file", required: false },
+  { from: "models", kind: "dir", required: true },
+  { from: "seeds", kind: "dir", required: true },
+  { from: "target/manifest.json", kind: "file", required: true },
 ]
 
 export interface MaterializeOptions {
@@ -258,6 +263,7 @@ async function materializeUnderLock(
     targetParent,
     preferredName,
     opts.sampleVersion,
+    sampleName,
     100,
     { skipVersionMismatch: opts.installAlongside === true },
   )
@@ -333,7 +339,7 @@ async function materializeUnderLock(
     // the lock, etc.); a stale classification must not authorize a
     // destructive remove.
     if (fs.existsSync(targetPath)) {
-      const nowState = classifyTarget(targetPath, opts.sampleVersion)
+      const nowState = classifyTarget(targetPath, opts.sampleVersion, sampleName)
       const stillEligible =
         (state.kind === "our-sample-different-version" && nowState.kind === "our-sample-different-version") ||
         (state.kind === "empty" && nowState.kind === "empty")
@@ -422,7 +428,19 @@ function copySampleTree(source: string, writeTo: string, finalTarget: string): v
   for (const entry of MATERIALIZE_ENTRIES) {
     const from = path.join(source, entry.from)
     const to = path.join(writeTo, entry.from)
-    if (!fs.existsSync(from)) continue // .gitignore is optional; skip quietly
+    if (!fs.existsSync(from)) {
+      // Optional entries (currently just .gitignore) skip quietly. Required
+      // entries mean the shipped package is broken — surface that as an
+      // error before writing a marker that would falsely mark this
+      // incomplete copy as reused-forever on subsequent runs.
+      if (entry.required) {
+        throw new Error(
+          `Sample source at ${source} is missing required entry '${entry.from}' — ` +
+            `the shipped package is incomplete. Reinstall with: npm i -g @altimateai/altimate-code@latest`,
+        )
+      }
+      continue
+    }
     if (entry.kind === "dir") {
       fs.cpSync(from, to, { recursive: true, force: true })
     } else if (entry.from === "target/manifest.json") {

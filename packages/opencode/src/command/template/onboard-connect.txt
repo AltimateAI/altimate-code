@@ -186,21 +186,40 @@ moment, not another menu):
       2. Install fresh: run `pip install dbt-duckdb` (grabs both dbt-core and
          the DuckDB adapter), then say "ready" and I'll continue.
 
-  If the user pastes a path (option 1), verify it works with
-  `<path> --version 2>&1 | grep -q "duckdb:"` via bash and use that binary
-  explicitly for the build (`<path> build` instead of `dbt build`). If they
-  install fresh (option 2) and say "ready", call `sample_setup` again — the
-  fresh call re-probes with `{ force: true }` and its `dbt:` line will now
-  say `present`. Only shell out if you have to; the tool's probe is the
-  source of truth.
+  If the user pastes a path (option 1), do NOT interpolate the pasted
+  string into a shell pipeline verbatim — a paste like `; rm -rf ~` would
+  execute. Validate first, then always run through a single-quoted argv:
+    1. Refuse if the path contains any of `; & | > < $ ` ( ) { } newline`
+       or unmatched single-quote. Ask the user to paste again.
+    2. Refuse if the file at that path is not executable
+       (`test -x '<path>'` — quote the path).
+    3. Verify it's a dbt-duckdb binary by running the SINGLE-QUOTED
+       command `'<path>' --version 2>&1` via bash and checking that its
+       stdout contains a line starting with `- duckdb:`. Do NOT chain
+       with `grep -q` on user-controlled strings.
+    4. If verified, remember the path and use `'<path>' build` (single-
+       quoted) for the build step below. Never pass the path unquoted.
+  If they install fresh (option 2) and say "ready", call `sample_setup`
+  again — the fresh call re-probes with `{ force: true }` and its `dbt:`
+  line will now say `present`. Only shell out if you have to; the tool's
+  probe is the source of truth.
 
-  Once dbt is available, run `dbt build` (or `<path> build`) in the sample
-  project dir via bash and report the PASS/FAIL counts truthfully. Before
+  Once dbt is available, run `dbt build` (or the validated `'<path>' build`
+  from above, with the path single-quoted) in the sample project dir via
+  bash and report the PASS/FAIL counts truthfully. Before
   running any queries, call the `dbt-profiles` tool with `projectDir`
-  pointed at the sample dir to discover the DuckDB profile, then register
-  it as a warehouse connection via `warehouse_add` — otherwise `sql_execute`
-  has nothing to connect to. Then offer a first query and run it with
-  `sql_execute`.
+  pointed at the sample dir to discover the DuckDB profile. The profile
+  reports the DuckDB path as `target/jaffle.duckdb` — a RELATIVE path
+  (dbt-duckdb resolves it against `dbt build`'s working directory, so it
+  landed at `<sample-path>/target/jaffle.duckdb`). If you pass that
+  relative string straight to `warehouse_add`, `sql_execute` will resolve
+  it against ITS own cwd and open (or create) an empty duckdb file
+  wherever the CLI happens to be running from — which is exactly the
+  bug that surfaced. Absolutize first: join the sample path from the
+  earlier `sample_setup` output with the profile's `path:` value, then
+  pass the ABSOLUTE path (`<sample-path>/target/jaffle.duckdb`) to
+  `warehouse_add` so `sql_execute` connects to the database dbt just
+  built. Then offer a first query and run it with `sql_execute`.
 - "Something else — describe it" → just ask what they're working on; free chat.
 
 Keep the tone calm and honest: the scan only reads local files the user already

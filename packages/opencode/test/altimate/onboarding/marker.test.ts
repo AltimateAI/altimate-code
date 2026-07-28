@@ -82,26 +82,26 @@ describe("classifyTarget — the four decision-table branches", () => {
   test("branch: dir does not exist → empty", () => {
     const parent = makeTmp("classify-notexist-")
     const target = path.join(parent, "does-not-exist")
-    expect(classifyTarget(target, "1.0.0")).toEqual({ kind: "empty" })
+    expect(classifyTarget(target, "1.0.0", "jaffle-shop-duckdb")).toEqual({ kind: "empty" })
   })
 
   test("branch: dir exists but is empty → empty", () => {
     const target = makeTmp("classify-emptydir-")
-    expect(classifyTarget(target, "1.0.0")).toEqual({ kind: "empty" })
+    expect(classifyTarget(target, "1.0.0", "jaffle-shop-duckdb")).toEqual({ kind: "empty" })
   })
 
   test("branch: target is a file, not a directory → unknown-dir", () => {
     const parent = makeTmp("classify-filepath-")
     const target = path.join(parent, "some-file")
     fs.writeFileSync(target, "hello")
-    const result = classifyTarget(target, "1.0.0")
+    const result = classifyTarget(target, "1.0.0", "jaffle-shop-duckdb")
     expect(result.kind).toBe("unknown-dir")
   })
 
   test("branch: our marker at requested version → our-sample-current", () => {
     const dir = makeTmp("classify-current-")
     writeMarker(dir, makeMarker({ version: "1.0.0" }))
-    const result = classifyTarget(dir, "1.0.0")
+    const result = classifyTarget(dir, "1.0.0", "jaffle-shop-duckdb")
     expect(result.kind).toBe("our-sample-current")
     if (result.kind === "our-sample-current") {
       expect(result.marker.version).toBe("1.0.0")
@@ -112,7 +112,7 @@ describe("classifyTarget — the four decision-table branches", () => {
   test("branch: our marker at different version → our-sample-different-version", () => {
     const dir = makeTmp("classify-diffver-")
     writeMarker(dir, makeMarker({ version: "1.0.0" }))
-    const result = classifyTarget(dir, "1.0.1")
+    const result = classifyTarget(dir, "1.0.1", "jaffle-shop-duckdb")
     expect(result.kind).toBe("our-sample-different-version")
     if (result.kind === "our-sample-different-version") {
       expect(result.marker.version).toBe("1.0.0")
@@ -122,7 +122,7 @@ describe("classifyTarget — the four decision-table branches", () => {
   test("branch: non-empty dir with NO marker → unknown-dir (never overwrite)", () => {
     const dir = makeTmp("classify-unknown-")
     fs.writeFileSync(path.join(dir, "unrelated.txt"), "something the user had")
-    const result = classifyTarget(dir, "1.0.0")
+    const result = classifyTarget(dir, "1.0.0", "jaffle-shop-duckdb")
     expect(result.kind).toBe("unknown-dir")
     if (result.kind === "unknown-dir") {
       expect(result.reason).toContain("no altimate-code marker")
@@ -135,15 +135,65 @@ describe("classifyTarget — the four decision-table branches", () => {
       path.join(dir, MARKER_FILE_NAME),
       JSON.stringify({ kind: "other-tool", sampleName: "x", version: "1", materializedAt: "", cliVersion: "" }),
     )
-    const result = classifyTarget(dir, "1.0.0")
+    const result = classifyTarget(dir, "1.0.0", "jaffle-shop-duckdb")
     expect(result.kind).toBe("unknown-dir")
+  })
+
+  test("branch: our marker but DIFFERENT sampleName → unknown-dir (cubic P1: don't reuse a different sample) (cubic P1 #1)", () => {
+    // The marker was written by an altimate-code CLI for sample-A. We're
+    // asking about sample-B. Even if the version happens to match, this
+    // is not "ours" for THIS request — must fall into the suffix
+    // escalation path, not silently reuse or in-place-upgrade.
+    const dir = makeTmp("classify-diff-sample-")
+    writeMarker(dir, makeMarker({ sampleName: "other-sample", version: "1.0.0" }))
+    const result = classifyTarget(dir, "1.0.0", "jaffle-shop-duckdb")
+    expect(result.kind).toBe("unknown-dir")
+    if (result.kind === "unknown-dir") {
+      expect(result.reason).toContain("belongs to sample 'other-sample'")
+    }
+  })
+
+  test("branch: symlinked directory → unknown-dir (codex NEW-21 — lstat, don't follow)", () => {
+    // Pre-seed a symlink pointing at a REAL dir with a valid marker.
+    // If classifyTarget follows the link, it would return
+    // our-sample-current and (in the outer flow) authorize a
+    // destructive overwrite of the linked-to content. lstat should catch
+    // it as a symlink and classify unknown-dir.
+    const linkTarget = makeTmp("classify-symlink-target-")
+    writeMarker(linkTarget, makeMarker({ version: "1.0.0" }))
+    const parent = makeTmp("classify-symlink-parent-")
+    const link = path.join(parent, "our-sample")
+    fs.symlinkSync(linkTarget, link)
+    const result = classifyTarget(link, "1.0.0", "jaffle-shop-duckdb")
+    expect(result.kind).toBe("unknown-dir")
+    if (result.kind === "unknown-dir") {
+      expect(result.reason).toContain("symlink")
+    }
+  })
+
+  test("branch: unreadable directory (chmod 000) → unknown-dir with EACCES-flavored reason", () => {
+    // Skip on root — chmod restrictions don't apply.
+    if (typeof process.getuid !== "function" || process.getuid() === 0) return
+    const dir = makeTmp("classify-unreadable-")
+    fs.writeFileSync(path.join(dir, "some-content"), "x")
+    fs.chmodSync(dir, 0o000)
+    try {
+      const result = classifyTarget(dir, "1.0.0", "jaffle-shop-duckdb")
+      expect(result.kind).toBe("unknown-dir")
+      if (result.kind === "unknown-dir") {
+        expect(result.reason.toLowerCase()).toMatch(/unreadable|permission|eacces/)
+      }
+    } finally {
+      // Restore so tmp cleanup can traverse it.
+      try { fs.chmodSync(dir, 0o755) } catch { /* ignore */ }
+    }
   })
 })
 
 describe("findSafeTarget — suffix hunt + randomized fallback", () => {
   test("preferred slot empty → returns suffix 0 at the preferred path", () => {
     const parent = makeTmp("safe-fresh-")
-    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0")
+    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0", "jaffle-shop-duckdb")
     expect(result.suffix).toBe(0)
     expect(result.path).toBe(path.join(parent, "altimate-sample-dbt"))
     expect(result.state.kind).toBe("empty")
@@ -154,7 +204,7 @@ describe("findSafeTarget — suffix hunt + randomized fallback", () => {
     const preferredPath = path.join(parent, "altimate-sample-dbt")
     fs.mkdirSync(preferredPath)
     fs.writeFileSync(path.join(preferredPath, "unrelated.txt"), "user's stuff")
-    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0")
+    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0", "jaffle-shop-duckdb")
     expect(result.suffix).toBe(1)
     expect(result.path).toBe(path.join(parent, "altimate-sample-dbt-2"))
   })
@@ -164,7 +214,7 @@ describe("findSafeTarget — suffix hunt + randomized fallback", () => {
     const preferredPath = path.join(parent, "altimate-sample-dbt")
     fs.mkdirSync(preferredPath)
     writeMarker(preferredPath, makeMarker({ version: "1.0.0" }))
-    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0")
+    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0", "jaffle-shop-duckdb")
     expect(result.suffix).toBe(0)
     expect(result.state.kind).toBe("our-sample-current")
   })
@@ -174,7 +224,7 @@ describe("findSafeTarget — suffix hunt + randomized fallback", () => {
     const preferredPath = path.join(parent, "altimate-sample-dbt")
     fs.mkdirSync(preferredPath)
     writeMarker(preferredPath, makeMarker({ version: "0.9.0" }))
-    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0")
+    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0", "jaffle-shop-duckdb")
     expect(result.suffix).toBe(0)
     expect(result.state.kind).toBe("our-sample-different-version")
   })
@@ -188,7 +238,7 @@ describe("findSafeTarget — suffix hunt + randomized fallback", () => {
       fs.mkdirSync(dir)
       fs.writeFileSync(path.join(dir, "unrelated.txt"), "user's stuff")
     }
-    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0", 3)
+    const result = findSafeTarget(parent, "altimate-sample-dbt", "1.0.0", "jaffle-shop-duckdb", 3)
     expect(typeof result.suffix).toBe("string")
     // Random suffix is 6 hex chars per the impl.
     expect(result.suffix).toMatch(/^[0-9a-f]{6}$/)

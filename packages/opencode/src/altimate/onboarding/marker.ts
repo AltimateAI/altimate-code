@@ -72,14 +72,30 @@ export function writeMarker(dir: string, marker: SampleMarker): void {
  *  - No such dir             → empty (safe to create + materialize)
  *  - Empty dir               → empty (safe to materialize into)
  *  - Has our marker,
+ *    sampleName differs      → unknown-dir (marker is ours but belongs to
+ *                              a DIFFERENT sample — never reuse or upgrade
+ *                              through it; treat as a foreign directory)
+ *  - Has our marker,
+ *    sampleName matches,
  *    version matches         → our-sample-current (reuse — nothing to do)
  *  - Has our marker,
+ *    sampleName matches,
  *    version differs         → our-sample-different-version (offer upgrade)
  *  - Non-empty dir,
  *    no marker (or bad kind) → unknown-dir (NEVER overwrite; caller must
  *                              suffix `-2`, `-3` etc. or refuse)
+ *
+ *  `expectedSampleName` gates the marker's `sampleName` field so an existing
+ *  sample-A marker never satisfies a sample-B request. Currently the shipped
+ *  CLI only carries jaffle-shop-duckdb, so this branch is unreachable in
+ *  practice — but a future second sample must not silently reuse an existing
+ *  first-sample dir just because the version happens to match.
  */
-export function classifyTarget(dir: string, expectedVersion: string): TargetState {
+export function classifyTarget(
+  dir: string,
+  expectedVersion: string,
+  expectedSampleName: string,
+): TargetState {
   // lstatSync (not statSync) so a symlinked target is classified as
   // unknown-dir rather than by what it points at. If a user has
   // ~/altimate-sample-dbt -> /somewhere-else, we must not "reuse" the
@@ -116,6 +132,19 @@ export function classifyTarget(dir: string, expectedVersion: string): TargetStat
       kind: "unknown-dir",
       path: dir,
       reason: "directory not empty and has no altimate-code marker (would clobber unrelated content)",
+    }
+  }
+  // Gate on sampleName BEFORE version. A marker whose sampleName differs
+  // from what we're materializing is not "ours" for THIS request — even
+  // though it was written by an altimate-code CLI. Treat it as a foreign
+  // directory: never reuse-through it, never authorize an
+  // allowInPlaceUpgrade against it. Falls into the same suffix escalation
+  // path as an unrelated non-sample dir.
+  if (marker.sampleName !== expectedSampleName) {
+    return {
+      kind: "unknown-dir",
+      path: dir,
+      reason: `marker belongs to sample '${marker.sampleName}', not '${expectedSampleName}' — refusing to reuse or overwrite a different sample`,
     }
   }
   if (marker.version === expectedVersion) {
@@ -167,6 +196,7 @@ export function findSafeTarget(
   parentDir: string,
   preferredName: string,
   expectedVersion: string,
+  expectedSampleName: string,
   attemptLimit: number = 100,
   opts: {
     /** When true, treat `our-sample-different-version` the same as `unknown-dir`
@@ -186,7 +216,7 @@ export function findSafeTarget(
   for (let i = 0; i < attemptLimit; i++) {
     const name = i === 0 ? preferredName : `${preferredName}-${i + 1}`
     const candidate = path.join(parentDir, name)
-    const state = classifyTarget(candidate, expectedVersion)
+    const state = classifyTarget(candidate, expectedVersion, expectedSampleName)
     if (!skippable(state.kind)) return { path: candidate, state, suffix: i }
     consecutiveSkipped++
     // The parent has enough unrelated content that continuing the numeric
@@ -199,7 +229,7 @@ export function findSafeTarget(
   const randomTag = randomBytes(3).toString("hex")
   const randomName = `${preferredName}-${randomTag}`
   const randomCandidate = path.join(parentDir, randomName)
-  const state = classifyTarget(randomCandidate, expectedVersion)
+  const state = classifyTarget(randomCandidate, expectedVersion, expectedSampleName)
   if (!skippable(state.kind)) {
     return { path: randomCandidate, state, suffix: randomTag }
   }
