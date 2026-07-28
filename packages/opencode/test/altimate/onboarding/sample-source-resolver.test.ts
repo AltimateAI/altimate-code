@@ -23,6 +23,71 @@ import {
   resolveSampleSource,
 } from "../../../src/altimate/onboarding/sample-source-resolver"
 
+describe("resolveSampleSource — ALTIMATE_BIN_DIR (real install layouts codex #10)", () => {
+  test("wrapper layout without postinstall hardlink (Windows, --ignore-scripts) → resolves via ALTIMATE_BIN_DIR", () => {
+    // Simulate the layout that ships in production BEFORE the postinstall
+    // hardlink from wrapper/bin/.altimate-code back to the platform binary:
+    //   wrapper-root/
+    //     bin/altimate-code             (the Node wrapper script)
+    //     sample-projects/<name>/dbt_project.yml
+    //     node_modules/<platform-pkg>/bin/altimate-code  (the actual exe)
+    // Without ALTIMATE_BIN_DIR, resolveSampleSource walks from execDir
+    // (the platform-package bin) and lands 2 hops away from sample-projects —
+    // the very failure the finding was written to fix.
+    const wrapperRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resolver-bindir-"))
+    const wrapperBinDir = path.join(wrapperRoot, "bin")
+    const sampleDir = path.join(wrapperRoot, "sample-projects", DEFAULT_SAMPLE_NAME)
+    fs.mkdirSync(wrapperBinDir, { recursive: true })
+    fs.mkdirSync(sampleDir, { recursive: true })
+    fs.writeFileSync(path.join(sampleDir, "dbt_project.yml"), "name: fake\n")
+
+    const origBinDir = process.env["ALTIMATE_BIN_DIR"]
+    const origEnv = process.env["ALTIMATE_STARTER_SAMPLE_DIR"]
+    delete process.env["ALTIMATE_STARTER_SAMPLE_DIR"]
+    process.env["ALTIMATE_BIN_DIR"] = wrapperBinDir
+    try {
+      const location = resolveSampleSource()
+      expect(location).toBeDefined()
+      expect(location!.origin).toBe("wrapper-bin-dir")
+      expect(location!.path).toBe(path.resolve(sampleDir))
+    } finally {
+      if (origBinDir === undefined) delete process.env["ALTIMATE_BIN_DIR"]
+      else process.env["ALTIMATE_BIN_DIR"] = origBinDir
+      if (origEnv === undefined) delete process.env["ALTIMATE_STARTER_SAMPLE_DIR"]
+      else process.env["ALTIMATE_STARTER_SAMPLE_DIR"] = origEnv
+    }
+  })
+
+  test("ALTIMATE_STARTER_SAMPLE_DIR still wins over ALTIMATE_BIN_DIR (override precedence)", () => {
+    // Both set → env override is more specific, takes precedence.
+    const envDir = fs.mkdtempSync(path.join(os.tmpdir(), "resolver-env-precedence-"))
+    const envSample = path.join(envDir, DEFAULT_SAMPLE_NAME)
+    fs.mkdirSync(envSample, { recursive: true })
+    fs.writeFileSync(path.join(envSample, "dbt_project.yml"), "# env-dir\n")
+
+    const binWrapper = fs.mkdtempSync(path.join(os.tmpdir(), "resolver-bindir-precedence-"))
+    const binDirSample = path.join(binWrapper, "sample-projects", DEFAULT_SAMPLE_NAME)
+    fs.mkdirSync(binDirSample, { recursive: true })
+    fs.writeFileSync(path.join(binDirSample, "dbt_project.yml"), "# bindir\n")
+
+    const origEnv = process.env["ALTIMATE_STARTER_SAMPLE_DIR"]
+    const origBinDir = process.env["ALTIMATE_BIN_DIR"]
+    process.env["ALTIMATE_STARTER_SAMPLE_DIR"] = envDir
+    process.env["ALTIMATE_BIN_DIR"] = path.join(binWrapper, "bin")
+    try {
+      const location = resolveSampleSource()
+      expect(location).toBeDefined()
+      expect(location!.origin).toBe("env")
+      expect(location!.path).toBe(path.resolve(envSample))
+    } finally {
+      if (origEnv === undefined) delete process.env["ALTIMATE_STARTER_SAMPLE_DIR"]
+      else process.env["ALTIMATE_STARTER_SAMPLE_DIR"] = origEnv
+      if (origBinDir === undefined) delete process.env["ALTIMATE_BIN_DIR"]
+      else process.env["ALTIMATE_BIN_DIR"] = origBinDir
+    }
+  })
+})
+
 describe("resolveSampleSource — env override", () => {
   test("ALTIMATE_STARTER_SAMPLE_DIR points at a valid sample → returns it with origin=env", () => {
     // Stage a fake sample dir under a tempdir so the override resolves.
