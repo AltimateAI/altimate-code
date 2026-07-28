@@ -190,7 +190,10 @@ moment, not another menu):
   string into a shell pipeline verbatim — a paste like `; rm -rf ~` would
   execute. Validate first, then always run through a single-quoted argv:
     1. Refuse if the path contains any of `; & | > < $ ` ( ) { } newline`
-       or unmatched single-quote. Ask the user to paste again.
+       or any single-quote. Ask the user to paste again. (Matched-pair
+       single quotes still break the single-quote wrap below — `'a'b'c'`
+       leaves `b` unquoted — so ANY single-quote is refused, not just
+       unmatched ones.)
     2. Refuse if the file at that path is not executable
        (`test -x '<path>'` — quote the path).
     3. Verify it's a dbt-duckdb binary by running the SINGLE-QUOTED
