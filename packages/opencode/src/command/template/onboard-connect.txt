@@ -134,8 +134,15 @@ moment, not another menu):
          - Install alongside → call `sample_setup` again with
                         `install_alongside: true`. The tool will
                         materialize the new version into `<path>-2`
-                        (or the next free suffix); after it returns,
-                        follow branch (d) or (e) as appropriate.
+                        (or the next free suffix). Do NOT re-route
+                        through branch (d) — its "existing directory
+                        wasn't ours" wording is wrong here, because the
+                        existing directory IS ours (an older version)
+                        and the user explicitly kept it. Instead say:
+                        "Installed the new sample alongside your
+                        existing copy at <new-path>. Your older copy at
+                        <old-path> is untouched." Then present the
+                        SAMPLE menu below.
 
     c. `status: ok` AND `reused: true` (any other note) → Existing sample
        reused. Say "Your sample is already set up at <path>." Then

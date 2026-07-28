@@ -126,13 +126,15 @@ export function rejectUnsafeHome(home: string | undefined): string | undefined {
     try { return fs.realpathSync(p) } catch { return path.resolve(p) }
   }
   const canonicalHome = canonicalize(home)
+  // Hoist references OUT of check() — realpathSync is a syscall on each
+  // call, and check() runs up to twice per invocation (once against the
+  // canonical home, once against the raw home). Neither ref depends on
+  // the candidate, so compute them once here. Some references (like the
+  // string literal "/tmp") can't always be realpathed as a directory,
+  // so we include them raw; the canonical versions catch the
+  // /private/tmp and /private/var/folders/... bypasses.
+  const refs: string[] = ["/tmp", canonicalize("/tmp"), os.tmpdir(), canonicalize(os.tmpdir())]
   const check = (candidate: string): string | undefined => {
-    // Compare the candidate against BOTH the literal and canonical form
-    // of each reference path. Some references (like the string literal
-    // "/tmp") can't be realpathed as a directory on all systems so we
-    // include them raw; the canonical versions catch the /private/tmp
-    // and /private/var/folders/... bypasses.
-    const refs: string[] = ["/tmp", canonicalize("/tmp"), os.tmpdir(), canonicalize(os.tmpdir())]
     for (const ref of refs) {
       if (!ref) continue
       if (candidate === ref || candidate.startsWith(ref + path.sep)) {
