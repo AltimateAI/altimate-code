@@ -142,9 +142,14 @@ describe("loadShippedManifest — end-to-end against the real shipped manifest",
   test("loading the shipped sample's manifest.json with a target substitution yields no dangling sentinels", () => {
     delete process.env["ALTIMATE_STARTER_SAMPLE_DIR"]
     const location = resolveSampleSource()
-    if (!location) return // dev-source-tree may miss under some layouts; skip rather than false-fail
+    // Every branch of this test suite runs from within the worktree checkout
+    // where the shipped sample tree lives at
+    // packages/opencode/sample-projects/jaffle-shop-duckdb/. If the resolver
+    // returns undefined here, the fallback candidate list is broken — that
+    // IS the failure mode this test exists to catch. Do not silently skip.
+    expect(location, "resolveSampleSource() returned undefined — the resolver's candidate-path list can no longer find the shipped sample tree in a dev checkout").toBeDefined()
     const materializedTarget = "/tmp/materialized-target"
-    const manifest = loadShippedManifest(location.path, materializedTarget)
+    const manifest = loadShippedManifest(location!.path, materializedTarget)
     // The rehydrated manifest MUST NOT contain the sentinel strings
     // anywhere — the whole point of the tree walk was to substitute
     // them all.
