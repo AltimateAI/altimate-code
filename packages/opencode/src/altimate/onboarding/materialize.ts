@@ -113,16 +113,41 @@ export function rejectUnsafeHome(home: string | undefined): string | undefined {
   if (home === "/root" && process.getuid?.() !== 0) {
     return "HOME=/root but this process is not running as root (likely `sudo npm install -g` — the sample would materialize into root's home and be invisible from your normal shell). Re-run without sudo, or pass an explicit `--target-parent`."
   }
-  if (home.startsWith("/tmp/") || home === "/tmp") {
-    return `HOME='${home}' is an ephemeral tmp path — the sample would disappear on reboot. Pass an explicit --target-parent to override.`
+  // Canonicalize BOTH sides of the tmp comparison before matching —
+  // otherwise a caller who passes `/private/tmp/foo` on macOS bypasses
+  // the `/tmp/*` check (because `/tmp` is a symlink to `/private/tmp`,
+  // so the raw string comparison sees no shared prefix) and the
+  // `os.tmpdir()` check (macOS reports `/var/folders/…` while realpath
+  // of the same tmpdir returns `/private/var/folders/…`). A codex sweep
+  // of this class flagged the raw comparison as a bypass. realpathSync
+  // fails on nonexistent paths — fall back to `path.resolve` so the
+  // check still handles relative parents like `./tmp`.
+  const canonicalize = (p: string): string => {
+    try { return fs.realpathSync(p) } catch { return path.resolve(p) }
   }
-  // Cross-platform tmp: macOS resolves os.tmpdir() to /var/folders/... (real
-  // dir, survives reboots but is user-invisible in Finder); Windows to
-  // %TEMP% (usually cleaned by Storage Sense or reboot in some configs).
-  // Never materialize a demo project into any of those.
-  const tmp = os.tmpdir()
-  if (tmp && (home === tmp || home.startsWith(tmp + path.sep))) {
-    return `HOME='${home}' is under the system tmp path (${tmp}) — the sample would be hard to find and may be swept by tmp-cleanup jobs. Pass an explicit --target-parent to override.`
+  const canonicalHome = canonicalize(home)
+  const check = (candidate: string): string | undefined => {
+    // Compare the candidate against BOTH the literal and canonical form
+    // of each reference path. Some references (like the string literal
+    // "/tmp") can't be realpathed as a directory on all systems so we
+    // include them raw; the canonical versions catch the /private/tmp
+    // and /private/var/folders/... bypasses.
+    const refs: string[] = ["/tmp", canonicalize("/tmp"), os.tmpdir(), canonicalize(os.tmpdir())]
+    for (const ref of refs) {
+      if (!ref) continue
+      if (candidate === ref || candidate.startsWith(ref + path.sep)) {
+        return `HOME='${home}' resolves to '${candidate}' which is under an ephemeral system tmp path (${ref}) — the sample would be hard to find or swept by tmp-cleanup jobs. Pass an explicit --target-parent to override.`
+      }
+    }
+    return undefined
+  }
+  // Check canonical form first (catches the bypasses above); then the
+  // raw literal for a redundant check against the caller's input.
+  const canonicalReject = check(canonicalHome)
+  if (canonicalReject) return canonicalReject
+  if (canonicalHome !== home) {
+    const rawReject = check(home)
+    if (rawReject) return rawReject
   }
   // Windows-specific system paths. Cheap conservative checks — we're not
   // trying to enumerate every dangerous Windows dir, just the two an
@@ -360,7 +385,18 @@ function sweepOrphanStaging(targetParent: string, preferredName: string): void {
     if (!entry.startsWith(prefix)) continue
     const entryPath = path.join(targetParent, entry)
     try {
-      const stat = fs.statSync(entryPath)
+      // lstatSync (not statSync) so a symlinked entry has ITS OWN age
+      // checked, not the age of whatever it points at. If a user drops
+      // `.<name>.tmp-abc123 -> /some/frequently-touched/dir` into the
+      // parent, statSync would follow the link and return the target's
+      // mtime; the age guard would pass on a symlink that's actually
+      // ancient and we'd rmSync it (Node removes the symlink itself,
+      // not the target, but the classification is still wrong). Skip
+      // symlinks entirely — a symlink can't be a stale staging tree we
+      // wrote, so we have no business garbage-collecting it. Same
+      // class as finding 21 / codex NEW-5.
+      const stat = fs.lstatSync(entryPath)
+      if (stat.isSymbolicLink()) continue
       const ageMs = now - Math.max(stat.mtimeMs, stat.birthtimeMs || 0)
       if (ageMs < ORPHAN_MAX_AGE_MS) continue // young — could be a live sibling
       fs.rmSync(entryPath, { recursive: true, force: true })

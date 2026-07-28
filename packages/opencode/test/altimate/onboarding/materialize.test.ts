@@ -53,6 +53,22 @@ describe("rejectUnsafeHome — codex-flagged HOME hygiene guard", () => {
     expect(err).toBeDefined()
     expect(err).toContain("sudo")
   })
+
+  // Canonicalization bypass — codex sweep NEW-1/NEW-4. On macOS, `/tmp`
+  // is a symlink to `/private/tmp`, so a caller passing `/private/tmp/foo`
+  // would slip past the raw `startsWith('/tmp/')` check. Assert we
+  // realpath first and STILL reject.
+  test("canonicalized-tmp path (macOS /private/tmp) → refused (bypass of raw string prefix check)", () => {
+    if (process.platform !== "darwin") return // /private/tmp is macOS-specific
+    // Sanity: /tmp really is a symlink to /private/tmp on this box; if not,
+    // the assertion below wouldn't prove anything.
+    let target = ""
+    try { target = fs.realpathSync("/tmp") } catch { return }
+    if (target !== "/private/tmp") return
+    const err = rejectUnsafeHome("/private/tmp/some-scratch-dir")
+    expect(err, "canonicalized /private/tmp path bypassed rejectUnsafeHome — realpath check missing").toBeDefined()
+    expect(err).toMatch(/tmp/)
+  })
 })
 
 describe("materializeSample — happy path", () => {
@@ -513,6 +529,39 @@ describe("materializeSample — orphan staging cleanup", () => {
     // Young orphan MUST still exist — the sweep is age-guarded to prevent
     // deleting a concurrent process's live staging tree.
     expect(fs.existsSync(youngOrphan)).toBe(true)
+  })
+
+  test("SYMLINKED orphan .starter.tmp-* is skipped (codex NEW-5 — age check would follow the link)", async () => {
+    const parent = makeTmpParent("materialize-orphan-symlink-")
+    // Real dir the symlink points at. If sweepOrphanStaging follows the
+    // symlink for its age check, the orphan classification uses that
+    // dir's fresh mtime — which would either KEEP an ancient link (age
+    // guard misfires) or DELETE a link over live content depending on
+    // whose mtime wins. The safe answer: skip symlinks entirely.
+    const realDir = makeTmpParent("materialize-orphan-symlink-target-")
+    fs.writeFileSync(path.join(realDir, "keep-me.txt"), "do not touch")
+    const symlinkOrphan = path.join(parent, ".starter.tmp-abcdef")
+    fs.symlinkSync(realDir, symlinkOrphan)
+    // Backdate the SYMLINK itself past the age guard. If sweep uses
+    // statSync (buggy) it would see the target's fresh mtime and skip;
+    // if it uses lstatSync (correct) it sees the symlink's own ancient
+    // mtime — but should still skip because of the isSymbolicLink guard.
+    const twoHoursAgo = (Date.now() - 2 * 60 * 60 * 1000) / 1000
+    try { fs.lutimesSync(symlinkOrphan, twoHoursAgo, twoHoursAgo) } catch { /* fallback: some fs lack lutimes */ }
+
+    await materializeSample({
+      targetParent: parent,
+      preferredTargetName: "starter",
+      sampleVersion: SAMPLE_VERSION,
+      cliVersion: CLI_VERSION,
+      allowUnsafeParent: true,
+    })
+
+    // Symlink still exists (skipped, not rm'd).
+    const stat = fs.lstatSync(symlinkOrphan)
+    expect(stat.isSymbolicLink(), "symlinked orphan was unlinked; sweep should skip symlinks entirely").toBe(true)
+    // What the link points at is intact.
+    expect(fs.readFileSync(path.join(realDir, "keep-me.txt"), "utf8")).toBe("do not touch")
   })
 
   test("orphan for a DIFFERENT preferredName is left alone (different sweep prefix)", async () => {
