@@ -59,7 +59,23 @@ export function _resetDbtRuntimeCacheForTests() {
 }
 
 async function probe(): Promise<DbtRuntime> {
-  const out = await tryExec("dbt", ["--version"], 5_000)
+  // Node's `execFile("dbt")` on Windows uses CreateProcess, which honours
+  // PATHEXT for `.exe`/`.com` but NOT `.cmd`/`.bat` (those need a shell).
+  // Some Windows dbt install layouts (older `pip install --user`, certain
+  // corporate distributions, WSL-bridge shims) drop a `dbt.cmd` wrapper
+  // on PATH instead of `dbt.exe`. Without a fallback we'd tell those
+  // users "dbt: missing" on the template's Build & query it branch even
+  // when dbt is right there.
+  //
+  // Fix: on Windows, if the direct probe misses, retry through
+  // `cmd.exe /c dbt --version` — cmd's own resolver honours the full
+  // PATHEXT (including `.cmd`/`.bat`) and finds any of the wrapper
+  // shapes. Args are constant strings so there's no injection surface.
+  // On macOS/Linux we skip the retry — one shell-less probe is enough.
+  let out = await tryExec("dbt", ["--version"], 5_000)
+  if (!out.ok && process.platform === "win32") {
+    out = await tryExec("cmd.exe", ["/c", "dbt", "--version"], 5_000)
+  }
   if (!out.ok) return { hasDbt: false, hasDbtDuckdb: false }
 
   // dbt --version on 1.x prints something like:
