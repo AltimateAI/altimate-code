@@ -12,7 +12,10 @@ const CALLBACK_PORT = 7317
 // Web app that hosts the signup/login (authorize) page. Overridable for
 // dev/staging via ALTIMATE_WEB_URL.
 const DEFAULT_WEB_URL = "https://app.myaltimate.com"
-// Fallback gateway API base if the callback omits one.
+// Fallback gateway API base when the browser callback omits a url. Overridable
+// for dev/staging via ALTIMATE_API_URL (mirrors ALTIMATE_WEB_URL) — e.g. point
+// the token exchange at a local backend when the web has no BACKEND_API_URL to
+// deliver.
 const DEFAULT_API_URL = "https://api.myaltimate.com"
 
 // Escape reflected values before interpolating them into the callback HTML — the
@@ -90,7 +93,7 @@ async function startCallbackServer(): Promise<void> {
 
     const token = url.searchParams.get("token")
     const instance = url.searchParams.get("instance")
-    const apiUrl = url.searchParams.get("url") || DEFAULT_API_URL
+    const apiUrl = url.searchParams.get("url") || process.env.ALTIMATE_API_URL || DEFAULT_API_URL
     if (!token || !instance) {
       const msg = "Missing credential in callback"
       entry.reject(new Error(msg))
