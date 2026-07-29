@@ -369,6 +369,7 @@
         "@types/turndown": "5.0.5",
         "@types/yargs": "17.0.33",
         "@typescript/native-preview": "catalog:",
+        "bun-pty": "0.4.8",
         "drizzle-orm": "catalog:",
         "playwright-core": "1.59.1",
         "prettier": "3.6.2",
