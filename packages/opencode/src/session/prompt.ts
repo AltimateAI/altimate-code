@@ -75,6 +75,7 @@ import { Tracer } from "../altimate/observability/tracing"
 import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1010,6 +1011,17 @@ export namespace SessionPrompt {
           }
         }
         // altimate_change end — task intent classification
+        // altimate_change start — onboarding funnel: first free-text prompt.
+        // "First" means the user actually typed something, so slash commands are excluded:
+        // the scan gate submits a hidden `/onboard-connect` as a normal user message
+        // (packages/tui/src/app.tsx), which would otherwise be counted as the user's first
+        // prompt in every fresh onboarding. The plugin's command.execute.before hook flags
+        // command-submitted messages; consuming the flag here also clears it.
+        const fromCommand = OnboardingTelemetry.consumeCommandSubmission(sessionID)
+        if (!fromCommand) {
+          void OnboardingTelemetry.emit({ type: "first_prompt_sent" })
+        }
+        // altimate_change end
         // altimate_change end — session start telemetry
       }
 
