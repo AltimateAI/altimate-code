@@ -47,8 +47,32 @@ We collect the following categories of events:
 | `schema_complexity` | Warehouse schema structural metrics from introspection — bucketed table, column, and schema counts plus average columns per table. No schema names or content. |
 | `validator_check` | A completion-gate validator ran on session end — validator name, `ok` boolean, step, retry count, `enforced` flag (false in shadow mode), and structured `details` (model counts, elapsed time, concurrency limit — no SQL or model content). Only emitted when `ALTIMATE_VALIDATORS_ENABLED=1` or `ALTIMATE_VALIDATORS_SHADOW=1`. See [Validators](../data-engineering/validators.md). |
 | `validator_retries_exhausted` | A session terminated with unresolved validator failures after exhausting the synthetic-retry budget — names of the failing validators (no failure body content). |
+| `onboarding_started` | The first-run setup gate opened (fresh launch with no usable model). |
+| `model_picker_shown` | The provider picker was displayed. `trigger` distinguishes the first run from `/connect`, from declining Big Pickle, and from the prompt gate. |
+| `provider_selected` | A provider row was chosen (`altimate_gateway`, `anthropic`, `openai`, `google`, `big_pickle`, `search_all`). Recorded at the moment of choice, so a sign-in that is then cancelled still counts. |
+| `big_pickle_confirm_shown` / `big_pickle_choice` | The Big Pickle interstitial was shown, and what the user decided (`accept`/`cancel`). |
+| `gateway_device_code_issued` | The Altimate Gateway authorize URL was built and the browser open attempted. **Name note:** the flow is a browser loopback OAuth — there is no device code. The name follows the original event spec. |
+| `gateway_auth_completed` / `gateway_auth_failed` | Gateway sign-in outcome. `reason` is `timeout`, `denied`, or `error` — never the underlying message, which can contain the instance name. An unrecognised callback state does not reject the pending attempt, so a CSRF mismatch surfaces as `timeout`. |
+| `instance_connected` | Credentials received and saved. `time_to_connect_ms` runs from the start of the authorize call, so it includes the browser launch. No instance or tenant name is sent. |
+| `onboarding_completed` | A model is ready and chat is live. |
+| `scan_gate_shown` / `scan_gate_choice` | The "scan your environment?" gate appeared, and whether the user chose `scan` or `skip`. |
+| `environment_scan_completed` | A `project_scan` finished — `has_dbt`, `has_warehouse`, `is_repo`, `connections_found`, and a bounded list of short `degraded` detection keys. No paths, hostnames, or connection details. Fires for every scan, including `/discover`, not just onboarding. |
+| `sample_setup_completed` | The sample dbt project was materialised. `success`, `models`, `tables`, and `reused` — the tool is deliberately re-callable, so this is per invocation. The target path is never sent. |
+| `activation_menu_shown` | The activation menu was (very likely) rendered. `variant` is `warehouse` or `no_data`. **Derived** — see the note below. |
+| `activation_job_selected` / `first_job_completed` | Which activation job the user started and, where observable, finished. **Derived** — see the note below. |
+| `first_prompt_sent` | The user's first typed message in an onboarding session. Slash commands are excluded, so the hidden `/onboard-connect` submission does not count. |
+| `onboarding_abandoned` | The CLI exited during a first run without connecting. `last_stage` is the furthest point reached: `started`, `model_picker`, `provider_setup`, `big_pickle_confirm`, `gateway_auth`, or `connected`. Only emitted for a genuine first run — opening `/connect` as an existing user does not enter the funnel, and abandonment after setup completes is out of scope by definition. |
 
-Each event includes a timestamp, anonymous session ID, CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
+### A note on the derived activation events
+
+`activation_menu_shown`, `activation_job_selected`, and `first_job_completed` are **inferred, not observed**. The activation menu is not a UI element: it is text the model writes from a prompt template, and the user picks a job by replying in free text. Nothing in the CLI can see either moment directly.
+
+They are therefore inferred from the closest deterministic signals — the menu from the command dispatch or the completed environment scan, the job from the first matching tool or skill invocation that follows. Treat the counts as **lower bounds**, and note two specific gaps:
+
+- The "something else" branch has no tool signature at all and is never counted.
+- `first_job_completed` only fires for jobs with a real completion signal. Skill-driven jobs (downstream impact, SQL review, cost) load an instruction bundle and then do their work through other tools, so their completion is not observable and they are absent from this event rather than wrongly counted in it.
+
+Each event includes a timestamp, anonymous session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
 
 ## Delivery & Reliability
 
