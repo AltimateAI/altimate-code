@@ -136,3 +136,34 @@ test("scan gate: Enter selects the default (Yes) and chooses scan", async () => 
     await gate.cleanup()
   }
 })
+
+// altimate_change — the gate submits `/onboard-connect` and records the funnel choice, so a
+// double-fire both double-counts the event and runs the command twice. Keyboard and mouse
+// handlers call run() directly with nothing between them and the dialog unmounting.
+test("scan gate: a rapid second keypress does not choose twice", async () => {
+  await using tmp = await tmpdir()
+  const gate = await mountGate(tmp.path)
+  try {
+    gate.app.mockInput.pressKey("y")
+    gate.app.mockInput.pressKey("y")
+    await wait(() => gate.chosen.length > 0)
+    await Bun.sleep(50)
+    expect(gate.chosen).toEqual(["scan"])
+  } finally {
+    await gate.cleanup()
+  }
+})
+
+test("scan gate: y then n keeps the first choice", async () => {
+  await using tmp = await tmpdir()
+  const gate = await mountGate(tmp.path)
+  try {
+    gate.app.mockInput.pressKey("y")
+    gate.app.mockInput.pressKey("n")
+    await wait(() => gate.chosen.length > 0)
+    await Bun.sleep(50)
+    expect(gate.chosen).toEqual(["scan"])
+  } finally {
+    await gate.cleanup()
+  }
+})
