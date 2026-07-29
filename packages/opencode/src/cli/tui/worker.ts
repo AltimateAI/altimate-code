@@ -24,6 +24,8 @@ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecy
 // does NOT receive this worker's in-process (Server.Default().fetch) session events.
 import { TraceConsumer } from "@/altimate/observability/trace-consumer"
 import { Instance } from "@/project/instance"
+// altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
+import { Telemetry } from "@/altimate/telemetry"
 
 Heap.start()
 
@@ -110,6 +112,21 @@ export const rpc = {
     // worker.terminate(), so an async flush() silently writes nothing; flushSync() uses writeFileSync.
     await Promise.race([traceTail, new Promise((r) => setTimeout(r, 2000))]).catch(() => {})
     traceConsumer.flushSync()
+    // altimate_change end
+    // altimate_change start — flush this thread's telemetry buffer before the worker dies.
+    // The worker loads its own instance of the Telemetry module (separate buffer from the main
+    // thread), and server-side events — gateway auth, project scan, sample setup, session
+    // events — land here. cli/cmd/tui.ts terminates the worker immediately after this RPC
+    // returns, so anything still buffered is lost.
+    //
+    // Bounded at 2s: the caller allows 5s total for this RPC and the trace drain above already
+    // claims up to 2s of it, so an unbounded flush (up to REQUEST_TIMEOUT_MS = 10s) would be
+    // cut off mid-request by worker.terminate() anyway.
+    try {
+      await Promise.race([Telemetry.shutdown(), new Promise((r) => setTimeout(r, 2000))])
+    } catch {
+      // Telemetry must never block worker shutdown.
+    }
     // altimate_change end
     await InstanceRuntime.disposeAllInstances()
     if (server) await server.stop(true)

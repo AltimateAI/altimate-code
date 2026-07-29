@@ -16,6 +16,10 @@ import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import { writeHeapSnapshot } from "v8"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
+// altimate_change start — onboarding telemetry: main-thread flush on the TUI exit path
+import { Telemetry } from "@/altimate/telemetry"
+import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+// altimate_change end
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -224,6 +228,22 @@ export const TuiThreadCommand = cmd({
       try {
         unguard?.()
       } catch {}
+      // altimate_change start — flush main-thread telemetry before the explicit exit below.
+      // This handler ends with process.exit(0), which skips the outer `finally` in src/index.ts
+      // that normally calls Telemetry.shutdown(). Without this, every event tracked on the TUI
+      // thread since the last 5s interval flush is lost — including onboarding_abandoned, which
+      // by definition only fires here. Runs after stop() so the worker has already drained.
+      //
+      // Bounded: flush() can block for REQUEST_TIMEOUT_MS (10s) on a slow or blackholed network,
+      // and that would be a visible hang between the user quitting and the shell prompt
+      // returning. 2s is the same budget the worker gives its trace drain.
+      try {
+        await OnboardingTelemetry.emitAbandonedIfIncomplete()
+        await withTimeout(Telemetry.shutdown(), 2000)
+      } catch {
+        // Never let telemetry delay or break exit.
+      }
+      // altimate_change end
     }
     process.exit(0)
   },
