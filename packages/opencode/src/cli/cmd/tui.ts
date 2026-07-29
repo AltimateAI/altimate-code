@@ -135,7 +135,12 @@ export const TuiThreadCommand = cmd({
       }
       const cwd = Filesystem.resolve(process.cwd())
 
-      const worker = new Worker(file)
+      // altimate_change — hand the launch correlation id to the worker explicitly. A Bun Worker
+      // does not see runtime mutations to process.env, so without this the worker mints its own
+      // and the TUI-thread and worker-thread halves of the onboarding funnel cannot be joined.
+      const worker = new Worker(file, {
+        env: { ...process.env, ALTIMATE_LAUNCH_ID: Telemetry.launchId() },
+      } as WorkerOptions)
       const client = Rpc.client<typeof rpc>(worker)
       const reload = () => {
         client.call("reload", undefined).catch(() => {})
