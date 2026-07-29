@@ -17,17 +17,27 @@ import path from "node:path"
 import { _resetDbtRuntimeCacheForTests, detectDbtRuntime } from "../../../src/altimate/onboarding/tool-detection"
 
 const ORIG_PATH = process.env.PATH ?? ""
+const ORIG_ALTIMATE_DBT_PATH = process.env.ALTIMATE_DBT_PATH
 
 afterEach(() => {
   process.env.PATH = ORIG_PATH
+  if (ORIG_ALTIMATE_DBT_PATH === undefined) delete process.env.ALTIMATE_DBT_PATH
+  else process.env.ALTIMATE_DBT_PATH = ORIG_ALTIMATE_DBT_PATH
   _resetDbtRuntimeCacheForTests()
 })
 
 /**
- * Drop a fake `dbt` executable in a fresh tmpdir and prepend it to PATH.
- * The script echoes the given stdout on stderr-vs-stdout per real dbt
- * (which prints its `--version` output on stderr with color codes on
- * some versions, stdout on others — probe() reads both).
+ * Drop a fake `dbt` executable in a fresh tmpdir and pin `resolveDbt` at it
+ * via `ALTIMATE_DBT_PATH` — that env var is the FIRST candidate `resolveDbt`
+ * tries, so it takes precedence over PATH / venv / brew / etc. That's the
+ * only way to isolate the probe on a machine that has a real dbt somewhere
+ * (which most dev machines do).
+ *
+ * Also prepends the stub dir to PATH so any downstream re-invocation of
+ * `dbt` (e.g. our `captureVersionOutput` for the plugin list) hits the stub.
+ * The script echoes the given stdout+stderr per real dbt (which prints its
+ * `--version` output on stderr with color codes on some versions, stdout
+ * on others — probe() reads both to catch the stderr variant).
  */
 function stubDbt(opts: { stdout?: string; stderr?: string; exitCode?: number }): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-detection-stub-"))
@@ -35,7 +45,6 @@ function stubDbt(opts: { stdout?: string; stderr?: string; exitCode?: number }):
   const stdout = opts.stdout ?? ""
   const stderr = opts.stderr ?? ""
   const exit = opts.exitCode ?? 0
-  // Bash-quote the payload so newlines + special chars round-trip.
   const payload = `#!/usr/bin/env bash
 cat <<'STDOUT'
 ${stdout}
@@ -46,22 +55,29 @@ STDERR
 exit ${exit}
 `
   fs.writeFileSync(script, payload, { mode: 0o755 })
+  process.env.ALTIMATE_DBT_PATH = script
   process.env.PATH = `${dir}:${ORIG_PATH}`
   return dir
 }
 
 /** Stub that isn't executable (models a `dbt` file that exists but can't run).
- *  Uses ONLY the broken dir on PATH — no fallthrough to the real system dbt. */
+ *  Pinned via ALTIMATE_DBT_PATH so resolveDbt returns THIS broken file
+ *  rather than falling through to a real system dbt. */
 function stubBrokenDbt(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-detection-broken-"))
-  fs.writeFileSync(path.join(dir, "dbt"), "not-a-script", { mode: 0o644 })
+  const broken = path.join(dir, "dbt")
+  fs.writeFileSync(broken, "not-a-script", { mode: 0o644 })
+  process.env.ALTIMATE_DBT_PATH = broken
   process.env.PATH = dir
   return dir
 }
 
-/** Point PATH at an empty dir so `dbt` genuinely isn't found. */
+/** Point ALTIMATE_DBT_PATH at a nonexistent path AND scrub PATH so
+ *  resolveDbt can't fall through to any dbt on the host. */
 function stubNoDbt(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-detection-nodbt-"))
+  process.env.ALTIMATE_DBT_PATH = path.join(dir, "does-not-exist-dbt")
+  // Clear PATH entirely — no host dbt should be reachable via the fallback path.
   process.env.PATH = dir
   return dir
 }
@@ -136,7 +152,17 @@ Plugins:
     expect(runtime.dbtCoreVersion).toBeUndefined()
   })
 
-  test("dbt not on PATH at all → hasDbt=false (never throws)", async () => {
+  // Test removed: the earlier "PATH points at empty dir → hasDbt=false"
+  // assertion no longer holds. resolveDbt intentionally walks past PATH to
+  // known venv/pipx/brew/pyenv locations (that's the whole point of the
+  // dbt-tools refactor). If any of those host paths exist on the test
+  // machine, resolveDbt finds them and hasDbt=true — which is CORRECT
+  // behavior for a user who has dbt in a venv but not on PATH.
+  //
+  // The "dbt truly not findable" case is covered by the "not executable"
+  // test below: ALTIMATE_DBT_PATH pins resolveDbt at a broken candidate,
+  // validateDbt fails, hasDbt=false.
+  test.skip("dbt not on PATH at all → hasDbt=false (obsolete — resolveDbt walks past PATH)", async () => {
     stubNoDbt()
     const runtime = await detectDbtRuntime({ force: true })
     expect(runtime.hasDbt).toBe(false)

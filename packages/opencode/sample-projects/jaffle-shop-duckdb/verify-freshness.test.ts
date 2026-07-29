@@ -24,6 +24,7 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
+import { Glob } from "@opencode-ai/core/util/glob"
 
 const SAMPLE_DIR = path.resolve(__dirname)
 const MANIFEST_PATH = path.join(SAMPLE_DIR, "target", "manifest.json")
@@ -110,23 +111,15 @@ describe("verify-freshness — committed manifest matches source files", () => {
     for (const node of Object.values(nodes)) {
       if (node.original_file_path) manifestPaths.add(node.original_file_path)
     }
-    // Enumerate the actual source tree the maintainer curates. Only files
-    // dbt itself would compile: .sql models, .csv seeds. Docs, YAML,
-    // manifest metadata files are not per-file compiled — dbt notices
-    // schema.yml through its own parser and doesn't emit a checksum'd
-    // node for it.
-    const expectedFiles: string[] = []
-    const walk = (relDir: string, exts: RegExp) => {
-      const absDir = path.join(SAMPLE_DIR, relDir)
-      if (!fs.existsSync(absDir)) return
-      for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
-        const relPath = path.join(relDir, entry.name)
-        if (entry.isDirectory()) walk(relPath, exts)
-        else if (exts.test(entry.name)) expectedFiles.push(relPath)
-      }
-    }
-    walk("models", /\.sql$/)
-    walk("seeds", /\.csv$/)
+    // Enumerate the actual source tree the maintainer curates via the shared
+    // `Glob.scan` helper (re-exports node-glob). Only files dbt itself would
+    // compile: .sql models, .csv seeds. Docs, YAML, manifest metadata files
+    // are not per-file compiled — dbt notices schema.yml through its own
+    // parser and doesn't emit a checksum'd node for it.
+    const expectedFiles = [
+      ...Glob.scanSync("models/**/*.sql", { cwd: SAMPLE_DIR }),
+      ...Glob.scanSync("seeds/**/*.csv", { cwd: SAMPLE_DIR }),
+    ]
     const missing = expectedFiles.filter((f) => !manifestPaths.has(f))
     expect(
       missing,

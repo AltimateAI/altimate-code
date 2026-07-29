@@ -5,6 +5,7 @@ import path from "node:path"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { MARKER_KIND, checkParentWritable, classifyTarget, findSafeTarget, writeMarker, type TargetState } from "./marker"
 import { DEFAULT_SAMPLE_NAME, loadShippedManifest, resolveSampleSource, type SampleSourceLocation } from "./sample-source-resolver"
+import { Filesystem } from "../../util/filesystem"
 
 /**
  * Materialize the shipped starter sample onto the user's filesystem.
@@ -28,24 +29,52 @@ import { DEFAULT_SAMPLE_NAME, loadShippedManifest, resolveSampleSource, type Sam
  * end users.
  */
 
-/** Files/dirs relative to the sample source that get materialized to the
- *  user's target dir. Explicitly enumerated (no glob) so future changes
- *  to the sample layout are a deliberate opt-in edit here. */
-const MATERIALIZE_ENTRIES: ReadonlyArray<{ from: string; kind: "file" | "dir"; required: boolean }> = [
-  { from: "README.md", kind: "file", required: true },
-  { from: "dbt_project.yml", kind: "file", required: true },
-  { from: "profiles.yml", kind: "file", required: true },
-  { from: "sample-manifest.json", kind: "file", required: true },
-  // .gitignore is the ONLY optional entry — dev checkouts may lack it and
-  // materialize should not fail. Every other entry is load-bearing for
-  // /discover, /review, or the "Build & query it" flow; missing any of
-  // them means a broken package and we must fail loudly rather than mark
-  // the incomplete copy as reused-forever.
-  { from: ".gitignore", kind: "file", required: false },
-  { from: "models", kind: "dir", required: true },
-  { from: "seeds", kind: "dir", required: true },
-  { from: "target/manifest.json", kind: "file", required: true },
-]
+/** Shape of an entry in the sample-manifest.json `assets` array. */
+export interface SampleAsset {
+  from: string
+  kind: "file" | "dir"
+  required: boolean
+}
+
+/**
+ * Read the asset list from a sample source's `sample-manifest.json`. Single
+ * source of truth — publish.ts, materialize.ts, and the publish-parity test
+ * all consume this list, so a new file added to the sample only needs to
+ * be listed in one place. Adding a new sample entry?
+ * Edit `sample-manifest.json`'s `assets` array; everything else picks it up.
+ *
+ * `.gitignore` is typically the ONLY optional entry — dev checkouts may lack
+ * it and materialize should not fail. Every other entry should be
+ * load-bearing for /discover, /review, or the "Build & query it" flow;
+ * missing a required entry means a broken package and copySampleTree
+ * fails loudly rather than mark the incomplete copy as reused-forever.
+ */
+export function readSampleAssets(sampleSourcePath: string): SampleAsset[] {
+  const manifestPath = path.join(sampleSourcePath, "sample-manifest.json")
+  const raw = fs.readFileSync(manifestPath, "utf8")
+  const parsed = JSON.parse(raw) as { assets?: unknown }
+  if (!Array.isArray(parsed.assets)) {
+    throw new Error(
+      `${manifestPath} must define an 'assets' array. See the docstring on SampleAsset.`,
+    )
+  }
+  const out: SampleAsset[] = []
+  for (const [i, entry] of parsed.assets.entries()) {
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      typeof (entry as any).from !== "string" ||
+      ((entry as any).kind !== "file" && (entry as any).kind !== "dir") ||
+      typeof (entry as any).required !== "boolean"
+    ) {
+      throw new Error(
+        `${manifestPath} assets[${i}] must be { from: string, kind: "file"|"dir", required: boolean }`,
+      )
+    }
+    out.push(entry as SampleAsset)
+  }
+  return out
+}
 
 export interface MaterializeOptions {
   /** Sample-source lookup name (defaults to jaffle-shop-duckdb). */
@@ -271,11 +300,13 @@ async function materializeUnderLock(
   // Belt-and-suspenders containment check. The name-regex above should already
   // guarantee this, but findSafeTarget also joins a numeric/hex suffix and any
   // future edit to that logic must not sneak the target outside targetParent.
-  const resolvedParent = path.resolve(targetParent)
-  const resolvedTarget = path.resolve(targetPath)
-  if (resolvedTarget !== resolvedParent && !resolvedTarget.startsWith(resolvedParent + path.sep)) {
+  // Uses `Filesystem.containsReal` (symlink-aware realpath + `..`-segment
+  // rejection) rather than a lexical `startsWith` — an earlier version was
+  // bypassable via a symlinked targetParent, which is exactly what
+  // `containsReal` was built to catch.
+  if (!Filesystem.containsReal(targetParent, targetPath)) {
     throw new Error(
-      `refusing to materialize outside targetParent: resolved '${resolvedTarget}' is not under '${resolvedParent}'`,
+      `refusing to materialize outside targetParent: '${targetPath}' is not under (or is not a symlink-safe descendant of) '${targetParent}'`,
     )
   }
 
@@ -425,7 +456,7 @@ function sweepOrphanStaging(targetParent: string, preferredName: string): void {
  */
 function copySampleTree(source: string, writeTo: string, finalTarget: string): void {
   fs.mkdirSync(writeTo, { recursive: true })
-  for (const entry of MATERIALIZE_ENTRIES) {
+  for (const entry of readSampleAssets(source)) {
     const from = path.join(source, entry.from)
     const to = path.join(writeTo, entry.from)
     if (!fs.existsSync(from)) {

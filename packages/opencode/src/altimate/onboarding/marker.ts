@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
+import { Filesystem } from "../../util/filesystem"
 
 /**
  * Marker file that identifies a directory as an altimate-code-materialized
@@ -57,13 +58,11 @@ export function readMarker(dir: string): SampleMarker | undefined {
 
 /** Write the marker atomically. Overwrites any existing marker in the dir.
  *  Caller MUST have already decided the dir is safe to write (via
- *  classifyTarget) — this function does not itself refuse. */
+ *  classifyTarget) — this function does not itself refuse. Uses the shared
+ *  {@link Filesystem.writeJsonAtomic} helper so the tmp-file + rename dance
+ *  isn't duplicated per call site. */
 export function writeMarker(dir: string, marker: SampleMarker): void {
-  const markerPath = path.join(dir, MARKER_FILE_NAME)
-  const tmpPath = `${markerPath}.tmp-${process.pid}`
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(tmpPath, JSON.stringify(marker, null, 2) + "\n")
-  fs.renameSync(tmpPath, markerPath) // atomic on POSIX
+  Filesystem.writeJsonAtomic(path.join(dir, MARKER_FILE_NAME), marker)
 }
 
 /** Classify a candidate materialization target. Never throws.

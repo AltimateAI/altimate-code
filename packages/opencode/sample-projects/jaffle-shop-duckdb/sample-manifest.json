@@ -12,5 +12,16 @@
     "Renamed profile from the original test fixture: `test_jaffle_shop` → `jaffle_shop`.",
     "DuckDB target file resolves project-relative at `target/jaffle.duckdb`; no host paths bake into the profile.",
     "target/manifest.json ships pre-compiled so static workflows (/discover, /review) work without dbt installed."
+  ],
+  "$assets_comment": "Single source of truth for the file list shipped to end users. `packages/opencode/src/altimate/onboarding/materialize.ts` copies these into the user's home; `packages/opencode/script/publish.ts` copies the same list into the wrapper npm package at release time; `packages/opencode/test/altimate/onboarding/publish-parity.test.ts` cross-checks both consumers use the same list. Adding a new sample file? Add it here — everything else picks it up automatically.",
+  "assets": [
+    { "from": "README.md", "kind": "file", "required": true },
+    { "from": "dbt_project.yml", "kind": "file", "required": true },
+    { "from": "profiles.yml", "kind": "file", "required": true },
+    { "from": "sample-manifest.json", "kind": "file", "required": true },
+    { "from": ".gitignore", "kind": "file", "required": false },
+    { "from": "models", "kind": "dir", "required": true },
+    { "from": "seeds", "kind": "dir", "required": true },
+    { "from": "target/manifest.json", "kind": "file", "required": true }
   ]
 }
