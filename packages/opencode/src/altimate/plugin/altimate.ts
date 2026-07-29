@@ -18,6 +18,32 @@ const DEFAULT_WEB_URL = "https://app.myaltimate.com"
 // deliver.
 const DEFAULT_API_URL = "https://api.myaltimate.com"
 
+// The one-time login_token is POSTed to the callback-supplied API base, so that
+// base must be trusted — otherwise a crafted callback could exfiltrate the token
+// to an attacker's server. Allow only HTTPS Altimate-owned hosts, an explicitly
+// configured ALTIMATE_API_URL, or loopback (for local dev, where http is ok).
+function isTrustedApiUrl(raw: string): boolean {
+  let u: URL
+  try {
+    u = new URL(raw)
+  } catch {
+    return false
+  }
+  const host = u.hostname
+  const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1"
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && isLoopback)) return false
+  const configured = process.env.ALTIMATE_API_URL
+  if (configured) {
+    try {
+      if (new URL(configured).hostname === host) return true
+    } catch {
+      /* ignore a malformed override */
+    }
+  }
+  if (isLoopback) return true
+  return host === "api.myaltimate.com" || host.endsWith(".myaltimate.com") || host.endsWith(".altimate.ai")
+}
+
 // Escape reflected values before interpolating them into the callback HTML — the
 // error text originates from the URL query string, so it must not be trusted.
 function escapeHtml(s: string): string {
@@ -96,6 +122,13 @@ async function startCallbackServer(): Promise<void> {
     const apiUrl = url.searchParams.get("url") || process.env.ALTIMATE_API_URL || DEFAULT_API_URL
     if (!token || !instance) {
       const msg = "Missing credential in callback"
+      entry.reject(new Error(msg))
+      html(400, HTML_ERROR(msg))
+      return
+    }
+    if (!isTrustedApiUrl(apiUrl)) {
+      // Refuse to hand the one-time token to an untrusted exchange target.
+      const msg = "Untrusted callback URL"
       entry.reject(new Error(msg))
       html(400, HTML_ERROR(msg))
       return

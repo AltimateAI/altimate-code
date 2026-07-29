@@ -556,25 +556,30 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // EXACTLY once, and only after startup has settled (`ready()` = plugin host +
   // sync bootstrap done), so a returning user with valid credentials never sees it.
   let firstRunPickerHandled = false
+  // Armed only when THIS launch starts genuinely un-onboarded (so the Part 2 scan
+  // gate below fires after the user completes first-run setup — not for a returning
+  // user whose onboardingReady merely flips false→true once sync loads providers).
+  let armScanGate = false
   createEffect(() => {
     if (firstRunPickerHandled) return
     if (!ready()) return // wait until providers are loaded before deciding
     firstRunPickerHandled = true
     if (onboardingReady()) return // already set up — no gate
+    armScanGate = true
     dialog.replace(() => <DialogModelWelcome />)
   })
   // altimate_change end
 
-  // altimate_change start — Part 2 scan gate: fire EXACTLY once, on the first time
-  // this session reaches "ready" from a not-ready start (i.e. the user just finished
-  // Part 1 in a fresh onboarding). `prev === false` guarantees a genuine false→true
-  // transition, so a returning user (ready from launch, prev === undefined) never
-  // sees it, and a later /model change (ready stays true, no transition) never
-  // re-triggers it. We do NOT auto-scan — the gate just asks.
+  // altimate_change start — Part 2 scan gate: fire EXACTLY once, after the user
+  // completes first-run Part 1. Gated on `armScanGate` (set above only when this
+  // launch started un-onboarded) so a RETURNING user — whose onboardingReady flips
+  // false→true simply because sync finished loading providers — never sees it.
+  // `prev === false` still requires a genuine transition, and a later /model change
+  // (ready stays true) never re-triggers it. We do NOT auto-scan — the gate asks.
   let scanGateShown = false
   createEffect(
     on(onboardingReady, (isReady, prev) => {
-      if (scanGateShown) return
+      if (scanGateShown || !armScanGate) return
       if (isReady && prev === false) {
         scanGateShown = true
         dialog.replace(() => (
