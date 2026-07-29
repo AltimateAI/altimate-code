@@ -1114,14 +1114,23 @@ export namespace SessionPrompt {
         }
         // altimate_change end — task intent classification
         // altimate_change start — onboarding funnel: first free-text prompt.
-        // "First" means the user actually typed something, so slash commands are excluded:
-        // the scan gate submits a hidden `/onboard-connect` as a normal user message
-        // (packages/tui/src/app.tsx), which would otherwise be counted as the user's first
-        // prompt in every fresh onboarding. The plugin's command.execute.before hook flags
-        // command-submitted messages; consuming the flag here also clears it.
+        //
+        // Three guards, each load-bearing:
+        //   - `step === 1` (the enclosing block) is NOT "first message of the session". `step`
+        //     is declared inside loop() and loop() runs once per user turn, so this block runs
+        //     on every turn. `claimFirstPrompt` is what makes this once-per-session.
+        //   - `isOnboardingSession` scopes it to the funnel. Without it, an onboarding-taxonomy
+        //     event would fire for every session in the product — TUI, `run`, GitHub, API.
+        //   - `consumeCommandSubmission` excludes slash commands, because the scan gate submits
+        //     a hidden `/onboard-connect` as an ordinary user message: it would otherwise be
+        //     recorded as the user's first typed prompt in every fresh onboarding.
         const fromCommand = OnboardingTelemetry.consumeCommandSubmission(sessionID)
-        if (!fromCommand) {
-          void OnboardingTelemetry.emit({ type: "first_prompt_sent" })
+        if (
+          !fromCommand &&
+          OnboardingTelemetry.isOnboardingSession(sessionID) &&
+          OnboardingTelemetry.claimFirstPrompt(sessionID)
+        ) {
+          void OnboardingTelemetry.emit({ type: "first_prompt_sent" }, sessionID)
         }
         // altimate_change end
         // altimate_change end — session start telemetry

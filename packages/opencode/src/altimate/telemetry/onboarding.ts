@@ -100,7 +100,7 @@ function advance(stage: OnboardingStage) {
  * Emit an onboarding event. Fire-and-forget by design — onboarding must never wait on, or fail
  * because of, telemetry. Awaiting the returned promise is only useful on an exit path.
  */
-export async function emit(event: EmitInput): Promise<void> {
+export async function emit(event: EmitInput, sessionID?: string): Promise<void> {
   try {
     const stage = STAGE_FOR_EVENT[event.type]
     if (stage) advance(stage)
@@ -110,7 +110,11 @@ export async function emit(event: EmitInput): Promise<void> {
     Telemetry.track({
       ...event,
       timestamp: Date.now(),
-      session_id: Telemetry.getContext().sessionId,
+      // Prefer the caller's session over the ambient telemetry context. setContext() is
+      // process-global and set by the session loop, so a plugin hook firing for session A while
+      // the context still points at session B would otherwise misattribute the event — or stamp
+      // "" when no session has run yet, which is the normal case for the gateway events.
+      session_id: sessionID ?? Telemetry.getContext().sessionId,
     } as Telemetry.Event)
   } catch {
     // Telemetry must never break onboarding.
@@ -151,71 +155,85 @@ export async function emitAbandonedIfIncomplete(): Promise<void> {
 // grow forever. Sets are capped and evict in insertion order.
 // ---------------------------------------------------------------------------
 
-const MAX_TRACKED_SESSIONS = 64
+const MAX_TRACKED_SESSIONS = 256
 
-function addBounded<T>(set: Set<T>, value: T) {
-  if (set.size >= MAX_TRACKED_SESSIONS) {
-    const oldest = set.values().next()
-    if (!oldest.done) set.delete(oldest.value)
-  }
-  set.add(value)
+/**
+ * One record per tracked session, rather than a set per flag. Separate sets can evict a session
+ * from some and not others, which produces the worst possible state: a session still considered
+ * "onboarding" but with its once-per-session claims forgotten, so it re-emits `first` events. A
+ * single map evicts a session's whole state atomically — it then simply stops being tracked.
+ */
+type SessionRecord = {
+  /** Next user message was submitted by a slash command, not typed. */
+  commandSubmission: boolean
+  /** Session was started by `/onboard-connect`. */
+  onboarding: boolean
+  menuShown: boolean
+  jobSelected: boolean
+  jobCompleted: boolean
+  firstPromptSent: boolean
 }
 
-/** Sessions whose next user message was submitted by a slash command, not typed by the user. */
-const commandSubmissions = new Set<string>()
-/** Sessions started by `/onboard-connect` — used to scope events to the onboarding flow. */
-const onboardingSessions = new Set<string>()
-/** Sessions that have already emitted each once-per-session activation event. */
-const activationMenuShown = new Set<string>()
-const activationJobSelected = new Set<string>()
-const activationJobCompleted = new Set<string>()
+const sessions = new Map<string, SessionRecord>()
+
+function record(sessionID: string): SessionRecord {
+  const existing = sessions.get(sessionID)
+  if (existing) return existing
+  if (sessions.size >= MAX_TRACKED_SESSIONS) {
+    const oldest = sessions.keys().next()
+    if (!oldest.done) sessions.delete(oldest.value)
+  }
+  const created: SessionRecord = {
+    commandSubmission: false,
+    onboarding: false,
+    menuShown: false,
+    jobSelected: false,
+    jobCompleted: false,
+    firstPromptSent: false,
+  }
+  sessions.set(sessionID, created)
+  return created
+}
+
+/** Claim a once-per-session flag. Returns false if it was already claimed. */
+function claim(sessionID: string, key: "menuShown" | "jobSelected" | "jobCompleted" | "firstPromptSent"): boolean {
+  const entry = record(sessionID)
+  if (entry[key]) return false
+  entry[key] = true
+  return true
+}
 
 /** Record that the next user message in this session comes from a slash command. */
 export function noteCommandSubmission(sessionID: string) {
-  addBounded(commandSubmissions, sessionID)
+  record(sessionID).commandSubmission = true
 }
 
 /** True (once) if this session's pending user message was command-submitted. */
 export function consumeCommandSubmission(sessionID: string): boolean {
-  return commandSubmissions.delete(sessionID)
+  const entry = sessions.get(sessionID)
+  if (!entry?.commandSubmission) return false
+  entry.commandSubmission = false
+  return true
 }
 
 export function markOnboardingSession(sessionID: string) {
-  addBounded(onboardingSessions, sessionID)
+  record(sessionID).onboarding = true
 }
 
 export function isOnboardingSession(sessionID: string): boolean {
-  return onboardingSessions.has(sessionID)
+  return sessions.get(sessionID)?.onboarding === true
 }
 
-/** Claim a once-per-session activation milestone. Returns false if already claimed. */
-export function claimActivationMenu(sessionID: string): boolean {
-  if (activationMenuShown.has(sessionID)) return false
-  addBounded(activationMenuShown, sessionID)
-  return true
-}
-
-export function claimActivationJobSelected(sessionID: string): boolean {
-  if (activationJobSelected.has(sessionID)) return false
-  addBounded(activationJobSelected, sessionID)
-  return true
-}
-
-export function claimFirstJobCompleted(sessionID: string): boolean {
-  if (activationJobCompleted.has(sessionID)) return false
-  addBounded(activationJobCompleted, sessionID)
-  return true
-}
+export const claimActivationMenu = (sessionID: string) => claim(sessionID, "menuShown")
+export const claimActivationJobSelected = (sessionID: string) => claim(sessionID, "jobSelected")
+export const claimFirstJobCompleted = (sessionID: string) => claim(sessionID, "jobCompleted")
+export const claimFirstPrompt = (sessionID: string) => claim(sessionID, "firstPromptSent")
 
 /** Test seam — module state is per-process by design, so tests need an explicit reset. */
 export function resetForTest() {
   furthestStage = undefined
   completed = false
   abandonedEmitted = false
-  commandSubmissions.clear()
-  onboardingSessions.clear()
-  activationMenuShown.clear()
-  activationJobSelected.clear()
-  activationJobCompleted.clear()
+  sessions.clear()
 }
 // altimate_change end

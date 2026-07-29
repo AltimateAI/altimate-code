@@ -61,11 +61,21 @@ function countScanConnections(metadata: unknown): number {
   }, 0)
 }
 
-/** A tool result is a real completion only if the tool did not report its own failure. */
-function succeeded(output: { metadata?: unknown }): boolean {
-  const success = (output.metadata as { success?: unknown } | undefined)?.success
-  // Most tools report no `success` field at all; absence means "did not fail".
-  return success !== false
+/**
+ * Whether a completed tool call is evidence the JOB finished, not merely that a tool returned.
+ *
+ * This distinction is the whole reason `first_job_completed` is narrower than
+ * `activation_job_selected`. `sample_setup` genuinely does the work and reports `metadata.success`.
+ * The `skill` tool does not: it loads an instruction bundle and returns, after which the agent
+ * does the actual analysis with other tools. Treating a successful skill load as job completion
+ * would report "downstream impact analysis complete" the moment the instructions were read.
+ *
+ * There is no reliable signal for when a skill-driven job finishes, so those jobs are absent from
+ * `first_job_completed` rather than wrong in it.
+ */
+function isJobCompletion(tool: string, output: { metadata?: unknown }): boolean {
+  if (tool !== "sample_setup") return false
+  return (output.metadata as { success?: unknown } | undefined)?.success !== false
 }
 
 export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Hooks> {
@@ -83,7 +93,7 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
       // now. The `scan` branch cannot be resolved here — the menu follows the scan, and the
       // variant depends on what the scan finds — so it is emitted from the scan result below.
       if (input.arguments?.trim() === "skip" && OnboardingTelemetry.claimActivationMenu(input.sessionID)) {
-        void OnboardingTelemetry.emit({ type: "activation_menu_shown", variant: "no_data" })
+        void OnboardingTelemetry.emit({ type: "activation_menu_shown", variant: "no_data" }, input.sessionID)
       }
     },
 
@@ -95,23 +105,28 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
       // actually being shown — closer than the command dispatch, which happens before the agent
       // has done anything and would over-count sessions that error out first.
       if (input.tool === "project_scan" && OnboardingTelemetry.claimActivationMenu(input.sessionID)) {
-        void OnboardingTelemetry.emit({
-          type: "activation_menu_shown",
-          variant: countScanConnections(output.metadata) > 0 ? "warehouse" : "no_data",
-        })
+        void OnboardingTelemetry.emit(
+          {
+            type: "activation_menu_shown",
+            // `no_data` tracks the template's own menu variant, which keys on whether a warehouse
+            // connection exists. A dbt project with no warehouse gets the no-data menu too.
+            variant: countScanConnections(output.metadata) > 0 ? "warehouse" : "no_data",
+          },
+          input.sessionID,
+        )
         return
       }
 
       const job = jobForTool(input.tool, input.args)
       if (!job) return
 
-      // Selection is inferred from the job starting, so both events land on completion of the
-      // first job-shaped tool call. A job that starts and then fails still counts as selected.
+      // Selection lands on the first job-shaped tool call. A job that starts and then fails still
+      // counts as selected — the user did choose it.
       if (OnboardingTelemetry.claimActivationJobSelected(input.sessionID)) {
-        void OnboardingTelemetry.emit({ type: "activation_job_selected", job })
+        void OnboardingTelemetry.emit({ type: "activation_job_selected", job }, input.sessionID)
       }
-      if (succeeded(output) && OnboardingTelemetry.claimFirstJobCompleted(input.sessionID)) {
-        void OnboardingTelemetry.emit({ type: "first_job_completed", job })
+      if (isJobCompletion(input.tool, output) && OnboardingTelemetry.claimFirstJobCompleted(input.sessionID)) {
+        void OnboardingTelemetry.emit({ type: "first_job_completed", job }, input.sessionID)
       }
     },
   }
