@@ -29,11 +29,10 @@ import { Telemetry } from "./index"
 export const ONBOARDING_STAGES = [
   "started",
   "model_picker",
+  "provider_setup",
   "big_pickle_confirm",
   "gateway_auth",
   "connected",
-  "scan_gate",
-  "activation",
 ] as const
 
 export type OnboardingStage = (typeof ONBOARDING_STAGES)[number]
@@ -83,12 +82,17 @@ let funnelStarted = false
 const STAGE_FOR_EVENT: Partial<Record<OnboardingEventInput["type"], OnboardingStage>> = {
   onboarding_started: "started",
   model_picker_shown: "model_picker",
+  // Any provider choice enters setup. Without this, a user who picks Anthropic and quits during
+  // key entry is reported as abandoning at `model_picker` — as if they never chose anything.
+  provider_selected: "provider_setup",
   big_pickle_confirm_shown: "big_pickle_confirm",
   gateway_device_code_issued: "gateway_auth",
   instance_connected: "connected",
   onboarding_completed: "connected",
-  scan_gate_shown: "scan_gate",
-  activation_menu_shown: "activation",
+  // Deliberately no entry for scan_gate_shown / activation_menu_shown. Abandonment is defined as
+  // quitting BEFORE connecting, and both of those only happen after `onboarding_completed` has
+  // set `completed`, which suppresses abandonment entirely. Stages for them would be values that
+  // can never be reported.
 }
 
 function advance(stage: OnboardingStage) {

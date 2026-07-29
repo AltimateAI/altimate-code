@@ -1351,6 +1351,22 @@ export namespace Telemetry {
   // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
   let shutdownPromise: Promise<void> | undefined
 
+  // altimate_change start — per-launch correlation id, shared across threads via the environment.
+  // The TUI worker is spawned after the CLI middleware has already initialised telemetry on the
+  // main thread, and a Worker inherits a copy of process.env, so whichever thread runs first
+  // publishes the value and the other reads it. Lazy rather than module-init so importing the
+  // telemetry module (in tests, tooling) does not mint ids nobody uses.
+  const LAUNCH_ID_ENV = "ALTIMATE_LAUNCH_ID"
+
+  function launchId(): string {
+    const existing = process.env[LAUNCH_ID_ENV]
+    if (existing) return existing
+    const created = randomUUID()
+    process.env[LAUNCH_ID_ENV] = created
+    return created
+  }
+  // altimate_change end
+
   function parseConnectionString(cs: string): AppInsightsConfig | undefined {
     const parts: Record<string, string> = {}
     for (const segment of cs.split(";")) {
@@ -1383,6 +1399,12 @@ export namespace Telemetry {
         source: clientSource,
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
+        // altimate_change — groups every event from one process launch. The onboarding funnel
+        // spans the TUI main thread and the server worker, and most of it runs before any chat
+        // session exists, so `session_id` is empty for the first half and real for the second —
+        // leaving no key to join a single run on. This is not persisted, not derived from the
+        // machine or the user, and not reused across launches; it only says "same run".
+        launch_id: launchId(),
       }
       const measurements: Record<string, number> = {}
 
@@ -1485,9 +1507,22 @@ export namespace Telemetry {
         try {
           machineId = fs.readFileSync(machineIdPath, "utf8").trim()
         } catch {
-          machineId = randomUUID()
+          // altimate_change start — create exclusively so two threads cannot mint different ids.
+          // The TUI main thread and the server worker each initialise their own copy of this
+          // module, and on a genuinely new install both can find the file missing at the same
+          // moment. With a plain write, the loser's value overwrites the winner's while both keep
+          // their own in memory, so a single first run reports two machine_ids — breaking the
+          // fallback identity exactly on the run that matters most. `wx` makes one of them fail,
+          // and the loser re-reads what the winner wrote.
+          const candidate = randomUUID()
           fs.mkdirSync(path.dirname(machineIdPath), { recursive: true })
-          fs.writeFileSync(machineIdPath, machineId, "utf8")
+          try {
+            fs.writeFileSync(machineIdPath, candidate, { encoding: "utf8", flag: "wx" })
+            machineId = candidate
+          } catch {
+            machineId = fs.readFileSync(machineIdPath, "utf8").trim()
+          }
+          // altimate_change end
         }
       } catch {
         // Machine ID unavailable — proceed without it
@@ -1604,7 +1639,23 @@ export namespace Telemetry {
   // does NOT cancel it: the losing promise keeps running and resets module state after the
   // caller has already moved on. Exit paths pass a budget so the fetch itself is aborted.
   export async function shutdown(opts?: { timeoutMs?: number }) {
-    if (shutdownPromise) return shutdownPromise
+    if (shutdownPromise) {
+      // An earlier caller is mid-flush, possibly on the default 10s budget. Returning its promise
+      // unchanged would silently ignore this caller's deadline and make the exit path wait past
+      // it — after which the worker is terminated anyway and the buffer is lost regardless. We
+      // cannot shorten the in-flight flush, but we can stop making the caller wait for it.
+      const budget = opts?.timeoutMs
+      if (budget === undefined) return shutdownPromise
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        shutdownPromise,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, budget)
+        }),
+      ]).catch(() => {})
+      if (timer) clearTimeout(timer)
+      return
+    }
     shutdownPromise = doShutdown(opts?.timeoutMs).finally(() => {
       shutdownPromise = undefined
     })
