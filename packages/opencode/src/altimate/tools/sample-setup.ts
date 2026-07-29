@@ -82,7 +82,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
           "conflict prompt. Mutually exclusive with allow_in_place_upgrade; alongside wins.",
       ),
   }),
-  async execute(args, _ctx) {
+  async execute(args, ctx) {
     const sampleName = DEFAULT_SAMPLE_NAME
     // Resolve the sample source ONCE per invocation and pass it forward.
     // materializeSample() would otherwise call resolveSampleSource() again
@@ -118,7 +118,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         models: 0,
         tables: 0,
         reused: false,
-      })
+      }, ctx.sessionID)
       return {
         title: "Starter sample unavailable",
         // `success: false` is the disambiguator for consumers reading
@@ -178,7 +178,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         models: sampleContents.models,
         tables: sampleContents.tables,
         reused: result.reused,
-      })
+      }, ctx.sessionID)
       // altimate_change end
       return {
         title: result.reused ? `Reused starter sample at ${result.targetPath}` : `Materialized starter sample at ${result.targetPath}`,
@@ -208,7 +208,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         models: 0,
         tables: 0,
         reused: false,
-      })
+      }, ctx.sessionID)
       return {
         title: "Starter materialization failed",
         // `success: false` is the disambiguator for consumers reading

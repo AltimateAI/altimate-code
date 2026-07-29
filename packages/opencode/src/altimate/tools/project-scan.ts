@@ -952,7 +952,11 @@ export const ProjectScanTool = Tool.define("project_scan", {
       is_repo: git.isRepo,
       connections_found: totalConnections,
       degraded: degradedList,
-    })
+      // Explicit session: emit() otherwise falls back to the process-global telemetry context,
+      // which is set per prompt loop. Two concurrent sessions in `serve` or in the TUI worker
+      // overwrite each other's context, so a scan would be attributed to whichever session most
+      // recently started a turn.
+    }, ctx.sessionID)
     // altimate_change end
 
     // Build metadata
