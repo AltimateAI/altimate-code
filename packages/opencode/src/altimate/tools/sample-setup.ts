@@ -109,6 +109,16 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         `was installed without its wrapper package assets. Reinstall with: ` +
         `\`npm i -g @altimateai/altimate-code@latest\`\n\n` +
         `Underlying error: ${message}`
+      // altimate_change — onboarding funnel: a broken install (sample assets missing) is a
+      // sample-setup failure too. Without this the failure count only covers materialization
+      // errors and silently under-reports the "CLI shipped without its assets" case.
+      void OnboardingTelemetry.emit({
+        type: "sample_setup_completed",
+        success: false,
+        models: 0,
+        tables: 0,
+        reused: false,
+      })
       return {
         title: "Starter sample unavailable",
         metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },

@@ -1347,6 +1347,9 @@ export namespace Telemetry {
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
   let initDone = false
+  // altimate_change — in-flight shutdown, declared with the rest of the module state so init()
+  // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
+  let shutdownPromise: Promise<void> | undefined
 
   function parseConnectionString(cs: string): AppInsightsConfig | undefined {
     const parts: Record<string, string> = {}
@@ -1430,7 +1433,13 @@ export namespace Telemetry {
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
     if (!initPromise) {
-      initPromise = doInit()
+      // altimate_change start — never re-init across an in-flight shutdown.
+      // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end,
+      // so a new session can begin while the previous shutdown is still awaiting flush(). Without
+      // this, init() returns immediately, the new session's events land in `buffer`, and the
+      // in-flight doShutdown() then clears that buffer — losing every event tracked in the gap.
+      initPromise = shutdownPromise ? shutdownPromise.catch(() => {}).then(doInit) : doInit()
+      // altimate_change end
     }
     return initPromise
   }
@@ -1520,7 +1529,11 @@ export namespace Telemetry {
     }
   }
 
-  export async function flush() {
+  // altimate_change — `timeoutMs` lets exit paths bound the flush from the INSIDE. Racing
+  // flush() against an external timer does not cancel the fetch: the losing promise keeps
+  // running and can reset module state after the caller has moved on. Threading the deadline
+  // into the existing AbortController actually aborts the request.
+  export async function flush(timeoutMs: number = REQUEST_TIMEOUT_MS) {
     if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
@@ -1538,7 +1551,7 @@ export namespace Telemetry {
     }
 
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetch(appInsights.endpoint, {
         method: "POST",
@@ -1578,27 +1591,27 @@ export namespace Telemetry {
   }
   // altimate_change end
 
-  // altimate_change start — serialize concurrent shutdowns.
+  // altimate_change start — serialize concurrent shutdowns, and let callers bound the flush.
+  //
   // shutdown() is called from several independent paths (session/prompt.ts at the end of each
   // session loop, the CLI's outer finally, and — for onboarding telemetry — the TUI exit path
   // and the TUI worker's rpc.shutdown). Two overlapping calls would both enter flush(), which
   // splices the shared buffer, so one caller can post a half-empty batch while the other drops
   // events. The in-flight promise is cleared on settle, so a later init/shutdown cycle (the
   // per-session pattern in prompt.ts) still works.
-  let shutdownPromise: Promise<void> | undefined
-
-  export async function shutdown() {
+  //
+  // `timeoutMs` bounds the flush from the inside. Racing shutdown() against an external timer
+  // does NOT cancel it: the losing promise keeps running and resets module state after the
+  // caller has already moved on. Exit paths pass a budget so the fetch itself is aborted.
+  export async function shutdown(opts?: { timeoutMs?: number }) {
     if (shutdownPromise) return shutdownPromise
-    shutdownPromise = doShutdown().finally(() => {
+    shutdownPromise = doShutdown(opts?.timeoutMs).finally(() => {
       shutdownPromise = undefined
     })
     return shutdownPromise
   }
 
-  /** Flush and reset. Bound this with `withTimeout` on exit paths — flush() can block for
-   *  REQUEST_TIMEOUT_MS (10s), which is longer than the TUI's shutdown budget. */
-  async function doShutdown() {
-    // altimate_change end
+  async function doShutdown(timeoutMs?: number) {
     // Wait for init to complete so we know whether telemetry is enabled
     // and have a valid endpoint to flush to.  init() is fire-and-forget
     // in CLI middleware, so it may still be in-flight when shutdown runs.
@@ -1613,7 +1626,7 @@ export namespace Telemetry {
       clearInterval(flushTimer)
       flushTimer = undefined
     }
-    await flush()
+    await flush(timeoutMs)
     enabled = false
     appInsights = undefined
     buffer = []
@@ -1624,4 +1637,5 @@ export namespace Telemetry {
     initPromise = undefined
     initDone = false
   }
+  // altimate_change end
 }

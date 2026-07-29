@@ -121,9 +121,10 @@ export const rpc = {
     //
     // Bounded at 2s: the caller allows 5s total for this RPC and the trace drain above already
     // claims up to 2s of it, so an unbounded flush (up to REQUEST_TIMEOUT_MS = 10s) would be
-    // cut off mid-request by worker.terminate() anyway.
+    // cut off mid-request by worker.terminate() anyway. The bound is applied inside shutdown()
+    // rather than by racing a timer here — racing neither cancels the flush nor clears its timer.
     try {
-      await Promise.race([Telemetry.shutdown(), new Promise((r) => setTimeout(r, 2000))])
+      await Telemetry.shutdown({ timeoutMs: 2000 })
     } catch {
       // Telemetry must never block worker shutdown.
     }

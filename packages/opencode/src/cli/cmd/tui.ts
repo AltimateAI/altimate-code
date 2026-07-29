@@ -234,12 +234,13 @@ export const TuiThreadCommand = cmd({
       // thread since the last 5s interval flush is lost — including onboarding_abandoned, which
       // by definition only fires here. Runs after stop() so the worker has already drained.
       //
-      // Bounded: flush() can block for REQUEST_TIMEOUT_MS (10s) on a slow or blackholed network,
-      // and that would be a visible hang between the user quitting and the shell prompt
-      // returning. 2s is the same budget the worker gives its trace drain.
+      // Bounded from the INSIDE (shutdown → flush → AbortController), not by racing a timer:
+      // a lost race would leave the flush running and resetting module state after we resumed.
+      // flush() would otherwise block for REQUEST_TIMEOUT_MS (10s) on a blackholed network — a
+      // visible hang between the user quitting and the shell prompt returning.
       try {
         await OnboardingTelemetry.emitAbandonedIfIncomplete()
-        await withTimeout(Telemetry.shutdown(), 2000)
+        await Telemetry.shutdown({ timeoutMs: 2000 })
       } catch {
         // Never let telemetry delay or break exit.
       }
