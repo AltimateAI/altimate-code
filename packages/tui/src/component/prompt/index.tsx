@@ -1058,7 +1058,10 @@ export function Prompt(props: PromptProps) {
     // discarded) with a friendly line, rather than erroring.
     if (!ready()) {
       dialog.replace(() => (
-        <DialogModelWelcome intro="First, let's connect your AI model — then I'll get right on that." />
+        <DialogModelWelcome
+          intro="First, let's connect your AI model — then I'll get right on that."
+          trigger="prompt_gate"
+        />
       ))
       input.clear()
       input.extmarks.clear()

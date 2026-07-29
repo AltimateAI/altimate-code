@@ -154,7 +154,13 @@ export function DialogModelWelcome(props: {
   // altimate_change — funnel: single choke point for row activation so keyboard and mouse
   // cannot diverge. Fires on selection, before auth resolves: a cancelled or failed sign-in
   // still counts as a provider having been chosen, which is what the funnel step means.
+  // Guarded: keyboard return and mouse-up both reach here, and nothing stops two firing before
+  // the dialog unmounts — a fast double input would both double-count and start the provider
+  // flow twice. Per instance, so re-opening the picker is a genuinely new selection.
+  let activated = false
   function activateRow(row: WelcomeRow) {
+    if (activated) return
+    activated = true
     trackOnboarding({ name: "provider_selected", provider: row.analyticsProvider })
     row.activate()
   }
@@ -178,9 +184,8 @@ export function DialogModelWelcome(props: {
     if (evt.name === "/" || (evt.ctrl && evt.name === "a") || /^[a-z0-9]$/i.test(evt.name ?? "")) {
       evt.preventDefault()
       // altimate_change — the "/" shortcut is the same intent as the "Search all providers…"
-      // row, so it records the same choice.
-      trackOnboarding({ name: "provider_selected", provider: "search_all" })
-      openFullCatalog()
+      // row, so it routes through the same guarded path.
+      activateRow(rows()[5])
     }
   })
 
