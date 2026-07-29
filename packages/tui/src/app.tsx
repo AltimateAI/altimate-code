@@ -9,6 +9,12 @@ import { UPGRADE_KV_KEY } from "./component/upgrade-indicator-utils"
 // altimate_change end
 import { ClipboardProvider, useClipboard } from "./context/clipboard"
 import { ExitProvider, useExit } from "./context/exit"
+// altimate_change — onboarding funnel telemetry seam
+import {
+  OnboardingTelemetryProvider,
+  useOnboardingTelemetry,
+  type TrackOnboarding,
+} from "./context/onboarding-telemetry"
 import { EpilogueProvider } from "./context/epilogue"
 import * as Selection from "./util/selection"
 import { createCliRenderer, MouseButton, type CliRenderer } from "@opentui/core"
@@ -153,6 +159,9 @@ export type TuiInput = {
   headers?: RequestInit["headers"]
   events?: EventSource
   pluginHost: TuiPluginHost
+  // altimate_change — onboarding funnel telemetry, injected by the host (packages/tui cannot
+  // reach the Telemetry module). Optional: absent means no tracking, not an error.
+  onTelemetry?: TrackOnboarding
 }
 
 function errorMessage(error: unknown) {
@@ -256,6 +265,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                 destroyRenderer(renderer)
               }}
             >
+            {/* altimate_change start — onboarding telemetry seam. Mounted here, above
+                DialogProvider, because dialog contents render as a sibling of DialogProvider's
+                children and cannot see anything provided inside it. Defaults to a no-op so
+                hosts that do not supply a tracker (tests, embedders) work unchanged. */}
+            <OnboardingTelemetryProvider track={input.onTelemetry ?? (() => {})}>
               <EpilogueProvider set={(value) => (exit.epilogue = value)}>
                 <ErrorBoundary fallback={(error, reset) => <ErrorComponent error={error} reset={reset} mode={mode} />}>
                   <TuiPathsProvider
@@ -347,6 +361,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                   </TuiPathsProvider>
                 </ErrorBoundary>
               </EpilogueProvider>
+            </OnboardingTelemetryProvider>
+            {/* altimate_change end */}
             </ExitProvider>
           )
         }, renderer)
@@ -548,6 +564,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // plugin startup, not onboarding state.
   const connected = useConnected()
   const onboardingReady = useReady()
+  // altimate_change — onboarding funnel tracker (no-op when the host injected none)
+  const trackOnboarding = useOnboardingTelemetry()
   // altimate_change end
 
   // altimate_change start — AI-7774: first-run onboarding gate. On a fresh launch
@@ -561,7 +579,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     if (!ready()) return // wait until providers are loaded before deciding
     firstRunPickerHandled = true
     if (onboardingReady()) return // already set up — no gate
-    dialog.replace(() => <DialogModelWelcome />)
+    // altimate_change — funnel: top of the first-run flow. Emitted only on the branch that
+    // actually opens the gate, so returning users never enter the funnel.
+    trackOnboarding({ name: "onboarding_started" })
+    dialog.replace(() => <DialogModelWelcome trigger="first_run" />)
   })
   // altimate_change end
 
@@ -577,9 +598,18 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       if (scanGateShown) return
       if (isReady && prev === false) {
         scanGateShown = true
+        // altimate_change — funnel: Part 1 finished (a model is ready) and the gate is opening.
+        // This false→true transition is exactly the ticket's "onboarding_completed" definition,
+        // so both events are emitted from it.
+        trackOnboarding({ name: "onboarding_completed" })
+        trackOnboarding({ name: "scan_gate_shown" })
         dialog.replace(() => (
           <DialogScanGate
             onChoose={(arg) => {
+              // altimate_change — funnel: emitted here rather than inside the gate because the
+              // dialog overlay renders outside the provider tree; `onChoose` is already the
+              // established way to hand the gate something it cannot reach itself.
+              trackOnboarding({ name: "scan_gate_choice", choice: arg })
               // Yes → /onboard-connect scan; No → /onboard-connect skip.
               // Both branches now have a real follow-up: `scan` runs
               // project_scan and branches into the discovery UX; `skip`
