@@ -207,7 +207,12 @@ export const TuiThreadCommand = cmd({
             },
             config,
             pluginHost: createLegacyTuiPluginHost(),
-            // altimate_change start — onboarding funnel seam. The TUI renders on this thread, so
+            // altimate_change — onboarding funnel seam. Deliberately a single-line marker, not a
+            // start/end pair: this sits inside the "clean up TUI worker after failed --session
+            // validation" region, and a nested `altimate_change end` truncates the block that
+            // test/cli/tui/command.test.ts slices to assert cleanup ordering.
+            //
+            // The TUI renders on this thread, so
             // this reaches the main-process Telemetry module directly (already initialized by the
             // CLI middleware) — no HTTP, no worker round-trip.
             //
@@ -226,7 +231,6 @@ export const TuiThreadCommand = cmd({
                 typeof OnboardingTelemetry.emit
               >[0])
             },
-            // altimate_change end
             directory: cwd,
             fetch: transport.fetch,
             events: transport.events,
