@@ -13,7 +13,7 @@
 // names must match the corresponding `Telemetry.Event` variants in
 // `packages/opencode/src/altimate/telemetry/index.ts`; the host maps `name` → `type` and spreads
 // the rest. A test pins the two together.
-import { createSimpleContext } from "./helper"
+import { createContext, useContext, type ParentProps } from "solid-js"
 
 export type OnboardingTelemetryEvent =
   | { name: "onboarding_started" }
@@ -35,8 +35,31 @@ export type OnboardingTelemetryEvent =
 
 export type TrackOnboarding = (event: OnboardingTelemetryEvent) => void
 
-export const { use: useOnboardingTelemetry, provider: OnboardingTelemetryProvider } = createSimpleContext({
-  name: "OnboardingTelemetry",
-  init: (input: { track: TrackOnboarding }) => input.track,
-})
+const OnboardingTelemetryContext = createContext<TrackOnboarding>()
+
+export function OnboardingTelemetryProvider(props: ParentProps<{ track: TrackOnboarding }>) {
+  return (
+    <OnboardingTelemetryContext.Provider value={props.track}>{props.children}</OnboardingTelemetryContext.Provider>
+  )
+}
+
+/**
+ * Deliberately NOT built on `createSimpleContext`, which throws when a consumer sits outside its
+ * provider. Telemetry is the one context that must never do that: these dialogs are rendered
+ * directly by tests and can be reused by other hosts, and analytics is not a reason to crash a
+ * UI. Missing provider means no tracking.
+ *
+ * The host callback is also isolated — a throwing tracker would otherwise propagate out of a
+ * mount handler or a keypress and take the dialog transition with it.
+ */
+export function useOnboardingTelemetry(): TrackOnboarding {
+  const track = useContext(OnboardingTelemetryContext)
+  return (event) => {
+    try {
+      track?.(event)
+    } catch {
+      // Telemetry must never break the UI.
+    }
+  }
+}
 // altimate_change end

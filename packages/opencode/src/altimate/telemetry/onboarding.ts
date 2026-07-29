@@ -76,6 +76,8 @@ type EmitInput = DistributiveOmit<OnboardingEventInput, "timestamp" | "session_i
 let furthestStage: OnboardingStage | undefined
 let completed = false
 let abandonedEmitted = false
+/** Set only when the first-run gate actually opened. Gates the whole funnel — see advance(). */
+let funnelStarted = false
 
 /** Stage implied by an event, where one is implied. Events not listed leave the stage alone. */
 const STAGE_FOR_EVENT: Partial<Record<OnboardingEventInput["type"], OnboardingStage>> = {
@@ -90,6 +92,17 @@ const STAGE_FOR_EVENT: Partial<Record<OnboardingEventInput["type"], OnboardingSt
 }
 
 function advance(stage: OnboardingStage) {
+  // Only a real first run is in the funnel. Most of the UI that emits funnel events is also
+  // reachable outside onboarding — `/connect` opens the same picker, `/model` opens the same Big
+  // Pickle interstitial — and a returning user doing either would otherwise enter the funnel at
+  // `model_picker`, never emit `onboarding_completed`, and be reported as ABANDONED on exit.
+  // That would have made abandonment mostly a count of returning users opening `/connect`.
+  //
+  // `onboarding_started` is emitted only from the branch that actually opens the first-run gate,
+  // so it is the gate for everything downstream.
+  if (stage !== "started" && !funnelStarted) return
+  if (stage === "started") funnelStarted = true
+
   const next = ONBOARDING_STAGES.indexOf(stage)
   const current = furthestStage ? ONBOARDING_STAGES.indexOf(furthestStage) : -1
   // Monotonic: re-opening the picker after reaching the scan gate must not walk the funnel back.
@@ -234,6 +247,7 @@ export function resetForTest() {
   furthestStage = undefined
   completed = false
   abandonedEmitted = false
+  funnelStarted = false
   sessions.clear()
 }
 // altimate_change end
