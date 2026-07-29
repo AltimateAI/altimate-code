@@ -53,6 +53,30 @@ describe("sample-manifest.json assets list ↔ sample source tree", () => {
     expect(wrongKind).toEqual([])
   })
 
+  test.each([
+    "../victim",
+    "/etc/passwd",
+    "models/../../../etc/passwd",
+    "models/../../escape",
+    "",
+  ])("readSampleAssets rejects traversal/absolute path %p (cubic P1)", (badFrom) => {
+    const scratch = fs.mkdtempSync(path.join(require("os").tmpdir(), "publish-parity-traversal-"))
+    try {
+      fs.writeFileSync(
+        path.join(scratch, "sample-manifest.json"),
+        JSON.stringify({
+          name: "x",
+          version: "1",
+          kind: "altimate-starter-sample",
+          assets: [{ from: badFrom, kind: "file", required: true }],
+        }),
+      )
+      expect(() => readSampleAssets(scratch)).toThrow(/relative path.*no '\.\.'/)
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true })
+    }
+  })
+
   test("readSampleAssets rejects a malformed manifest", () => {
     // Create a scratch source dir with a broken manifest — assets not an array.
     const scratch = fs.mkdtempSync(path.join(require("os").tmpdir(), "publish-parity-"))

@@ -71,6 +71,20 @@ export function readSampleAssets(sampleSourcePath: string): SampleAsset[] {
         `${manifestPath} assets[${i}] must be { from: string, kind: "file"|"dir", required: boolean }`,
       )
     }
+    // Guard against a malicious sample-manifest.json (custom bundle, or
+    // ALTIMATE_STARTER_SAMPLE_DIR env override pointing at attacker
+    // content) declaring `from: "../victim"` or `from: "/etc/passwd"`.
+    // copySampleTree does `path.join(writeTo, entry.from)` — without this
+    // guard, a `..`-containing or absolute path escapes the staging dir
+    // and can overwrite files outside it. Same class as the
+    // preferredTargetName regex on the LLM-facing surface, applied here
+    // to the manifest-facing surface.
+    const from = (entry as SampleAsset).from
+    if (!from || from.startsWith("/") || path.isAbsolute(from) || from.split(/[/\\]/).includes("..")) {
+      throw new Error(
+        `${manifestPath} assets[${i}].from='${from}' — must be a non-empty relative path with no '..' segments`,
+      )
+    }
     out.push(entry as SampleAsset)
   }
   return out
