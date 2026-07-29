@@ -1,0 +1,27 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: Renamed customer columns from the raw seed.
+    columns:
+      - name: customer_id
+        description: Primary key of the customer.
+        data_tests:
+          - unique
+          - not_null
+
+  - name: stg_orders
+    description: Renamed order columns from the raw seed.
+    columns:
+      - name: order_id
+        description: Primary key of the order.
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: Foreign key to `stg_customers`.
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id

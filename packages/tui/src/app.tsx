@@ -585,9 +585,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         dialog.replace(() => (
           <DialogScanGate
             onChoose={(arg) => {
-              // No → the gate already cleared itself; just drop the user into the
-              // empty chat input. Only Yes kicks off the scan flow.
-              if (arg === "skip") return
+              // Yes → /onboard-connect scan; No → /onboard-connect skip.
+              // Both branches now have a real follow-up: `scan` runs
+              // project_scan and branches into the discovery UX; `skip`
+              // asks what the user is working on and offers the activation
+              // menu (sample dbt, downstream impact, SQL PR, or free chat).
+              // Template lives at packages/opencode/src/command/template/onboard-connect.txt.
               const ref = promptRef.current
               if (!ref) return
               ref.set({ input: `/onboard-connect ${arg}`, parts: [] })

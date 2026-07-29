@@ -1,0 +1,175 @@
+import fs from "node:fs"
+import path from "node:path"
+
+/**
+ * Locate the read-only source tree of a starter sample project.
+ *
+ * The sample is shipped inside the wrapper npm package (see
+ * `script/publish.ts::copyAssets` — it copies `sample-projects/` into the
+ * wrapper alongside `bin/` and `skills/`). At runtime the resolver hunts
+ * across the layouts we ship in:
+ *
+ *   1. `ALTIMATE_STARTER_SAMPLE_DIR` env override — used by tests and by
+ *      users pointing at a hand-curated fork of the sample.
+ *   2. Production: the compiled bun single-file exe lives at
+ *      `<wrapper-pkg>/bin/altimate-code`, so the sample source is at
+ *      `<wrapper-pkg>/sample-projects/<name>/`.
+ *   3. `bun run src/index.ts` (dev) or `bun test` — resolves relative to
+ *      this file's own dirname, walking up to `packages/opencode/` then
+ *      into `sample-projects/`.
+ *   4. Some install layouts (npx cache, pnpm content-addressable store) put
+ *      the exe two hops away from the wrapper root — try one more level up.
+ *
+ * Returns the absolute path to the sample source directory, or `undefined`
+ * if no candidate contained a `dbt_project.yml`. Callers should surface an
+ * actionable error rather than crash — the sample is a nice-to-have on
+ * every activation, but the CLI stays usable without it.
+ */
+
+export const DEFAULT_SAMPLE_NAME = "jaffle-shop-duckdb"
+
+/** Sentinel in `target/manifest.json` that stands in for the materialized
+ *  target path. Substituted at load time by the sample-project consumer. */
+export const SAMPLE_ROOT_SENTINEL = "{{SAMPLE_ROOT}}"
+
+/** Sentinel for the parent of the materialized target — a couple of dbt
+ *  manifest metadata fields carry the parent. */
+export const SAMPLE_ROOT_PARENT_SENTINEL = "{{SAMPLE_ROOT_PARENT}}"
+
+export interface SampleSourceLocation {
+  /** Absolute path to the sample source directory. */
+  path: string
+  /** Which candidate matched — surfaced in logs for debugging install-layout issues. */
+  origin:
+    | "env"
+    | "wrapper-bin-dir"
+    | "wrapper-bin-parent"
+    | "dev-source-tree"
+    | "wrapper-bin-grandparent"
+}
+
+export function resolveSampleSource(
+  name: string = DEFAULT_SAMPLE_NAME,
+): SampleSourceLocation | undefined {
+  const envOverride = process.env["ALTIMATE_STARTER_SAMPLE_DIR"]
+  if (envOverride) {
+    const candidate = path.join(envOverride, name)
+    if (hasSampleShape(candidate)) return { path: path.resolve(candidate), origin: "env" }
+  }
+
+  // The wrapper's bin script (`packages/opencode/bin/altimate-code:40`) sets
+  // ALTIMATE_BIN_DIR to its own scriptDir before spawning the platform
+  // binary. Use it as the FIRST post-env candidate: it survives every install
+  // scenario the exec-path chain doesn't — Windows (postinstall.mjs exits
+  // early on win32, so the hardlink from wrapper/bin/.altimate-code back to
+  // the platform binary never happens), `--ignore-scripts` installs (common
+  // in CI / corporate registries; same hardlink never runs), and
+  // ALTIMATE_CODE_BIN_PATH overrides (the wrapper honors this at
+  // bin/altimate-code:72 and runs the binary from an arbitrary location that
+  // has no relationship to the wrapper package).
+  const binDir = process.env["ALTIMATE_BIN_DIR"]
+
+  // `process.execPath` is often a symlink or shim under package managers
+  // (npm global `/usr/local/bin/altimate-code -> .../lib/node_modules/...`,
+  // Homebrew `bin/altimate-code -> ../libexec/bin/altimate-code`, pnpm .bin
+  // shims). Resolve it so the candidate hunt walks from the real binary
+  // location, not the shim's directory.
+  let realExec: string
+  try {
+    realExec = fs.realpathSync(process.execPath)
+  } catch {
+    realExec = process.execPath
+  }
+  const execDir = path.dirname(realExec)
+  const selfDir = import.meta.dirname ?? (typeof __dirname === "string" ? __dirname : "")
+
+  const candidates: Array<{ path: string; origin: SampleSourceLocation["origin"] }> = []
+  if (binDir) {
+    candidates.push({
+      path: path.join(binDir, "..", "sample-projects", name),
+      origin: "wrapper-bin-dir",
+    })
+  }
+  candidates.push(
+    { path: path.join(execDir, "..", "sample-projects", name), origin: "wrapper-bin-parent" },
+    // Dev / test: <repo>/packages/opencode/src/altimate/onboarding/*.ts
+    // → 3 hops up to packages/opencode/, then into sample-projects/.
+    // (../onboarding → ../altimate → ../src → packages/opencode)
+    {
+      path: path.join(selfDir, "..", "..", "..", "sample-projects", name),
+      origin: "dev-source-tree",
+    },
+    // Some layouts (pnpm content-addressable, custom Homebrew brews) put the
+    // exe two levels beneath the wrapper root.
+    {
+      path: path.join(execDir, "..", "..", "sample-projects", name),
+      origin: "wrapper-bin-grandparent",
+    },
+  )
+
+  for (const c of candidates) {
+    if (hasSampleShape(c.path)) return { path: path.resolve(c.path), origin: c.origin }
+  }
+  return undefined
+}
+
+function hasSampleShape(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, "dbt_project.yml"))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Load the shipped `target/manifest.json` from the sample source, rehydrating
+ * the SAMPLE_ROOT sentinels with the user's materialized target path. Static
+ * workflows (/discover, /review) read this without needing dbt installed on
+ * the user's machine.
+ *
+ * The rehydration parses JSON FIRST and walks the tree replacing sentinels
+ * only inside string values. A prior naive text-level replace would corrupt
+ * the manifest if the user's target path contained JSON-significant
+ * characters like `"` or `\` (concrete failure: `/tmp/a"b` produces invalid
+ * JSON; Windows `C:\Users\...` produces invalid escape sequences).
+ *
+ * Throws if the sample source is missing or the manifest is malformed —
+ * callers should catch and fall back to an actionable message.
+ */
+export function loadShippedManifest(
+  sampleSource: string,
+  materializedTarget: string,
+): Record<string, unknown> {
+  const manifestPath = path.join(sampleSource, "target", "manifest.json")
+  const raw = fs.readFileSync(manifestPath, "utf8")
+  const parsed = JSON.parse(raw) as unknown
+  const parentTarget = path.dirname(materializedTarget)
+  return rehydrateSentinels(parsed, materializedTarget, parentTarget) as Record<string, unknown>
+}
+
+/**
+ * Walk a parsed JSON tree and replace sentinel occurrences inside STRING
+ * values only. Object keys, numbers, booleans, and nulls are untouched.
+ * Exported for the freshness test to exercise the round-trip directly.
+ */
+export function rehydrateSentinels(value: unknown, sampleRoot: string, sampleRootParent: string): unknown {
+  if (typeof value === "string") {
+    if (value.indexOf(SAMPLE_ROOT_SENTINEL) === -1 && value.indexOf(SAMPLE_ROOT_PARENT_SENTINEL) === -1) {
+      return value
+    }
+    // Replace both sentinels, longest-first so SAMPLE_ROOT never matches
+    // inside a preceding SAMPLE_ROOT_PARENT hit.
+    return value.split(SAMPLE_ROOT_PARENT_SENTINEL).join(sampleRootParent).split(SAMPLE_ROOT_SENTINEL).join(sampleRoot)
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => rehydrateSentinels(item, sampleRoot, sampleRootParent))
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = rehydrateSentinels(v, sampleRoot, sampleRootParent)
+    }
+    return out
+  }
+  return value
+}

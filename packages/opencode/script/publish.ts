@@ -78,6 +78,40 @@ async function copyAssets(targetDir: string) {
   if (fs.existsSync("../dbt-tools/dist/altimate_python_packages")) {
     await $`cp -r ../dbt-tools/dist/altimate_python_packages ${targetDir}/dbt-tools/dist/`
   }
+  // altimate_change start — ship the starter sample dbt project alongside
+  // the wrapper package. Runtime resolver in
+  // src/altimate/onboarding/sample-source-resolver.ts finds it here in
+  // production. Excludes target/ except the pre-compiled manifest.json
+  // (source of truth for /discover + /review on the shipped sample).
+  //
+  // Single source of truth: the file list comes from `sample-manifest.json`
+  // (assets array). materialize.ts reads the same list at runtime, and
+  // publish-parity.test.ts asserts every asset exists in the shipped
+  // package. Adding a new sample file? Edit sample-manifest.json.
+  const sampleSource = "./sample-projects/jaffle-shop-duckdb"
+  const sampleDest = `${targetDir}/sample-projects/jaffle-shop-duckdb`
+  const sampleManifest = JSON.parse(fs.readFileSync(`${sampleSource}/sample-manifest.json`, "utf8")) as {
+    assets: Array<{ from: string; kind: "file" | "dir"; required: boolean }>
+  }
+  await $`mkdir -p ${sampleDest}`
+  for (const asset of sampleManifest.assets) {
+    const src = `${sampleSource}/${asset.from}`
+    const dst = `${sampleDest}/${asset.from}`
+    if (!fs.existsSync(src)) {
+      if (asset.required) {
+        throw new Error(`publish: required sample asset missing at ${src} — cannot ship an incomplete package`)
+      }
+      continue
+    }
+    // Create the parent (for nested paths like target/manifest.json).
+    await $`mkdir -p ${sampleDest}/${asset.from.includes("/") ? asset.from.split("/").slice(0, -1).join("/") : "."}`
+    if (asset.kind === "dir") {
+      await $`cp -r ${src} ${dst}`
+    } else {
+      await $`cp ${src} ${dst}`
+    }
+  }
+  // altimate_change end
   await Bun.file(`${targetDir}/LICENSE`).write(await Bun.file("../../LICENSE").text())
   await Bun.file(`${targetDir}/CHANGELOG.md`).write(await Bun.file("../../CHANGELOG.md").text())
 }
