@@ -310,7 +310,18 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
           label: "Altimate LLM Gateway",
           async authorize() {
             const state = randomBytes(16).toString("hex")
-            await startCallbackServer()
+            // altimate_change start — the attempt starts here, before the callback server and the
+            // browser open. startCallbackServer() throws when port 7317 is taken, which is a real
+            // and reasonably common gateway-auth failure that happens before any callback object
+            // exists — without this catch it would never appear in the funnel.
+            const startedAt = Date.now()
+            try {
+              await startCallbackServer()
+            } catch (err) {
+              void OnboardingTelemetry.emit({ type: "gateway_auth_failed", reason: "error" })
+              throw err
+            }
+            // altimate_change end
             // Register the pending flow BEFORE opening the browser so an instant
             // redirect can be matched by state rather than dropped as CSRF.
             const result = registerPending(state)
@@ -351,8 +362,12 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             // attempted". open() failures are swallowed above (the URL is also printed for the
             // user to paste), so this fires even when no browser actually launched.
             // The URL is never sent — it carries the CSRF `state`.
-            const startedAt = Date.now()
             void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
+
+            // One outcome per attempt. callback() closes over `result` and re-runs its whole body
+            // on every invocation, so a repeated call would otherwise re-emit completion/failure
+            // (and re-report a connect time measured from the original attempt).
+            let outcomeReported = false
             // altimate_change end
 
             return {
@@ -380,13 +395,18 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                   })
                   // altimate_change start — onboarding funnel: auth succeeded and the instance
                   // is live. The instance name is the customer's tenant identifier and is never
-                  // sent. time_to_connect_ms is measured from the browser-open above, so it
-                  // belongs to this attempt's closure rather than any shared pending state.
-                  void OnboardingTelemetry.emit({ type: "gateway_auth_completed" })
-                  void OnboardingTelemetry.emit({
-                    type: "instance_connected",
-                    time_to_connect_ms: Date.now() - startedAt,
-                  })
+                  // sent. time_to_connect_ms runs from the start of authorize() — before the
+                  // callback server and browser open, both of which are part of the wait the user
+                  // actually experiences — and lives in this attempt's closure, so a concurrent
+                  // attempt cannot overwrite it.
+                  if (!outcomeReported) {
+                    outcomeReported = true
+                    void OnboardingTelemetry.emit({ type: "gateway_auth_completed" })
+                    void OnboardingTelemetry.emit({
+                      type: "instance_connected",
+                      time_to_connect_ms: Date.now() - startedAt,
+                    })
+                  }
                   // altimate_change end
                   return { type: "success", key: authToken, provider: "altimate-backend" }
                 } catch (err) {
@@ -396,7 +416,10 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                   // altimate_change — onboarding funnel: only the classified enum is sent. The
                   // message can embed the instance name (see the invalid-instance throw above),
                   // so it never reaches telemetry.
-                  void OnboardingTelemetry.emit({ type: "gateway_auth_failed", reason: reasonOf(err) })
+                  if (!outcomeReported) {
+                    outcomeReported = true
+                    void OnboardingTelemetry.emit({ type: "gateway_auth_failed", reason: reasonOf(err) })
+                  }
                   return { type: "failed" }
                 } finally {
                   // Keep the shared server up while another flow is still waiting.
