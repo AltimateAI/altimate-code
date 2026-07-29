@@ -1356,9 +1356,17 @@ export namespace Telemetry {
   // main thread, and a Worker inherits a copy of process.env, so whichever thread runs first
   // publishes the value and the other reads it. Lazy rather than module-init so importing the
   // telemetry module (in tests, tooling) does not mint ids nobody uses.
+  // One id per process launch, shared with the TUI's server Worker through its environment.
+  //
+  // It has to be handed over explicitly at Worker construction (see cli/cmd/tui.ts). Two things
+  // that look like they would work do not, both confirmed end to end:
+  //   - mutating process.env after startup: a Bun Worker does not observe it, so the worker mints
+  //     its own id and the two halves of the funnel become unjoinable;
+  //   - deriving it from the process (pid + start time): process.uptime() is per-THREAD in Bun,
+  //     so the worker computes a different start time than the main thread.
   const LAUNCH_ID_ENV = "ALTIMATE_LAUNCH_ID"
 
-  function launchId(): string {
+  export function launchId(): string {
     const existing = process.env[LAUNCH_ID_ENV]
     if (existing) return existing
     const created = randomUUID()

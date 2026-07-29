@@ -322,14 +322,19 @@ describe("launch correlation id", () => {
       Telemetry.track({ type: "scan_gate_choice", timestamp: 2, session_id: "ses_1", choice: "scan" })
       await Telemetry.flush()
 
-      const envelopes = JSON.parse(bodies[0])
-      expect(envelopes).toHaveLength(2)
+      // Select by name rather than by position: the telemetry buffer is module-global, so a
+      // sibling test file can leave events in it and they flush alongside these.
+      const envelopes = JSON.parse(bodies[0]) as any[]
+      const byName = (name: string) => envelopes.find((e) => e.data.baseData.name === name)
+      const preSession = byName("onboarding_started")
+      const withSession = byName("scan_gate_choice")
+      expect(preSession).toBeDefined()
+      expect(withSession).toBeDefined()
 
-      const ids = envelopes.map((e: any) => e.data.baseData.properties.launch_id)
-      expect(ids[0]).toBeTruthy()
       // The whole point: an event emitted before any session exists and one emitted with a real
       // session must still be joinable to the same run.
-      expect(ids[0]).toBe(ids[1])
+      expect(preSession.data.baseData.properties.launch_id).toBeTruthy()
+      expect(preSession.data.baseData.properties.launch_id).toBe(withSession.data.baseData.properties.launch_id)
     } finally {
       process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
       if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
