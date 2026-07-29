@@ -1,6 +1,6 @@
 # Getting Started
 
-> **New to altimate?** [Start with the 5-minute quickstart](quickstart.md) to go from install to your first analysis in minutes.
+> **New to Altimate Code?** [Start with the quickstart](getting-started/quickstart.md) to go from install to your first analysis.
 
 ## Why altimate?
 
@@ -140,12 +140,13 @@ altimate offers specialized agent modes for different workflows:
 |---|---|
 | Analyzing data without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling. SQL writes are blocked entirely. |
 | Building or generating dbt models | **Builder** for model scaffolding, SQL generation, ref() wiring. SQL writes prompt for approval. |
+| Reviewing a change before it merges | **Reviewer** for grading SQL/dbt changes and returning an approve, comment, or request-changes verdict |
 | Planning before acting | **Plan** for outlining an approach before switching to builder to execute it |
 
 Switch modes in the TUI:
 
-```
-/mode analyst
+```text title="In the TUI"
+/agent analyst
 ```
 
 ## Step 5: Start Working
