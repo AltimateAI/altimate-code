@@ -20,7 +20,14 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
 
   onMount(() => dialog.setSize("large"))
 
+  // altimate_change — keyboard (return / y / n) and mouse handlers all call run() directly, and
+  // nothing stops two firing before the dialog unmounts. Without this guard a fast double-press
+  // submits `/onboard-connect` twice and double-counts the funnel choice.
+  let chosen = false
+
   function run(arg: "scan" | "skip") {
+    if (chosen) return
+    chosen = true
     dialog.clear()
     props.onChoose(arg)
   }

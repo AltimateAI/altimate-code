@@ -207,6 +207,26 @@ export const TuiThreadCommand = cmd({
             },
             config,
             pluginHost: createLegacyTuiPluginHost(),
+            // altimate_change start — onboarding funnel seam. The TUI renders on this thread, so
+            // this reaches the main-process Telemetry module directly (already initialized by the
+            // CLI middleware) — no HTTP, no worker round-trip.
+            //
+            // The `name` → `type` remap is the one untyped point in the chain: packages/tui
+            // cannot import the Telemetry event union, so it declares its own mirror in
+            // context/onboarding-telemetry.tsx. A test pins the two lists together.
+            //
+            // Selecting the gateway provider also marks the auth stage, because the browser flow
+            // itself runs in the worker and cannot reach this thread's abandonment state.
+            onTelemetry: (event) => {
+              const { name, ...props } = event
+              if (name === "provider_selected" && event.provider === "altimate_gateway") {
+                OnboardingTelemetry.markStage("gateway_auth")
+              }
+              void OnboardingTelemetry.emit({ type: name, ...props } as Parameters<
+                typeof OnboardingTelemetry.emit
+              >[0])
+            },
+            // altimate_change end
             directory: cwd,
             fetch: transport.fetch,
             events: transport.events,
