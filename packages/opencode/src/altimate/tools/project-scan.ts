@@ -4,6 +4,8 @@ import { Dispatcher } from "../native"
 import { existsSync, readFileSync } from "fs"
 import path from "path"
 import { Telemetry } from "@/telemetry"
+// altimate_change — onboarding funnel: environment_scan_completed
+import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 import { Config } from "@/config/config"
 import { Skill } from "../../skill"
 
@@ -929,6 +931,29 @@ export const ProjectScanTool = Tool.define("project_scan", {
         lines.push(`- ${d}`)
       }
     }
+
+    // altimate_change start — onboarding funnel: the scan result, in the shape the funnel asks
+    // for. Deliberately separate from `environment_census` above, which stays the richer
+    // dbt/warehouse fingerprint; this one answers "did the scan find the user a working setup".
+    //
+    // Fires on every project_scan, not just the onboarding one — the tool is also reachable via
+    // /discover and any model-initiated call.
+    //
+    // has_warehouse and connections_found both come from totalConnections, NOT
+    // connections.alreadyConfigured: connections discovered from dbt profiles, docker, and env
+    // vars are counted separately, and a user whose only warehouse was auto-discovered would
+    // otherwise be recorded as having none.
+    //
+    // degraded[] is a sorted list of short detection-failure keys — no paths, hosts, or messages.
+    void OnboardingTelemetry.emit({
+      type: "environment_scan_completed",
+      has_dbt: dbtProject.found,
+      has_warehouse: totalConnections > 0,
+      is_repo: git.isRepo,
+      connections_found: totalConnections,
+      degraded: degradedList,
+    })
+    // altimate_change end
 
     // Build metadata
     const toolsFound = dataTools.filter((t) => t.installed).map((t) => t.name)

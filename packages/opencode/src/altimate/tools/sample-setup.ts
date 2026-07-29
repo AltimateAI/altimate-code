@@ -6,6 +6,8 @@ import { Tool } from "../../tool/tool"
 import { materializeSample } from "../onboarding/materialize"
 import { DEFAULT_SAMPLE_NAME, resolveSampleSource, type SampleSourceLocation } from "../onboarding/sample-source-resolver"
 import { detectDbtRuntime } from "../onboarding/tool-detection"
+// altimate_change — onboarding funnel: sample_setup_completed
+import * as OnboardingTelemetry from "../telemetry/onboarding"
 
 /**
  * `sample_setup` — LLM-invoked tool that copies the shipped jaffle-shop
@@ -155,6 +157,19 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         `suffix: ${result.suffix}\n` +
         `${dbtLine}\n` +
         `note: ${result.note}`
+      // altimate_change start — onboarding funnel. `reused` is carried because the tool is
+      // deliberately re-callable (reuse / reset / install-alongside / dbt re-probe), so this
+      // fires per invocation, not once per sample. targetPath is never sent — it is a filesystem
+      // path under the user's home.
+      const sampleContents = countSampleContents(sampleSource.path)
+      void OnboardingTelemetry.emit({
+        type: "sample_setup_completed",
+        success: true,
+        models: sampleContents.models,
+        tables: sampleContents.tables,
+        reused: result.reused,
+      })
+      // altimate_change end
       return {
         title: result.reused ? `Reused starter sample at ${result.targetPath}` : `Materialized starter sample at ${result.targetPath}`,
         metadata: {
@@ -175,6 +190,15 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       // reliably detect it from `output` alone — metadata never reaches
       // the model.
       const message = err instanceof Error ? err.message : String(err)
+      // altimate_change — onboarding funnel: failed setup. The error message embeds filesystem
+      // paths (unsafe HOME, unwritable parent), so it is not sent — only the boolean.
+      void OnboardingTelemetry.emit({
+        type: "sample_setup_completed",
+        success: false,
+        models: 0,
+        tables: 0,
+        reused: false,
+      })
       return {
         title: "Starter materialization failed",
         // `success: false` is the disambiguator for consumers reading
@@ -200,6 +224,42 @@ export const SampleSetupTool = Tool.define("sample_setup", {
  * The version stamps into the on-disk marker so a future run can detect
  * whether the materialized copy is current or lags a CLI upgrade.
  */
+// altimate_change start — onboarding funnel: model/seed counts for sample_setup_completed.
+//
+// Counted from the shipped source tree rather than read from a constant or from dbt's
+// target/manifest.json. A constant silently drifts the first time someone adds a model;
+// target/manifest.json is ~17k lines and parsing it to count two things is a waste on a path
+// the user is actively waiting on. Counting files can't drift and costs one shallow walk.
+//
+// Best-effort by construction: telemetry must never fail a sample setup, so any fs error
+// yields 0 rather than propagating.
+function countFilesWithExtension(dir: string, extension: string): number {
+  let total = 0
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      total += countFilesWithExtension(path.join(dir, entry.name), extension)
+    } else if (entry.isFile() && entry.name.endsWith(extension)) {
+      total += 1
+    }
+  }
+  return total
+}
+
+/** dbt models (`models/**\/*.sql`) and seed tables (`seeds/*.csv`) in the shipped sample. */
+function countSampleContents(sampleSourcePath: string): { models: number; tables: number } {
+  return {
+    models: countFilesWithExtension(path.join(sampleSourcePath, "models"), ".sql"),
+    tables: countFilesWithExtension(path.join(sampleSourcePath, "seeds"), ".csv"),
+  }
+}
+// altimate_change end
+
 function readSampleVersionAt(sampleSourcePath: string): string {
   const manifestPath = path.join(sampleSourcePath, "sample-manifest.json")
   const raw = fs.readFileSync(manifestPath, "utf8")

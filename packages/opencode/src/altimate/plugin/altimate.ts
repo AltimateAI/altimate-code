@@ -3,6 +3,28 @@ import { createServer } from "http"
 import { randomBytes } from "crypto"
 import open from "open"
 import { AltimateApi } from "../api/client"
+// altimate_change — onboarding telemetry for the gateway sign-in funnel
+import * as OnboardingTelemetry from "../telemetry/onboarding"
+
+/**
+ * Why a failure reason is attached at the rejection site rather than inferred from the message:
+ * `gateway_auth_failed.reason` is a closed enum, and the callback's catch sees only an Error.
+ * Matching on message text would silently drift the moment any of these strings is reworded, and
+ * the `error` query param is attacker-influenced text we must not parse or forward. Tagging the
+ * error where the cause is known keeps the classification deterministic — and note that an
+ * unknown/invalid `state` never rejects a pending flow at all (the handler 400s without touching
+ * the map), so a CSRF mismatch legitimately surfaces later as `timeout`, not `denied`.
+ */
+type GatewayFailureReason = "timeout" | "denied" | "error"
+
+function markReason(err: Error, reason: GatewayFailureReason): Error {
+  return Object.assign(err, { altimateGatewayReason: reason })
+}
+
+function reasonOf(err: unknown): GatewayFailureReason {
+  const tagged = (err as { altimateGatewayReason?: GatewayFailureReason } | undefined)?.altimateGatewayReason
+  return tagged ?? "error"
+}
 
 // Loopback port range the CLI listens on for the browser to deliver the gateway
 // credential after sign-in. We prefer 7317 (mnemonic + otherwise unused in this
@@ -153,7 +175,8 @@ async function doStartCallbackServer(): Promise<void> {
 
     const error = url.searchParams.get("error")
     if (error) {
-      entry.reject(new Error(error))
+      // altimate_change — the browser reported an explicit failure: the only true `denied` signal
+      entry.reject(markReason(new Error(error), "denied"))
       html(200, HTML_ERROR(error))
       return
     }
@@ -257,7 +280,8 @@ function stopCallbackServer() {
 function registerPending(state: string, timeoutMs = 15 * 60 * 1000): Promise<CallbackResult> {
   return new Promise<CallbackResult>((resolve, reject) => {
     const timeout = setTimeout(() => {
-      if (pending.delete(state)) reject(new Error("Timed out waiting for browser sign-in"))
+      // altimate_change — tag as `timeout` for gateway_auth_failed classification
+      if (pending.delete(state)) reject(markReason(new Error("Timed out waiting for browser sign-in"), "timeout"))
       // If the dialog was dismissed and callback() never ran its finally, the
       // loopback server would otherwise stay bound past the timeout. Free the
       // port once nothing is waiting on it.
@@ -321,6 +345,16 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             // Removed to stop leaking state-bearing authorize URLs into logs.
             await open(authorizeUrl).catch(() => undefined)
 
+            // altimate_change start — onboarding funnel: gateway sign-in started.
+            // Spec name is `gateway_device_code_issued`; this flow is a browser loopback OAuth
+            // with no device code, so the event means "authorize URL built, browser open
+            // attempted". open() failures are swallowed above (the URL is also printed for the
+            // user to paste), so this fires even when no browser actually launched.
+            // The URL is never sent — it carries the CSRF `state`.
+            const startedAt = Date.now()
+            void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
+            // altimate_change end
+
             return {
               url: authorizeUrl,
               instructions: "Complete sign-in in your browser to connect Altimate LLM Gateway.",
@@ -344,11 +378,25 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                     altimateInstanceName: creds.instance,
                     altimateApiKey: authToken,
                   })
+                  // altimate_change start — onboarding funnel: auth succeeded and the instance
+                  // is live. The instance name is the customer's tenant identifier and is never
+                  // sent. time_to_connect_ms is measured from the browser-open above, so it
+                  // belongs to this attempt's closure rather than any shared pending state.
+                  void OnboardingTelemetry.emit({ type: "gateway_auth_completed" })
+                  void OnboardingTelemetry.emit({
+                    type: "instance_connected",
+                    time_to_connect_ms: Date.now() - startedAt,
+                  })
+                  // altimate_change end
                   return { type: "success", key: authToken, provider: "altimate-backend" }
                 } catch (err) {
                   // Log the reason (CSRF / timeout / invalid instance / …). Runs in the
                   // server process, so this goes to the log, not the TUI display.
                   console.error("[altimate] gateway sign-in failed:", err instanceof Error ? err.message : err)
+                  // altimate_change — onboarding funnel: only the classified enum is sent. The
+                  // message can embed the instance name (see the invalid-instance throw above),
+                  // so it never reaches telemetry.
+                  void OnboardingTelemetry.emit({ type: "gateway_auth_failed", reason: reasonOf(err) })
                   return { type: "failed" }
                 } finally {
                   // Keep the shared server up while another flow is still waiting.

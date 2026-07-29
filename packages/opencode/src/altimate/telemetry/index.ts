@@ -731,6 +731,147 @@ export namespace Telemetry {
         /** output tokens on the stop-without-tools generation — helps distinguish "refused" (low) from "wrote a long text plan" (high) */
         tokens_output: number
       }
+    // altimate_change end
+    // altimate_change start — first-run onboarding funnel taxonomy.
+    //
+    // Event names and property names follow the product spec verbatim so the taxonomy is
+    // queryable under the names it was specified with. Two naming notes for whoever writes
+    // the queries:
+    //   - `gateway_device_code_issued` is a spec name kept for fidelity. The gateway flow is
+    //     actually a browser loopback OAuth (see altimate/plugin/altimate.ts) — there is no
+    //     device code. The event means "authorize URL built and browser open attempted".
+    //   - `environment_scan_completed` overlaps `environment_census` above; census stays the
+    //     richer dbt/warehouse fingerprint, this one is the onboarding-shaped scan result.
+    //
+    // Events tagged "derived" are inferred from a proxy signal, not observed directly — the
+    // activation menu is model-rendered text (src/command/template/onboard-connect.txt), so
+    // there is no UI event to capture. Treat their counts as lower bounds.
+    | {
+        type: "onboarding_started"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "model_picker_shown"
+        timestamp: number
+        session_id: string
+        /** the picker mounts from several paths — without this the event over-counts first runs */
+        trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+      }
+    | {
+        type: "provider_selected"
+        timestamp: number
+        session_id: string
+        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all"
+      }
+    | {
+        type: "big_pickle_confirm_shown"
+        timestamp: number
+        session_id: string
+        origin: "welcome" | "model"
+      }
+    | {
+        type: "big_pickle_choice"
+        timestamp: number
+        session_id: string
+        choice: "accept" | "cancel"
+      }
+    | {
+        type: "gateway_device_code_issued"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "gateway_auth_completed"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "gateway_auth_failed"
+        timestamp: number
+        session_id: string
+        /** `denied` only from an explicit error callback; an unknown/invalid state never rejects
+         *  the pending promise, so CSRF mismatches surface as `timeout`. Never carries error text. */
+        reason: "timeout" | "denied" | "error"
+      }
+    | {
+        type: "instance_connected"
+        timestamp: number
+        session_id: string
+        /** measured from the authorize() call that opened the browser */
+        time_to_connect_ms: number
+      }
+    | {
+        type: "onboarding_completed"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "scan_gate_shown"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "scan_gate_choice"
+        timestamp: number
+        session_id: string
+        choice: "scan" | "skip"
+      }
+    | {
+        type: "environment_scan_completed"
+        timestamp: number
+        session_id: string
+        has_dbt: boolean
+        has_warehouse: boolean
+        is_repo: boolean
+        connections_found: number
+        /** bounded list of short enum reasons — arrays are JSON.stringify'd into customDimensions */
+        degraded: string[]
+      }
+    | {
+        type: "activation_menu_shown"
+        timestamp: number
+        session_id: string
+        variant: "warehouse" | "no_data"
+      }
+    | {
+        /** derived — inferred from the first job tool/skill after the menu. `something_else`
+         *  has no tool anchor and is systematically under-counted. */
+        type: "activation_job_selected"
+        timestamp: number
+        session_id: string
+        job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
+      }
+    | {
+        /** derived — see activation_job_selected */
+        type: "first_job_completed"
+        timestamp: number
+        session_id: string
+        job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
+      }
+    | {
+        type: "sample_setup_completed"
+        timestamp: number
+        session_id: string
+        success: boolean
+        /** counts come from the shipped jaffle-shop manifest; the target path is never sent */
+        models: number
+        tables: number
+        /** the tool is deliberately re-callable (reuse / reset / install-alongside) */
+        reused: boolean
+      }
+    | {
+        type: "first_prompt_sent"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "onboarding_abandoned"
+        timestamp: number
+        session_id: string
+        /** last funnel stage observed before exit without a completion */
+        last_stage: string
+      }
   // altimate_change end
 
   /** SHA256 hash a masked error message for anonymous grouping. */
@@ -1437,7 +1578,27 @@ export namespace Telemetry {
   }
   // altimate_change end
 
+  // altimate_change start — serialize concurrent shutdowns.
+  // shutdown() is called from several independent paths (session/prompt.ts at the end of each
+  // session loop, the CLI's outer finally, and — for onboarding telemetry — the TUI exit path
+  // and the TUI worker's rpc.shutdown). Two overlapping calls would both enter flush(), which
+  // splices the shared buffer, so one caller can post a half-empty batch while the other drops
+  // events. The in-flight promise is cleared on settle, so a later init/shutdown cycle (the
+  // per-session pattern in prompt.ts) still works.
+  let shutdownPromise: Promise<void> | undefined
+
   export async function shutdown() {
+    if (shutdownPromise) return shutdownPromise
+    shutdownPromise = doShutdown().finally(() => {
+      shutdownPromise = undefined
+    })
+    return shutdownPromise
+  }
+
+  /** Flush and reset. Bound this with `withTimeout` on exit paths — flush() can block for
+   *  REQUEST_TIMEOUT_MS (10s), which is longer than the TUI's shutdown budget. */
+  async function doShutdown() {
+    // altimate_change end
     // Wait for init to complete so we know whether telemetry is enabled
     // and have a valid endpoint to flush to.  init() is fire-and-forget
     // in CLI middleware, so it may still be in-flight when shutdown runs.
