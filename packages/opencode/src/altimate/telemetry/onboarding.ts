@@ -139,10 +139,83 @@ export async function emitAbandonedIfIncomplete(): Promise<void> {
   await emit({ type: "onboarding_abandoned", last_stage: furthestStage })
 }
 
+// ---------------------------------------------------------------------------
+// Session-scoped state (worker thread)
+//
+// The activation events are inferred, not observed: the menu is text the model writes from
+// src/command/template/onboard-connect.txt, and the user answers in free text. What IS
+// deterministic is which command started the session and which tool ran next, so that is what
+// these track. Lives here rather than in the plugin so there is one home for onboarding state.
+//
+// Bounded: a `serve` process is long-lived and sees unboundedly many sessions, so these must not
+// grow forever. Sets are capped and evict in insertion order.
+// ---------------------------------------------------------------------------
+
+const MAX_TRACKED_SESSIONS = 64
+
+function addBounded<T>(set: Set<T>, value: T) {
+  if (set.size >= MAX_TRACKED_SESSIONS) {
+    const oldest = set.values().next()
+    if (!oldest.done) set.delete(oldest.value)
+  }
+  set.add(value)
+}
+
+/** Sessions whose next user message was submitted by a slash command, not typed by the user. */
+const commandSubmissions = new Set<string>()
+/** Sessions started by `/onboard-connect` — used to scope events to the onboarding flow. */
+const onboardingSessions = new Set<string>()
+/** Sessions that have already emitted each once-per-session activation event. */
+const activationMenuShown = new Set<string>()
+const activationJobSelected = new Set<string>()
+const activationJobCompleted = new Set<string>()
+
+/** Record that the next user message in this session comes from a slash command. */
+export function noteCommandSubmission(sessionID: string) {
+  addBounded(commandSubmissions, sessionID)
+}
+
+/** True (once) if this session's pending user message was command-submitted. */
+export function consumeCommandSubmission(sessionID: string): boolean {
+  return commandSubmissions.delete(sessionID)
+}
+
+export function markOnboardingSession(sessionID: string) {
+  addBounded(onboardingSessions, sessionID)
+}
+
+export function isOnboardingSession(sessionID: string): boolean {
+  return onboardingSessions.has(sessionID)
+}
+
+/** Claim a once-per-session activation milestone. Returns false if already claimed. */
+export function claimActivationMenu(sessionID: string): boolean {
+  if (activationMenuShown.has(sessionID)) return false
+  addBounded(activationMenuShown, sessionID)
+  return true
+}
+
+export function claimActivationJobSelected(sessionID: string): boolean {
+  if (activationJobSelected.has(sessionID)) return false
+  addBounded(activationJobSelected, sessionID)
+  return true
+}
+
+export function claimFirstJobCompleted(sessionID: string): boolean {
+  if (activationJobCompleted.has(sessionID)) return false
+  addBounded(activationJobCompleted, sessionID)
+  return true
+}
+
 /** Test seam — module state is per-process by design, so tests need an explicit reset. */
 export function resetForTest() {
   furthestStage = undefined
   completed = false
   abandonedEmitted = false
+  commandSubmissions.clear()
+  onboardingSessions.clear()
+  activationMenuShown.clear()
+  activationJobSelected.clear()
+  activationJobCompleted.clear()
 }
 // altimate_change end
