@@ -109,7 +109,10 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         `Underlying error: ${message}`
       return {
         title: "Starter sample unavailable",
-        metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
+        // `suffix: -1` (not 0) so error rows can't be confused with a success-
+        // path fresh materialize (which reports suffix: 0 for the preferred
+        // slot). Tech Lead flagged the shape collision during v0.9.4 review.
+        metadata: { success: false, error: message, targetPath: "", reused: false, suffix: -1, note: "" },
         output: `status: error\nreason: sample_source_missing\n\n${guidance}`,
       }
     }
@@ -170,7 +173,10 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       const message = err instanceof Error ? err.message : String(err)
       return {
         title: "Starter materialization failed",
-        metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
+        // `suffix: -1` (not 0) so error rows can't be confused with a success-
+        // path fresh materialize (which reports suffix: 0 for the preferred
+        // slot). Tech Lead flagged the shape collision during v0.9.4 review.
+        metadata: { success: false, error: message, targetPath: "", reused: false, suffix: -1, note: "" },
         output: `status: error\nreason: materialize_failed\n\n${message}`,
       }
     }
