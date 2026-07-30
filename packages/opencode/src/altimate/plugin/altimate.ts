@@ -31,15 +31,18 @@ function isTrustedApiUrl(raw: string): boolean {
   }
   const host = u.hostname
   const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1"
-  // An operator-configured ALTIMATE_API_URL host is trusted regardless of scheme:
-  // its whole purpose is pointing the exchange at a dev/staging backend, which is
-  // commonly plain http on a non-loopback host (docker/LAN). Checked BEFORE the
-  // https/loopback rule so that case isn't rejected (the previous ordering made
-  // the override unreachable for http dev backends).
+  // An operator-configured ALTIMATE_API_URL backend is trusted so the exchange can
+  // point at a dev/staging backend, which is commonly plain http on a non-loopback
+  // host (docker/LAN). Match the configured ORIGIN (scheme + host + port), not the
+  // host alone — otherwise an https-configured host could be downgraded to plaintext
+  // http on a hostname match (a callback `url=http://<same-host>` would leak the
+  // one-time token over cleartext). Plain-http dev still works when the operator
+  // themselves configured http.
   const configured = process.env.ALTIMATE_API_URL
   if (configured) {
     try {
-      if (new URL(configured).hostname === host) return true
+      const c = new URL(configured)
+      if (c.protocol === u.protocol && c.host === u.host) return true
     } catch {
       /* ignore a malformed override */
     }
