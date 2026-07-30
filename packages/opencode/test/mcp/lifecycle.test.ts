@@ -2,7 +2,7 @@ import path from "node:path"
 import { mkdtempSync } from "node:fs"
 import os, { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
-import { expect, mock, beforeEach, spyOn } from "bun:test"
+import { expect, mock, beforeEach, afterEach, spyOn } from "bun:test"
 import { ListRootsRequestSchema, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
 import { Cause, Effect, Exit } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
@@ -242,12 +242,13 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
   },
 }))
 
+let homedirSpy: ReturnType<typeof spyOn> | undefined
 beforeEach(() => {
   // Isolate the home dir to a fresh empty dir. MCP.defaultLayer auto-discovers home-scoped MCP
   // config (~/.claude.json etc.) on connect; without isolation the developer's real MCP servers
   // leak into these mock-server assertions (extra tools/servers → wrong counts). (bun's
   // os.homedir() caches $HOME at startup, so it must be spied rather than set via process.env.)
-  spyOn(os, "homedir").mockImplementation(() => mkdtempSync(path.join(tmpdir(), "mcp-lifecycle-home-")))
+  homedirSpy = spyOn(os, "homedir").mockImplementation(() => mkdtempSync(path.join(tmpdir(), "mcp-lifecycle-home-")))
   clientStates.clear()
   lastCreatedClientName = undefined
   connectShouldFail = false
@@ -255,6 +256,17 @@ beforeEach(() => {
   connectError = "Mock transport cannot connect"
   clientCreateCount = 0
   transportCloseCount = 0
+})
+
+// Restore the os.homedir spy after each test. Without this, the mock survives
+// into subsequent test files (bun runs the whole suite in one process), which
+// broke 6 `permission/next.test.ts` tilde-expansion tests on CI — they saw
+// `/tmp/mcp-lifecycle-home-XXXX` as `$HOME` and their patterns diverged from
+// expectations. Tech Lead flagged this during the v0.9.4 release review;
+// root cause was the missing restore here. (P1 from release review.)
+afterEach(() => {
+  homedirSpy?.mockRestore()
+  homedirSpy = undefined
 })
 
 // Import after mocks
