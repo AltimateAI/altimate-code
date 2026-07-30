@@ -182,64 +182,76 @@ function buildOptions(wired: WiredDatamates, datamates: Datamate[]): TuiDialogSe
   })
 }
 
+// Sentinel value for informational rows (loading / no credentials / error / empty). Selecting
+// them is a no-op. Same device as skill-ops' synthetic install row.
+const STATUS_ROW = "__datamate_status__"
+
 function DialogDatamateList(props: { api: TuiPluginApi }) {
   const { api } = props
   const [state] = createResource(() => loadState(api))
 
+  // One DialogSelect for every state. Swapping the top-level dialog component (e.g. a
+  // DialogAlert fallback while loading) re-mounts this factory, which re-creates the
+  // resource and refetches in a loop — so status states render as rows, not alerts.
+  const options = createMemo<TuiDialogSelectOption<string>[]>(() => {
+    const current = state()
+    if (!current) return [{ title: "Loading datamates...", value: STATUS_ROW }]
+    if (current.kind === "unconfigured")
+      return [
+        {
+          title: "Altimate credentials not found",
+          description: "Run /connect and pick the Altimate provider, then reopen /datamates.",
+          value: STATUS_ROW,
+        },
+      ]
+    if (current.kind === "error")
+      return [
+        {
+          title: "Failed to load datamates",
+          description: current.message.slice(0, 80),
+          value: STATUS_ROW,
+        },
+      ]
+    if (current.datamates.length === 0)
+      return [
+        {
+          title: "No datamates in this workspace yet",
+          description: "Create one in the Altimate console, then reopen /datamates.",
+          value: STATUS_ROW,
+        },
+      ]
+    return buildOptions(current.wired, current.datamates)
+  })
+
+  const title = createMemo(() => {
+    const current = state()
+    // With the gateway there is no single active datamate, so the title carries the explanation.
+    return current?.kind === "ready" && current.wired.gateway ? "Datamates (via extension gateway)" : "Datamates"
+  })
+
+  // Standalone mode points the cursor at the wired datamate; gateway mode leaves it unset.
+  const activeId = createMemo(() => {
+    const current = state()
+    if (current?.kind !== "ready" || current.wired.gateway) return undefined
+    return [...current.wired.ids][0]
+  })
+
   return (
-    <Show when={state()} fallback={<api.ui.DialogAlert title="Datamates" message="Loading datamates..." />}>
-      {(resolved) => {
-        const current = resolved()
-        if (current.kind === "unconfigured") {
-          return (
-            <api.ui.DialogAlert
-              title="Datamates"
-              message={
-                "Altimate credentials not found.\n\n" +
-                "Run /connect and pick the Altimate provider to add your instance name and API key, " +
-                "then reopen /datamates."
-              }
-            />
-          )
-        }
-        if (current.kind === "error") {
-          return (
-            <api.ui.DialogAlert
-              title="Datamates"
-              message={`Failed to load datamates: ${current.message.slice(0, 300)}`}
-            />
-          )
-        }
-        if (current.datamates.length === 0) {
-          return (
-            <api.ui.DialogAlert
-              title="Datamates"
-              message={
-                "No datamates in this workspace yet.\n\n" +
-                "Create one in the Altimate console (or ask the agent to), then reopen /datamates."
-              }
-            />
-          )
-        }
-        // With the gateway there is no single active datamate, so leave `current` unset and let the
-        // title carry the explanation; standalone mode can point the cursor at the wired one.
-        const activeId = current.wired.gateway ? undefined : [...current.wired.ids][0]
-        return (
-          <api.ui.DialogSelect
-            title={current.wired.gateway ? "Datamates (via extension gateway)" : "Datamates"}
-            placeholder="Search datamates..."
-            options={buildOptions(current.wired, current.datamates)}
-            current={activeId}
-            onSelect={(item) => {
-              const datamate = current.datamates.find((d) => d.id === item.value)
-              if (!datamate) return
-              api.ui.dialog.clear()
-              void wireDatamate(api, datamate)
-            }}
-          />
-        )
+    <api.ui.DialogSelect
+      title={title()}
+      placeholder="Search datamates..."
+      options={options()}
+      current={activeId()}
+      onSelect={(item) => {
+        if (item.value === STATUS_ROW) return
+        const current = state()
+        if (current?.kind !== "ready") return
+        const datamate = current.datamates.find((d) => d.id === item.value)
+        if (!datamate) return
+        api.ui.dialog.clear()
+        void wireDatamate(api, datamate)
       }}
-    </Show>
+    />
   )
 }
 
@@ -321,10 +333,17 @@ const tui: TuiPlugin = async (api) => {
     slots: {
       home_bottom() {
         const dismissed = createMemo(() => api.kv.get(BANNER_KV_KEY, false))
-        // Once a datamate MCP server exists there is nothing left to promote. Read live MCP status
-        // rather than the config so the banner also stays hidden for gateway-supplied servers.
+        // Once a datamate MCP server is connected there is nothing left to promote. Read live MCP
+        // status rather than the config so the banner also stays hidden for gateway-supplied
+        // servers — but only a *connected* server counts: a stale failed `datamate` entry is
+        // exactly the situation the picker fixes, so it must not suppress the promo.
         const connected = createMemo(() =>
-          api.state.mcp().some((item) => item.name === DATAMATE_KEY || item.name.startsWith("datamate-")),
+          api.state
+            .mcp()
+            .some(
+              (item) =>
+                (item.name === DATAMATE_KEY || item.name.startsWith("datamate-")) && item.status === "connected",
+            ),
         )
         const show = createMemo(() => api.state.ready && !dismissed() && !connected())
         return (
