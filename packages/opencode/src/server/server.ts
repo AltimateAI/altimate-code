@@ -34,6 +34,7 @@ import { MCP } from "../mcp"
 // Import sync + fresh-read helpers directly from the shared transport module.
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
 import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
+import { connectDatamate } from "../altimate/datamate-connect"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
@@ -713,6 +714,23 @@ export namespace Server {
           const error = err instanceof Error ? err.message : String(err)
           log.error("reload-datamate: failed", { error })
           return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — POST /altimate/datamate/connect
+      // Wires a datamate as an MCP server on behalf of the /datamates TUI picker. The picker runs in
+      // the TUI main thread, which has no Instance/MCP runtime (the server lives in a Worker — see
+      // cli/cmd/tui.ts), so the connect step has to happen here. Shares connectDatamate with the
+      // datamate_manager tool's 'add' operation so both surfaces wire identically.
+      .post("/altimate/datamate/connect", validator("json", z.object({ datamate_id: z.string() })), async (c) => {
+        const { datamate_id } = c.req.valid("json")
+        try {
+          const result = await connectDatamate({ datamateId: datamate_id })
+          return c.json({ ok: true as const, result })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("datamate connect: failed", { datamateId: datamate_id, error })
+          return c.json({ ok: false as const, error }, 500)
         }
       })
       // altimate_change end

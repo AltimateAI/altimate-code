@@ -222,6 +222,39 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(skill).toMatch(/DialogSkillCreate[\s\S]{0,80}initialValue/)
   })
 
+  // The /datamates picker is registered from the fork plugin aggregator and reaches the live MCP
+  // registry through a fork server endpoint (the TUI main thread has no MCP runtime). A merge that
+  // drops the registration, the endpoint, or the shared connectDatamate core leaves the command
+  // silently absent or the picker unable to wire anything — no compile error either way.
+  test("datamates picker is registered and shares the tool's connect core", async () => {
+    const aggregator = await read("src/plugin/tui/altimate/index.ts")
+    expect(aggregator).toContain('from "./datamates"')
+    expect(aggregator).toMatch(/return \[[^\]]*Datamates[^\]]*\]/)
+
+    const picker = await read("src/plugin/tui/altimate/datamates.tsx")
+    expect(picker).toMatch(/name: "altimate\.datamate\.list"/)
+    expect(picker).toMatch(/slashName: "datamates"/)
+    expect(picker).toContain("/altimate/datamate/connect")
+    // The banner lives in home_bottom behind a KV dismissal key.
+    expect(picker).toMatch(/home_bottom\(\)/)
+    expect(picker).toContain("dismissed_datamates_banner")
+
+    // The picker must NOT import the server-only wiring module — that would drag Instance/MCP into
+    // the TUI main thread, where neither exists.
+    expect(picker).not.toContain("datamate-connect")
+
+    const server = await read("src/server/server.ts")
+    expect(server).toContain('"/altimate/datamate/connect"')
+    expect(server).toContain("connectDatamate(")
+
+    // One implementation of the wiring, shared by the tool's 'add' operation and the picker.
+    const connect = await read("src/altimate/datamate-connect.ts")
+    expect(connect).toContain("export async function connectDatamate")
+    expect(connect).toContain("MCP.connect(DATAMATE_KEY)") // reconnect path persists enabled:true
+    const datamate = await read("src/altimate/tools/datamate.ts")
+    expect(datamate).toContain("connectDatamate(")
+  })
+
   test("re-homed TUI upstream fixes keep prompt/update/child-session behavior", async () => {
     const promptEnhance = await read("src/plugin/tui/altimate/prompt-enhance.tsx")
     expect(promptEnhance).toMatch(
