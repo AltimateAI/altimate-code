@@ -28,25 +28,35 @@ target/
                         work without dbt-core / dbt-duckdb installed
 ```
 
-## What to try (works with zero external tools)
+## What to try
 
-- `/discover stg_customers` — walk the DAG and see what depends on this model
-- `/review models/marts/customers.sql` — run the reviewer against a mart model
-- Open any `.sql` file and ask altimate-code to explain the transformation
-- Ask altimate-code "what tests would you recommend for `orders`?"
+**If you got here via altimate-code's activation menu**, the chat is already
+offering you a numbered menu — pick a number (or say what else you want to
+do). Every option is wired to a real workflow:
 
-## What to try (needs `dbt-core` + `dbt-duckdb` installed)
+- **See what breaks downstream before you change a model** — try `customers`
+  or `orders`.
+- **Review the SQL in this project with every finding explained** — targets
+  the mart models.
+- **Build & query it** — altimate-code detects whether dbt-core + dbt-duckdb
+  are installed, offers to reuse an existing dbt binary if you paste its
+  path, and walks you through the run. Auto-registers the DuckDB file as a
+  warehouse so `sql_execute` connects to the database dbt just built.
+
+**If you `cd`'d into `~/altimate-sample-dbt/` from a different shell** — no
+activation menu, no LLM in the loop. You can drive dbt yourself:
 
 ```bash
-pip install dbt-duckdb
-cd ~/altimate-sample-dbt         # or wherever you materialized the sample
-dbt seed                          # load the CSVs into DuckDB
-dbt build                         # run models + tests
+pip install dbt-duckdb                    # or `pipx install dbt-duckdb` if you hit PEP 668
+cd ~/altimate-sample-dbt                  # wherever you materialized the sample
+dbt seed                                  # load the CSVs into DuckDB
+dbt build                                 # run models + tests
 duckdb target/jaffle.duckdb -c 'select * from customers'
 ```
 
-Once `dbt-duckdb` is on your `$PATH`, altimate-code detects it automatically
-and the "run" workflows appear in `/help`.
+Once `dbt` is discoverable (venv, pipx, conda, uv, poetry, homebrew — the CLI
+walks every common Python env manager), altimate-code's "Build & query"
+option surfaces the same actions inside the chat.
 
 ## Bringing your own project
 
