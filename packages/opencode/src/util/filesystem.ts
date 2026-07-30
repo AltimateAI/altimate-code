@@ -272,6 +272,7 @@ export namespace Filesystem {
     }
   }
 
+  // altimate_change start — fork util (AI-7520 onboarding/materialize): atomic JSON write
   /**
    * Atomic JSON write via tmp-file + rename. Serializes `value` with 2-space
    * indent + trailing newline, writes to `<targetPath>.tmp-<random>`, then
@@ -292,6 +293,7 @@ export namespace Filesystem {
     writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n")
     renameSync(tmpPath, targetPath)
   }
+  // altimate_change end
 
   export async function findUp(target: string, start: string, stop?: string) {
     let current = start

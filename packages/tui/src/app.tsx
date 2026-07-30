@@ -562,7 +562,13 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   let armScanGate = false
   createEffect(() => {
     if (firstRunPickerHandled) return
-    if (!ready()) return // wait until providers are loaded before deciding
+    // Decide only once BOTH the plugin host has started AND sync has finished
+    // loading providers. `ready()` alone is plugin-host startup, which can settle
+    // before sync populates `sync.data.provider` — deciding then would transiently
+    // see a returning (connected) user as un-onboarded and re-show the picker +
+    // scan gate (the AI-7774 regression). `sync.status` is the provider-load signal
+    // (same one used for continue/fork above).
+    if (!ready() || sync.status !== "complete") return
     firstRunPickerHandled = true
     if (onboardingReady()) return // already set up — no gate
     armScanGate = true
@@ -592,7 +598,16 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
               // menu (sample dbt, downstream impact, SQL PR, or free chat).
               // Template lives at packages/opencode/src/command/template/onboard-connect.txt.
               const ref = promptRef.current
-              if (!ref) return
+              if (!ref) {
+                // The prompt should be mounted by the time the gate resolves, but
+                // if it isn't, don't silently drop the user's choice — tell them
+                // how to continue instead of a dead keypress.
+                toast.show({
+                  message: `Run /onboard-connect ${arg} to continue.`,
+                  variant: "error",
+                })
+                return
+              }
               ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
               ref.submit()
             }}

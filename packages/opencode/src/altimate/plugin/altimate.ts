@@ -172,6 +172,10 @@ function registerPending(state: string, timeoutMs = 5 * 60 * 1000): Promise<Call
   return new Promise<CallbackResult>((resolve, reject) => {
     const timeout = setTimeout(() => {
       if (pending.delete(state)) reject(new Error("Timed out waiting for browser sign-in"))
+      // If the dialog was dismissed and callback() never ran its finally, the
+      // loopback server would otherwise stay bound past the timeout. Free the
+      // port once nothing is waiting on it.
+      if (pending.size === 0) stopCallbackServer()
     }, timeoutMs)
     pending.set(state, {
       resolve: (creds) => {
