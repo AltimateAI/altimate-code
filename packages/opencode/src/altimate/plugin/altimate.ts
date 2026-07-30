@@ -4,10 +4,17 @@ import { randomBytes } from "crypto"
 import open from "open"
 import { AltimateApi } from "../api/client"
 
-// Loopback port the CLI listens on for the browser to deliver the gateway
-// credential after sign-in. Must match the redirect the web authorize page posts
-// back to. 7317 is otherwise unused in this codebase.
-const CALLBACK_PORT = 7317
+// Loopback port range the CLI listens on for the browser to deliver the gateway
+// credential after sign-in. We prefer 7317 (mnemonic + otherwise unused in this
+// codebase), then fall back through 7318..7325 so a squatting dev tool
+// (Docker Desktop, Rancher, a stray dev server) can't wedge sign-in. The
+// browser is redirected to whatever port we successfully bind, so the fallback
+// is transparent to the user.
+const CALLBACK_PORT_PREFERRED = 7317
+const CALLBACK_PORT_MAX = 7325
+// Actual port bound at runtime — filled in by startCallbackServer() so the
+// authorize URL redirect matches whatever we could grab.
+let currentCallbackPort: number | undefined
 
 // Web app that hosts the signup/login (authorize) page. Overridable for
 // dev/staging via ALTIMATE_WEB_URL.
@@ -97,7 +104,7 @@ const pending = new Map<string, Pending>()
 async function startCallbackServer(): Promise<void> {
   if (server) return
   server = createServer((req, res) => {
-    const url = new URL(req.url || "/", `http://localhost:${CALLBACK_PORT}`)
+    const url = new URL(req.url || "/", `http://localhost:${currentCallbackPort ?? CALLBACK_PORT_PREFERRED}`)
     if (url.pathname !== "/callback") {
       res.writeHead(404)
       res.end("Not found")
@@ -147,37 +154,58 @@ async function startCallbackServer(): Promise<void> {
     html(200, HTML_SUCCESS)
   })
 
-  try {
-    await new Promise<void>((resolve, reject) => {
-      // Bind to loopback only — the credential/abort endpoints must not be reachable
-      // from the LAN.
-      server!.listen(CALLBACK_PORT, "127.0.0.1", () => resolve())
-      server!.on("error", reject)
-    })
-  } catch (err) {
-    // Reset so a retry isn't blocked by the `if (server) return` guard, and surface
-    // a clear reason (e.g. the port is already taken) instead of hanging.
-    server = undefined
-    const code = (err as NodeJS.ErrnoException)?.code
-    throw new Error(
-      code === "EADDRINUSE"
-        ? `Port ${CALLBACK_PORT} is already in use — close whatever is using it and try again.`
-        : `Could not start the sign-in server: ${err instanceof Error ? err.message : String(err)}`,
-    )
+  // Walk the port range so a squatting dev tool on 7317 doesn't wedge sign-in.
+  // First success wins; only report EADDRINUSE if every port in the range is
+  // taken. Non-EADDRINUSE errors fail fast (permissions, exhausted fds).
+  const tried: number[] = []
+  let lastErr: NodeJS.ErrnoException | undefined
+  for (let port = CALLBACK_PORT_PREFERRED; port <= CALLBACK_PORT_MAX; port++) {
+    tried.push(port)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // Bind to loopback only — the credential/abort endpoints must not be reachable
+        // from the LAN.
+        server!.listen(port, "127.0.0.1", () => resolve())
+        server!.on("error", reject)
+      })
+      currentCallbackPort = port
+      return
+    } catch (err) {
+      lastErr = err as NodeJS.ErrnoException
+      // Detach the failed listener before trying the next port — otherwise the
+      // 'error' handler stays wired and fires on the next listen attempt too.
+      server!.removeAllListeners("error")
+      if (lastErr.code !== "EADDRINUSE") break
+    }
   }
+  // Every candidate port is either taken or gave a hard failure. Reset so a
+  // retry isn't blocked by the `if (server) return` guard.
+  server = undefined
+  currentCallbackPort = undefined
+  const code = lastErr?.code
+  throw new Error(
+    code === "EADDRINUSE"
+      ? `Every port in ${CALLBACK_PORT_PREFERRED}-${CALLBACK_PORT_MAX} is already in use (tried ${tried.join(", ")}). Close whatever is using them (e.g. \`lsof -i :${CALLBACK_PORT_PREFERRED}\`) and try again.`
+      : `Could not start the sign-in server: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+  )
 }
 
 function stopCallbackServer() {
   if (server) {
     server.close()
     server = undefined
+    currentCallbackPort = undefined
   }
 }
 
 // Register a pending flow keyed by `state` and return its promise. Called
 // synchronously in authorize() before the browser opens; the server handler
 // resolves/rejects it by state, so a fast redirect is never lost.
-function registerPending(state: string, timeoutMs = 5 * 60 * 1000): Promise<CallbackResult> {
+// 15-minute window for the whole flow — the earlier 5-minute default was too
+// short for corporate SSO where Okta → Duo → password manager → MFA on phone
+// can easily push past 5 min. Ticket load ("got MFA prompt, went to phone, came
+// back, sign-in failed") justifies the longer wait.
+function registerPending(state: string, timeoutMs = 15 * 60 * 1000): Promise<CallbackResult> {
   return new Promise<CallbackResult>((resolve, reject) => {
     const timeout = setTimeout(() => {
       if (pending.delete(state)) reject(new Error("Timed out waiting for browser sign-in"))
@@ -221,8 +249,11 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
 
             const webUrl = (process.env.ALTIMATE_WEB_URL || DEFAULT_WEB_URL).replace(/\/+$/, "")
             // Use 127.0.0.1 to match the loopback bind — a plain `localhost` redirect
-            // can resolve to ::1 first and hit a closed IPv6 port.
-            const redirect = `http://127.0.0.1:${CALLBACK_PORT}/callback`
+            // can resolve to ::1 first and hit a closed IPv6 port. `currentCallbackPort`
+            // reflects the actual port startCallbackServer() grabbed (may fall back
+            // from 7317 to 7318..7325 if a dev tool is squatting).
+            const boundPort = currentCallbackPort ?? CALLBACK_PORT_PREFERRED
+            const redirect = `http://127.0.0.1:${boundPort}/callback`
             // Land on the sign-up page and let the user choose how to authenticate
             // (Google today, more providers later) rather than forcing Google.
             const authorizeUrl =
@@ -230,7 +261,14 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
               `&redirect=${encodeURIComponent(redirect)}` +
               `&state=${state}`
 
+            // Try to open the browser, but ALWAYS print the URL to stderr too —
+            // `open()` silently fails on SSH / tmux / WSL-without-wslu / VS Code
+            // Remote-SSH, and without a printed URL a headless user gets no path
+            // forward and times out staring at "Complete sign-in in your browser".
             await open(authorizeUrl).catch(() => undefined)
+            process.stderr.write(
+              `\nIf your browser didn't open automatically, complete sign-in at:\n  ${authorizeUrl}\n\n`,
+            )
 
             return {
               url: authorizeUrl,
