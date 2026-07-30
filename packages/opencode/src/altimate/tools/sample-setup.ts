@@ -80,13 +80,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
           "conflict prompt. Mutually exclusive with allow_in_place_upgrade; alongside wins.",
       ),
   }),
-  async execute(args, ctx) {
-    // Test/internal seam: a home dir may be supplied via the (non-LLM) context
-    // so tests can land the sample in a scratch dir WITHOUT monkeypatching the
-    // global `os.homedir` (which races with other suites under parallel CI).
-    // Not exposed on the parameters schema, so the LLM can't set it; still
-    // gated by rejectUnsafeHome inside materializeSample — not a safety bypass.
-    const homeDir = (ctx as { extra?: { homeDir?: string } } | undefined)?.extra?.homeDir
+  async execute(args, _ctx) {
     const sampleName = DEFAULT_SAMPLE_NAME
     // Resolve the sample source ONCE per invocation and pass it forward.
     // materializeSample() would otherwise call resolveSampleSource() again
@@ -128,9 +122,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         // was removed from the LLM-facing schema to close a bypass of the
         // rejectUnsafeHome guard (a caller-controlled parent skipped the
         // check). Callers who need a specific parent use materializeSample
-        // directly with allowUnsafeParent for tests. `homeDir` (from ctx, not
-        // args) only overrides the DEFAULT parent and stays rejectUnsafeHome-gated.
-        homeDir,
+        // directly with allowUnsafeParent for tests.
         cliVersion: InstallationVersion,
         sampleVersion,
         allowInPlaceUpgrade: args.allow_in_place_upgrade,

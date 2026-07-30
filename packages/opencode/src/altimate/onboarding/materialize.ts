@@ -99,12 +99,6 @@ export interface MaterializeOptions {
   /** Parent directory that the target lands in. Defaults to `os.homedir()`
    *  after passing the safety guard (see rejectUnsafeHome). */
   targetParent?: string
-  /** Home directory used to derive the default `targetParent` when it isn't
-   *  given. Defaults to `os.homedir()`. This exists so tests can exercise the
-   *  defaulted-parent path by injection instead of monkeypatching the global
-   *  `os.homedir` (which races with other suites under concurrent CI). It is
-   *  still subject to `rejectUnsafeHome`, so it is NOT a safety bypass. */
-  homeDir?: string
   /** altimate-code version, written into the marker. */
   cliVersion: string
   /** Sample version, written into the marker. Should mirror the value in
@@ -256,7 +250,7 @@ export async function materializeSample(opts: MaterializeOptions): Promise<Mater
     )
   }
 
-  const targetParent = opts.targetParent ?? opts.homeDir ?? os.homedir()
+  const targetParent = opts.targetParent ?? os.homedir()
   // rejectUnsafeHome applies to ANY targetParent, not just the defaulted-from-HOME
   // one. A prompt-injected model turn (or a misconfigured caller) that passes
   // targetParent: "/root" or "/tmp/x" must be refused; the guard exists to
