@@ -84,8 +84,9 @@ If a REAL warehouse is connected (found by the scan, or just added):
 
 If NOTHING usable was found, or the user declined the scan:
   Lead with the sample, then the stack-agnostic jobs:
-  1. Try Altimate on a sample dbt project (spins up a small jaffle-shop DuckDB —
-     real data, real dbt models, nothing touches your warehouse)
+  1. Try Altimate on a sample dbt project (materializes a small jaffle-shop
+     DuckDB project at `~/altimate-sample-dbt/` — real data, real dbt models,
+     nothing touches your warehouse)
   2. See what breaks downstream before you change a model
   3. Review a SQL PR with every finding explained
   4. Something else — describe it
@@ -184,7 +185,14 @@ moment, not another menu):
          `dbt` binary (e.g. `/Users/you/venvs/dbt/bin/dbt`) and I'll use it
          from there — no reinstall needed.
       2. Install fresh: run `pip install dbt-duckdb` (grabs both dbt-core and
-         the DuckDB adapter), then say "ready" and I'll continue.
+         the DuckDB adapter), then say "ready" and I'll continue. If you see an
+         `externally-managed-environment` error (modern macOS and Debian/Ubuntu
+         block bare `pip` under PEP 668), use one of these instead — same
+         result, no root install:
+           • `pipx install dbt-duckdb`   (isolated per-tool venv, recommended)
+           • `uv tool install dbt-duckdb`   (if you already have `uv`)
+           • `python3 -m venv ~/.venvs/dbt && ~/.venvs/dbt/bin/pip install dbt-duckdb`
+             then paste `~/.venvs/dbt/bin/dbt` via option 1 above.
 
   If the user pastes a path (option 1), do NOT interpolate the pasted
   string into a shell pipeline verbatim — a paste like `; rm -rf ~` would
