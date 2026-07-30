@@ -25,6 +25,13 @@ export interface MergeConfig {
   skipFiles: string[]
 
   /**
+   * Glob patterns of LIVE fork files excluded from the branding audit only.
+   * Unlike skipFiles these are never deleted and their merge conflicts are
+   * resolved normally (manually), not auto-resolved to upstream.
+   */
+  auditExclude: string[]
+
+  /**
    * Glob patterns of files that historically hold altimate behavioral patches
    * (UA strings, retry loops, hour-aligned cleanup tasks, etc.) without
    * `altimate_change` markers. The bridge merge tool MUST flag these for human
@@ -441,6 +448,20 @@ export const defaultConfig: MergeConfig = {
     ".zed/settings.json",
     // Upstream changelog command — we have our own bridge-merge / release process.
     ".opencode/command/changelog.md",
+    // Upstream web/preview packages introduced after v1.17.9 — only consumed by
+    // skipped packages (app, enterprise, storybook). Not shipped by the CLI fork.
+    "packages/client/**",
+    "packages/session-ui/**",
+    "packages/sdk-next/**",
+    "packages/httpapi-codegen/**",
+  ],
+
+  // Files that are LIVE fork content but excluded from the branding audit
+  // (development metadata, vendored upstream test suites, generated SDK
+  // surfaces). These MUST NOT be in skipFiles: merge.ts deletes skipFiles
+  // matches and auto-resolves their conflicts to upstream's version, which
+  // would destroy or clobber these files.
+  auditExclude: [
     // Repo-local upstream opencode config/commands are development metadata, not
     // shipped fork source; keep them out of the branding audit.
     ".opencode/command/issues.md",

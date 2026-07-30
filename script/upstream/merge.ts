@@ -858,10 +858,18 @@ async function cleanupSkipFiles(config: MergeConfig): Promise<void> {
   const { minimatch } = await import("minimatch")
   const root = repoRoot()
 
-  // Get all tracked files and find those matching skipFiles patterns
+  // Get all tracked files and find those matching skipFiles patterns.
+  // Safety guard: only delete files the merge newly introduced — a file that
+  // already exists on the base branch is live fork content, and deleting it
+  // here would destroy it (skipFiles is meant for upstream-only surfaces the
+  // merge re-introduces).
   const trackedFiles = await git.getTrackedFiles()
-  const toRemove = trackedFiles.filter((f) =>
-    config.skipFiles.some((p) => minimatch(f, p)),
+  const baselineOutput = await $`git ls-tree -r --name-only ${config.baseBranch}`
+    .cwd(root)
+    .text()
+  const baselineFiles = new Set(baselineOutput.trim().split("\n"))
+  const toRemove = trackedFiles.filter(
+    (f) => !baselineFiles.has(f) && config.skipFiles.some((p) => minimatch(f, p)),
   )
 
   if (toRemove.length === 0) {
@@ -918,7 +926,7 @@ function sanitizePackageJson(pkgPath: string): void {
   // Known top-level keys to keep
   const allowedKeys = new Set([
     "$schema", "name", "version", "type", "license", "private", "description",
-    "scripts", "bin", "exports", "dependencies", "devDependencies",
+    "scripts", "bin", "exports", "imports", "dependencies", "devDependencies",
     "peerDependencies", "optionalDependencies", "overrides", "resolutions",
     "engines", "repository", "homepage", "bugs", "keywords", "author",
     "contributors", "files", "main", "module", "types", "typings",
