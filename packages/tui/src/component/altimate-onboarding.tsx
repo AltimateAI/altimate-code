@@ -34,6 +34,19 @@ export function useReady() {
   return createMemo(() => connected() || setupComplete())
 }
 
+/**
+ * Setup completion ONLY — deliberately without the `connected()` term.
+ *
+ * `connected()` flips as soon as a provider appears in sync data, which happens inside
+ * `await sync.bootstrap()` in the BYOK confirm handlers — before those handlers go on to open the
+ * model picker. Anything driven off `useReady()` therefore fires while the user still has no model
+ * selected, and is then immediately replaced by that picker. Use this accessor for "the user has
+ * finished setting up", and `useReady()` only for "is chat usable at all".
+ */
+export function useSetupComplete() {
+  return setupComplete
+}
+
 // First-run welcome picker (presentation only; reuses the same action handlers as
 // DialogModel/createDialogProviderOptions). A curated six: five recommended
 // providers + a "Search all providers…" row that hands off to the full DialogModel

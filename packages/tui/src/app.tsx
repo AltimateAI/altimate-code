@@ -37,7 +37,7 @@ import { DialogProvider, useDialog } from "./ui/dialog"
 // altimate_change start — /auth (gateway sign-in) + /connect (curated welcome picker)
 // + /logout commands
 import { DialogAltimateAuth } from "./component/dialog-provider"
-import { DialogModelWelcome, useReady, resetSetupComplete } from "./component/altimate-onboarding"
+import { DialogModelWelcome, useReady, useSetupComplete, resetSetupComplete } from "./component/altimate-onboarding"
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
 import { DialogScanGate } from "./component/dialog-scan-gate"
@@ -564,6 +564,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // plugin startup, not onboarding state.
   const connected = useConnected()
   const onboardingReady = useReady()
+  // altimate_change — setup completion alone (no `connected()` term); see the scan-gate effect
+  const setupComplete = useSetupComplete()
   // altimate_change — onboarding funnel tracker (no-op when the host injected none)
   const trackOnboarding = useOnboardingTelemetry()
   // altimate_change end
@@ -597,17 +599,31 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   })
   // altimate_change end
 
-  // altimate_change start — Part 2 scan gate: fire EXACTLY once, after the user
-  // completes first-run Part 1. Gated on `armScanGate` (set above only when this
-  // launch started un-onboarded) so a RETURNING user — whose onboardingReady flips
-  // false→true simply because sync finished loading providers — never sees it.
-  // `prev === false` still requires a genuine transition, and a later /model change
-  // (ready stays true) never re-triggers it. We do NOT auto-scan — the gate asks.
+  // altimate_change start — Part 2 scan gate: fire EXACTLY once, when the user has actually
+  // finished picking a model during a first run.
+  //
+  // Two independent guards, because there are two ways this gate goes wrong:
+  //
+  // 1. `armScanGate` (set above only when this launch started un-onboarded) keeps a RETURNING
+  //    user from seeing it — including one who later opens /model and picks a model, which does
+  //    set setupComplete.
+  // 2. The trigger is setupComplete, NOT useReady(). useReady() also counts `connected()`, which
+  //    flips as soon as a provider lands in sync data — and the BYOK confirm handlers do exactly
+  //    that inside `await sync.bootstrap()` before going on to open the model picker
+  //    (dialog-provider.tsx ApiMethod/CodeMethod). Triggering on readiness mounted this gate
+  //    mid-handler, the handler's own `dialog.replace(<DialogModel/>)` destroyed it a moment
+  //    later, and the one-shot latch meant it never came back: `/onboard-connect` was never
+  //    submitted, so every activation event was unreachable for BYOK users while
+  //    `onboarding_completed` and `scan_gate_shown` were still reported for a gate nobody saw.
+  //
+  // setupComplete is only set once a model is genuinely chosen (dialog-model.tsx, the Big Pickle
+  // accept path, and the gateway auto-select), which is what this gate and the spec both mean.
+  // `prev === false` still requires a genuine transition. We do NOT auto-scan — the gate asks.
   let scanGateShown = false
   createEffect(
-    on(onboardingReady, (isReady, prev) => {
+    on(setupComplete, (isComplete, prev) => {
       if (scanGateShown || !armScanGate) return
-      if (isReady && prev === false) {
+      if (isComplete && prev === false) {
         scanGateShown = true
         // altimate_change — funnel: Part 1 finished (a model is ready) and the gate is opening.
         // This false→true transition is exactly the ticket's "onboarding_completed" definition,
