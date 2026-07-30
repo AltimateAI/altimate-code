@@ -279,10 +279,14 @@ export namespace Filesystem {
    * renames onto `targetPath`. On POSIX the rename is atomic — a concurrent
    * reader sees either the old or new file, never a partial write.
    *
-   * Extracted from an earlier local dance in marker.ts. Same shape is used
-   * in `packages/tui/src/util/persistence.ts`, `packages/opencode/src/memory/store.ts`,
-   * and `packages/opencode/src/altimate/observability/tracing.ts` — those
-   * sites can migrate to this helper over time.
+   * Extracted from an earlier local dance in marker.ts. The same
+   * tmp-write-rename pattern is duplicated in `packages/tui/src/util/persistence.ts`,
+   * `packages/opencode/src/memory/store.ts`, and
+   * `packages/opencode/src/altimate/observability/tracing.ts` — see
+   * https://github.com/AltimateAI/altimate-code/issues for the tracking issue
+   * to migrate them (Tech Lead flagged the promise-vs-reality mismatch
+   * during v0.9.4 release review; this docstring used to claim the
+   * migration was done).
    *
    * @param targetPath Destination path. Parent directory is created if missing.
    * @param value Value to serialize as JSON.
