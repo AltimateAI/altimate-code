@@ -850,6 +850,11 @@ export namespace Telemetry {
         job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
       }
     | {
+        /** Deliberately a `success` boolean rather than a `sample_setup_failed` sibling, unlike
+         *  the gateway_auth_completed/_failed pair. The gateway has genuinely distinct failure
+         *  modes worth their own enum (timeout / denied / error); this tool either materialised
+         *  the sample or did not, and the useful breakdown is `reused`, which only exists on the
+         *  success path. Splitting it would duplicate the counts an analyst has to add back up. */
         type: "sample_setup_completed"
         timestamp: number
         session_id: string
@@ -1366,12 +1371,15 @@ export namespace Telemetry {
   //     so the worker computes a different start time than the main thread.
   const LAUNCH_ID_ENV = "ALTIMATE_LAUNCH_ID"
 
+  let cachedLaunchId: string | undefined
+
   export function launchId(): string {
-    const existing = process.env[LAUNCH_ID_ENV]
-    if (existing) return existing
-    const created = randomUUID()
-    process.env[LAUNCH_ID_ENV] = created
-    return created
+    // The worker reads the value the TUI handed it through WorkerOptions.env; the main thread
+    // generates it. Cached in module scope rather than written back to process.env — the worker
+    // is given it explicitly, so writing it would only leak the id into every subprocess the CLI
+    // spawns, for no benefit.
+    if (!cachedLaunchId) cachedLaunchId = process.env[LAUNCH_ID_ENV] || randomUUID()
+    return cachedLaunchId
   }
   // altimate_change end
 
@@ -1537,6 +1545,11 @@ export namespace Telemetry {
       }
       enabled = true
       log.info("telemetry initialized", { mode: "appinsights" })
+      // altimate_change — clear any existing interval before installing a new one. doInit() can
+      // run more than once per process (init/shutdown cycles per session in prompt.ts), and
+      // without this each extra run strands the previous timer: shutdown() only ever clears the
+      // current handle, so orphans accumulate for the life of a `serve` process.
+      if (flushTimer) clearInterval(flushTimer)
       const timer = setInterval(flush, FLUSH_INTERVAL_MS)
       if (typeof timer === "object" && timer && "unref" in timer) (timer as any).unref()
       flushTimer = timer
@@ -1671,6 +1684,7 @@ export namespace Telemetry {
   }
 
   async function doShutdown(timeoutMs?: number) {
+    const initPromiseAtShutdown = initPromise
     // Wait for init to complete so we know whether telemetry is enabled
     // and have a valid endpoint to flush to.  init() is fire-and-forget
     // in CLI middleware, so it may still be in-flight when shutdown runs.
@@ -1693,8 +1707,19 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
-    initPromise = undefined
-    initDone = false
+    // altimate_change — only clear initPromise if it is still the one this shutdown began with.
+    // init() can set `initPromise = shutdownPromise.then(doInit)`; nulling that unconditionally
+    // discards a doInit() which has not run yet, so the next init() starts a second one.
+    //
+    // Not covered by a test: that assignment requires initPromise to be undefined while
+    // shutdownPromise is still live, and those two are cleared one statement apart — a window I
+    // could not reach deterministically. Kept because it is free and obviously correct; the
+    // clear-before-assign in doInit() is what actually prevents an orphaned interval, whatever
+    // path leads to a second doInit.
+    if (initPromise === initPromiseAtShutdown) {
+      initPromise = undefined
+      initDone = false
+    }
   }
   // altimate_change end
 }

@@ -398,8 +398,10 @@ function AutoMethod(props: AutoMethodProps) {
     await sdk.client.instance.dispose()
     await sync.bootstrap()
     if (disposed) return
-    // altimate_change start — mark setup complete (flips useReady → unlocks first-run chat/tips)
-    markSetupComplete()
+    // altimate_change start — setup is marked complete once a model is actually selected, not
+    // here. The branch below deliberately refuses to claim success when the gateway connects but
+    // offers nothing usable ("Connected, but no model is available yet"); marking completion up
+    // front contradicted that, and it drives onboarding_completed and the Part 2 scan gate.
     // The gateway sign-in already shows the auth URL + "Waiting for authorization…".
     // On success, confirm inline (green) and auto-close after a moment rather than
     // opening the model picker. Auto-select a model so the user can chat right away.
@@ -419,6 +421,9 @@ function AutoMethod(props: AutoMethodProps) {
         return
       }
       local.model.set({ providerID: props.providerID, modelID: model }, { recent: true })
+      // A model is chosen — this is the real end of setup (flips useReady → unlocks first-run
+      // chat/tips, and opens the Part 2 scan gate).
+      markSetupComplete()
       setConnected(true)
       closeTimer = setTimeout(() => {
         if (!disposed) dialog.clear()
@@ -427,6 +432,7 @@ function AutoMethod(props: AutoMethodProps) {
     }
     // altimate_change end
     toast.show({ message: `Connected to ${props.title}`, variant: "success" })
+    // No markSetupComplete() here: this opens the model picker, which marks it on selection.
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
   })
 

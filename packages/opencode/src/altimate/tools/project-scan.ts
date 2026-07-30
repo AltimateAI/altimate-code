@@ -945,18 +945,25 @@ export const ProjectScanTool = Tool.define("project_scan", {
     // otherwise be recorded as having none.
     //
     // degraded[] is a sorted list of short detection-failure keys — no paths, hosts, or messages.
-    void OnboardingTelemetry.emit({
-      type: "environment_scan_completed",
-      has_dbt: dbtProject.found,
-      has_warehouse: totalConnections > 0,
-      is_repo: git.isRepo,
-      connections_found: totalConnections,
-      degraded: degradedList,
-      // Explicit session: emit() otherwise falls back to the process-global telemetry context,
-      // which is set per prompt loop. Two concurrent sessions in `serve` or in the TUI worker
-      // overwrite each other's context, so a scan would be attributed to whichever session most
-      // recently started a turn.
-    }, ctx.sessionID)
+    // Only for onboarding runs. project_scan is also reachable via /discover and any
+    // model-initiated call; without this guard an event in the onboarding taxonomy fires for all
+    // of them, and a funnel query on scan_gate_shown → environment_scan_completed can exceed 100%.
+    //
+    // Explicit session id as well: emit() otherwise falls back to the process-global telemetry
+    // context, which is set per prompt loop, so two concurrent sessions overwrite each other's.
+    if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID)) {
+      void OnboardingTelemetry.emit(
+        {
+          type: "environment_scan_completed",
+          has_dbt: dbtProject.found,
+          has_warehouse: totalConnections > 0,
+          is_repo: git.isRepo,
+          connections_found: totalConnections,
+          degraded: degradedList,
+        },
+        ctx.sessionID,
+      )
+    }
     // altimate_change end
 
     // Build metadata

@@ -81,13 +81,17 @@ function isJobCompletion(tool: string, output: { metadata?: unknown }): boolean 
 export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Hooks> {
   return {
     "command.execute.before": async (input) => {
+      // Mark the session BEFORE flagging the submission: noteCommandSubmission only touches
+      // sessions already tracked (so ordinary slash commands cannot churn the capped map), and
+      // /onboard-connect is the command that creates the record in the first place.
+      if (input.command === ONBOARD_CONNECT) OnboardingTelemetry.markOnboardingSession(input.sessionID)
+
       // Any slash command means the next user message was not typed by the user — needed so
       // `first_prompt_sent` measures a real first prompt rather than the scan gate's hidden
       // `/onboard-connect` submission.
       OnboardingTelemetry.noteCommandSubmission(input.sessionID)
 
       if (input.command !== ONBOARD_CONNECT) return
-      OnboardingTelemetry.markOnboardingSession(input.sessionID)
 
       // `skip` renders the menu immediately, with no scan to wait for, so the variant is known
       // now. The `scan` branch cannot be resolved here — the menu follows the scan, and the

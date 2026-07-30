@@ -219,7 +219,11 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         // metadata inspects `suffix` before checking `success` — reverted
         // in v0.9.4 consensus review m6 to keep the shape typed.
         metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
-        output: `status: error\nreason: materialize_failed\n\n${message}`,
+        // Paths are masked in `output` but kept verbatim in `metadata.error`. `output` is what
+        // the model sees (session/message-v2.ts), so it lands in conversation context and is sent
+        // to the provider on every later turn — and rejectUnsafeHome messages embed HOME
+        // verbatim. metadata never reaches the model, so the full text stays available locally.
+        output: `status: error\nreason: materialize_failed\n\n${redactPaths(message)}`,
       }
     }
   },
@@ -243,6 +247,18 @@ export const SampleSetupTool = Tool.define("sample_setup", {
 //
 // Best-effort by construction: telemetry must never fail a sample setup, so any fs error
 // yields 0 rather than propagating.
+/**
+ * Replace absolute filesystem paths with a placeholder.
+ *
+ * Deliberately local rather than reusing Telemetry.maskString: importing the telemetry module
+ * here drags in Config/Account and hangs this tool's tests. This only needs to handle paths.
+ */
+function redactPaths(message: string): string {
+  return message
+    .replace(/(?:[A-Za-z]:)?[\\/](?:[\w.\-~ ]+[\\/])+[\w.\-~ ]*/g, "<path>")
+    .replace(/~[\\/][^\s'"]*/g, "<path>")
+}
+
 function countFilesWithExtension(dir: string, extension: string): number {
   let total = 0
   let entries: fs.Dirent[]

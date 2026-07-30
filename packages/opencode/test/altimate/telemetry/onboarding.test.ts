@@ -11,6 +11,7 @@ import { describe, expect, test, beforeEach, afterEach, spyOn, mock } from "bun:
 import { Telemetry } from "@/altimate/telemetry"
 import * as Onboarding from "@/altimate/telemetry/onboarding"
 import { OnboardingTelemetryPlugin } from "@/altimate/plugin/onboarding-telemetry"
+import type { OnboardingTelemetryEvent } from "@opencode-ai/tui/context/onboarding-telemetry"
 
 type Tracked = Telemetry.Event
 
@@ -268,28 +269,45 @@ describe("activation events", () => {
 // Slash-command suppression, which first_prompt_sent depends on
 // ---------------------------------------------------------------------------
 describe("command submission tracking", () => {
-  test("a command-submitted message is flagged, once", () => {
+  test("a command-submitted message in an onboarding session is flagged, once", () => {
+    Onboarding.markOnboardingSession("ses_a")
     Onboarding.noteCommandSubmission("ses_a")
     expect(Onboarding.consumeCommandSubmission("ses_a")).toBe(true)
     expect(Onboarding.consumeCommandSubmission("ses_a")).toBe(false)
   })
 
   test("a session that never ran a command is not flagged", () => {
+    Onboarding.markOnboardingSession("ses_never")
     expect(Onboarding.consumeCommandSubmission("ses_never")).toBe(false)
   })
 
   test("the flag does not leak between sessions", () => {
+    Onboarding.markOnboardingSession("ses_a")
+    Onboarding.markOnboardingSession("ses_b")
     Onboarding.noteCommandSubmission("ses_a")
     expect(Onboarding.consumeCommandSubmission("ses_b")).toBe(false)
     expect(Onboarding.consumeCommandSubmission("ses_a")).toBe(true)
   })
 
-  test("every slash command is flagged, not just /onboard-connect", async () => {
+  test("an untracked session is not created just by running a slash command", () => {
+    // The anti-churn property. command.execute.before fires for every slash command in every
+    // session; if that created a record, ordinary /discover and /model traffic in a long-lived
+    // `serve` process would evict genuine onboarding sessions from the capped map and silently
+    // drop those users' remaining activation events.
+    Onboarding.noteCommandSubmission("ses_unrelated")
+    expect(Onboarding.consumeCommandSubmission("ses_unrelated")).toBe(false)
+    expect(Onboarding.isOnboardingSession("ses_unrelated")).toBe(false)
+  })
+
+  test("/onboard-connect marks the session before flagging its own submission", async () => {
+    // Ordering matters: the command that creates the record must be flagged too, or the hidden
+    // scan-gate submission counts as the user's first typed prompt.
     const hooks = await OnboardingTelemetryPlugin({} as any)
     await hooks["command.execute.before"]!(
-      { command: "discover", sessionID: "ses_c", arguments: "" },
+      { command: "onboard-connect", sessionID: "ses_c", arguments: "skip" },
       { parts: [] } as any,
     )
+    expect(Onboarding.isOnboardingSession("ses_c")).toBe(true)
     expect(Onboarding.consumeCommandSubmission("ses_c")).toBe(true)
   })
 })
@@ -341,5 +359,28 @@ describe("launch correlation id", () => {
       else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       fetchMock.mockRestore()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cross-package event parity
+// ---------------------------------------------------------------------------
+//
+// packages/tui cannot import the Telemetry event union, so it declares its own mirror and the
+// host remaps `name` → `type` through an unchecked cast in cli/cmd/tui.ts. Without this, a rename
+// or an added property on either side compiles clean and ships malformed events.
+//
+// Compile-time only: tsgo runs over test files, so drift is a build failure. There is nothing to
+// assert at runtime — a type is not a value.
+type TuiEventAsEmitInput<E> = E extends { name: infer N } ? Omit<E, "name"> & { type: N } : never
+
+// Fails to compile if any TUI event lacks a matching Telemetry variant, or if their property
+// names or enum values diverge.
+const _tuiEventsMatchTelemetry: Onboarding.OnboardingEmitInput = null as unknown as TuiEventAsEmitInput<OnboardingTelemetryEvent>
+void _tuiEventsMatchTelemetry
+
+describe("cross-package event parity", () => {
+  test("is enforced by the type assertion above, not at runtime", () => {
+    expect(true).toBe(true)
   })
 })

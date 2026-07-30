@@ -19,6 +19,7 @@ import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
 // altimate_change start — onboarding telemetry: main-thread flush on the TUI exit path
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+import { AltimateApi } from "@/altimate/api/client"
 // altimate_change end
 
 declare global {
@@ -268,7 +269,12 @@ export const TuiThreadCommand = cmd({
       // flush() would otherwise block for REQUEST_TIMEOUT_MS (10s) on a blackholed network — a
       // visible hang between the user quitting and the shell prompt returning.
       try {
-        await OnboardingTelemetry.emitAbandonedIfIncomplete()
+        // Ask whether gateway credentials landed. The success events are emitted on the worker
+        // thread and this state is main-thread-owned, so without this a browser sign-in that
+        // completed just before the user quit is reported as an abandonment in the same launch
+        // that already reported instance_connected.
+        const connected = await AltimateApi.isConfigured().catch(() => false)
+        await OnboardingTelemetry.emitAbandonedIfIncomplete({ connected })
         await Telemetry.shutdown({ timeoutMs: 2000 })
       } catch {
         // Never let telemetry delay or break exit.
@@ -278,4 +284,3 @@ export const TuiThreadCommand = cmd({
     process.exit(0)
   },
 })
-// scratch

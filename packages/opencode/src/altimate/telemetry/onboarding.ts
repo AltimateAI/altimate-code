@@ -70,6 +70,9 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 
 type EmitInput = DistributiveOmit<OnboardingEventInput, "timestamp" | "session_id">
 
+/** Exported so the cross-package parity assertion in the tests can pin the TUI union to this. */
+export type OnboardingEmitInput = EmitInput
+
 // Module-global, per thread. Resets on every process launch, which is correct: a fresh launch
 // is a fresh onboarding attempt.
 let furthestStage: OnboardingStage | undefined
@@ -154,8 +157,18 @@ export function isCompleted() {
  * Call on the exit path, before the final flush. No-ops when the user never started (a
  * returning user with credentials), already completed, or when it has already fired.
  */
-export async function emitAbandonedIfIncomplete(): Promise<void> {
+export async function emitAbandonedIfIncomplete(opts?: { connected?: boolean }): Promise<void> {
   if (completed || abandonedEmitted || !furthestStage) return
+  // A gateway sign-in that succeeded is not an abandonment, even if the TUI never observed it.
+  // `gateway_auth_completed` and `instance_connected` are emitted on the WORKER thread, and this
+  // state lives on the main thread — so a user who finishes in the browser and quits before the
+  // TUI notices the new provider would otherwise be reported as abandoning at `gateway_auth`, in
+  // the same launch that already reported a successful connection. Two contradictory terminal
+  // states for one run, and gateway auth is the slowest step so it is the likeliest to hit this.
+  //
+  // The caller passes whether credentials now exist, which is the main thread's own view of the
+  // same fact and needs no cross-thread channel.
+  if (opts?.connected) return
   abandonedEmitted = true
   await emit({ type: "onboarding_abandoned", last_stage: furthestStage })
 }
@@ -220,9 +233,20 @@ function claim(sessionID: string, key: "menuShown" | "jobSelected" | "jobComplet
   return true
 }
 
-/** Record that the next user message in this session comes from a slash command. */
+/**
+ * Record that the next user message in this session comes from a slash command.
+ *
+ * Only touches sessions already tracked. `command.execute.before` fires for EVERY slash command
+ * in every session, so creating a record here made ordinary `/discover`, `/model` and so on churn
+ * the capped map and evict genuine onboarding sessions — after which `isOnboardingSession()`
+ * returns false and the rest of that user's activation events are silently dropped.
+ *
+ * An untracked session has no onboarding state to protect, so skipping it loses nothing:
+ * `first_prompt_sent` is gated on `isOnboardingSession` anyway.
+ */
 export function noteCommandSubmission(sessionID: string) {
-  record(sessionID).commandSubmission = true
+  const entry = sessions.get(sessionID)
+  if (entry) entry.commandSubmission = true
 }
 
 /** True (once) if this session's pending user message was command-submitted. */
