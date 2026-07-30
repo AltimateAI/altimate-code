@@ -2,7 +2,7 @@ import path from "node:path"
 import { mkdtempSync } from "node:fs"
 import os, { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
-import { expect, mock, beforeEach, spyOn } from "bun:test"
+import { expect, mock, beforeEach, afterEach, spyOn } from "bun:test"
 import { ListRootsRequestSchema, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
 import { Cause, Effect, Exit } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
@@ -255,6 +255,16 @@ beforeEach(() => {
   connectError = "Mock transport cannot connect"
   clientCreateCount = 0
   transportCloseCount = 0
+})
+
+// Restore all spies (including the `os.homedir` spy installed above) after
+// every test. Without this the spy persists past this file and pollutes any
+// downstream test in the same worker that calls `os.homedir()` — most
+// visibly the tilde/`$HOME`-expansion assertions in
+// `test/permission/next.test.ts`, which then see two different random
+// `mkdtempSync` paths within the same expect(). See issue #1042.
+afterEach(() => {
+  mock.restore()
 })
 
 // Import after mocks
