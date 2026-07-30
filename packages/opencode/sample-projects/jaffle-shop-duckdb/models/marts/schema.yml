@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: customers
+    description: One row per customer with total order count and revenue.
+    columns:
+      - name: customer_id
+        description: Primary key.
+        data_tests:
+          - unique
+          - not_null
+      - name: order_count
+        description: Number of orders placed by the customer (0 when none).
+        data_tests:
+          - not_null
+      - name: total_amount
+        description: Sum of all order amounts (0 when none).
+        data_tests:
+          - not_null
+
+  - name: orders
+    description: One row per order with a joined customer name.
+    columns:
+      - name: order_id
+        description: Primary key.
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: Foreign key to `stg_customers`.
+        data_tests:
+          - not_null

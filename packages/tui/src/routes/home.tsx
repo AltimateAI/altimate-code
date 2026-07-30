@@ -1,6 +1,5 @@
 import { Prompt, type PromptRef } from "../component/prompt"
 import { createEffect, createMemo, createSignal, onMount } from "solid-js"
-import { Logo } from "../component/logo"
 import { useSync } from "../context/sync"
 import { Toast } from "../ui/toast"
 import { useArgs } from "../context/args"
@@ -14,6 +13,12 @@ import { useTuiConfig } from "../config"
 import { HomeSessionDestinationProvider } from "./home/session-destination"
 // altimate_change start — upstream_fix: restore first-run home onboarding hint
 import { useTheme } from "../context/theme"
+// altimate_change end
+// altimate_change start — Part 1 onboarding: the boot box is now the readiness-aware
+// WelcomePanel (replaces the bare Logo default in the home_logo slot); superseded the
+// one-line "Get started: /connect ... /discover ..." hint below, which duplicated the
+// same guidance the panel's "Tips for getting started" section now covers.
+import { WelcomePanel } from "../component/welcome-panel"
 // altimate_change end
 
 let once = false
@@ -62,14 +67,6 @@ export function Home() {
     if (configured === "auto") return Math.max(75, Math.floor(dimensions().width * 0.7))
     return configured ?? 75
   })
-  // altimate_change start — upstream_fix: restore first-run home onboarding state
-  const connected = createMemo(() =>
-    sync.data.provider.some(
-      (item) => item.id !== "opencode" || Object.values(item.models).some((model) => model.cost?.input !== 0),
-    ),
-  )
-  const isFirstTimeUser = createMemo(() => sync.ready && sync.data.session.length === 0 && !connected())
-  // altimate_change end
   let sent = false
 
   onMount(() => {
@@ -105,22 +102,22 @@ export function Home() {
   return (
     <HomeSessionDestinationProvider>
       <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
-        <box flexGrow={1} minHeight={0} />
-        <box height={4} minHeight={0} flexShrink={1} />
-        <box flexShrink={0}>
+        {/* altimate_change start — boot box always shows on home (its "Tips for getting
+            started" section is readiness-aware, see WelcomePanel), replacing the plain
+            Logo default for the home_logo slot. */}
+        <box height={2} flexShrink={0} />
+        <box width="100%" flexShrink={0}>
           <pluginRuntime.Slot name="home_logo" mode="replace">
-            <Logo />
+            <WelcomePanel />
           </pluginRuntime.Slot>
         </box>
-        <box height={1} minHeight={0} flexShrink={1} />
+        <box flexGrow={1} minHeight={0} />
+        {/* altimate_change end */}
         <box width="100%" maxWidth={promptMaxWidth()} zIndex={1000} paddingTop={1} flexShrink={0}>
           <pluginRuntime.Slot name="home_prompt" mode="replace" ref={bind}>
             <Prompt ref={bind} right={<pluginRuntime.Slot name="home_prompt_right" />} placeholders={placeholder} />
           </pluginRuntime.Slot>
         </box>
-        {/* altimate_change start — upstream_fix: restore first-run home onboarding hint */}
-        <HomeFirstTimeOnboardingHint isFirstTime={isFirstTimeUser()} maxWidth={promptMaxWidth()} />
-        {/* altimate_change end */}
         <pluginRuntime.Slot name="home_bottom" />
         <box flexGrow={1} minHeight={0} />
         <Toast />

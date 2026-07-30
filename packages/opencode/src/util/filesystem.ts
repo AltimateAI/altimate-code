@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, writeFile } from "fs/promises"
-import { createWriteStream, existsSync, statSync } from "fs"
+import { createWriteStream, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "fs"
+import { randomBytes } from "crypto"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
@@ -270,6 +271,29 @@ export namespace Filesystem {
       }
     }
   }
+
+  // altimate_change start — fork util (AI-7520 onboarding/materialize): atomic JSON write
+  /**
+   * Atomic JSON write via tmp-file + rename. Serializes `value` with 2-space
+   * indent + trailing newline, writes to `<targetPath>.tmp-<random>`, then
+   * renames onto `targetPath`. On POSIX the rename is atomic — a concurrent
+   * reader sees either the old or new file, never a partial write.
+   *
+   * Extracted from an earlier local dance in marker.ts. Same shape is used
+   * in `packages/tui/src/util/persistence.ts`, `packages/opencode/src/memory/store.ts`,
+   * and `packages/opencode/src/altimate/observability/tracing.ts` — those
+   * sites can migrate to this helper over time.
+   *
+   * @param targetPath Destination path. Parent directory is created if missing.
+   * @param value Value to serialize as JSON.
+   */
+  export function writeJsonAtomic(targetPath: string, value: unknown): void {
+    const tmpPath = `${targetPath}.tmp-${randomBytes(6).toString("hex")}`
+    mkdirSync(dirname(targetPath), { recursive: true })
+    writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n")
+    renameSync(tmpPath, targetPath)
+  }
+  // altimate_change end
 
   export async function findUp(target: string, start: string, stop?: string) {
     let current = start

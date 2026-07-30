@@ -16,7 +16,6 @@ import { fileURLToPath } from "url"
 import { useLocal } from "../../context/local"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { tint, useTheme } from "../../context/theme"
-import { EmptyBorder, SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { useClipboard } from "../../context/clipboard"
 import { Spinner } from "../spinner"
@@ -46,7 +45,10 @@ import { errorMessage } from "../../util/error"
 import { formatDuration } from "../../util/format"
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
-import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+import { DialogProvider as DialogProviderConnect, WARNLIST } from "../dialog-provider"
+// altimate_change — first-run submit gate: open the curated welcome picker instead
+// of erroring when no model is ready yet (see altimate-onboarding.tsx).
+import { DialogModelWelcome, useReady } from "../altimate-onboarding"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
@@ -255,6 +257,12 @@ export function Prompt(props: PromptProps) {
   const [cursorVersion, setCursorVersion] = createSignal(0)
   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
   const hasRightContent = createMemo(() => Boolean(props.right))
+  // altimate_change start — readiness gate: guide (don't block) when no provider is set
+  // up; and flag known-bad tool-callers with a persistent "⚠ unreliable model" chip in
+  // the prompt meta row (same WARNLIST the model picker warns with).
+  const ready = useReady()
+  const unreliableModel = createMemo(() => Boolean(WARNLIST[local.model.parsed().model]))
+  // altimate_change end
 
   function promptModelWarning() {
     toast.show({
@@ -1045,6 +1053,19 @@ export function Prompt(props: PromptProps) {
       void exit()
       return true
     }
+    // altimate_change start — first-run gate without dead chat / error copy: a normal
+    // message with no provider ready opens the welcome picker (the message is
+    // discarded) with a friendly line, rather than erroring.
+    if (!ready()) {
+      dialog.replace(() => (
+        <DialogModelWelcome intro="First, let's connect your AI model — then I'll get right on that." />
+      ))
+      input.clear()
+      input.extmarks.clear()
+      setStore("prompt", { input: "", parts: [] })
+      return false
+    }
+    // altimate_change end
     const selectedModel = local.model.current()
     if (!selectedModel) {
       void promptModelWarning()
@@ -1449,26 +1470,26 @@ export function Prompt(props: PromptProps) {
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
-        <box
-          width="100%"
-          border={["left"]}
-          borderColor={borderHighlight()}
-          customBorderChars={{
-            ...SplitBorder.customBorderChars,
-            bottomLeft: "╹",
-          }}
-        >
+        {/* altimate_change start — Claude-Code-style input bar: thin rule above and
+            below, "›" prompt char, no filled background; agent/model hints move to a
+            line under the bottom rule */}
+        <box width="100%" border={["top"]} borderColor={borderHighlight()}>
           <box
-            paddingLeft={2}
+            paddingLeft={1}
             paddingRight={2}
             paddingTop={1}
             flexShrink={0}
-            backgroundColor={theme.backgroundElement}
             flexGrow={1}
             width="100%"
+            flexDirection="row"
+            gap={1}
           >
+            <text fg={borderHighlight()} flexShrink={0}>
+              ›
+            </text>
             <textarea
               width="100%"
+              flexGrow={1}
               placeholder={placeholderText()}
               placeholderColor={theme.textMuted}
               textColor={leader() ? theme.textMuted : theme.text}
@@ -1536,76 +1557,54 @@ export function Prompt(props: PromptProps) {
                 }, 0)
               }}
               onMouseDown={(r: MouseEvent) => r.target?.focus()}
-              focusedBackgroundColor={theme.backgroundElement}
+              focusedBackgroundColor={theme.background}
               cursorColor={props.disabled ? theme.backgroundElement : theme.text}
               syntaxStyle={syntax()}
             />
-            <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
-              <box flexDirection="row" gap={1}>
-                <Show when={local.agent.current()} fallback={<box height={1} />}>
-                  {(agent) => (
-                    <>
-                      <text fg={fadeColor(highlight(), agentMetaAlpha())}>
-                        {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
-                      </text>
-                      <Show when={store.mode === "normal"}>
-                        <box flexDirection="row" gap={1}>
-                          <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
-                          <text
-                            flexShrink={0}
-                            fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}
-                          >
-                            {local.model.parsed().model}
-                          </text>
-                          <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{currentProviderLabel()}</text>
-                          <Show when={showVariant()}>
-                            <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
-                            <text>
-                              <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
-                                {local.model.variant.current()}
-                              </span>
-                            </text>
-                          </Show>
-                        </box>
-                      </Show>
-                    </>
-                  )}
-                </Show>
-              </box>
-              <Show when={hasRightContent()}>
-                <box flexDirection="row" gap={1} alignItems="center">
-                  {props.right}
-                </box>
-              </Show>
-            </box>
           </box>
         </box>
-        <box
-          height={1}
-          border={["left"]}
-          borderColor={borderHighlight()}
-          customBorderChars={{
-            ...EmptyBorder,
-            vertical: theme.backgroundElement.a !== 0 ? "╹" : " ",
-          }}
-        >
-          <box
-            height={1}
-            border={["bottom"]}
-            borderColor={theme.backgroundElement}
-            customBorderChars={
-              theme.backgroundElement.a !== 0
-                ? {
-                    ...EmptyBorder,
-                    horizontal: "▀",
-                  }
-                : {
-                    ...EmptyBorder,
-                    horizontal: " ",
-                  }
-            }
-          />
+        <box height={1} border={["top"]} borderColor={theme.border} />
+        <box flexDirection="row" flexShrink={0} paddingLeft={1} gap={1} justifyContent="space-between">
+          <box flexDirection="row" gap={1}>
+            <Show when={local.agent.current()} fallback={<box height={1} />}>
+              {(agent) => (
+                <>
+                  <text fg={fadeColor(highlight(), agentMetaAlpha())}>
+                    {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
+                  </text>
+                  <Show when={store.mode === "normal"}>
+                    <box flexDirection="row" gap={1}>
+                      <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
+                      <text flexShrink={0} fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}>
+                        {local.model.parsed().model}
+                      </text>
+                      <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{currentProviderLabel()}</text>
+                      <Show when={showVariant()}>
+                        <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
+                        <text>
+                          <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
+                            {local.model.variant.current()}
+                          </span>
+                        </text>
+                      </Show>
+                      {/* altimate_change — persistent chip for models on WARNLIST
+                          (known-bad tool-callers) */}
+                      <Show when={unreliableModel()}>
+                        <text fg={fadeColor(theme.warning, modelMetaAlpha())}>⚠ unreliable model</text>
+                      </Show>
+                    </box>
+                  </Show>
+                </>
+              )}
+            </Show>
+          </box>
+          <Show when={hasRightContent()}>
+            <box flexDirection="row" gap={1} alignItems="center">
+              {props.right}
+            </box>
+          </Show>
         </box>
+        {/* altimate_change end */}
         <box width="100%" flexDirection="row" justifyContent="space-between">
           <Switch>
             <Match when={status().type !== "idle"}>

@@ -1,0 +1,14 @@
+# DuckDB profile — everything runs locally against a single file at
+# `target/jaffle.duckdb` (created on first `dbt build`). No cloud credentials.
+# `path:` is unqualified, so dbt-duckdb resolves it against the PROCESS
+# working directory at build time — NOT the project directory. Run
+# `dbt build` from the materialized sample dir (`cd <sample-path>`) and
+# the database lands at `<sample-path>/target/jaffle.duckdb`.
+# Run it from anywhere else and dbt writes to `$PWD/target/jaffle.duckdb`.
+jaffle_shop:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "target/jaffle.duckdb"
+      threads: 1

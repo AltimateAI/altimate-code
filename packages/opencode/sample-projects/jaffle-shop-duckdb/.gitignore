@@ -1,0 +1,12 @@
+# Build/run artifacts that must NOT be committed. `target/*` (not `target/`)
+# so the re-include below actually works — git ignores the CONTENTS of target/
+# individually, then lets us un-ignore the one pre-compiled artifact we ship.
+# Using `target/` here would exclude the directory as a whole and make the
+# `!target/manifest.json` line inert (git will not descend into an ignored
+# directory to re-include children).
+target/*
+!target/manifest.json
+
+dbt_packages/
+logs/
+.user.yml

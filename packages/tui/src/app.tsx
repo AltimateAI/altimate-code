@@ -28,7 +28,13 @@ import {
 } from "solid-js"
 import { TuiPathsProvider, TuiStartupProvider, TuiTerminalEnvironmentProvider, useTuiStartup } from "./context/runtime"
 import { DialogProvider, useDialog } from "./ui/dialog"
-import { DialogProvider as DialogProviderList } from "./component/dialog-provider"
+// altimate_change start — /auth (gateway sign-in) + /connect (curated welcome picker)
+// + /logout commands
+import { DialogAltimateAuth } from "./component/dialog-provider"
+import { DialogModelWelcome, useReady, resetSetupComplete } from "./component/altimate-onboarding"
+// altimate_change end
+// altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
+import { DialogScanGate } from "./component/dialog-scan-gate"
 import { ErrorComponent } from "./component/error-component"
 import { PluginRouteMissing } from "./component/plugin-route-missing"
 import { ProjectProvider, useProject } from "./context/project"
@@ -535,18 +541,82 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     })
   })
 
-  createEffect(
-    on(
-      () => sync.status === "complete" && sync.data.provider.length === 0,
-      (isEmpty, wasEmpty) => {
-        // only trigger when we transition into an empty-provider state
-        if (!isEmpty || wasEmpty) return
-        dialog.replace(() => <DialogProviderList />)
-      },
-    ),
-  )
-
+  // altimate_change start — connection + onboarding readiness. `connected` tracks a
+  // paid/BYOK provider; `onboardingReady` also counts a completed first-run setup pick
+  // (e.g. Big Pickle) and gates first-run chat/tips (see component/altimate-onboarding.tsx).
+  // Distinct from the plugin-host `ready` signal above (line ~408), which tracks TUI
+  // plugin startup, not onboarding state.
   const connected = useConnected()
+  const onboardingReady = useReady()
+  // altimate_change end
+
+  // altimate_change start — AI-7774: first-run onboarding gate. On a fresh launch
+  // with no usable model, open the curated provider picker as the entry point (chat
+  // input stays visible; submit is gated in the prompt until setup completes). Fire
+  // EXACTLY once, and only after startup has settled (`ready()` = plugin host +
+  // sync bootstrap done), so a returning user with valid credentials never sees it.
+  let firstRunPickerHandled = false
+  // Armed only when THIS launch starts genuinely un-onboarded (so the Part 2 scan
+  // gate below fires after the user completes first-run setup — not for a returning
+  // user whose onboardingReady merely flips false→true once sync loads providers).
+  let armScanGate = false
+  createEffect(() => {
+    if (firstRunPickerHandled) return
+    // Decide only once BOTH the plugin host has started AND sync has finished
+    // loading providers. `ready()` alone is plugin-host startup, which can settle
+    // before sync populates `sync.data.provider` — deciding then would transiently
+    // see a returning (connected) user as un-onboarded and re-show the picker +
+    // scan gate (the AI-7774 regression). `sync.status` is the provider-load signal
+    // (same one used for continue/fork above).
+    if (!ready() || sync.status !== "complete") return
+    firstRunPickerHandled = true
+    if (onboardingReady()) return // already set up — no gate
+    armScanGate = true
+    dialog.replace(() => <DialogModelWelcome />)
+  })
+  // altimate_change end
+
+  // altimate_change start — Part 2 scan gate: fire EXACTLY once, after the user
+  // completes first-run Part 1. Gated on `armScanGate` (set above only when this
+  // launch started un-onboarded) so a RETURNING user — whose onboardingReady flips
+  // false→true simply because sync finished loading providers — never sees it.
+  // `prev === false` still requires a genuine transition, and a later /model change
+  // (ready stays true) never re-triggers it. We do NOT auto-scan — the gate asks.
+  let scanGateShown = false
+  createEffect(
+    on(onboardingReady, (isReady, prev) => {
+      if (scanGateShown || !armScanGate) return
+      if (isReady && prev === false) {
+        scanGateShown = true
+        dialog.replace(() => (
+          <DialogScanGate
+            onChoose={(arg) => {
+              // Yes → /onboard-connect scan; No → /onboard-connect skip.
+              // Both branches now have a real follow-up: `scan` runs
+              // project_scan and branches into the discovery UX; `skip`
+              // asks what the user is working on and offers the activation
+              // menu (sample dbt, downstream impact, SQL PR, or free chat).
+              // Template lives at packages/opencode/src/command/template/onboard-connect.txt.
+              const ref = promptRef.current
+              if (!ref) {
+                // The prompt should be mounted by the time the gate resolves, but
+                // if it isn't, don't silently drop the user's choice — tell them
+                // how to continue instead of a dead keypress.
+                toast.show({
+                  message: `Run /onboard-connect ${arg} to continue.`,
+                  variant: "error",
+                })
+                return
+              }
+              ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
+              ref.submit()
+            }}
+          />
+        ))
+      }
+    }),
+  )
+  // altimate_change end
   const currentWorktreeWorkspace = createMemo(() => {
     const workspaceID = project.workspace.current()
     if (!workspaceID) return
@@ -733,16 +803,46 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           local.agent.move(-1)
         },
       },
+      // altimate_change start — /connect opens the curated welcome picker (Gateway + top
+      // BYOK providers + Big Pickle) instead of the full provider list; "Search all
+      // providers…" still hands off to the full DialogModel catalog.
       {
         name: "provider.connect",
-        title: "Connect provider",
+        title: "Connect to your AI model provider",
         suggested: !connected(),
         slashName: "connect",
         run: () => {
-          dialog.replace(() => <DialogProviderList />)
+          dialog.replace(() => <DialogModelWelcome />)
         },
         category: "Provider",
       },
+      // altimate_change end
+      // altimate_change start — /auth: sign in to the Altimate LLM Gateway directly;
+      // /logout: clear the stored gateway credential and disconnect.
+      {
+        name: "altimate.auth",
+        title: "Sign in to Altimate LLM Gateway",
+        suggested: !connected(),
+        slashName: "auth",
+        run: () => {
+          dialog.replace(() => <DialogAltimateAuth />)
+        },
+        category: "Provider",
+      },
+      {
+        name: "altimate.logout",
+        title: "Sign out of Altimate LLM Gateway",
+        slashName: "logout",
+        run: () => {
+          // altimate_change — the credential clear + instance dispose + toast happen
+          // opencode-side (AltimateApi is unreachable from packages/tui); see
+          // packages/opencode/src/plugin/tui/altimate/provider-credentials.tsx.
+          keymap.dispatchCommand("altimate.provider.logout")
+          resetSetupComplete()
+        },
+        category: "Provider",
+      },
+      // altimate_change end
       ...(sync.data.console_state.switchableOrgCount > 1
         ? [
             {
@@ -1014,6 +1114,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     const version = evt.properties.version
     // altimate_change start — upstream_fix: persist update availability for footer indicator
     kv.set(UPGRADE_KV_KEY, version)
+    // altimate_change end
+    // altimate_change start — don't cover the first-run welcome panel with the update
+    // confirm dialog; the footer upgrade indicator still surfaces it. Prompt once ready.
+    if (!onboardingReady()) return
     // altimate_change end
 
     const skipped = kv.get("skipped_version")

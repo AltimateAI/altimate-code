@@ -41,3 +41,7 @@ tsconfig.tsbuildinfo
 **/.github/meta/pr-body-*.md
 .bridge-merge-report.md
 /data/
+
+# Rendered VHS demos — regenerable from .tape files, kept out of git
+docs/media/*.gif
+docs/reviews/AI-7520-code-pr1001-review-threads.md
