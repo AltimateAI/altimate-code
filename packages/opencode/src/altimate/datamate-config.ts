@@ -56,12 +56,16 @@ export async function readWiredDatamates(projectRootDir: string): Promise<WiredD
   for (const configPath of configPaths) {
     for (const name of await listMcpInConfig(configPath)) {
       if (name !== DATAMATE_KEY && !name.startsWith("datamate-")) continue
+      const entry = await readMcpEntryFromDisk(name, configPath)
+      // A disabled entry is not wired — a stale `datamate` key with `enabled: false` must not
+      // flip the dialog into gateway mode or claim an active datamate.
+      if (entry && typeof entry === "object" && (entry as { enabled?: unknown }).enabled === false) continue
       if (!serverNames.includes(name)) serverNames.push(name)
       if (name === DATAMATE_KEY) {
         gateway = true
         continue
       }
-      const id = datamateIdFromEntry(await readMcpEntryFromDisk(name, configPath))
+      const id = datamateIdFromEntry(entry)
       if (id) ids.add(id)
     }
   }
