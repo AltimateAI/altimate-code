@@ -82,6 +82,10 @@ export const EngineVersions = z.object({
   reviewer: z.string().default("dbt-pr-review/1"),
   core: z.string().optional(),
   model: z.string().optional(),
+  /** The altimate-code CLI release that generated this verdict — lets an
+   *  auditor reconstruct which policy version applied months later, when
+   *  the verdict envelope has outlived the running binary. */
+  cliVersion: z.string().optional(),
 })
 export type EngineVersions = z.infer<typeof EngineVersions>
 
@@ -92,6 +96,13 @@ export const VerdictEnvelope = z.object({
   idealVerdict: Verdict,
   mode: ReviewMode,
   tier: RiskTier,
+  /** G1 — reasons the classifier assigned this tier (only when --explain-tier). */
+  tierReasons: z.array(z.string()).optional(),
+  /** G2 — true when --force-tier bypassed the classifier. Included in signature so
+   *  a tampered envelope claiming natural tier can't fake a forced run. */
+  tierForced: z.boolean().optional(),
+  /** The classifier's original tier before --force-tier overrode it (G2). */
+  tierClassified: RiskTier.optional(),
   findings: z.array(Finding),
   summary: z.object({
     critical: z.number().int().nonnegative(),
@@ -103,6 +114,12 @@ export const VerdictEnvelope = z.object({
   engine: EngineVersions,
   /** Hash of the dbt manifest the verdict was computed against, when present. */
   manifestHash: z.string().optional(),
+  /** True when a change-affecting source file was modified after the manifest
+   *  was written (checked via mtime; see run.ts::detectStaleManifest). Durably
+   *  records in the signed envelope that the verdict may have been computed
+   *  against out-of-date metadata — a stderr warning alone is easy for CI to
+   *  swallow. */
+  staleManifest: z.boolean().optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -115,6 +132,32 @@ export const VerdictEnvelope = z.object({
     .optional(),
   /** HMAC-SHA256 over the canonical body (added by signEnvelope). */
   signature: z.string().optional(),
+}).superRefine((env, ctx) => {
+  // G2 audit invariant — enforced at the envelope boundary so a hand-built
+  // envelope (bypassing runReview) can't sign inconsistent forced-tier
+  // metadata. When --force-tier is used, BOTH tierForced=true AND
+  // tierClassified must be present (per PR #1027 consensus MINOR #2).
+  const hasForced = env.tierForced === true
+  const hasClassified = env.tierClassified !== undefined
+  if (hasForced !== hasClassified) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "tierForced and tierClassified must both be present or both absent: " +
+        `tierForced=${env.tierForced}, tierClassified=${env.tierClassified ?? "undefined"}`,
+      path: ["tierForced"],
+    })
+  }
+  // tierForced: false is not a legitimate state — the flag records
+  // "was --force-tier used?" as a positive marker; false is indistinguishable
+  // from a natural (unforced) run and only adds noise to the canonical body.
+  if (env.tierForced === false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "tierForced must be true or undefined, not false",
+      path: ["tierForced"],
+    })
+  }
 })
 export type VerdictEnvelope = z.infer<typeof VerdictEnvelope>
 
@@ -127,6 +170,14 @@ export interface BuildEnvelopeInput {
   manifestHash?: string
   generatedAt?: string
   degraded?: boolean
+  /** G1 — classifier reasons for the tier (only surfaced when explainTier=true). */
+  tierReasons?: string[]
+  /** G2 — set when --force-tier was applied. */
+  tierForced?: boolean
+  /** G2 — classifier's original tier before the force override. */
+  tierClassified?: RiskTier
+  /** True when mtime signals the manifest predates a change-affecting file. */
+  staleManifest?: boolean
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -147,10 +198,14 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     idealVerdict: ideal,
     mode: input.mode,
     tier: input.tier,
+    tierReasons: input.tierReasons,
+    tierForced: input.tierForced,
+    tierClassified: input.tierClassified,
     findings: input.findings,
     summary: summarize(input.findings, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
+    staleManifest: input.staleManifest ? true : undefined,
     generatedAt: input.generatedAt,
   })
 }

@@ -5,6 +5,7 @@ import {
   DEFAULT_RUBRIC,
   type ChangedFile,
 } from "../../src/altimate/review"
+import { dedupe } from "../../src/altimate/review/finding"
 
 // Build a modified-model ChangedFile from a new-SQL body + a synthetic diff
 // where the given lines are "added" (prefixed with +).
@@ -156,6 +157,1380 @@ describe("dbt-patterns detectors", () => {
       DEFAULT_RUBRIC,
     )
     expect(f.length).toBe(0)
+  })
+
+  // ------------------------------------------------------------------------
+  // Post-R18 review follow-ups: structural YAML path + sibling-column edge case
+  // + model-level tests + fallback shape. The rewritten detector prefers full
+  // old/new file content; these tests validate both paths.
+  // ------------------------------------------------------------------------
+
+  test("schema.yml (structural): unique removed from one column while sibling keeps it → 1 finding on the affected column", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // 2 removals on customers.customer_id (unique + not_null), 0 on orders/email
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+    // At least one finding names customers.customer_id specifically
+    expect(f.some((x) => (x.title || "").includes("customers.customer_id"))).toBe(true)
+    // No finding attributed to orders.order_id (sibling still has `unique`)
+    expect(f.some((x) => (x.title || "").includes("orders.order_id"))).toBe(false)
+  })
+
+  test("schema.yml (structural): model-level unique test removed → 1 finding with model-level attribution", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    tests:
+      - unique
+    columns:
+      - name: customer_id
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect(f[0].category).toBe("test_coverage")
+    expect(f[0].severity).toBe("warning")
+    expect((f[0].title || "").includes("model-level")).toBe(true)
+    // Attribution flag in evidence lets downstream see it wasn't column-scoped
+    const evResult = (f[0].evidence?.result || {}) as Record<string, unknown>
+    expect(evResult.attribution).toBe("model-level")
+  })
+
+  test("schema.yml (structural): dropping BOTH of two relationships on one column emits TWO findings (PR #1027 consensus MINOR #4)", () => {
+    // Regression: with `(entity, column, test)` keying alone, two
+    // `relationships` tests on the same column collapsed to a single set
+    // entry — dropping both produced ONE finding, and dropping either one
+    // in isolation produced ZERO (because the surviving one still matched
+    // the collapsed key). The extractor now discriminates by (to, field)
+    // so distinct relationships on one column stay distinct.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+          - relationships:
+              to: ref('legacy_customers')
+              field: id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // Both relationships removals surface separately.
+    expect(f.length).toBe(2)
+    // Distinct fingerprint ids so the global dedupe keeps them.
+    expect(new Set(f.map((x) => x.id)).size).toBe(2)
+    // Display copy stays clean — no raw discriminator control chars leak.
+    for (const finding of f) {
+      expect(finding.title).toContain("relationships")
+      expect(finding.title).not.toContain("\x01")
+      expect(finding.title).not.toContain("\x02")
+      expect(finding.body).not.toContain("\x01")
+      expect(finding.body).not.toContain("\x02")
+    }
+  })
+
+  test("schema.yml (structural): relationships discriminator survives colons in `to`/`field` args (codex round-5 minor)", () => {
+    // Codex flagged that a `:`-joined discriminator would collide when
+    // either arg contains `:` (e.g. `to='a:b', field='c'` vs `to='a',
+    // field='b:c'`). Discriminator now retains the internal `\x02`
+    // separator inside ruleKey (hashed, not displayed) so distinct
+    // (to, field) tuples never share a fingerprint.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: "ref('a:b')"
+              field: c
+          - relationships:
+              to: ref('a')
+              field: "b:c"
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    // Two distinct removals, distinct fingerprints (would collide on a
+    // colon-joined tag).
+    expect(f.length).toBe(2)
+    expect(new Set(f.map((x) => x.id)).size).toBe(2)
+    // Display copy still stripped of raw control chars.
+    for (const finding of f) {
+      expect(finding.title).not.toContain("\x01")
+      expect(finding.body).not.toContain("\x02")
+    }
+  })
+
+  test("schema.yml (structural): dropping ONE of TWO relationships on one column surfaces (PR #1027 consensus MINOR #4 companion)", () => {
+    // Companion regression: with pre-fix keying, dropping one relationship
+    // while keeping the other left the collapsed key still in newSet, so
+    // no removal was reported. Now the (to, field) discriminator makes the
+    // dropped one distinct — a finding surfaces.
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+          - relationships:
+              to: ref('legacy_customers')
+              field: id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect(f[0].title).toContain("relationships")
+    expect(f[0].title).not.toContain("\x01")
+    expect(f[0].body).not.toContain("\x01")
+  })
+
+  test("schema.yml (structural): block-form relationships removal is detected", () => {
+    const oldContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+`
+    const newContent = `version: 2
+models:
+  - name: orders
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(1)
+    expect((f[0].title || "").includes("relationships")).toBe(true)
+  })
+
+  test("schema.yml (structural): data_tests (dbt 1.8+ alias) is recognized", () => {
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        data_tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+  })
+
+  test("schema.yml (structural): source column test removal is detected", () => {
+    const oldContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: users
+        columns:
+          - name: id
+            tests: [unique, not_null]
+`
+    const newContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: users
+        columns:
+          - name: id
+            tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/sources.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    // Source table gets qualified as `source.table` in the model field
+    expect(f.some((x) => (x.title || "").includes("raw.users.id"))).toBe(true)
+  })
+
+  test("schema.yml (structural): added file (status=added, no oldContent) surfaces no removal findings", () => {
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.length).toBe(0)
+  })
+
+  test("schema.yml (structural): renamed file with removed test still surfaces finding", () => {
+    // Regression guard: earlier code only fetched oldContent when
+    // status === "modified", so a rename that also dropped a guardrail test
+    // silently bypassed the detector.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "renamed",
+        oldPath: "models/_models.yml",
+        diff: undefined,
+      },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml (structural): modified file with oldContent=undefined falls back to diff detection", () => {
+    // When the content resolver couldn't read the old side (e.g. transient
+    // git failure) on a MODIFIED file, we must NOT treat the situation as
+    // "added file, nothing removed" — the diff still contains real removed
+    // lines. Fall back to line-based detection instead of silently dropping.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent: "version: 2\nmodels: []\n" },
+    )
+    expect(has(f, "test_coverage")).toBe(true)
+  })
+
+  test("schema.yml (fallback): diff-only path still surfaces removal (existing test's shape)", () => {
+    // Exercises the fallback line-based detection when the orchestrator can't
+    // supply file content (e.g. offline CI diffs).
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    // At least one test_coverage finding surfaces so a customer isn't blind to
+    // removed guardrails just because the content resolver wasn't wired.
+    expect(has(f, "test_coverage")).toBe(true)
+  })
+
+  test("schema.yml (fallback): distinct removals of same test type on different columns each surface", () => {
+    // Regression guard for the earlier dedup bug: (model="", column="", test)
+    // key reduced to just `test` and silently collapsed distinct removals of
+    // the same test type on different columns. The fallback path now emits
+    // one finding per removed test-line.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        // Two `- unique` removed lines representing two different columns
+        // losing the `unique` test in the same PR.
+        diff: "-          - unique\n-          - not_null\n-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    // 4 removed test-lines → 4 findings (fallback preserves per-line detail).
+    expect(f.length).toBe(4)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml (fallback): distinct removals survive the global fingerprint dedupe", () => {
+    // Integration-shape guard: the detector-level test above returns 4
+    // findings, but `runReview` runs a global `dedupe(findings)` step that
+    // fingerprints by (category, file, model, column, ruleKey). If ruleKey
+    // only varies by test-name for the fallback path, two `- unique`
+    // removals share a fingerprint and get merged post-detector. This test
+    // pipes the detector's output through `dedupe` to prove distinct
+    // removals actually reach the user.
+    const f = detectSchemaYmlPatterns(
+      {
+        path: "models/marts/_models.yml",
+        status: "modified",
+        diff: "-          - unique\n-          - not_null\n-          - unique\n-          - not_null",
+      },
+      DEFAULT_RUBRIC,
+    )
+    const deduped = dedupe(f)
+    expect(deduped.length).toBe(4)
+    // All 4 must be test_coverage findings; `unique` removals are `warning`,
+    // and fallback `not_null` (no column attribution) is `suggestion` because
+    // we can't tell if it was on an id/key column.
+    expect(deduped.every((x) => x.category === "test_coverage")).toBe(true)
+    // The 4 fingerprints must be distinct (was the exact regression: without
+    // an occurrence-index discriminator in ruleKey, the two `- unique` and
+    // two `- not_null` removals collapse to 2 findings after dedupe).
+    expect(new Set(deduped.map((x) => x.id)).size).toBe(4)
+    // 2 `- unique` (warning) + 2 `- not_null` (suggestion) — the exact split.
+    expect(deduped.filter((x) => x.severity === "warning").length).toBe(2)
+    expect(deduped.filter((x) => x.severity === "suggestion").length).toBe(2)
+  })
+
+  test("schema.yml (structural): distinct column removals also survive global dedupe", () => {
+    // Structural attribution provides (model.column.test) uniqueness natively,
+    // but the guard is worth codifying so future rule-key changes don't
+    // silently regress into the fingerprint-collision failure mode.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique]
+      - name: email
+        tests: [unique]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+      - name: email
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    const deduped = dedupe(f)
+    expect(deduped.length).toBe(2)
+    expect(new Set(deduped.map((x) => x.id)).size).toBe(2)
+  })
+
+  test("snapshot yml property file (structural): removed test surfaces finding", () => {
+    // Regression: snapshot YAML property files were previously classified as
+    // `snapshot` kind (blocking the `schema_yml` gate in the orchestrator).
+    // Now `.yml` files under snapshots/ classify as `schema_yml` while `.sql`
+    // snapshots stay `snapshot` (tier-forcing catalog rules unchanged).
+    const oldContent = `version: 2
+snapshots:
+  - name: orders_snapshot
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+`
+    const newContent = `version: 2
+snapshots:
+  - name: orders_snapshot
+    columns:
+      - name: order_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "snapshots/orders_snapshot.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("schema.yml summary: multi-model removals emit ONE aggregate summary line", () => {
+    // Regression guard: the aggregate "This PR removes N tests total on
+    // model(s) X, Y" summary was previously appended once per model, so a
+    // diff touching two models produced two copies of the same summary in
+    // separate findings. Now emitted once per FILE on the first finding.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique]
+`
+    const newContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: []
+  - name: orders
+    columns:
+      - name: order_id
+        tests: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/schema.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    expect(f.length).toBe(2)
+    // Only ONE finding body should contain the aggregate "N data tests"
+    // summary line; the other should be plain. Wording is per-schema-file
+    // scoped (PR #1027 consensus MINOR #3): "This schema file drops N data
+    // tests" so reviewers don't misread it as a PR-wide total on multi-file
+    // diffs.
+    const summaryCount = f.filter((x) => (x.body || "").includes("This schema file drops")).length
+    expect(summaryCount).toBe(1)
+    const withSummary = f.find((x) => (x.body || "").includes("This schema file drops"))!
+    // Explicitly reject the old ambiguous PR-wide wording.
+    expect(withSummary.body).not.toContain("This PR removes")
+    expect(withSummary.body).not.toContain("in total")
+    // And the mentioned model list should include BOTH models it touched.
+    expect(withSummary.body).toContain("`customers`")
+    expect(withSummary.body).toContain("`orders`")
+  })
+
+  test("deleted schema.yml: every prior test surfaces as a removal finding (cubic-review P2)", () => {
+    // Regression: deleting a whole schema.yml removes every test declared in
+    // it — arguably a bigger removal than dropping a single test. Previously
+    // the detector early-returned `[]` for `status === "deleted"`, so the
+    // deletion went unnoticed. Now the detector diffs the old document against
+    // an empty new document.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: email
+        tests: [not_null]
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [unique]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      // Only oldContent is available for a deleted file; newContent is undefined
+      // because git-show at HEAD would fail.
+      { oldContent, newContent: undefined },
+    )
+    // 4 removals: customers.customer_id.unique, customers.customer_id.not_null,
+    // customers.email.not_null, orders.order_id.unique
+    expect(f.length).toBe(4)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+    // Structured attribution surfaces on the top-level Finding, not just in
+    // evidence.result (cubic-review P3).
+    const byModel = f.filter((x) => x.model === "customers")
+    expect(byModel.length).toBe(3)
+    const byColumn = f.filter((x) => x.column === "email")
+    expect(byColumn.length).toBe(1)
+  })
+
+  test("deleted schema.yml without oldContent: no findings (safe degrade)", () => {
+    // Without the old side, we can't know what tests to flag as removed.
+    // The detector should degrade to `[]` rather than fabricating findings.
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent: undefined },
+    )
+    expect(f.length).toBe(0)
+  })
+
+  test("deleted schema.yml with unparsable oldContent + deletion diff → fallback surfaces removals", () => {
+    // Structural path can't commit (old YAML fails to parse), so the diff-only
+    // fallback runs. Confirms: unparsable-old → fallback, not silent drop.
+    const oldContent = `version: 2
+models:
+  - name: customers
+    columns:
+      - name: customer_id
+        tests:
+          - not_null   # <-- unterminated block below causes parse failure
+    tests: [
+`
+    // Diff uses the block-list shape the fallback regex targets
+    // (`-      - unique` / `-      - not_null`).
+    const diff = `--- a/models/marts/_models.yml
++++ /dev/null
+@@ -1,8 +0,0 @@
+-version: 2
+-models:
+-  - name: customers
+-    columns:
+-      - name: customer_id
+-        tests:
+-          - unique
+-          - not_null
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
+    )
+    // Diff-only fallback picks up the removed `- unique` and `- not_null`
+    // lines, so we still emit at least one removal finding rather than silently
+    // dropping when the structural path couldn't commit.
+    expect(f.length).toBeGreaterThan(0)
+    expect(has(f, "test_coverage", "warning")).toBe(true)
+  })
+
+  test("deleted empty schema.yml: no fabricated findings (locks in precision)", () => {
+    // Old side parses cleanly but declares no tests. Ensures the structural
+    // loop doesn't fabricate findings when oldSet is empty.
+    const oldContent = `version: 2
+models: []
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/_models.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
+    )
+    expect(f.length).toBe(0)
+  })
+
+  // R20 S1 — grain-key `not_null` completeness. Every column named in a
+  // `unique_combination_of_columns` test's `combination_of_columns` must have
+  // `not_null` coverage on the same model (constraint if contracted, data_test
+  // if view). Directly targets PR D×2 + PR A×2 human findings in the R20
+  // corpus study; explicit rule in DBT_GUIDELINES.md.
+  test("R20 S1: unique_combination_of_columns with grain col missing not_null → warning finding", () => {
+    // `price_start_time` is grain but has no not_null coverage → gap.
+    // `metastore_id` / `sku_name` have not_null via constraints on the
+    // contracted model → covered. Test scoped as a newly-added model to
+    // trigger the change-scoped gate (see the steady-state test below for
+    // the no-change precision guarantee).
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: metastore_id
+        constraints:
+          - type: not_null
+      - name: sku_name
+        constraints:
+          - type: not_null
+      - name: price_start_time
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - metastore_id
+            - sku_name
+            - price_start_time
+`
+    // Grain declaration didn't exist on the old side — the model itself is new.
+    const oldContent = "version: 2\nmodels: []\n"
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    const gap = f.find((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gap).toBeDefined()
+    expect(gap!.severity).toBe("warning")
+    expect(gap!.model).toBe("mrt_x")
+    expect(gap!.column).toBe("price_start_time")
+    // Contract is enforced → recommendation should point at `constraints:`.
+    expect(gap!.body).toContain("constraints: [{type: not_null}]")
+    // Non-gap columns must not appear as findings.
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(1)
+  })
+
+  test("R20 S1: steady-state grain gap on unchanged model is NOT re-surfaced (change-scoped precision)", () => {
+    // altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099. A
+    // housekeeping edit (description bump, meta tag) on a file whose grain
+    // declarations are identical old→new must not surface pre-existing
+    // gaps on unrelated models. Otherwise reviewers suppress the rule.
+    const yml = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+      - name: change_time   # ← pre-existing gap on a grain column
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id, change_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: yml, newContent: yml },
+    )
+    // Same grain declaration old→new → grain-key gap should NOT fire even
+    // though the not_null coverage is incomplete. Removals detector still
+    // covers the case where coverage was dropped in this diff.
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: grain declaration changed (column added to combination_of_columns) does fire gap", () => {
+    // Same file, but the PR ADDS `change_time` to `combination_of_columns`
+    // without adding not_null coverage. This is a real regression the
+    // reviewer must catch even though the model existed before this PR.
+    const oldContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+      - name: change_time   # ← added, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id, change_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "modified", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("change_time")
+  })
+
+  test("R20 S1: grain detector also covers snapshots (SCD-2 grain declaration)", () => {
+    // altimate-harness-bot review, PR #1029 dbt-patterns.ts:963.
+    // Snapshots carry `unique_combination_of_columns` for SCD-2 unique_key
+    // semantics — a legitimate grain-declaration site the previous
+    // models-only iteration silently skipped.
+    const newContent = `version: 2
+snapshots:
+  - name: dim_customer_snapshot
+    columns:
+      - name: customer_id
+        data_tests: [not_null]
+      - name: valid_from   # ← grain col, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [customer_id, valid_from]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "snapshots/dim_customer_snapshot.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].model).toBe("dim_customer_snapshot")
+    expect(gaps[0].column).toBe("valid_from")
+  })
+
+  test("R20 S1: grain detector also covers source tables (per-table `columns:` + tests)", () => {
+    // Source tables declare `columns:` + `tests:` at the table level;
+    // grain declarations there are legitimate and were previously missed.
+    const newContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_tests: [not_null]
+          - name: event_ts   # ← grain col, no not_null
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [order_id, event_ts]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/sources.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    // Source-table entity is qualified as `<source>.<table>` so two
+    // sources with same-named tables don't conflate (cubic-review P2).
+    expect(gaps[0].model).toBe("raw.orders")
+    expect(gaps[0].column).toBe("event_ts")
+  })
+
+  test("R20 S1: same source-table name in two sources does NOT conflate (cubic-review P2)", () => {
+    // Two sources both containing a table named `orders`. A grain gap on
+    // one must not surface / suppress gaps on the other, and the finding
+    // fingerprint must distinguish them.
+    const newContent = `version: 2
+sources:
+  - name: raw
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_tests: [not_null]
+          - name: event_ts   # ← grain col, no not_null
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [order_id, event_ts]
+  - name: legacy
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_tests: [not_null]
+          - name: event_ts   # ← same shape, same grain gap in the OTHER source
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [order_id, event_ts]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/sources.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    // Two distinct entities → two distinct gaps.
+    expect(gaps.length).toBe(2)
+    const models = new Set(gaps.map((g) => g.model))
+    expect(models).toEqual(new Set(["raw.orders", "legacy.orders"]))
+  })
+
+  test("R20 S1: grain detector also covers seeds", () => {
+    // Grain-key tests on seeds are rare but legal — coverage for symmetry
+    // with `extractTestOccurrences` which iterates all four entity types.
+    const newContent = `version: 2
+seeds:
+  - name: lookup
+    columns:
+      - name: region_id
+        data_tests: [not_null]
+      - name: effective_from   # ← grain col, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [region_id, effective_from]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "seeds/lookup.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].model).toBe("lookup")
+    expect(gaps[0].column).toBe("effective_from")
+  })
+
+  test("R20 S1: non-contracted (view) model recommends data_tests: not_null", () => {
+    const newContent = `version: 2
+models:
+  - name: stg_billing
+    columns:
+      - name: metastore_id
+        data_tests:
+          - not_null
+      - name: sku_name
+        data_tests:
+          - not_null
+      - name: price_start_time   # ← no not_null on this grain col
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - metastore_id
+            - sku_name
+            - price_start_time
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/staging/stg_billing.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gap = f.find((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gap).toBeDefined()
+    // Non-contracted model → recommendation should point at `data_tests:`.
+    expect(gap!.body).toContain("data_tests:")
+    expect(gap!.body).not.toContain("constraints: [{type: not_null}]")
+  })
+
+  test("R20 S1: grain col covered by column-level tests: [not_null] (dbt <1.8 alias) is not a gap", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+        tests:
+          - not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: SCD2-style grain (change_time) missing not_null flagged (PR D F4 shape)", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_job_tasks_inventory
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: metastore_id
+        constraints: [{type: not_null}]
+      - name: job_id
+        constraints: [{type: not_null}]
+      - name: task_key
+        constraints: [{type: not_null}]
+      - name: change_time   # ← temporal grain, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - metastore_id
+            - job_id
+            - task_key
+            - change_time
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_job_tasks_inventory.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("change_time")
+  })
+
+  test("R20 S1: no false positive when every grain col has not_null coverage", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: a
+        data_tests: [not_null]
+      - name: b
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: bare unique_combination_of_columns (no `dbt_utils.` prefix) also matches", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+    data_tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(1)
+  })
+
+  test("R20 S1: non-contracted model — `constraints: [not_null]` does NOT count as coverage", () => {
+    // On a view / non-contracted model, `constraints:` is documentation
+    // only (not enforced by the DB). Only column-level `not_null` data_tests
+    // should count as coverage. Codex R20 S1 high #3.
+    const newContent = `version: 2
+models:
+  - name: stg_x   # ← no config.contract.enforced
+    columns:
+      - name: id
+        constraints:
+          - type: not_null   # ← doesn't count on non-contracted model
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/staging/stg_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].body).toContain("data_tests:")
+  })
+
+  test("R20 S1: top-level `contract: {enforced: true}` (not nested under config:) is recognised", () => {
+    // dbt supports declaring contract enforcement either at model.config.contract
+    // or at model.contract directly. Both must count as contract-enforced so
+    // the recommendation correctly suggests `constraints:`.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    contract:
+      enforced: true
+    columns:
+      - name: id
+        constraints: [{type: not_null}]
+      - name: change_time   # ← grain col, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id, change_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("change_time")
+    // Contract IS enforced (via top-level `contract:`) → recommendation should
+    // point at `constraints:`, not data_tests.
+    expect(gaps[0].body).toContain("constraints: [{type: not_null}]")
+  })
+
+  test("R20 S1: test-name match is exact, not endsWith (false-positive guard)", () => {
+    // `not_unique_combination_of_columns` (fictional but plausible) or a
+    // third-party macro ending in the same suffix must NOT trigger the rule.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+    data_tests:
+      - some_package.not_unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: adapter case-folding — SNOWFLAKE_ID grain col matches snowflake_id column coverage", () => {
+    // Snowflake folds unquoted identifiers to uppercase. If someone writes
+    // `combination_of_columns: [WORKSPACE_ID]` while the column is declared
+    // as `- name: workspace_id`, the coverage should still match.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: workspace_id
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [WORKSPACE_ID]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: MODEL-level primary_key constraint covers every listed grain column (consensus MAJOR #1)", () => {
+    // Consensus MAJOR #1 — dbt 1.5+ supports model-level constraints via
+    // `constraints: [{type: primary_key, columns: [a, b]}]`. A primary key
+    // inherently enforces NOT NULL on Postgres/Snowflake/BigQuery/
+    // Databricks. Grain columns declared via a model-level PK constraint
+    // must not be flagged as missing not_null.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [metastore_id, sku_name, price_start_time]
+    columns:
+      - name: metastore_id
+      - name: sku_name
+      - name: price_start_time
+      - name: currency
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [metastore_id, sku_name, price_start_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: MODEL-level not_null constraint with `columns:` list covers each named column", () => {
+    // Explicit multi-column form of the model-level constraint. Same
+    // coverage effect as the primary_key case.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: not_null
+        columns: [a, b]
+    columns:
+      - name: a
+      - name: b
+      - name: c
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: COLUMN-level primary_key constraint also counts as not_null coverage", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        constraints:
+          - type: primary_key
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: model-level primary_key still misses columns NOT in its list", () => {
+    // Precision guard — a PK that names only some grain cols must still
+    // leave the OTHER grain cols flagged.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [a]   # only covers a
+    columns:
+      - name: a
+      - name: b
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("b")
+  })
+
+  test("R20 S1: model-level constraints on NON-CONTRACTED model do NOT count as coverage (documentation-only)", () => {
+    // Consistent with column-level rule — model-level constraints without
+    // contract enforcement are documentation, not enforcement, on most
+    // adapters.
+    const newContent = `version: 2
+models:
+  - name: stg_x
+    constraints:
+      - type: primary_key
+        columns: [a, b]
+    columns:
+      - name: a
+      - name: b
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/staging/stg_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    // Both columns flagged (no test-level not_null, no contract).
+    expect(gaps.length).toBe(2)
+  })
+
+  test("R20 S1: `config.contract` object without `enforced` does NOT mask a top-level `contract: {enforced: true}` (MINOR #3)", () => {
+    // Consensus MINOR #3 — an earlier ternary short-circuited when
+    // `cfg.contract` was any object. `config: {contract: {alias: X}}`
+    // with no `enforced` key hid a top-level `contract: {enforced: true}`.
+    // Now both locations are OR'd; either declaration counts.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        alias: SOMETHING_ELSE   # no enforced key here
+    contract:
+      enforced: true            # ← must still count as contracted
+    columns:
+      - name: id
+        constraints:
+          - type: not_null
+      - name: change_time       # ← grain col, no not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id, change_time]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("change_time")
+    // Contract IS enforced — recommendation must point at constraints.
+    expect(gaps[0].body).toContain("constraints: [{type: not_null}]")
+  })
+
+  test("R20 S1: `dbt.not_null` namespaced test alias counts as coverage (MINOR #4)", () => {
+    // Consensus MINOR #4 — dbt 1.8+ allows namespaced test names. Column
+    // covered by `data_tests: [dbt.not_null]` must not be flagged.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+        data_tests: [dbt.not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: `{name:, test_name: not_null}` alternative test form counts as coverage (MINOR #6)", () => {
+    // Consensus MINOR #6 — dbt's documented alternative object form is
+    // `{name: my_test, test_name: not_null, ...}`. Reading only the first
+    // key returns `name` (an alias), missing the underlying test type. The
+    // `test_name` field is authoritative when present.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+        data_tests:
+          - name: id_never_null
+            test_name: not_null
+    data_tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: dbt 1.9+ `arguments:` nesting is recognised (real corpus shape)", () => {
+    // The real internal corpus PRs use the dbt 1.9+ shape:
+    // `- dbt_utils.unique_combination_of_columns: {arguments: {combination_of_columns: [...]}}`
+    // Detector must recognise both nested (`arguments:`) and pre-1.9 flat forms.
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: a
+        constraints: [{type: not_null}]
+      - name: b   # ← missing not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [a, b]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    const gaps = f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
+    expect(gaps.length).toBe(1)
+    expect(gaps[0].column).toBe("b")
+  })
+
+  test("R20 S1: does not fire when there's no unique_combination_of_columns test", () => {
+    const newContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: a
+      - name: b
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "added", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent: undefined, newContent },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
+  })
+
+  test("R20 S1: does not fire on deleted schema.yml (no current grain to guard)", () => {
+    const oldContent = `version: 2
+models:
+  - name: mrt_x
+    columns:
+      - name: id
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [id]
+`
+    const f = detectSchemaYmlPatterns(
+      { path: "models/marts/mrt_x.yml", status: "deleted", diff: undefined },
+      DEFAULT_RUBRIC,
+      { oldContent, newContent: undefined },
+    )
+    expect(f.filter((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing").length).toBe(0)
   })
 
   test("benign additive column produces NO dbt-pattern finding (precision)", () => {

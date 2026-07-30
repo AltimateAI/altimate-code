@@ -79,6 +79,7 @@ export type Event =
   | EventProjectUpdated
   | EventSessionStatus
   | EventSessionIdle
+  | EventSessionPhase
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
@@ -1527,6 +1528,15 @@ export type GlobalEvent = {
         type: "session.idle"
         properties: {
           sessionID: string
+        }
+      }
+    | {
+        id: string
+        type: "session.phase"
+        properties: {
+          sessionID: string
+          phase: string
+          active: boolean
         }
       }
     | {
@@ -5035,6 +5045,16 @@ export type EventSessionIdle = {
   type: "session.idle"
   properties: {
     sessionID: string
+  }
+}
+
+export type EventSessionPhase = {
+  id: string
+  type: "session.phase"
+  properties: {
+    sessionID: string
+    phase: string
+    active: boolean
   }
 }
 

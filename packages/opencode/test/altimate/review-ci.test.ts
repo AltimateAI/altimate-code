@@ -19,6 +19,43 @@ describe("review CLI command", () => {
     expect(ReviewCommand.command).toBe("review")
     expect(typeof ReviewCommand.handler).toBe("function")
   })
+
+  test("boolean-negation:false does not break other declared boolean flags (PR #1027 consensus MINOR #5)", async () => {
+    // The B1 fix disables yargs' `--no-<option>` auto-negation on the review
+    // command via `parserConfiguration({ "boolean-negation": false })`, so
+    // `--no-ai` binds to the declared `noAi` boolean. That setting is
+    // command-global — if a future boolean flag is added, its `--no-<flag>`
+    // form silently changes shape. This regression asserts every currently
+    // declared boolean parses to the expected type + default.
+    const yargsMod = await import("yargs")
+    // Build the command's yargs builder in isolation (no execution) and
+    // check the parsed argv shape for each boolean flag's on/off/default
+    // forms. Uses parseAsync so the whole builder chain runs.
+    const buildBase = () => (ReviewCommand.builder as any)(yargsMod.default([]).exitProcess(false).help(false))
+    const parse = async (args: string[]) => {
+      const parsed = await buildBase().parseAsync(args)
+      return parsed
+    }
+
+    const flags: Array<{ name: string; long: string; camel: string; default?: boolean }> = [
+      { name: "json", long: "--json", camel: "json", default: false },
+      { name: "post", long: "--post", camel: "post", default: false },
+      { name: "no-ai", long: "--no-ai", camel: "noAi", default: false },
+      { name: "explain-tier", long: "--explain-tier", camel: "explainTier", default: false },
+    ]
+
+    for (const f of flags) {
+      // Default (flag absent).
+      const defaultParsed = await parse([])
+      expect((defaultParsed as any)[f.camel]).toBe(f.default ?? false)
+      // Bare form flips to true (the whole point of B1).
+      const bareParsed = await parse([f.long])
+      expect((bareParsed as any)[f.camel]).toBe(true)
+      // Explicit `=false` still works.
+      const explicitFalse = await parse([`${f.long}=false`])
+      expect((explicitFalse as any)[f.camel]).toBe(false)
+    }
+  })
 })
 
 describe("resolveGitHubTarget", () => {

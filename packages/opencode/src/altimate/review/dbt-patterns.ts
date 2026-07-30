@@ -1,4 +1,6 @@
 import path from "node:path"
+import YAML from "yaml"
+import { Log } from "@/altimate/util/log"
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
 import { type ChangedFile, classifyDbtFile } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
@@ -790,33 +792,802 @@ export function detectModelPatterns(file: ChangedFile, newSql: string | undefine
  * Detect removal of `unique` / `not_null` / `relationships` tests in a schema.yml
  * diff — the guardrail that catches fan-out/dupes is the thing being deleted.
  */
-export function detectSchemaYmlPatterns(file: ChangedFile, rubric: Rubric): Finding[] {
+/**
+ * Structural extraction of `(model, column?, test)` tuples from a parsed
+ * schema.yml document. Handles:
+ *  - Column-level tests under `models[*].columns[*].tests` / `.data_tests`
+ *  - Model-level tests directly under `models[*].tests` / `.data_tests`
+ *    (surrogate-key `unique`, etc. — no column)
+ *  - Sources (`sources[*].tables[*].(columns[*].)tests`) since dbt supports
+ *    the same test grammar there
+ *  - Snapshots (`snapshots[*].(columns[*].)tests`)
+ *  - Both bare (`- unique`) and block-form (`- relationships: {...}`)
+ *  - Both `tests` and `data_tests` (dbt 1.8+ alias)
+ *
+ * Returns a Set of canonical `${modelOrSource}\x00${column}\x00${test}` keys
+ * (column is empty string for model-level tests). Yields nothing when the
+ * document isn't shaped like a schema.yml.
+ */
+function extractTestOccurrences(doc: unknown): Set<string> {
+  const out = new Set<string>()
+  if (!doc || typeof doc !== "object") return out
+  const d = doc as Record<string, unknown>
+
+  const emitTests = (entity: string, column: string, tests: unknown): void => {
+    if (!Array.isArray(tests)) return
+    for (const t of tests) {
+      const name =
+        typeof t === "string"
+          ? t
+          : t && typeof t === "object"
+            ? Object.keys(t as Record<string, unknown>)[0]
+            : undefined
+      if (!name) continue
+      const n = name.toLowerCase()
+      // Restrict to the guardrail tests the detector cares about; a bespoke
+      // custom test being removed is not a signal at this level.
+      if (n === "unique" || n === "not_null" || n === "relationships") {
+        // PR #1027 consensus MINOR #4 — a column can carry MULTIPLE
+        // `relationships` tests pointing at different parents (e.g. one to
+        // dim_customers, one to legacy.dim_customers during a migration).
+        // Keying on `(entity, column, test)` alone collapses them into a
+        // single set entry, so dropping one silently doesn't surface.
+        // `unique` / `not_null` are single-instance semantically (a repeat is
+        // a no-op), so this discriminator only affects `relationships`.
+        // Block-form: `- relationships: {to: ..., field: ...}` → append the
+        // (to, field) tuple to the key. Bare string form: no discriminator
+        // (the block-form is the shape dbt requires for `relationships`
+        // anyway; a bare `- relationships` isn't a legal declaration).
+        let discriminator = ""
+        if (n === "relationships" && t && typeof t === "object") {
+          const args = (t as Record<string, unknown>)[name]
+          // dbt 1.10.5+ nests test args under `arguments:`; earlier versions
+          // put them at the top level of the test's value map (cubic-review P3).
+          const argsObj =
+            args && typeof args === "object" ? (args as Record<string, unknown>) : undefined
+          const nested =
+            argsObj?.arguments && typeof argsObj.arguments === "object"
+              ? (argsObj.arguments as Record<string, unknown>)
+              : undefined
+          const to = String((nested ?? argsObj)?.to ?? "")
+          const field = String((nested ?? argsObj)?.field ?? "")
+          if (to || field) discriminator = `\x01${to}\x02${field}`
+        }
+        out.add(`${entity}\x00${column}\x00${n}${discriminator}`)
+      }
+    }
+  }
+
+  const walkEntityWithColumns = (entityName: string | undefined, node: unknown): void => {
+    if (!entityName || !node || typeof node !== "object") return
+    const n = node as Record<string, unknown>
+    // Model/source/snapshot-level tests: `tests:` or `data_tests:` right under the entity.
+    emitTests(entityName, "", n.tests)
+    emitTests(entityName, "", n.data_tests)
+    if (Array.isArray(n.columns)) {
+      for (const col of n.columns) {
+        if (!col || typeof col !== "object") continue
+        const c = col as Record<string, unknown>
+        const cname = typeof c.name === "string" ? c.name : undefined
+        if (!cname) continue
+        emitTests(entityName, cname, c.tests)
+        emitTests(entityName, cname, c.data_tests)
+      }
+    }
+  }
+
+  // `models:` — array of `{ name, columns?, tests? }`
+  if (Array.isArray(d.models)) {
+    for (const m of d.models) {
+      if (!m || typeof m !== "object") continue
+      const mm = m as Record<string, unknown>
+      const mname = typeof mm.name === "string" ? mm.name : undefined
+      walkEntityWithColumns(mname, mm)
+    }
+  }
+  // `snapshots:` — same shape as models
+  if (Array.isArray(d.snapshots)) {
+    for (const s of d.snapshots) {
+      if (!s || typeof s !== "object") continue
+      const ss = s as Record<string, unknown>
+      const sname = typeof ss.name === "string" ? ss.name : undefined
+      walkEntityWithColumns(sname, ss)
+    }
+  }
+  // `sources:` — `[{ name, tables: [{ name, columns?, tests? }] }]`
+  if (Array.isArray(d.sources)) {
+    for (const src of d.sources) {
+      if (!src || typeof src !== "object") continue
+      const srcObj = src as Record<string, unknown>
+      const srcName = typeof srcObj.name === "string" ? srcObj.name : undefined
+      if (!Array.isArray(srcObj.tables)) continue
+      for (const t of srcObj.tables) {
+        if (!t || typeof t !== "object") continue
+        const tt = t as Record<string, unknown>
+        const tname = typeof tt.name === "string" ? tt.name : undefined
+        const qualified = srcName && tname ? `${srcName}.${tname}` : tname || undefined
+        walkEntityWithColumns(qualified, tt)
+      }
+    }
+  }
+  // `seeds:` — leaf entity, same test grammar
+  if (Array.isArray(d.seeds)) {
+    for (const s of d.seeds) {
+      if (!s || typeof s !== "object") continue
+      const ss = s as Record<string, unknown>
+      const sname = typeof ss.name === "string" ? ss.name : undefined
+      walkEntityWithColumns(sname, ss)
+    }
+  }
+  return out
+}
+
+/**
+ * R20 S1 — grain-key `not_null` completeness.
+ *
+ * A `dbt_utils.unique_combination_of_columns` test names N columns as the
+ * declared grain. If any grain column lacks `not_null` coverage, a NULL
+ * grain-key silently passes the uniqueness test — the guardrail is toothless.
+ * `DBT_GUIDELINES.md` in the corpus repo states this as a hard rule; kilo
+ * catches it, we didn't.
+ *
+ * Coverage sources (either counts):
+ *  - `constraints: [{type: not_null}]` on the column — enforced by the
+ *    database when the model has `contract: {enforced: true}` on Trino /
+ *    Databricks-with-contracts / Postgres / Snowflake.
+ *  - `data_tests: [not_null]` / `tests: [not_null]` on the column —
+ *    enforced by dbt test runner regardless of contract.
+ *
+ * Returns one gap per uncovered column per grain declaration.
+ */
+export interface GrainKeyGap {
+  /** Model / entity name. */
+  model: string
+  /** Column name in the uncovered `combination_of_columns`. */
+  column: string
+  /** True when `config.contract.enforced == true` — coverage should be a
+   *  `constraints:` entry rather than a `data_tests:` entry, since the
+   *  constraint enforces at write-time and the test enforces at CI-time. */
+  contractEnforced: boolean
+}
+
+/**
+ * Iterate every dbt entity in a schema.yml that can carry
+ * `unique_combination_of_columns` + `columns:` + `constraints:` — the shape
+ * checked for grain-key not_null coverage. Models are the primary case;
+ * snapshots also declare grain (SCD-2 unique_key semantics) and are a real
+ * miss vector when omitted. Sources declare table-level `columns:` + tests
+ * on their `tables[]` entries, so we descend one level. Seeds are covered
+ * for symmetry with `extractTestOccurrences` — grain-key tests on a seed
+ * are rare but legal (altimate-harness-bot review, PR #1029
+ * dbt-patterns.ts:963).
+ */
+function iterateGrainEntities(d: Record<string, unknown>): Array<{ name: string; body: Record<string, unknown> }> {
+  const out: Array<{ name: string; body: Record<string, unknown> }> = []
+  for (const key of ["models", "snapshots", "seeds"] as const) {
+    const arr = d[key]
+    if (!Array.isArray(arr)) continue
+    for (const e of arr) {
+      if (!e || typeof e !== "object") continue
+      const body = e as Record<string, unknown>
+      const name = typeof body.name === "string" ? body.name : undefined
+      if (name) out.push({ name, body })
+    }
+  }
+  // sources nest per-table entities under `.tables[]`; each table has its own
+  // `name` + `columns` + `tests`/`data_tests`, matching the model shape.
+  // Qualify with the enclosing source name (`<source>.<table>`) so two
+  // sources with a table of the same name don't conflate in change-scoping
+  // OR finding fingerprint (cubic-review P2 on PR #1029).
+  const sources = d.sources
+  if (Array.isArray(sources)) {
+    for (const s of sources) {
+      if (!s || typeof s !== "object") continue
+      const src = s as Record<string, unknown>
+      const srcName = typeof src.name === "string" ? src.name : undefined
+      if (!srcName) continue
+      const tables = src.tables
+      if (!Array.isArray(tables)) continue
+      for (const t of tables) {
+        if (!t || typeof t !== "object") continue
+        const body = t as Record<string, unknown>
+        const tblName = typeof body.name === "string" ? body.name : undefined
+        if (tblName) out.push({ name: `${srcName}.${tblName}`, body })
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * Extract the `combination_of_columns` set for each entity in a doc. Used to
+ * scope grain-gap findings to entities whose grain declaration actually
+ * changed between the base and head of the PR — otherwise a housekeeping
+ * edit (adding a description, bumping a meta tag) surfaces every
+ * pre-existing gap in the file and trains reviewers to suppress the rule
+ * (altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099).
+ */
+function extractGrainDeclarations(doc: unknown): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  if (!doc || typeof doc !== "object") return out
+  const d = doc as Record<string, unknown>
+  for (const { name, body: mm } of iterateGrainEntities(d)) {
+    const cols = new Set<string>()
+    for (const testsKey of ["tests", "data_tests"] as const) {
+      const tests = mm[testsKey]
+      if (!Array.isArray(tests)) continue
+      for (const t of tests) {
+        if (!t || typeof t !== "object") continue
+        for (const [k, args] of Object.entries(t as Record<string, unknown>)) {
+          const bare = k.toLowerCase().replace(/^dbt_utils\./, "")
+          if (bare !== "unique_combination_of_columns") continue
+          if (!args || typeof args !== "object") continue
+          const argsObj = args as Record<string, unknown>
+          const nested =
+            argsObj.arguments && typeof argsObj.arguments === "object"
+              ? (argsObj.arguments as Record<string, unknown>)
+              : undefined
+          const combo =
+            (nested?.combination_of_columns as unknown) ?? (argsObj.combination_of_columns as unknown)
+          if (!Array.isArray(combo)) continue
+          for (const c of combo) if (typeof c === "string") cols.add(c.toLowerCase())
+        }
+      }
+    }
+    if (cols.size) out.set(name, cols)
+  }
+  return out
+}
+
+/**
+ * Entities whose grain declaration differs from old → new (added, removed,
+ * or column set changed). Emit gap findings only for these entities so a
+ * PR that doesn't touch grain declarations doesn't surface every
+ * pre-existing gap.
+ */
+function grainDeclChangedEntities(oldDoc: unknown, newDoc: unknown): Set<string> {
+  const oldMap = extractGrainDeclarations(oldDoc)
+  const newMap = extractGrainDeclarations(newDoc)
+  const changed = new Set<string>()
+  for (const [name, cols] of newMap) {
+    const prior = oldMap.get(name)
+    if (!prior || prior.size !== cols.size || [...cols].some((c) => !prior.has(c))) changed.add(name)
+  }
+  return changed
+}
+
+/**
+ * Grain-key not_null completeness gaps for every entity (model, snapshot,
+ * source table, seed) in a schema.yml document. Callers filter by
+ * `grainDeclChangedEntities` before emitting findings, so this returns the
+ * full population and change-scoping happens above.
+ */
+function extractGrainKeyGaps(doc: unknown): GrainKeyGap[] {
+  const gaps: GrainKeyGap[] = []
+  if (!doc || typeof doc !== "object") return gaps
+  const d = doc as Record<string, unknown>
+  const entities = iterateGrainEntities(d)
+  if (!entities.length) return gaps
+
+  // Normalise column names for coverage comparison. dbt YAML often uses
+  // adapter-cased column names (Snowflake folds unquoted identifiers to
+  // uppercase; other adapters differ). Lowercase both sides so `ORDER_ID`
+  // in `combination_of_columns` matches `order_id` in `columns:`. Hoisted
+  // to function scope per consensus NIT #7 (was redeclared per-model).
+  const norm = (s: string): string => s.toLowerCase()
+
+  // Pull the string test-name from a YAML test entry. Consensus fixes:
+  //  - MINOR #6: dbt's documented alternative object form is
+  //    `{name: <alias>, test_name: not_null, ...}`. `Object.keys(t)[0]`
+  //    would return `name`, missing the underlying test type. Prefer
+  //    `test_name` when present.
+  //  - MINOR #4: dbt 1.8+ allows namespaced names like `dbt.not_null`;
+  //    strip a leading `dbt.` prefix so `dbt.not_null` matches `not_null`.
+  // Bare form: `- not_null`. Block form: `- not_null: {config: ...}`.
+  const testName = (t: unknown): string | undefined => {
+    if (typeof t === "string") return t.toLowerCase().replace(/^dbt\./, "")
+    if (t && typeof t === "object") {
+      const obj = t as Record<string, unknown>
+      // Alternative form: `{name: <alias>, test_name: <macro>, ...}`.
+      // If both `name` and `test_name` are present, `test_name` wins.
+      if (typeof obj.test_name === "string") return obj.test_name.toLowerCase().replace(/^dbt\./, "")
+      const k = Object.keys(obj)[0]
+      return k ? k.toLowerCase().replace(/^dbt\./, "") : undefined
+    }
+    return undefined
+  }
+
+  for (const { name: mname, body: mm } of entities) {
+
+    // Contract enforcement: either at model-level `config.contract.enforced`
+    // OR at top-level `contract:` (dbt supports both shapes). Consensus
+    // MINOR #3 — earlier ternary short-circuited on `cfg.contract` being
+    // an object (e.g. `config: {contract: {alias: ...}}` with no
+    // `enforced` key), masking a top-level `contract: {enforced: true}`.
+    // Evaluate `enforced === true` at both locations independently and OR
+    // them so either declaration counts.
+    const cfg = mm.config && typeof mm.config === "object" ? (mm.config as Record<string, unknown>) : {}
+    const cfgContract =
+      cfg.contract && typeof cfg.contract === "object" ? (cfg.contract as Record<string, unknown>) : undefined
+    const topContract =
+      mm.contract && typeof mm.contract === "object" ? (mm.contract as Record<string, unknown>) : undefined
+    const contractEnforced = cfgContract?.enforced === true || topContract?.enforced === true
+
+    // Coverage per column, split by mechanism (per codex R20 S1 review):
+    //  - constraint coverage counts ONLY when `contract.enforced == true`.
+    //    On non-contracted models, `constraints: [{type: not_null}]` is
+    //    documentation-only and not enforced by the database. Requiring
+    //    contract-enforced means we don't miss a real gap on views.
+    //  - test coverage (`tests:` / `data_tests: [not_null]`) always counts,
+    //    since dbt's test runner enforces it independent of contract state.
+    //
+    // Consensus MAJOR #1 — also count MODEL-LEVEL constraints:
+    //  - `constraints: [{type: primary_key, columns: [a, b]}]` (dbt 1.5+)
+    //    inherently enforces NOT NULL on every named column on
+    //    Postgres/Snowflake/BigQuery/Databricks, so grain columns declared
+    //    via a model-level PK are already covered.
+    //  - `constraints: [{type: not_null, columns: [...]}]` (dbt's model-
+    //    level form) — same coverage, just spelled out.
+    //  - Column-level `constraints: [{type: primary_key}]` — same rationale
+    //    at column granularity.
+    const coveredByConstraint = new Set<string>()
+    const coveredByTest = new Set<string>()
+
+    // Model-level constraints — dbt allows a `constraints:` list under
+    // the model itself (not per-column) that names one or more columns.
+    if (Array.isArray(mm.constraints)) {
+      for (const cn of mm.constraints) {
+        if (!cn || typeof cn !== "object") continue
+        const cnRec = cn as Record<string, unknown>
+        const type = typeof cnRec.type === "string" ? cnRec.type.toLowerCase() : ""
+        // `primary_key` implies NOT NULL on every listed column across the
+        // adapters dbt supports for enforced contracts; `not_null` at
+        // model level is the explicit multi-column variant of the column
+        // form.
+        if (type !== "not_null" && type !== "primary_key") continue
+        const cols = Array.isArray(cnRec.columns) ? (cnRec.columns as unknown[]) : []
+        for (const c of cols) {
+          if (typeof c === "string") coveredByConstraint.add(norm(c))
+        }
+      }
+    }
+
+    if (Array.isArray(mm.columns)) {
+      for (const col of mm.columns) {
+        if (!col || typeof col !== "object") continue
+        const c = col as Record<string, unknown>
+        const cname = typeof c.name === "string" ? c.name : undefined
+        if (!cname) continue
+        const key = norm(cname)
+        if (Array.isArray(c.constraints)) {
+          for (const cn of c.constraints) {
+            if (cn && typeof cn === "object") {
+              const type = (cn as Record<string, unknown>).type
+              const t = typeof type === "string" ? type.toLowerCase() : ""
+              // Column-level `not_null` OR `primary_key` — the latter
+              // inherently enforces NOT NULL (consensus MAJOR #1).
+              if (t === "not_null" || t === "primary_key") {
+                coveredByConstraint.add(key)
+              }
+            }
+          }
+        }
+        for (const testsKey of ["tests", "data_tests"] as const) {
+          const tests = c[testsKey]
+          if (!Array.isArray(tests)) continue
+          for (const t of tests) {
+            if (testName(t) === "not_null") coveredByTest.add(key)
+          }
+        }
+      }
+    }
+    const hasCoverage = (col: string): boolean => {
+      const k = norm(col)
+      return coveredByTest.has(k) || (contractEnforced && coveredByConstraint.has(k))
+    }
+
+    // Find grain declarations in this model's model-level tests / data_tests.
+    // Restrict to `unique_combination_of_columns` and
+    // `dbt_utils.unique_combination_of_columns` exactly (per codex R20 S1
+    // review) — `endsWith` would over-match `not_unique_combination_of_columns`
+    // and third-party macros that share the suffix.
+    // Supports both dbt shapes:
+    //   pre-1.9: `- dbt_utils.unique_combination_of_columns: {combination_of_columns: [...]}`
+    //   1.9+:    `- dbt_utils.unique_combination_of_columns: {arguments: {combination_of_columns: [...]}}`
+    const isGrainTestName = (name: string): boolean => {
+      const n = name.toLowerCase()
+      return n === "unique_combination_of_columns" || n === "dbt_utils.unique_combination_of_columns"
+    }
+    for (const testsKey of ["tests", "data_tests"] as const) {
+      const tests = mm[testsKey]
+      if (!Array.isArray(tests)) continue
+      for (const t of tests) {
+        if (!t || typeof t !== "object") continue
+        const entry = t as Record<string, unknown>
+        for (const k of Object.keys(entry)) {
+          if (!isGrainTestName(k)) continue
+          const args = entry[k]
+          if (!args || typeof args !== "object") continue
+          const argsObj = args as Record<string, unknown>
+          const nested =
+            argsObj.arguments && typeof argsObj.arguments === "object"
+              ? (argsObj.arguments as Record<string, unknown>)
+              : undefined
+          const combo =
+            (nested?.combination_of_columns as unknown) ?? (argsObj.combination_of_columns as unknown)
+          if (!Array.isArray(combo)) continue
+          for (const col of combo) {
+            if (typeof col !== "string") continue
+            if (!hasCoverage(col)) {
+              // Preserve original grain-column spelling in the finding.
+              gaps.push({ model: mname, column: col, contractEnforced })
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return gaps
+}
+
+/**
+ * Fallback removed-test detector for callers that supply only the diff
+ * (no old/new content). Kept intentionally conservative: matches removed
+ * lines that look like `- unique | not_null | relationships`, subtracts any
+ * added line with the same trimmed text. Cannot distinguish "moved to
+ * another column" from "removed from this column" — that requires content.
+ * The old-string dedup false-negative on sibling columns is inherent to
+ * diff-only input; when structural content is available we use the
+ * structural path (`extractTestOccurrences` diff of old vs new).
+ */
+function fallbackRemovedTestLines(diff: string | undefined): string[] {
+  if (!diff) return []
+  const added: string[] = []
+  const removed: string[] = []
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("+") && !raw.startsWith("+++")) added.push(raw.slice(1))
+    else if (raw.startsWith("-") && !raw.startsWith("---")) removed.push(raw.slice(1))
+  }
+  const testLine = /^\s*-\s*(unique|not_null|relationships)\b/i
+  const removedTests = removed.filter((l) => testLine.test(l))
+  const addedTrim = new Set(added.map((l) => l.trim()))
+  return removedTests.filter((l) => !addedTrim.has(l.trim()))
+}
+
+export interface SchemaYmlDetectContent {
+  oldContent?: string
+  newContent?: string
+}
+
+/**
+ * Detect removed data tests in a schema.yml diff.
+ *
+ * PREFERRED path (production, via orchestrator): pass full old/new content in
+ * `opts` — the detector parses both YAML documents, diffs by
+ * `(entity, column, test)` tuples, and emits one finding per genuine removal.
+ * This captures model-level tests (no column), sibling-column edge cases
+ * (unique removed from column X while column Y still declares it), quoted /
+ * commented YAML names, and any layout / indent style the parser accepts.
+ *
+ * FALLBACK path (callers that only have the raw diff, e.g. unit tests or
+ * pre-collected CI diffs without a content resolver): use the string-based
+ * removed-line detection preserved from the pre-R18 detector. It cannot
+ * tell "removed" from "moved to another column" for the same test type on
+ * a sibling column — that limitation is inherent to diff-only input.
+ */
+export function detectSchemaYmlPatterns(
+  file: ChangedFile,
+  rubric: Rubric,
+  opts: SchemaYmlDetectContent = {},
+): Finding[] {
   const kind = classifyDbtFile(file.path)
-  if (kind !== "schema_yml" || file.status === "deleted") return []
-  const { added, removed } = splitDiff(file.diff)
-  const removedTests = removed.filter((l) => /^\s*-\s*(unique|not_null|relationships)\b/i.test(l))
-  // A test still present (just moved) shouldn't fire.
-  const addedTests = new Set(added.map((l) => l.trim()))
-  const genuinelyRemoved = removedTests.filter((l) => !addedTests.has(l.trim()))
-  if (!genuinelyRemoved.length) return []
-  const removedUnique = genuinelyRemoved.some((l) => /\bunique\b/i.test(l))
-  const f = makeFinding({
-    severity: removedUnique ? "warning" : "suggestion",
-    category: "test_coverage",
-    title: `${file.path.split("/").pop()}: removed ${genuinelyRemoved.length} data test(s)`,
-    body:
-      "This change deletes `unique`/`not_null`/`relationships` test(s) — the guardrails that catch fan-out, duplicate, " +
-      "and broken-FK regressions. Removing a `unique` test on a grain key is how silent duplicate bugs ship. " +
-      "Confirm the test is genuinely obsolete, not removed to make CI green.",
-    file: file.path,
-    confidence: "high",
-    evidence: {
-      tool: "dbt-patterns",
-      result: { rule: "removed_tests", removed: genuinelyRemoved.map((l) => l.trim()) },
-    },
-    ruleKey: "test_coverage:removed-tests",
-  })
-  return [{ ...f, severity: clampSeverity(f.category, f.severity, f.confidence) }].filter(
-    (x) => !exclusionReason(x, rubric),
-  )
+  if (kind !== "schema_yml") return []
+
+  const removals: Array<{
+    model: string
+    column: string
+    test: string
+    /** Extra discriminator (e.g. `to:field` for a `relationships` test) so
+     *  multiple same-named tests on one column don't collapse via ruleKey.
+     *  Empty for `unique` / `not_null` and for fallback (diff-only) findings. */
+    testTag?: string
+  }> = []
+  let usedStructural = false
+  // R20 S1 — populated from the structural NEW-side parse below.
+  let grainGaps: GrainKeyGap[] = []
+
+  // Deleting a whole schema.yml removes every test declared in it — arguably
+  // a bigger removal than dropping a single test. Treat the new side as empty
+  // and diff the old document against `{}` so every prior test surfaces as a
+  // removal (cubic-review P2). Requires `oldContent` from the caller.
+  const isDeletedFile = file.status === "deleted"
+
+  // PREFERRED: structural YAML diff when we have both sides' content.
+  //
+  // "Added" file case (no `oldContent` supplied AND status marks the file as
+  // newly-added upstream) — the old side is empty, so there's nothing to
+  // remove; using the structural path with an empty old set is correct.
+  //
+  // "Deleted" file case — the new side is empty; use the structural path
+  // with an empty new set so every old test surfaces as a removal.
+  //
+  // "Modified but resolver returned undefined" case (`oldContent === undefined`
+  // for a file whose status is `modified` or `renamed`) — the resolver couldn't
+  // read the old side. Do NOT treat this as an added file (would silently drop
+  // real removals). Fall through to the diff-only fallback below.
+  const isAddedFile = file.status === "added"
+  const canUseStructural =
+    (isDeletedFile
+      ? opts.oldContent !== undefined
+      : opts.newContent !== undefined &&
+        // For a real modification/rename we require both sides; without oldContent
+        // fall back to diff parsing so removals in the diff still surface.
+        (isAddedFile || opts.oldContent !== undefined))
+
+  if (canUseStructural) {
+    let oldDoc: unknown = undefined
+    let newDoc: unknown = undefined
+    if (opts.newContent !== undefined) {
+      try {
+        newDoc = YAML.parse(opts.newContent)
+      } catch (err) {
+        // Debug telemetry: YAML parsers can trip on Jinja injected into a
+        // schema.yml or on non-ASCII quirks; log so failures are diagnosable
+        // rather than silently demoting to the fallback path.
+        Log.create({ service: "review", tag: "detectSchemaYmlPatterns" }).warn(
+          `YAML.parse failed on new content of ${file.path}; falling back to diff-only detection`,
+          err instanceof Error ? { error: err.message } : undefined,
+        )
+        newDoc = undefined
+      }
+    }
+    if (opts.oldContent !== undefined) {
+      try {
+        oldDoc = YAML.parse(opts.oldContent)
+      } catch (err) {
+        Log.create({ service: "review", tag: "detectSchemaYmlPatterns" }).warn(
+          `YAML.parse failed on old content of ${file.path}; falling back to diff-only detection`,
+          err instanceof Error ? { error: err.message } : undefined,
+        )
+        oldDoc = undefined
+      }
+    }
+    // Only commit to the structural path when the appropriate sides parsed:
+    //  - deleted → old must parse; new is treated as `{}`
+    //  - added   → new must parse; old is treated as `{}`
+    //  - modified/renamed → both must parse
+    // This preserves "unparseable YAML" → fallback rather than
+    // "structural with empty side = every test looks removed/added".
+    const canCommit = isDeletedFile
+      ? oldDoc !== undefined
+      : newDoc !== undefined && (isAddedFile || oldDoc !== undefined)
+    if (canCommit) {
+      const oldSet = extractTestOccurrences(oldDoc ?? {})
+      const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc)
+      for (const key of oldSet) {
+        if (newSet.has(key)) continue
+        const [model, column, testField] = key.split("\x00")
+        // `testField` may carry a `\x01<to>\x02<field>` discriminator for
+        // `relationships` tests so multiple relationships on the same column
+        // don't collapse to one removal (MINOR #4). Strip it for display;
+        // retain the internal `\x02` separator in `testTag` for the ruleKey
+        // — a colon-joined form would collide when either arg contains `:`
+        // (e.g. `to='a:b'` vs `field='b:c'`, codex R20 review minor).
+        // ruleKey is hashed for fingerprinting; control chars survive.
+        const [test, tagPayload] = testField.split("\x01")
+        const testTag = tagPayload ?? ""
+        removals.push({ model, column, test, testTag })
+      }
+      usedStructural = true
+      // R20 S1 — grain-key `not_null` completeness. Only fire on
+      // non-deleted files: a deleted schema.yml has no current grain to
+      // guard. Change-scoped: only emit gaps for entities (models,
+      // snapshots, source tables, seeds) whose grain declaration
+      // (`combination_of_columns` set) actually changed between the base
+      // and head of this PR. A housekeeping edit — adding a description,
+      // bumping a meta tag — must not surface pre-existing gaps on
+      // unrelated entities; that trains reviewers to suppress the rule
+      // (altimate-harness-bot review, PR #1029 dbt-patterns.ts:1099).
+      // When there's no old side (added file), every entity counts as
+      // changed and every gap surfaces.
+      if (!isDeletedFile && newDoc !== undefined) {
+        const changedEntities = grainDeclChangedEntities(oldDoc, newDoc)
+        grainGaps = extractGrainKeyGaps(newDoc).filter((g) => changedEntities.has(g.model))
+      }
+    }
+  }
+
+  // FALLBACK: line-based detection for diff-only callers (unit tests, offline
+  // CI diffs) OR when the structural path couldn't parse both sides.
+  //
+  // No local deduplication: each entry in `removedLines` is already one match
+  // per raw removed line, and model/column are always empty on this path — a
+  // (model, column, test) dedup key would collapse to just `test` and silently
+  // merge distinct removals of the same test type on different columns.
+  //
+  // Downstream, `runReview` runs a global `dedupe` step that fingerprints
+  // findings by (category, file, model, column, ruleKey). Two fallback
+  // findings that share `file`, empty `model`, empty `column`, and a
+  // test-name-only `ruleKey` would still collapse there. We tag each fallback
+  // finding with a stable occurrence-index discriminator (`#0`, `#1`, …) so
+  // distinct removals in the same diff survive the global dedupe. The index
+  // is per-diff, not per-file-history — sufficient for one review pass and
+  // stable across dry-repeats of the same diff.
+  const fallbackDiscriminators: string[] = []
+  if (!usedStructural) {
+    const removedLines = fallbackRemovedTestLines(file.diff)
+    let idx = 0
+    for (const l of removedLines) {
+      const m = /^\s*-\s*(unique|not_null|relationships)\b/i.exec(l)
+      if (!m) continue
+      removals.push({ model: "", column: "", test: m[1].toLowerCase() })
+      fallbackDiscriminators.push(`#${idx++}`)
+    }
+  }
+
+  if (!removals.length && !grainGaps.length) return []
+
+  const findings: Finding[] = []
+  const isMartLayer = /(^|\/)(marts?|reporting)\//.test(file.path)
+  const layerLabel = isMartLayer ? "mart-layer" : "declared"
+  // Emit the "N removals across models A/B/C" summary line ONCE per file
+  // (on the first finding), not once per distinct model — otherwise a diff
+  // that removes tests from three models produces three copies of the same
+  // global summary. A single boolean guard is enough.
+  let summaryEmitted = false
+
+  // Consumed in lock-step with the removals loop below (fallback path only).
+  // Using an index avoids `shift()`, which would be O(N) per call on the
+  // discriminator array — negligible on 2-3 removals but O(N²) on a large
+  // schema.yml PR that drops many tests.
+  let fallbackIdx = 0
+  for (const r of removals) {
+    const isUniquenessSignal = r.test === "unique"
+    const notNullOnLikelyPK =
+      r.test === "not_null" && !!r.column && /(_id$|^id$|_key$)/i.test(r.column)
+    // Uniqueness OR not_null on an id/key column = warning (silent-dup / null-PK
+    // risk); other not_null / relationships removals = suggestion.
+    const sev: Severity = isUniquenessSignal || notNullOnLikelyPK ? "warning" : "suggestion"
+
+    // Title / body vary based on whether structural attribution is available.
+    const attributed = !!r.model && !!r.column
+    const modelLevel = !!r.model && !r.column
+    const filename = file.path.split("/").pop()
+    const locKey = attributed ? `${r.model}.${r.column}` : modelLevel ? `${r.model} (model-level)` : "(unknown location)"
+    const title = attributed
+      ? `${filename}: ${r.test} test removed from ${locKey}`
+      : modelLevel
+        ? `${filename}: model-level ${r.test} test removed from \`${r.model}\``
+        : `${filename}: ${r.test} data test removed`
+
+    let bodyLead: string
+    if (attributed) {
+      bodyLead = `The \`${r.test}\` data test was removed from column \`${r.column}\` on model \`${r.model}\`. `
+    } else if (modelLevel) {
+      bodyLead = `A model-level \`${r.test}\` test was removed from \`${r.model}\`. `
+    } else {
+      bodyLead = `A \`${r.test}\` data test was removed from this schema file. `
+    }
+    let bodyRationale: string
+    if (isUniquenessSignal) {
+      bodyRationale =
+        `Removing a \`unique\` test on a ${layerLabel} key is how silent duplicate rows ship — ` +
+        `downstream joins fan out, aggregates double-count, and no test catches it. Restore ` +
+        `the test, or explicitly document why the grain no longer needs to be unique on this column.`
+    } else if (notNullOnLikelyPK) {
+      bodyRationale =
+        `Removing \`not_null\` on what looks like an identifier column (\`${r.column}\`) means nulls ` +
+        `will slip through into downstream joins and aggregates. Restore the test unless the column ` +
+        `is genuinely nullable now.`
+    } else {
+      bodyRationale =
+        `Removing an existing data test is a silent-regression risk. Confirm the test is genuinely ` +
+        `obsolete, not dropped to make CI green.`
+    }
+    // Emit the aggregate summary once per file, on the first finding, and
+    // only when there are multiple removals to summarise. Uses the file-scoped
+    // `summaryEmitted` flag rather than a per-model guard so a diff touching
+    // three models emits ONE summary, not three. Distinct-models computation
+    // is gated inside the branch so we don't pay for the Set/spread/map on
+    // every loop iteration when the summary won't be attached.
+    const shouldEmitSummary = !summaryEmitted && removals.length > 1
+    let bodyTail = ""
+    if (shouldEmitSummary) {
+      summaryEmitted = true
+      const distinctModels = [...new Set(removals.map((x) => x.model).filter(Boolean))]
+      const modelClause = distinctModels.length
+        ? ` on model(s) ${distinctModels.map((m) => `\`${m}\``).join(", ")}`
+        : ""
+      // Scoped to THIS schema file — the removals loop counts the current
+      // file's removals only, not the PR's aggregate. Wording was previously
+      // "This PR removes N data tests in total" which misled reviewers on
+      // multi-file diffs (per PR #1027 consensus MINOR #3). A global-PR
+      // summary would need to move to orchestrate.ts.
+      bodyTail = `\n\n_This schema file drops ${removals.length} data tests${modelClause}._`
+    }
+
+    // ruleKey feeds the finding fingerprint (finding.ts:107). For attributed
+    // (structural) findings, `(model.column.test)` is unique per removal in
+    // the file. For unattributed fallback findings, `(?.?.test)` collapses
+    // distinct removals of the same test type — we append the fallback
+    // discriminator so each removed line becomes a distinct finding
+    // downstream of the global dedupe.
+    const discriminator = attributed || modelLevel ? "" : `.${fallbackDiscriminators[fallbackIdx++] ?? "#?"}`
+    findings.push(
+      makeFinding({
+        severity: clampSeverity("test_coverage", sev, "high"),
+        category: "test_coverage",
+        title,
+        body: bodyLead + bodyRationale + bodyTail,
+        file: file.path,
+        // Surface the extracted attribution on the top-level Finding so
+        // downstream consumers (dedupe, formatting, telemetry) see it —
+        // not just inside `evidence.result` (cubic-review P3).
+        model: r.model || undefined,
+        column: r.column || undefined,
+        confidence: "high",
+        evidence: {
+          tool: "dbt-patterns",
+          result: {
+            rule: "removed_tests",
+            model: r.model || undefined,
+            column: r.column || undefined,
+            test: r.test,
+            attribution: attributed ? "column" : modelLevel ? "model-level" : "diff-only",
+          },
+        },
+        // testTag suffix (`:to:field` for `relationships`) survives the global
+        // finding fingerprint dedupe so multiple relationships on the same
+        // column emit distinct findings (MINOR #4).
+        ruleKey: `test_coverage:removed-tests:${r.model || "?"}.${r.column || "?"}.${r.test}${
+          r.testTag ? `.${r.testTag}` : ""
+        }${discriminator}`,
+      }),
+    )
+  }
+
+  // R20 S1 — grain-key `not_null` completeness. For every column in a
+  // `unique_combination_of_columns` test's `combination_of_columns` that
+  // lacks `not_null` coverage on the same model, emit one finding.
+  // Recommendation flips between `constraints:` (contracted model) and
+  // `data_tests:` (view / non-contracted model) based on the model's
+  // contract state — matches the adapter-semantics discussion in the
+  // corpus study (four instances across the sample).
+  for (const g of grainGaps) {
+    const filename = file.path.split("/").pop()
+    const recommendation = g.contractEnforced
+      ? `Add \`constraints: [{type: not_null}]\` to \`${g.column}\` on \`${g.model}\` (contract is \`enforced: true\` so the constraint is enforced at write-time).`
+      : `Add \`not_null\` to \`${g.column}\`'s \`data_tests:\` on \`${g.model}\` (contract is not enforced, so a \`constraints:\` entry would be inert — use a data_test).`
+    findings.push(
+      makeFinding({
+        severity: clampSeverity("test_coverage", "warning", "high"),
+        category: "test_coverage",
+        title: `${filename}: grain column \`${g.column}\` in unique_combination_of_columns lacks \`not_null\` on \`${g.model}\``,
+        body:
+          `The \`unique_combination_of_columns\` test on \`${g.model}\` names \`${g.column}\` as a grain key, but no \`not_null\` ` +
+          `coverage is declared for it (either as a \`constraints:\` entry on a contracted model, or as a \`data_tests: [not_null]\` ` +
+          `on a view). A NULL grain-key value silently passes the uniqueness test, so a fan-out or duplicate bug can ship without ` +
+          `any test catching it. ${recommendation}`,
+        file: file.path,
+        model: g.model,
+        column: g.column,
+        confidence: "high",
+        evidence: {
+          tool: "dbt-patterns",
+          result: {
+            rule: "grain_key_not_null_missing",
+            model: g.model,
+            column: g.column,
+            contractEnforced: g.contractEnforced,
+          },
+        },
+        // Per-column ruleKey so the global fingerprint dedupe keeps distinct
+        // grain-column gaps on the same model as separate findings.
+        ruleKey: `test_coverage:grain-key-not-null:${g.model}.${g.column}`,
+      }),
+    )
+  }
+
+  return findings.filter((x) => !exclusionReason(x, rubric))
 }

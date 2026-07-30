@@ -9,7 +9,7 @@ import {
   SEVERITY_ORDER,
 } from "./finding"
 import { type ChangedFile, filterChangedFiles } from "./diff-filter"
-import { classifyPR, TIER_LANES } from "./risk-tier"
+import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
@@ -180,6 +180,8 @@ export interface OrchestrateInput {
   manifestHash?: string
   coreVersion?: string
   modelVersion?: string
+  /** altimate-code CLI release recorded in engine.cliVersion for audit reconstruction. */
+  cliVersion?: string
   /**
    * Optional LLM reviewer lane. Injected (not imported) so the orchestrator
    * stays pure/unit-testable: production wires `runAiReview` (harness LLM);
@@ -190,6 +192,12 @@ export interface OrchestrateInput {
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
+  /** G1 — attach the classifier's reason list to the envelope. */
+  explainTier?: boolean
+  /** G2 — override the classifier's tier decision. Envelope carries tierForced:true. */
+  forceTier?: "trivial" | "lite" | "full"
+  /** Manifest was stale relative to change-affecting files (see run.ts::detectStaleManifest). */
+  staleManifest?: boolean
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -1088,14 +1096,58 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // A run is degraded when model files exist but none resolved against a manifest.
   const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
 
-  const tier = classifyPR(reviewable, {
+  // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
+  // the reviewer core carries no default list. `undefined` when no
+  // categories are configured, which keeps `highRiskPathTokenCategory`
+  // undefined per file and no promotion fires.
+  //
+  // `compilePathTokenResolver` throws on an unknown `preset:<name>` (typo
+  // guard, cubic + harness-bot P2). Catch that here so a single config
+  // typo in `.altimate/review.yml` doesn't crash every review run in the
+  // project's CI — surface the error to stderr AND propagate a
+  // `configError` reason into the envelope so the reader can see what
+  // broke. The review continues with no path-token promotion (the
+  // conservative safe fallback), so users notice their opt-in is dead
+  // rather than getting silent auto-approve on billing/PCI/etc. paths
+  // (cubic-review P2 on PR #1028 risk-tier.ts:134).
+  let pathTokenCategoryOf: ((p: string) => string | undefined) | undefined
+  let pathTokenConfigError: string | undefined
+  try {
+    pathTokenCategoryOf = compilePathTokenResolver(input.config.riskTierPathTokens)
+  } catch (e: any) {
+    pathTokenConfigError = `riskTierPathTokens config invalid: ${e?.message ?? String(e)}`
+    process.stderr.write(`⚠️  ${pathTokenConfigError}\n   Review continuing without path-token promotion.\n`)
+    pathTokenCategoryOf = undefined
+  }
+  const tierResult = classifyPR(reviewable, {
     blastRadiusOf: (p) => {
       const c = ctxByPath.get(p)
       return c ? c.impact.directCount + c.impact.transitiveCount : 0
     },
     touchesPiiOf: (f) => (ctxByPath.get(f.path)?.pii.length ?? 0) > 0,
     isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
-  }).tier
+    pathTokenCategoryOf,
+  })
+  // Surface config errors in the tier-reasons stream so a reader of the
+  // envelope (or PR comment) sees WHY their opt-in didn't fire.
+  if (pathTokenConfigError) tierResult.reasons.unshift(pathTokenConfigError)
+  const classifiedTier = tierResult.tier
+  // G2 — --force-tier overrides the classifier. Envelope records both the
+  // forced tier and the original classification whenever the flag is passed
+  // (regardless of whether the forced value happens to match the classifier),
+  // so audits can see the bypass every time the flag was used. The reasons
+  // list gets a leading "forced" marker so downstream doesn't confuse the
+  // forced tier for a natural one. Codex-R18-review fix — the earlier
+  // `!== classifiedTier` gate silently hid the bypass when the forced tier
+  // matched the classifier's result.
+  const tier = input.forceTier ?? classifiedTier
+  const tierForced = input.forceTier !== undefined
+  const tierReasons = tierForced
+    ? [
+        `forced via --force-tier=${input.forceTier} (classifier said ${classifiedTier})`,
+        ...tierResult.reasons,
+      ]
+    : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
 
@@ -1196,8 +1248,38 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
 
   // schema.yml-level detectors (test removal) — run on changed YAML files
   // regardless of tier, since deleting a guardrail test is always worth flagging.
-  for (const file of reviewable) {
-    if (file.kind === "schema_yml") all.push(detectSchemaYmlPatterns(file, input.rubric))
+  // Pass old + new content when available so the detector diffs structural YAML
+  // (per-(entity, column, test) tuples) instead of walking the unified diff
+  // (which loses context when the model header is outside the -U3 window and
+  // silently drops sibling-column edge cases). Falls back to diff-only line
+  // detection when a content resolver isn't wired (e.g. unit-test callers).
+  //
+  // `oldContent` is fetched for anything that has an old side — MODIFIED,
+  // RENAMED, and DELETED. A schema.yml being renamed (e.g. moved to a new
+  // subdir) that also drops a `unique`/`not_null` guardrail must still surface
+  // as a finding; the earlier `status === "modified"` gate silently skipped
+  // renames. A whole schema.yml being DELETED removes every test declared in
+  // it — an even bigger removal — so the detector runs against `oldContent`
+  // vs an empty new document (cubic-review P2).
+  //
+  // `newContent` fetch is skipped for deleted files (nothing at HEAD to read;
+  // git-show would fail).
+  //
+  // Fetches run in parallel across schema files (a schema-heavy PR could touch
+  // dozens of yml files; serial `git show` per file adds up).
+  const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  if (schemaFiles.length) {
+    const schemaFindingSets = await Promise.all(
+      schemaFiles.map(async (file) => {
+        const oldRef = file.oldPath ?? file.path
+        const [oldContent, newContent] = await Promise.all([
+          file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
+          file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
+        ])
+        return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
+      }),
+    )
+    for (const findings of schemaFindingSets) all.push(findings)
   }
 
   // Architectural dedup: the regex `dbt-patterns`/`rule-catalog` layer is a
@@ -1345,10 +1427,21 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     tier,
     mode: input.mode,
     rubric: input.rubric,
-    engine: { core: input.coreVersion, model: input.modelVersion },
+    engine: { core: input.coreVersion, model: input.modelVersion, cliVersion: input.cliVersion },
     manifestHash: input.manifestHash,
+    staleManifest: input.staleManifest,
     generatedAt: input.generatedAt,
     degraded,
+    // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
+    // when a riskTierPathTokens config error was caught above, OR when the
+    // classifier lands on `full` tier — a naturally-full run is a customer-
+    // visible policy call ("why did my YAML-only diff get REQUEST_CHANGES?")
+    // and the reason list is what makes the verdict debuggable without the
+    // customer having to re-run with --explain-tier. `trivial`/`lite` runs
+    // stay silent to avoid noise on approvals.
+    tierReasons: input.explainTier || tierForced || pathTokenConfigError || tier === "full" ? tierReasons : undefined,
+    tierForced: tierForced ? true : undefined,
+    tierClassified: tierForced ? classifiedTier : undefined,
   })
   return signEnvelope(envelope)
 }

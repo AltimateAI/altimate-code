@@ -21,6 +21,8 @@ import {
   shouldReview,
   classifyPR,
   classifyFile,
+  compilePathTokenResolver,
+  RISK_TOKEN_PRESETS,
   type ChangedFile,
   runReview,
   modelNameFromPath,
@@ -265,6 +267,138 @@ describe("verdict", () => {
     expect(verifyEnvelope(tampered, "test-key")).toBe(false)
   })
 
+  test("--force-tier audit fields are set whenever the flag is passed (even when forced == classified)", () => {
+    // Simulates orchestrate.ts's audit-envelope construction for the two
+    // --force-tier cases. Ensures we never silently bypass the audit trail
+    // just because the forced value happens to match the classifier's tier.
+    // Regression guard for the post-R18 review finding.
+    const withForcedDifferent = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      tierForced: true,
+      tierClassified: "trivial",
+      tierReasons: ["forced via --force-tier=full (classifier said trivial)"],
+    })
+    expect(withForcedDifferent.tierForced).toBe(true)
+    expect(withForcedDifferent.tierClassified).toBe("trivial")
+
+    const withForcedSame = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      tierForced: true,
+      tierClassified: "full",
+      tierReasons: ["forced via --force-tier=full (classifier said full)"],
+    })
+    expect(withForcedSame.tierForced).toBe(true)
+    expect(withForcedSame.tierClassified).toBe("full")
+
+    const notForced = buildEnvelope({ findings: [], tier: "lite", mode: "comment" })
+    expect(notForced.tierForced).toBeUndefined()
+    expect(notForced.tierClassified).toBeUndefined()
+  })
+
+  test("envelope schema rejects inconsistent tierForced / tierClassified (PR #1027 consensus MINOR #2)", async () => {
+    // Direct-parse invariants at the envelope boundary. `runReview` never
+    // builds an inconsistent envelope, but a hand-built envelope with
+    // `tierForced: true` and no `tierClassified` (or vice versa) is a
+    // silent audit-metadata break — the signed body claims a bypass but
+    // records no origin tier, or vice versa. The zod `superRefine`
+    // makes both states unparseable and unsignable.
+    const { VerdictEnvelope: EnvelopeSchema } = await import("../../src/altimate/review/verdict")
+
+    const goodBothPresent = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      tierForced: true,
+      tierClassified: "trivial",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(goodBothPresent.success).toBe(true)
+
+    const goodBothAbsent = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "lite",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(goodBothAbsent.success).toBe(true)
+
+    const badForcedOnly = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      tierForced: true,
+      // tierClassified missing — inconsistent audit metadata
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badForcedOnly.success).toBe(false)
+
+    const badClassifiedOnly = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "full",
+      // tierForced missing but tierClassified claims an origin
+      tierClassified: "trivial",
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badClassifiedOnly.success).toBe(false)
+
+    const badForcedFalse = EnvelopeSchema.safeParse({
+      version: "1",
+      verdict: "APPROVE",
+      idealVerdict: "APPROVE",
+      mode: "comment",
+      tier: "lite",
+      // `tierForced: false` is not a legitimate state — the marker exists to
+      // record forced runs; unforced runs must omit it entirely.
+      tierForced: false,
+      findings: [],
+      summary: { critical: 0, warning: 0, suggestion: 0, degraded: false },
+      engine: { reviewer: "test/1" },
+    })
+    expect(badForcedFalse.success).toBe(false)
+  })
+
+  test("tierForced + tierClassified are covered by the signature (tampering detected)", () => {
+    // Confirms the audit fields live inside the signed canonical body — a
+    // tampered envelope claiming a natural tier when a bypass ran can't slip
+    // past verifyEnvelope.
+    const signed = signEnvelope(
+      buildEnvelope({
+        findings: [],
+        tier: "full",
+        mode: "comment",
+        tierForced: true,
+        tierClassified: "trivial",
+        tierReasons: ["forced via --force-tier=full (classifier said trivial)"],
+        generatedAt: "2026-05-29T00:00:00Z",
+      }),
+      "k",
+    )
+    expect(verifyEnvelope(signed, "k")).toBe(true)
+    const strippedForce = { ...signed, tierForced: undefined, tierClassified: undefined, tierReasons: undefined }
+    expect(verifyEnvelope(strippedForce, "k")).toBe(false)
+  })
+
   test("tampering a NESTED finding field is detected (signature covers findings)", () => {
     const f = makeFinding({
       severity: "warning",
@@ -313,6 +447,10 @@ describe("diff-filter", () => {
     expect(classifyDbtFile("models/marts/_marts.yml")).toBe("schema_yml")
     expect(classifyDbtFile("macros/x.sql")).toBe("macro")
     expect(classifyDbtFile("snapshots/s.sql")).toBe("snapshot")
+    // Snapshot YAML property files carry column/test declarations and route
+    // to the schema_yml detector, not the snapshot catalog rules.
+    expect(classifyDbtFile("snapshots/orders_snapshot.yml")).toBe("schema_yml")
+    expect(classifyDbtFile("snapshots/orders_snapshot.yaml")).toBe("schema_yml")
     expect(classifyDbtFile("seeds/c.csv")).toBe("seed")
     expect(classifyDbtFile("dbt_project.yml")).toBe("project_config")
     expect(classifyDbtFile("models/marts/m.py")).toBe("python_model")
@@ -365,6 +503,504 @@ describe("risk-tier", () => {
     expect(r.tier).toBe("full")
     expect(r.reasons.join(" ")).toContain("source")
   })
+
+  // R20 S4 — triage-tier promotion for the two auto-approval failure modes
+  // exposed by the 5-PR internal corpus study. Historical baseline auto-
+  // approved PRs D (test-only YAML on contracted marts, 8 missed findings)
+  // and E (cost-anchor redesign, 11 missed findings). These tests lock in
+  // the "never auto-approve risk-bearing dbt metadata changes" contract.
+  test("R20 S4: full: schema.yml adds data_tests: [not_null] on a mart (PR D shape)", () => {
+    const diff =
+      "@@ -1,3 +1,6 @@\n" +
+      " models:\n" +
+      "   - name: mrt_column_lineage\n" +
+      "     columns:\n" +
+      "       - name: record_id\n" +
+      "+        data_tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/marts/mrt_column_lineage.yml", diff)])
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("data_tests")
+    // Marts context flag surfaces so the customer sees where the promotion came from.
+    expect(r.reasons.join(" ")).toContain("mart-API surface")
+  })
+
+  test("R20 S4: full: schema.yml adds constraints: block on a contracted model", () => {
+    const diff =
+      "@@ -1,3 +1,5 @@\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "+        constraints:\n" +
+      "+          - type: not_null\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+    // Reason names the specific key that fired (consensus MINOR #4).
+    expect(r.reasons.join(" ")).toContain("constraints")
+  })
+
+  test("R20 S4: full: legacy `tests:` key (pre-dbt-1.8) also promotes (consensus MAJOR #1)", () => {
+    // Consensus MAJOR #1 — the original DBT_RISK_KEY_RE covered `data_tests`
+    // but not the pre-1.8 `tests:` alias. Projects on dbt <1.8 or mid-
+    // migration could add `tests: [- unique / - not_null]` under
+    // `models/marts/` and slip past the trivial gate.
+    const diff =
+      "@@ -1,3 +1,6 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "+        tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/marts/mrt_x.yml", diff)])
+    expect(r.tier).toBe("full")
+    // The specific key must be named — consensus MINOR #4.
+    expect(r.reasons.join(" ")).toContain("tests")
+    expect(r.reasons.join(" ")).toContain("mart-API surface")
+  })
+
+  test("R20 S4: legacy `tests:` outside marts still promotes (kind gate isn't marts-only)", () => {
+    // The rule fires on any schema_yml, not just marts — promoting an int_
+    // yml adding `tests: [not_null]` on a grain key is still risk-worthy
+    // even without the marts-API-surface context.
+    const diff =
+      "@@ -1,3 +1,6 @@\n" +
+      " models:\n" +
+      "   - name: int_x\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "+        tests:\n" +
+      "+          - unique\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+  })
+
+  test("R20 S4: block-scalar description containing `data_tests:` does NOT promote (consensus MINOR #6)", () => {
+    // Consensus MINOR #6 — the `(?!#)` guard only excluded `#` comments,
+    // not YAML block-scalar bodies (`description: |` or `description: >`).
+    // A long-form description that happens to contain the substring
+    // `data_tests:` on its own line would trigger a promotion that had
+    // nothing to do with actual risk changes.
+    const diff =
+      "@@ -1,3 +1,8 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "+    description: |\n" +
+      "+      This mart is the source of truth for X.\n" +
+      "+      data_tests: are declared in the sibling schema.yml.\n" +
+      "+      constraints: are managed via the contract there.\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: block-scalar header with explicit indentation indicator or trailing comment (kilo-bot review)", () => {
+    // kilo-code-bot suggestion — `blockScalarStart` earlier accepted only
+    // `|`/`>` with an optional `+`/`-` chomp, so `description: |2`,
+    // `description: |+2`, and `description: | # legacy` were skipped and
+    // their body lines could false-positive promote. All three shapes
+    // must now open a scalar so the body is masked.
+    for (const opener of ["description: |2", "description: |+2", "description: | # legacy comment"]) {
+      const diff =
+        "@@ -1,3 +1,7 @@\n" +
+        " models:\n" +
+        "   - name: mrt_x\n" +
+        `+    ${opener}\n` +
+        "+      data_tests: are declared in the sibling schema.yml\n" +
+        "+      constraints: are managed via the contract there.\n"
+      const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+      expect(r.tier).toBe("trivial")
+    }
+  })
+
+  test("R20 S4: `|1` block scalar in context — body indent measured consistently (cubic P2 bot review)", () => {
+    // Cubic P2 — the diff-marker vs indentation calculation was
+    // inconsistent between context lines (retained their leading space)
+    // and changed lines (whose `+`/`-` marker was stripped). A valid `|1`
+    // block scalar opened in context with a body indented exactly one
+    // space beyond the header wasn't masked because the context
+    // scalarIndent counted one extra space. Now BOTH context and changed
+    // lines have their leading diff marker stripped before indent
+    // measurement.
+    const diff =
+      "@@ -1,8 +1,9 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     description: |1\n" +
+      "       Existing body line stays put.\n" +
+      "+      data_tests: are still in the sibling schema.yml, not here.\n" +
+      "+      constraints: too.\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: block-scalar OPENED IN CONTEXT (not changed) still suppresses body (codex round-6 HIGH)", () => {
+    // Codex R20 round-6 HIGH — an earlier version stripped only the
+    // filtered +/- slice, so a pre-existing `description: |` in the
+    // context would be invisible and a `+      data_tests: ...` line
+    // inside its body would wrongly promote. The scan now walks the
+    // whole diff for scalar state and only masks output on changed lines.
+    const diff =
+      "@@ -1,7 +1,8 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     description: |\n" +
+      "       This mart is the source of truth for X.\n" +
+      "-      Some prior description body.\n" +
+      "+      data_tests: are declared in the sibling schema.yml.\n" +
+      "+      constraints: are managed via the contract there.\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: block-scalar closes at ≤ start-indent (subsequent risk keys still fire)", () => {
+    // Precision guard for the block-scalar strip — when the block scalar
+    // ENDS and a subsequent line at ≤ its start indent adds a real risk
+    // key, the promotion must still fire. Otherwise the strip could
+    // silently suppress genuine risk changes.
+    const diff =
+      "@@ -1,3 +1,9 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "+    description: |\n" +
+      "+      Body: mentions data_tests: only inside prose.\n" +
+      "+    columns:\n" +
+      "+      - name: id\n" +
+      "+        data_tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("data_tests")
+  })
+
+  test("R20 S4: removing a `data_tests:` block also promotes (consensus NIT #9)", () => {
+    // Consensus NIT #9 — the risk-key regex matches BOTH `+` and `-`
+    // prefixes because `changedLines()` includes both. Removing a
+    // guardrail is at least as risk-worthy as adding one; this locks in
+    // that behavior with an explicit test.
+    const diff =
+      "@@ -1,7 +1,3 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      "     columns:\n" +
+      "       - name: id\n" +
+      "-        data_tests:\n" +
+      "-          - not_null\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("full")
+  })
+
+  test("R20 S4: raw `git diff -p` free-form headers do NOT reach the scanner (harness-bot review)", () => {
+    // altimate-harness-bot review, PR #1028 risk-tier.ts:251. The earlier
+    // guard skipped only `+++`/`---`/`@@` unified-diff headers and
+    // context (space-prefixed) lines; free-form lines from a raw
+    // `git diff -p` output (`diff --git`, `index abc..def`, `Author:`,
+    // `Date:`) fell through with a `""` marker and reached
+    // `dbtRiskYmlKeyMatches`. In-production `file.diff` never carries
+    // these — the GitHub PR files API strips them — so the risk was
+    // defensive parity only, but exercise it here so a future caller
+    // passing a raw diff can't silently over-promote.
+    const diff =
+      "diff --git a/models/intermediate/int_x.yml b/models/intermediate/int_x.yml\n" +
+      "index abcdef1..1234567 100644\n" +
+      "--- a/models/intermediate/int_x.yml\n" +
+      "+++ b/models/intermediate/int_x.yml\n" +
+      "@@ -1,3 +1,4 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      '+    description: "See tests documentation for the grain policy"\n'
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    // Same content as the bare-`tests`-word test below; must stay trivial
+    // regardless of whether the caller included raw diff headers.
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: bare `tests` (no colon) does NOT match the risk-key regex (word-boundary guard)", () => {
+    // FP guard — a description line like `# tests explanation`, or a
+    // yml value containing the string `tests` without a following colon,
+    // must not promote. The regex requires `[ \t]*:`.
+    const diff =
+      "@@ -1,3 +1,4 @@\n" +
+      " models:\n" +
+      "   - name: mrt_x\n" +
+      '+    description: "See tests documentation for the grain policy"\n'
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: full: schema.yml adds unique_combination_of_columns test (consensus MAJOR #3 tightened)", () => {
+    // Locked-down test for the DBT_UNIQUE_COMBO_RE regex specifically.
+    // Path chosen so `DBT_UNIQUE_COMBO_RE` is the sole possible promoter
+    // (non-mart, no configured high-risk tokens by default), and the reason
+    // string is asserted to confirm which signal fired.
+    const diff =
+      "@@ -1,3 +1,7 @@\n" +
+      "     data_tests:\n" +
+      "+      - dbt_utils.unique_combination_of_columns:\n" +
+      "+          combination_of_columns:\n" +
+      "+            - a\n" +
+      "+            - b\n"
+    const r = classifyPR([file("models/intermediate/int_grain.yml", diff)])
+    expect(r.tier).toBe("full")
+    // The reason must name the exact triggering signal (consensus MINOR #4).
+    // Both `data_tests:` (the key) and `unique_combination_of_columns` (the
+    // test name inside the list) fire on this diff.
+    expect(r.reasons.join(" ")).toContain("unique_combination_of_columns")
+    // Explicit FP guard — no other promotion signal should fire on this path.
+    expect(r.reasons.join(" ")).not.toContain("high-risk token")
+    expect(r.reasons.join(" ")).not.toContain("mart-API surface")
+  })
+
+  // The path-token promotion is USER-CONFIGURED, not baked into the core.
+  // These tests exercise the resolver + tier plumbing with an explicit
+  // finops preset opt-in. A project that doesn't set `riskTierPathTokens`
+  // gets no path-token promotion at all — verified by the default-classifier
+  // paths tested above.
+  const finopsResolver = compilePathTokenResolver({ finops: ["preset:finops"] })
+
+  test("R20 S4: full: high-risk path-token category matches when the finops preset is enabled", () => {
+    // Small SQL change on a mart whose path contains a preset token should
+    // NOT auto-approve at lite tier just because it's within the line limit.
+    const r = classifyPR([file("models/marts/mrt_cost_daily.sql", "+select 1 as a\n")], {
+      blastRadiusOf: () => 1,
+      pathTokenCategoryOf: (p) => finopsResolver!(p),
+    })
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("high-risk token category 'finops'")
+  })
+
+  test("R20 S4: high-risk token category — every preset token fires at a boundary", () => {
+    // Property-based: iterate the shipped preset and assert each token
+    // promotes when placed at a path boundary. Adding a preset token
+    // extends coverage automatically; a regression that broke the
+    // boundary character class shows up as multiple simultaneous test
+    // failures.
+    for (const tok of RISK_TOKEN_PRESETS.finops) {
+      const p = `models/marts/mrt_${tok}_summary.sql`
+      const r = classifyPR([file(p, "+select 1\n")], {
+        blastRadiusOf: () => 0,
+        pathTokenCategoryOf: (x) => finopsResolver!(x),
+      })
+      expect(r.tier).toBe("full")
+      expect(r.reasons.join(" ")).toContain("high-risk token category 'finops'")
+    }
+  })
+
+  test("R20 S4: high-risk token — interior substring does NOT fire (boundary anchors exercised)", () => {
+    // Property-based FP guard. For every preset token, wrap it in
+    // ASCII-letter padding on both sides so the token IS present in the
+    // path as an interior substring. The alternation matches; only the
+    // boundary anchors (path/word/digit) block promotion. If someone
+    // weakens the boundary class, every one of these fails.
+    for (const tok of RISK_TOKEN_PRESETS.finops) {
+      const p = `models/staging/stg_x${tok}y.sql`
+      const r = classifyPR([file(p, "+select 1\n")], {
+        blastRadiusOf: () => 0,
+        pathTokenCategoryOf: (x) => finopsResolver!(x),
+      })
+      expect(r.tier).toBe("lite")
+    }
+  })
+
+  test("R20 S4: high-risk token — boundary matches digit suffixes (consensus MINOR #7)", () => {
+    // The boundary class includes `\d` so digit-suffixed names still fire.
+    // A single named case is enough — the property tests above cover the
+    // full alternation.
+    const r = classifyPR([file("models/marts/mrt_cost2024.sql", "+select 1\n")], {
+      blastRadiusOf: () => 0,
+      pathTokenCategoryOf: (p) => finopsResolver!(p),
+    })
+    expect(r.tier).toBe("full")
+    expect(r.reasons.join(" ")).toContain("high-risk token category 'finops'")
+  })
+
+  test("R20 S4: high-risk token — unknown preset name throws with the known-list in the message", () => {
+    // cubic-review P2 + altimate-harness-bot on PR #1028 — a typo in a
+    // `preset:<name>` entry (e.g. `preset:finop` instead of `preset:finops`)
+    // must not silently no-op the category. Fail loud at resolver-build so
+    // the misconfiguration is caught before any diff is scanned.
+    expect(() => compilePathTokenResolver({ finops: ["preset:finop"] })).toThrow(/unknown preset 'finop'/)
+    // The error message lists the known presets so the reader gets a
+    // fix pointer rather than "unknown, good luck".
+    try {
+      compilePathTokenResolver({ finops: ["preset:finop"] })
+      throw new Error("expected throw")
+    } catch (e: any) {
+      expect(String(e.message)).toContain("finops")
+    }
+    // A category can mix a typo with valid tokens — the typo still fails,
+    // and the resolver-build never returns a partially-broken resolver.
+    expect(() => compilePathTokenResolver({ finops: ["cost", "preset:finop", "billing"] })).toThrow(/preset 'finop'/)
+    // A known preset still works.
+    const ok = compilePathTokenResolver({ finops: ["preset:finops"] })
+    expect(ok).toBeDefined()
+    expect(ok!("models/marts/mrt_cost_daily.sql")).toBe("finops")
+  })
+
+  test("R20 S4: runReview does NOT crash on an unknown-preset config typo — degrades gracefully (cubic P2)", async () => {
+    // cubic-review P2 on PR #1028 — a typo like `preset:finop` in
+    // `.altimate/review.yml` would make `compilePathTokenResolver` throw
+    // and, previously, take the entire review run down with it. Catch
+    // in orchestrate.ts, log to stderr, and continue with no path-token
+    // promotion; surface the error in `tierReasons` so a reader of the
+    // envelope (or PR comment) sees why their opt-in didn't fire.
+    const files: ChangedFile[] = [{ path: "models/marts/m.sql", status: "modified", diff: "+select 1\n" }]
+    // Minimal runner — this test only needs runReview to reach the
+    // resolver-build path and back out with an envelope.
+    const runner: ReviewRunner = {
+      async check() { return { issues: [], ran: false } },
+      async detectPii() { return { columns: [] } },
+      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
+      async grade() { return { grade: "A", decided: true } },
+    }
+    // Silence stderr for the expected warning during the test run.
+    const origWrite = process.stderr.write.bind(process.stderr)
+    let stderrCaptured = ""
+    process.stderr.write = ((s: string) => {
+      stderrCaptured += String(s)
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const env = await runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG, riskTierPathTokens: { finops: ["preset:finop"] } } as any,
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        getContent: async () => "select 1",
+        generatedAt: "2026-05-29T00:00:00Z",
+        explainTier: true,
+      })
+      // Envelope was still produced — no crash.
+      expect(env.verdict).toBeDefined()
+      // stderr got the diagnostic + the fallback banner.
+      expect(stderrCaptured).toContain("riskTierPathTokens config invalid")
+      expect(stderrCaptured).toContain("Review continuing without path-token promotion")
+      // Envelope's tier-reasons stream carries the config error so a
+      // reader who never sees stderr still knows why promotion didn't fire.
+      const reasons = (env.tierReasons ?? []).join(" ")
+      expect(reasons).toContain("riskTierPathTokens config invalid")
+      expect(reasons).toContain("unknown preset 'finop'")
+    } finally {
+      process.stderr.write = origWrite
+    }
+  })
+
+  test("R20 S4: config error surfaces in envelope even WITHOUT --explain-tier (coderabbit review)", async () => {
+    // coderabbit review on PR #1028 orchestrate.ts:1129 — a normal
+    // `comment` / `gate` run does NOT set `explainTier`, so the envelope's
+    // `tierReasons` field is dropped. That silently strips the config
+    // error, and a user with a typoed `.altimate/review.yml` sees no
+    // reason WHY their opt-in didn't fire in the PR comment — the whole
+    // point of the earlier fail-loud fix. The envelope gate now includes
+    // tierReasons whenever a config error was caught, regardless of
+    // explain-tier.
+    const files: ChangedFile[] = [{ path: "models/marts/m.sql", status: "modified", diff: "+select 1\n" }]
+    const runner: ReviewRunner = {
+      async check() { return { issues: [], ran: false } },
+      async detectPii() { return { columns: [] } },
+      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
+      async grade() { return { grade: "A", decided: true } },
+    }
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      // NOTE: explainTier is intentionally NOT set here (default false).
+      const env = await runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG, riskTierPathTokens: { finops: ["preset:finop"] } } as any,
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner,
+        getContent: async () => "select 1",
+        generatedAt: "2026-05-29T00:00:00Z",
+      })
+      // Envelope was still produced.
+      expect(env.verdict).toBeDefined()
+      // Config error surfaces in tierReasons DESPITE explainTier being unset.
+      const reasons = (env.tierReasons ?? []).join(" ")
+      expect(reasons).toContain("riskTierPathTokens config invalid")
+      expect(reasons).toContain("unknown preset 'finop'")
+    } finally {
+      process.stderr.write = origWrite
+    }
+  })
+
+  test("R20 S4: high-risk token — no promotion when no resolver is configured (core is neutral)", () => {
+    // Same paths that fire above must stay lite when the caller doesn't
+    // supply a resolver — the reviewer core has zero opinion about which
+    // paths are high-risk, all of which comes from user config.
+    for (const p of [
+      "models/marts/mrt_daily_totals.sql",
+      "models/marts/mrt_cost2024.sql",
+      "models/staging/stg_billing2.sql",
+    ]) {
+      const r = classifyPR([file(p, "+select 1\n")], { blastRadiusOf: () => 0 })
+      expect(r.tier).toBe("lite")
+    }
+  })
+
+  test("R20 S4: trivial: description-only edits under models/marts/ still trivial (no risk keys)", () => {
+    // A schema.yml under marts that only changes descriptions/docs should
+    // stay trivial — the promotion requires diff-level risk signals, not
+    // just path membership. Precision guard against over-firing on doc PRs.
+    const r = classifyPR([file("models/marts/_m.yml", "+    description: better docs\n+    meta:\n+      owner: alice\n")])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges does NOT fire outside schema.yml (kind gate)", () => {
+    // The token `data_tests:` appearing in a .sql or .md file shouldn't
+    // promote — the rule keys off schema.yml kind + diff-level regex, not
+    // the token appearing in arbitrary text.
+    const r = classifyPR([file("models/intermediate/int_x.sql", "+-- note: data_tests: not_null on grain\n")], {
+      blastRadiusOf: () => 0,
+    })
+    expect(r.tier).toBe("lite")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges does NOT fire on yml comment lines mentioning the key", () => {
+    // Comment lines starting with `#` (with or without diff `+`/`-` prefix)
+    // must not promote — a reviewer explaining `constraints:` in a schema.yml
+    // comment shouldn't trigger a full-tier run.
+    const diff =
+      "@@ -1,3 +1,4 @@\n" +
+      " models:\n" +
+      "   - name: foo\n" +
+      "+    # note: constraints: are handled at the mart layer\n" +
+      "+    description: foo model\n"
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges does NOT fire on description strings mentioning the key", () => {
+    // A `description:` string containing the substring `data_tests:` or
+    // `constraints:` must not promote — the regex anchors to key position.
+    // Note: `contract:` in a description would trip the pre-existing
+    // `touchesContract` hard-floor rule (diff-filter.ts:139), which is out
+    // of S4 scope; keep this negative test on `data_tests` / `constraints`.
+    const diff =
+      "@@ -1,2 +1,3 @@\n" +
+      " models:\n" +
+      "   - name: foo\n" +
+      '+    description: "grain-key columns get data_tests: not_null via dbt_utils.unique_combination_of_columns"\n'
+    const r = classifyPR([file("models/intermediate/int_x.yml", diff)])
+    expect(r.tier).toBe("trivial")
+  })
+
+  test("R20 S4: dbtRiskYmlChanges fires on YAML key at nested indent (production shape)", () => {
+    // Sanity: the tightened regex still fires on realistic dbt YAML shapes
+    // where `data_tests:` sits under `columns:` at 8-space indent.
+    const diff =
+      "@@ -1,5 +1,7 @@\n" +
+      " models:\n" +
+      "   - name: mrt_order\n" +
+      "     columns:\n" +
+      "       - name: order_id\n" +
+      "+        data_tests:\n" +
+      "+          - not_null\n"
+    const r = classifyPR([file("models/marts/mrt_order.yml", diff)])
+    expect(r.tier).toBe("full")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -386,6 +1022,19 @@ describe("config", () => {
     const cfg = { ...DEFAULT_REVIEW_CONFIG, exclude: ["legacy/old.sql"] }
     const rubric = resolveRubric(cfg)
     expect(rubric.exclusions.excludeGlobs).toContain("legacy/old.sql")
+  })
+
+  test("riskTierPathTokens rejects empty-string tokens (cubic-review P2)", () => {
+    // An empty token would compile to a `(?:|foo)` alternative that
+    // matches the empty string between two boundary chars — e.g.
+    // `stg__orders.sql` would silently over-promote. Zod schema
+    // requires non-empty tokens.
+    expect(() =>
+      parseReviewConfig("riskTierPathTokens:\n  finops:\n    - ''\n    - cost\n"),
+    ).toThrow()
+    // Legit non-empty tokens still parse.
+    const ok = parseReviewConfig("riskTierPathTokens:\n  finops:\n    - cost\n    - preset:finops\n")
+    expect(ok.riskTierPathTokens.finops).toEqual(["cost", "preset:finops"])
   })
 })
 
@@ -1822,6 +2471,42 @@ describe("orchestrate", () => {
       getContent: content("select 1 as value"),
     })
     expect(env.summary.degraded).toBe(true)
+  })
+
+  test("renderSummary escapes backticks in tierReasons (cubic-review P3)", async () => {
+    // Regression: a fixed single-backtick fence around each tier reason meant a
+    // path like `weird`path`.sql` would terminate the code span mid-way and
+    // inject Markdown into the summary. Fence now sizes to max(backtick-run)+1
+    // and pads leading/trailing backticks with a space.
+    const env = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "comment",
+      generatedAt: "2026-05-29T00:00:00Z",
+      tierReasons: [
+        "models/x.sql", // plain path — one-backtick fence still fine
+        "path with `single` inside", // needs 2-backtick fence
+        "path with ``double`` inside", // needs 3-backtick fence
+        "`starts-with-backtick",
+        "ends-with-backtick`",
+        "`both-ends`", // both leading + trailing backticks — symmetric padding
+      ],
+    })
+    const summary = renderSummary(env)
+    // Sanity: the tier line exists
+    expect(summary).toContain("Tier: full")
+    // A path with `single` inside must be wrapped by a fence longer than the
+    // longest backtick run inside it. Two-backtick fence sees `single` as a
+    // single-backtick run inside the code span → renders correctly.
+    expect(summary).toContain("``path with `single` inside``")
+    // Three-backtick fence for two-backtick run inside.
+    expect(summary).toContain("```path with ``double`` inside```")
+    // Leading/trailing backticks get space padding so the fence doesn't fuse
+    // with the reason text.
+    expect(summary).toContain("`` `starts-with-backtick ``")
+    expect(summary).toContain("`` ends-with-backtick` ``")
+    // Both ends have backticks — same single pad wraps both sides symmetrically.
+    expect(summary).toContain("`` `both-ends` ``")
   })
 
   test("renderSummary + inlineComments produce marker + structured output", async () => {

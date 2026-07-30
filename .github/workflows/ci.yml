@@ -509,6 +509,12 @@ jobs:
         run: bun test
         working-directory: script/upstream
 
+      - name: Run release preflight tests
+        # Root bunfig.toml pins `bun test` away from the repo root, so run from
+        # script/ — same pattern as the marker parser tests above.
+        run: bun test release-preflight.test.ts
+        working-directory: script
+
       - name: Check for missing altimate_change markers
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
@@ -530,9 +536,9 @@ jobs:
             fi
           elif [[ "${{ github.head_ref }}" == merge-upstream-* ]] || [[ "${{ github.head_ref }}" == upstream/merge-* ]]; then
             echo "Upstream merge PR detected — running marker check in non-strict mode"
-            bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }}
+            bun run script/upstream/analyze.ts --markers --base origin/${{ github.event.pull_request.base.ref }}
           else
-            bun run script/upstream/analyze.ts --markers --base ${{ github.event.pull_request.base.ref }} --strict
+            bun run script/upstream/analyze.ts --markers --base origin/${{ github.event.pull_request.base.ref }} --strict
           fi
 
       - name: Branding leak audit (broadened scan, see analyze.ts LEAK_PATTERNS)

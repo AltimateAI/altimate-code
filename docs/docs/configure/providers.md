@@ -276,15 +276,18 @@ Create a PAT in Snowsight: **Admin > Security > Programmatic Access Tokens**.
 
 Billing flows through your Snowflake credits — no per-token costs.
 
-**Available models:**
+Prompt caching is applied automatically for Claude models: cache markers are placed on the system prompt and trailing messages, so repeated context in long sessions is billed at Snowflake's reduced cached-input rate (5-minute TTL; exact cache-read and cache-write rates vary by model — see Snowflake's Cortex pricing). Savings are workload-dependent: long agent sessions with large stable prefixes benefit most, while very short sessions may see little change — monitor `cache_read_input`/`cache_write_input` in Snowflake's `CORTEX_FUNCTIONS_QUERY_USAGE_HISTORY`/`TOKENS_GRANULAR` telemetry after upgrading (these columns were previously always NULL for altimate-code workloads and now populate). OpenAI models are cached automatically by Cortex itself; other model families don't support caching.
+
+**Available models** (catalog verified live against Cortex on 2026-07-20):
 
 | Model | Tool Calling |
 |-------|-------------|
-| `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-4-sonnet`, `claude-3-7-sonnet`, `claude-3-5-sonnet` | Yes |
-| `openai-gpt-4.1`, `openai-gpt-5`, `openai-gpt-5.1`, `openai-gpt-5.2`, `openai-gpt-5-mini`, `openai-gpt-5-nano`, `openai-gpt-5-chat` | Yes |
-| `llama4-maverick`, `llama4-scout`, `llama3.3-70b`, `snowflake-llama-3.3-70b`, `snowflake-llama-3.1-405b`, `llama3.1-70b`, `llama3.1-405b`, `llama3.1-8b` | No |
-| `mistral-large`, `mistral-large2`, `mistral-7b`, `mixtral-8x7b` | No |
-| `deepseek-r1`, `gemini-3.1-pro` | No |
+| `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-4-sonnet` | Yes |
+| `openai-gpt-4.1`, `openai-gpt-5`, `openai-gpt-5.1`, `openai-gpt-5.2`, `openai-gpt-5.4`, `openai-gpt-5.4-mini`, `openai-gpt-5.4-nano`, `openai-gpt-5-mini`, `openai-gpt-5-nano` | Yes |
+| `llama4-maverick`, `llama3.3-70b`, `llama3.1-70b`, `llama3.1-8b` | No |
+| `mistral-large2`, `mistral-7b` | No |
+
+Snowflake deprecated `deepseek-r1`, `mistral-large`, `llama3.1-405b`, and `snowflake-llama-3.3-70b` on July 8, 2026, and has delisted `claude-3-7-sonnet`, `claude-3-5-sonnet`, `openai-gpt-5-chat`, `llama4-scout`, `mixtral-8x7b`, and `gemini-3.1-pro` — requests to these now fail.
 
 !!! note
     Model availability depends on your Snowflake region. Enable cross-region inference with `ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION'` for full model access.
@@ -309,7 +312,7 @@ Snowflake Cortex adds models faster than this list can be updated. If a model is
 }
 ```
 
-The entry merges with the built-in list, so the model appears in the picker and can be selected as `snowflake-cortex/your-new-model-id`. Set `"tool_call": false` for models that don't support tools on Cortex (Llama, Mistral, DeepSeek, Gemini today) — otherwise requests with tools will fail.
+The entry merges with the built-in list, so the model appears in the picker and can be selected as `snowflake-cortex/your-new-model-id`. Set `"tool_call": false` for models that don't support tools on Cortex (Llama and Mistral today) — otherwise requests with tools will fail.
 
 The `tool_call` field uses snake_case (matching the rest of the `altimate-code.json` schema) and maps to the picker's `capabilities.toolcall`. The request transform reads the same value, so a user-added model marked `tool_call: true` keeps `tools` and `tool_choice` in outgoing requests — and one marked `tool_call: false` has them stripped, the same as the built-in non-tool entries.
 

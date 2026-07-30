@@ -28,7 +28,12 @@ export function verdictHeadline(env: VerdictEnvelope): string {
     [critical && `${critical} critical`, warning && `${warning} warning`, suggestion && `${suggestion} suggestion`]
       .filter(Boolean)
       .join(", ") || "no findings"
-  return `${VERDICT_LABEL[env.verdict]} — ${counts} (${env.tier} tier)`
+  // tierClassified is optional in the schema — guard against externally-built
+  // envelopes that mark tierForced without threading the original classification.
+  const tierLabel = env.tierForced
+    ? `${env.tier} tier — forced (was ${env.tierClassified ?? "unknown"})`
+    : `${env.tier} tier`
+  return `${VERDICT_LABEL[env.verdict]} — ${counts} (${tierLabel})`
 }
 
 /** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
@@ -41,6 +46,37 @@ export function renderSummary(env: VerdictEnvelope): string {
       "> data-impact checks were skipped. Wire `manifest_path` (and optionally warehouse creds) for the full verdict.",
       "",
     )
+  }
+
+  // G1 (Round 18) — surface classifier reasons when --explain-tier populated
+  // them, so a customer can see why the review ran at this tier. Also surfaces
+  // when --force-tier bypassed the classifier (tierReasons is auto-populated).
+  // Truncate the rendered summary on very large diffs: classifyPR appends one
+  // reason per file forcing FULL tier (e.g. every touched schema.yml or every
+  // PII column), which bloats the comment on wide PRs. The full list stays in
+  // the signed envelope's tierReasons[]; the summary shows the first 8.
+  if (env.tierReasons && env.tierReasons.length) {
+    const RENDER_CAP = 8
+    // Pick an inline-code-span fence longer than any backtick run inside `r`
+    // so a path like `packages/…/foo`bar`.sql` cannot terminate the span
+    // (cubic-review P3).
+    const shown = env.tierReasons
+      .slice(0, RENDER_CAP)
+      .map((r) => {
+        const runs = r.match(/`+/g)
+        const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
+        const fence = "`".repeat(maxRun + 1)
+        // If the reason itself starts/ends with a backtick, pad with a space so
+        // the leading/trailing backtick isn't glued to the fence.
+        const pad = /^`|`$/.test(r) ? " " : ""
+        return `${fence}${pad}${r}${pad}${fence}`
+      })
+      .join(", ")
+    const overflow =
+      env.tierReasons.length > RENDER_CAP
+        ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`
+        : ""
+    lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
   }
 
   if (!env.findings.length) {

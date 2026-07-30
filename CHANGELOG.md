@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-07-24
+
+Focused polish on the `altimate review` dbt PR reviewer — plus TUI startup UX
+and audit-trail hardening on the signed verdict envelope.
+
+### Added
+
+- **Grain-key `not_null` completeness detector.** For every column named in a `unique_combination_of_columns` test (or the `dbt_utils` equivalent), the reviewer now checks that a `not_null` test or constraint exists on the same column — without it, a NULL grain value silently passes the uniqueness guardrail. Supports contracted models (`constraints:` with `contract.enforced: true`), column-level `data_tests:` / `tests:`, and model-level primary-key constraints. Case-folds column names for Snowflake compatibility. Delivered +11 real findings on the internal 5-PR corpus. (#1029)
+- **`--explain-tier` flag.** Pass `--explain-tier` to surface the classifier's tier-reason list on the verdict envelope so you can see why a diff was rated `trivial`, `lite`, or `full`. Full-tier verdicts also now include the reason line in the PR comment by default (no flag required), so a `REQUEST_CHANGES` on a schema.yml diff is never unexplained. (#1027)
+- **`--force-tier` flag.** *[EXPERIMENTAL / bench debug]* Bypass the classifier with `--force-tier=trivial|lite|full`. The signed envelope carries `tierForced: true` and the classifier's original decision, so an auditor always sees the bypass — the flag can't be used silently. (#1027)
+- **`riskTierPathTokens` config in `.altimate/review.yml`.** Configure named token categories (including `preset:finops` for the built-in cost/billing keyword list) to promote matching files to full review tier. Previously the FinOps preset was hardcoded and always on; it is now opt-in via this config. A typo in a category value surfaces in both stderr and the verdict envelope `tierReasons[]` (and the PR comment) so it can't kill your opt-in silently. (#1028)
+- **`engine.cliVersion` in the signed verdict envelope.** The altimate-code release that generated each verdict is now stamped into `engine.cliVersion` and covered by the HMAC signature — auditors reconstructing decisions from stored envelopes months later can identify which policy version applied.
+- **`staleManifest` flag on the verdict envelope.** When a change-affecting source file has been modified after the manifest was written, the signed envelope now carries `staleManifest: true`. A stderr warning alone is easy for CI to swallow; the envelope field is durable and part of the signed body.
+- **Bootstrap phase labels in the TUI.** While the agent initializes, the busy spinner now shows what it is actually doing ("Loading config…", "Discovering tools…", "Thinking…") matching the convention users already know from other agent UIs. Phase events are also emitted as trace spans for server-side latency profiling. (#1002)
+
+### Changed
+
+- **Risky dbt metadata surfaces never auto-approve.** PRs that touch `data_tests:`, `tests:`, `constraints:`, `contract:`, or `unique_combination_of_columns` in schema.yml under `models/marts/` — or files under any configured `riskTierPathTokens` category — are always promoted to `full` review tier. A small metadata diff can no longer slip through on `trivial` classification. Grounded in a corpus study where two PRs auto-approved with 8–11 human-visible findings each. **CI in `gate` mode may see exit-code changes on affected PRs.** (#1028)
+- **`--no-ai` flag now actually disables the LLM lane.** A yargs `boolean-negation` conflict caused a bare `--no-ai` to silently fall into the help path (exit 0, no review ran). The flag is fixed; CI scripts using `--no-ai` since v0.8.x should verify behavior on upgrade — those runs may have been executing the AI lane and getting billed. (#1027)
+- **`altimate review` auto-discovers `target/manifest.json`.** When `--manifest` is not passed and the config-relative path doesn't resolve, the reviewer walks up from `cwd` to the nearest `dbt_project.yml` and uses its adjacent `target/manifest.json`. Discovery is logged to stderr; explicit `--manifest` still wins. Removes the most common "review did nothing" support case for mono-repo invocations. (#1027)
+- **schema.yml test-removal detection is now column-aware.** The detector parses both sides of the diff structurally (YAML parse rather than diff-line pattern) and keys removals by `(model, column, test)` — eliminating false cancellations where a sibling column re-added the same test type. (#1027)
+- **Stale-manifest detection now runs for local working-tree reviews too.** Previously gated behind `--head`, so the local workflow "`dbt compile` once, edit for an hour, then `altimate review`" — where staleness bites in practice — silently under-warned. The check is limited to files that could materially change the manifest (models, schema.yml, seeds, macros, dbt config) so noise stays bounded.
+
+## [0.9.2] - 2026-07-20
+
+### Added
+
+- **Snowflake Cortex: `claude-sonnet-5`, `claude-opus-4-8`, and OpenAI GPT-5.4 (`openai-gpt-5.4`, `-mini`, `-nano`) in the model picker.** All verified live against Cortex, including prompt caching and tool calling on the new Claude models.
+- **Human-readable tool-call titles and source badges.** Tool calls now render dbt-aware labels — "Reading customers model", "Searching \*\*/\*.sql" — instead of raw paths, and every call carries an authoritative source badge (`builtin` / `altimate` / `mcp`) stamped server-side so all clients (chat webview, TUI) display consistent origins. (#980)
+
+### Changed
+
+- **Snowflake Cortex model catalog refreshed against the live service (2026-07-20).** Removed models Snowflake has deprecated (July 8, 2026: `deepseek-r1`, `mistral-large`, `llama3.1-405b`, `snowflake-llama-3.3-70b`) or delisted (`claude-3-7-sonnet`, `claude-3-5-sonnet`, `openai-gpt-5-chat`, `llama4-scout`, `mixtral-8x7b`, `snowflake-llama-3.1-405b`, `gemini-3.1-pro`) — requests to these now hard-fail on Cortex. **If your config pins one of these IDs, the next request fails with `Model not found: snowflake-cortex/<model>. Did you mean: ...?`** — switch to a current model, or re-register the ID via `altimate-code.json` (see the providers docs). Locally registered models are unaffected.
+
+### Fixed
+
+- **Snowflake Cortex prompt caching now activates for Claude models.** Cortex only honors caching markers placed inside content blocks (`messages[].content[].cache_control`), but requests carried them as message-level fields — so every request billed the full input rate (`cache_read_input`/`cache_write_input` stayed NULL in `TOKENS_GRANULAR`). The provider now relocates the markers into content blocks (system prompt + trailing messages, max 4 breakpoints), so repeated prefixes bill at Snowflake's reduced cached-input rate — savings are workload-dependent and largest on long agent sessions with big stable prefixes. If a Cortex account rejects the marked shape, the request is retried once without markers and marker injection pauses for a 5-minute cooldown. Note for Snowflake admins: `cache_read_input`/`cache_write_input` in `TOKENS_GRANULAR` begin populating for these workloads (previously always NULL) — update any dashboard queries that assumed those columns were NULL. (#1009)
+- **Legacy documentation links canonicalized.** `docs.altimate.sh`, `datamates-docs.myaltimate.com`, and `www.altimate.sh/benchmarks` references (including the TUI's docs links and system prompts) now point to `help.altimate.ai` and `altimate.ai/benchmarks`. (#1004)
+
 ## [0.9.1] - 2026-07-08
 
 This release rebases altimate-code onto **upstream OpenCode v1.17.9** (bridged up from v1.4.0 — ~165 upstream commits) behind the fork's own fixes and hardening. It is a larger-than-usual jump from 0.8.10; the upgrade is automatic and in-place (see **Upgrading from 0.8.10** below).

@@ -91,7 +91,13 @@ DIST=$(find packages/opencode/dist -type d -name '*'"$(uname -m | sed s/arm64/ar
 # 4. marker guard
 bun run script/upstream/analyze.ts --markers --base main --strict
 
-# 5. Local Verdaccio sanity IF docker + a native-platform build are available
+# 5. Deterministic preflight (tag collisions, version sanity vs npm, prerelease
+#    ancestry, release-blocker PRs). For a beta cut from main use it as-is; for a
+#    branch beta the `base` check will FAIL by design — then rely on the manual
+#    tag verification in Step 4 instead.
+bun script/release-preflight.ts --version X.Y.Z-beta.N --stage tag --allow-prerelease
+
+# 6. Local Verdaccio sanity IF docker + a native-platform build are available
 #    (the docker image is linux; on a mac you cannot cross-build the linux NAPI dist,
 #     so this validates the current platform only — CI covers the rest):
 # (cd packages/dbt-tools && bun run build) && docker compose \
@@ -108,7 +114,12 @@ The `-beta.N` suffix is what routes to the beta channel. Do NOT omit it.
 
 ```bash
 BETA_TAG="vX.Y.Z-beta.N"
+# Fail closed on collisions — a stale local tag makes `git tag` no-op and the
+# push would publish whatever the old tag points at. Never delete-and-recreate.
+git rev-parse -q --verify "refs/tags/$BETA_TAG" && { echo "LOCAL TAG EXISTS — STOP"; exit 1; }
+git ls-remote origin "refs/tags/$BETA_TAG" | grep -q . && { echo "REMOTE TAG EXISTS — STOP"; exit 1; }
 git tag "$BETA_TAG"
+test "$(git rev-parse "$BETA_TAG")" = "$(git rev-parse HEAD)" || { echo "TAG MISMATCH — STOP"; exit 1; }
 git push origin "$BETA_TAG"     # push the TAG (not necessarily main)
 ```
 

@@ -197,6 +197,31 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(skill).toMatch(/url:\s*"\/skill"[\s\S]*query:\s*\{\s*reload:\s*"true"\s*\}/)
   })
 
+  // Minimal merge-drop guards for the synthetic "Install <query>" top-of-list option in
+  // /skills. A silent upstream drop of any of these would remove a user-facing feature
+  // (ctrl+i can't be trusted — its wire byte 0x09 collides with Tab — so Enter on this
+  // synthetic row is the only reliable install path). Behavioural coverage of the
+  // classifier lives in `test/altimate/skill-install-classifier.test.ts`; keep this test
+  // narrow so cosmetic refactors don't churn it.
+  test("DialogSkillList wires synthetic install option + prefill plumbing", async () => {
+    const skill = await read("src/plugin/tui/altimate/skill-ops.tsx")
+    // Shared classifier + sentinel exist at module scope (installer and list must not drift).
+    expect(skill).toMatch(/classifyInstallSource/)
+    expect(skill).toMatch(/INSTALL_ACTION_VALUE/)
+    // The memo block that actually MAKES the Install row exist — a filter-driven
+    // `classifyInstallSource(q)` guard within reach of the row's `value:
+    // INSTALL_ACTION_VALUE`. The 300-char bound is deliberately tight: a real
+    // deletion of the synthetic-row block collapses the gap to zero and the memo
+    // stops matching, so this guard fails loudly on merge-drop. (Verified: 200 is
+    // too tight — fails against correct source; 300 fits with room to spare.)
+    expect(skill).toMatch(/classifyInstallSource\(q\)[\s\S]{0,300}value: INSTALL_ACTION_VALUE/)
+    // Enter on the synthetic row routes to the install flow with the typed filter text.
+    expect(skill).toMatch(/item\.value === INSTALL_ACTION_VALUE[\s\S]{0,120}showInstall\(api, filter\(\)/)
+    // Install/create sub-dialogs receive the typed text as a prefill.
+    expect(skill).toMatch(/DialogSkillInstall[\s\S]{0,80}initialValue/)
+    expect(skill).toMatch(/DialogSkillCreate[\s\S]{0,80}initialValue/)
+  })
+
   test("re-homed TUI upstream fixes keep prompt/update/child-session behavior", async () => {
     const promptEnhance = await read("src/plugin/tui/altimate/prompt-enhance.tsx")
     expect(promptEnhance).toMatch(
@@ -210,5 +235,42 @@ describe("fork feature presence guards (merge drop detection)", () => {
     const session = await read("src/routes/session/index.tsx", MONO + "/tui")
     expect(session).toMatch(/findIndex\(\(x\) => x\.id === session\(\)\?\.id\) \+ direction/)
     expect(session).not.toMatch(/findIndex\(\(x\) => x\.id === session\(\)\?\.id\) - direction/)
+  })
+
+  // AI-7519: the session.phase event pipeline is a fork feature — server publishes on traceSpan
+  // entry/exit, TUI subscribes and renders an honest "Discovering tools..." style label during
+  // the pre-first-visible-response window. Every piece is load-bearing for the <10s SLO half of
+  // the ticket; a merge silently dropping any of them turns the label back into a silent spinner.
+  test("AI-7519: session.phase event pipeline is wired (publish + subscribe + render)", async () => {
+    const status = await read("src/session/status.ts")
+    expect(status).toMatch(/Phase:\s*EventV2\.define\(/)
+    expect(status).toMatch(/type:\s*"session\.phase"/)
+    expect(status).toMatch(/export async function publishPhase/)
+
+    const prompt = await read("src/session/prompt.ts")
+    expect(prompt).toMatch(/function traceSpan<T>\([\s\S]{0,200}sessionID\?: SessionID/)
+    expect(prompt).toMatch(/SessionStatus\.publishPhase\(sessionID, name, true\)/)
+    expect(prompt).toMatch(/SessionStatus\.publishPhase\(sessionID, name, false\)/)
+    expect(prompt).toMatch(/"bootstrap\.session-get",[\s\S]{0,120}sessionID/)
+    expect(prompt).toMatch(/"bootstrap\.config-get",[\s\S]{0,120}sessionID/)
+    // resolve-tools span name is step-aware — "bootstrap.resolve-tools" on
+    // step===1, "turn.resolve-tools" on subsequent steps so telemetry doesn't
+    // over-count bootstrap operations.
+    expect(prompt).toMatch(/"bootstrap\.resolve-tools"\s*:\s*"turn\.resolve-tools"/)
+    expect(prompt).toMatch(/step\s*===\s*1[\s\S]{0,200}resolve-tools[\s\S]{0,400}sessionID/)
+
+    const sync = await read("src/context/sync.tsx", MONO + "/tui")
+    expect(sync).toMatch(/session_phase:\s*\{/)
+    expect(sync).toMatch(/case "session\.phase":/)
+    expect(sync).toMatch(/setStore\("session_phase"/)
+
+    const phaseLabelSrc = await read("src/util/phase-label.ts", MONO + "/tui")
+    expect(phaseLabelSrc).toMatch(/export function phaseLabel/)
+    expect(phaseLabelSrc).toMatch(/"bootstrap\.session-get"/)
+    expect(phaseLabelSrc).toMatch(/"bootstrap\.resolve-tools"/)
+
+    const promptTsx = await read("src/component/prompt/index.tsx", MONO + "/tui")
+    expect(promptTsx).toMatch(/import\s*\{\s*phaseLabel\s*\}\s*from\s*"[^"]*phase-label"/)
+    expect(promptTsx).toMatch(/phaseLabel\(phase\(\)\)/)
   })
 })

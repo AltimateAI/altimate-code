@@ -669,8 +669,12 @@ function getChangedFiles(base?: string): string[] {
   const cmd = base ? `git diff --name-only --diff-filter=M ${base}...HEAD` : `git diff --name-only --diff-filter=M HEAD`
   try {
     return execSync(cmd, { cwd: root, encoding: "utf-8" }).trim().split("\n").filter(Boolean)
-  } catch {
-    return []
+  } catch (error) {
+    // An unresolvable base ref must fail the gate loudly — silently returning []
+    // turns the marker check into a false "ok" (this happened in CI when the PR
+    // checkout lacked a local branch ref for the base name).
+    console.error(`error resolving changed files via \`${cmd}\`: ${error instanceof Error ? error.message : error}`)
+    process.exit(1)
   }
 }
 

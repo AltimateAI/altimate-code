@@ -34,6 +34,44 @@ import fs from "fs/promises"
 
 const id = "altimate:skill-ops"
 
+// altimate_change start — single classifier shared by installSkillDirect and the skill-list
+// dialog's "Install <query>" affordance. Extracted so the UI's install-preview and the
+// installer can't drift (an earlier `looksInstallable` that only checked `q.includes("/")`
+// surfaced the Install option for shapes the installer then rejected as "Path not found",
+// e.g. `owner/repo/subpath`). A clean two-segment `owner/repo` is intentionally treated
+// as GitHub shorthand — indistinguishable from a two-token search without a network call,
+// and skill names cannot contain a slash so no real search result is hijacked. Returns
+// null for shapes the installer wouldn't accept without ambiguity — three-segment paths,
+// relative paths, `~`, bare identifiers — so we only surface the synthetic Install row
+// when Enter will actually try to install.
+export type InstallSourceKind = "github-url" | "owner-repo" | "absolute-path"
+const OWNER_REPO_REGEX = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/
+
+// Strip the surface variation the classifier tolerates — whitespace, trailing dots,
+// and a `.git` suffix — before comparing. Exported so callers that consume the
+// classified string (e.g. installSkillDirect building a clone URL) can use the exact
+// same shape as the classifier, avoiding double-suffix bugs like `owner/repo.git.git`.
+export function normalizeInstallSource(source: string): string {
+  return source.trim().replace(/\.+$/, "").replace(/\.git$/, "")
+}
+
+export function classifyInstallSource(source: string): InstallSourceKind | null {
+  const trimmed = normalizeInstallSource(source)
+  if (trimmed.length < 3) return null
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return "github-url"
+  if (OWNER_REPO_REGEX.test(trimmed)) return "owner-repo"
+  if (trimmed.startsWith("/")) return "absolute-path"
+  if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return "absolute-path"
+  return null
+}
+
+// Sentinel value for the synthetic top-of-list "Install <query>" option. Namespaced so it
+// can't collide with any skill name (skill names match `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`).
+// Module-scope so it's stable across renders and reachable by every function that needs
+// to check whether an item.value is the sentinel (onSelect, onMove, showActions).
+const INSTALL_ACTION_VALUE = "__altimate:skill:install-from-query__"
+// altimate_change end
+
 // Categorize skills by domain for cleaner grouping in the list.
 const SKILL_CATEGORIES: Record<string, string> = {
   "dbt-develop": "dbt",
@@ -143,12 +181,27 @@ async function installSkillDirect(
     normalized = `https://github.com/${ghWebMatch[1]}.git`
   }
 
-  if (
-    normalized.startsWith("http://") ||
-    normalized.startsWith("https://") ||
-    normalized.match(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/)
-  ) {
-    const url = normalized.startsWith("http") ? normalized : `https://github.com/${normalized}.git`
+  // Classify the source. Anything the classifier recognises (github-url / owner-repo /
+  // absolute-path) takes the corresponding branch. Anything it doesn't (relative path,
+  // `~`, bare identifier) falls through to the path branch below and is resolved against
+  // cwd — that's the historical behaviour, preserved as a fallback for callers that
+  // reach the installer without going through the UI's install-preview.
+  const kind = classifyInstallSource(normalized)
+  if (kind === "github-url" || kind === "owner-repo") {
+    // Branch on the already-computed `kind`, not on a `startsWith("http")` probe of the
+    // normalized string. Two bugs are avoided that way:
+    //   1. An owner whose name literally starts with `http` (e.g. `httpie/httpie`,
+    //      `http-party/http-server`) classifies as `owner-repo` but its normalized form
+    //      also starts with `http` — a raw prefix test would treat it as an "already a
+    //      URL" and try to `git clone httpie/httpie`, which fails.
+    //   2. `normalizeInstallSource` strips a trailing `.git`; for owner-repo we want that
+    //      (so `owner/repo.git` doesn't produce `owner/repo.git.git`), but for an explicit
+    //      `github-url` we want to preserve whatever the user typed — self-hosted git
+    //      servers require the exact suffix form.
+    const url =
+      kind === "github-url"
+        ? normalized.trim().replace(/\.+$/, "")
+        : `https://github.com/${normalizeInstallSource(normalized)}.git`
     const label = url.replace(/https?:\/\/github\.com\//, "").replace(/\.git$/, "")
     onProgress?.(`Cloning ${label}...`)
     const cache = cacheDir()
@@ -295,7 +348,7 @@ async function reloadAndVerify(api: TuiPluginApi, expectedNames: string[]): Prom
 
 // ── Sub-dialogs ─────────────────────────────────────────────────────────────────────────────────
 
-function DialogSkillCreate(props: { api: TuiPluginApi }) {
+function DialogSkillCreate(props: { api: TuiPluginApi; initialValue?: string }) {
   const { api } = props
   const theme = () => api.theme.current
   const [busy, setBusy] = createSignal(false)
@@ -303,6 +356,7 @@ function DialogSkillCreate(props: { api: TuiPluginApi }) {
     <api.ui.DialogPrompt
       title="Create Skill"
       placeholder="my-tool"
+      value={props.initialValue}
       busy={busy()}
       busyText="Creating skill..."
       description={() => (
@@ -350,7 +404,7 @@ function DialogSkillCreate(props: { api: TuiPluginApi }) {
   )
 }
 
-function DialogSkillInstall(props: { api: TuiPluginApi }) {
+function DialogSkillInstall(props: { api: TuiPluginApi; initialValue?: string }) {
   const { api } = props
   const theme = () => api.theme.current
   const [busy, setBusy] = createSignal(false)
@@ -359,6 +413,7 @@ function DialogSkillInstall(props: { api: TuiPluginApi }) {
     <api.ui.DialogPrompt
       title="Install Skill (owner/repo, URL, or path)"
       placeholder="anthropics/skills"
+      value={props.initialValue}
       busy={busy()}
       busyText="Installing skill..."
       description={() => (
@@ -552,7 +607,18 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
   // Expose the lookup to the keymap-layer commands (ctrl+a/test/etc).
   registerLookup(api, skillMap)
 
-  const options = createMemo<TuiDialogSelectOption<string>[]>(() => {
+  // altimate_change start — capture the current filter text so an install/create
+  // action triggered from inside the list can prefill the sub-dialog with what the user typed
+  // (e.g. a GitHub URL typed into the search box), instead of dropping it on the floor.
+  const [filter, setFilter] = createSignal("")
+  currentFilter = filter
+  // altimate_change end
+
+  // Base list — depends only on `skills()`. Kept separate from the `options` memo below
+  // so that per-keystroke filter changes don't re-run `detectToolReferences` (regex parse
+  // per skill) across the whole list. On projects with many installed skills the previous
+  // fused memo produced noticeable typing lag.
+  const baseOptions = createMemo<TuiDialogSelectOption<string>[]>(() => {
     const list = skills() ?? []
     const maxWidth = Math.max(0, ...list.map((s) => s.name.length))
     return list.map((skill) => {
@@ -570,13 +636,49 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
     })
   })
 
+  const options = createMemo<TuiDialogSelectOption<string>[]>(() => {
+    const items = baseOptions()
+    // altimate_change start — when the filter looks like a shape installSkillDirect will
+    // accept (github URL, `owner/repo` shorthand, or absolute path), prepend a synthetic
+    // "Install <query>" top option. Selecting it (Enter) routes to installSkillDirect.
+    // Non-mutating build (spread instead of unshift) so this stays a pure memo — Solid
+    // dev-mode double-eval would otherwise double-prepend.
+    // ctrl+i on the wire is byte 0x09 = Tab, so we can't offer a reliable ctrl+i binding
+    // on default terminals; Enter on this synthetic row is the discoverable substitute.
+    const q = filter().trim()
+    if (classifyInstallSource(q) !== null) {
+      const installOption: TuiDialogSelectOption<string> = {
+        title: `Install ${q}`,
+        description: "Press Enter to install from this GitHub repo, URL, or path",
+        footer: undefined,
+        value: INSTALL_ACTION_VALUE,
+        category: "Install",
+      }
+      return [installOption, ...items]
+    }
+    // altimate_change end
+    return items
+  })
+
   return (
     <api.ui.DialogSelect
-      title="Skills (ctrl+a actions · ctrl+n new · ctrl+i install)"
-      placeholder="Search skills..."
+      title="Skills"
+      placeholder="Search skills, or type a repo/URL and press Enter to install..."
       options={options()}
-      onMove={(item) => props.onCurrent(item.value)}
+      onFilter={(q) => setFilter(q)}
+      // altimate_change start — filter the sentinel out of onCurrent so highlighting
+      // the synthetic Install row doesn't set `currentSkill` to the sentinel string
+      // (which would trip ctrl+a's showActions into opening a degenerate action picker
+      // on a non-existent skill named INSTALL_ACTION_VALUE).
+      onMove={(item) => props.onCurrent(item.value === INSTALL_ACTION_VALUE ? undefined : item.value)}
+      // altimate_change end
       onSelect={(item) => {
+        // altimate_change start — synthetic install option routes to installer.
+        if (item.value === INSTALL_ACTION_VALUE) {
+          showInstall(api, filter().trim() || undefined)
+          return
+        }
+        // altimate_change end
         props.onCurrent(item.value)
         // Selecting a skill opens its action picker (the pre-merge default action was the picker).
         openActionPicker(api, skillMap().get(item.value), item.value, () => showList(api))
@@ -589,34 +691,48 @@ function DialogSkillList(props: { api: TuiPluginApi; onCurrent: (skill: string |
 // Both are module-level so the layer (registered once at plugin init) can reach the live values.
 let currentSkill: string | undefined
 let currentLookup: () => Map<string, SkillInfo> = () => new Map()
+// altimate_change start — expose the current list dialog's filter text so the outer
+// keymap-layer install/create commands (ctrl+i/ctrl+n) can prefill the sub-dialog with whatever
+// the user has typed into the search box. Reset to a no-op after the list closes so a fresh
+// keybind press from an unrelated context doesn't leak stale text.
+let currentFilter: () => string = () => ""
+// altimate_change end
 
 function registerLookup(_api: TuiPluginApi, lookup: () => Map<string, SkillInfo>) {
   currentLookup = lookup
 }
 
 function showList(api: TuiPluginApi) {
-  api.ui.dialog.replace(() => (
-    <DialogSkillList api={api} onCurrent={(skill) => (currentSkill = skill)} />
-  ))
+  api.ui.dialog.replace(
+    () => <DialogSkillList api={api} onCurrent={(skill) => (currentSkill = skill)} />,
+    () => {
+      currentFilter = () => ""
+    },
+  )
 }
 
-function showCreate(api: TuiPluginApi) {
+function showCreate(api: TuiPluginApi, initialValue?: string) {
   api.ui.dialog.replace(
-    () => <DialogSkillCreate api={api} />,
+    () => <DialogSkillCreate api={api} initialValue={initialValue} />,
     () => setTimeout(() => showList(api), 0),
   )
 }
 
-function showInstall(api: TuiPluginApi) {
+function showInstall(api: TuiPluginApi, initialValue?: string) {
   api.ui.dialog.replace(
-    () => <DialogSkillInstall api={api} />,
+    () => <DialogSkillInstall api={api} initialValue={initialValue} />,
     () => setTimeout(() => showList(api), 0),
   )
 }
 
 function showActions(api: TuiPluginApi) {
-  if (!currentSkill) return
-  openActionPicker(api, currentLookup().get(currentSkill), currentSkill, () => showList(api))
+  // Belt-and-braces against the synthetic Install row leaking into `currentSkill` via a
+  // future refactor that forgets the DialogSkillList `onMove` filter — refuse to open a
+  // per-skill action picker unless we can resolve a real skill entry from the lookup.
+  if (!currentSkill || currentSkill === INSTALL_ACTION_VALUE) return
+  const info = currentLookup().get(currentSkill)
+  if (!info) return
+  openActionPicker(api, info, currentSkill, () => showList(api))
 }
 
 const tui: TuiPlugin = async (api) => {
@@ -649,7 +765,7 @@ const tui: TuiPlugin = async (api) => {
         category: "Altimate",
         namespace: "palette",
         run() {
-          showCreate(api)
+          showCreate(api, currentFilter().trim() || undefined)
         },
       },
       {
@@ -659,7 +775,7 @@ const tui: TuiPlugin = async (api) => {
         category: "Altimate",
         namespace: "palette",
         run() {
-          showInstall(api)
+          showInstall(api, currentFilter().trim() || undefined)
         },
       },
     ],

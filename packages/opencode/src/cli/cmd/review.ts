@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
+import { Installation } from "../../installation"
 import { reviewPullRequest } from "../../altimate/review/run"
 import { renderSummary } from "../../altimate/review/format"
 import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/post-github"
@@ -22,9 +23,15 @@ export const ReviewCommand = cmd({
   describe: "review dbt/SQL changes and emit a signed verdict (APPROVE/COMMENT/REQUEST_CHANGES)",
   builder: (yargs) =>
     yargs
+      // Disable yargs' `--no-<option>` auto-negation for this command. Without this,
+      // yargs interprets bare `--no-ai` as "set option `ai` to false" — which is
+      // NOT a declared option, so the command silently falls into the help path
+      // (exit 0, no review runs). With `boolean-negation: false`, `--no-ai` binds
+      // to the declared `noAi` boolean flag as authored. B1 fix, Round 18.
+      .parserConfiguration({ "boolean-negation": false })
       .option("base", { type: "string", describe: "base git ref (default: merge-base with origin/main)" })
       .option("head", { type: "string", describe: "head git ref (default: working tree)" })
-      .option("manifest", { type: "string", describe: "path to dbt manifest.json" })
+      .option("manifest", { type: "string", describe: "path to dbt manifest.json (auto-discovered under target/ when omitted)" })
       .option("mode", {
         type: "string",
         choices: ["comment", "gate"] as const,
@@ -47,9 +54,25 @@ export const ReviewCommand = cmd({
         default: false,
         describe: "disable the advisory LLM reviewer lane (no model calls / cost)",
       })
+      .option("explain-tier", {
+        type: "boolean",
+        default: false,
+        describe: "emit tierReasons[] in the verdict envelope explaining the tier classification",
+      })
+      .option("force-tier", {
+        type: "string",
+        choices: ["trivial", "lite", "full"] as const,
+        describe: "[EXPERIMENTAL / bench debug] override the tier classifier — verdict envelope carries tierForced: true",
+      })
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
+    if (args.forceTier) {
+      process.stderr.write(
+        `⚠️  --force-tier=${args.forceTier} is EXPERIMENTAL (bench / debug only). ` +
+          `Classifier bypassed; verdict envelope will carry tierForced: true.\n`,
+      )
+    }
     await bootstrap(cwd, async () => {
       const env = await reviewPullRequest({
         cwd,
@@ -58,11 +81,15 @@ export const ReviewCommand = cmd({
         manifestPath: args.manifest as string | undefined,
         mode: args.mode as ReviewMode | undefined,
         severityThreshold: args.severity as Severity | undefined,
-        // The flag is registered as `--no-ai`, so yargs sets `args.noAi`. No `ai`
-        // option is declared, so `--ai=false` is NOT a supported CLI flag; the
-        // `args.ai === false` check only covers programmatic callers that pass
-        // `ai: false` directly.
+        // With `boolean-negation: false` above, `--no-ai` binds to `noAi` and
+        // the historical `--ai=false` programmatic path stays supported.
         noAi: args.noAi === true || args.ai === false,
+        explainTier: args.explainTier === true,
+        forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
+        // Stamp the CLI version into engine.cliVersion so an auditor can
+        // reconstruct which policy version generated a stored verdict long
+        // after the binary that ran it is gone.
+        cliVersion: Installation.VERSION,
       })
 
       if (args.output) await fs.writeFile(args.output as string, JSON.stringify(env, null, 2))
