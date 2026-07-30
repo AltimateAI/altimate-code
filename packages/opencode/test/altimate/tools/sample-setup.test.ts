@@ -23,12 +23,12 @@ beforeAll(async () => {
 
 const CTX: any = { sessionID: "test-session" }
 
-const ORIG_HOMEDIR = os.homedir
-function pinHomedirTo(dir: string) {
-  Object.defineProperty(os, "homedir", { value: () => dir, configurable: true })
-}
+// Land the sample in a scratch home via the tool's (non-LLM) ctx seam rather
+// than monkeypatching the global `os.homedir` — the global mutation races with
+// concurrent suites that read os.homedir() (e.g. permission/next) under
+// parallel CI. `homeDir` stays gated by rejectUnsafeHome inside materializeSample.
 afterEach(() => {
-  Object.defineProperty(os, "homedir", { value: ORIG_HOMEDIR, configurable: true })
+  CTX.extra = undefined
 })
 
 // Scratch dirs carved out of the REAL home directory. The sample_setup tool
@@ -61,7 +61,7 @@ afterAll(() => {
 describe("sample_setup tool — LLM-facing contract", () => {
   test("fresh materialize → output starts with 'status: ok', includes path/reused/suffix", async () => {
     const home = makeTmpHome("fresh")
-    pinHomedirTo(home)
+    CTX.extra = { homeDir: home }
     const result = await tool.execute({ preferred_target_name: "sample", allow_in_place_upgrade: false }, CTX)
     // Template branches on the FIRST LINE of output — assert that first.
     const firstLine = result.output.split("\n")[0]
@@ -79,7 +79,7 @@ describe("sample_setup tool — LLM-facing contract", () => {
 
   test("second call to same target → 'status: ok' + 'reused: true' (template branch c)", async () => {
     const home = makeTmpHome("reuse")
-    pinHomedirTo(home)
+    CTX.extra = { homeDir: home }
     await tool.execute({ preferred_target_name: "sample", allow_in_place_upgrade: false }, CTX)
     const second = await tool.execute({ preferred_target_name: "sample", allow_in_place_upgrade: false }, CTX)
     expect(second.output).toContain("status: ok")
@@ -89,7 +89,7 @@ describe("sample_setup tool — LLM-facing contract", () => {
 
   test("preferred name taken by unrelated content → suffix carries a non-zero value (template branch d)", async () => {
     const home = makeTmpHome("collide")
-    pinHomedirTo(home)
+    CTX.extra = { homeDir: home }
     const preferred = path.join(home, "sample")
     fs.mkdirSync(preferred, { recursive: true })
     fs.writeFileSync(path.join(preferred, "user-file.txt"), "important")
@@ -104,7 +104,7 @@ describe("sample_setup tool — LLM-facing contract", () => {
 
   test("existing our-sample at different version → 'reused: true' + 'Caller must prompt' note (template branch b)", async () => {
     const home = makeTmpHome("diffver")
-    pinHomedirTo(home)
+    CTX.extra = { homeDir: home }
     const preferred = path.join(home, "sample")
     fs.mkdirSync(preferred, { recursive: true })
     writeMarker(preferred, {
@@ -121,9 +121,9 @@ describe("sample_setup tool — LLM-facing contract", () => {
   })
 
   test("unsafe HOME → 'status: error' + verbatim actionable message in output (template branch a)", async () => {
-    // Simulate the /root-as-non-root case rejectUnsafeHome catches: pin
-    // os.homedir() to /tmp/xyz, since /tmp/* is universally refused.
-    pinHomedirTo("/tmp/xyz-unsafe")
+    // Simulate the /root-as-non-root case rejectUnsafeHome catches: point the
+    // tool's home at /tmp/xyz, since /tmp/* is universally refused.
+    CTX.extra = { homeDir: "/tmp/xyz-unsafe" }
     const result = await tool.execute({ preferred_target_name: "sample", allow_in_place_upgrade: false }, CTX)
     // FIRST line — that's what the template reads before deciding to show
     // the sample menu vs surface the message.
@@ -139,7 +139,7 @@ describe("sample_setup tool — LLM-facing contract", () => {
 
   test("install_alongside=true skips version-mismatched slot 0 → lands at sample-2 with fresh marker (template branch b→install-alongside routing)", async () => {
     const home = makeTmpHome("alongside")
-    pinHomedirTo(home)
+    CTX.extra = { homeDir: home }
     // Seed slot 0 with an older-version sample so install_alongside has
     // something to route around.
     const old = path.join(home, "sample")
@@ -178,7 +178,7 @@ describe("sample_setup tool — LLM-facing contract", () => {
     // already did. Assert both the presence and the "present"/"missing"
     // dichotomy so a regression that dropped the field is caught.
     const home = makeTmpHome("dbtline")
-    pinHomedirTo(home)
+    CTX.extra = { homeDir: home }
     const result = await tool.execute({ preferred_target_name: "sample", allow_in_place_upgrade: false }, CTX)
     expect(result.output).toContain("status: ok")
     const dbtLine = result.output.split("\n").find((l) => l.startsWith("dbt:"))
@@ -197,7 +197,7 @@ describe("sample_setup tool — LLM-facing contract", () => {
     // happened" contract — a regression that silently accepted "../foo"
     // would land on disk and this test would catch it.
     const home = makeTmpHome("zod-guard")
-    pinHomedirTo(home)
+    CTX.extra = { homeDir: home }
     await expect(
       tool.execute(
         { preferred_target_name: "../escape", allow_in_place_upgrade: false } as any,

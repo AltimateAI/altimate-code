@@ -259,27 +259,20 @@ describe("materializeSample — conflict policy", () => {
 })
 
 describe("materializeSample — failure modes", () => {
-  test("unsafe HOME (unset targetParent + HOME=/tmp) → refuses with actionable error", async () => {
-    // Simulate the unsafe-HOME path by pointing targetParent at /tmp/x
-    // directly (bypasses the opts.targetParent short-circuit? Actually
-    // opts.targetParent set → skips rejectUnsafeHome. To exercise the
-    // guard we need to omit targetParent and control os.homedir(). We
-    // spy on os.homedir instead.
-    const origHomedir = os.homedir
-    Object.defineProperty(os, "homedir", { value: () => "/tmp/xyz-unsafe", configurable: true })
-    try {
-      // NO allowUnsafeParent — this test EXISTS to prove the guard fires
-      // when the defaulted targetParent falls on an ephemeral path.
-      await expect(
-        materializeSample({
-          preferredTargetName: "starter",
-          sampleVersion: SAMPLE_VERSION,
-          cliVersion: CLI_VERSION,
-        }),
-      ).rejects.toThrow(/ephemeral/)
-    } finally {
-      Object.defineProperty(os, "homedir", { value: origHomedir, configurable: true })
-    }
+  test("unsafe HOME (defaulted targetParent on /tmp) → refuses with actionable error", async () => {
+    // Point the defaulted parent at an ephemeral path via the `homeDir` seam
+    // (no monkeypatching os.homedir — that races with concurrent suites that
+    // read os.homedir()). NO allowUnsafeParent — this test EXISTS to prove
+    // rejectUnsafeHome fires when the defaulted parent falls on an ephemeral
+    // path. rejectUnsafeHome guards targetParent regardless of how it's derived.
+    await expect(
+      materializeSample({
+        preferredTargetName: "starter",
+        sampleVersion: SAMPLE_VERSION,
+        cliVersion: CLI_VERSION,
+        homeDir: "/tmp/xyz-unsafe",
+      }),
+    ).rejects.toThrow(/ephemeral/)
   })
 
   test("unwritable target parent → refuses with actionable error (codex #3)", async () => {
@@ -377,20 +370,18 @@ describe("materializeSample — default targetParent", () => {
     // "unsafe HOME → refuses" test above that verifies it fires on the
     // defaulted path.
     const scratchParent = makeTmpParent("materialize-default-home-")
-    const origHomedir = os.homedir
-    Object.defineProperty(os, "homedir", { value: () => scratchParent, configurable: true })
-    try {
-      const result = await materializeSample({
-        preferredTargetName: "altimate-sample-default",
-        sampleVersion: SAMPLE_VERSION,
-        cliVersion: CLI_VERSION,
-        allowUnsafeParent: true,
-      })
-      expect(result.targetPath).toBe(path.join(scratchParent, "altimate-sample-default"))
-      expect(fs.existsSync(path.join(result.targetPath, MARKER_FILE_NAME))).toBe(true)
-    } finally {
-      Object.defineProperty(os, "homedir", { value: origHomedir, configurable: true })
-    }
+    // Inject the home via the `homeDir` seam instead of monkeypatching the
+    // global `os.homedir` — the global mutation races with concurrent suites
+    // that read os.homedir() (e.g. permission/next) under parallel CI.
+    const result = await materializeSample({
+      preferredTargetName: "altimate-sample-default",
+      sampleVersion: SAMPLE_VERSION,
+      cliVersion: CLI_VERSION,
+      homeDir: scratchParent,
+      allowUnsafeParent: true,
+    })
+    expect(result.targetPath).toBe(path.join(scratchParent, "altimate-sample-default"))
+    expect(fs.existsSync(path.join(result.targetPath, MARKER_FILE_NAME))).toBe(true)
   })
 })
 
