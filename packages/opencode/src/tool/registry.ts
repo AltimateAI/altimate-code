@@ -47,6 +47,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { MCP } from "@/mcp"
 import { McpCatalog } from "@/mcp/catalog"
 import * as Permission from "@/permission"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 // altimate_change end
 // altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
 // ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
@@ -567,7 +568,7 @@ export namespace ToolRegistry {
     // altimate_change start — upstream port (v1.18.10 code mode): catalog injected by the
     // Effect facade (honors mocked/replaced MCP layers); Promise-facade callers fall back
     // to the MCP namespace wrapper.
-    mcpCatalog?: { tools: Record<string, unknown> },
+    mcpCatalog?: { tools: Record<string, unknown>; permission?: PermissionV1.Ruleset },
     // altimate_change end
   ) {
     const tools = await all(plugins, configInput, runtimeFlags)
@@ -578,17 +579,24 @@ export namespace ToolRegistry {
     let codeModeDescription: string | undefined
     if (runtimeFlags?.experimentalCodeMode && tools.some((t) => t.id === "execute")) {
       const { mod } = await loadCodeMode()
-      const ruleset = Permission.merge(agent?.permission ?? [])
+      // Session-level rules merge AFTER agent rules (session denials win) — mirrors the
+      // runtime enforcement in session/tools.ts's ctx.ask ruleset.
+      const ruleset = Permission.merge(agent?.permission ?? [], mcpCatalog?.permission ?? [])
       const catalog = mcpCatalog?.tools ?? ((await MCP.tools()) as Record<string, unknown>)
       const visible = Permission.visibleTools(catalog, ruleset)
       if (Object.keys(visible).length > 0) {
+        // Fork MCP entries carry the original client name as `clientName` (`client` is the
+        // MCP client OBJECT). Sanitize those so describeCatalog groups flattened keys exactly
+        // like the runtime tool tree — otherwise underscore-containing server names split at
+        // the wrong boundary and the advertised tools.<server>.<tool> paths don't exist.
         const servers = [
           ...new Set(
-            Object.values(visible).map((entry) =>
-              McpCatalog.sanitize(String((entry as { client?: string }).client ?? "")),
-            ),
+            Object.values(visible)
+              .map((entry) => (entry as { clientName?: string }).clientName)
+              .filter((name): name is string => typeof name === "string" && name.length > 0)
+              .map(McpCatalog.sanitize),
           ),
-        ].filter(Boolean)
+        ]
         codeModeDescription = mod.describeCatalog(visible, servers)
       }
     }
@@ -654,6 +662,9 @@ export namespace ToolRegistry {
       providerID: ProviderID
       modelID: ModelID
       agent?: Agent.Info
+      // altimate_change — upstream port (v1.18.10 code mode): session-level ruleset merged
+      // into the code-mode visibility gate (denied MCP tools stay out of execute's description)
+      permission?: PermissionV1.Ruleset
     }) => Effect.Effect<Awaited<ReturnType<typeof tools>>>
   }
 
@@ -721,7 +732,10 @@ export namespace ToolRegistry {
             const flags = Option.getOrUndefined(runtimeFlags)
             const mcpCatalog =
               flags?.experimentalCodeMode && Option.isSome(mcpSvc)
-                ? { tools: (yield* mcpSvc.value.tools()) as Record<string, unknown> }
+                ? {
+                    tools: (yield* mcpSvc.value.tools()) as Record<string, unknown>,
+                    permission: model.permission,
+                  }
                 : undefined
             // altimate_change end
             return yield* bridgeWithPlugins((plugins, configInput) =>

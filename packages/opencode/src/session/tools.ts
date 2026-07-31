@@ -99,8 +99,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     modelID: ModelID.make(input.model.api.id),
     providerID: input.model.providerID,
     agent: input.agent,
-    // altimate_change — upstream_fix: `permission` isn't part of ToolRegistry.Interface.tools()'s
-    // model param (never was pre-merge either); dropped the stray field
+    // altimate_change — upstream port (v1.18.10 code mode): session-level ruleset feeds the
+    // code-mode visibility gate so session-denied MCP tools stay out of execute's description
+    permission: input.session.permission,
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({

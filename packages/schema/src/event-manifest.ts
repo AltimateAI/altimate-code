@@ -58,6 +58,12 @@ export const ServerDefinitions = Event.inventory(
   ...foundationDefinitions,
   ...featureDefinitions,
   ...SessionTodo.Event.Definitions,
+  // altimate_change start (AI-7519) — the fork publishes session.status/idle/phase onto the
+  // v2 bus (session/status.ts) and the /api/event handler encodes every passing event against
+  // the OpenCodeEvent union built from THIS inventory. Without these, one status event kills
+  // the SSE stream with an encode error.
+  ...SessionStatusEvent.Definitions,
+  // altimate_change end
 )
 
 export const Definitions = Event.inventory(

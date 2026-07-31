@@ -25,9 +25,33 @@ import fs from "fs"
 import path from "path"
 import * as git from "./utils/git"
 import * as logger from "./utils/logger"
-import { RESET, BOLD, DIM, CYAN, GREEN, RED, YELLOW, MAGENTA, bold, dim, cyan, green, red, yellow, banner } from "./utils/logger"
+import {
+  RESET,
+  BOLD,
+  DIM,
+  CYAN,
+  GREEN,
+  RED,
+  YELLOW,
+  MAGENTA,
+  bold,
+  dim,
+  cyan,
+  green,
+  red,
+  yellow,
+  banner,
+} from "./utils/logger"
 import { loadConfig, repoRoot, type MergeConfig, type StringReplacement } from "./utils/config"
-import { createReport, addFileReport, printSummary, writeReport, type MergeReport, type FileReport, type Change } from "./utils/report"
+import {
+  createReport,
+  addFileReport,
+  printSummary,
+  writeReport,
+  type MergeReport,
+  type FileReport,
+  type Change,
+} from "./utils/report"
 import { validateRelease, getReleaseTags } from "./utils/github"
 
 // ---------------------------------------------------------------------------
@@ -215,12 +239,7 @@ function transformFile(filePath: string, config: MergeConfig): FileReport {
   let hasChanges = false
 
   for (let i = 0; i < lines.length; i++) {
-    const { result, changes } = transformLine(
-      lines[i],
-      i + 1,
-      config.brandingRules,
-      config.preservePatterns,
-    )
+    const { result, changes } = transformLine(lines[i], i + 1, config.brandingRules, config.preservePatterns)
     transformedLines.push(result)
     if (changes.length > 0) {
       report.changes.push(...changes)
@@ -316,8 +335,12 @@ async function autoResolveConflicts(
       }
 
       // Strategy 3: Lock files — accept ours, will regenerate later
-      if (file === "bun.lock" || file.endsWith("/bun.lock") ||
-          file === "package-lock.json" || file.endsWith("/package-lock.json")) {
+      if (
+        file === "bun.lock" ||
+        file.endsWith("/bun.lock") ||
+        file === "package-lock.json" ||
+        file.endsWith("/package-lock.json")
+      ) {
         await $`git checkout --ours -- ${file}`.cwd(root).quiet()
         await $`git add ${file}`.cwd(root).quiet()
         resolved.push(file)
@@ -326,9 +349,25 @@ async function autoResolveConflicts(
       }
 
       // Strategy 4: Binary files — accept upstream
-      const binaryExts = [".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2",
-                          ".ttf", ".eot", ".pyc", ".whl", ".gz", ".zip", ".tar",
-                          ".svg", ".webp", ".avif"]
+      const binaryExts = [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".pyc",
+        ".whl",
+        ".gz",
+        ".zip",
+        ".tar",
+        ".svg",
+        ".webp",
+        ".avif",
+      ]
       if (binaryExts.some((ext) => file.endsWith(ext))) {
         try {
           await $`git checkout --theirs -- ${file}`.cwd(root).quiet()
@@ -628,10 +667,7 @@ async function main(): Promise<void> {
   const hasUpstream = await git.hasRemote(config.upstreamRemote)
   if (!hasUpstream) {
     logger.info(`Adding upstream remote: ${config.upstreamRepo}`)
-    await git.addRemote(
-      config.upstreamRemote,
-      `https://github.com/${config.upstreamRepo}.git`,
-    )
+    await git.addRemote(config.upstreamRemote, `https://github.com/${config.upstreamRepo}.git`)
   }
   logger.success(`Remote '${config.upstreamRemote}' configured`)
 
@@ -736,7 +772,7 @@ async function main(): Promise<void> {
   if (mergeResult.success) {
     logger.success("Merge completed without conflicts")
     // Even without conflicts, apply branding transforms
-    await postMergeTransforms(config, mergeRef, versionSnapshot)
+    await postMergeTransforms(config, mergeRef, versionSnapshot, baseBranch)
     return
   }
 
@@ -746,10 +782,7 @@ async function main(): Promise<void> {
 
   logger.step(5, TOTAL_STEPS, "Auto-resolving conflicts")
 
-  const { resolved, remaining } = await autoResolveConflicts(
-    mergeResult.conflicts,
-    config,
-  )
+  const { resolved, remaining } = await autoResolveConflicts(mergeResult.conflicts, config)
 
   logger.info(`Auto-resolved: ${green(String(resolved.length))} files`)
 
@@ -758,7 +791,7 @@ async function main(): Promise<void> {
 
     // Commit the merge
     await $`git commit --no-edit`.cwd(root).quiet()
-    await postMergeTransforms(config, mergeRef, versionSnapshot)
+    await postMergeTransforms(config, mergeRef, versionSnapshot, baseBranch)
     return
   }
 
@@ -817,7 +850,10 @@ async function continueAfterConflicts(config: MergeConfig): Promise<void> {
 
   // Check for remaining conflicts
   const conflictOutput = await $`git diff --name-only --diff-filter=U`.cwd(root).text()
-  const remaining = conflictOutput.trim().split("\n").filter((f) => f.length > 0)
+  const remaining = conflictOutput
+    .trim()
+    .split("\n")
+    .filter((f) => f.length > 0)
 
   if (remaining.length > 0) {
     logger.error(`${remaining.length} file(s) still have conflicts:`)
@@ -843,7 +879,7 @@ async function continueAfterConflicts(config: MergeConfig): Promise<void> {
   // Use pre-merge version snapshot from saved state, fall back to current if not available
   const versionSnapshot = state.versionSnapshot ?? snapshotVersions()
 
-  await postMergeTransforms(config, state.version, versionSnapshot)
+  await postMergeTransforms(config, state.version, versionSnapshot, state.baseBranch)
 }
 
 // ---------------------------------------------------------------------------
@@ -854,7 +890,7 @@ async function continueAfterConflicts(config: MergeConfig): Promise<void> {
  * Delete files/directories matching skipFiles patterns that exist in the repo.
  * These are upstream packages we don't need — the merge may have re-introduced them.
  */
-async function cleanupSkipFiles(config: MergeConfig): Promise<void> {
+async function cleanupSkipFiles(config: MergeConfig, baseBranch: string): Promise<void> {
   const { minimatch } = await import("minimatch")
   const root = repoRoot()
 
@@ -864,13 +900,9 @@ async function cleanupSkipFiles(config: MergeConfig): Promise<void> {
   // here would destroy it (skipFiles is meant for upstream-only surfaces the
   // merge re-introduces).
   const trackedFiles = await git.getTrackedFiles()
-  const baselineOutput = await $`git ls-tree -r --name-only ${config.baseBranch}`
-    .cwd(root)
-    .text()
+  const baselineOutput = await $`git ls-tree -r --name-only ${baseBranch}`.cwd(root).text()
   const baselineFiles = new Set(baselineOutput.trim().split("\n"))
-  const toRemove = trackedFiles.filter(
-    (f) => !baselineFiles.has(f) && config.skipFiles.some((p) => minimatch(f, p)),
-  )
+  const toRemove = trackedFiles.filter((f) => !baselineFiles.has(f) && config.skipFiles.some((p) => minimatch(f, p)))
 
   if (toRemove.length === 0) {
     logger.info("No skipFiles to clean up")
@@ -890,15 +922,25 @@ async function cleanupSkipFiles(config: MergeConfig): Promise<void> {
     }
   }
 
-  // Also delete leftover empty directories for skipFiles directory patterns
+  // Also delete leftover directories for skipFiles directory patterns — but only when the
+  // base branch has NO tracked files under that directory. An unconditional recursive rm
+  // here would defeat the newly-introduced-only guard above (it removed baseline-tracked
+  // and untracked fork content wholesale for any /** pattern that matched one new file).
   for (const pattern of config.skipFiles) {
     // Only handle directory-level patterns (ending with /**)
     if (!pattern.endsWith("/**")) continue
-    const dirPath = path.join(root, pattern.replace("/**", ""))
+    const dirRel = pattern.replace("/**", "")
+    const dirPrefix = dirRel.endsWith("/") ? dirRel : dirRel + "/"
+    const hasBaselineContent = [...baselineFiles].some((f) => f.startsWith(dirPrefix))
+    if (hasBaselineContent) {
+      logger.info(`Keeping directory with base-branch content: ${dirRel}`)
+      continue
+    }
+    const dirPath = path.join(root, dirRel)
     if (fs.existsSync(dirPath)) {
       try {
         fs.rmSync(dirPath, { recursive: true, force: true })
-        logger.success(`Removed directory: ${pattern.replace("/**", "")}`)
+        logger.success(`Removed directory: ${dirRel}`)
       } catch {
         // Best effort
       }
@@ -925,12 +967,38 @@ function sanitizePackageJson(pkgPath: string): void {
 
   // Known top-level keys to keep
   const allowedKeys = new Set([
-    "$schema", "name", "version", "type", "license", "private", "description",
-    "scripts", "bin", "exports", "imports", "dependencies", "devDependencies",
-    "peerDependencies", "optionalDependencies", "overrides", "resolutions",
-    "engines", "repository", "homepage", "bugs", "keywords", "author",
-    "contributors", "files", "main", "module", "types", "typings",
-    "sideEffects", "publishConfig", "workspaces",
+    "$schema",
+    "name",
+    "version",
+    "type",
+    "license",
+    "private",
+    "description",
+    "scripts",
+    "bin",
+    "exports",
+    "imports",
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+    "overrides",
+    "resolutions",
+    "engines",
+    "repository",
+    "homepage",
+    "bugs",
+    "keywords",
+    "author",
+    "contributors",
+    "files",
+    "main",
+    "module",
+    "types",
+    "typings",
+    "sideEffects",
+    "publishConfig",
+    "workspaces",
   ])
 
   for (const key of Object.keys(pkg)) {
@@ -985,6 +1053,8 @@ async function postMergeTransforms(
   config: MergeConfig,
   version: string,
   versionSnapshot: VersionSnapshot,
+  // altimate_change — honor the --base-branch override for the skipFiles baseline guard
+  baseBranch: string = config.baseBranch,
 ): Promise<void> {
   const root = repoRoot()
   const report = createReport(version)
@@ -994,7 +1064,7 @@ async function postMergeTransforms(
   logger.step(7, TOTAL_STEPS, "Cleaning up skipFiles and applying branding transforms")
 
   // Delete skipFiles directories/files that may have been introduced by the merge
-  await cleanupSkipFiles(config)
+  await cleanupSkipFiles(config, baseBranch)
 
   await applyBrandingTransforms(config, report)
 
@@ -1169,7 +1239,10 @@ async function dryRunAnalysis(mergeRef: string, config: MergeConfig): Promise<vo
   let markerCount = 0
   for (const file of transformable) {
     try {
-      const content = await $`git show HEAD:${file}`.cwd(root).text().catch(() => "")
+      const content = await $`git show HEAD:${file}`
+        .cwd(root)
+        .text()
+        .catch(() => "")
       if (content.includes(config.changeMarker)) {
         markerCount++
         if (markerCount <= 10) {

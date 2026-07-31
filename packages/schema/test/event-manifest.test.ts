@@ -9,8 +9,11 @@ import { WorkspaceEvent } from "../src/workspace-event"
 
 describe("public event manifest", () => {
   test("owns the complete public event surface", () => {
-    expect(EventManifest.ServerDefinitions.length).toBe(55)
-    expect(EventManifest.Definitions.length).toBe(85)
+    // 61/89: upstream's 55/85 + the fork's session.status/idle/phase in ServerDefinitions
+    // (the /api/event union — see the altimate_change in event-manifest.ts) and merge-era
+    // definition additions; Latest/Durable pins updated below to match.
+    expect(EventManifest.ServerDefinitions.length).toBe(61)
+    expect(EventManifest.Definitions.length).toBe(89)
     expect(SessionV1.Event.Definitions).toEqual([
       SessionV1.Event.Created,
       SessionV1.Event.Updated,
@@ -23,8 +26,8 @@ describe("public event manifest", () => {
       SessionV1.Event.Diff,
       SessionV1.Event.Error,
     ])
-    expect(EventManifest.Latest.size).toBe(85)
-    expect(EventManifest.Durable.size).toBe(32)
+    expect(EventManifest.Latest.size).toBe(89)
+    expect(EventManifest.Durable.size).toBe(35)
   })
 
   test("uses canonical definitions for current public events", () => {
@@ -42,11 +45,11 @@ describe("public event manifest", () => {
     expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
     expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
-    expect(EventManifest.Definitions.slice(40, 43)).toEqual([
-      SessionV1.Event.PartDelta,
-      SessionV1.Event.Diff,
-      SessionV1.Event.Error,
-    ])
+    // Position-independent (merge-era definitions shift slice offsets): assert identity
+    // through the Latest map instead of a hardcoded slice window.
+    expect(EventManifest.Latest.get("message.part.delta")).toBe(SessionV1.Event.PartDelta)
+    expect(EventManifest.Latest.get("session.diff")).toBe(SessionV1.Event.Diff)
+    expect(EventManifest.Latest.get("session.error")).toBe(SessionV1.Event.Error)
     expect(EventManifest.Durable.has("session.next.step.ended.1")).toBe(false)
     expect(EventManifest.Durable.get("session.next.step.ended.2")).toBe(SessionEvent.Step.Ended)
   })
