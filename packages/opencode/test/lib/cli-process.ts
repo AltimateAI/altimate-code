@@ -282,7 +282,18 @@ export function withCliFixture<A, E>(
       if (opts?.command) argv.push("--command", opts.command)
       if (opts?.extraArgs) argv.push(...opts.extraArgs)
       argv.push(message)
-      return spawn(argv, opts)
+      // altimate_change start — retry once on SQLite "database is locked" from
+      // the child. Session storage opens SQLite at boot and the WAL
+      // checkpoint can collide with the tracer's write on cold spawns under
+      // parallel test load — a real transient, not a product bug. Retry only
+      // this specific error class so genuine failures still surface.
+      return Effect.gen(function* () {
+        const first = yield* spawn(argv, opts)
+        if (first.exitCode === 0) return first
+        if (!/database is locked/i.test(first.stderr)) return first
+        return yield* spawn(argv, opts)
+      })
+      // altimate_change end
     }
 
     const serve = Effect.fn("opencode.serve")(function* (opts?: ServeOpts) {
