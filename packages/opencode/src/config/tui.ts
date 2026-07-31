@@ -2,7 +2,7 @@ export * as TuiConfig from "./tui"
 
 import path from "path"
 import { mergeDeep, unique } from "remeda"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Context, Effect, Fiber, Layer } from "effect"
 import { ConfigParse } from "@/config/parse"
@@ -297,9 +297,19 @@ const layer = Layer.effect(
   }).pipe(Effect.withSpan("TuiConfig.layer")),
 )
 
-export const node = LayerNode.make({ service: Service, layer, deps: [Npm.node, FSUtil.node] })
+// altimate_change start — upstream_fix: Project.node dep for the worktree-bounded TUI config
+// discovery restored above (project.fromDirectory)
+export const node = LayerNode.make({
+  service: Service,
+  layer,
+  deps: LayerNode.lazy(() => [Npm.node, FSUtil.node, Project.node]),
+})
+// altimate_change end
 
-const { runPromise } = makeRuntime(Service, AppNodeBuilder.build(node))
+const { runPromise } = makeRuntime(
+  Service,
+  Layer.suspend(() => AppNodeBuilderV1.build(node)),
+)
 
 export async function waitForDependencies() {
   await runPromise((svc) => svc.waitForDependencies())

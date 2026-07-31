@@ -2,6 +2,12 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import type * as SDK from "@opencode-ai/sdk/v2"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
+// altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
+import { makeRuntime, attachWith } from "@/effect/run-service"
+// altimate_change end
+// altimate_change start — Bus.subscribe restores MessageV2 event forwarding (see watch() comment below)
+import { Bus } from "@/bus"
+// altimate_change end
 import { Effect, Exit, Layer, Option, Schema, Scope, Context, Stream } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { Account } from "@/account/account"
@@ -16,8 +22,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
 import { Config } from "@/config/config"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
-import { ProviderV2 } from "@opencode-ai/core/provider"
-import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderID, ModelID } from "@/provider/schema"
 import { EventV2 } from "@opencode-ai/core/event"
 // altimate_change start — SessionSummary.diff computes the full-session diff on read; the
 // Session.Service.diff facade is a stub that always returns [] (true in both fork and upstream —
@@ -195,18 +200,35 @@ const layer = Layer.effect(
             yield* sync(info.id, [{ type: "session", data: structuredClone(info) as SDK.Session }])
           }),
         )
-        yield* watch(MessageV2.Event.Updated, (data) =>
-          Effect.gen(function* () {
-            const info = data.info
-            yield* sync(info.sessionID, [{ type: "message", data: structuredClone(info) as SDK.Message }])
-            if (info.role !== "user") return
-            const model = yield* provider.getModel(info.model.providerID, info.model.modelID)
-            yield* sync(info.sessionID, [{ type: "model", data: [model] }])
-          }),
-        )
-        yield* watch(MessageV2.Event.PartUpdated, (data) =>
-          sync(data.part.sessionID, [{ type: "part", data: structuredClone(data.part) as SDK.Part }]),
-        )
+        // altimate_change start — upstream_fix: MessageV2 is a fork-only message model that was
+        // never migrated to the core EventV2 bus `watch()` reads above — session/index.ts and
+        // session/session.ts's PartDelta case still publish these via the legacy zod `Bus`
+        // (pre-merge share.ts subscribed the same way). Restore Bus.subscribe here instead of
+        // watch(), or share stops receiving message/part updates entirely.
+        const runInInstance = (effect: Effect.Effect<void, unknown>) =>
+          Effect.runPromise(attachWith(effect, { instance: _ctx })).catch((cause) =>
+            Effect.runPromise(Effect.logError("share subscriber failed", { cause })),
+          )
+
+        const unsubMessageUpdated = Bus.subscribe(MessageV2.Event.Updated, (evt) => {
+          const info = evt.properties.info
+          return runInInstance(
+            Effect.gen(function* () {
+              yield* sync(info.sessionID, [{ type: "message", data: structuredClone(info) as SDK.Message }])
+              if (info.role !== "user") return
+              const model = yield* provider.getModel(info.model.providerID, info.model.modelID)
+              yield* sync(info.sessionID, [{ type: "model", data: [model] }])
+            }),
+          )
+        })
+        yield* Effect.addFinalizer(() => Effect.sync(unsubMessageUpdated))
+
+        const unsubPartUpdated = Bus.subscribe(MessageV2.Event.PartUpdated, (evt) => {
+          const part = evt.properties.part
+          return runInInstance(sync(part.sessionID, [{ type: "part", data: structuredClone(part) as SDK.Part }]))
+        })
+        yield* Effect.addFinalizer(() => Effect.sync(unsubPartUpdated))
+        // altimate_change end
         yield* watch(Session.Event.Diff, (data) =>
           sync(data.sessionID, [{ type: "session_diff", data: structuredClone(data.diff) as SDK.SnapshotFileDiff[] }]),
         )
@@ -301,7 +323,11 @@ const layer = Layer.effect(
               .map((item) => [`${item.providerID}/${item.modelID}`, item] as const),
           ).values(),
         ),
-        (item) => provider.getModel(ProviderV2.ID.make(item.providerID), ModelV2.ID.make(item.modelID)),
+        // altimate_change start — upstream_fix: provider.getModel takes the fork's ProviderID/
+        // ModelID brand, not core's ProviderV2.ID/ModelV2.ID (SDK.UserMessage.model carries plain
+        // strings here)
+        (item) => provider.getModel(ProviderID.make(item.providerID), ModelID.make(item.modelID)),
+        // altimate_change end
         { concurrency: 8 },
       )
 
@@ -387,7 +413,7 @@ export const node = LayerNode.make({
   layer: layer,
   // altimate_change start — upstream_fix: lazy deps — SessionSummary/Session/Provider are
   // cyclic fork facades; defer reading their .node exports until the graph is compiled.
-  deps: () => [
+  deps: LayerNode.lazy(() => [
     Account.node,
     EventV2Bridge.node,
     Config.node,
@@ -397,8 +423,39 @@ export const node = LayerNode.make({
     Session.node,
     // fork dependency — see SessionSummary import comment above
     SessionSummary.node,
-  ],
+  ]),
   // altimate_change end
 })
+
+// altimate_change start — Layer.suspend defers facade refs past circular module-init. The
+// `as Layer.Layer<Service>` cast mirrors config.ts/event-v2-bridge.ts: LayerNode's own
+// Missing-dependency check (CheckDependencies) confirms this composition leaves no service
+// unresolved, but tsgo's structural inference for this many chained `Layer.provide` calls
+// doesn't collapse RIn to `never` on its own.
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Account.defaultLayer),
+    Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(Database.defaultLayer),
+    Layer.provide(FetchHttpClient.layer),
+    Layer.provide(Provider.defaultLayer),
+    Layer.provide(Session.defaultLayer),
+    Layer.provide(SessionSummary.defaultLayer),
+  ),
+) as Layer.Layer<Service>
+// altimate_change end
+
+// altimate_change start — restore the imperative Promise wrappers upstream removed in the
+// Effect-only migration. session/index.ts's legacy `share`/`unshare` facades call these from
+// plain async code; the makeRuntime bridge keeps reads/mutations bound to the active instance.
+const { runPromise: runShareNext } = makeRuntime(Service, defaultLayer)
+export async function create(sessionID: SessionID) {
+  return runShareNext((svc) => svc.create(sessionID))
+}
+export async function remove(sessionID: SessionID) {
+  return runShareNext((svc) => svc.remove(sessionID))
+}
+// altimate_change end
 
 export * as ShareNext from "./share-next"

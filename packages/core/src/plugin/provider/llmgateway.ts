@@ -17,8 +17,9 @@ export const LLMGatewayPlugin = define({
           evt.provider.update(item.provider.id, (provider) => {
             // altimate_change start — provider identity headers
             provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
-            provider.request.headers["X-Title"] = "altimate-code"
-            provider.request.headers["X-Source"] = "altimate-code"
+            // X-Title and X-Source stay upstream: LLMGateway keys allowlisted callers on these exact legacy values.
+            provider.request.headers["X-Title"] = "opencode"
+            provider.request.headers["X-Source"] = "opencode"
             // altimate_change end
           })
         }

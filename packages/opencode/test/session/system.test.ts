@@ -17,17 +17,25 @@ const skills = [
   {
     name: "zeta-skill",
     description: "Zeta skill.",
+    location: "/skills/zeta-skill/SKILL.md",
+    content: "# zeta-skill",
   },
   {
     name: "alpha-skill",
     description: "Alpha skill.",
+    location: "/skills/alpha-skill/SKILL.md",
+    content: "# alpha-skill",
   },
   {
     name: "middle-skill",
     description: "Middle skill.",
+    location: "/skills/middle-skill/SKILL.md",
+    content: "# middle-skill",
   },
   {
     name: "manual-skill",
+    location: "/skills/manual-skill/SKILL.md",
+    content: "# manual-skill",
   },
 ]
 
@@ -60,7 +68,7 @@ const build: Agent.Info = {
   options: {},
 }
 
-const it = withLegacyInstanceRunner(testEffect(SystemPrompt.layer))
+const it = withLegacyInstanceRunner(testEffect(SystemPrompt.defaultLayer))
 
 // altimate_change start — mocked-layer runner for tests that don't need a real
 // on-disk instance (Meta prompt selection, MCP instructions formatting). The

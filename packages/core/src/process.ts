@@ -258,4 +258,9 @@ const layer = Layer.effect(
 
 export const node = makeGlobalNode({ service: Service, layer: layer, deps: [CrossSpawnSpawner.node] })
 
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers. Removed upstream in the makeGlobalNode migration.
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(CrossSpawnSpawner.defaultLayer)))
+// altimate_change end
+
 export * as AppProcess from "./process"

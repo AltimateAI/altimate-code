@@ -3,6 +3,7 @@ import { stat, readFile } from "node:fs/promises"
 import path from "node:path"
 import { Effect, Layer, Stream } from "effect"
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { Location } from "@opencode-ai/core/location"
@@ -14,6 +15,10 @@ import { LSP } from "../lsp/lsp"
 import { File } from "../file"
 import { Snapshot } from "../snapshot"
 import { Project } from "./project"
+// altimate_change start — upstream_fix: ShareNext was referenced below (yield* ShareNext.Service,
+// ShareNext.node) but never imported
+import { ShareNext } from "@/share/share-next"
+// altimate_change end
 import { Vcs } from "./vcs"
 import { Command } from "../command"
 import { GlobalBus, type GlobalEvent } from "@/bus/global"
@@ -138,8 +143,10 @@ const layer = Layer.effect(
 
       // Each service self-manages its own slow work via Effect.forkScoped against
       // its per-instance state scope. We just await materialization here.
+      // altimate_change — upstream_fix: `project` (Project.Service) has no `.init()` method;
+      // drop it from this list (it's still yielded above for setInitialized() below)
       yield* Effect.forEach(
-        [lsp, shareNext, format, vcs, snapshot, project],
+        [lsp, shareNext, format, vcs, snapshot],
         (s) => s.init().pipe(Effect.catchCause((cause) => Effect.logWarning("init failed", { cause }))),
         { concurrency: "unbounded", discard: true },
       ).pipe(Effect.withSpan("InstanceBootstrap.init"))
@@ -165,7 +172,7 @@ export const node = makeGlobalNode({
   layer: layer,
   // altimate_change start — EventV2Bridge.node: the branch-HEAD watcher + setInitialized bridge
   // above need EventV2Bridge.Service, which upstream's bootstrap doesn't depend on.
-  deps: [
+  deps: LayerNode.lazy(() => [
     Config.node,
     Format.node,
     LSP.node,
@@ -175,7 +182,7 @@ export const node = makeGlobalNode({
     Snapshot.node,
     Vcs.node,
     EventV2Bridge.node,
-  ],
+  ]),
   // altimate_change end
 })
 

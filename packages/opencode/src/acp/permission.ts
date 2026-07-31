@@ -221,7 +221,9 @@ async function diffContentForFiles(files: PermissionFileMetadata[]) {
 }
 
 async function diffContentForPatch(filepath: string, diff: string, displayPath = filepath) {
-  const content = (await exists(filepath)) ? await readText(filepath) : ""
+  // altimate_change — upstream_fix: use the Filesystem facade (exists/readText were dangling
+  // names left over from the fork's filesystem helper extraction)
+  const content = (await Filesystem.exists(filepath)) ? await Filesystem.readText(filepath) : ""
   const next = applyPatch(content, diff)
   if (next === false) return undefined
   return {

@@ -151,7 +151,11 @@ const layer = Layer.effect(
       ),
     )
 
-    const source = Flag.OPENCODE_MODELS_URL || "https://models.opencode.ai"
+    // altimate_change start — brand the default models.dev catalog source; keep it consistent
+    // with the "models.json" fast-path filename below (see recording-cost-report.ts for the
+    // matching convention elsewhere).
+    const source = Flag.OPENCODE_MODELS_URL || "https://models.altimate.ai"
+    // altimate_change end
     const filepath = path.join(
       Global.Path.cache,
       source === "https://models.altimate.ai" ? "models.json" : `models-${Hash.fast(source)}.json`,

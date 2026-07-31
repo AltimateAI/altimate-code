@@ -30,7 +30,7 @@ export type Info = Schema.Schema.Type<typeof Info>
 
 export class AuthServiceError extends Schema.TaggedErrorClass<AuthServiceError>()("AuthServiceError", {
   message: Schema.String,
-  cause: Schema.optional(Schema.Defect),
+  cause: Schema.optional(Schema.Defect()),
 }) {}
 
 const file = path.join(Global.Path.data, "auth.json")

@@ -231,9 +231,13 @@ export const messageLoaderNode = LayerNode.unbound(MessageLoader, Node.tags.valu
 export const contextLimitLoaderNode = makeGlobalNode({
   service: ContextLimitLoader,
   layer: contextLimitLoaderLayer,
-  deps: [Provider.node, InstanceStore.node],
+  deps: LayerNode.lazy(() => [Provider.node, InstanceStore.node]),
 })
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [messageLoaderNode, contextLimitLoaderNode] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer,
+  deps: LayerNode.lazy(() => [messageLoaderNode, contextLimitLoaderNode]),
+})
 
 export * as UsageService from "./usage"

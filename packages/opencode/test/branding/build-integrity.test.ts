@@ -219,15 +219,23 @@ describe("No Orphaned Package References", () => {
     const taskKeys = Object.keys(turbo.tasks || {})
     const workspaceDirs: string[] = rootPkg.workspaces.packages
 
-    // Collect directory base names as valid package short names
+    // Collect directory base names AND real package.json names as valid package
+    // references — turbo's modern task-key syntax scopes by package NAME
+    // (e.g. "@opencode-ai/core#test"), while older keys used dir short names.
     const validShortNames = new Set<string>()
     for (const dir of workspaceDirs) {
       const parts = dir.split("/")
       validShortNames.add(parts[parts.length - 1])
+      try {
+        const pkg = readJSON(`${dir}/package.json`)
+        if (typeof pkg.name === "string") validShortNames.add(pkg.name)
+      } catch {
+        // workspace glob entries without a package.json are covered by dir name
+      }
     }
 
     for (const taskKey of taskKeys) {
-      // Task keys with # indicate package-scoped tasks (e.g., "opencode#test")
+      // Task keys with # indicate package-scoped tasks (e.g., "@opencode-ai/core#test")
       if (taskKey.includes("#")) {
         const pkgShortName = taskKey.split("#")[0]
         expect(validShortNames.has(pkgShortName)).toBe(true)

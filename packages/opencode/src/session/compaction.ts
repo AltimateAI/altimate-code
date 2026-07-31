@@ -65,7 +65,7 @@ export namespace SessionCompaction {
   }
   // altimate_change end
 
-  // UNSURE: upstream v1.18.10 replaced this with `SessionCompactionEvent` from
+  // Fork keeps the legacy BusEvent: upstream v1.18.10 replaced this with `SessionCompactionEvent` from
   // `@opencode-ai/schema/session-compaction-event` (EventV2-style, published via injected
   // EventV2Bridge.Service). Kept the fork's original legacy BusEvent here instead of switching,
   // since no other file in packages/opencode/src consumes "session.compacted" today (grepped) and
@@ -740,4 +740,5 @@ When constructing the summary, try to stick to this template:
   // injects Config/Session/Agent/Plugin/Provider/etc. via DI).
   export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
+  // altimate_change end — closes the Effect Context.Service facade block
 }

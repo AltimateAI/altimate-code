@@ -1,7 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrapper (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Config } from "@/config/config"
@@ -717,14 +717,14 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, Auth.node, Plugin.node, Skill.node, Provider.node, locationServiceMapNode],
+  deps: LayerNode.lazy(() => [Config.node, Auth.node, Plugin.node, Skill.node, Provider.node, locationServiceMapNode]),
 })
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the HTTP server consumes Agent.list() directly. defaultLayer is
 // compiled from `node` (per-service `.defaultLayer` facades were dropped upstream in favor
 // of the LayerNode graph) so it always matches this service's real dependency wiring.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runAgent } = makeRuntime(Service, defaultLayer)
 export async function list() {
   return runAgent((s) => s.list())

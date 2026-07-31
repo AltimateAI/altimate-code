@@ -73,11 +73,17 @@ const layer = Layer.effect(
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EventV2Bridge.defaultLayer), Layer.provide(Database.defaultLayer)))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(EventV2Bridge.defaultLayer), Layer.provide(Database.defaultLayer)),
+)
 // altimate_change end
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
-export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [EventV2Bridge.node, Database.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [EventV2Bridge.node, Database.node]),
+})
 // altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the

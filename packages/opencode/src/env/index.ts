@@ -44,7 +44,7 @@ export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
 // altimate_change start — restore the imperative wrappers upstream removed in the Effect-only
 // migration. Env is backed by process.env (no async IO), and the fork callers read it
 // synchronously, so these run the Service effects via runSync and return plain values.
-const { runSync: runEnvSync } = makeRuntime(Service, defaultLayer)
+const { runSync: runEnvSync } = makeRuntime(Service, layer)
 export function get(key: string) {
   return runEnvSync((s) => s.get(key))
 }

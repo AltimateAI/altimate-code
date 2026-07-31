@@ -230,13 +230,15 @@ const layer: Layer.Layer<
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(Global.layer),
-  Layer.provide(FSUtil.defaultLayer),
-  Layer.provide(FetchHttpClient.layer),
-  Layer.provide(RuntimeFlags.defaultLayer),
-))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(Global.defaultLayer),
+    Layer.provide(FSUtil.defaultLayer),
+    Layer.provide(FetchHttpClient.layer),
+    Layer.provide(RuntimeFlags.defaultLayer),
+  ),
+)
 // altimate_change end
 
 export function loaded(messages: SessionV1.WithParts[]) {
@@ -247,7 +249,7 @@ export function loaded(messages: SessionV1.WithParts[]) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: () => [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient],
+  deps: LayerNode.lazy(() => [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient]),
 })
 // altimate_change end
 

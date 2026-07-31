@@ -34,4 +34,9 @@ const layer = Layer.succeed(
 
 export const node = LayerNode.make({ service: Service, layer, deps: [] })
 
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumer (mcp/index.ts). Removed upstream in the makeGlobalNode migration.
+export const defaultLayer = layer
+// altimate_change end
+
 export * as McpBrowser from "./browser"

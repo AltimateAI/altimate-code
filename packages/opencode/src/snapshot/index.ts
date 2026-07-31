@@ -12,7 +12,7 @@ import { Global } from "@opencode-ai/core/global"
 import { Info } from "@opencode-ai/schema/file-diff"
 // altimate_change start — makeRuntime + AppNodeBuilder bridge for the restored Promise wrappers (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 
 export const Patch = Schema.Struct({
@@ -805,13 +805,13 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, AppProcess.node, Config.node],
+  deps: LayerNode.lazy(() => [FSUtil.node, AppProcess.node, Config.node]),
 })
 
 // altimate_change start — restore imperative Promise wrappers for the session processor, which
 // drives snapshot tracking from a Promise-based stream loop (not an Effect context). defaultLayer
 // is compiled from `node` since per-service `.defaultLayer` facades were dropped upstream.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runSnapshot } = makeRuntime(Service, defaultLayer)
 export async function track() {
   return runSnapshot((s) => s.track())

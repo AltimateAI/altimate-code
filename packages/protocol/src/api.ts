@@ -73,7 +73,15 @@ export const makeApi = <
   readonly locationMiddleware: Context.Key<LocationId, LocationService>
   readonly sessionLocationMiddleware: Context.Key<SessionLocationId, SessionLocationService>
 }) =>
-  makeApiFromGroup(makeEventGroup(options.definitions), options.locationMiddleware, options.sessionLocationMiddleware)
+  // altimate_change start — upstream_fix: the fork's /api/event handler scopes the stream to the
+  // request's Location (per-project filtering on the shared global event bus), so the event group
+  // needs the location middleware to discharge Location.Service like every other scoped group.
+  makeApiFromGroup(
+    makeEventGroup(options.definitions).middleware(options.locationMiddleware),
+    options.locationMiddleware,
+    options.sessionLocationMiddleware,
+  )
+// altimate_change end
 
 export const makeDefaultApi = <
   LocationId extends HttpApiMiddleware.AnyId,
@@ -83,4 +91,11 @@ export const makeDefaultApi = <
 >(options: {
   readonly locationMiddleware: Context.Key<LocationId, LocationService>
   readonly sessionLocationMiddleware: Context.Key<SessionLocationId, SessionLocationService>
-}) => makeApiFromGroup(EventGroup, options.locationMiddleware, options.sessionLocationMiddleware)
+}) =>
+  // altimate_change start — upstream_fix: same location-middleware wiring as makeApi above
+  makeApiFromGroup(
+    EventGroup.middleware(options.locationMiddleware),
+    options.locationMiddleware,
+    options.sessionLocationMiddleware,
+  )
+// altimate_change end

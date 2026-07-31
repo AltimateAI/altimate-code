@@ -19,8 +19,6 @@ import { ToolJsonSchema } from "@/tool/json-schema"
 import { MessageID, SessionID } from "@/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ModelID, ProviderID } from "@/provider/schema"
-import { ProviderV2 } from "@opencode-ai/core/provider"
-import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 
@@ -75,6 +73,8 @@ const withCodeMode = testEffect(
                 inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
               } as MCPToolDef,
               client: {} as MCP.McpTool["client"],
+              // altimate_change — upstream_fix: MCP.Service.tools() now returns `McpTool & {clientName}`
+              clientName: "weather",
             },
           }),
         clients: () => Effect.succeed({ weather: {} as any }),
@@ -134,8 +134,8 @@ describe("tool.registry", () => {
       const agents = yield* Agent.Service
       const ids = yield* registry.ids()
       const tools = yield* registry.tools({
-        providerID: ProviderV2.ID.opencode,
-        modelID: ModelV2.ID.make("test"),
+        providerID: ProviderID.opencode,
+        modelID: ModelID.make("test"),
         agent: yield* agents.defaultInfo(),
       })
       const execute = tools.find((tool) => tool.id === "execute")
@@ -151,8 +151,8 @@ describe("tool.registry", () => {
       const registry = yield* ToolRegistry.Service
       const agents = yield* Agent.Service
       const tools = yield* registry.tools({
-        providerID: ProviderV2.ID.opencode,
-        modelID: ModelV2.ID.make("test"),
+        providerID: ProviderID.opencode,
+        modelID: ModelID.make("test"),
         agent: yield* agents.defaultInfo(),
       })
 

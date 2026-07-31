@@ -384,8 +384,10 @@ describe("invariant: HTML error templates escape user-controlled strings", () =>
       if (offenders.length) {
         throw new Error(`${rel} has unescaped error interpolations: ${offenders.join(", ")}`)
       }
-      // Positive: there must be at least one escapeHtml(error) usage.
-      expect(content).toMatch(/escapeHtml\(\s*error\s*\)/)
+      // Positive: user-controlled error strings must flow through an escaping renderer —
+      // either a local escapeHtml(error) call, or (since the v1.18.10 merge) delegation to
+      // the shared OauthCallbackPage component, which escapes every interpolated field.
+      expect(content).toMatch(/escapeHtml\(\s*error\s*\)|OauthCallbackPage\.error\(/)
     })
   }
 })
@@ -505,7 +507,8 @@ describe("invariant: build infrastructure pinning (cycle 2)", () => {
     // `workspaces.catalog`. The effect core + its @effect/* peers MUST stay on the
     // same beta so the Context/Layer ABI matches; a partial bump re-breaks the build.
     const cat = pkg.workspaces?.catalog ?? pkg.catalog ?? {}
-    const EFFECT_PIN = "4.0.0-beta.74"
+    // v1.18.10: upstream coordinated a bump to beta.83 ("chore: upgrade Effect to beta 83").
+    const EFFECT_PIN = "4.0.0-beta.83"
     expect(cat["effect"]).toBe(EFFECT_PIN)
     expect(cat["@effect/platform-node"]).toBe(EFFECT_PIN)
     expect(cat["@effect/opentelemetry"]).toBe(EFFECT_PIN)

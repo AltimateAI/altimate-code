@@ -1002,7 +1002,17 @@ export async function runMini(input: MiniCommandInput) {
     dir: input.directory,
     port: undefined,
     variant: undefined,
-    thinking: undefined,
+    thinking: false,
+    // altimate_change start — upstream_fix: RunCommand.handler's arg type gained these options
+    // (all with yargs defaults, making them required non-optional fields); fill in the
+    // no-op/default values for the mini-command's synthetic args object
+    output: undefined,
+    audience: undefined,
+    query: undefined,
+    trace: true,
+    "max-turns": undefined,
+    maxTurns: undefined,
+    // altimate_change end
     mini: true,
     interactive: false,
     replay: input.replay ?? true,

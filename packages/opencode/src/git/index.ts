@@ -1,6 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — AppNodeBuilder for the defaultLayer facade kept for existing consumers
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import { AppProcess } from "@opencode-ai/core/process"
 import { Effect, Layer, Context, Stream } from "effect"
@@ -346,12 +346,12 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [AppProcess.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [AppProcess.node]) })
 
 // altimate_change start — defaultLayer kept for existing consumers (worktree/index.ts,
 // storage/storage.ts, project/vcs.ts, app-runtime.ts); compiled from `node` since per-service
 // `.defaultLayer` facades were dropped upstream in favor of the LayerNode graph.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 // altimate_change end
 
 export * as Git from "."

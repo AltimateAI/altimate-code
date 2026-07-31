@@ -21,10 +21,14 @@ export const Parameters = Schema.Struct({
 
 type CallEntry = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
 
+// altimate_change start — upstream_fix: Tool.Metadata requires an index signature plus
+// `error?: string` (telemetry error message, not a boolean flag) — see tool.ts's `interface Metadata`.
 type Metadata = {
+  [key: string]: any
   toolCalls: CallEntry[]
-  error?: boolean
+  error?: string
 }
+// altimate_change end
 
 type Attachment = NonNullable<Tool.ExecuteResult["attachments"]>[number]
 
@@ -200,7 +204,7 @@ export const CodeModeTool = Tool.define(
         if (ctx.abort.aborted) {
           return {
             title: CODE_MODE_TOOL,
-            metadata: { toolCalls: [], error: true },
+            metadata: { toolCalls: [], error: "Execution cancelled." },
             output: "Execution cancelled.",
           } satisfies Tool.ExecuteResult<Metadata>
         }
@@ -282,7 +286,7 @@ export const CodeModeTool = Tool.define(
           if (ctx.abort.aborted) {
             return {
               title: CODE_MODE_TOOL,
-              metadata: { toolCalls: calls, error: true },
+              metadata: { toolCalls: calls, error: "Execution cancelled." },
               output: "Execution cancelled.",
             } satisfies Tool.ExecuteResult<Metadata>
           }

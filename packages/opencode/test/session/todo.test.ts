@@ -1,35 +1,35 @@
 import { describe, expect } from "bun:test"
-import { Database } from "@opencode-ai/core/database/database"
-import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Deferred, Effect, Layer } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { Todo } from "@/session/todo"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { Storage } from "@/storage/storage"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { BackgroundJob } from "@/background/job"
 import { Log } from "../../src/util/log"
 import { testInstanceStoreLayer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 Log.init({ print: false })
 
+// altimate_change start — upstream_fix: Session/Todo/CrossSpawnSpawner no longer expose
+// per-module `.defaultLayer` facades; compose the test environment from `.node` via
+// AppNodeBuilder, overriding RuntimeFlags to disable experimental workspaces.
+// SessionProjector.node is required too — Session.create only publishes
+// SessionV1.Event.Created; the projector is what actually persists the row to
+// SessionTable, and Todo rows FK-reference it.
 const it = testEffect(
   Layer.mergeAll(
-    SessionNs.layer.pipe(
-      Layer.provide(Storage.defaultLayer),
-      Layer.provide(Database.defaultLayer),
-      Layer.provideMerge(EventV2Bridge.defaultLayer),
-      Layer.provide(SessionProjector.defaultLayer),
-      Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
-      Layer.provide(BackgroundJob.defaultLayer),
+    AppNodeBuilder.build(
+      LayerNode.group([SessionNs.node, Todo.node, CrossSpawnSpawner.node, EventV2Bridge.node, SessionProjector.node]),
+      [[RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })]],
     ),
-    Todo.layer.pipe(Layer.provide(Database.defaultLayer), Layer.provideMerge(EventV2Bridge.defaultLayer)),
-    CrossSpawnSpawner.defaultLayer,
     testInstanceStoreLayer,
   ),
 )
+// altimate_change end
 
 const awaitDeferred = <T>(deferred: Deferred.Deferred<T>, message: string) =>
   Effect.race(

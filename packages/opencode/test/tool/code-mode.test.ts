@@ -23,22 +23,26 @@ const ctx: Tool.Context = {
   ask: () => Effect.void,
 }
 
+// altimate_change start — upstream_fix: MCP.Service.tools() now returns `McpTool & {clientName}`;
+// clientName is unused by code-mode.ts (pure passthrough) so a fixed placeholder is safe here.
 function mcpTool(
   name: string,
   handler: (args: Record<string, unknown>) => unknown,
   inputSchema: Record<string, unknown> = { type: "object", properties: {} },
   outputSchema?: Record<string, unknown>,
-): MCP.McpTool {
+): MCP.McpTool & { clientName: string } {
   return {
     def: { name, description: name, inputSchema, ...(outputSchema ? { outputSchema } : {}) } as MCPToolDef,
     client: {
       callTool: async (params: { arguments?: Record<string, unknown> }) => handler(params.arguments ?? {}),
     } as unknown as MCP.McpTool["client"],
+    clientName: "test-server",
   }
 }
+// altimate_change end
 
 function harness(input: {
-  mcpTools: Record<string, MCP.McpTool>
+  mcpTools: Record<string, MCP.McpTool & { clientName: string }>
   servers: string[]
   permission?: PermissionV1.Rule[]
   trigger?: Plugin.Interface["trigger"]
@@ -63,12 +67,12 @@ function harness(input: {
   )
 }
 
-function serverNames(mcpTools: Record<string, MCP.McpTool>, servers?: string[]) {
+function serverNames(mcpTools: Record<string, MCP.McpTool & { clientName: string }>, servers?: string[]) {
   return servers ?? [...new Set(Object.keys(mcpTools).map((key) => key.split("_")[0]!))]
 }
 
 function build(
-  mcpTools: Record<string, MCP.McpTool>,
+  mcpTools: Record<string, MCP.McpTool & { clientName: string }>,
   servers?: string[],
   permission?: PermissionV1.Rule[],
   trigger?: Plugin.Interface["trigger"],
@@ -82,7 +86,11 @@ function build(
   )
 }
 
-function describeFor(mcpTools: Record<string, MCP.McpTool>, servers?: string[], permission: PermissionV1.Rule[] = []) {
+function describeFor(
+  mcpTools: Record<string, MCP.McpTool & { clientName: string }>,
+  servers?: string[],
+  permission: PermissionV1.Rule[] = [],
+) {
   return describeCatalog(Permission.visibleTools(mcpTools, permission), serverNames(mcpTools, servers))
 }
 
@@ -193,7 +201,7 @@ describe("code mode execute", () => {
   })
 
   test("large catalogs inline a budgeted PARTIAL list plus runtime search", async () => {
-    const tools: Record<string, MCP.McpTool> = {}
+    const tools: Record<string, MCP.McpTool & { clientName: string }> = {}
     const filler = "a searchable description of this operation that consumes catalog budget ".repeat(3)
     for (let i = 0; i < 150; i++) {
       tools[`alpha_op_${i}`] = {
@@ -203,6 +211,7 @@ describe("code mode execute", () => {
           inputSchema: { type: "object", properties: { value: { type: "string" }, count: { type: "number" } } },
         } as MCPToolDef,
         client: { callTool: async () => ({ content: [] }) } as unknown as MCP.McpTool["client"],
+        clientName: "alpha",
       }
     }
     tools["zeta_only_tool"] = mcpTool("only_tool", () => "", {
@@ -332,8 +341,11 @@ describe("code mode execute", () => {
     )
 
     expect(output.output).toBe("12")
-    expect(output.metadata.toolCalls.map((c) => c.tool).sort()).toEqual(["echo.one", "echo.two"])
-    expect(output.metadata.toolCalls.every((c) => c.status === "completed")).toBe(true)
+    // altimate_change start — upstream_fix: CodeModeTool's Metadata generic isn't inferred through
+    // the build()/Tool.init() chain here, widening toolCalls to `any[]`; annotate explicitly.
+    expect(output.metadata.toolCalls.map((c: { tool: string }) => c.tool).sort()).toEqual(["echo.one", "echo.two"])
+    expect(output.metadata.toolCalls.every((c: { status: string }) => c.status === "completed")).toBe(true)
+    // altimate_change end
   })
 
   test("a program failure fails the tool with a readable error", async () => {
@@ -616,7 +628,11 @@ describe("code mode execute", () => {
       ),
     )
     expect(output.output).toBe("Execution cancelled.")
-    expect(output.metadata.error).toBe(true)
+    // altimate_change start — Tool's base Metadata field is `error?: string` (a telemetry
+    // message, not a boolean flag — see tool.ts's `interface Metadata`), and CodeModeTool
+    // consistently sets it to the cancellation message everywhere else in this file.
+    expect(output.metadata.error).toBe("Execution cancelled.")
+    // altimate_change end
     expect(output.metadata.toolCalls).toEqual([{ tool: "host.trigger", status: "running" }])
   })
 

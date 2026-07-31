@@ -10,6 +10,11 @@ export function testProviderConfig(llmUrl: string) {
   return {
     formatter: false,
     lsp: false,
+    // Tracing is on by default in the CLI `run` path (see cli/cmd/run.ts) and emits a
+    // "trace_saved" JSON event once the trace file is finalized. Most tests here assert an exact
+    // event sequence and don't care about tracing, so keep it off by default; tests that do test
+    // tracing (e.g. "--trace writes a session trace artifact") override this field explicitly.
+    tracing: { enabled: false },
     provider: {
       test: {
         name: "Test",

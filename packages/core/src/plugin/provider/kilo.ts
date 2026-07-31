@@ -13,7 +13,8 @@ export const KiloPlugin = define({
           evt.provider.update(item.provider.id, (provider) => {
             // altimate_change start — provider identity headers
             provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
-            provider.request.headers["X-Title"] = "altimate-code"
+            // X-Title stays upstream: Kilo keys allowlisted callers on this exact legacy value.
+            provider.request.headers["X-Title"] = "opencode"
             // altimate_change end
           })
         }

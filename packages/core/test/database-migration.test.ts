@@ -66,10 +66,9 @@ describe("DatabaseMigration", () => {
             sqlite.run(query)
           }),
       }
-      sqlite
-        .transaction(() => {
-          Effect.runSync(freshSchema.up(tx as never))
-          sqlite.run(`
+      sqlite.transaction(() => {
+        Effect.runSync(freshSchema.up(tx as never))
+        sqlite.run(`
             CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (
               id INTEGER PRIMARY KEY,
               hash text NOT NULL,
@@ -78,11 +77,11 @@ describe("DatabaseMigration", () => {
               applied_at TEXT
             )
           `)
-          sqlite.run(`
+        sqlite.run(`
             INSERT INTO "__drizzle_migrations" (hash, created_at, name, applied_at)
             VALUES ('', 1, '20260511173437_session-metadata', 'now')
           `)
-        })()
+      })()
     } finally {
       sqlite.close()
     }
@@ -183,7 +182,8 @@ describe("DatabaseMigration", () => {
           const db = yield* makeDb
           const broken = {
             id: "99999999999999_broken_test_migration",
-            up: (tx: Parameters<typeof iconUrlOverrideMigration.up>[0]) => tx.run(sql`ALTER TABLE nonexistent ADD col text`),
+            up: (tx: Parameters<typeof iconUrlOverrideMigration.up>[0]) =>
+              tx.run(sql`ALTER TABLE nonexistent ADD col text`),
           }
           yield* DatabaseMigration.applyOnly(db, [broken])
         }),
@@ -359,8 +359,20 @@ describe("DatabaseMigration", () => {
         yield* db.run(
           sql`INSERT INTO session_context_epoch (session_id, baseline, snapshot, baseline_seq) VALUES ('session', 'baseline', '{}', 9)`,
         )
+        // Force this migration to actually execute (not silently adopted): `apply()` above already
+        // created the fully-current schema, so `applyOnly`'s fingerprint-based adopt shortcut would
+        // otherwise skip re-running it — but this migration is data-destructive (wipes event-sourcing
+        // tables), and this test wants to exercise that real wipe, not the structural-adopt path
+        // covered by the dedicated journal-adoption tests below.
         yield* db.run(sql`DELETE FROM migration WHERE id = ${simplifySessionInputMigration.id}`)
-        yield* DatabaseMigration.applyOnly(db, [simplifySessionInputMigration])
+        yield* db.transaction((tx) =>
+          Effect.gen(function* () {
+            yield* simplifySessionInputMigration.up(tx)
+            yield* tx.run(
+              sql`INSERT INTO migration (id, time_completed) VALUES (${simplifySessionInputMigration.id}, ${Date.now()})`,
+            )
+          }),
+        )
 
         const database = Layer.succeed(Database.Service, { db })
         yield* EventV2.Service.use((service) =>
@@ -780,9 +792,9 @@ describe("DatabaseMigration", () => {
       const sqlite = generatedSchemaSqlite()
       try {
         const actual = (
-          sqlite
-            .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")
-            .all() as { name: string }[]
+          sqlite.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'").all() as {
+            name: string
+          }[]
         )
           .map((row) => row.name)
           .sort()

@@ -34,7 +34,10 @@ jobs:
             typescript:
               # altimate_change start — upstream_fix: typecheck every declared TypeScript workspace
               - 'packages/cli/**'
+              - 'packages/codemode/**'
               - 'packages/core/**'
+              - 'packages/protocol/**'
+              - 'packages/schema/**'
               - 'packages/dbt-tools/**'
               - 'packages/effect-drizzle-sqlite/**'
               - 'packages/effect-sqlite-node/**'

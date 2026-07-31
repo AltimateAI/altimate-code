@@ -14,7 +14,8 @@
  *    but allows dbt_pr_review.
  */
 import { afterEach, expect } from "bun:test"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Cause, Effect, Exit } from "effect"
 import { disposeAllInstances } from "../../fixture/fixture"
 import { testEffect } from "../../lib/effect"
 import { Agent } from "../../../src/agent/agent"
@@ -26,18 +27,19 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Plugin } from "../../../src/plugin"
 import { Provider } from "../../../src/provider/provider"
 import { Skill } from "../../../src/skill"
-import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 
+// altimate_change start — upstream_fix: Agent no longer exposes a `.layer` facade and the
+// fork's old location-layer.ts (with its standalone `LocationServiceMap.layer`) was deleted in
+// the v1.18.10 merge. Compose the test environment from `.node` via LayerNode, matching
+// test/agent/agent.test.ts (the supported way to boot this service in tests) — that harness
+// needs no LocationServiceMap wiring either, since Agent.node's own dependency graph doesn't
+// require it.
 const agentLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
-  Agent.layer.pipe(
-    Layer.provide(Plugin.defaultLayer),
-    Layer.provide(Provider.defaultLayer),
-    Layer.provide(Auth.defaultLayer),
-    Layer.provide(Config.defaultLayer),
-    Layer.provide(Skill.defaultLayer),
-    Layer.provide(LocationServiceMap.layer),
-    Layer.provide(RuntimeFlags.layer(flags)),
+  LayerNode.compile(
+    LayerNode.group([Agent.node, Plugin.node, Provider.node, Auth.node, Config.node, Skill.node, RuntimeFlags.node]),
+    [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
   )
+// altimate_change end
 
 const it = testEffect(agentLayer())
 

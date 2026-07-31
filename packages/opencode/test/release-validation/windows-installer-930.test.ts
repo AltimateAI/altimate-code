@@ -36,6 +36,9 @@ import { Effect, Layer, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { AppProcess } from "@opencode-ai/core/process"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Installation } from "../../src/installation"
 import { Telemetry } from "../../src/telemetry"
 
@@ -60,9 +63,7 @@ function setPlatform(value: string) {
   Object.defineProperty(process, "platform", { value, configurable: true })
 }
 
-type HttpHandler = (
-  request: HttpClientRequest.HttpClientRequest,
-) => Response | Effect.Effect<Response, unknown>
+type HttpHandler = (request: HttpClientRequest.HttpClientRequest) => Response | Effect.Effect<Response, unknown>
 
 type SpawnResult = string | { code: number; stdout?: string; stderr?: string }
 type SpawnCall = { cmd: string; args: readonly string[]; env?: Record<string, string>; stdin?: unknown }
@@ -113,13 +114,15 @@ function upgradeWith(input: {
   spawn?: (call: SpawnCall) => SpawnResult
 }) {
   setPlatform(input.platform)
-  const appProcess = AppProcess.layer.pipe(Layer.provide(mockSpawner(input.spawn)))
-  const layer = Installation.layer.pipe(
-    Layer.provide(
-      mockHttpClient(input.http ?? (() => new Response("", { status: 200, statusText: "OK" }))),
-    ),
-    Layer.provide(appProcess),
-  )
+  // altimate_change start — upstream_fix: AppProcess/Installation have no `.layer`/`.defaultLayer`
+  // facades; build from `.node`, replacing CrossSpawnSpawner (inside AppProcess.node) with the
+  // mock spawner and httpClient (inside Installation.node) with the mock HTTP client.
+  const appProcess = AppNodeBuilder.build(AppProcess.node, [[CrossSpawnSpawner.node, mockSpawner(input.spawn)]])
+  const layer = AppNodeBuilder.build(Installation.node, [
+    [httpClient, mockHttpClient(input.http ?? (() => new Response("", { status: 200, statusText: "OK" })))],
+    [AppProcess.node, appProcess],
+  ])
+  // altimate_change end
   return Effect.runPromise(Installation.use.upgrade("curl", input.target ?? "1.2.3").pipe(Effect.provide(layer)))
 }
 
@@ -446,7 +449,9 @@ describe("install.ps1 — GITHUB_PATH emission gated on GitHub Actions (static)"
 describe("install.ps1 — missing altimate.exe in archive fails + cleans up (static)", () => {
   test("throws 'Archive did not contain' when the extracted binary is absent", () => {
     // if (-not (Test-Path $extracted)) { throw "Archive did not contain $BinaryName" }
-    expect(PS1).toMatch(/if\s*\(-not\s*\(Test-Path\s+\$extracted\)\)\s*\{\s*throw\s+"Archive did not contain \$BinaryName"/)
+    expect(PS1).toMatch(
+      /if\s*\(-not\s*\(Test-Path\s+\$extracted\)\)\s*\{\s*throw\s+"Archive did not contain \$BinaryName"/,
+    )
   })
 
   test("the temp dir (altimate_install_$PID) is removed in a finally block", () => {

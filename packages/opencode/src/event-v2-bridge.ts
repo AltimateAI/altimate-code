@@ -2,7 +2,7 @@
 // so direct EventV2 consumers can isolate directory/workspace streams.
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — AppNodeBuilder for the defaultLayer facade kept for existing consumers
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { GlobalBus } from "@/bus/global"
@@ -69,12 +69,12 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [EventV2.node]) })
 
 // altimate_change start — defaultLayer kept for existing consumers (app-runtime.ts, tests);
 // compiled from `node` since per-service `.defaultLayer` facades (e.g. EventV2.defaultLayer)
 // were dropped upstream in favor of the LayerNode graph.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 // altimate_change end
 
 export * as EventV2Bridge from "./event-v2-bridge"

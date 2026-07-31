@@ -1,6 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — AppNodeBuilder for the defaultLayer facade kept for existing consumers
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import { Deferred, Effect, Layer, Schema, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
@@ -99,8 +99,10 @@ interface PendingEntry {
 // Anchor the registry on `globalThis` so every module copy shares one Map. Keyed
 // by instance directory so `list()` stays per-instance.
 type PendingByDir = Map<string, Map<QuestionID, PendingEntry>>
-const pendingByDir: PendingByDir = ((globalThis as Record<string, unknown>)["__altimateQuestionPending"] ??=
-  new Map<string, Map<QuestionID, PendingEntry>>()) as PendingByDir
+const pendingByDir: PendingByDir = ((globalThis as Record<string, unknown>)["__altimateQuestionPending"] ??= new Map<
+  string,
+  Map<QuestionID, PendingEntry>
+>()) as PendingByDir
 function pendingFor(directory: string): Map<QuestionID, PendingEntry> {
   let map = pendingByDir.get(directory)
   if (!map) {
@@ -256,13 +258,13 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [EventV2Bridge.node]) })
 
 // altimate_change start — restore the imperative Promise wrappers the server routes
 // (server/routes/question.ts) call from plain async code. The makeRuntime bridge keeps the
 // question reads/mutations bound to the active workspace/instance. defaultLayer is compiled
 // from `node` since per-service `.defaultLayer` facades were dropped upstream.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runQuestion } = makeRuntime(Service, defaultLayer)
 export function ask(input: { sessionID: SessionID; questions: ReadonlyArray<Info>; tool?: Tool }) {
   return runQuestion((svc) => svc.ask(input))

@@ -3,7 +3,7 @@
 import { OpenCode } from "@opencode-ai/core"
 import { ReadTool } from "@opencode-ai/core/tools"
 
-const opencode = Altimate Code.make({})
+const opencode = OpenCode.make({})
 
 opencode.tool.add(ReadTool)
 

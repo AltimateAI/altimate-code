@@ -108,7 +108,7 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FSUtil.
 // altimate_change end
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
-export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [FSUtil.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [FSUtil.node]) })
 // altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the

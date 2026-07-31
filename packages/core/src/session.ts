@@ -29,6 +29,7 @@ import { SessionStore } from "./session/store"
 import { SessionExecution } from "./session/execution"
 import { makeGlobalNode } from "./effect/app-node"
 import { LocationServiceMap } from "./location-service-map"
+import { locationServiceMapLayer } from "./location-services"
 import { MessageDecodeError } from "./session/error"
 import { SessionEvent } from "./session/event"
 import { SessionInput } from "./session/input"
@@ -484,3 +485,23 @@ export const node = makeGlobalNode({
     SessionProjector.node,
   ],
 })
+
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (session/session.ts). Removed upstream in the makeGlobalNode migration.
+// SessionExecution.Service is intentionally left unresolved — LocationServiceMap is "unbound" so
+// it's provided via the real locationServiceMapLayer here, but SessionExecution needs the fork's
+// legacy-facade callers to choose real vs. noop, so that stays a caller-provided dependency
+// (see session/session.ts's Layer.provide(SessionExecution.noopLayer)).
+// Layer.suspend defers the sibling-module reads to build time — location-services and this file
+// are in an import cycle, so an eager pipe here hits the TDZ at module evaluation.
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.orDie,
+    Layer.provide(Database.defaultLayer),
+    Layer.provide(EventV2.defaultLayer),
+    Layer.provide(ProjectV2.defaultLayer),
+    Layer.provide(SessionStore.defaultLayer),
+    Layer.provide(locationServiceMapLayer),
+  ),
+)
+// altimate_change end

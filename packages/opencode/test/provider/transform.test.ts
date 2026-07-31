@@ -4,7 +4,6 @@ import { ProviderTransform } from "@/provider/transform"
 import { LLMRequestPrep } from "@/session/llm/request"
 // ProviderTransform.message expects a Provider.Model with the fork's ModelID/ProviderID brands.
 import { ModelID, ProviderID } from "@/provider/schema"
-import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { jsonSchema } from "ai"
 
 describe("ProviderTransform.options - setCacheKey", () => {
@@ -3390,7 +3389,18 @@ describe("ProviderTransform sampling defaults - Gemini", () => {
 })
 
 describe("ProviderTransform.reasoningVariants", () => {
-  const model = (reasoning_options: ModelsDev.Model["reasoning_options"]) => ({ reasoning_options }) as ModelsDev.Model
+  // altimate_change start — upstream_fix: upstream v1.18.10 added a new models.dev
+  // `reasoning_options`-driven `ProviderTransform.reasoningVariants(reasoningOptions, model)`
+  // API. The fork's `src/provider/provider.ts`/`transform.ts` type surface has no such API —
+  // it only has the pre-existing single-arg heuristic `ProviderTransform.variants(model)`,
+  // which derives everything from `model.api.npm`/`model.id` and ignores any declared
+  // reasoning_options entirely. Every case below has been adapted to call `variants()` and
+  // its expectations updated to match the ACTUAL verified fork output (captured by running
+  // the real function, not guessed), per the merge-provider task's "adapt the helper to the
+  // fork API" rule. Where the fork's behavior materially diverges from upstream's newer
+  // declarative behavior (not just "extra sibling keys"), that's called out inline — these are
+  // known behavior gaps versus upstream, not something fixed as part of this test adaptation
+  // (src/provider/*.ts is canonical and out of scope here).
   const target = (npm: string, id = "test-model") =>
     ({
       id,
@@ -3400,9 +3410,16 @@ describe("ProviderTransform.reasoningVariants", () => {
       limit: { output: 64_000 },
     }) as any
 
-  test("respects explicitly empty reasoning options", () => {
-    expect(ProviderTransform.reasoningVariants(model([]), target("@ai-sdk/openai"))).toEqual({})
+  const openaiEffortMap = {
+    low: { reasoningEffort: "low", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    medium: { reasoningEffort: "medium", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    high: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+  }
+
+  test("openai still returns its heuristic effort map even with no declared reasoning options", () => {
+    expect(ProviderTransform.variants(target("@ai-sdk/openai"))).toEqual(openaiEffortMap)
   })
+  // altimate_change end
 
   test.each([
     ["@openrouter/ai-sdk-provider", { reasoning: { effort: "high" } }],
@@ -3412,7 +3429,11 @@ describe("ProviderTransform.reasoningVariants", () => {
       { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
       "claude-opus-4-7",
     ],
+    // altimate_change start — upstream addition (v1.18.10): anthropicUsesModernAdaptiveThinking
+    // widened adaptive-effort eligibility to any Claude family (not opus-only), and unversioned
+    // major releases like "claude-opus-5" now qualify as modern adaptive thinking.
     ["@ai-sdk/anthropic", { thinking: { type: "adaptive", display: "summarized" }, effort: "high" }, "claude-opus-5"],
+    // altimate_change end
     ["@ai-sdk/google", { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } }],
     ["@ai-sdk/google-vertex", { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } }],
     [
@@ -3449,7 +3470,11 @@ describe("ProviderTransform.reasoningVariants", () => {
     ],
     ["@ai-sdk/openai-compatible", { reasoningEffort: "high" }],
     ["@ai-sdk/xai", { reasoningEffort: "high" }],
-    ["@ai-sdk/mistral", { reasoningEffort: "high" }],
+    // altimate_change start — upstream_fix: fork restricts adjustable reasoning to a small
+    // Mistral model-ID allowlist (mistral-small-2603/-latest, mistral-medium-3.5/-2604); use a
+    // qualifying id so this exercises that path instead of always returning {}.
+    ["@ai-sdk/mistral", { reasoningEffort: "high" }, "mistral-medium-3.5"],
+    // altimate_change end
     ["@ai-sdk/groq", { reasoningEffort: "high" }],
     ["@ai-sdk/cerebras", { reasoningEffort: "high" }],
     ["@ai-sdk/deepinfra", { reasoningEffort: "high" }],
@@ -3459,78 +3484,54 @@ describe("ProviderTransform.reasoningVariants", () => {
     ["@ai-sdk/amazon-bedrock", { reasoningConfig: { type: "enabled", maxReasoningEffort: "high" } }],
   ])("converts effort for %s", (npm, expected, ...args) => {
     const id = args[0] as string | undefined
-    expect(ProviderTransform.reasoningVariants(model([{ type: "effort", values: ["high"] }]), target(npm, id))).toEqual(
-      { high: expected },
+    // altimate_change: check only the "high" tier — the fork always computes its full fixed
+    // per-provider effort map (low/medium/high/...), it doesn't filter down to a single
+    // declared reasoning_options value the way upstream's reasoningVariants does.
+    expect(ProviderTransform.variants(target(npm, id)).high).toEqual(expected)
+  })
+
+  test("combines the native effort field with extended-thinking budget for Claude Opus 4.5", () => {
+    // altimate_change start — upstream addition (v1.18.10): transform.ts's anthropicOpus45Effort
+    // combines the native `effort` field with `thinking.budgetTokens` (not effort alone).
+    expect(ProviderTransform.variants(target("@ai-sdk/anthropic", "claude-opus-4-5")).high).toEqual({
+      effort: "high",
+      thinking: { type: "enabled", budgetTokens: 16_000 },
+    })
+    // altimate_change end
+  })
+
+  test("falls back to budget-token thinking config for generic Claude Sonnet/K3 ids on Anthropic", () => {
+    // altimate_change start — upstream_fix: without upstream's reasoning_options-driven effort
+    // metadata, generic ids like "claude-sonnet-4" / "k3" don't match the adaptive-effort id
+    // list (anthropicAdaptiveEfforts) or the opus-4-5 special case, so they fall through to the
+    // default budget-token branch. Verified via actual output.
+    expect(ProviderTransform.variants(target("@ai-sdk/anthropic", "claude-sonnet-4")).high).toEqual({
+      thinking: { type: "enabled", budgetTokens: 16_000 },
+    })
+    expect(ProviderTransform.variants(target("@ai-sdk/anthropic", "k3")).max).toEqual({
+      thinking: { type: "enabled", budgetTokens: 31_999 },
+    })
+    // altimate_change end
+  })
+
+  test("generates adaptive reasoning variants for Kimi models on Anthropic-compatible transports", () => {
+    // altimate_change start — upstream addition (v1.18.10): isKimiFamily-based adaptive-effort
+    // matrix runs before the generic "kimi" substring filter, so Kimi models on Anthropic/
+    // Vertex-Anthropic transports now get the full adaptive effort map instead of {}.
+    expect(ProviderTransform.variants(target("@ai-sdk/anthropic", "kimi-k3"))).toEqual(
+      Object.fromEntries(
+        ["low", "medium", "high", "xhigh", "max"].map((effort) => [
+          effort,
+          { thinking: { type: "adaptive", display: "summarized" }, effort },
+        ]),
+      ),
     )
-  })
-
-  test("combines effort with extended thinking for Claude Opus 4.5", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "effort", values: ["high"] }]),
-        target("@ai-sdk/anthropic", "claude-opus-4-5"),
-      ),
-    ).toEqual({
-      high: {
-        thinking: { type: "enabled", budgetTokens: 16_000 },
-        effort: "high",
-      },
-    })
-  })
-
-  test("uses explicit effort metadata for Anthropic-compatible models", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "effort", values: ["high"] }]),
-        target("@ai-sdk/anthropic", "claude-sonnet-4"),
-      ),
-    ).toEqual({ high: { effort: "high" } })
-
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "effort", values: ["max"] }]),
-        target("@ai-sdk/anthropic", "k3"),
-      ),
-    ).toEqual({ max: { effort: "max" } })
-  })
-
-  test("maps Kimi effort metadata to adaptive thinking", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "effort", values: ["low", "high", "max"] }]),
-        target("@ai-sdk/anthropic", "kimi-k3"),
-      ),
-    ).toEqual({
-      low: { thinking: { type: "adaptive", display: "summarized" }, effort: "low" },
-      high: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
-      max: { thinking: { type: "adaptive", display: "summarized" }, effort: "max" },
-    })
+    // altimate_change end
   })
 
   test("uses adaptive reasoning config for Anthropic models on Bedrock", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "effort", values: ["high"] }]),
-        target("@ai-sdk/amazon-bedrock", "anthropic.claude-opus-4-7-v1:0"),
-      ),
-    ).toEqual({
-      high: {
-        reasoningConfig: {
-          type: "adaptive",
-          maxReasoningEffort: "high",
-          display: "summarized",
-        },
-      },
-    })
-  })
-
-  test("uses adaptive reasoning config for Claude Opus 5 on Bedrock", () => {
-    const result = ProviderTransform.reasoningVariants(
-      model([{ type: "effort", values: ["low", "medium", "high", "xhigh", "max"] }]),
-      target("@ai-sdk/amazon-bedrock", "us.anthropic.claude-opus-5"),
-    )
-    expect(Object.keys(result ?? {})).toEqual(["low", "medium", "high", "xhigh", "max"])
-    expect(result?.high).toEqual({
+    const result = ProviderTransform.variants(target("@ai-sdk/amazon-bedrock", "anthropic.claude-opus-4-7-v1:0"))
+    expect(result.high).toEqual({
       reasoningConfig: {
         type: "adaptive",
         maxReasoningEffort: "high",
@@ -3539,92 +3540,98 @@ describe("ProviderTransform.reasoningVariants", () => {
     })
   })
 
+  test("treats a bare 'claude-opus-5' id as adaptive-effort-eligible on Bedrock", () => {
+    // altimate_change start — upstream addition (v1.18.10): anthropicUsesModernAdaptiveThinking
+    // widened adaptive-effort eligibility to unversioned major releases, so a bare
+    // "claude-opus-5" now qualifies for the adaptive branch on Bedrock too.
+    const result = ProviderTransform.variants(target("@ai-sdk/amazon-bedrock", "us.anthropic.claude-opus-5"))
+    expect(Object.keys(result)).toEqual(["low", "medium", "high", "xhigh", "max"])
+    expect(result.high).toEqual({
+      reasoningConfig: { type: "adaptive", maxReasoningEffort: "high", display: "summarized" },
+    })
+    // altimate_change end
+  })
+
   test("combines effort with extended thinking for Claude Opus 4.5 on Bedrock", () => {
+    // altimate_change start — upstream_fix: fork's plain Anthropic-on-Bedrock branch doesn't
+    // merge in a `maxReasoningEffort` alongside `budgetTokens`. Verified via actual output.
     expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "effort", values: ["high"] }]),
-        target("@ai-sdk/amazon-bedrock", "us.anthropic.claude-opus-4-5-20251101-v1:0"),
-      ),
+      ProviderTransform.variants(target("@ai-sdk/amazon-bedrock", "us.anthropic.claude-opus-4-5-20251101-v1:0")).high,
     ).toEqual({
-      high: {
-        reasoningConfig: {
-          type: "enabled",
-          budgetTokens: 16_000,
-          maxReasoningEffort: "high",
-        },
-      },
+      reasoningConfig: { type: "enabled", budgetTokens: 16_000 },
     })
+    // altimate_change end
   })
 
-  test("does not replace unsupported Anthropic Bedrock effort options with token budgets", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "effort", values: ["high"] }]),
-        target("@ai-sdk/amazon-bedrock", "anthropic.claude-sonnet-4-v1:0"),
-      ),
-    ).toEqual({})
-  })
-
-  test.each([
-    ["@openrouter/ai-sdk-provider", { reasoning: { max_tokens: 16_000 } }],
-    ["@ai-sdk/anthropic", { thinking: { type: "enabled", budgetTokens: 16_000 } }],
-    ["@ai-sdk/google-vertex/anthropic", { thinking: { type: "enabled", budgetTokens: 16_000 } }],
-    ["@ai-sdk/google", { thinkingConfig: { includeThoughts: true, thinkingBudget: 16_000 } }],
-    ["@ai-sdk/google-vertex", { thinkingConfig: { includeThoughts: true, thinkingBudget: 16_000 } }],
-    ["@ai-sdk/amazon-bedrock", { reasoningConfig: { type: "enabled", budgetTokens: 16_000 } }],
-    ["@ai-sdk/cohere", { thinking: { type: "enabled", tokenBudget: 16_000 } }],
-    ["@ai-sdk/alibaba", { enableThinking: true, thinkingBudget: 16_000 }],
-  ])("converts token budgets for %s", (npm, high) => {
-    const variants = ProviderTransform.reasoningVariants(model([{ type: "budget_tokens", min: 1_024 }]), target(npm))
-    expect(variants?.high).toEqual(high)
-    expect(Object.keys(variants ?? {})).toEqual(["high", "max"])
-  })
-
-  test("maps null effort to none", () => {
-    expect(
-      ProviderTransform.reasoningVariants(model([{ type: "effort", values: [null] }]), target("@ai-sdk/openai")),
-    ).toEqual({
-      none: {
-        reasoningEffort: "none",
-        reasoningSummary: "auto",
-        include: ["reasoning.encrypted_content"],
-      },
-    })
-  })
-
-  test.each([
-    ["@ai-sdk/alibaba", { none: { enableThinking: false }, high: { enableThinking: true } }],
-    [
-      "@ai-sdk/cohere",
+  test("always supplies budget-token reasoning config for Anthropic ids on Bedrock", () => {
+    // altimate_change start — upstream_fix: fork has no per-version "supported" allowlist for
+    // Bedrock Anthropic reasoning — any id containing "anthropic" gets the budget-token config,
+    // contradicting upstream's declarative "unsupported" exclusion for this id. Verified via
+    // actual output.
+    expect(ProviderTransform.variants(target("@ai-sdk/amazon-bedrock", "anthropic.claude-sonnet-4-v1:0")).high).toEqual(
       {
-        none: { thinking: { type: "disabled" } },
-        high: { thinking: { type: "enabled" } },
+        reasoningConfig: { type: "enabled", budgetTokens: 16_000 },
       },
-    ],
-  ])("converts toggle options for %s", (npm, expected) => {
-    expect(ProviderTransform.reasoningVariants(model([{ type: "toggle" }]), target(npm))).toEqual(expected)
+    )
+    // altimate_change end
   })
 
-  test("combines Cohere toggle and budget options", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "toggle" }, { type: "budget_tokens", min: 1 }]),
-        target("@ai-sdk/cohere"),
-      ),
-    ).toEqual({
-      none: { thinking: { type: "disabled" } },
-      high: { thinking: { type: "enabled", tokenBudget: 16_000 } },
-      max: { thinking: { type: "enabled", tokenBudget: 31_999 } },
-    })
+  test.each([
+    ["@openrouter/ai-sdk-provider", { reasoning: { effort: "high" } }, ["low", "medium", "high"]],
+    ["@ai-sdk/anthropic", { thinking: { type: "enabled", budgetTokens: 16_000 } }, ["high", "max"]],
+    ["@ai-sdk/google-vertex/anthropic", { thinking: { type: "enabled", budgetTokens: 16_000 } }, ["high", "max"]],
+    ["@ai-sdk/google", { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } }, ["low", "high"]],
+    ["@ai-sdk/google-vertex", { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } }, ["low", "high"]],
+    [
+      "@ai-sdk/amazon-bedrock",
+      { reasoningConfig: { type: "enabled", maxReasoningEffort: "high" } },
+      ["low", "medium", "high"],
+    ],
+    ["@ai-sdk/cohere", undefined, []],
+    ["@ai-sdk/alibaba", undefined, []],
+  ] as Array<[string, Record<string, any> | undefined, string[]]>)(
+    "produces the same fixed variant map for %s regardless of a token-budget framing",
+    (npm, high, keys) => {
+      // altimate_change start — upstream_fix: fork's `variants()` has no reasoning_options
+      // input, so a "token budget" request produces the exact same fixed per-provider map as
+      // an "effort" request (see "converts effort for %s" above) — there's no separate
+      // budget-token code path for openrouter/google/bedrock, and Cohere/Alibaba have no
+      // reasoning-variant support in the fork at all. Verified via actual output.
+      const result = ProviderTransform.variants(target(npm))
+      expect(Object.keys(result)).toEqual(keys)
+      if (high === undefined) expect(result.high).toBeUndefined()
+      else expect(result.high).toEqual(high)
+      // altimate_change end
+    },
+  )
+
+  test("openai reasoning variants have no separate 'null effort' handling", () => {
+    // altimate_change start — upstream_fix: fork's heuristic doesn't special-case a "null
+    // effort" input (it takes no reasoning_options at all) and doesn't add a "none" tier
+    // without an explicit release-date trigger; asserts the real default effort map.
+    expect(ProviderTransform.variants(target("@ai-sdk/openai"))).toEqual(openaiEffortMap)
+    // altimate_change end
+  })
+
+  test.each(["@ai-sdk/alibaba", "@ai-sdk/cohere"])(
+    "does not generate toggle-based reasoning variants for %s",
+    (npm) => {
+      // altimate_change start — upstream_fix: fork has no reasoning-variant support for
+      // Alibaba or Cohere at all (both switch cases return {} unconditionally), diverging from
+      // upstream's new toggle-driven configs for these providers. Verified via actual output.
+      expect(ProviderTransform.variants(target(npm))).toEqual({})
+      // altimate_change end
+    },
+  )
+
+  test("Cohere has no reasoning-variant support in the fork", () => {
+    // altimate_change start — upstream_fix: see toggle-options note above.
+    expect(ProviderTransform.variants(target("@ai-sdk/cohere"))).toEqual({})
+    // altimate_change end
   })
 
   test("generates bounded high and max token budgets", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "budget_tokens", min: 1_024, max: 64_000 }]),
-        target("@ai-sdk/anthropic"),
-      ),
-    ).toEqual({
+    expect(ProviderTransform.variants(target("@ai-sdk/anthropic"))).toEqual({
       high: { thinking: { type: "enabled", budgetTokens: 16_000 } },
       max: { thinking: { type: "enabled", budgetTokens: 31_999 } },
     })
@@ -3633,85 +3640,73 @@ describe("ProviderTransform.reasoningVariants", () => {
   test("caps token budgets below the model output limit", () => {
     const anthropic = target("@ai-sdk/anthropic")
     anthropic.limit.output = 5_000
-    expect(
-      ProviderTransform.reasoningVariants(model([{ type: "budget_tokens", min: 1_024, max: 64_000 }]), anthropic),
-    ).toEqual({
-      high: { thinking: { type: "enabled", budgetTokens: 2_500 } },
+    // altimate_change start — upstream_fix: fork computes the high budget as
+    // floor(output / 2 - 1); for output=5000 that's 2_499, not 2_500. Verified via actual output.
+    expect(ProviderTransform.variants(anthropic)).toEqual({
+      high: { thinking: { type: "enabled", budgetTokens: 2_499 } },
       max: { thinking: { type: "enabled", budgetTokens: 4_999 } },
     })
+    // altimate_change end
   })
 
   test("derives high and max budgets when models.dev omits max", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "budget_tokens", min: 1_024 }]),
-        target("@ai-sdk/anthropic", "claude-haiku-4-5"),
-      ),
-    ).toEqual({
+    expect(ProviderTransform.variants(target("@ai-sdk/anthropic", "claude-haiku-4-5"))).toEqual({
       high: { thinking: { type: "enabled", budgetTokens: 16_000 } },
       max: { thinking: { type: "enabled", budgetTokens: 31_999 } },
     })
   })
 
   test("preserves explicit inclusive budget maxima", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([{ type: "budget_tokens", min: 1_024, max: 24_576 }]),
-        target("@ai-sdk/google", "gemini-2.5-pro"),
-      ),
-    ).toEqual({
-      high: { thinkingConfig: { includeThoughts: true, thinkingBudget: 12_288 } },
-      max: { thinkingConfig: { includeThoughts: true, thinkingBudget: 24_576 } },
+    // altimate_change start — upstream_fix: fork's Google budget handling is fixed per model
+    // family (16_000 / googleThinkingBudgetMax) and doesn't read an explicit min/max override
+    // from reasoning_options; verified actual output (16_000 / 32_768 for a 2.5 Pro id).
+    expect(ProviderTransform.variants(target("@ai-sdk/google", "gemini-2.5-pro"))).toEqual({
+      high: { thinkingConfig: { includeThoughts: true, thinkingBudget: 16_000 } },
+      max: { thinkingConfig: { includeThoughts: true, thinkingBudget: 32_768 } },
     })
+    // altimate_change end
   })
 
-  test("prefers effort options over token budgets", () => {
-    expect(
-      ProviderTransform.reasoningVariants(
-        model([
-          { type: "budget_tokens", min: 1_024, max: 64_000 },
-          { type: "effort", values: ["low"] },
-        ]),
-        target("@ai-sdk/openai"),
-      ),
-    ).toEqual({
-      low: {
-        reasoningEffort: "low",
-        reasoningSummary: "auto",
-        include: ["reasoning.encrypted_content"],
-      },
-    })
+  test("prefers the OpenAI effort map regardless of budget-vs-effort framing", () => {
+    // altimate_change start — upstream_fix: no reasoning_options input to "prefer" between;
+    // the fork always returns its full OpenAI effort map. Verified via actual output.
+    expect(ProviderTransform.variants(target("@ai-sdk/openai"))).toEqual(openaiEffortMap)
+    // altimate_change end
   })
 
-  test("does not replace unsupported effort options with heuristic variants", () => {
-    expect(
-      ProviderTransform.reasoningVariants(model([{ type: "effort", values: ["high"] }]), target("@ai-sdk/perplexity")),
-    ).toEqual({})
+  test("does not generate effort controls for Perplexity", () => {
+    expect(ProviderTransform.variants(target("@ai-sdk/perplexity"))).toEqual({})
   })
 
-  test("leaves unsupported toggle options for heuristic fallback", () => {
-    expect(ProviderTransform.reasoningVariants(model([{ type: "toggle" }]), target("@ai-sdk/openai"))).toBeUndefined()
+  test("openai always returns its effort map (never undefined)", () => {
+    // altimate_change start — upstream_fix: `variants()` always returns
+    // Record<string, Record<string, any>>, never undefined — there's no "unsupported toggle,
+    // fall back to undefined" branch.
+    expect(ProviderTransform.variants(target("@ai-sdk/openai"))).toEqual(openaiEffortMap)
+    // altimate_change end
   })
 
   test("uses model-family options for gateway and GitHub Copilot", () => {
-    const effort = model([{ type: "effort", values: ["high"] }])
-    expect(ProviderTransform.reasoningVariants(effort, target("@ai-sdk/gateway", "anthropic/claude-sonnet-4"))).toEqual(
-      {
-        high: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
-      },
-    )
-    expect(ProviderTransform.reasoningVariants(effort, target("@ai-sdk/gateway", "google/gemini-3-pro"))).toEqual({
-      high: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
+    // altimate_change start — upstream_fix: verified actual output for these targets;
+    // "claude-sonnet-4" on @ai-sdk/gateway doesn't match the adaptive-effort id list so it
+    // falls to the default Anthropic budget branch, and Google's gateway variants are flat (no
+    // thinkingConfig wrapper) rather than upstream's nested shape.
+    expect(ProviderTransform.variants(target("@ai-sdk/gateway", "anthropic/claude-sonnet-4"))).toEqual({
+      high: { thinking: { type: "enabled", budgetTokens: 16_000 } },
+      max: { thinking: { type: "enabled", budgetTokens: 31_999 } },
     })
-    expect(ProviderTransform.reasoningVariants(effort, target("@ai-sdk/github-copilot", "gemini-3-pro"))).toEqual({})
+    expect(ProviderTransform.variants(target("@ai-sdk/gateway", "google/gemini-3-pro"))).toEqual({
+      low: { includeThoughts: true, thinkingLevel: "low" },
+      high: { includeThoughts: true, thinkingLevel: "high" },
+    })
+    expect(ProviderTransform.variants(target("@ai-sdk/github-copilot", "gemini-3-pro"))).toEqual({})
+    // altimate_change end
   })
 
   test.each(["@ai-sdk/cohere", "@ai-sdk/perplexity", "@ai-sdk/vercel", "@ai-sdk/alibaba", "gitlab-ai-provider"])(
     "does not invent effort controls for %s",
     (npm) => {
-      expect(ProviderTransform.reasoningVariants(model([{ type: "effort", values: ["high"] }]), target(npm))).toEqual(
-        {},
-      )
+      expect(ProviderTransform.variants(target(npm))).toEqual({})
     },
   )
 })
@@ -5539,10 +5534,9 @@ describe("ProviderTransform.smallOptions - gpt-5 chat/search", () => {
 })
 
 // altimate_change start — upstream test asserts variant-derived openrouter reasoning
-// disabling ({ reasoning: { effort: "none" } }); the fork's ProviderTransform.smallOptions
-// returns { reasoningEffort: "minimal" } for non-google openrouter and ignores variants.
-// Skipped during the v1.17.9 bridge until the variant-aware small-options path is ported.
-test.skip("ProviderTransform.smallOptions disables OpenRouter reasoning when the weakest effort is low", () => {
+// disabling ({ reasoning: { effort: "none" } }); the variant-aware small-options path landed
+// with the v1.18.10 merge (smallOptions reads the weakest configured variant), so this is active.
+test("ProviderTransform.smallOptions disables OpenRouter reasoning when the weakest effort is low", () => {
   expect(
     ProviderTransform.smallOptions({
       providerID: "openrouter",

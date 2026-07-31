@@ -171,7 +171,7 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(Databas
 // altimate_change end
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
-export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [Database.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [Database.node]) })
 // altimate_change end
 
 export * as AccountRepo from "./repo"

@@ -504,4 +504,9 @@ const layer: Layer.Layer<ChildProcessSpawner, never, FileSystem.FileSystem | Pat
 
 export const node = makeGlobalNode({ service: ChildProcessSpawner, layer, deps: [filesystem, path] })
 
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (mcp/index.ts). Removed upstream in the makeGlobalNode migration.
+export const defaultLayer = layer.pipe(Layer.provide(NodeFileSystem.layer), Layer.provide(NodePath.layer))
+// altimate_change end
+
 export * as CrossSpawnSpawner from "./cross-spawn-spawner"

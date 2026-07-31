@@ -19,7 +19,7 @@ import { QuestionTool } from "../../src/tool/question"
 import { Parameters as Read } from "../../src/tool/read"
 import { Parameters as Shell } from "../../src/tool/shell"
 import { SkillTool } from "../../src/tool/skill"
-import { TaskTool } from "../../src/tool/task"
+import { Parameters as TaskParameters, TaskTool } from "../../src/tool/task"
 import { Parameters as Todo } from "../../src/tool/todo"
 import { WebFetchTool } from "../../src/tool/webfetch"
 import { Parameters as WebSearch } from "../../src/tool/websearch"
@@ -38,26 +38,27 @@ const minimalInstance = {
   worktree: tmp.path,
   project: { id: "test", worktree: tmp.path } as unknown,
 } as InstanceContext
-const {
-  GlobDef,
-  PlanDef,
-  QuestionDef,
-  SkillDef,
-  TaskDef,
-  WebFetchDef,
-} = await Instance.restore(minimalInstance, async () => ({
-  GlobDef: await initTool(GlobTool),
-  PlanDef: await initTool(PlanExitTool),
-  QuestionDef: await initTool(QuestionTool),
-  SkillDef: await initTool(SkillTool),
-  TaskDef: await initTool(TaskTool),
-  WebFetchDef: await initTool(WebFetchTool),
-}))
+const { GlobDef, PlanDef, QuestionDef, SkillDef, TaskDef, WebFetchDef } = await Instance.restore(
+  minimalInstance,
+  async () => ({
+    GlobDef: await initTool(GlobTool),
+    PlanDef: await initTool(PlanExitTool),
+    QuestionDef: await initTool(QuestionTool),
+    SkillDef: await initTool(SkillTool),
+    TaskDef: await initTool(TaskTool),
+    WebFetchDef: await initTool(WebFetchTool),
+  }),
+)
 const Glob = GlobDef.parameters
 const Plan = PlanDef.parameters
 const Question = QuestionDef.parameters
 const Skill = SkillDef.parameters
-const Task = TaskDef.parameters
+// altimate_change start — upstream_fix: TS can't infer InferDef<T>'s Parameters through the
+// async `Instance.restore` + `initTool` chain for this specific tool, widening `.parameters` to
+// `Decoder<unknown>`. Annotate with the tool module's own exported schema type (same runtime
+// value) so downstream `parse(Task, ...)` assertions get a real decoded type.
+const Task = TaskDef.parameters as typeof TaskParameters
+// altimate_change end
 const WebFetch = WebFetchDef.parameters
 
 const toToolJsonSchema = (tool: unknown) =>

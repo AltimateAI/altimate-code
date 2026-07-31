@@ -22,8 +22,11 @@ import { EffectBridge } from "@/effect/bridge"
 // altimate_change start — shared tool-source stamping so this resolver can't drift from prompt.ts
 import { stampRegistryToolSource, describeMcpTool } from "@/altimate/tool-source"
 // altimate_change end
-import { ProviderV2 } from "@opencode-ai/core/provider"
-import { ModelV2 } from "@opencode-ai/core/model"
+// altimate_change start — upstream_fix: raw API model id must be re-branded with the fork's
+// ModelID (@/provider/schema) before ToolRegistry lookup — registry.tools() below is the fork's
+// own @/tool/registry (not core's), which takes the fork's ModelID/ProviderID brands
+import { ModelID } from "@/provider/schema"
+// altimate_change end
 import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
@@ -93,12 +96,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   })
 
   for (const item of yield* registry.tools({
-    // upstream_fix dropped: v1.18.10 ships its own fix for the same bug (raw API model id must be
-    // branded before ToolRegistry lookup) via its own ModelV2.ID type — see @opencode-ai/core/model.
-    modelID: ModelV2.ID.make(input.model.api.id),
+    modelID: ModelID.make(input.model.api.id),
     providerID: input.model.providerID,
     agent: input.agent,
-    permission: input.session.permission,
+    // altimate_change — upstream_fix: `permission` isn't part of ToolRegistry.Interface.tools()'s
+    // model param (never was pre-merge either); dropped the stray field
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({
@@ -403,7 +405,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     // altimate_change start — keep the original client name available for source
     // classification; McpCatalog.convertTool builds `item` fresh from entry.def so the
     // client name never leaks into the model-facing tool object on its own.
-    const clientName = entry.client
+    // upstream_fix: entry.client is the MCPClient object, not the display name — that's
+    // entry.clientName (see Interface.tools in mcp/index.ts).
+    const clientName = entry.clientName
     // altimate_change end
     const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
     const execute = item.execute

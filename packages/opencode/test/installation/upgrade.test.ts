@@ -4,7 +4,8 @@ import { join, resolve } from "path"
 import { Glob } from "bun"
 import { Effect, Layer } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
-import { AppProcess } from "@opencode-ai/core/process"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Installation } from "../../src/installation"
 import { isPublishableChannel } from "../../src/cli/upgrade"
 
@@ -16,9 +17,12 @@ function mockHttpClient(handler: (request: HttpClientRequest.HttpClientRequest) 
   return Layer.succeed(HttpClient.HttpClient, client)
 }
 
+// altimate_change start — upstream_fix: Installation has no `.layer`/`.defaultLayer` facade;
+// build from `.node` (which already wires AppProcess.node) and replace the httpClient node.
 function latestWith(body: unknown, method: Installation.Method) {
-  const layer = Installation.layer.pipe(
-    Layer.provide(
+  const layer = AppNodeBuilder.build(Installation.node, [
+    [
+      httpClient,
       mockHttpClient(
         () =>
           new Response(JSON.stringify(body), {
@@ -26,11 +30,11 @@ function latestWith(body: unknown, method: Installation.Method) {
             headers: { "content-type": "application/json" },
           }),
       ),
-    ),
-    Layer.provide(AppProcess.defaultLayer),
-  )
+    ],
+  ])
   return Effect.runPromise(Installation.use.latest(method).pipe(Effect.provide(layer)))
 }
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // 1. VERSION normalization

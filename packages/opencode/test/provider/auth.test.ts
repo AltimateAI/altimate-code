@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test"
 import type { Hooks } from "@opencode-ai/plugin"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer } from "effect"
 import { Auth } from "../../src/auth"
 import { ProviderAuth } from "../../src/provider/auth"
@@ -65,19 +66,26 @@ const copilotConditionHook: Hooks = {
   },
 }
 
+// altimate_change start — upstream_fix: src/provider/auth.ts no longer exports the raw
+// `layer` const (only `node`, via LayerNode) — that export was dropped somewhere along the
+// v1.4.0->v1.18.10 bridge merges. Build the test layer via LayerNode.compile with a Plugin.node
+// replacement instead, matching the established pattern in test/plugin/auth-override.test.ts.
+// Auth stays real (ProviderAuth.node's own Auth.node dependency is compiled as-is); only
+// Plugin.Service is mocked.
 const providerAuthIt = testEffect(
-  ProviderAuth.layer.pipe(
-    Layer.provide(Auth.defaultLayer),
-    Layer.provide(
+  LayerNode.compile(ProviderAuth.node, [
+    [
+      Plugin.node,
       Layer.mock(Plugin.Service)({
         trigger: <Name extends string, Input, Output>(_name: Name, _input: Input, output: Output) =>
           Effect.succeed(output),
         list: () => Effect.succeed([copilotConditionHook]),
         init: () => Effect.void,
       }),
-    ),
-  ),
+    ],
+  ]),
 )
+// altimate_change end
 
 providerAuthIt.instance("ProviderAuth.methods maps Copilot condition prompts to serializable when rules", () =>
   Effect.gen(function* () {

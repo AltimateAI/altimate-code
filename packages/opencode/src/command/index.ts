@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import path from "path"
 // altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrapper (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import { InstanceState } from "@/effect/instance-state"
 import { EffectBridge } from "@/effect/bridge"
@@ -275,12 +275,16 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, MCP.node, Skill.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [Config.node, MCP.node, Skill.node]),
+})
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the HTTP server consumes Command.list() directly. defaultLayer is
 // compiled from `node` since per-service `.defaultLayer` facades were dropped upstream.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runCommand } = makeRuntime(Service, defaultLayer)
 export async function list() {
   return runCommand((s) => s.list())

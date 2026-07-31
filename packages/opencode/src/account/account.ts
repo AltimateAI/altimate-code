@@ -469,11 +469,17 @@ const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpCl
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(FetchHttpClient.layer)))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(FetchHttpClient.layer)),
+)
 // altimate_change end
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
-export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [AccountRepo.node, httpClient] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [AccountRepo.node, httpClient]),
+})
 // altimate_change end
 
 export * as Account from "./account"

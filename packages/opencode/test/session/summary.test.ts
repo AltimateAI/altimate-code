@@ -3,7 +3,9 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Effect, Layer, Stream } from "effect"
+import { Config } from "@/config/config"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Session } from "@/session/session"
 import { SessionSummary } from "@/session/summary"
@@ -144,6 +146,7 @@ const events = EventV2Bridge.Service.of({
     }),
   subscribe: () => Stream.empty,
   all: () => Stream.empty,
+  durable: () => Stream.empty,
   aggregateEvents: () => Stream.empty,
   sync: () => Effect.succeed(Effect.void),
   listen: () => Effect.succeed(Effect.void),
@@ -155,15 +158,20 @@ const events = EventV2Bridge.Service.of({
   claim: () => Effect.void,
 } as EventV2.Interface)
 
+// altimate_change start — upstream_fix: SessionSummary.defaultLayer is self-contained (its own
+// Session/Snapshot/Storage/EventV2Bridge/Config deps are already resolved internally), so
+// providing mocks from outside it is a no-op. Build from `.node` instead, replacing those
+// dependency nodes by name so the mocks actually take effect.
 const it = testEffect(
-  SessionSummary.layer.pipe(
-    Layer.provide(Layer.succeed(Session.Service, session)),
-    Layer.provide(Layer.succeed(Snapshot.Service, snapshot)),
-    Layer.provide(Layer.succeed(Storage.Service, storage)),
-    Layer.provide(Layer.succeed(EventV2Bridge.Service, events)),
-    Layer.provide(TestConfig.layer({ get: () => Effect.succeed({ snapshot: true }) })),
-  ),
+  AppNodeBuilder.build(SessionSummary.node, [
+    [Session.node, Layer.succeed(Session.Service, session)],
+    [Snapshot.node, Layer.succeed(Snapshot.Service, snapshot)],
+    [Storage.node, Layer.succeed(Storage.Service, storage)],
+    [EventV2Bridge.node, Layer.succeed(EventV2Bridge.Service, events)],
+    [Config.node, TestConfig.layer({ get: () => Effect.succeed({ snapshot: true }) })],
+  ]),
 )
+// altimate_change end
 
 it.effect("summarize persists the computed session diff after the initial empty diff", () =>
   Effect.gen(function* () {

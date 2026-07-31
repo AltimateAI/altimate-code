@@ -39,6 +39,9 @@ import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { Format } from "@/format"
 import { InstanceStore } from "@/project/instance-store"
+// altimate_change start — upstream_fix: see InstanceBootstrap.node marker below
+import { InstanceBootstrap } from "@/project/bootstrap"
+// altimate_change end
 import { Project } from "@/project/project"
 import { Vcs } from "@/project/vcs"
 import { Workspace } from "@/control-plane/workspace"
@@ -55,58 +58,73 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilderV1 } from "./app-node-builder-v1"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 
-export const AppLayer = AppNodeBuilderV1.build(
-  LayerNode.group([
-    Npm.node,
-    FSUtil.node,
-    Database.node,
-    Auth.node,
-    Account.node,
-    Config.node,
-    Git.node,
-    Storage.node,
-    Snapshot.node,
-    Plugin.node,
-    ModelsDev.node,
-    Provider.node,
-    ProviderAuth.node,
-    Agent.node,
-    Skill.node,
-    Discovery.node,
-    Question.node,
-    Permission.node,
-    Todo.node,
-    Session.node,
-    SessionProjector.node,
-    SessionStatus.node,
-    BackgroundJob.node,
-    RuntimeFlags.node,
-    EventV2Bridge.node,
-    SessionRunState.node,
-    SessionProcessor.node,
-    SessionCompaction.node,
-    SessionRevert.node,
-    SessionSummary.node,
-    SessionPrompt.node,
-    Instruction.node,
-    LLM.node,
-    LSP.node,
-    MCP.node,
-    McpAuth.node,
-    Command.node,
-    Truncate.node,
-    ToolRegistry.node,
-    Format.node,
-    InstanceStore.node,
-    Project.node,
-    Vcs.node,
-    Workspace.node,
-    Worktree.node,
-    Installation.node,
-    ShareNext.node,
-    SessionShare.node,
-  ]),
-).pipe(Layer.provideMerge(AppNodeBuilderV1.build(Ripgrep.node)), Layer.provideMerge(Observability.layer))
+// altimate_change start — upstream_fix: Layer.suspend defers reading the cyclically-imported
+// service facades' `.node` exports until the runtime is first built (module-load TDZ otherwise;
+// asserted by test/upstream/adversarial/upi-runtime-session.test.ts).
+export const AppLayer = Layer.suspend(() =>
+  AppNodeBuilderV1.build(
+    LayerNode.group([
+      Npm.node,
+      FSUtil.node,
+      Database.node,
+      Auth.node,
+      Account.node,
+      Config.node,
+      Git.node,
+      Storage.node,
+      Snapshot.node,
+      Plugin.node,
+      ModelsDev.node,
+      Provider.node,
+      ProviderAuth.node,
+      Agent.node,
+      Skill.node,
+      Discovery.node,
+      Question.node,
+      Permission.node,
+      Todo.node,
+      Session.node,
+      SessionProjector.node,
+      SessionStatus.node,
+      BackgroundJob.node,
+      RuntimeFlags.node,
+      EventV2Bridge.node,
+      SessionRunState.node,
+      SessionProcessor.node,
+      SessionCompaction.node,
+      SessionRevert.node,
+      SessionSummary.node,
+      SessionPrompt.node,
+      Instruction.node,
+      LLM.node,
+      LSP.node,
+      MCP.node,
+      McpAuth.node,
+      Command.node,
+      Truncate.node,
+      ToolRegistry.node,
+      Format.node,
+      InstanceStore.node,
+      // altimate_change start — upstream_fix: InstanceStore only declares an *unbound* dependency
+      // on bootstrap-service.Service (see instance-store.ts's bootstrapNode); AppNodeBuilderV1.build
+      // already replaces it with the real InstanceBootstrap.node at compile time, but that
+      // replacement is invisible to AppLayer's *static* type. List it explicitly too so
+      // AppServices/AppRuntime.runPromise can type-check effects that need bootstrap-service.Service
+      // (project/bootstrap.ts's own `bootstrap()` entrypoint). Same node object either way — no
+      // duplicate instantiation.
+      InstanceBootstrap.node,
+      // altimate_change end
+      Project.node,
+      Vcs.node,
+      Workspace.node,
+      Worktree.node,
+      Installation.node,
+      ShareNext.node,
+      SessionShare.node,
+    ]),
+  ).pipe(Layer.provideMerge(AppNodeBuilderV1.build(Ripgrep.node)), Layer.provideMerge(Observability.layer)),
+)
+// altimate_change end
 
 const rt = ManagedRuntime.make(AppLayer, { memoMap })
 type Runtime = Pick<typeof rt, "runSync" | "runPromise" | "runPromiseExit" | "runFork" | "runCallback" | "dispose">

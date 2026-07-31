@@ -125,5 +125,7 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/glob",
   layer,
-  deps: [ToolRegistry.node, Ripgrep.node, Location.node, PermissionV2.node],
+  // altimate_change start — upstream_fix: FSUtil.node for the Location-containment check above
+  deps: [ToolRegistry.node, Ripgrep.node, Location.node, PermissionV2.node, FSUtil.node],
+  // altimate_change end
 })

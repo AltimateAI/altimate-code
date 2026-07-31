@@ -159,11 +159,17 @@ const layer = Layer.effect(
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EffectFlock.defaultLayer), Layer.provide(FSUtil.defaultLayer)))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(EffectFlock.defaultLayer), Layer.provide(FSUtil.defaultLayer)),
+)
 // altimate_change end
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
-export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [FSUtil.node, EffectFlock.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [FSUtil.node, EffectFlock.node]),
+})
 // altimate_change end
 
 export * as McpAuth from "./auth"

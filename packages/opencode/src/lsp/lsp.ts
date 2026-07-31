@@ -1,6 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — AppNodeBuilder for the defaultLayer facade kept for existing consumers
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -504,13 +504,15 @@ export * as Diagnostic from "./diagnostic"
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, RuntimeFlags.node, FSUtil.node, EventV2Bridge.node],
+  // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+  deps: LayerNode.lazy(() => [Config.node, RuntimeFlags.node, FSUtil.node, EventV2Bridge.node]),
+  // altimate_change end
 })
 
 // altimate_change start — defaultLayer kept for existing consumers (project/bootstrap.ts,
 // app-runtime.ts); compiled from `node` since per-service `.defaultLayer` facades were dropped
 // upstream in favor of the LayerNode graph.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 // altimate_change end
 
 export * as LSP from "./lsp"

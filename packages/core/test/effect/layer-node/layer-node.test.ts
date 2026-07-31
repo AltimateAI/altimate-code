@@ -10,6 +10,12 @@ class Database extends Context.Service<Database, { readonly name: string }>()("t
 class Users extends Context.Service<Users, { readonly list: Effect.Effect<string[]> }>()("test/GraphUsers") {}
 class App extends Context.Service<App, { readonly run: Effect.Effect<string[]> }>()("test/GraphApp") {}
 
+// altimate_change start — upstream_fix: helper to resolve possibly-lazy node dependencies
+const depsOf = (node: { dependencies: readonly unknown[] | (() => readonly unknown[]) } | undefined) => {
+  const deps = node?.dependencies ?? []
+  return (typeof deps === "function" ? deps() : deps) as readonly { dependencies: any; kind: string }[]
+}
+// altimate_change end
 const tags = LayerNode.tags({ app: [] })
 const make = tags.make("app")
 const build = <A, E>(root: LayerNode.Node<A, E, any>, replacements?: readonly LayerNode.Replacement[]) =>
@@ -191,10 +197,12 @@ describe("layer node", () => {
     })
 
     const result = LayerNode.hoist(LayerNode.group([app]), tags.values.global)
-    expect(result.node.dependencies[0]?.dependencies[0]?.dependencies[0]).toMatchObject({
+    // altimate_change start — upstream_fix: dependencies may be a lazy thunk; resolve for indexing
+    expect(depsOf(depsOf(depsOf(result.node)[0])[0])[0]).toMatchObject({
       kind: "group",
       dependencies: [],
     })
+    // altimate_change end
     expect(result.hoisted.dependencies).toEqual([database])
 
     const layer = LayerNode.compile(result.node).pipe(
@@ -253,9 +261,11 @@ describe("layer node", () => {
     })
     const result = LayerNode.hoist(LayerNode.group([users]), tags.values.global)
 
-    expect(result.node.dependencies[0]?.dependencies[0]?.dependencies[0]).toMatchObject({
+    // altimate_change start — upstream_fix: dependencies may be a lazy thunk; resolve for indexing
+    expect(depsOf(depsOf(depsOf(result.node)[0])[0])[0]).toMatchObject({
       kind: "group",
       dependencies: [],
     })
+    // altimate_change end
   })
 })

@@ -636,3 +636,8 @@ export const layerWith = (options?: LayerOptions) =>
 
 const layer = layerWith()
 export const node = makeGlobalNode({ service: Service, layer: layer, deps: [Database.node] })
+
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (session.ts). Removed upstream in the makeGlobalNode migration.
+export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(Database.defaultLayer)))
+// altimate_change end

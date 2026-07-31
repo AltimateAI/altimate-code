@@ -1,6 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — AppNodeBuilder for the defaultLayer facade kept for existing consumers
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import { NodePath } from "@effect/platform-node"
 import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effect"
@@ -154,12 +154,14 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [FSUtil.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [FSUtil.node]) })
 
 // altimate_change start — defaultLayer kept for existing consumers (app-runtime.ts,
 // test/tool/bash.test.ts); compiled from `node` (per-service `.defaultLayer` facades were
 // dropped upstream) plus NodePath.layer, which this service's layer still depends on directly.
-export const defaultLayer = AppNodeBuilder.build(node).pipe(Layer.provide(NodePath.layer)) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)).pipe(
+  Layer.provide(NodePath.layer),
+) as Layer.Layer<Service>
 // altimate_change end
 
 export * as Truncate from "./truncate"

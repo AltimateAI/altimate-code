@@ -194,7 +194,7 @@ export type DiffInput = Schema.Schema.Type<typeof DiffInput>
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: () => [
+  deps: LayerNode.lazy(() => [
     Session.node,
     Snapshot.node,
     EventV2Bridge.node,
@@ -202,7 +202,7 @@ export const node = LayerNode.make({
     // altimate_change start — upstream_fix: Storage node for session diff persistence
     Storage.node,
     // altimate_change end
-  ],
+  ]),
 })
 // altimate_change end
 

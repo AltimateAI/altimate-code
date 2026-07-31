@@ -13,8 +13,10 @@ export const NvidiaPlugin = define({
           evt.provider.update(item.provider.id, (provider) => {
             // altimate_change start — provider identity headers
             provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
-            provider.request.headers["X-Title"] = "altimate-code"
-            provider.request.headers["X-BILLING-INVOKE-ORIGIN"] ??= "AltimateAI"
+            // X-Title and X-BILLING-INVOKE-ORIGIN stay upstream: NVIDIA keys its
+            // billing/allowlist recognition on these exact legacy values.
+            provider.request.headers["X-Title"] = "opencode"
+            provider.request.headers["X-BILLING-INVOKE-ORIGIN"] ??= "OpenCode"
             // altimate_change end
           })
         }

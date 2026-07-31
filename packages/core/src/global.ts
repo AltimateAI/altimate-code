@@ -84,6 +84,11 @@ const layer = Layer.effect(
 
 export const node = makeGlobalNode({ service: Service, layer: layer, deps: [] })
 
+// altimate_change start — upstream_fix: restore defaultLayer for fork test/facade consumers;
+// removed upstream in the makeGlobalNode migration.
+export const defaultLayer = layer
+// altimate_change end
+
 export const layerWith = (input: Partial<Interface>) =>
   Layer.effect(
     Service,

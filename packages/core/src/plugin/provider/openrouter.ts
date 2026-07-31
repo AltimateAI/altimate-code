@@ -13,7 +13,8 @@ export const OpenRouterPlugin = define({
           evt.provider.update(item.provider.id, (provider) => {
             // altimate_change start — provider identity headers
             provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
-            provider.request.headers["X-Title"] = "altimate-code"
+            // X-Title stays upstream: OpenRouter keys allowlisted callers on this exact legacy value.
+            provider.request.headers["X-Title"] = "opencode"
             // altimate_change end
           })
           for (const modelID of [ModelV2.ID.make("gpt-5-chat-latest"), ModelV2.ID.make("openai/gpt-5-chat")]) {

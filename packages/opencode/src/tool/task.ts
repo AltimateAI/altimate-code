@@ -10,10 +10,9 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Effect, Exit, Schema, Scope } from "effect"
+import { Effect, Exit, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { Database } from "@opencode-ai/core/database/database"
 // altimate_change start — re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands
 // SessionPrompt expects (identity at runtime; see marker at the ops.prompt() call site below)
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -89,9 +88,7 @@ export const TaskTool = Tool.define(
     const background = yield* BackgroundJob.Service
     const config = yield* Config.Service
     const sessions = yield* Session.Service
-    const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
-    const database = yield* Database.Service
 
     // altimate_change start — list available subagent types in the tool description. The legacy
     // (pre-merge) version also filtered this list by the calling agent's own "task" permission,
@@ -197,10 +194,13 @@ export const TaskTool = Tool.define(
           ],
         }))
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
-        Effect.provideService(Database.Service, database),
-        Effect.orDie,
-      )
+      // altimate_change start — upstream_fix: MessageV2.get is the fork's synchronous
+      // @/storage/db-backed facade (reads the active instance via ALS), not an Effect — it was
+      // never Effect-shaped pre-merge either (this whole `run` just wraps the old async function
+      // body in Effect.fn). Bridge it in with Effect.sync so a NotFoundError throw becomes a
+      // defect, matching the old code's unhandled-throw behavior.
+      const msg = yield* Effect.sync(() => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }))
+      // altimate_change end
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
@@ -268,7 +268,15 @@ export const TaskTool = Tool.define(
               },
             ],
           })
-          .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
+          // altimate_change start — upstream_fix: fork detached instead of into a captured
+          // Scope.Scope. TaskTool's outer Effect.gen re-runs on every AppRuntime.runPromise
+          // call (see prompt.ts's `Effect.flatMap(TaskTool, (info) => info.init())`), so a
+          // `yield* Scope.Scope` captured here would close as soon as *that* call's promise
+          // settles — long before this background-completion fork needs to run. forkDetach
+          // survives independently of any caller scope, matching the "notify after the fact"
+          // intent, and drops the Scope requirement from TaskTool's R entirely.
+          .pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }))
+        // altimate_change end
       })
 
       const notify = Effect.fn("TaskTool.notifyBackgroundResult")(function* (jobID: string) {
@@ -278,7 +286,8 @@ export const TaskTool = Tool.define(
             if (result.info?.status === "error") return inject("error", result.info.error ?? "")
             return Effect.void
           }),
-          Effect.forkIn(scope, { startImmediately: true }),
+          // altimate_change — see forkDetach comment above
+          Effect.forkDetach({ startImmediately: true }),
         )
       })
 

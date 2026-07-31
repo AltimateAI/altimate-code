@@ -156,8 +156,7 @@ type TransportLabel = "stdio" | "sse" | "streamable-http"
 // altimate_change start — internal test hooks for headersCommand resolution (#791/#792)
 /** @internal — exported only for unit tests. Prefer using `tools()` in production code. */
 export const _testing = {
-  resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") =>
-    resolveHeadersCommand(spec, key),
+  resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") => resolveHeadersCommand(spec, key),
   hasAuthorizationHeader,
   mergeHeaders,
 }
@@ -633,10 +632,9 @@ const layer = Layer.effect(
           client: mcpClient,
           status,
           transport,
-        } =
-          mcp.type === "remote"
-            ? yield* connectRemote(key, mcp as ConfigMCPV1.Info & { type: "remote" })
-            : yield* connectLocal(key, mcp as ConfigMCPV1.Info & { type: "local" })
+        } = mcp.type === "remote"
+          ? yield* connectRemote(key, mcp as ConfigMCPV1.Info & { type: "remote" })
+          : yield* connectLocal(key, mcp as ConfigMCPV1.Info & { type: "local" })
 
         if (!mcpClient) {
           if (status.status !== "connected" && status.status !== "disabled") {
@@ -648,9 +646,7 @@ const layer = Layer.effect(
         return yield* Effect.gen(function* () {
           // altimate_change — McpCatalog.defs() tolerates both outputSchema
           // reference errors and Fabric-style null annotation hints (#792).
-          const listed = mcpClient.getServerCapabilities()?.tools
-            ? yield* McpCatalog.defs(mcpClient, mcp.timeout)
-            : []
+          const listed = mcpClient.getServerCapabilities()?.tools ? yield* McpCatalog.defs(mcpClient, mcp.timeout) : []
           if (!listed) {
             return yield* Effect.fail(new Error("Failed to get tools"))
           }
@@ -1003,9 +999,7 @@ const layer = Layer.effect(
       Effect.gen(function* () {
         const directory = yield* InstanceState.directory
         yield* Effect.promise(() => {
-          const run = persistChain.then(() =>
-            persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config),
-          )
+          const run = persistChain.then(() => persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config))
           persistChain = run.catch(() => {})
           return run
         })
@@ -1023,8 +1017,7 @@ const layer = Layer.effect(
           const names = await listMcpInConfig(p)
           if (names.includes(name)) {
             const entry = await readMcpEntryFromDisk(name, p)
-            if (entry)
-              await addMcpToConfig(name, { ...entry, enabled } as Parameters<typeof addMcpToConfig>[1], p)
+            if (entry) await addMcpToConfig(name, { ...entry, enabled } as Parameters<typeof addMcpToConfig>[1], p)
             found = true
             break
           }
@@ -1414,20 +1407,23 @@ export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
 // --- Per-service runtime ---
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(McpAuth.defaultLayer),
-  Layer.provide(EventV2Bridge.defaultLayer),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(CrossSpawnSpawner.defaultLayer),
-  Layer.provide(FSUtil.defaultLayer),
-))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(McpAuth.defaultLayer),
+    Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(CrossSpawnSpawner.defaultLayer),
+    Layer.provide(FSUtil.defaultLayer),
+    Layer.provide(McpBrowser.defaultLayer),
+  ),
+)
 // altimate_change end
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: () => [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node],
+  deps: LayerNode.lazy(() => [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node]),
 })
 // altimate_change end
 

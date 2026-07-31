@@ -93,8 +93,8 @@ export function provider(model: Provider.Model) {
 // In practice superseded by the ambient `<env>` date line in environment() below (which reads
 // as ambient context instead of a user-turn echo target), but kept intact because
 // test/skill/release-v0.8.10-adversarial.test.ts (#950) calls this directly to guard the
-// original regression. UNSURE: flagged in the merge report — worth a follow-up to confirm
-// nothing still depends on the old trailing-user-message placement this was written for.
+// original regression. The production path now embeds the date via environment(); retire this
+// function together with that test if the trailing-user-message placement is confirmed unused.
 export function currentDate() {
   return `Today's date is ${new Date().toDateString()}.`
 }
@@ -123,18 +123,20 @@ const autoLoadLog = Log.create({ service: "system-prompt-autoload" })
  *     downstream log readers / grep / awk.
  */
 function escapeXmlAttr(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\n/g, "&#10;")
-    .replace(/\r/g, "&#13;")
-    .replace(/\t/g, "&#9;")
-    // XML 1.0 forbids most control characters in any value; strip them
-    // entirely. The kept-as-entity TAB/LF/CR cases above are already handled.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
+  return (
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\n/g, "&#10;")
+      .replace(/\r/g, "&#13;")
+      .replace(/\t/g, "&#9;")
+      // XML 1.0 forbids most control characters in any value; strip them
+      // entirely. The kept-as-entity TAB/LF/CR cases above are already handled.
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
+  )
 }
 
 async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {
@@ -321,7 +323,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode],
+  deps: LayerNode.lazy(() => [Skill.node, MCP.node, locationServiceMapNode]),
 })
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init; restores

@@ -1,0 +1,2037 @@
+{
+  "version": "v1.18.10",
+  "startedAt": "2026-07-31T02:22:32.899Z",
+  "files": [
+    {
+      "file": ".opencode/command/issues.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 6,
+          "before": "Search through existing issues in anomalyco/opencode using the gh cli to find issues matching this query:",
+          "after": "Search through existing issues in AltimateAI/altimate-code using the gh cli to find issues matching this query:",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": ".opencode/opencode.jsonc",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 2,
+          "before": "  \"$schema\": \"https://opencode.ai/config.json\",",
+          "after": "  \"$schema\": \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": ".opencode/plugins/smoke-theme.json",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 2,
+          "before": "  \"$schema\": \"https://opencode.ai/theme.json\",",
+          "after": "  \"$schema\": \"https://altimate.ai/theme.json\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": ".opencode/tui.json",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 2,
+          "before": "  \"$schema\": \"https://opencode.ai/tui.json\",",
+          "after": "  \"$schema\": \"https://altimate.ai/tui.json\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "CONTEXT.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 1,
+          "before": "# OpenCode Session Runtime",
+          "after": "# Altimate Code Session Runtime",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 3,
+          "before": "OpenCode sessions preserve durable conversational history while assembling the runtime context an agent needs to act correctly in its current environment.",
+          "after": "Altimate Code sessions preserve durable conversational history while assembling the runtime context an agent needs to act correctly in its current environment.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 58,
+          "before": "A temporary file created under OpenCode's shared tool-output directory to retain complete output that was too large for Session history.",
+          "after": "A temporary file created under Altimate Code's shared tool-output directory to retain complete output that was too large for Session history.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 73,
+          "before": "**OpenCode Client**:",
+          "after": "**Altimate Code Client**:",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 74,
+          "before": "The generated Promise and Effect APIs derived from the public `HttpApi`; **Embedded OpenCode** shares the Effect API through an in-memory `HttpClient` against the same router and handlers.",
+          "after": "The generated Promise and Effect APIs derived from the public `HttpApi`; **Embedded Altimate Code** shares the Effect API through an in-memory `HttpClient` against the same router and handlers.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 80,
+          "before": "**Embedded OpenCode**:",
+          "after": "**Embedded Altimate Code**:",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 81,
+          "before": "A scoped in-process host that structurally extends the **OpenCode Client**, supplies an in-memory HTTP transport, and exposes additional same-process capabilities directly.",
+          "after": "A scoped in-process host that structurally extends the **Altimate Code Client**, supplies an in-memory HTTP transport, and exposes additional same-process capabilities directly.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 139,
+          "before": "- Networked and **Embedded OpenCode** use the same **OpenCode Client** and preserve the full HTTP encoding, routing, middleware, and decoding boundary; only the `HttpClient` transport differs.",
+          "after": "- Networked and **Embedded Altimate Code** use the same **Altimate Code Client** and preserve the full HTTP encoding, routing, middleware, and decoding boundary; only the `HttpClient` transport differs.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 141,
+          "before": "- Creating **Embedded OpenCode** is scoped. Closing its owning Scope releases the in-process server resources, database resources, registrations, and fibers.",
+          "after": "- Creating **Embedded Altimate Code** is scoped. Closing its owning Scope releases the in-process server resources, database resources, registrations, and fibers.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 142,
+          "before": "- **Embedded OpenCode** exposes shared client capabilities and embedded-only capabilities on one object; consumers do not navigate through a nested `.client` property.",
+          "after": "- **Embedded Altimate Code** exposes shared client capabilities and embedded-only capabilities on one object; consumers do not navigate through a nested `.client` property.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 143,
+          "before": "- The beta **OpenCode Client** currently uses plural consumer-facing capability groups such as `sessions`; whether the stable Session namespace should instead be singular `session` must be settled before stabilization. Internal server identifiers do not implicitly define public client names.",
+          "after": "- The beta **Altimate Code Client** currently uses plural consumer-facing capability groups such as `sessions`; whether the stable Session namespace should instead be singular `session` must be settled before stabilization. Internal server identifiers do not implicitly define public client names.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 144,
+          "before": "- Server's concrete `HttpApi` is authoritative for shared **OpenCode Client** capabilities. Codegen compiles its Session group directly; the Effect runtime uses an equivalent Protocol-only projection so generated artifacts remain independent of Core and Server.",
+          "after": "- Server's concrete `HttpApi` is authoritative for shared **Altimate Code Client** capabilities. Codegen compiles its Session group directly; the Effect runtime uses an equivalent Protocol-only projection so generated artifacts remain independent of Core and Server.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 164,
+          "before": "- A capability intended for both networked and **Embedded OpenCode** belongs in the authoritative public `HttpApi`; embedded-only same-process capabilities extend **Embedded OpenCode** separately.",
+          "after": "- A capability intended for both networked and **Embedded Altimate Code** belongs in the authoritative public `HttpApi`; embedded-only same-process capabilities extend **Embedded Altimate Code** separately.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 171,
+          "before": "- The stable `sessions.list(...)` design returns a **Page** in both networked and **Embedded OpenCode**; embedded execution does not define a separate unbounded array-returning list operation. The beta client currently preserves the existing HTTP `{ data, cursor }` envelope until emitter-level Page projection is implemented.",
+          "after": "- The stable `sessions.list(...)` design returns a **Page** in both networked and **Embedded Altimate Code**; embedded execution does not define a separate unbounded array-returning list operation. The beta client currently preserves the existing HTTP `{ data, cursor }` envelope until emitter-level Page projection is implemented.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 184,
+          "before": "- The **Embedded OpenCode** Layer delegates to the same scoped creation path; it does not define a second implementation.",
+          "after": "- The **Embedded Altimate Code** Layer delegates to the same scoped creation path; it does not define a second implementation.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "artifacts/glm52-rise-video/src/data.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 2,
+          "before": "// Scope: tier='Go' (OpenCode Go), dataset='zen', client='all', source='all', grain='day'.",
+          "after": "// Scope: tier='Go' (Altimate Code Go), dataset='zen', client='all', source='all', grain='day'.",
+          "rule": "Product name: Go"
+        }
+      ]
+    },
+    {
+      "file": "artifacts/glm52-rise-video/src/flash.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 4,
+          "before": "// stats.opencode.ai design tokens (light theme)",
+          "after": "// stats.altimate.ai design tokens (light theme)",
+          "rule": "Root domain"
+        },
+        {
+          "line": 21,
+          "before": "// verified: OpenCode Go, week of Jun 22-28, 2026 (2026-W26). share = % of 19.64T total Go tokens.",
+          "after": "// verified: Altimate Code Go, week of Jun 22-28, 2026 (2026-W26). share = % of 19.64T total Go tokens.",
+          "rule": "Product name: Go"
+        },
+        {
+          "line": 180,
+          "before": "          <div style={{ color: c.ink }}>opencode.ai/data</div>",
+          "after": "          <div style={{ color: c.ink }}>altimate.ai/data</div>",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "artifacts/glm52-rise-video/src/june.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 18,
+          "before": "// verified: OpenCode Go (tier=Go, dataset=zen), June 1-30, 2026.",
+          "after": "// verified: Altimate Code Go (tier=Go, dataset=zen), June 1-30, 2026.",
+          "rule": "Product name: Go"
+        },
+        {
+          "line": 139,
+          "before": "          <div style={{ color: c.ink }}>opencode.ai/data</div>",
+          "after": "          <div style={{ color: c.ink }}>altimate.ai/data</div>",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "artifacts/glm52-rise-video/src/minimax.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 20,
+          "before": "// verified: minimax-m3, OpenCode Go (tier=Go, dataset=zen), weekly total_tokens.",
+          "after": "// verified: minimax-m3, Altimate Code Go (tier=Go, dataset=zen), weekly total_tokens.",
+          "rule": "Product name: Go"
+        },
+        {
+          "line": 196,
+          "before": "          <div style={{ color: c.ink }}>opencode.ai/data</div>",
+          "after": "          <div style={{ color: c.ink }}>altimate.ai/data</div>",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "artifacts/glm52-rise-video/src/novel.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 10,
+          "before": "// verified: OpenCode Go, week of Jun 22-28, 2026 (2026-W26)",
+          "after": "// verified: Altimate Code Go, week of Jun 22-28, 2026 (2026-W26)",
+          "rule": "Product name: Go"
+        },
+        {
+          "line": 129,
+          "before": "            <div style={{ color: c.white }}>opencode.ai/data</div>",
+          "after": "            <div style={{ color: c.white }}>altimate.ai/data</div>",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "artifacts/glm52-rise-video/src/sheep.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 11,
+          "before": "// verified: NZ OpenCode Go, week of Jun 22-28, 2026 (2026-W26)",
+          "after": "// verified: NZ Altimate Code Go, week of Jun 22-28, 2026 (2026-W26)",
+          "rule": "Product name: Go"
+        },
+        {
+          "line": 133,
+          "before": "            <div style={{ color: c.white }}>opencode.ai/data</div>",
+          "after": "            <div style={{ color: c.white }}>altimate.ai/data</div>",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "artifacts/glm52-rise-video/src/video.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 5,
+          "before": "// stats.opencode.ai design tokens (light theme)",
+          "after": "// stats.altimate.ai design tokens (light theme)",
+          "rule": "Root domain"
+        },
+        {
+          "line": 28,
+          "before": "// the correct opencode \"DATA\" wordmark (from stats.opencode.ai header)",
+          "after": "// the correct opencode \"DATA\" wordmark (from stats.altimate.ai header)",
+          "rule": "Root domain"
+        },
+        {
+          "line": 248,
+          "before": "            <div style={{ color: c.ink }}>opencode.ai/data</div>",
+          "after": "            <div style={{ color: c.ink }}>altimate.ai/data</div>",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/cli/script/build.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 108,
+          "before": "        repository: { type: \"git\", url: \"git+https://github.com/anomalyco/opencode.git\" },",
+          "after": "        repository: { type: \"git\", url: \"git+https://github.com/AltimateAI/altimate-code.git\" },",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "packages/cli/script/publish.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 38,
+          "before": "      repository: { type: \"git\", url: \"git+https://github.com/anomalyco/opencode.git\" },",
+          "after": "      repository: { type: \"git\", url: \"git+https://github.com/AltimateAI/altimate-code.git\" },",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "packages/cli/src/commands/commands.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 7,
+          "before": "  description: \"OpenCode 2.0 preview command line interface\",",
+          "after": "  description: \"Altimate Code 2.0 preview command line interface\",",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/codemode/README.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 184,
+          "before": "The catalog-entry budget defaults to 2,000 estimated tokens (characters / 4, the same heuristic OpenCode uses). It applies only to full tool entries shown in the catalog; fixed instructions and namespace summaries are not counted. Override it when constructing a runtime:",
+          "after": "The catalog-entry budget defaults to 2,000 estimated tokens (characters / 4, the same heuristic Altimate Code uses). It applies only to full tool entries shown in the catalog; fixed instructions and namespace summaries are not counted. Override it when constructing a runtime:",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 268,
+          "before": "No limit has a default, on purpose: execution budgets are host policy, not library policy - a host that wants a bound sets one; a host that can interrupt the execution fiber (as OpenCode does on user cancel) may set no timeout, and a host with its own tool-output truncation (as OpenCode has) may leave `maxOutputBytes` unset. A host with neither should set `maxOutputBytes`, or oversized results silently flood model context.",
+          "after": "No limit has a default, on purpose: execution budgets are host policy, not library policy - a host that wants a bound sets one; a host that can interrupt the execution fiber (as Altimate Code does on user cancel) may set no timeout, and a host with its own tool-output truncation (as Altimate Code has) may leave `maxOutputBytes` unset. A host with neither should set `maxOutputBytes`, or oversized results silently flood model context.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/codemode/codemode.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 86,
+          "before": "### V2 OpenCode adapter",
+          "after": "### V2 Altimate Code adapter",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/codemode/test/fixtures/opencode-v2-openapi.json",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 703,
+          "before": "        \"description\": \"Retrieve foreground Session drains currently owned by this OpenCode process. Sessions absent from the result are inactive. Watermarks are the durable log positions read alongside the activity snapshot; activity itself is process state, so the pairing is advisory rather than transactional.\",",
+          "after": "        \"description\": \"Retrieve foreground Session drains currently owned by this Altimate Code process. Sessions absent from the result are inactive. Watermarks are the durable log positions read alongside the activity snapshot; activity itself is process state, so the pairing is advisory rather than transactional.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2746,
+          "before": "        \"description\": \"Interrupt active execution owned by this OpenCode process. Idle interruption is a no-op.\",",
+          "after": "        \"description\": \"Interrupt active execution owned by this Altimate Code process. Idle interruption is a no-op.\",",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/src/models-dev.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 157,
+          "before": "      source === \"https://models.opencode.ai\" ? \"models.json\" : `models-${Hash.fast(source)}.json`,",
+          "after": "      source === \"https://models.altimate.ai\" ? \"models.json\" : `models-${Hash.fast(source)}.json`,",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/src/oauth/page.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 9,
+          "before": "// The visual language mirrors the OpenCode app: the design tokens are a curated",
+          "after": "// The visual language mirrors the Altimate Code app: the design tokens are a curated",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 28,
+          "before": "      message: provider ? `OpenCode is now connected to ${escapeHtml(provider)}.` : \"OpenCode is now authorized.\",",
+          "after": "      message: provider ? `Altimate Code is now connected to ${escapeHtml(provider)}.` : \"Altimate Code is now authorized.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 43,
+          "before": "        ? `OpenCode couldn't finish connecting to ${escapeHtml(provider)}.`",
+          "after": "        ? `Altimate Code couldn't finish connecting to ${escapeHtml(provider)}.`",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 44,
+          "before": "        : \"OpenCode couldn't complete authorization.\",",
+          "after": "        : \"Altimate Code couldn't complete authorization.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 46,
+          "before": "      footnote: \"Close this window and try again from OpenCode.\",",
+          "after": "      footnote: \"Close this window and try again from Altimate Code.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 103,
+          "before": "    <title>${escapeHtml(input.title)} · OpenCode</title>",
+          "after": "    <title>${escapeHtml(input.title)} · Altimate Code</title>",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 119,
+          "before": "  function fail(text){card.dataset.status=\"error\";headline.textContent=\"Authorization failed\";message.textContent=PROVIDER?(\"OpenCode couldn't finish connecting to \"+PROVIDER+\".\"):\"OpenCode couldn't complete authorization.\";if(text){detail.textContent=text;detail.hidden=false}footnote.textContent=\"Close this window and try again from OpenCode.\"}",
+          "after": "  function fail(text){card.dataset.status=\"error\";headline.textContent=\"Authorization failed\";message.textContent=PROVIDER?(\"Altimate Code couldn't finish connecting to \"+PROVIDER+\".\"):\"Altimate Code couldn't complete authorization.\";if(text){detail.textContent=text;detail.hidden=false}footnote.textContent=\"Close this window and try again from Altimate Code.\"}",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 120,
+          "before": "  function ok(){card.dataset.status=\"success\";headline.textContent=\"Authorization successful\";message.textContent=PROVIDER?(\"OpenCode is now connected to \"+PROVIDER+\".\"):\"OpenCode is now authorized.\";detail.hidden=true;footnote.textContent=\"You can close this window.\";setTimeout(function(){try{window.close()}catch(e){}},2500)}",
+          "after": "  function ok(){card.dataset.status=\"success\";headline.textContent=\"Authorization successful\";message.textContent=PROVIDER?(\"Altimate Code is now connected to \"+PROVIDER+\".\"):\"Altimate Code is now authorized.\";detail.hidden=true;footnote.textContent=\"You can close this window.\";setTimeout(function(){try{window.close()}catch(e){}},2500)}",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 252,
+          "before": "// OpenCode wordmark — same path geometry as packages/ui/src/components/logo.tsx (Logo).",
+          "after": "// Altimate Code wordmark — same path geometry as packages/ui/src/components/logo.tsx (Logo).",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 253,
+          "before": "const WORDMARK = `<svg class=\"wordmark\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 234 42\" fill=\"none\" aria-label=\"OpenCode\" role=\"img\">",
+          "after": "const WORDMARK = `<svg class=\"wordmark\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 234 42\" fill=\"none\" aria-label=\"Altimate Code\" role=\"img\">",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/src/plugin/provider/opencode.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 16,
+          "before": "const defaultServer = \"https://console.opencode.ai\"",
+          "after": "const defaultServer = \"https://console.altimate.ai\"",
+          "rule": "Root domain"
+        },
+        {
+          "line": 43,
+          "before": "      label: \"OpenCode Console account\",",
+          "after": "      label: \"Altimate Code Console account\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 95,
+          "before": "              Effect.logWarning(\"failed to load OpenCode provider config\", { cause }).pipe(Effect.as(undefined)),",
+          "after": "              Effect.logWarning(\"failed to load Altimate Code provider config\", { cause }).pipe(Effect.as(undefined)),",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 103,
+          "before": "        integration.name = \"OpenCode\"",
+          "after": "        integration.name = \"Altimate Code\"",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-google-vertex.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 98,
+          "before": "            url: \"https://opencode.ai/zen/v1\",",
+          "after": "            url: \"https://altimate.ai/zen/v1\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-kilo.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 42,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 64,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 93,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-llmgateway.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 49,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-nvidia.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 42,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 44,
+          "before": "        \"X-BILLING-INVOKE-ORIGIN\": \"OpenCode\",",
+          "after": "        \"X-BILLING-INVOKE-ORIGIN\": \"Altimate Code\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 65,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 67,
+          "before": "        \"X-BILLING-INVOKE-ORIGIN\": \"OpenCode\",",
+          "after": "        \"X-BILLING-INVOKE-ORIGIN\": \"Altimate Code\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 91,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-opencode.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 78,
+          "before": "          label: \"OpenCode Console account\",",
+          "after": "          label: \"Altimate Code Console account\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 85,
+          "before": "  it.live(\"loads providers and models from the connected OpenCode server\", () =>",
+          "after": "  it.live(\"loads providers and models from the connected Altimate Code server\", () =>",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-openrouter.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 42,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-vercel.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 35,
+          "before": "        \"http-referer\": \"https://opencode.ai/\",",
+          "after": "        \"http-referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/core/test/plugin/provider-zenmux.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 44,
+          "before": "      expect(result.request.headers).toEqual({ \"HTTP-Referer\": \"https://opencode.ai/\", \"X-Title\": \"opencode\" })",
+          "after": "      expect(result.request.headers).toEqual({ \"HTTP-Referer\": \"https://altimate.ai/\", \"X-Title\": \"opencode\" })",
+          "rule": "Root domain"
+        },
+        {
+          "line": 66,
+          "before": "        \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "        \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/http-recorder/package.json",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 10,
+          "before": "    \"url\": \"git+https://github.com/anomalyco/opencode.git\",",
+          "after": "    \"url\": \"git+https://github.com/AltimateAI/altimate-code.git\",",
+          "rule": "Main repo"
+        },
+        {
+          "line": 13,
+          "before": "  \"homepage\": \"https://github.com/anomalyco/opencode/tree/dev/packages/http-recorder\",",
+          "after": "  \"homepage\": \"https://github.com/AltimateAI/altimate-code/tree/dev/packages/http-recorder\",",
+          "rule": "Main repo"
+        },
+        {
+          "line": 14,
+          "before": "  \"bugs\": \"https://github.com/anomalyco/opencode/issues\",",
+          "after": "  \"bugs\": \"https://github.com/AltimateAI/altimate-code/issues\",",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "packages/llm/DESIGN.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 15,
+          "before": "- Secondary audience: OpenCode and other durable agent runtimes",
+          "after": "- Secondary audience: Altimate Code and other durable agent runtimes",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 451,
+          "before": "OpenCode and other durable runtimes need to own persistence, tool settlement,",
+          "after": "Altimate Code and other durable runtimes need to own persistence, tool settlement,",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1094,
+          "before": "OpenCode should migrate to `generateTurn` / `streamTurn`, preserving its durable",
+          "after": "Altimate Code should migrate to `generateTurn` / `streamTurn`, preserving its durable",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/llm/script/recording-cost-report.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 5,
+          "before": "const MODELS_DEV_URL = \"https://models.opencode.ai/api.json\"",
+          "after": "const MODELS_DEV_URL = \"https://models.altimate.ai/api.json\"",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/specs/tui-plugins.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 21,
+          "before": "  \"$schema\": \"https://opencode.ai/tui.json\",",
+          "after": "  \"$schema\": \"https://altimate.ai/tui.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 187,
+          "before": "- The value is a semver range checked against the running OpenCode version.",
+          "after": "- The value is a semver range checked against the running Altimate Code version.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 250,
+          "before": "- The host already installs the default OpenTUI bundle (`default keys`, metadata fields, and enabled fields) plus OpenCode's comma bindings, leader token, base layout fallback, pending-sequence helpers, and managed textarea layer.",
+          "after": "- The host already installs the default OpenTUI bundle (`default keys`, metadata fields, and enabled fields) plus Altimate Code's comma bindings, leader token, base layout fallback, pending-sequence helpers, and managed textarea layer.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 261,
+          "before": "OpenCode registers a `mode` layer field on the host keymap. Plugins can use it to keep bindings active only in the relevant UI state.",
+          "after": "Altimate Code registers a `mode` layer field on the host keymap. Plugins can use it to keep bindings active only in the relevant UI state.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 319,
+          "before": "Mode pushes are automatically tracked by the plugin runtime. If a plugin is disabled, fails during activation, or the TUI shuts down before the plugin calls the disposer, OpenCode pops the plugin's pushed modes during plugin cleanup. Calling the disposer yourself is still recommended for component lifetimes; cleanup remains idempotent.",
+          "after": "Mode pushes are automatically tracked by the plugin runtime. If a plugin is disabled, fails during activation, or the TUI shuts down before the plugin calls the disposer, Altimate Code pops the plugin's pushed modes during plugin cleanup. Calling the disposer yourself is still recommended for component lifetimes; cleanup remains idempotent.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/specs/v2/api.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 6,
+          "before": "const opencode = OpenCode.make({})",
+          "after": "const opencode = Altimate Code.make({})",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/acp/service.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 902,
+          "before": "  return \"OpenCode prompt failed\"",
+          "after": "  return \"Altimate Code prompt failed\"",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/cli/cmd/import.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 30,
+          "before": "// altimate_change start — share URLs use altimate.ai (was opencode.ai)",
+          "after": "// altimate_change start — share URLs use altimate.ai (was altimate.ai)",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/config/tui-migrate.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 11,
+          "before": "// altimate_change start — schema URL points to altimate.ai (was opencode.ai)",
+          "after": "// altimate_change start — schema URL points to altimate.ai (was altimate.ai)",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/installation/index.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 29,
+          "before": "// Upstream uses opencode.ai/install. We fetch the altimate install script",
+          "after": "// Upstream uses altimate.ai/install. We fetch the altimate install script",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/mcp/index.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 63,
+          "before": "    // https://github.com/anomalyco/opencode/issues/11948",
+          "after": "    // https://github.com/AltimateAI/altimate-code/issues/11948",
+          "rule": "Main repo"
+        },
+        {
+          "line": 65,
+          "before": "    // https://github.com/anomalyco/opencode/issues/23066",
+          "after": "    // https://github.com/AltimateAI/altimate-code/issues/23066",
+          "rule": "Main repo"
+        },
+        {
+          "line": 67,
+          "before": "    // https://github.com/anomalyco/opencode/issues/2308",
+          "after": "    // https://github.com/AltimateAI/altimate-code/issues/2308",
+          "rule": "Main repo"
+        },
+        {
+          "line": 69,
+          "before": "    // https://github.com/anomalyco/opencode/issues/28567",
+          "after": "    // https://github.com/AltimateAI/altimate-code/issues/28567",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/mcp/oauth-provider.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 46,
+          "before": "      // altimate_change start — branding (was \"OpenCode\" / \"https://opencode.ai\")",
+          "after": "      // altimate_change start — branding (was \"OpenCode\" / \"https://altimate.ai\")",
+          "rule": "Root domain"
+        },
+        {
+          "line": 46,
+          "before": "      // altimate_change start — branding (was \"OpenCode\" / \"https://altimate.ai\")",
+          "after": "      // altimate_change start — branding (was \"Altimate Code\" / \"https://altimate.ai\")",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/plugin/github-copilot/models.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 101,
+          "before": "  // Copilot prices are AIC per billing batch; OpenCode stores USD per million tokens.",
+          "after": "  // Copilot prices are AIC per billing batch; Altimate Code stores USD per million tokens.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/session/prompt/meta.txt",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 1,
+          "before": "You are OpenCode, a coding agent that helps users with software engineering tasks. You are powered by Muse Spark, a large language model trained by Meta MSL.",
+          "after": "You are Altimate Code, a coding agent that helps users with software engineering tasks. You are powered by Muse Spark, a large language model trained by Meta MSL.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 56,
+          "before": "# Tool Use – OpenCode Specifics",
+          "after": "# Tool Use – Altimate Code Specifics",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 64,
+          "before": "- Users can give feedback or report issues at https://github.com/anomalyco/opencode and mention that they are using Meta Muse Spark.",
+          "after": "- Users can give feedback or report issues at https://github.com/AltimateAI/altimate-code and mention that they are using Meta Muse Spark.",
+          "rule": "Main repo"
+        },
+        {
+          "line": 65,
+          "before": "- When users ask directly about OpenCode (eg. \"can OpenCode do...\", \"are you able to do...\") or its features (eg. implement a hook, write a slash command, or install an MCP server), use the WebFetch tool to gather information to answer the question from the OpenCode docs at https://opencode.ai/docs.",
+          "after": "- When users ask directly about OpenCode (eg. \"can OpenCode do...\", \"are you able to do...\") or its features (eg. implement a hook, write a slash command, or install an MCP server), use the WebFetch tool to gather information to answer the question from the OpenCode docs at https://altimate.ai/docs.",
+          "rule": "Root domain"
+        },
+        {
+          "line": 65,
+          "before": "- When users ask directly about OpenCode (eg. \"can OpenCode do...\", \"are you able to do...\") or its features (eg. implement a hook, write a slash command, or install an MCP server), use the WebFetch tool to gather information to answer the question from the OpenCode docs at https://altimate.ai/docs.",
+          "after": "- When users ask directly about Altimate Code (eg. \"can Altimate Code do...\", \"are you able to do...\") or its features (eg. implement a hook, write a slash command, or install an MCP server), use the WebFetch tool to gather information to answer the question from the Altimate Code docs at https://altimate.ai/docs.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/src/share/share-next.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 223,
+          "before": "        // altimate_change — keep fork's altimate.ai fallback URL over upstream's opncd.ai",
+          "after": "        // altimate_change — keep fork's altimate.ai fallback URL over upstream's altimate.ai",
+          "rule": "Short domain alias"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/acp/tool.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 16,
+          "before": "  test(\"maps OpenCode tool ids to ACP tool kinds\", () => {",
+          "after": "  test(\"maps Altimate Code tool ids to ACP tool kinds\", () => {",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/cli/account.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 7,
+          "before": "  // altimate_change — fork's default login console is console.altimate.ai, not upstream's console.opencode.ai.",
+          "after": "  // altimate_change — fork's default login console is console.altimate.ai, not upstream's console.altimate.ai.",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/cli/error.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 57,
+          "before": "      url: \"https://console.opencode.ai/auth/device/code\",",
+          "after": "      url: \"https://console.altimate.ai/auth/device/code\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 62,
+          "before": "    expect(formatted).toContain(\"Could not reach POST https://console.opencode.ai/auth/device/code.\")",
+          "after": "    expect(formatted).toContain(\"Could not reach POST https://console.altimate.ai/auth/device/code.\")",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/cli/import.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 48,
+          "before": "  expect(parseShareUrl(\"https://opncd.ai/share/Jsj3hNIW\")).toBe(\"Jsj3hNIW\")",
+          "after": "  expect(parseShareUrl(\"https://altimate.ai/share/Jsj3hNIW\")).toBe(\"Jsj3hNIW\")",
+          "rule": "Short domain alias"
+        },
+        {
+          "line": 54,
+          "before": "  expect(parseShareUrl(\"https://opncd.ai/s/Jsj3hNIW\")).toBeNull() // legacy format",
+          "after": "  expect(parseShareUrl(\"https://altimate.ai/s/Jsj3hNIW\")).toBeNull() // legacy format",
+          "rule": "Short domain alias"
+        },
+        {
+          "line": 55,
+          "before": "  expect(parseShareUrl(\"https://opncd.ai/share/\")).toBeNull()",
+          "after": "  expect(parseShareUrl(\"https://altimate.ai/share/\")).toBeNull()",
+          "rule": "Short domain alias"
+        },
+        {
+          "line": 56,
+          "before": "  expect(parseShareUrl(\"https://opncd.ai/share/id/extra\")).toBeNull()",
+          "after": "  expect(parseShareUrl(\"https://altimate.ai/share/id/extra\")).toBeNull()",
+          "rule": "Short domain alias"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/cli/run/footer.view.test.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 62,
+          "before": "      url: \"https://opencode.ai\",",
+          "after": "      url: \"https://altimate.ai\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/cli/run/permission.shared.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 134,
+          "before": "    // altimate_change — fork branding: copy says \"Altimate Code\", not \"OpenCode\".",
+          "after": "    // altimate_change — fork branding: copy says \"Altimate Code\", not \"Altimate Code\".",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/config/config.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 115,
+          "before": "const schemaConfig = (config: object) => ({ $schema: \"https://opencode.ai/config.json\", ...config })",
+          "after": "const schemaConfig = (config: object) => ({ $schema: \"https://altimate.ai/config.json\", ...config })",
+          "rule": "Root domain"
+        },
+        {
+          "line": 273,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 367,
+          "before": "      { $schema: \"https://opencode.ai/config.json\", shell: \"bash\" },",
+          "after": "      { $schema: \"https://altimate.ai/config.json\", shell: \"bash\" },",
+          "rule": "Root domain"
+        },
+        {
+          "line": 382,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 389,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 501,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 521,
+          "before": "        \"$schema\": \"https://opencode.ai/config.json\",",
+          "after": "        \"$schema\": \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 557,
+          "before": "        $schema: \"https://opencode.ai/config.json\",",
+          "after": "        $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 564,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 580,
+          "before": "        $schema: \"https://opencode.ai/config.json\",",
+          "after": "        $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 617,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 630,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 685,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 706,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 730,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 754,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 776,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 789,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 812,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1222,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1238,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1254,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1270,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1287,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1333,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1346,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1359,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1377,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1395,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1456,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1474,
+          "before": "        $schema: \"https://opencode.ai/config.json\",",
+          "after": "        $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1504,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1519,
+          "before": "        $schema: \"https://opencode.ai/config.json\",",
+          "after": "        $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1547,
+          "before": "      $schema: \"https://opencode.ai/config.json\",",
+          "after": "      $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1560,
+          "before": "        $schema: \"https://opencode.ai/config.json\",",
+          "after": "        $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 2006,
+          "before": "          $schema: \"https://opencode.ai/config.json\",",
+          "after": "          $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 2024,
+          "before": "          $schema: \"https://opencode.ai/config.json\",",
+          "after": "          $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 2044,
+          "before": "          PayloadDisplayName: \"OpenCode Managed\",",
+          "after": "          PayloadDisplayName: \"Altimate Code Managed\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2072,
+          "before": "          $schema: \"https://opencode.ai/config.json\",",
+          "after": "          $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 2092,
+          "before": "          $schema: \"https://opencode.ai/config.json\",",
+          "after": "          $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 2122,
+          "before": "          $schema: \"https://opencode.ai/config.json\",",
+          "after": "          $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 2137,
+          "before": "      await ConfigManaged.parseManagedPlist(JSON.stringify({ $schema: \"https://opencode.ai/config.json\" })),",
+          "after": "      await ConfigManaged.parseManagedPlist(JSON.stringify({ $schema: \"https://altimate.ai/config.json\" })),",
+          "rule": "Root domain"
+        },
+        {
+          "line": 2142,
+          "before": "  expect(config.$schema).toBe(\"https://opencode.ai/config.json\")",
+          "after": "  expect(config.$schema).toBe(\"https://altimate.ai/config.json\")",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/fixture/fixture.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 166,
+          "before": "        $schema: \"https://opencode.ai/config.json\",",
+          "after": "        $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 224,
+          "before": "          JSON.stringify({ $schema: \"https://opencode.ai/config.json\", ...resolved }),",
+          "after": "          JSON.stringify({ $schema: \"https://altimate.ai/config.json\", ...resolved }),",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/fixtures/recordings/session/native-zen-tool-loop.json",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 16,
+          "before": "        \"url\": \"https://console.opencode.ai/proxy/connections/{connection}/v1/responses\",",
+          "after": "        \"url\": \"https://console.altimate.ai/proxy/connections/{connection}/v1/responses\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 34,
+          "before": "        \"url\": \"https://console.opencode.ai/proxy/connections/{connection}/v1/responses\",",
+          "after": "        \"url\": \"https://console.altimate.ai/proxy/connections/{connection}/v1/responses\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/plugin/trigger.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 44,
+          "before": "                $schema: \"https://opencode.ai/config.json\",",
+          "after": "                $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/plugin/workspace-adapter.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 85,
+          "before": "              $schema: \"https://opencode.ai/config.json\",",
+          "after": "              $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/project/instance-bootstrap.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 57,
+          "before": "        $schema: \"https://opencode.ai/config.json\",",
+          "after": "        $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/provider/gitlab-duo.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 22,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 46,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 78,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 115,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 151,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 183,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 213,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 239,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 274,
+          "before": "//           $schema: \"https://opencode.ai/config.json\",",
+          "after": "//           $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/provider/provider.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 1314,
+          "before": "      \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "      \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1316,
+          "before": "      \"X-BILLING-INVOKE-ORIGIN\": \"OpenCode\",",
+          "after": "      \"X-BILLING-INVOKE-ORIGIN\": \"Altimate Code\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1327,
+          "before": "      \"HTTP-Referer\": \"https://opencode.ai/\",",
+          "after": "      \"HTTP-Referer\": \"https://altimate.ai/\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1329,
+          "before": "      \"X-BILLING-INVOKE-ORIGIN\": \"OpenCode\",",
+          "after": "      \"X-BILLING-INVOKE-ORIGIN\": \"Altimate Code\",",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/provider/transform.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 2863,
+          "before": "        url: \"https://api.opencode.ai\",",
+          "after": "        url: \"https://api.altimate.ai\",",
+          "rule": "API subdomain"
+        },
+        {
+          "line": 2897,
+          "before": "        url: \"https://api.opencode.ai\",",
+          "after": "        url: \"https://api.altimate.ai\",",
+          "rule": "API subdomain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/server/httpapi-cors.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 74,
+          "before": "            headers: { origin: \"https://app.opencode.ai\" },",
+          "after": "            headers: { origin: \"https://app.altimate.ai\" },",
+          "rule": "Root domain"
+        },
+        {
+          "line": 81,
+          "before": "      expect(response.headers.get(\"access-control-allow-origin\")).toBe(\"https://app.opencode.ai\")",
+          "after": "      expect(response.headers.get(\"access-control-allow-origin\")).toBe(\"https://app.altimate.ai\")",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/server/httpapi-workspace.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 398,
+          "before": "          body: JSON.stringify({ $schema: \"https://opencode.ai/config.json\" }),",
+          "after": "          body: JSON.stringify({ $schema: \"https://altimate.ai/config.json\" }),",
+          "rule": "Root domain"
+        },
+        {
+          "line": 415,
+          "before": "            body: JSON.stringify({ $schema: \"https://opencode.ai/config.json\" }),",
+          "after": "            body: JSON.stringify({ $schema: \"https://altimate.ai/config.json\" }),",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/session/llm-native-recorded.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 31,
+          "before": "const zenURL = (connection: string) => `https://console.opencode.ai/proxy/connections/${connection}/v1`",
+          "after": "const zenURL = (connection: string) => `https://console.altimate.ai/proxy/connections/${connection}/v1`",
+          "rule": "Root domain"
+        },
+        {
+          "line": 163,
+          "before": "    name: \"OpenCode proxy\",",
+          "after": "    name: \"Altimate Code proxy\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 173,
+          "before": "        name: \"OpenCode Zen\",",
+          "after": "        name: \"Altimate Code Zen\",",
+          "rule": "Product name: Zen"
+        },
+        {
+          "line": 298,
+          "before": "      JSON.stringify({ $schema: \"https://opencode.ai/config.json\", ...scenario.config(model) }),",
+          "after": "      JSON.stringify({ $schema: \"https://altimate.ai/config.json\", ...scenario.config(model) }),",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/session/prompt.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 327,
+          "before": "    JSON.stringify({ $schema: \"https://opencode.ai/config.json\", ...config }),",
+          "after": "    JSON.stringify({ $schema: \"https://altimate.ai/config.json\", ...config }),",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/session/schema-decoding.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 247,
+          "before": "        message: \"Subscribe to OpenCode Go.\",",
+          "after": "        message: \"Subscribe to Altimate Code Go.\",",
+          "rule": "Product name: Go"
+        },
+        {
+          "line": 249,
+          "before": "        link: \"https://opencode.ai/go\",",
+          "after": "        link: \"https://altimate.ai/go\",",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/skill/skill.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 516,
+          "before": "# OpenCode Skill",
+          "after": "# Altimate Code Skill",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 563,
+          "before": "# OpenCode Skill",
+          "after": "# Altimate Code Skill",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 573,
+          "before": "# OpenCode Skill",
+          "after": "# Altimate Code Skill",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/opencode/test/tool/code-mode.test.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 635,
+          "before": "  test(\"leaves oversized results to OpenCode's native tool-output truncation\", async () => {",
+          "after": "  test(\"leaves oversized results to Altimate Code's native tool-output truncation\", async () => {",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/plugin/src/v2/effect/README.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 1,
+          "before": "# OpenCode V2 Effect Plugin API",
+          "after": "# Altimate Code V2 Effect Plugin API",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 5,
+          "before": "- `hook` installs behavior at an OpenCode extension point.",
+          "after": "- `hook` installs behavior at an Altimate Code extension point.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 48,
+          "before": "OpenCode rebuilds the domain when a transform is registered or disposed. A rebuild starts from fresh domain state and runs every active transform in registration order.",
+          "after": "Altimate Code rebuilds the domain when a transform is registered or disposed. A rebuild starts from fresh domain state and runs every active transform in registration order.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/plugin/src/v2/promise/README.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 1,
+          "before": "# OpenCode V2 Promise Plugin API",
+          "after": "# Altimate Code V2 Promise Plugin API",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 5,
+          "before": "- `hook` installs behavior at an OpenCode extension point.",
+          "after": "- `hook` installs behavior at an Altimate Code extension point.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/protocol/src/groups/session.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 153,
+          "before": "            \"Retrieve foreground Session drains currently owned by this OpenCode process. Sessions absent from the result are inactive.\",",
+          "after": "            \"Retrieve foreground Session drains currently owned by this Altimate Code process. Sessions absent from the result are inactive.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 355,
+          "before": "            description: \"Interrupt active execution owned by this OpenCode process. Idle interruption is a no-op.\",",
+          "after": "            description: \"Interrupt active execution owned by this Altimate Code process. Idle interruption is a no-op.\",",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/sdk/js/src/gen/types.gen.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 1212,
+          "before": "   * Command configuration, see https://opencode.ai/docs/commands",
+          "after": "   * Command configuration, see https://altimate.ai/docs/commands",
+          "rule": "Root domain"
+        },
+        {
+          "line": 1269,
+          "before": "   * Agent configuration, see https://opencode.ai/docs/agent",
+          "after": "   * Agent configuration, see https://altimate.ai/docs/agent",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "packages/sdk/js/src/v2/client.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 87,
+          "before": "      throw new Error(\"Request is not supported by this version of OpenCode Server (Server responded with text/html)\")",
+          "after": "      throw new Error(\"Request is not supported by this version of Altimate Code Server (Server responded with text/html)\")",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/sdk/js/src/v2/gen/sdk.gen.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 559,
+          "before": "   * Get a list of all available AI agents in the OpenCode system.",
+          "after": "   * Get a list of all available AI agents in the Altimate Code system.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 589,
+          "before": "   * Get a list of all available skills in the OpenCode system.",
+          "after": "   * Get a list of all available skills in the Altimate Code system.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 664,
+          "before": "   * Get experimental features enabled on the OpenCode server.",
+          "after": "   * Get experimental features enabled on the Altimate Code server.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 768,
+          "before": "   * Persist a new active Console account/org selection for the current local OpenCode state.",
+          "after": "   * Persist a new active Console account/org selection for the current local Altimate Code state.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 809,
+          "before": "   * Get a list of all OpenCode sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.",
+          "after": "   * Get a list of all Altimate Code sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1284,
+          "before": "   * Retrieve the current global OpenCode configuration settings and preferences.",
+          "after": "   * Retrieve the current global Altimate Code configuration settings and preferences.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1296,
+          "before": "   * Update global OpenCode configuration settings and preferences.",
+          "after": "   * Update global Altimate Code configuration settings and preferences.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1322,
+          "before": "   * Get health information about the OpenCode server.",
+          "after": "   * Get health information about the Altimate Code server.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1334,
+          "before": "   * Subscribe to global events from the OpenCode system using server-sent events.",
+          "after": "   * Subscribe to global events from the Altimate Code system using server-sent events.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1421,
+          "before": "   * Retrieve the current OpenCode configuration settings and preferences.",
+          "after": "   * Retrieve the current Altimate Code configuration settings and preferences.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1451,
+          "before": "   * Update OpenCode configuration settings and preferences.",
+          "after": "   * Update Altimate Code configuration settings and preferences.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2163,
+          "before": "   * Get a list of all available commands in the OpenCode system.",
+          "after": "   * Get a list of all available commands in the Altimate Code system.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2534,
+          "before": "   * Get a list of projects that have been opened with OpenCode.",
+          "after": "   * Get a list of projects that have been opened with Altimate Code.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2564,
+          "before": "   * Retrieve the currently active project that OpenCode is working with.",
+          "after": "   * Retrieve the currently active project that Altimate Code is working with.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2731,
+          "before": "   * Get a list of all active pseudo-terminal (PTY) sessions managed by OpenCode.",
+          "after": "   * Get a list of all active pseudo-terminal (PTY) sessions managed by Altimate Code.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 3366,
+          "before": "   * Get a list of all OpenCode sessions, sorted by most recently updated.",
+          "after": "   * Get a list of all Altimate Code sessions, sorted by most recently updated.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 3408,
+          "before": "   * Create a new OpenCode session for interacting with AI assistants and managing conversations.",
+          "after": "   * Create a new Altimate Code session for interacting with AI assistants and managing conversations.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 3525,
+          "before": "   * Retrieve detailed information about a specific OpenCode session.",
+          "after": "   * Retrieve detailed information about a specific Altimate Code session.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 5511,
+          "before": "   * Retrieve foreground Session drains currently owned by this OpenCode process. Sessions absent from the result are inactive.",
+          "after": "   * Retrieve foreground Session drains currently owned by this Altimate Code process. Sessions absent from the result are inactive.",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 5780,
+          "before": "   * Interrupt active execution owned by this OpenCode process. Idle interruption is a no-op.",
+          "after": "   * Interrupt active execution owned by this Altimate Code process. Idle interruption is a no-op.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/sdk/openapi.json",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 314,
+          "before": "        \"description\": \"Get health information about the OpenCode server.\",",
+          "after": "        \"description\": \"Get health information about the Altimate Code server.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 351,
+          "before": "        \"description\": \"Subscribe to global events from the OpenCode system using server-sent events.\",",
+          "after": "        \"description\": \"Subscribe to global events from the Altimate Code system using server-sent events.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 388,
+          "before": "        \"description\": \"Retrieve the current global OpenCode configuration settings and preferences.\",",
+          "after": "        \"description\": \"Retrieve the current global Altimate Code configuration settings and preferences.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 430,
+          "before": "        \"description\": \"Update global OpenCode configuration settings and preferences.\",",
+          "after": "        \"description\": \"Update global Altimate Code configuration settings and preferences.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 664,
+          "before": "        \"description\": \"Retrieve the current OpenCode configuration settings and preferences.\",",
+          "after": "        \"description\": \"Retrieve the current Altimate Code configuration settings and preferences.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 723,
+          "before": "        \"description\": \"Update OpenCode configuration settings and preferences.\",",
+          "after": "        \"description\": \"Update Altimate Code configuration settings and preferences.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 857,
+          "before": "        \"description\": \"Get experimental features enabled on the OpenCode server.\",",
+          "after": "        \"description\": \"Get experimental features enabled on the Altimate Code server.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1063,
+          "before": "        \"description\": \"Persist a new active Console account/org selection for the current local OpenCode state.\",",
+          "after": "        \"description\": \"Persist a new active Console account/org selection for the current local Altimate Code state.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 1615,
+          "before": "        \"description\": \"Get a list of all OpenCode sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.\",",
+          "after": "        \"description\": \"Get a list of all Altimate Code sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2710,
+          "before": "        \"description\": \"Get a list of all available commands in the OpenCode system.\",",
+          "after": "        \"description\": \"Get a list of all available commands in the Altimate Code system.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2768,
+          "before": "        \"description\": \"Get a list of all available AI agents in the OpenCode system.\",",
+          "after": "        \"description\": \"Get a list of all available AI agents in the Altimate Code system.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 2842,
+          "before": "        \"description\": \"Get a list of all available skills in the OpenCode system.\",",
+          "after": "        \"description\": \"Get a list of all available skills in the Altimate Code system.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 3650,
+          "before": "        \"description\": \"Get a list of projects that have been opened with OpenCode.\",",
+          "after": "        \"description\": \"Get a list of projects that have been opened with Altimate Code.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 3704,
+          "before": "        \"description\": \"Retrieve the currently active project that OpenCode is working with.\",",
+          "after": "        \"description\": \"Retrieve the currently active project that Altimate Code is working with.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 4133,
+          "before": "        \"description\": \"Get a list of all active pseudo-terminal (PTY) sessions managed by OpenCode.\",",
+          "after": "        \"description\": \"Get a list of all active pseudo-terminal (PTY) sessions managed by Altimate Code.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 5395,
+          "before": "        \"description\": \"Get a list of all OpenCode sessions, sorted by most recently updated.\",",
+          "after": "        \"description\": \"Get a list of all Altimate Code sessions, sorted by most recently updated.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 5454,
+          "before": "        \"description\": \"Create a new OpenCode session for interacting with AI assistants and managing conversations.\",",
+          "after": "        \"description\": \"Create a new Altimate Code session for interacting with AI assistants and managing conversations.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 5647,
+          "before": "        \"description\": \"Retrieve detailed information about a specific OpenCode session.\",",
+          "after": "        \"description\": \"Retrieve detailed information about a specific Altimate Code session.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 10240,
+          "before": "        \"description\": \"Retrieve foreground Session drains currently owned by this OpenCode process. Sessions absent from the result are inactive.\",",
+          "after": "        \"description\": \"Retrieve foreground Session drains currently owned by this Altimate Code process. Sessions absent from the result are inactive.\",",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 11439,
+          "before": "        \"description\": \"Interrupt active execution owned by this OpenCode process. Idle interruption is a no-op.\",",
+          "after": "        \"description\": \"Interrupt active execution owned by this Altimate Code process. Idle interruption is a no-op.\",",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "packages/tui/src/component/error-component.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 207,
+          "before": "  // altimate_change start — upstream_fix: bug-report URL pointed at anomalyco/opencode;",
+          "after": "  // altimate_change start — upstream_fix: bug-report URL pointed at AltimateAI/altimate-code;",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "packages/tui/src/feature-plugins/sidebar/footer.tsx",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 72,
+          "before": "        {/* altimate_change start — rebrand sidebar wordmark; upstream split \"Open\"+\"Code\" across spans, which evades the literal-\"OpenCode\" branding scanner */}",
+          "after": "        {/* altimate_change start — rebrand sidebar wordmark; upstream split \"Open\"+\"Code\" across spans, which evades the literal-\"Altimate Code\" branding scanner */}",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "patches/install-korean-ime-fix.sh",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 5,
+          "before": "# https://github.com/anomalyco/opencode/issues/14371",
+          "after": "# https://github.com/AltimateAI/altimate-code/issues/14371",
+          "rule": "Main repo"
+        },
+        {
+          "line": 117,
+          "before": "echo \"  curl -fsSL https://opencode.ai/install | bash\"",
+          "after": "echo \"  curl -fsSL https://altimate.ai/install | bash\"",
+          "rule": "Root domain"
+        }
+      ]
+    },
+    {
+      "file": "script/github/close-issues.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 3,
+          "before": "const repo = \"anomalyco/opencode\"",
+          "after": "const repo = \"AltimateAI/altimate-code\"",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "script/github/close-prs.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 5,
+          "before": "const defaultRepo = \"anomalyco/opencode\"",
+          "after": "const defaultRepo = \"AltimateAI/altimate-code\"",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "script/release-preflight.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 615,
+          "before": "        detail: `upstream remote unavailable — guard ran in degraded pattern-only mode, coverage incomplete.\\nAdd it: git remote add upstream https://github.com/anomalyco/opencode.git && git fetch upstream --no-tags\\n${fullOutput}`,",
+          "after": "        detail: `upstream remote unavailable — guard ran in degraded pattern-only mode, coverage incomplete.\\nAdd it: git remote add upstream https://github.com/AltimateAI/altimate-code.git && git fetch upstream --no-tags\\n${fullOutput}`,",
+          "rule": "Main repo"
+        }
+      ]
+    },
+    {
+      "file": "script/translate-app.md",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 17,
+          "before": "- Preserve technical terms and artifacts exactly: OpenCode, API names, identifiers, code, commands, flags, paths, URLs, versions, error messages, config keys, and placeholder tokens.",
+          "after": "- Preserve technical terms and artifacts exactly: Altimate Code, API names, identifiers, code, commands, flags, paths, URLs, versions, error messages, config keys, and placeholder tokens.",
+          "rule": "Product name: generic"
+        }
+      ]
+    },
+    {
+      "file": "script/translate-app.ts",
+      "transform": "branding",
+      "changes": [
+        {
+          "line": 112,
+          "before": "  if (!match?.[1]) throw new Error(\"OpenCode did not report a session ID.\")",
+          "after": "  if (!match?.[1]) throw new Error(\"Altimate Code did not report a session ID.\")",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 118,
+          "before": "    throw new Error(\"OpenCode returned an invalid session export.\")",
+          "after": "    throw new Error(\"Altimate Code returned an invalid session export.\")",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 122,
+          "before": "      throw new Error(\"OpenCode session export omitted the assistant model.\")",
+          "after": "      throw new Error(\"Altimate Code session export omitted the assistant model.\")",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 148,
+          "before": "    $schema: \"https://opencode.ai/config.json\",",
+          "after": "    $schema: \"https://altimate.ai/config.json\",",
+          "rule": "Root domain"
+        },
+        {
+          "line": 203,
+          "before": "  -c, --concurrency <count>  Maximum parallel OpenCode runs for 'all' (default: 4)",
+          "after": "  -c, --concurrency <count>  Maximum parallel Altimate Code runs for 'all' (default: 4)",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 204,
+          "before": "      --model <provider/id>  OpenCode model (default: opencode/gpt-5.5)",
+          "after": "      --model <provider/id>  Altimate Code model (default: opencode/gpt-5.5)",
+          "rule": "Product name: generic"
+        },
+        {
+          "line": 206,
+          "before": "      --dry-run              Report drift without running OpenCode",
+          "after": "      --dry-run              Report drift without running Altimate Code",
+          "rule": "Product name: generic"
+        }
+      ]
+    }
+  ],
+  "totalChanges": 258,
+  "totalFiles": 80,
+  "conflicts": []
+}

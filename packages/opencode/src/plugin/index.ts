@@ -36,8 +36,12 @@ import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { errorMessage } from "@/util/error"
 import { PluginLoader } from "./loader"
+import { ConfigPlugin } from "@/config/plugin"
 import { parsePluginSpecifier, readPluginId, readV1Plugin, resolvePluginId } from "./shared"
 import { registerAdapter } from "@/control-plane/adapters"
+// altimate_change start — upstream_fix: registerAdapter needs core's Project.ID brand (see marker below)
+import { ProjectV2 } from "@opencode-ai/core/project"
+// altimate_change end
 import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -158,7 +162,9 @@ const layer = Layer.effect(
           baseUrl: serverUrl?.toString() ?? "http://localhost:4096",
           directory: ctx.directory,
           headers: ServerAuth.headers(),
-          ...(serverUrl ? {} : { fetch: async (...args) => Server.Default().app.fetch(...args) }),
+          // altimate_change — upstream_fix: Server.Default() is the Hono app itself now
+          // (createApp() return), not a wrapper with an `.app` property
+          ...(serverUrl ? {} : { fetch: async (...args) => Server.Default().fetch(...args) }),
         })
         const cfg = yield* config.get()
         const input: PluginInput = {
@@ -170,7 +176,9 @@ const layer = Layer.effect(
           // control-plane registry, scoped to the current project.
           experimental_workspace: {
             register(type: string, adapter: PluginWorkspaceAdapter) {
-              registerAdapter(ctx.project.id, type, adapter as WorkspaceAdapter)
+              // altimate_change — upstream_fix: registerAdapter takes core's Project.ID brand,
+              // not the fork's ProjectID (identity at runtime)
+              registerAdapter(ProjectV2.ID.make(ctx.project.id), type, adapter as WorkspaceAdapter)
             },
           },
           // altimate_change end
@@ -192,7 +200,18 @@ const layer = Layer.effect(
           if (init._tag === "Some") hooks.push(init.value)
         }
 
-        const plugins = flags.pure ? [] : (cfg.plugin_origins ?? [])
+        // altimate_change start — upstream_fix: PR #18186 — keep Anthropic bundled as a provider.
+        // Upstream dropped Anthropic; the fork ships the anthropic-auth plugin by default, gated
+        // by the same flags as the other default plugins. Origin (not a bare spec string) because
+        // PluginLoader.loadExternal indexes items by `.spec` — a raw string here crashes
+        // isDeprecatedPlugin() with `spec.includes is not a function`.
+        const BUILTIN: ConfigPlugin.Origin[] = [
+          { spec: "opencode-anthropic-auth@0.0.13", source: "builtin", scope: "global" },
+        ]
+        const plugins: ConfigPlugin.Origin[] = flags.pure
+          ? []
+          : [...(flags.disableDefaultPlugins ? [] : BUILTIN), ...(cfg.plugin_origins ?? [])]
+        // altimate_change end
         if (flags.pure && cfg.plugin_origins?.length) {
         }
         if (plugins.length) yield* config.waitForDependencies()
@@ -339,7 +358,11 @@ const layer = Layer.effect(
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
 export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(Layer.provide(EventV2Bridge.defaultLayer), Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.defaultLayer)),
+  layer.pipe(
+    Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(RuntimeFlags.defaultLayer),
+  ),
 )
 // altimate_change end
 
@@ -347,7 +370,7 @@ export const defaultLayer = Layer.suspend(() =>
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: () => [EventV2Bridge.node, Config.node, RuntimeFlags.node],
+  deps: LayerNode.lazy(() => [EventV2Bridge.node, Config.node, RuntimeFlags.node]),
 })
 // altimate_change end
 

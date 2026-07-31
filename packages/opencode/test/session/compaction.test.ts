@@ -50,8 +50,7 @@ const compactionEffect = {
         model: { providerID: ProviderID.make(input.model.providerID), modelID: ModelID.make(input.model.modelID) },
       }),
     ),
-  prune: (input: Parameters<typeof SessionCompaction.prune>[0]) =>
-    Effect.promise(() => SessionCompaction.prune(input)),
+  prune: (input: Parameters<typeof SessionCompaction.prune>[0]) => Effect.promise(() => SessionCompaction.prune(input)),
 }
 
 // `process` is an imperative async fn taking an AbortSignal. Effect.promise hands us a
@@ -379,7 +378,11 @@ function llm() {
   > = []
 
   return {
-    push(stream: Stream.Stream<LLMEvent, unknown> | ((input: Omit<LLM.StreamInput, "abort">) => Stream.Stream<LLMEvent, unknown>)) {
+    push(
+      stream:
+        | Stream.Stream<LLMEvent, unknown>
+        | ((input: Omit<LLM.StreamInput, "abort">) => Stream.Stream<LLMEvent, unknown>),
+    ) {
       queue.push(stream)
     },
     llmLayer: Layer.succeed(
@@ -971,7 +974,10 @@ describe("session.compaction.process", () => {
       const unsub = yield* events.listen((evt) => {
         seen.push(evt.type)
         if (evt.type !== SessionCompaction.Event.Compacted.type) return Effect.void
-        if ((evt.data as typeof SessionCompaction.Event.Compacted.data.Type).sessionID !== session.id)
+        // altimate_change start — upstream_fix: SessionCompaction.Event.Compacted is a fork
+        // BusEvent (Zod `.properties`), not an EventV2 Definition (Effect Schema `.data`/`.Type`)
+        if ((evt.data as { sessionID: SessionID }).sessionID !== session.id)
+          // altimate_change end
           return Effect.void
         Deferred.doneUnsafe(done, Effect.void)
         return Effect.void
@@ -1345,12 +1351,11 @@ describe("session.compaction.process", () => {
         yield* Effect.addFinalizer(() => off)
 
         const fiber = yield* runCompactionProcess({
-            parentID: msg.id,
-            messages: msgs,
-            sessionID: session.id,
-            auto: false,
-          })
-          .pipe(Effect.forkChild)
+          parentID: msg.id,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        }).pipe(Effect.forkChild)
 
         yield* Deferred.await(ready).pipe(Effect.timeout("5 seconds"))
         const start = Date.now()
@@ -1378,12 +1383,11 @@ describe("session.compaction.process", () => {
           const msg = yield* createUserMessage(session.id, "hello")
           const msgs = yield* ssn.messages({ sessionID: session.id })
           const fiber = yield* runCompactionProcess({
-              parentID: msg.id,
-              messages: msgs,
-              sessionID: session.id,
-              auto: false,
-            })
-            .pipe(Effect.forkChild)
+            parentID: msg.id,
+            messages: msgs,
+            sessionID: session.id,
+            auto: false,
+          }).pipe(Effect.forkChild)
 
           yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
           yield* Fiber.interrupt(fiber)

@@ -1,5 +1,7 @@
 // altimate_change start — re-export shim: permission/schema moved to @opencode-ai/core.
-export * from "@opencode-ai/core/permission/schema"
+// upstream_fix: the target moved again from `permission/schema` to the top-level `permission`
+// module (`packages/core/src/permission.ts`) during the v1.18.10 makeGlobalNode migration.
+export * from "@opencode-ai/core/permission"
 
 // Restore the fork's PermissionID brand. Core's permission/schema only ships the
 // PermissionV2 rule/effect schemas, not the request ID. Fork consumers

@@ -105,22 +105,33 @@ describe("v2 location HttpApi", () => {
     }
   })
 
-  test("streams native EventV2 payloads across locations", async () => {
-    await using subscriber = await tmpdir({ git: true })
-    await using publisher = await tmpdir({ git: true })
-    const response = await request("/api/event", subscriber.path)
+  // altimate_change start — upstream_fix: upstream's /api/event is a single-location
+  // global broadcast (no filtering, no location on server.connected — see
+  // @opencode-ai/server handlers/event.ts at v1.18.10). The fork's EventV2.Service is a
+  // single global bus SHARED by every location/workspace this server process hosts
+  // (packages/server/src/handlers/event.ts, added in the v1.17.9 reconciliation), so the
+  // subscribe handler deliberately scopes the stream to the connecting client's own
+  // project/workspace and stamps the resolved Location.Info onto server.connected. Without
+  // this, any client subscribed to /api/event would see every other project's session and
+  // file events too — a cross-tenant leak this fork's multi-workspace server model can't
+  // allow. This test exercises that isolation directly instead of upstream's cross-location
+  // broadcast semantics.
+  test("streams native EventV2 payloads scoped to the connecting location", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const response = await request("/api/event", tmp.path)
     const reader = eventStream(response.body!)
     const connected = await readEvent(reader)
     expect(connected.type).toBe("server.connected")
-    expect(connected.location).toBeUndefined()
+    expect(connected.location).toMatchObject({ directory: tmp.path })
 
-    const created = await request("/session", publisher.path, { method: "POST" })
+    const created = await request("/session", tmp.path, { method: "POST" })
     expect(created.status).toBe(200)
     expect(await readEventType(reader, "session.created")).toMatchObject({
       type: "session.created",
-      location: { directory: publisher.path },
+      location: { directory: tmp.path },
       data: { sessionID: expect.any(String) },
     })
     await reader.return(undefined)
   })
 })
+// altimate_change end

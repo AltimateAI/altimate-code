@@ -50,19 +50,21 @@ const layer = Layer.effect(
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(ShareNext.defaultLayer),
-  Layer.provide(Session.defaultLayer),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(RuntimeFlags.defaultLayer),
-))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(ShareNext.defaultLayer),
+    Layer.provide(Session.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(RuntimeFlags.defaultLayer),
+  ),
+)
 // altimate_change end
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: () => [Config.node, Session.node, ShareNext.node, RuntimeFlags.node],
+  deps: LayerNode.lazy(() => [Config.node, Session.node, ShareNext.node, RuntimeFlags.node]),
 })
 // altimate_change end
 

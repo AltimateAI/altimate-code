@@ -13,7 +13,6 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Session } from "@/session/session"
 import type { SessionPrompt } from "../../src/session/prompt"
-import type { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
@@ -117,7 +116,10 @@ function stubOps(opts?: { onPrompt?: (input: SessionPrompt.PromptInput) => void;
   }
 }
 
-function reply(input: SessionPrompt.PromptInput, text: string): MessageV2.WithParts {
+// altimate_change start — upstream_fix: TaskPromptOps.prompt returns SessionV1.WithParts
+// (core-branded ProviderV2.ID/ModelV2.ID), not MessageV2.WithParts (fork-branded
+// ProviderID/ModelID) — re-brand the model ids at this adapter boundary.
+function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithParts {
   const id = MessageID.ascending()
   return {
     info: {
@@ -130,8 +132,8 @@ function reply(input: SessionPrompt.PromptInput, text: string): MessageV2.WithPa
       cost: 0,
       path: { cwd: "/tmp", root: "/tmp" },
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-      modelID: input.model?.modelID ?? ref.modelID,
-      providerID: input.model?.providerID ?? ref.providerID,
+      modelID: ModelV2.ID.make(input.model?.modelID ?? ref.modelID),
+      providerID: ProviderV2.ID.make(input.model?.providerID ?? ref.providerID),
       time: { created: Date.now() },
       finish: "stop",
     },
@@ -146,6 +148,7 @@ function reply(input: SessionPrompt.PromptInput, text: string): MessageV2.WithPa
     ],
   }
 }
+// altimate_change end
 
 describe("tool.task", () => {
   it.instance(

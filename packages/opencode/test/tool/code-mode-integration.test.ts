@@ -133,10 +133,16 @@ async function buildTool() {
   await client.connect()
 
   const listed = (await client.listTools()).tools as MCPToolDef[]
-  const mcpTools: Record<string, MCP.McpTool> = {}
+  // altimate_change start — upstream_fix: MCP.Service.tools() now returns `McpTool & {clientName}`
+  const mcpTools: Record<string, MCP.McpTool & { clientName: string }> = {}
   for (const def of listed) {
-    mcpTools[McpCatalog.toolName(SERVER, def.name)] = { def, client: client as unknown as Client }
+    mcpTools[McpCatalog.toolName(SERVER, def.name)] = {
+      def,
+      client: client as unknown as Client,
+      clientName: SERVER,
+    }
   }
+  // altimate_change end
 
   const layer = Layer.mergeAll(
     Layer.mock(Plugin.Service, {
@@ -248,7 +254,13 @@ describe("code mode integration (real MCP server)", () => {
     `)
     expect(out.output).toBe("two shots: 2")
     expect(out.attachments).toHaveLength(2)
-    expect(out.metadata.toolCalls.map((c) => c.tool)).toEqual(["fixtures.screenshot", "fixtures.screenshot"])
+    // altimate_change start — upstream_fix: CodeModeTool's Metadata generic isn't inferred through
+    // buildTool()'s Tool.init() chain, widening toolCalls to `any[]`; annotate explicitly.
+    expect(out.metadata.toolCalls.map((c: { tool: string }) => c.tool)).toEqual([
+      "fixtures.screenshot",
+      "fixtures.screenshot",
+    ])
+    // altimate_change end
   })
 
   test("propagates an MCP isError into the program as a catchable error", async () => {

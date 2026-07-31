@@ -843,7 +843,8 @@ const layer: Layer.Layer<
       if (input.limit) {
         // altimate_change start — MessageV2.page is now a synchronous helper (ambient Database.use),
         // not an Effect; its MessageV2.WithParts items are runtime-identical to SessionV1.WithParts.
-        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items as unknown as SessionV1.WithParts[]
+        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit })
+          .items as unknown as SessionV1.WithParts[]
         // altimate_change end
       }
 
@@ -954,14 +955,22 @@ const layer: Layer.Layer<
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(BackgroundJob.defaultLayer),
-  Layer.provide(Database.defaultLayer),
-  Layer.provide(EventV2Bridge.defaultLayer),
-  Layer.provide(SessionExecution.noopLayer),
-  Layer.provide(SessionV2.defaultLayer),
-  Layer.provide(RuntimeFlags.defaultLayer),
-))
+// upstream_fix: SessionV2.defaultLayer itself still requires SessionExecution.Service (it's
+// intentionally left unbound there — see core/session.ts). `Layer.provide` only satisfies
+// requirements that exist in the accumulator *at the point it's applied*, so the noop must be
+// provided *after* SessionV2.defaultLayer is folded in, not before — otherwise SessionV2's own
+// residual SessionExecution requirement leaks out unsatisfied and the whole layer dies at
+// runtime with "Service not found: SessionExecution".
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(BackgroundJob.defaultLayer),
+    Layer.provide(Database.defaultLayer),
+    Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(SessionV2.defaultLayer),
+    Layer.provide(SessionExecution.noopLayer),
+    Layer.provide(RuntimeFlags.defaultLayer),
+  ),
+)
 // altimate_change end
 
 const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function* (
@@ -1048,7 +1057,7 @@ function listByProject(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: () => [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
+  deps: LayerNode.lazy(() => [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node]),
 })
 // altimate_change end
 

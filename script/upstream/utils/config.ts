@@ -96,6 +96,13 @@ const urlRules: StringReplacement[] = [
     description: "Dev subdomain",
   },
   {
+    // Regex-escaped form first (e.g. CORS origin patterns like /opencode\.ai$/) so the
+    // escaped dot survives the rewrite — the plain rule below would leave `opencode\` behind.
+    pattern: /opencode\\\.ai/g,
+    replacement: "altimate\\.ai",
+    description: "Root domain (regex-escaped)",
+  },
+  {
     pattern: /opencode\.ai/g,
     replacement: "altimate.ai",
     description: "Root domain",
@@ -501,7 +508,7 @@ export const defaultConfig: MergeConfig = {
     // Provider and auth endpoints may key allowlists on the legacy
     // opencode/${version} User-Agent, so outbound provider UA strings stay
     // compatibility-branded even though UI copy is Altimate-branded.
-    "\"User-Agent\": `opencode/${InstallationVersion}",
+    '"User-Agent": `opencode/${InstallationVersion}',
     // The native Effect embedding API intentionally exports OpenCode-named
     // symbols/context ids for downstream compatibility.
     "export { OpenCode } from",
@@ -515,6 +522,15 @@ export const defaultConfig: MergeConfig = {
     "opencode-web-ui.gen.ts",
     // Historical compatibility note in the shared LLM package, not product copy.
     "OpenCode's historical Gemini rules",
+    // AI-gateway provider plugins (kilo/llmgateway/nvidia/openrouter/vercel/zenmux) key their
+    // own allowlists and (for NVIDIA) billing attribution on these exact legacy identity header
+    // values. HTTP-Referer/http-referer may stay Altimate-branded; X-Title/x-title, X-Source, and
+    // X-BILLING-INVOKE-ORIGIN must not be re-branded.
+    'headers["X-Title"] = "opencode"',
+    'headers["X-Title"] ??= "opencode"',
+    'headers["x-title"] = "opencode"',
+    'headers["X-Source"] = "opencode"',
+    'headers["X-BILLING-INVOKE-ORIGIN"] ??= "OpenCode"',
     "@opencode-ai/",
     "packages/opencode",
     "OPENCODE_",

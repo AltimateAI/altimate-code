@@ -41,7 +41,7 @@ describe("NvidiaPlugin", () => {
         Existing: "value",
         "HTTP-Referer": "https://altimate.ai/",
         "X-Title": "opencode",
-        "X-BILLING-INVOKE-ORIGIN": "Altimate Code",
+        "X-BILLING-INVOKE-ORIGIN": "OpenCode",
       })
       expect((yield* catalog.provider.get(ProviderV2.ID.openrouter))?.request.headers).toEqual({})
     }),
@@ -64,7 +64,7 @@ describe("NvidiaPlugin", () => {
       expect((yield* catalog.provider.get(ProviderV2.ID.make("nvidia")))?.request.headers).toEqual({
         "HTTP-Referer": "https://altimate.ai/",
         "X-Title": "opencode",
-        "X-BILLING-INVOKE-ORIGIN": "Altimate Code",
+        "X-BILLING-INVOKE-ORIGIN": "OpenCode",
       })
     }),
   )

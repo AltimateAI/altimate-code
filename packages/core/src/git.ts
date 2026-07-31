@@ -945,6 +945,13 @@ const layer = Layer.effect(
 
 export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, AppProcess.node] })
 
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers. Removed upstream in the makeGlobalNode migration.
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(FSUtil.defaultLayer), Layer.provide(AppProcess.defaultLayer)),
+)
+// altimate_change end
+
 interface Result {
   readonly exitCode: number
   readonly text: string

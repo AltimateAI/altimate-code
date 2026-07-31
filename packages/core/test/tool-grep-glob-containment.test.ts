@@ -3,6 +3,8 @@ import os from "os"
 import fsp from "fs/promises"
 import nodePath from "path"
 import { Effect, Exit, Layer } from "effect"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Location } from "@opencode-ai/core/location"
 import { PermissionV2 } from "@opencode-ai/core/permission"
@@ -10,6 +12,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Global } from "@opencode-ai/core/global"
+import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { location } from "./fixture/location"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { GrepTool } from "@opencode-ai/core/tool/grep"
@@ -56,30 +59,22 @@ const permission = Layer.succeed(
     list: () => Effect.die("unused"),
   }),
 )
-const registry = ToolRegistry.defaultLayer.pipe(Layer.provide(permission))
 // realPath as identity (no symlinks on the test paths) — still exercises the FSUtil.contains rejection.
 const testFileSystem = Layer.effect(
   FSUtil.Service,
   FSUtil.Service.use((fs) => Effect.succeed(FSUtil.Service.of({ ...fs, realPath: (path) => Effect.succeed(path) }))),
 ).pipe(Layer.provide(FSUtil.defaultLayer))
-const infrastructure = Layer.mergeAll(
-  testFileSystem,
-  Layer.succeed(Location.Service, Location.Service.of(location({ directory: ROOT }))),
-  Global.layerWith({ data: Global.Path.data }),
-)
-const grepLayer = GrepTool.layer.pipe(
-  Layer.provide(registry),
-  Layer.provide(permission),
-  Layer.provide(ripgrep),
-  Layer.provide(infrastructure),
-)
-const globLayer = GlobTool.layer.pipe(
-  Layer.provide(registry),
-  Layer.provide(permission),
-  Layer.provide(ripgrep),
-  Layer.provide(infrastructure),
-)
-const it = testEffect(Layer.mergeAll(registry, permission, ripgrep, infrastructure, grepLayer, globLayer))
+const locationLayer = Layer.succeed(Location.Service, Location.Service.of(location({ directory: ROOT })))
+
+const testLayer = AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, GrepTool.node, GlobTool.node]), [
+  [PermissionV2.node, permission],
+  [Ripgrep.node, ripgrep],
+  [FSUtil.node, testFileSystem],
+  [Location.node, locationLayer],
+  [Global.node, Global.layerWith({ data: Global.Path.data })],
+  [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+])
+const it = testEffect(testLayer)
 const sessionID = SessionV2.ID.make("ses_grep_glob_containment")
 
 const grep = (id: string, input: { pattern: string; path?: string }) =>
@@ -198,21 +193,19 @@ describe("GrepTool real-symlink containment (real realPath)", () => {
 
   // Same ripgrep/permission/registry as above, but REAL FSUtil (real realPath) + Location = the temp
   // project. Location reads projectRoot lazily (Effect.sync) so it's set by beforeAll at run time.
-  const realInfra = Layer.mergeAll(
-    FSUtil.defaultLayer,
-    Layer.effect(
-      Location.Service,
-      Effect.sync(() => Location.Service.of(location({ directory: AbsolutePath.make(projectRoot) }))),
-    ),
-    Global.layerWith({ data: Global.Path.data }),
+  const realLocationLayer = Layer.effect(
+    Location.Service,
+    Effect.sync(() => Location.Service.of(location({ directory: AbsolutePath.make(projectRoot) }))),
   )
-  const realGrepLayer = GrepTool.layer.pipe(
-    Layer.provide(registry),
-    Layer.provide(permission),
-    Layer.provide(ripgrep),
-    Layer.provide(realInfra),
-  )
-  const realIt = testEffect(Layer.mergeAll(registry, permission, ripgrep, realInfra, realGrepLayer))
+  const realTestLayer = AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, GrepTool.node]), [
+    [PermissionV2.node, permission],
+    [Ripgrep.node, ripgrep],
+    [FSUtil.node, FSUtil.defaultLayer],
+    [Location.node, realLocationLayer],
+    [Global.node, Global.layerWith({ data: Global.Path.data })],
+    [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+  ])
+  const realIt = testEffect(realTestLayer)
 
   realIt.effect("dies on <symlink-to-outside>/<missing-leaf> and never invokes ripgrep", () =>
     Effect.gen(function* () {
@@ -221,7 +214,12 @@ describe("GrepTool real-symlink containment (real realPath)", () => {
       const exit = yield* executeTool(reg, {
         sessionID,
         ...toolIdentity,
-        call: { type: "tool-call", id: "g-symlink", name: "grep", input: { pattern: "TOPSECRET", path: "extlink/missing" } },
+        call: {
+          type: "tool-call",
+          id: "g-symlink",
+          name: "grep",
+          input: { pattern: "TOPSECRET", path: "extlink/missing" },
+        },
       }).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true) // contained → died
       expect(grepCalls.length).toBe(0) // ripgrep never ran → nothing outside was read
@@ -235,7 +233,12 @@ describe("GrepTool real-symlink containment (real realPath)", () => {
       const exit = yield* executeTool(reg, {
         sessionID,
         ...toolIdentity,
-        call: { type: "tool-call", id: "g-symlink-dir", name: "grep", input: { pattern: "TOPSECRET", path: "extlink" } },
+        call: {
+          type: "tool-call",
+          id: "g-symlink-dir",
+          name: "grep",
+          input: { pattern: "TOPSECRET", path: "extlink" },
+        },
       }).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
       expect(grepCalls.length).toBe(0)
@@ -252,7 +255,12 @@ describe("GrepTool real-symlink containment (real realPath)", () => {
       const exit = yield* executeTool(reg, {
         sessionID,
         ...toolIdentity,
-        call: { type: "tool-call", id: "g-symlink-file", name: "grep", input: { pattern: "TOPSECRET", path: "secretlink" } },
+        call: {
+          type: "tool-call",
+          id: "g-symlink-file",
+          name: "grep",
+          input: { pattern: "TOPSECRET", path: "secretlink" },
+        },
       }).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
       expect(grepCalls.length).toBe(0)

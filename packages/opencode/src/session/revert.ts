@@ -155,14 +155,14 @@ export const defaultLayer = Layer.suspend(() =>
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: () => [
+  deps: LayerNode.lazy(() => [
     Session.node,
     Snapshot.node,
     Storage.node,
     EventV2Bridge.node,
     SessionSummary.node,
     SessionRunState.node,
-  ],
+  ]),
 })
 // altimate_change end
 

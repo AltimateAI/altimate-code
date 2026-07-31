@@ -134,3 +134,14 @@ export const node = makeGlobalNode({
   layer: layer,
   deps: [FSUtil.node, Git.node, ProjectDirectories.node],
 })
+
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (project/project.ts). Removed upstream in the makeGlobalNode migration.
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(FSUtil.defaultLayer),
+    Layer.provide(Git.defaultLayer),
+    Layer.provide(ProjectDirectories.defaultLayer),
+  ),
+)
+// altimate_change end

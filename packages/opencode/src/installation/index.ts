@@ -1,5 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Effect, Layer, Schema, Context, Stream } from "effect"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -26,10 +26,11 @@ async function getTelemetry() {
 // altimate_change end
 
 // altimate_change start — curl-upgrade endpoint config
-// Upstream uses altimate.ai/install. We fetch the altimate install script
-// from www.altimate.sh/install (the apex altimate.sh isn't routed to the
-// Amplify Next.js app — tracked separately; revisit when apex DNS is fixed).
-// Bounded timeout so a stalled CDN/origin can't hang `altimate upgrade` forever.
+// Upstream's opencode fetches its install script from its own apex domain's /install path.
+// We fetch the altimate install script from www.altimate.sh/install instead (the apex
+// altimate.sh isn't routed to the Amplify Next.js app — tracked separately; revisit when
+// apex DNS is fixed). Bounded timeout so a stalled CDN/origin can't hang `altimate upgrade`
+// forever.
 const UPGRADE_INSTALL_URL = "https://www.altimate.sh/install"
 // Native Windows has no `bash`, so the curl-installed binary self-updates via
 // the PowerShell installer instead (downloads the same Bun exe from GitHub
@@ -171,45 +172,41 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
       return "sh"
     })
 
-    const upgradeCurl = Effect.fnUntraced(
-      function* (target: string) {
-        // altimate_change start — friendly fetch error + manual-recovery hint, branded install URL, bounded timeout
-        const response = yield* httpOk
-          .execute(HttpClientRequest.get(UPGRADE_INSTALL_URL))
-          .pipe(
-            Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
-            Effect.mapError(
-              (err) =>
-                new UpgradeFailedError({
-                  stderr:
-                    `Could not download install script from ${UPGRADE_INSTALL_URL}: ${errorMessage(err)}. ` +
-                    `Re-run the install manually: curl -fsSL ${UPGRADE_INSTALL_URL} | bash — ` +
-                    `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
-                }),
-            ),
-          )
-        const body = yield* response.text.pipe(
-          Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
-        )
-        // altimate_change end
-        const bodyBytes = new TextEncoder().encode(body)
-        const shell = yield* upgradeScriptShell()
-        const result = yield* appProcess
-          .run(
-            ChildProcess.make(shell, [], {
-              stdin: Stream.make(bodyBytes),
-              env: { VERSION: target },
-              extendEnv: true,
+    const upgradeCurl = Effect.fnUntraced(function* (target: string) {
+      // altimate_change start — friendly fetch error + manual-recovery hint, branded install URL, bounded timeout
+      const response = yield* httpOk.execute(HttpClientRequest.get(UPGRADE_INSTALL_URL)).pipe(
+        Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+        Effect.mapError(
+          (err) =>
+            new UpgradeFailedError({
+              stderr:
+                `Could not download install script from ${UPGRADE_INSTALL_URL}: ${errorMessage(err)}. ` +
+                `Re-run the install manually: curl -fsSL ${UPGRADE_INSTALL_URL} | bash — ` +
+                `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
             }),
-          )
-          .pipe(Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })))
-        return {
-          code: result.exitCode,
-          stdout: result.stdout.toString("utf8"),
-          stderr: result.stderr.toString("utf8"),
-        }
-      },
-    )
+        ),
+      )
+      const body = yield* response.text.pipe(
+        Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
+      )
+      // altimate_change end
+      const bodyBytes = new TextEncoder().encode(body)
+      const shell = yield* upgradeScriptShell()
+      const result = yield* appProcess
+        .run(
+          ChildProcess.make(shell, [], {
+            stdin: Stream.make(bodyBytes),
+            env: { VERSION: target },
+            extendEnv: true,
+          }),
+        )
+        .pipe(Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })))
+      return {
+        code: result.exitCode,
+        stdout: result.stdout.toString("utf8"),
+        stderr: result.stderr.toString("utf8"),
+      }
+    })
 
     // altimate_change start — Windows curl-install upgrade via PowerShell
     // The curl/standalone install on native Windows lives in %USERPROFILE%\.altimate\bin
@@ -219,20 +216,18 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
     const upgradePowershell = Effect.fnUntraced(function* (target: string) {
       // Probe-only fetch to surface a friendly error before we hand the URL to
       // PowerShell (which would otherwise fail opaquely inside `irm | iex`).
-      yield* httpOk
-        .execute(HttpClientRequest.head(UPGRADE_INSTALL_PS_URL))
-        .pipe(
-          Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
-          Effect.mapError(
-            (err) =>
-              new UpgradeFailedError({
-                stderr:
-                  `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${errorMessage(err)}. ` +
-                  `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
-                  `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
-              }),
-          ),
-        )
+      yield* httpOk.execute(HttpClientRequest.head(UPGRADE_INSTALL_PS_URL)).pipe(
+        Effect.timeout(UPGRADE_FETCH_TIMEOUT_MS),
+        Effect.mapError(
+          (err) =>
+            new UpgradeFailedError({
+              stderr:
+                `Could not download install script from ${UPGRADE_INSTALL_PS_URL}: ${errorMessage(err)}. ` +
+                `Re-run the install manually: powershell -c "irm ${UPGRADE_INSTALL_PS_URL} | iex" — ` +
+                `or download a release binary directly from https://github.com/AltimateAI/altimate-code/releases/latest`,
+            }),
+        ),
+      )
       return yield* run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `irm ${UPGRADE_INSTALL_PS_URL} | iex`],
         { env: { VERSION: target } },
@@ -368,8 +363,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         switch (m) {
           case "curl":
             // altimate_change start — native Windows has no bash; use the PS installer
-            upgradeResult =
-              process.platform === "win32" ? yield* upgradePowershell(target) : yield* upgradeCurl(target)
+            upgradeResult = process.platform === "win32" ? yield* upgradePowershell(target) : yield* upgradeCurl(target)
             // altimate_change end
             break
           case "npm":
@@ -421,11 +415,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
             return yield* new UpgradeFailedError({ stderr: `Unknown installation method: ${m}` })
         }
         // altimate_change start — telemetry for upgrade result
-        const telemetryMethod = (["npm", "bun", "brew"].includes(m) ? m : "other") as
-          | "npm"
-          | "bun"
-          | "brew"
-          | "other"
+        const telemetryMethod = (["npm", "bun", "brew"].includes(m) ? m : "other") as "npm" | "bun" | "brew" | "other"
         if (!upgradeResult || upgradeResult.code !== 0) {
           const stderr = upgradeFailure(m, upgradeResult)
           const T = yield* Effect.promise(() => getTelemetry())
@@ -468,9 +458,16 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [httpClient, AppProcess.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [httpClient, AppProcess.node]),
+})
 
-const { runPromise } = makeRuntime(Service, AppNodeBuilder.build(node))
+const { runPromise } = makeRuntime(
+  Service,
+  Layer.suspend(() => AppNodeBuilderV1.build(node)),
+)
 
 export const latest = (...args: Parameters<Interface["latest"]>) => runPromise((s) => s.latest(...args))
 export const method = () => runPromise((s) => s.method())

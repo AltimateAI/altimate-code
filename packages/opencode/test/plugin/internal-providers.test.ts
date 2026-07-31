@@ -16,7 +16,10 @@ describe("plugin.internal-providers", () => {
       expect(src).toContain(`import { ${provider.name} } from "${provider.importPath}"`)
     }
 
-    const match = src.match(/const INTERNAL_PLUGINS: PluginInstance\[\] = \[([\s\S]*?)\n\s*\]/)
+    // internalPlugins() was refactored from a plain `const INTERNAL_PLUGINS` array into a
+    // function of RuntimeFlags (so default-plugin gating can vary per-flags); match its
+    // `return [...]` body instead of the old top-level const.
+    const match = src.match(/function internalPlugins\([^)]*\): PluginInstance\[\] \{\s*return \[([\s\S]*?)\n\s*\]/)
     expect(match).not.toBeNull()
 
     const block = match![1]

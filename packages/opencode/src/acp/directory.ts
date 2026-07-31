@@ -137,7 +137,11 @@ export const loaderLayer = Layer.effect(
           )
           return build({
             directory,
-            providers,
+            // altimate_change start — upstream_fix: fork Provider.Service.list() returns
+            // Record<ProviderID, Provider.Info>; re-brand to core ProviderV2.ID keys (identity at
+            // runtime, matches the per-model re-branding already done inside build()).
+            providers: providers as Record<ProviderV2.ID, Provider.Info>,
+            // altimate_change end
             modes: agents
               .filter((item) => item.mode !== "subagent" && item.hidden !== true)
               .map((item) => ({
@@ -147,7 +151,17 @@ export const loaderLayer = Layer.effect(
               })),
             defaultModeID: defaultAgent.name,
             commands: commands.toSorted((a, b) => a.name.localeCompare(b.name)),
-            ...(defaultModel._tag === "Some" ? { defaultModel: defaultModel.value } : {}),
+            // altimate_change start — upstream_fix: re-brand fork ProviderID/ModelID to core
+            // ProviderV2.ID/ModelV2.ID (identity at runtime)
+            ...(defaultModel._tag === "Some"
+              ? {
+                  defaultModel: {
+                    providerID: ProviderV2.ID.make(defaultModel.value.providerID),
+                    modelID: ModelV2.ID.make(defaultModel.value.modelID),
+                  },
+                }
+              : {}),
+            // altimate_change end
           })
         }).pipe(Effect.provideService(InstanceRef, ctx))
       }),
@@ -218,9 +232,9 @@ const layer = Layer.effect(
 export const loaderNode = LayerNode.make({
   service: Loader,
   layer: loaderLayer,
-  deps: [Provider.node, Agent.node, Command.node, InstanceStore.node],
+  deps: LayerNode.lazy(() => [Provider.node, Agent.node, Command.node, InstanceStore.node]),
 })
 
-export const node = LayerNode.make({ service: Service, layer, deps: [loaderNode] })
+export const node = LayerNode.make({ service: Service, layer, deps: LayerNode.lazy(() => [loaderNode]) })
 
 export * as Directory from "./directory"

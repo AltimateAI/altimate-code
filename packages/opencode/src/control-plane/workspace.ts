@@ -714,20 +714,26 @@ const layer = Layer.effect(
     })
 
     const list = Effect.fn("Workspace.list")(function* (project: Project.Info) {
-      return (yield* db
-        .select()
-        .from(WorkspaceTable)
-        .where(eq(WorkspaceTable.project_id, ProjectV2.ID.make(project.id)))
-        .all()
-        .pipe(Effect.orDie))
-        .map(fromRow)
-        .sort((a, b) => a.id.localeCompare(b.id))
+      return (
+        (yield* db
+          .select()
+          .from(WorkspaceTable)
+          // altimate_change start — re-brand the legacy Project id to ProjectV2.ID at the DB boundary
+          .where(eq(WorkspaceTable.project_id, ProjectV2.ID.make(project.id)))
+          // altimate_change end
+          .all()
+          .pipe(Effect.orDie))
+          .map(fromRow)
+          .sort((a, b) => a.id.localeCompare(b.id))
+      )
     })
 
     const syncList = Effect.fn("Workspace.syncList")(function* (project: Project.Info) {
       const names = new Set((yield* list(project)).map((workspace) => workspace.name))
       const discovered = yield* Effect.forEach(
+        // altimate_change start — re-brand the legacy Project id to ProjectV2.ID
         registeredAdapters(ProjectV2.ID.make(project.id)),
+        // altimate_change end
         ([type, adapter]) =>
           WorkspaceAdapterRuntime.list(adapter).pipe(
             Effect.catchCause((error) =>
@@ -948,7 +954,7 @@ function route(url: string | URL, path: string) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [
+  deps: LayerNode.lazy(() => [
     Auth.node,
     Session.node,
     SessionPrompt.node,
@@ -958,7 +964,7 @@ export const node = LayerNode.make({
     RuntimeFlags.node,
     FSUtil.node,
     Database.node,
-  ],
+  ]),
 })
 
 export * as Workspace from "./workspace"

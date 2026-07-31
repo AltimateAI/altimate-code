@@ -507,10 +507,7 @@ export namespace ToolRegistry {
     return all(plugins, configInput)
   }
 
-  export async function ids(
-    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
-    configInput?: RegistryConfigInput,
-  ) {
+  export async function ids(plugins?: Awaited<ReturnType<typeof Plugin.list>>, configInput?: RegistryConfigInput) {
     return all(plugins, configInput).then((x) => x.map((t) => t.id))
   }
   // altimate_change end
@@ -624,10 +621,7 @@ export namespace ToolRegistry {
             })
           : Effect.succeed(undefined)
       const bridgeWithPlugins = <T>(
-        fn: (
-          plugins?: Awaited<ReturnType<typeof Plugin.list>>,
-          configInput?: RegistryConfigInput,
-        ) => Promise<T>,
+        fn: (plugins?: Awaited<ReturnType<typeof Plugin.list>>, configInput?: RegistryConfigInput) => Promise<T>,
       ): Effect.Effect<T> =>
         Effect.gen(function* () {
           const plugins = yield* resolvePlugins()
@@ -655,8 +649,13 @@ export namespace ToolRegistry {
 
   export const defaultLayer = layer
 
-  // altimate_change start — declare Plugin.node so swapped Plugin.Service layers reach this layer
-  export const node = LayerNode.make(layer, () => [Plugin.node, RuntimeFlags.node, Config.node])
+  // altimate_change start — declare Plugin.node so swapped Plugin.Service layers reach this layer;
+  // lazy deps: Plugin/Config are cyclic fork facades
+  export const node = LayerNode.make({
+    name: "opencode/tool-registry",
+    layer: layer,
+    deps: LayerNode.lazy(() => [Plugin.node, RuntimeFlags.node, Config.node]),
+  })
   // altimate_change end
-  // altimate_change end
+  // altimate_change end — closes the Effect Context.Service facade block
 }

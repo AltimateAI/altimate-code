@@ -31,7 +31,11 @@ function fakeInstance(directory = "/tmp/upi-runtime") {
 describe("UPI-01 runtime graph: lazy layers and explicit cycle failures", () => {
   test("LayerNode dependency thunks are resolved at build time, after cyclic imports settle", () => {
     let dependency: any
-    const root = LayerNode.make({ name: "upi-root", layer: Layer.empty as any, deps: (() => [dependency]) as any })
+    const root = LayerNode.make({
+      name: "upi-root",
+      layer: Layer.empty as any,
+      deps: LayerNode.lazy(() => [dependency]),
+    })
     dependency = LayerNode.make({ name: "upi-dep", layer: Layer.empty as any, deps: [] as any })
 
     expect(() => LayerNode.compile(root as any)).not.toThrow()
@@ -40,18 +44,20 @@ describe("UPI-01 runtime graph: lazy layers and explicit cycle failures", () => 
   test("LayerNode reports an explicit cycle path instead of failing with undefined deps", () => {
     let a: any
     let b: any
-    a = LayerNode.make({ name: "upi-a", layer: Layer.empty as any, deps: (() => [b]) as any })
-    b = LayerNode.make({ name: "upi-b", layer: Layer.empty as any, deps: (() => [a]) as any })
+    a = LayerNode.make({ name: "upi-a", layer: Layer.empty as any, deps: LayerNode.lazy(() => [b]) })
+    b = LayerNode.make({ name: "upi-b", layer: Layer.empty as any, deps: LayerNode.lazy(() => [a]) })
 
     expect(() => LayerNode.compile(a as any)).toThrow(/Cycle detected in layer tree: .+ -> .+/)
   })
 
-  test("AppLayer defers defaultLayer reads for the circular service graph", async () => {
+  test("AppLayer defers node reads for the circular service graph", async () => {
     const source = await readSrc("effect", "app-runtime.ts")
     expect(source).toContain("export const AppLayer = Layer.suspend(() =>")
 
+    // v1.18.10: AppLayer composes LayerNode `.node` exports (not per-service defaultLayers);
+    // the suspension still defers reading the cyclic facades until first build.
     for (const service of ["Config", "Provider", "ToolRegistry", "SessionPrompt", "MCP", "LSP", "Permission"]) {
-      expect(source).toContain(`${service}.defaultLayer`)
+      expect(source).toContain(`${service}.node`)
     }
   })
 
@@ -68,7 +74,7 @@ describe("UPI-01 runtime graph: lazy layers and explicit cycle failures", () => 
 
     for (const [file, label] of files) {
       const source = stripComments(await readSrc(...file.split("/")))
-      expect(source, `${label} should defer LayerNode dependencies`).toMatch(/deps:\s*\(\)\s*=>\s*\[/s)
+      expect(source, `${label} should defer LayerNode dependencies`).toMatch(/deps:\s*LayerNode\.lazy\(\(\)\s*=>\s*\[/s)
     }
   })
 })
@@ -149,7 +155,11 @@ describe("UPI-05 through UPI-07 session split invariants", () => {
 
   test("Effect Session rows preserve path, agent, model, metadata, tokens, and permission copies", async () => {
     const source = await readSrc("session", "session.ts")
-    for (const field of ["path: row.path ?? undefined", "agent: row.agent ?? undefined", "metadata: row.metadata ?? undefined"]) {
+    for (const field of [
+      "path: row.path ?? undefined",
+      "agent: row.agent ?? undefined",
+      "metadata: row.metadata ?? undefined",
+    ]) {
       expect(source).toContain(field)
     }
     expect(source).toContain("permission: row.permission ? [...row.permission] : undefined")
@@ -160,8 +170,14 @@ describe("UPI-05 through UPI-07 session split invariants", () => {
 
   test("Effect session create/update publish through EventV2Bridge instead of direct legacy Bus writes", async () => {
     const source = await readSrc("session", "session.ts")
-    const createBody = source.slice(source.indexOf('Effect.fn("Session.createNext"'), source.indexOf('const get = Effect.fn("Session.get"'))
-    const patchBody = source.slice(source.indexOf("const patch ="), source.indexOf('const touch = Effect.fn("Session.touch"'))
+    const createBody = source.slice(
+      source.indexOf('Effect.fn("Session.createNext"'),
+      source.indexOf('const get = Effect.fn("Session.get"'),
+    )
+    const patchBody = source.slice(
+      source.indexOf("const patch ="),
+      source.indexOf('const touch = Effect.fn("Session.touch"'),
+    )
 
     expect(createBody).toContain("events.publish(SessionV1.Event.Created")
     expect(patchBody).toContain("events.publish(SessionV1.Event.Updated")
@@ -170,7 +186,10 @@ describe("UPI-05 through UPI-07 session split invariants", () => {
 
   test("PartDelta remains on the legacy Bus because it is not a core EventV2 definition", async () => {
     const source = await readSrc("session", "session.ts")
-    const body = source.slice(source.indexOf('const updatePartDelta = Effect.fnUntraced'), source.indexOf("return Service.of", source.indexOf('const updatePartDelta = Effect.fnUntraced')))
+    const body = source.slice(
+      source.indexOf("const updatePartDelta = Effect.fnUntraced"),
+      source.indexOf("return Service.of", source.indexOf("const updatePartDelta = Effect.fnUntraced")),
+    )
 
     expect(body).toContain("Bus.publish(MessageV2.Event.PartDelta")
     expect(body).not.toContain("events.publish")

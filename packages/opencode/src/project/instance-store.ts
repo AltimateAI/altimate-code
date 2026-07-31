@@ -207,7 +207,7 @@ export const bootstrapNode = LayerNode.unbound(InstanceBootstrap.Service, Node.t
 export const node = makeGlobalNode({
   service: Service,
   layer: layer,
-  deps: [Project.node, bootstrapNode],
+  deps: LayerNode.lazy(() => [Project.node, bootstrapNode]),
 })
 
 export * as InstanceStore from "./instance-store"

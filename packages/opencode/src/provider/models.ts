@@ -22,6 +22,15 @@ export namespace ModelsDev {
   )
   const ttl = 5 * 60 * 1000
 
+  // altimate_change start — upstream addition (v1.18.10): declarative reasoning_options metadata
+  // (drives ProviderTransform.reasoningVariants instead of the model-ID heuristic)
+  const ReasoningOption = z.union([
+    z.object({ type: z.literal("effort"), values: z.array(z.string().nullable()) }),
+    z.object({ type: z.literal("toggle") }),
+    z.object({ type: z.literal("budget_tokens"), min: z.number().optional(), max: z.number().optional() }),
+  ])
+  // altimate_change end
+
   export const Model = z.object({
     id: z.string(),
     name: z.string(),
@@ -31,6 +40,9 @@ export namespace ModelsDev {
     reasoning: z.boolean(),
     temperature: z.boolean(),
     tool_call: z.boolean(),
+    // altimate_change start — upstream addition (v1.18.10)
+    reasoning_options: z.array(ReasoningOption).optional(),
+    // altimate_change end
     interleaved: z
       .union([
         z.literal(true),
@@ -68,7 +80,42 @@ export namespace ModelsDev {
         output: z.array(z.enum(["text", "audio", "image", "video", "pdf"])),
       })
       .optional(),
-    experimental: z.boolean().optional(),
+    // altimate_change start — upstream addition (v1.18.10): per-model "modes" that generate
+    // derived model entries (e.g. "-fast"/"-pro") with mode-specific cost/options overrides
+    experimental: z
+      .object({
+        modes: z
+          .record(
+            z.string(),
+            z.object({
+              cost: z
+                .object({
+                  input: z.number(),
+                  output: z.number(),
+                  cache_read: z.number().optional(),
+                  cache_write: z.number().optional(),
+                  context_over_200k: z
+                    .object({
+                      input: z.number(),
+                      output: z.number(),
+                      cache_read: z.number().optional(),
+                      cache_write: z.number().optional(),
+                    })
+                    .optional(),
+                })
+                .optional(),
+              provider: z
+                .object({
+                  body: z.record(z.string(), z.any()).optional(),
+                  headers: z.record(z.string(), z.string()).optional(),
+                })
+                .optional(),
+            }),
+          )
+          .optional(),
+      })
+      .optional(),
+    // altimate_change end
     status: z.enum(["alpha", "beta", "deprecated"]).optional(),
     options: z.record(z.string(), z.any()),
     headers: z.record(z.string(), z.string()).optional(),

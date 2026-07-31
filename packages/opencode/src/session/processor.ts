@@ -24,7 +24,7 @@ import { Telemetry } from "@/altimate/telemetry"
 // a Service. The fork keeps the imperative `create()` namespace function below; this is a
 // thin delegating facade that preserves behavior exactly.
 //
-// UNSURE / NEEDS FOLLOW-UP: upstream v1.18.10 fully rewrote this file as an Effect-native
+// FOLLOW-UP: upstream v1.18.10 fully rewrote this file as an Effect-native
 // `Layer.effect` service (pulling in Permission.Service, Image.Service, Database.Service,
 // EventV2Bridge, Scope, Deferred, Usage/LLMEvent) instead of the fork's imperative factory +
 // delegating facade. That rewrite was NOT ported in here — reconciling ~15 interleaved
@@ -37,6 +37,19 @@ import { Telemetry } from "@/altimate/telemetry"
 // upstream's new processor architecture with each fork behavior re-verified individually.
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
+// altimate_change end
+// altimate_change start — upstream_fix: bridge Effect's FiberRef-scoped InstanceRef into the
+// legacy AsyncLocalStorage instance context for the whole lifetime of `process()`. `process()` is
+// a plain async function that `await`s across many real Promise boundaries (LLM.stream, tool
+// execution, SessionStatus.set, Bus.publish, ...); Effect's "current fiber" tracking (which the
+// ambient Promise facades in run-service.ts's attach() rely on) does not survive those boundaries,
+// so nested ambient calls die with "InstanceRef not provided" once no ALS scope is active. Capture
+// InstanceRef once, synchronously, when the processor is created (a proper Effect context — see
+// the layer below) and re-establish it via Instance.restore for the entire process() call, the
+// same mechanism production's HTTP-request boundary and the test-only withLegacyInstance helper
+// each independently rely on.
+import { InstanceRef } from "@/effect/instance-ref"
+import { Instance } from "@/project/instance"
 // altimate_change end
 
 export namespace SessionProcessor {
@@ -713,7 +726,22 @@ export namespace SessionProcessor {
   export const layer = Layer.succeed(
     Service,
     Service.of({
-      create: (input: CreateInput) => Effect.sync(() => create(input)),
+      // altimate_change start — upstream_fix: see the InstanceRef/Instance.restore import marker
+      // above. Capture the instance context here (a real Effect context, so InstanceRef resolves
+      // reliably) and wrap `process` so every call re-enters that ALS scope for its whole async
+      // lifetime, not just its first synchronous tick.
+      create: (input: CreateInput) =>
+        Effect.gen(function* () {
+          const instance = yield* InstanceRef
+          const info = create(input)
+          if (!instance) return info
+          const process = info.process.bind(info)
+          return {
+            ...info,
+            process: (streamInput) => Instance.restore(instance, () => process(streamInput)),
+          }
+        }),
+      // altimate_change end
     }),
   )
 
@@ -723,4 +751,5 @@ export namespace SessionProcessor {
   // pure sync wrapper with no Effect service dependencies.
   export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
+  // altimate_change end — closes the Effect Context.Service facade block
 }

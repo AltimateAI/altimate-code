@@ -19,7 +19,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { WorktreeEvent } from "@opencode-ai/schema/worktree-event"
 // altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrappers (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 
 export const Event = WorktreeEvent
@@ -625,14 +625,22 @@ const layer: Layer.Layer<
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, path, AppProcess.node, Git.node, Project.node, InstanceStore.node, Database.node],
+  deps: LayerNode.lazy(() => [
+    FSUtil.node,
+    path,
+    AppProcess.node,
+    Git.node,
+    Project.node,
+    InstanceStore.node,
+    Database.node,
+  ]),
 })
 
 // altimate_change start — restore the imperative Promise wrappers the server routes
 // (server/routes/experimental.ts) call from plain async code. The makeRuntime bridge keeps
 // the worktree operations bound to the active workspace/instance. defaultLayer is compiled
 // from `node` since per-service `.defaultLayer` facades were dropped upstream.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runWorktree } = makeRuntime(Service, defaultLayer)
 export function create(input?: CreateInput) {
   return runWorktree((svc) => svc.create(input))

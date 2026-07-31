@@ -1,7 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrapper (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 import path from "path"
 import { Effect, Layer, Context, Schema } from "effect"
@@ -414,13 +414,20 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Discovery.node, Config.node, EventV2Bridge.node, FSUtil.node, Global.node, RuntimeFlags.node],
+  deps: LayerNode.lazy(() => [
+    Discovery.node,
+    Config.node,
+    EventV2Bridge.node,
+    FSUtil.node,
+    Global.node,
+    RuntimeFlags.node,
+  ]),
 })
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed. project-scan's
 // environment census calls `await Skill.all()` from plain async code; bind it through makeRuntime.
 // defaultLayer is compiled from `node` since per-service `.defaultLayer` facades were dropped upstream.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runSkill } = makeRuntime(Service, defaultLayer)
 export async function all() {
   return runSkill((svc) => svc.all())

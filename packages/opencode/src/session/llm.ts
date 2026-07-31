@@ -384,6 +384,7 @@ export namespace LLM {
   )
 
   export const defaultLayer = layer
+  // altimate_change end
 
   // altimate_change start — restore upstream's hasToolCalls re-export (consumed by
   // test/session/llm.test.ts); the fork's stream() implementation doesn't call it itself

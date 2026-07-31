@@ -293,7 +293,11 @@ export const defaultLayer = Layer.suspend(() =>
 )
 
 // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
-export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [Auth.node, Plugin.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [Auth.node, Plugin.node]),
+})
 // altimate_change end
 
 // altimate_change start — restore imperative Promise wrappers for the HTTP route layer

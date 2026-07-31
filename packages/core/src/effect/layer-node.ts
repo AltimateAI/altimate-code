@@ -29,6 +29,16 @@ const makeTag = Brand.nominal<Tag>()
 // Upstream call sites keep passing plain arrays and are unaffected.
 export type LazyDeps<Items extends NodeList> = Items | (() => Items)
 
+/**
+ * Wrap a dependency thunk for `deps:`. Type-erases to `Items` so upstream's
+ * `deps: Items & CheckDependencies<...>` inference is untouched for plain-array
+ * callers, while the thunk's return type still gets the same dependency check.
+ * `nodeDependencies` resolves the thunk at graph-consumption time.
+ */
+export function lazy<const Items extends NodeList>(thunk: () => Items): Items {
+  return thunk as unknown as Items
+}
+
 function nodeDependencies(node: AnyNode): readonly AnyNode[] {
   const deps = node.dependencies
   return typeof deps === "function" ? deps() : deps
@@ -90,9 +100,7 @@ type MakeInput<
   T extends Tag | undefined = undefined,
 > = NodeIdentity & {
   readonly layer: Implementation
-  // altimate_change start — upstream_fix: accept lazy deps (see LazyDeps above)
-  readonly deps: LazyDeps<Items> & CheckDependencies<Implementation, NoInfer<Items>>
-  // altimate_change end
+  readonly deps: Items & CheckDependencies<Implementation, NoInfer<Items>>
   readonly tag?: T
 }
 

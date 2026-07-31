@@ -1,7 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient, path } from "@opencode-ai/core/effect/app-node-platform"
 // altimate_change start — AppNodeBuilder + makeRuntime for the restored Promise wrapper (see bottom of file)
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 import { Effect, Layer, Path, Schema, Context } from "effect"
@@ -138,12 +138,16 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [FSUtil.node, path, httpClient] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [FSUtil.node, path, httpClient]),
+})
 
 // altimate_change start — restore the imperative Promise wrapper the fork's skill/skill.ts
 // (`await Discovery.pull(url)`) calls from plain async code. defaultLayer is compiled from
 // `node` since per-service `.defaultLayer` facades were dropped upstream.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise } = makeRuntime(Service, defaultLayer)
 export async function pull(url: string): Promise<string[]> {
   return runPromise((service) => service.pull(url))

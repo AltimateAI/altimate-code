@@ -12,7 +12,8 @@ export const VercelPlugin = define({
           evt.provider.update(item.provider.id, (provider) => {
             // altimate_change start — provider identity headers
             provider.request.headers["http-referer"] = "https://altimate.ai/"
-            provider.request.headers["x-title"] = "altimate-code"
+            // x-title stays upstream: Vercel keys allowlisted callers on this exact legacy value.
+            provider.request.headers["x-title"] = "opencode"
             // altimate_change end
           })
         }

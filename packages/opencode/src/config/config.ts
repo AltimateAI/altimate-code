@@ -40,7 +40,7 @@ import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 // altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrappers (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 
 // Custom merge function that concatenates array fields instead of replacing them
@@ -233,10 +233,13 @@ function globalConfigFile() {
   // altimate_change start - support altimate-code.json/.jsonc config filenames
   // altimate-code.json stays first so it remains the default target when no config exists yet;
   // altimate-code.jsonc is still discovered when it already exists.
-  const candidates = ["altimate-code.json", "altimate-code.jsonc", "opencode.jsonc", "opencode.json", "config.json"].map(
-    (file) =>
-    path.join(Global.Path.config, file),
-  )
+  const candidates = [
+    "altimate-code.json",
+    "altimate-code.jsonc",
+    "opencode.jsonc",
+    "opencode.json",
+    "config.json",
+  ].map((file) => path.join(Global.Path.config, file))
   // altimate_change end
   for (const file of candidates) {
     if (existsSync(file)) return file
@@ -849,7 +852,9 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Auth.node, Account.node, Env.node, Npm.node, httpClient],
+  // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+  deps: LayerNode.lazy(() => [FSUtil.node, Auth.node, Account.node, Env.node, Npm.node, httpClient]),
+  // altimate_change end
 })
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the
@@ -858,7 +863,7 @@ export const node = LayerNode.make({
 // the current fiber's InstanceRef, so these reads stay bound to the active workspace/instance.
 // defaultLayer is compiled from `node` since per-service `.defaultLayer` facades were dropped
 // upstream in favor of the LayerNode graph.
-export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runConfig } = makeRuntime(Service, defaultLayer)
 export async function get() {
   return runConfig((svc) => svc.get())
