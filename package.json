@@ -107,7 +107,7 @@
     "oxlint-tsgolint": "0.21.0",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
-    "turbo": "2.8.13"
+    "turbo": "2.10.7"
   },
   "dependencies": {
     "@opencode-ai/plugin": "workspace:*",
