@@ -102,8 +102,12 @@ let server: ReturnType<typeof createServer> | undefined
 let startupInFlight: Promise<void> | undefined
 // Pending flows keyed by the unguessable `state`. Registered synchronously in
 // authorize() BEFORE the browser opens, so an instant redirect (an already
-// signed-in user) is matched instead of dropped; keying by state also lets two
-// concurrent /auth flows coexist without clobbering each other.
+// signed-in user) is matched instead of dropped. Note: `ProviderAuth.authorize`
+// (packages/opencode/src/provider/auth.ts) stores one pending flow per provider,
+// so two OVERLAPPING Altimate sign-ins at the same time are already unsupported
+// at the layer above — this map still exists per-state so a browser callback
+// arriving out-of-order can find its own promise, and to keep the same server
+// reusable across sequential sign-ins.
 const pending = new Map<string, Pending>()
 
 async function startCallbackServer(): Promise<void> {
@@ -182,21 +186,45 @@ async function doStartCallbackServer(): Promise<void> {
   let lastErr: NodeJS.ErrnoException | undefined
   for (let port = CALLBACK_PORT_PREFERRED; port <= CALLBACK_PORT_MAX; port++) {
     tried.push(port)
+    // Use a NAMED handler for the bind attempt so we can removeListener on
+    // both success AND failure. A prior version left the anonymous `reject`
+    // wired on success — a later runtime error would then call reject() on
+    // an already-resolved promise (silent no-op), swallowing the diagnostic.
+    // A named handler pairs cleanly with removeListener + makes the lifetime
+    // symmetric.
+    const onListenErr = (err: NodeJS.ErrnoException) => {
+      lastErr = err
+    }
+    let bound = false
     try {
       await new Promise<void>((resolve, reject) => {
         // Bind to loopback only — the credential/abort endpoints must not be reachable
         // from the LAN.
-        server!.listen(port, "127.0.0.1", () => resolve())
-        server!.on("error", reject)
+        const onErr = (err: NodeJS.ErrnoException) => {
+          onListenErr(err)
+          reject(err)
+        }
+        server!.once("error", onErr)
+        server!.listen(port, "127.0.0.1", () => {
+          server!.removeListener("error", onErr)
+          resolve()
+        })
       })
+      bound = true
       currentCallbackPort = port
       return
     } catch (err) {
       lastErr = err as NodeJS.ErrnoException
-      // Detach the failed listener before trying the next port — otherwise the
-      // 'error' handler stays wired and fires on the next listen attempt too.
-      server!.removeAllListeners("error")
+      // `once` self-detached on fire; nothing to remove here. If the code
+      // ever moves back to `on(...)`, add an explicit removeListener here.
       if (lastErr.code !== "EADDRINUSE") break
+    } finally {
+      if (!bound) {
+        // Defensive: even with `once`, if the promise rejects for any
+        // reason OTHER than an `error` event (unlikely today, cheap
+        // insurance for future edits), make sure no stale handler remains.
+        server!.removeAllListeners("error")
+      }
     }
   }
   // Every candidate port is either taken or gave a hard failure. Reset so a
@@ -282,14 +310,16 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
               `&redirect=${encodeURIComponent(redirect)}` +
               `&state=${state}`
 
-            // Try to open the browser, but ALWAYS print the URL to stderr too —
-            // `open()` silently fails on SSH / tmux / WSL-without-wslu / VS Code
-            // Remote-SSH, and without a printed URL a headless user gets no path
-            // forward and times out staring at "Complete sign-in in your browser".
+            // Try to open the browser. Failure is silent because the URL is
+            // already surfaced elsewhere: the auth dialog in packages/tui/src/
+            // component/dialog-provider.tsx renders it as a clickable Link and
+            // binds `c` to copy it to the clipboard. An earlier version wrote
+            // the URL to process.stderr here as a fallback for SSH/tmux, but
+            // the auth plugin runs inside a worker whose stderr is redirected
+            // to the log file at the top of packages/opencode/src/cli/tui/
+            // worker.ts — so that write reached the log, never the terminal.
+            // Removed to stop leaking state-bearing authorize URLs into logs.
             await open(authorizeUrl).catch(() => undefined)
-            process.stderr.write(
-              `\nIf your browser didn't open automatically, complete sign-in at:\n  ${authorizeUrl}\n\n`,
-            )
 
             return {
               url: authorizeUrl,
