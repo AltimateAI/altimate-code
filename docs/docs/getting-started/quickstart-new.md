@@ -14,14 +14,20 @@ npm install -g altimate-code
 
 ---
 
-## Step 2: Connect Your LLM
+## Step 2: Sign in
 
 ```bash
 altimate        # Launch the TUI
-/connect        # Interactive setup
 ```
 
-Or set an environment variable and skip the prompt:
+On a fresh install, a welcome panel appears with a curated 6-provider picker:
+
+- **Altimate LLM Gateway** *(recommended)* — 10M tokens free, no API keys. Routes to the best model per task across Sonnet, Opus, GPT-5, and more. Sign-in opens a browser tab; complete Google or email signup and you're back in the TUI. If your terminal can't open a browser (SSH / tmux / WSL), the CLI prints the URL — paste it into a browser on your desktop.
+- **Anthropic** / **OpenAI** / **Google** — paste an API key or OAuth in.
+- **Big Pickle** — free tier, chats work but many data tasks fail; useful for kicking tires.
+- **Search all providers…** — full picker if you need Bedrock, Databricks AI Gateway, Cloudflare AI Gateway, Snowflake Cortex, DigitalOcean Inference, etc.
+
+Or set an environment variable and skip the picker:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -29,7 +35,22 @@ altimate
 ```
 
 !!! tip "Don't want to manage API keys?"
-    The [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/) gives you 10M tokens free — no API keys needed. It dynamically routes to the best model for each task across Sonnet 4.6, Opus 4.6, GPT-5.4, and more.
+    The [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/) is the top row of the picker — 10M free tokens, and altimate-code auto-selects the right model per task. First-run sign-in uses a loopback OAuth on `127.0.0.1:7317-7325` (falls back if the preferred port is taken).
+
+---
+
+## Step 2.5: First-run scan (optional)
+
+Immediately after model setup, a **"Scan your environment?"** Yes/No dialog appears. Say **Yes** and altimate-code reads local config files (`.dbt/profiles.yml`, `dbt_project.yml`, `.git/config`) — no credentials are read or sent, and no schema, model contents, or queries leave your computer. An anonymous environment summary (e.g. "dbt project detected, no warehouse configured") may be included in the standard telemetry stream if telemetry is enabled; disable via `OPENCODE_DISABLE_TELEMETRY=1` or the [telemetry docs](../usage/telemetry.md) if you want a strictly-offline scan. The scan then routes you into one of four branches:
+
+- **Found a warehouse** → offers to add + verify each connection, then index its schema.
+- **Found dbt project, no warehouse** → asks which warehouse it runs against and walks you through `warehouse_add`.
+- **In a git repo, no dbt** → suggests you `cd` into the right project and re-run.
+- **Nothing yet** → offers to try Altimate on a sample dbt project (bundled jaffle-shop DuckDB, no warehouse needed) or another exploratory job.
+
+Every branch ends on a numbered "**What would you like to do?**" menu in the chat — pick a job by typing the number, or free-text if none fit. **The menu is chat text, not an arrow-key picker; type your answer and press Enter.**
+
+Say **No** to the scan gate and you land on the same activation menu without the scan detail — good for users who already know what they want to run.
 
 ---
 

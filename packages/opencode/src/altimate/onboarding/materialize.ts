@@ -159,7 +159,17 @@ export function rejectUnsafeHome(home: string | undefined): string | undefined {
   if (!home) return "HOME environment variable is not set"
   if (home === "/" || home === "") return `HOME='${home}' is not a usable directory`
   if (home === "/root" && process.getuid?.() !== 0) {
-    return "HOME=/root but this process is not running as root (likely `sudo npm install -g` — the sample would materialize into root's home and be invisible from your normal shell). Re-run without sudo, or pass an explicit `--target-parent`."
+    return (
+      "HOME=/root but this process is not running as root (likely `sudo npm install -g` — " +
+      "the sample would materialize into root's home and be invisible from your normal shell). " +
+      "Preferred fix: re-run altimate-code without sudo (install to a per-user prefix like " +
+      "`npm i -g --prefix ~/.local altimate-code`, or use nvm/asdf). If the CLI was already " +
+      "installed as root, drop `sudo` from the launch command — the wrapper reads HOME from " +
+      "your shell. If you must launch under sudo (locked-down environment only), pass your " +
+      "own HOME explicitly: `sudo -E HOME=\"$HOME\" altimate-code` — but note the sample and " +
+      "any files it materializes will be owned by root and need `sudo chown -R \"$USER\" " +
+      "~/altimate-sample-dbt` before you can modify them from your normal shell."
+    )
   }
   // Canonicalize BOTH sides of the tmp comparison before matching —
   // otherwise a caller who passes `/private/tmp/foo` on macOS bypasses
@@ -186,7 +196,7 @@ export function rejectUnsafeHome(home: string | undefined): string | undefined {
     for (const ref of refs) {
       if (!ref) continue
       if (candidate === ref || candidate.startsWith(ref + path.sep)) {
-        return `HOME='${home}' resolves to '${candidate}' which is under an ephemeral system tmp path (${ref}) — the sample would be hard to find or swept by tmp-cleanup jobs. Pass an explicit --target-parent to override.`
+        return `HOME='${home}' resolves to '${candidate}' which is under an ephemeral system tmp path (${ref}) — the sample would be hard to find or swept by tmp-cleanup jobs. Set HOME to a persistent user directory before launching (e.g. \`HOME=/Users/you altimate-code\`).`
       }
     }
     return undefined

@@ -4,10 +4,17 @@ import { randomBytes } from "crypto"
 import open from "open"
 import { AltimateApi } from "../api/client"
 
-// Loopback port the CLI listens on for the browser to deliver the gateway
-// credential after sign-in. Must match the redirect the web authorize page posts
-// back to. 7317 is otherwise unused in this codebase.
-const CALLBACK_PORT = 7317
+// Loopback port range the CLI listens on for the browser to deliver the gateway
+// credential after sign-in. We prefer 7317 (mnemonic + otherwise unused in this
+// codebase), then fall back through 7318..7325 so a squatting dev tool
+// (Docker Desktop, Rancher, a stray dev server) can't wedge sign-in. The
+// browser is redirected to whatever port we successfully bind, so the fallback
+// is transparent to the user.
+const CALLBACK_PORT_PREFERRED = 7317
+const CALLBACK_PORT_MAX = 7325
+// Actual port bound at runtime — filled in by startCallbackServer() so the
+// authorize URL redirect matches whatever we could grab.
+let currentCallbackPort: number | undefined
 
 // Web app that hosts the signup/login (authorize) page. Overridable for
 // dev/staging via ALTIMATE_WEB_URL.
@@ -88,16 +95,41 @@ interface Pending {
 }
 
 let server: ReturnType<typeof createServer> | undefined
+// Shared in-flight startup promise. Concurrent `authorize()` calls must await
+// the SAME startup (and read the SAME bound port) instead of one racing past
+// the other on a stale/undefined `currentCallbackPort`. Cleared on both
+// success and failure so a subsequent retry re-runs the port walk.
+let startupInFlight: Promise<void> | undefined
 // Pending flows keyed by the unguessable `state`. Registered synchronously in
 // authorize() BEFORE the browser opens, so an instant redirect (an already
-// signed-in user) is matched instead of dropped; keying by state also lets two
-// concurrent /auth flows coexist without clobbering each other.
+// signed-in user) is matched instead of dropped. Note: `ProviderAuth.authorize`
+// (packages/opencode/src/provider/auth.ts) stores one pending flow per provider,
+// so two OVERLAPPING Altimate sign-ins at the same time are already unsupported
+// at the layer above — this map still exists per-state so a browser callback
+// arriving out-of-order can find its own promise, and to keep the same server
+// reusable across sequential sign-ins.
 const pending = new Map<string, Pending>()
 
 async function startCallbackServer(): Promise<void> {
-  if (server) return
+  // Fast path: server already bound and healthy.
+  if (server && currentCallbackPort !== undefined) return
+  // Coalesce: a second caller mid-startup awaits the first's outcome so the
+  // redirect it builds uses the actually-bound port, not a guess. Without
+  // this, `currentCallbackPort ?? PREFERRED` would resolve to 7317 on the
+  // second caller before the first's port walk finished — the exact race
+  // CodeRabbit + cubic flagged as P1.
+  if (startupInFlight) return startupInFlight
+  startupInFlight = doStartCallbackServer()
+  try {
+    await startupInFlight
+  } finally {
+    startupInFlight = undefined
+  }
+}
+
+async function doStartCallbackServer(): Promise<void> {
   server = createServer((req, res) => {
-    const url = new URL(req.url || "/", `http://localhost:${CALLBACK_PORT}`)
+    const url = new URL(req.url || "/", `http://localhost:${currentCallbackPort ?? CALLBACK_PORT_PREFERRED}`)
     if (url.pathname !== "/callback") {
       res.writeHead(404)
       res.end("Not found")
@@ -147,37 +179,82 @@ async function startCallbackServer(): Promise<void> {
     html(200, HTML_SUCCESS)
   })
 
-  try {
-    await new Promise<void>((resolve, reject) => {
-      // Bind to loopback only — the credential/abort endpoints must not be reachable
-      // from the LAN.
-      server!.listen(CALLBACK_PORT, "127.0.0.1", () => resolve())
-      server!.on("error", reject)
-    })
-  } catch (err) {
-    // Reset so a retry isn't blocked by the `if (server) return` guard, and surface
-    // a clear reason (e.g. the port is already taken) instead of hanging.
-    server = undefined
-    const code = (err as NodeJS.ErrnoException)?.code
-    throw new Error(
-      code === "EADDRINUSE"
-        ? `Port ${CALLBACK_PORT} is already in use — close whatever is using it and try again.`
-        : `Could not start the sign-in server: ${err instanceof Error ? err.message : String(err)}`,
-    )
+  // Walk the port range so a squatting dev tool on 7317 doesn't wedge sign-in.
+  // First success wins; only report EADDRINUSE if every port in the range is
+  // taken. Non-EADDRINUSE errors fail fast (permissions, exhausted fds).
+  const tried: number[] = []
+  let lastErr: NodeJS.ErrnoException | undefined
+  for (let port = CALLBACK_PORT_PREFERRED; port <= CALLBACK_PORT_MAX; port++) {
+    tried.push(port)
+    // Use a NAMED handler for the bind attempt so we can removeListener on
+    // both success AND failure. A prior version left the anonymous `reject`
+    // wired on success — a later runtime error would then call reject() on
+    // an already-resolved promise (silent no-op), swallowing the diagnostic.
+    // A named handler pairs cleanly with removeListener + makes the lifetime
+    // symmetric.
+    const onListenErr = (err: NodeJS.ErrnoException) => {
+      lastErr = err
+    }
+    let bound = false
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // Bind to loopback only — the credential/abort endpoints must not be reachable
+        // from the LAN.
+        const onErr = (err: NodeJS.ErrnoException) => {
+          onListenErr(err)
+          reject(err)
+        }
+        server!.once("error", onErr)
+        server!.listen(port, "127.0.0.1", () => {
+          server!.removeListener("error", onErr)
+          resolve()
+        })
+      })
+      bound = true
+      currentCallbackPort = port
+      return
+    } catch (err) {
+      lastErr = err as NodeJS.ErrnoException
+      // `once` self-detached on fire; nothing to remove here. If the code
+      // ever moves back to `on(...)`, add an explicit removeListener here.
+      if (lastErr.code !== "EADDRINUSE") break
+    } finally {
+      if (!bound) {
+        // Defensive: even with `once`, if the promise rejects for any
+        // reason OTHER than an `error` event (unlikely today, cheap
+        // insurance for future edits), make sure no stale handler remains.
+        server!.removeAllListeners("error")
+      }
+    }
   }
+  // Every candidate port is either taken or gave a hard failure. Reset so a
+  // retry isn't blocked by the `if (server) return` guard.
+  server = undefined
+  currentCallbackPort = undefined
+  const code = lastErr?.code
+  throw new Error(
+    code === "EADDRINUSE"
+      ? `Every port in ${CALLBACK_PORT_PREFERRED}-${CALLBACK_PORT_MAX} is already in use (tried ${tried.join(", ")}). Close whatever is using them (e.g. \`lsof -i :${CALLBACK_PORT_PREFERRED}\`) and try again.`
+      : `Could not start the sign-in server: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+  )
 }
 
 function stopCallbackServer() {
   if (server) {
     server.close()
     server = undefined
+    currentCallbackPort = undefined
   }
 }
 
 // Register a pending flow keyed by `state` and return its promise. Called
 // synchronously in authorize() before the browser opens; the server handler
 // resolves/rejects it by state, so a fast redirect is never lost.
-function registerPending(state: string, timeoutMs = 5 * 60 * 1000): Promise<CallbackResult> {
+// 15-minute window for the whole flow — the earlier 5-minute default was too
+// short for corporate SSO where Okta → Duo → password manager → MFA on phone
+// can easily push past 5 min. Ticket load ("got MFA prompt, went to phone, came
+// back, sign-in failed") justifies the longer wait.
+function registerPending(state: string, timeoutMs = 15 * 60 * 1000): Promise<CallbackResult> {
   return new Promise<CallbackResult>((resolve, reject) => {
     const timeout = setTimeout(() => {
       if (pending.delete(state)) reject(new Error("Timed out waiting for browser sign-in"))
@@ -221,8 +298,11 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
 
             const webUrl = (process.env.ALTIMATE_WEB_URL || DEFAULT_WEB_URL).replace(/\/+$/, "")
             // Use 127.0.0.1 to match the loopback bind — a plain `localhost` redirect
-            // can resolve to ::1 first and hit a closed IPv6 port.
-            const redirect = `http://127.0.0.1:${CALLBACK_PORT}/callback`
+            // can resolve to ::1 first and hit a closed IPv6 port. `currentCallbackPort`
+            // reflects the actual port startCallbackServer() grabbed (may fall back
+            // from 7317 to 7318..7325 if a dev tool is squatting).
+            const boundPort = currentCallbackPort ?? CALLBACK_PORT_PREFERRED
+            const redirect = `http://127.0.0.1:${boundPort}/callback`
             // Land on the sign-up page and let the user choose how to authenticate
             // (Google today, more providers later) rather than forcing Google.
             const authorizeUrl =
@@ -230,6 +310,15 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
               `&redirect=${encodeURIComponent(redirect)}` +
               `&state=${state}`
 
+            // Try to open the browser. Failure is silent because the URL is
+            // already surfaced elsewhere: the auth dialog in packages/tui/src/
+            // component/dialog-provider.tsx renders it as a clickable Link and
+            // binds `c` to copy it to the clipboard. An earlier version wrote
+            // the URL to process.stderr here as a fallback for SSH/tmux, but
+            // the auth plugin runs inside a worker whose stderr is redirected
+            // to the log file at the top of packages/opencode/src/cli/tui/
+            // worker.ts — so that write reached the log, never the terminal.
+            // Removed to stop leaking state-bearing authorize URLs into logs.
             await open(authorizeUrl).catch(() => undefined)
 
             return {

@@ -109,6 +109,13 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         `Underlying error: ${message}`
       return {
         title: "Starter sample unavailable",
+        // `success: false` is the disambiguator for consumers reading
+        // metadata; the `output` string separately begins `status: error`
+        // for the template branches (which never see metadata). An earlier
+        // version added `suffix: -1` here as a sentinel, but the error path
+        // emits no `suffix:` line in `output`, and no downstream reader of
+        // metadata inspects `suffix` before checking `success` — reverted
+        // in v0.9.4 consensus review m6 to keep the shape typed.
         metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
         output: `status: error\nreason: sample_source_missing\n\n${guidance}`,
       }
@@ -170,6 +177,13 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       const message = err instanceof Error ? err.message : String(err)
       return {
         title: "Starter materialization failed",
+        // `success: false` is the disambiguator for consumers reading
+        // metadata; the `output` string separately begins `status: error`
+        // for the template branches (which never see metadata). An earlier
+        // version added `suffix: -1` here as a sentinel, but the error path
+        // emits no `suffix:` line in `output`, and no downstream reader of
+        // metadata inspects `suffix` before checking `success` — reverted
+        // in v0.9.4 consensus review m6 to keep the shape typed.
         metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
         output: `status: error\nreason: materialize_failed\n\n${message}`,
       }

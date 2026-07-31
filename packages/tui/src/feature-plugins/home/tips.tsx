@@ -3,6 +3,11 @@ import type { BuiltinTuiPlugin } from "../builtins"
 import { createMemo, Show } from "solid-js"
 import { Tips } from "./tips-view"
 import { useBindings } from "../../keymap"
+// altimate_change start — reuse the same connected predicate used by
+// useConnected() so the tip visibility and the welcome-picker gate can never
+// disagree. Extracted to util/connected.ts per consensus review m8 on PR #1053.
+import { isAnyProviderConnected } from "../../util/connected"
+// altimate_change end
 
 const id = "internal:home-tips"
 
@@ -45,15 +50,10 @@ const tui: TuiPlugin = async (api) => {
         // altimate_change start — upstream_fix: wait for synced session count before first-run onboarding
         const first = createMemo(() => api.state.ready && api.state.session.count() === 0)
         // altimate_change end
-        // altimate_change start — treat undefined cost as "not paid" (upstream `!== 0`
-        // was true for undefined, mislabeling OpenCode as connected without a Zen key).
-        const connected = createMemo(() =>
-          api.state.provider.some(
-            (item) =>
-              item.id !== "opencode" ||
-              Object.values(item.models).some((model) => model.cost?.input != null && model.cost.input !== 0),
-          ),
-        )
+        // altimate_change start — shared predicate; matches use-connected.tsx
+        // so the welcome-picker gate and the tips gate cannot silently diverge.
+        // Extracted to util/connected.ts per consensus review m8 on PR #1053.
+        const connected = createMemo(() => isAnyProviderConnected(api.state.provider))
         // altimate_change end
         // altimate_change start — upstream_fix: restore first-run onboarding state
         const isFirstTime = createMemo(() => first() && !connected())
