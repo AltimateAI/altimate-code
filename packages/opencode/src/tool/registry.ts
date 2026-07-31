@@ -43,6 +43,11 @@ import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change start — upstream_fix: task.background schema follows RuntimeFlags.
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
+// altimate_change start — upstream port (v1.18.10 code mode): MCP catalog description deps
+import { MCP } from "@/mcp"
+import { McpCatalog } from "@/mcp/catalog"
+import * as Permission from "@/permission"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
 // ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
 // compile. Delegates to the existing namespace functions; behavior preserved.
@@ -299,7 +304,29 @@ export namespace ToolRegistry {
   // altimate_change end
 
   // altimate_change start — upstream_fix: hide task.background unless the runtime flag enables it.
-  type ToolRuntimeFlags = Pick<RuntimeFlags.Info, "experimentalBackgroundSubagents" | "enableExa" | "enableParallel">
+  type ToolRuntimeFlags = Pick<
+    RuntimeFlags.Info,
+    "experimentalBackgroundSubagents" | "enableExa" | "enableParallel" | "experimentalCodeMode"
+  >
+
+  // altimate_change start — upstream port (v1.18.10 code mode): flag-gated lazy resolution of
+  // the `execute` tool. Cached per process; the definition itself is agent-independent (the
+  // per-call MCP catalog description is swapped in tools() below).
+  // Structural type (not `typeof import`) — the module reference would close a type
+  // cycle back through this file and collapse inference to `any`.
+  type CodeModeModule = {
+    describeCatalog: (mcpTools: Record<string, unknown>, servers: readonly string[]) => string
+  }
+  let codeModePromise: Promise<{ mod: CodeModeModule; tool: Tool.Info }> | undefined
+  function loadCodeMode(): Promise<{ mod: CodeModeModule; tool: Tool.Info }> {
+    codeModePromise ??= (async () => {
+      const mod = await import("./code-mode")
+      const tool = (await AppRuntime.runPromise(mod.CodeModeTool)) as Tool.Info
+      return { mod: mod as unknown as CodeModeModule, tool }
+    })()
+    return codeModePromise
+  }
+  // altimate_change end
 
   function backgroundSubagentsEnabled(flags?: ToolRuntimeFlags) {
     if (flags) return flags.experimentalBackgroundSubagents
@@ -349,6 +376,9 @@ export namespace ToolRegistry {
   async function all(
     plugins?: Awaited<ReturnType<typeof Plugin.list>>,
     configInput?: RegistryConfigInput,
+    // altimate_change start — upstream port (v1.18.10 code mode)
+    runtimeFlags?: ToolRuntimeFlags,
+    // altimate_change end
   ): Promise<Tool.Info[]> {
     const custom = configInput?.matches
       ? await loadCustomTools(configInput.matches).then((x) => x.custom)
@@ -494,7 +524,10 @@ export namespace ToolRegistry {
     // altimate_change end
     // altimate_change end
     // altimate_change start — include plugin-provided custom tools
-    return [...resolved, ...custom, ...pluginCustom]
+    // altimate_change start — upstream port (v1.18.10 code mode): expose `execute` when enabled
+    const codeMode = runtimeFlags?.experimentalCodeMode ? [(await loadCodeMode()).tool] : []
+    return [...resolved, ...custom, ...pluginCustom, ...codeMode]
+    // altimate_change end
     // altimate_change end
   }
 
@@ -503,12 +536,21 @@ export namespace ToolRegistry {
   export async function allInfos(
     plugins?: Awaited<ReturnType<typeof Plugin.list>>,
     configInput?: RegistryConfigInput,
+    // altimate_change start — upstream port (v1.18.10 code mode)
+    runtimeFlags?: ToolRuntimeFlags,
+    // altimate_change end
   ): Promise<Tool.Info[]> {
-    return all(plugins, configInput)
+    return all(plugins, configInput, runtimeFlags)
   }
 
-  export async function ids(plugins?: Awaited<ReturnType<typeof Plugin.list>>, configInput?: RegistryConfigInput) {
-    return all(plugins, configInput).then((x) => x.map((t) => t.id))
+  export async function ids(
+    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
+    configInput?: RegistryConfigInput,
+    // altimate_change start — upstream port (v1.18.10 code mode)
+    runtimeFlags?: ToolRuntimeFlags,
+    // altimate_change end
+  ) {
+    return all(plugins, configInput, runtimeFlags).then((x) => x.map((t) => t.id))
   }
   // altimate_change end
 
@@ -522,11 +564,38 @@ export namespace ToolRegistry {
     plugins?: Awaited<ReturnType<typeof Plugin.list>>,
     runtimeFlags?: ToolRuntimeFlags,
     configInput?: RegistryConfigInput,
+    // altimate_change start — upstream port (v1.18.10 code mode): catalog injected by the
+    // Effect facade (honors mocked/replaced MCP layers); Promise-facade callers fall back
+    // to the MCP namespace wrapper.
+    mcpCatalog?: { tools: Record<string, unknown> },
+    // altimate_change end
   ) {
-    const tools = await all(plugins, configInput)
+    const tools = await all(plugins, configInput, runtimeFlags)
+    // altimate_change end
+    // altimate_change start — upstream port (v1.18.10 code mode): swap in the per-call MCP
+    // catalog description; drop `execute` entirely when the caller's permission ruleset leaves
+    // no visible MCP tools (mirrors upstream's describeCodeMode gate).
+    let codeModeDescription: string | undefined
+    if (runtimeFlags?.experimentalCodeMode && tools.some((t) => t.id === "execute")) {
+      const { mod } = await loadCodeMode()
+      const ruleset = Permission.merge(agent?.permission ?? [])
+      const catalog = mcpCatalog?.tools ?? ((await MCP.tools()) as Record<string, unknown>)
+      const visible = Permission.visibleTools(catalog, ruleset)
+      if (Object.keys(visible).length > 0) {
+        const servers = [
+          ...new Set(
+            Object.values(visible).map((entry) =>
+              McpCatalog.sanitize(String((entry as { client?: string }).client ?? "")),
+            ),
+          ),
+        ].filter(Boolean)
+        codeModeDescription = mod.describeCatalog(visible, servers)
+      }
+    }
+    const toolList = tools.filter((t) => t.id !== "execute" || codeModeDescription !== undefined)
     // altimate_change end
     const result = await Promise.all(
-      tools
+      toolList
         .filter((t) => {
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {
@@ -551,7 +620,9 @@ export namespace ToolRegistry {
           // altimate_change end
           // altimate_change end
           const output = {
-            description: tool.description,
+            // altimate_change start — upstream port (v1.18.10 code mode): per-call MCP catalog description
+            description: t.id === "execute" && codeModeDescription ? codeModeDescription : tool.description,
+            // altimate_change end
             parameters: tool.parameters,
           }
           await Plugin.trigger("tool.definition", { toolID: t.id }, output)
@@ -608,6 +679,11 @@ export namespace ToolRegistry {
       const pluginSvc = yield* Effect.serviceOption(Plugin.Service)
       const runtimeFlags = yield* Effect.serviceOption(RuntimeFlags.Service)
       const configSvc = yield* Effect.serviceOption(Config.Service)
+      // altimate_change start — upstream port (v1.18.10 code mode): injected MCP catalog for
+      // the execute-tool description (must use the graph's MCP.Service, not the Promise facade,
+      // so replaced/mocked layers are honored)
+      const mcpSvc = yield* Effect.serviceOption(MCP.Service)
+      // altimate_change end
       const resolvePlugins = (): Effect.Effect<Awaited<ReturnType<typeof Plugin.list>> | undefined> =>
         Option.isSome(pluginSvc) ? pluginSvc.value.list() : Effect.succeed(undefined)
       const resolveConfigInput = (): Effect.Effect<RegistryConfigInput | undefined> =>
@@ -629,19 +705,37 @@ export namespace ToolRegistry {
           return yield* bridge(() => fn(plugins, configInput))
         })
       return Service.of({
-        ids: () => bridgeWithPlugins((plugins, configInput) => ids(plugins, configInput)),
-        allInfos: () => bridgeWithPlugins((plugins, configInput) => allInfos(plugins, configInput)),
+        // altimate_change start — upstream port (v1.18.10 code mode): thread flags into ids/allInfos
+        ids: () =>
+          bridgeWithPlugins((plugins, configInput) => ids(plugins, configInput, Option.getOrUndefined(runtimeFlags))),
+        allInfos: () =>
+          bridgeWithPlugins((plugins, configInput) =>
+            allInfos(plugins, configInput, Option.getOrUndefined(runtimeFlags)),
+          ),
+        // altimate_change end
         register: (tool) => bridge(() => register(tool)),
         tools: (model) =>
-          bridgeWithPlugins((plugins, configInput) =>
-            tools(
-              { providerID: model.providerID, modelID: model.modelID },
-              model.agent,
-              plugins,
-              Option.getOrUndefined(runtimeFlags),
-              configInput,
-            ),
-          ),
+          Effect.gen(function* () {
+            // altimate_change start — upstream port (v1.18.10 code mode): resolve the MCP
+            // catalog through the injected service before crossing the Promise bridge
+            const flags = Option.getOrUndefined(runtimeFlags)
+            const mcpCatalog =
+              flags?.experimentalCodeMode && Option.isSome(mcpSvc)
+                ? { tools: (yield* mcpSvc.value.tools()) as Record<string, unknown> }
+                : undefined
+            // altimate_change end
+            return yield* bridgeWithPlugins((plugins, configInput) =>
+              tools(
+                { providerID: model.providerID, modelID: model.modelID },
+                model.agent,
+                plugins,
+                flags,
+                configInput,
+                // altimate_change — upstream port (v1.18.10 code mode)
+                mcpCatalog,
+              ),
+            )
+          }),
       })
     }),
     // altimate_change end
@@ -654,7 +748,7 @@ export namespace ToolRegistry {
   export const node = LayerNode.make({
     name: "opencode/tool-registry",
     layer: layer,
-    deps: LayerNode.lazy(() => [Plugin.node, RuntimeFlags.node, Config.node]),
+    deps: LayerNode.lazy(() => [Plugin.node, RuntimeFlags.node, Config.node, MCP.node]),
   })
   // altimate_change end
   // altimate_change end — closes the Effect Context.Service facade block

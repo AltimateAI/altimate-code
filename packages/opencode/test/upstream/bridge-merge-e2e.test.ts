@@ -374,12 +374,12 @@ describe("E2E: TUI theme schemas point at altimate.ai (cycle 7)", () => {
 describe("E2E: OAuth callback XSS prevention (cycle 1 + 2)", () => {
   test("mcp/oauth-callback.ts has escapeHtml AND uses it for error interpolation", async () => {
     const content = readFileSync(path.join(srcDir, "mcp", "oauth-callback.ts"), "utf-8")
-    // The v1.17.9 merge extracted the inline escapeHtml helper into the shared
-    // util (src/util/html.ts); oauth-callback.ts now imports it. Accept either an
-    // inline `function escapeHtml` (legacy) or the shared-util import — the XSS
-    // property below is what actually matters and is asserted unchanged.
+    // v1.18.10: the callback delegates every HTML render to the shared, escaping
+    // OauthCallbackPage component (core/src/oauth/page.ts) — no inline HTML remains.
+    // Accept any of the three historical shapes; the raw-interpolation walk below is
+    // the XSS property that actually matters and is asserted unchanged.
     expect(content).toMatch(
-      /function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/,
+      /function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']|import\s*\{\s*OauthCallbackPage\s*\}\s*from\s*["']@opencode-ai\/core\/oauth\/page["']/,
     )
     // Every ${error} or ${error_description} interpolation must go through escapeHtml
     const errorInterps = content.match(/\$\{(error[A-Za-z_]*?)\}/g) ?? []

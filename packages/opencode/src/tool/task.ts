@@ -8,6 +8,9 @@ import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
+// altimate_change start — upstream_fix: caller-permission filter for the subagent list
+import { PermissionNext } from "@/permission/next"
+// altimate_change end
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
 import { Effect, Exit, Schema } from "effect"
@@ -90,19 +93,23 @@ export const TaskTool = Tool.define(
     const sessions = yield* Session.Service
     const flags = yield* RuntimeFlags.Service
 
-    // altimate_change start — list available subagent types in the tool description. The legacy
-    // (pre-merge) version also filtered this list by the calling agent's own "task" permission,
-    // but the modern Effect.Effect<Init<...>> Tool.define shape (unlike the legacy async-function
-    // shape) doesn't thread a caller ctx into tool init, so that filter can't be reconstructed
-    // here. This is a UX-only narrowing (an agent could still see a subagent type it can't
-    // invoke) — NOT a security regression: ctx.ask({ permission: id, ... }) below still enforces
-    // the real permission check on every call. Falls back to the unfiltered list, matching what
-    // the legacy code already did whenever no caller ctx was available.
+    // altimate_change start — list available subagent types in the tool description, filtered
+    // by the CALLER's own "task" permission (via the restored Tool.InitContext threading in
+    // ToolRegistry.tools — the init returned at the bottom is a ctx-function). Denied subagent
+    // types are hidden from the description; the real enforcement stays ctx.ask({ permission:
+    // id, ... }) on every call. Falls back to the unfiltered list when no caller ctx is
+    // available, matching the legacy behavior.
     const agents = (yield* agent.list()).filter((a) => a.mode !== "primary")
-    const agentList = agents
-      .map((a) => `- ${a.name}: ${a.description ?? "This subagent should only be called manually by the user."}`)
-      .join("\n")
-    const baseDescription = DESCRIPTION.replace("{agents}", agentList)
+    function baseDescriptionFor(initCtx?: Tool.InitContext) {
+      const caller = initCtx?.agent
+      const accessibleAgents = caller
+        ? agents.filter((a) => PermissionNext.evaluate(id, a.name, caller.permission).action !== "deny")
+        : agents
+      const agentList = accessibleAgents
+        .map((a) => `- ${a.name}: ${a.description ?? "This subagent should only be called manually by the user."}`)
+        .join("\n")
+      return DESCRIPTION.replace("{agents}", agentList)
+    }
     // altimate_change end
 
     const run = Effect.fn("TaskTool.execute")(function* (
@@ -385,14 +392,20 @@ export const TaskTool = Tool.define(
       )
     })
 
-    return {
-      description: flags.experimentalBackgroundSubagents
-        ? [baseDescription, BACKGROUND_DESCRIPTION].join("\n\n")
-        : baseDescription,
-      parameters: Parameters,
-      jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
-        run(params, ctx).pipe(Effect.orDie),
+    // altimate_change start — upstream_fix: return the ctx-function Init shape so the
+    // caller's agent (threaded by ToolRegistry.tools) reaches the description filter above.
+    return (initCtx?: Tool.InitContext) => {
+      const baseDescription = baseDescriptionFor(initCtx)
+      return Effect.succeed({
+        description: flags.experimentalBackgroundSubagents
+          ? [baseDescription, BACKGROUND_DESCRIPTION].join("\n\n")
+          : baseDescription,
+        parameters: Parameters,
+        jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
+        execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+          run(params, ctx).pipe(Effect.orDie),
+      })
     }
+    // altimate_change end
   }),
 )
