@@ -27,7 +27,7 @@ export type ShareData =
   | { type: "session_diff"; data: unknown }
   | { type: "model"; data: unknown }
 
-// altimate_change start — share URLs use altimate.ai (was opencode.ai)
+// altimate_change start — share URLs use altimate.ai (was altimate.ai)
 /** Extract share ID from a share URL like https://altimate.ai/share/abc123 */
 // altimate_change end
 export function parseShareUrl(url: string): string | null {

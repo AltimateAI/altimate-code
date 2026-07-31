@@ -153,10 +153,12 @@ function busyError(sessionID: SessionID) {
   return new Session.BusyError({ sessionID })
 }
 
-// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
-// packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
-// API with a plain array; needs verification once layer-node.ts's conflict is resolved that this
-// doesn't reintroduce the cyclic-import undefined-node bug the thunk was guarding against.
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [BackgroundJob.node, SessionStatus.node] })
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: () => [BackgroundJob.node, SessionStatus.node],
+})
+// altimate_change end
 
 export * as SessionRunState from "./run-state"

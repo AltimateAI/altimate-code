@@ -8,7 +8,7 @@ const c = {
 }
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
 
-// verified: NZ OpenCode Go, week of Jun 22-28, 2026 (2026-W26)
+// verified: NZ Altimate Code Go, week of Jun 22-28, 2026 (2026-W26)
 const TOKENS = 40_915_594_381 // 40.9B
 const SHEEP = 23_600_000 // 23.6M
 const PER_SHEEP = Math.round(TOKENS / SHEEP) // 1,734
@@ -130,7 +130,7 @@ export function NZSheep() {
             }}
           >
             <div style={{ color: c.dim }}>40.9B tokens ÷ 23.6M sheep · last week</div>
-            <div style={{ color: c.white }}>opencode.ai/data</div>
+            <div style={{ color: c.white }}>altimate.ai/data</div>
           </div>
         </div>
       </div>

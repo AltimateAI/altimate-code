@@ -220,6 +220,12 @@ export namespace FSUtil {
 
   export const node = makeGlobalNode({ service: Service, layer: layer, deps: [filesystem] })
 
+  // altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+  // consumers (12 call sites in packages/opencode/src). Removed upstream in the makeGlobalNode
+  // migration; the fork's legacy bridge layers still compose it directly.
+  export const defaultLayer = layer.pipe(Layer.provide(NodeFileSystem.layer))
+  // altimate_change end
+
   // Pure helpers that don't need Effect (path manipulation, sync operations)
   export function mimeType(p: string): string {
     return lookup(p) || "application/octet-stream"

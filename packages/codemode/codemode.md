@@ -83,7 +83,7 @@ data, tool failures, limits, timeouts, and execution failures.
 Files and other attachment content stay outside the interpreter. A host may collect them while child tools execute and
 attach them to the outer result, but the program receives only the structured tool output.
 
-### V2 OpenCode adapter
+### V2 Altimate Code adapter
 
 This section describes the `v2` branch integration. On `dev`, CodeMode is integrated through
 `packages/opencode/src/tool/code-mode.ts`, where nested MCP calls run the `tool.execute.before` and

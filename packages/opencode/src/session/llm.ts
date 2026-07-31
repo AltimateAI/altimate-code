@@ -390,13 +390,12 @@ export namespace LLM {
   export const hasToolCalls = LLMRequestPrep.hasToolCalls
   // altimate_change end
 
-  // UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
-  // packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's
-  // object-style API with an empty deps array — the fork's `layer` above is a Layer.succeed
-  // with no Effect dependencies (stream() is a plain async function, not Effect-service-driven),
-  // so upstream's deps list (Auth.node, Config.node, Provider.node, Plugin.node, Permission.node,
-  // EventV2Bridge.node, llmClient, RuntimeFlags.node) doesn't apply here — those back upstream's
-  // own LLMClient-based Effect service, which the fork's implementation doesn't use.
+  // altimate_change start — object-style LayerNode API with an empty deps array. The fork's
+  // `layer` above is a Layer.succeed with no Effect dependencies (stream() is a plain async
+  // function, not Effect-service-driven), so upstream's deps list (Auth.node, Config.node,
+  // Provider.node, Plugin.node, Permission.node, EventV2Bridge.node, llmClient, RuntimeFlags.node)
+  // doesn't apply here — those back upstream's own LLMClient-based Effect service, which the
+  // fork's implementation doesn't use.
   export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

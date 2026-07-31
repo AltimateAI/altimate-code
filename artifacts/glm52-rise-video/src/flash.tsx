@@ -1,7 +1,7 @@
 import React from "react"
 import { AbsoluteFill, Easing, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion"
 
-// stats.opencode.ai design tokens (light theme)
+// stats.altimate.ai design tokens (light theme)
 const c = {
   bg: "#ffffff",
   ink: "#161616",
@@ -18,7 +18,7 @@ const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Cons
 const DOT_MASK =
   "url(\"data:image/svg+xml,%3Csvg viewBox='0 0 6 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0 0H2V2H0V0Z' fill='black'/%3E%3C/svg%3E\")"
 
-// verified: OpenCode Go, week of Jun 22-28, 2026 (2026-W26). share = % of 19.64T total Go tokens.
+// verified: Altimate Code Go, week of Jun 22-28, 2026 (2026-W26). share = % of 19.64T total Go tokens.
 const bars = [
   { label: "deepseek-v4-flash", share: 48.3, hero: true },
   { label: "deepseek-v4-pro", share: 19.4 },
@@ -177,7 +177,7 @@ export function FlashShare() {
             <span style={{ width: 13, height: 13, background: c.accent, display: "inline-block" }} />
             DeepSeek V4 Flash · 9.48T tokens · 83.6M requests
           </div>
-          <div style={{ color: c.ink }}>opencode.ai/data</div>
+          <div style={{ color: c.ink }}>altimate.ai/data</div>
         </div>
       </div>
     </AbsoluteFill>

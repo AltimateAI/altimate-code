@@ -162,6 +162,8 @@ const layer = Layer.effect(
 export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EffectFlock.defaultLayer), Layer.provide(FSUtil.defaultLayer)))
 // altimate_change end
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [FSUtil.node, EffectFlock.node] })
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [FSUtil.node, EffectFlock.node] })
+// altimate_change end
 
 export * as McpAuth from "./auth"

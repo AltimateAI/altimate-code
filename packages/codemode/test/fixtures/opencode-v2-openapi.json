@@ -700,7 +700,7 @@
             }
           }
         },
-        "description": "Retrieve foreground Session drains currently owned by this OpenCode process. Sessions absent from the result are inactive. Watermarks are the durable log positions read alongside the activity snapshot; activity itself is process state, so the pairing is advisory rather than transactional.",
+        "description": "Retrieve foreground Session drains currently owned by this Altimate Code process. Sessions absent from the result are inactive. Watermarks are the durable log positions read alongside the activity snapshot; activity itself is process state, so the pairing is advisory rather than transactional.",
         "summary": "List active sessions"
       }
     },
@@ -2743,7 +2743,7 @@
             }
           }
         },
-        "description": "Interrupt active execution owned by this OpenCode process. Idle interruption is a no-op.",
+        "description": "Interrupt active execution owned by this Altimate Code process. Idle interruption is a no-op.",
         "summary": "Interrupt session execution"
       }
     },

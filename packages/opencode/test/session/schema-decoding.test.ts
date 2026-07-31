@@ -244,9 +244,9 @@ describe("SessionStatus.Info", () => {
         reason: "free_tier_limit",
         provider: "opencode",
         title: "Free limit reached",
-        message: "Subscribe to OpenCode Go.",
+        message: "Subscribe to Altimate Code Go.",
         label: "subscribe",
-        link: "https://opencode.ai/go",
+        link: "https://altimate.ai/go",
       },
       next: 500,
     }

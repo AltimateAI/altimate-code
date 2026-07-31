@@ -204,7 +204,7 @@ function buildIssueURL(message: string, stack: string) {
   // Field keys match the ids in .github/ISSUE_TEMPLATE/bug-report.yml so the issue
   // form opens pre-filled. Populating os/terminal/reproduce keeps the report past
   // the contributing-guidelines compliance check, which pushes for system info.
-  // altimate_change start — upstream_fix: bug-report URL pointed at anomalyco/opencode;
+  // altimate_change start — upstream_fix: bug-report URL pointed at AltimateAI/altimate-code;
   // we file bugs against AltimateAI/altimate-code.
   const url = new URL("https://github.com/AltimateAI/altimate-code/issues/new?template=bug-report.yml")
   // altimate_change end

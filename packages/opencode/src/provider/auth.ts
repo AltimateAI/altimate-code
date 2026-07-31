@@ -292,7 +292,9 @@ export const defaultLayer = Layer.suspend(() =>
   layer.pipe(Layer.provide(Auth.defaultLayer), Layer.provide(Plugin.defaultLayer)),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Auth.node, Plugin.node] })
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [Auth.node, Plugin.node] })
+// altimate_change end
 
 // altimate_change start — restore imperative Promise wrappers for the HTTP route layer
 // (server/routes/provider.ts) which the Effect-only migration dropped. ProviderV2.ID is a

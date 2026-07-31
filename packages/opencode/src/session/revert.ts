@@ -151,16 +151,20 @@ export const defaultLayer = Layer.suspend(() =>
   ),
 )
 
-// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
-// packages/core/src/effect/layer-node.ts, not owned by this file). The fork previously thunked
-// these deps (`() => [...]`) to defer reading cyclically-imported facade `.node` refs past
-// module-init. Using upstream's object-style API with a plain array here; needs verification
-// once layer-node.ts's conflict is resolved that this doesn't reintroduce the undefined-node bug.
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Session.node, Snapshot.node, Storage.node, EventV2Bridge.node, SessionSummary.node, SessionRunState.node],
+  deps: () => [
+    Session.node,
+    Snapshot.node,
+    Storage.node,
+    EventV2Bridge.node,
+    SessionSummary.node,
+    SessionRunState.node,
+  ],
 })
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the session prompt loop consumes SessionRevert.cleanup directly.

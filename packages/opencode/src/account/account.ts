@@ -472,6 +472,8 @@ const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpCl
 export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(FetchHttpClient.layer)))
 // altimate_change end
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [AccountRepo.node, httpClient] })
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [AccountRepo.node, httpClient] })
+// altimate_change end
 
 export * as Account from "./account"

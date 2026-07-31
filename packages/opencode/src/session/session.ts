@@ -1044,14 +1044,12 @@ function listByProject(
 // (already merged above, non-conflicted — see `Interface.listGlobal` / `Service.of({ listGlobal })`)
 // properly supersedes it; `handlers/experimental.ts` already consumes that via `sessions.listGlobal(...)`.
 
-// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
-// packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
-// API with a plain array; needs verification once layer-node.ts's conflict is resolved that this
-// doesn't reintroduce the cyclic-import undefined-node bug the thunk was guarding against.
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
+  deps: () => [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
 })
+// altimate_change end
 
 export * as Session from "./session"

@@ -996,24 +996,23 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "provider failure")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* refModel(provider)
         const seen: string[] = []
         const off = yield* events.listen((event) => {
           seen.push(event.type)
           return Effect.void
         })
-        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id,
+          model: mdl,
+          abort: controller.signal,
+        })
 
         expect(
-          yield* handle.process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies SessionV1.User,
+          yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
             sessionID: chat.id,
             model: mdl,
             agent: agent(),
@@ -1024,7 +1023,7 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
         ).toBe("stop")
         yield* off
 
-        const parts = yield* MessageV2.parts(msg.id)
+        const parts = MessageV2.parts(msg.id)
         expect(parts).toEqual(
           expect.arrayContaining([
             expect.objectContaining({ type: "text", text: "partial" }),

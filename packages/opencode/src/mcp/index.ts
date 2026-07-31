@@ -60,13 +60,13 @@ const log = Log.create({ service: "mcp" })
 const CLIENT_OPTIONS = {
   capabilities: {
     // altimate_change start — upstream issue-tracker references (capabilities pending upstream); acknowledged, not a brand leak
-    // https://github.com/anomalyco/opencode/issues/11948
+    // https://github.com/AltimateAI/altimate-code/issues/11948
     // sampling: {},
-    // https://github.com/anomalyco/opencode/issues/23066
+    // https://github.com/AltimateAI/altimate-code/issues/23066
     // elicitation: {},
-    // https://github.com/anomalyco/opencode/issues/2308
+    // https://github.com/AltimateAI/altimate-code/issues/2308
     roots: {},
-    // https://github.com/anomalyco/opencode/issues/28567
+    // https://github.com/AltimateAI/altimate-code/issues/28567
     // tasks: {},
     // altimate_change end
   },
@@ -1423,11 +1423,13 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(
 ))
 // altimate_change end
 
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node],
+  deps: () => [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node],
 })
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the
 // Effect-only migration. Our datamate/mcp-discover tools call these from plain async code; the

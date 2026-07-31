@@ -62,7 +62,7 @@ async function headStamp(file: string) {
 }
 
 const startBranchHeadWatcher = Effect.fn("InstanceBootstrap.startBranchHeadWatcher")(function* (
-  ctx: { directory: string; worktree: string; project: { id: string; vcs?: string } },
+  ctx: InstanceContext,
   events: EventV2.Interface,
 ) {
   if (ctx.project.vcs !== "git") return

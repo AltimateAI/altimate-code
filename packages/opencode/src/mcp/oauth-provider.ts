@@ -43,7 +43,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
   get clientMetadata(): OAuthClientMetadata {
     return {
       redirect_uris: [this.redirectUrl],
-      // altimate_change start — branding (was "OpenCode" / "https://opencode.ai")
+      // altimate_change start — branding (was "Altimate Code" / "https://altimate.ai")
       client_name: "Altimate Code",
       client_uri: "https://altimate.ai",
       // altimate_change end

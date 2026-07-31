@@ -243,16 +243,13 @@ export function loaded(messages: SessionV1.WithParts[]) {
   return extract(messages)
 }
 
-// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support entirely (see
-// packages/core/src/effect/layer-node.ts, not owned by this file). The fork previously thunked
-// these deps (`() => [...]`) to defer reading cyclically-imported facade `.node` refs past
-// module-init. Using upstream's object-style API with a plain array here; needs verification
-// once layer-node.ts's conflict is resolved that this doesn't reintroduce the undefined-node bug.
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient],
+  deps: () => [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient],
 })
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise-based facade upstream removed in the
 // Effect-only migration; the session prompt loop consumes these synchronously.

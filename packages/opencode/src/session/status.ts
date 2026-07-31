@@ -128,11 +128,9 @@ const layer = Layer.effect(
 export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EventV2Bridge.defaultLayer)))
 // altimate_change end
 
-// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
-// packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
-// API with a plain array; needs verification once layer-node.ts's conflict is resolved that this
-// doesn't reintroduce the cyclic-import undefined-node bug the thunk was guarding against.
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node] })
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [EventV2Bridge.node] })
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the session prompt loop sets status synchronously.

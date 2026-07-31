@@ -55,3 +55,11 @@ export function path() {
 }
 
 export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })
+
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (session/session.ts, session/todo.ts, worktree, account/repo, control-plane/workspace).
+// Upstream v1.18.10 removed it in the makeGlobalNode migration; the fork's legacy bridge layers
+// still compose it directly. Layer.suspend defers path()/Flag reads to build time, matching the
+// old Layer.unwrap(Effect.gen(...)) semantics.
+export const defaultLayer = Layer.suspend(() => layerFromPath(path()))
+// altimate_change end

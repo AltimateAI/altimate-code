@@ -11,7 +11,9 @@ import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
-const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
+// MessageV2 is a plain namespace over the legacy @/storage/db accessor (no Effect
+// Service/node of its own) — only Session needs a layer here.
+const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, SessionProjector.node])))
 
 function expectNotFoundMessage(error: unknown, message: string) {
   expect(error).toMatchObject({

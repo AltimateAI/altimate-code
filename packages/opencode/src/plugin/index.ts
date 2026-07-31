@@ -343,11 +343,13 @@ export const defaultLayer = Layer.suspend(() =>
 )
 // altimate_change end
 
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [EventV2Bridge.node, Config.node, RuntimeFlags.node],
+  deps: () => [EventV2Bridge.node, Config.node, RuntimeFlags.node],
 })
+// altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the
 // Effect-only migration. Many non-Effect call sites (session/prompt.ts, tool/registry.ts,

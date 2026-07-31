@@ -7,11 +7,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anomalyco/opencode.git",
+    "url": "git+https://github.com/AltimateAI/altimate-code.git",
     "directory": "packages/http-recorder"
   },
-  "homepage": "https://github.com/anomalyco/opencode/tree/dev/packages/http-recorder",
-  "bugs": "https://github.com/anomalyco/opencode/issues",
+  "homepage": "https://github.com/AltimateAI/altimate-code/tree/dev/packages/http-recorder",
+  "bugs": "https://github.com/AltimateAI/altimate-code/issues",
   "keywords": [
     "effect",
     "http",

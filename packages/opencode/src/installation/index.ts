@@ -26,7 +26,7 @@ async function getTelemetry() {
 // altimate_change end
 
 // altimate_change start — curl-upgrade endpoint config
-// Upstream uses opencode.ai/install. We fetch the altimate install script
+// Upstream uses altimate.ai/install. We fetch the altimate install script
 // from www.altimate.sh/install (the apex altimate.sh isn't routed to the
 // Amplify Next.js app — tracked separately; revisit when apex DNS is fixed).
 // Bounded timeout so a stalled CDN/origin can't hang `altimate upgrade` forever.

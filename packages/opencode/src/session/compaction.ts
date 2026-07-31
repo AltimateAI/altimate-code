@@ -733,11 +733,11 @@ When constructing the summary, try to stick to this template:
 
   export const defaultLayer = layer
 
-  // UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
-  // packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
-  // API. Deps stay empty — our Effect Service layer is a thin `Layer.succeed` shim that delegates to
-  // the plain async functions above (which manage their own dependencies via static imports), unlike
-  // upstream's full Effect.gen rewrite which injects Config/Session/Agent/Plugin/Provider/etc. via DI.
+  // altimate_change start — object-style LayerNode API (layer-node.ts now supports lazy `deps`
+  // thunks again, but this node's deps stay a plain empty array — our Effect Service layer is a
+  // thin `Layer.succeed` shim that delegates to the plain async functions above, which manage
+  // their own dependencies via static imports, unlike upstream's full Effect.gen rewrite which
+  // injects Config/Session/Agent/Plugin/Provider/etc. via DI).
   export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

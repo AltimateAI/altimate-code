@@ -719,10 +719,8 @@ export namespace SessionProcessor {
 
   export const defaultLayer = layer
 
-  // UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
-  // packages/core/src/effect/layer-node.ts, not owned by this file). Adopting upstream's
-  // object-style API here (deps stays empty since ours' layer is a pure sync wrapper with no
-  // Effect service dependencies); needs verification once layer-node.ts's conflict is resolved.
+  // altimate_change start — object-style LayerNode API; deps stays empty since ours' layer is a
+  // pure sync wrapper with no Effect service dependencies.
   export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

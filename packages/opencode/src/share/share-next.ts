@@ -220,7 +220,7 @@ const layer = Layer.effect(
       const headers: Record<string, string> = {}
       const active = yield* account.active()
       if (Option.isNone(active) || !active.value.active_org_id) {
-        // altimate_change — keep fork's altimate.ai fallback URL over upstream's opncd.ai
+        // altimate_change — keep fork's altimate.ai fallback URL over upstream's altimate.ai
         const baseUrl = (yield* cfg.get()).enterprise?.url ?? "https://altimate.ai"
         return { headers, api: legacyApi, baseUrl } satisfies Req
       }
