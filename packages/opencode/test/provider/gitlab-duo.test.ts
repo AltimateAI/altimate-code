@@ -19,7 +19,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //         }),
 //       )
 //     },
@@ -43,7 +43,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //           provider: {
 //             gitlab: {
 //               options: {
@@ -75,7 +75,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //         }),
 //       )
 //     },
@@ -112,7 +112,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //         }),
 //       )
 //     },
@@ -148,7 +148,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //           provider: {
 //             gitlab: {
 //               options: {
@@ -180,7 +180,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //           provider: {
 //             gitlab: {
 //               options: {
@@ -210,7 +210,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //         }),
 //       )
 //     },
@@ -236,7 +236,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //           provider: {
 //             gitlab: {
 //               options: {
@@ -271,7 +271,7 @@ export {}
 //       await Bun.write(
 //         path.join(dir, "opencode.json"),
 //         JSON.stringify({
-//           $schema: "https://opencode.ai/config.json",
+//           $schema: "https://altimate.ai/config.json",
 //         }),
 //       )
 //     },

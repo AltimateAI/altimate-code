@@ -531,8 +531,8 @@ function ApiMethod(props: ApiMethodProps) {
     <DialogPrompt
       title={props.title}
       placeholder="API key"
-      description={
-        {
+      description={() =>
+        ({
           opencode: (
             <box gap={1}>
               <text fg={theme.textMuted}>
@@ -555,7 +555,7 @@ function ApiMethod(props: ApiMethodProps) {
               </text>
             </box>
           ),
-        }[props.providerID] ?? undefined
+        })[props.providerID] ?? undefined
       }
       onConfirm={async (value) => {
         if (!value) return

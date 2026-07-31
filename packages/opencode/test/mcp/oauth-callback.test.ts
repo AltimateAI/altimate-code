@@ -1,12 +1,12 @@
 import { test, expect, describe, afterEach } from "bun:test"
-import { createServer } from "net"
+import { createConnection, createServer } from "net"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
 import { parseRedirectUri } from "../../src/mcp/oauth-provider"
 
-// altimate_change — find a free loopback port at runtime. The ensureRunning tests previously hardcoded
-// ports (18000/18001/…), which collide with whatever else is listening on the dev machine (the server
-// silently no-ops when the port is already in use, leaving isRunning() false and fetches hitting the
-// other process). Binding port 0 lets the OS hand us a guaranteed-free port for each test.
+// altimate_change start — find a free loopback port at runtime. The ensureRunning tests previously
+// hardcoded ports (18000/18001/…), which collide with whatever else is listening on the dev machine
+// (the server silently no-ops when the port is already in use, leaving isRunning() false and fetches
+// hitting the other process). Binding port 0 lets the OS hand us a guaranteed-free port for each test.
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer()
@@ -17,6 +17,23 @@ function freePort(): Promise<number> {
       const port = typeof address === "object" && address ? address.port : 0
       srv.close(() => resolve(port))
     })
+  })
+}
+// altimate_change end
+
+async function canConnect(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port })
+    const done = (ok: boolean) => {
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(ok)
+    }
+
+    socket.setTimeout(500)
+    socket.once("connect", () => done(true))
+    socket.once("error", () => done(false))
+    socket.once("timeout", () => done(false))
   })
 }
 
@@ -85,6 +102,14 @@ describe("McpOAuthCallback.ensureRunning", () => {
       `${redirectUri}?state=test&error=access_denied&error_description=${encodeURIComponent("The user denied access")}`,
     )
 
-    expect(await response.text()).toContain('<div class="error">The user denied access</div>')
+    expect(await response.text()).toContain('<pre class="detail" id="oc-detail">The user denied access</pre>')
+  })
+
+  test("binds the callback server to IPv4 loopback", async () => {
+    const port = await freePort()
+    await McpOAuthCallback.ensureRunning(`http://127.0.0.1:${port}/custom/callback`)
+
+    expect(await canConnect("127.0.0.1", port)).toBe(true)
+    expect(await canConnect("::1", port)).toBe(false)
   })
 })

@@ -1,23 +1,59 @@
 import { test, expect } from "bun:test"
 import {
   aggregateImportedUsage,
+  formatImportFileError,
   parseShareUrl,
   shouldAttachShareAuthHeaders,
   transformShareData,
   type ShareData,
 } from "../../src/cli/cmd/import"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { PlatformError } from "effect"
+
+test("formats import file errors", () => {
+  expect(
+    formatImportFileError(
+      "test.json",
+      new PlatformError.PlatformError(
+        new PlatformError.SystemError({
+          _tag: "NotFound",
+          module: "FileSystem",
+          method: "readFileString",
+        }),
+      ),
+    ),
+  ).toBe("File not found: test.json")
+  expect(
+    formatImportFileError(
+      "test.json",
+      new PlatformError.PlatformError(
+        new PlatformError.SystemError({
+          _tag: "PermissionDenied",
+          module: "FileSystem",
+          method: "readFileString",
+        }),
+      ),
+    ),
+  ).toBe("Failed to read file: Permission denied")
+  expect(
+    formatImportFileError(
+      "test.json",
+      new FSUtil.FileSystemError({ method: "readJson", cause: new SyntaxError("Unexpected token") }),
+    ),
+  ).toBe("Invalid JSON in test.json: Unexpected token")
+})
 
 // parseShareUrl tests
 test("parses valid share URLs", () => {
-  expect(parseShareUrl("https://opncd.ai/share/Jsj3hNIW")).toBe("Jsj3hNIW")
+  expect(parseShareUrl("https://altimate.ai/share/Jsj3hNIW")).toBe("Jsj3hNIW")
   expect(parseShareUrl("https://custom.example.com/share/abc123")).toBe("abc123")
   expect(parseShareUrl("http://localhost:3000/share/test_id-123")).toBe("test_id-123")
 })
 
 test("rejects invalid URLs", () => {
-  expect(parseShareUrl("https://opncd.ai/s/Jsj3hNIW")).toBeNull() // legacy format
-  expect(parseShareUrl("https://opncd.ai/share/")).toBeNull()
-  expect(parseShareUrl("https://opncd.ai/share/id/extra")).toBeNull()
+  expect(parseShareUrl("https://altimate.ai/s/Jsj3hNIW")).toBeNull() // legacy format
+  expect(parseShareUrl("https://altimate.ai/share/")).toBeNull()
+  expect(parseShareUrl("https://altimate.ai/share/id/extra")).toBeNull()
   expect(parseShareUrl("not-a-url")).toBeNull()
 })
 

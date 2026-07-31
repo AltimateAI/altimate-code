@@ -1,5 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -23,8 +23,7 @@ import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "e
 // altimate_change start — upstream_fix: invalidate Config's per-instance cache after writes
 import { ScopedCache } from "effect"
 // altimate_change end
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
-import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { RemoteAuthError } from "@opencode-ai/core/v1/config/error"
@@ -39,8 +38,9 @@ import { ConfigPlugin } from "./plugin"
 import { ConfigVariable } from "./variable"
 import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
-// altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
+// altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrappers (see bottom of file)
 import { makeRuntime } from "@/effect/run-service"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 // altimate_change end
 
 // Custom merge function that concatenates array fields instead of replacing them
@@ -233,10 +233,13 @@ function globalConfigFile() {
   // altimate_change start - support altimate-code.json/.jsonc config filenames
   // altimate-code.json stays first so it remains the default target when no config exists yet;
   // altimate-code.jsonc is still discovered when it already exists.
-  const candidates = ["altimate-code.json", "altimate-code.jsonc", "opencode.jsonc", "opencode.json", "config.json"].map(
-    (file) =>
-    path.join(Global.Path.config, file),
-  )
+  const candidates = [
+    "altimate-code.json",
+    "altimate-code.jsonc",
+    "opencode.jsonc",
+    "opencode.json",
+    "config.json",
+  ].map((file) => path.join(Global.Path.config, file))
   // altimate_change end
   for (const file of candidates) {
     if (existsSync(file)) return file
@@ -270,7 +273,7 @@ function writableGlobal(info: Info) {
   return next
 }
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
@@ -401,6 +404,7 @@ export const layer = Layer.effect(
     })
 
     const ensureGitignore = Effect.fn("Config.ensureGitignore")(function* (dir: string) {
+      yield* fs.ensureDir(dir)
       const gitignore = path.join(dir, ".gitignore")
       const hasIgnore = yield* fs.existsSafe(gitignore)
       if (!hasIgnore) {
@@ -845,26 +849,21 @@ export const layer = Layer.effect(
   }),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(EffectFlock.defaultLayer),
-  Layer.provide(FSUtil.defaultLayer),
-  Layer.provide(Env.defaultLayer),
-  Layer.provide(Auth.defaultLayer),
-  Layer.provide(Account.defaultLayer),
-  Layer.provide(Npm.defaultLayer),
-  Layer.provide(FetchHttpClient.layer),
-))
-// altimate_change end
-
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [FSUtil.node, Auth.node, Account.node, Env.node, Npm.node, httpClient])
-// altimate_change end
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+  deps: LayerNode.lazy(() => [FSUtil.node, Auth.node, Account.node, Env.node, Npm.node, httpClient]),
+  // altimate_change end
+})
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the
 // Effect-only migration. Our altimate consumers (and several upstream-shared callers) still
 // call `await Config.get()` etc. The makeRuntime bridge's `attach()` reads WorkspaceContext +
 // the current fiber's InstanceRef, so these reads stay bound to the active workspace/instance.
+// defaultLayer is compiled from `node` since per-service `.defaultLayer` facades were dropped
+// upstream in favor of the LayerNode graph.
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 const { runPromise: runConfig } = makeRuntime(Service, defaultLayer)
 export async function get() {
   return runConfig((svc) => svc.get())

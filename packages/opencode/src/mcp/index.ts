@@ -1,7 +1,6 @@
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { type Tool } from "ai"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 // altimate_change start — makeRuntime for the restored Promise wrappers (see bottom of file)
@@ -31,13 +30,11 @@ const execFileAsync = promisify(execFile)
 // altimate_change end
 import { withTimeout } from "@/util/timeout"
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
+import { McpOAuthPendingProvider, McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { EventV2 } from "@opencode-ai/core/event"
 import { TuiEvent } from "@/server/tui-event"
-import open from "open"
 import { Cause, Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
 // altimate_change start — effect@4 renamed Either → Result (Effect.either → Effect.result)
 import * as Result from "effect/Result"
@@ -53,6 +50,8 @@ import { Global } from "@opencode-ai/core/global"
 import { Telemetry } from "@/telemetry"
 import { Log } from "../util/log"
 // altimate_change end
+import { McpEvent } from "@opencode-ai/schema/mcp-event"
+import { McpBrowser } from "./browser"
 
 const DEFAULT_TIMEOUT = 30_000
 // altimate_change start — upstream_fix: logger to drain local MCP server stderr (see connectLocal)
@@ -61,13 +60,13 @@ const log = Log.create({ service: "mcp" })
 const CLIENT_OPTIONS = {
   capabilities: {
     // altimate_change start — upstream issue-tracker references (capabilities pending upstream); acknowledged, not a brand leak
-    // https://github.com/anomalyco/opencode/issues/11948
+    // https://github.com/AltimateAI/altimate-code/issues/11948
     // sampling: {},
-    // https://github.com/anomalyco/opencode/issues/23066
+    // https://github.com/AltimateAI/altimate-code/issues/23066
     // elicitation: {},
-    // https://github.com/anomalyco/opencode/issues/2308
+    // https://github.com/AltimateAI/altimate-code/issues/2308
     roots: {},
-    // https://github.com/anomalyco/opencode/issues/28567
+    // https://github.com/AltimateAI/altimate-code/issues/28567
     // tasks: {},
     // altimate_change end
   },
@@ -82,20 +81,9 @@ export const Resource = Schema.Struct({
 }).annotate({ identifier: "McpResource" })
 export type Resource = Schema.Schema.Type<typeof Resource>
 
-export const ToolsChanged = EventV2.define({
-  type: "mcp.tools.changed",
-  schema: {
-    server: Schema.String,
-  },
-})
+export const ToolsChanged = McpEvent.ToolsChanged
 
-export const BrowserOpenFailed = EventV2.define({
-  type: "mcp.browser.open.failed",
-  schema: {
-    mcpName: Schema.String,
-    url: Schema.String,
-  },
-})
+export const BrowserOpenFailed = McpEvent.BrowserOpenFailed
 
 export const Failed = NamedError.create("MCPFailed", {
   name: Schema.String,
@@ -145,11 +133,12 @@ export type Status = Schema.Schema.Type<typeof Status>
 
 // Store transports for OAuth servers to allow finishing auth
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
-const pendingOAuthTransports = new Map<string, TransportWithAuth>()
+const pendingOAuthTransports = new Map<string, { transport: TransportWithAuth; provider?: McpOAuthPendingProvider }>()
 
 // Prompt cache types
 type PromptInfo = Awaited<ReturnType<MCPClient["listPrompts"]>>["prompts"][number]
 type ResourceInfo = Awaited<ReturnType<MCPClient["listResources"]>>["resources"][number]
+type ResourceTemplateInfo = Awaited<ReturnType<MCPClient["listResourceTemplates"]>>["resourceTemplates"][number]
 type McpEntry = NonNullable<ConfigV1.Info["mcp"]>[string]
 
 function isMcpConfigured(entry: McpEntry): entry is ConfigMCPV1.Info {
@@ -167,8 +156,7 @@ type TransportLabel = "stdio" | "sse" | "streamable-http"
 // altimate_change start — internal test hooks for headersCommand resolution (#791/#792)
 /** @internal — exported only for unit tests. Prefer using `tools()` in production code. */
 export const _testing = {
-  resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") =>
-    resolveHeadersCommand(spec, key),
+  resolveHeadersCommand: (spec: Record<string, string[]> | undefined, key = "test") => resolveHeadersCommand(spec, key),
   hasAuthorizationHeader,
   mergeHeaders,
 }
@@ -257,6 +245,7 @@ interface CreateResult {
   // altimate_change start — carry transport label for census telemetry
   transport?: TransportLabel
   // altimate_change end
+  instructions?: string
 }
 
 interface AuthResult {
@@ -272,18 +261,37 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  instructions: Record<string, string>
+}
+
+export interface ServerInstructions {
+  name: string
+  instructions: string
+  tools: string[]
+}
+
+/** An MCP tool in its native shape; consumers adapt it to their own tool format. */
+export interface McpTool {
+  /** Shared cached definition; consumers must copy rather than mutate it. */
+  readonly def: MCPToolDef
+  readonly client: MCPClient
+  readonly timeout?: number
 }
 
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
+  readonly instructions: () => Effect.Effect<ServerInstructions[]>
   // altimate_change start — carry the original (pre-sanitize) client name so tool-source
   // classification works from the real name, not the flattened `<client>_<tool>` key
   // (see altimate/tool-source).
-  readonly tools: () => Effect.Effect<Record<string, Tool & { client: string }>>
-  readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
-  readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
+  readonly tools: () => Effect.Effect<Record<string, McpTool & { clientName: string }>>
   // altimate_change end
+  readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
+  readonly resources: (clientName?: string) => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
+  readonly resourceTemplates: (
+    clientName?: string,
+  ) => Effect.Effect<Record<string, ResourceTemplateInfo & { client: string }>>
   readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
   readonly connect: (name: string) => Effect.Effect<void, NotFoundError>
   readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError>
@@ -302,7 +310,10 @@ export interface Interface {
   readonly startAuth: (
     mcpName: string,
   ) => Effect.Effect<{ authorizationUrl: string; oauthState: string }, NotFoundError>
-  readonly authenticate: (mcpName: string) => Effect.Effect<Status, NotFoundError>
+  readonly authenticate: (
+    mcpName: string,
+    onAuthorization?: (authorizationUrl: string) => void,
+  ) => Effect.Effect<Status, NotFoundError>
   readonly finishAuth: (mcpName: string, authorizationCode: string) => Effect.Effect<Status, NotFoundError>
   readonly removeAuth: (mcpName: string) => Effect.Effect<void>
   readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError>
@@ -330,12 +341,13 @@ function trackCensus(key: string, transport: TransportLabel, toolCount: number) 
 }
 // altimate_change end
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const auth = yield* McpAuth.Service
     const events = yield* EventV2Bridge.Service
+    const browser = yield* McpBrowser.Service
 
     type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -478,7 +490,7 @@ export const layer = Layer.effect(
                   })
                   .pipe(Effect.ignore, Effect.as(undefined))
               } else {
-                pendingOAuthTransports.set(key, transport)
+                pendingOAuthTransports.set(key, { transport })
                 lastStatus = { status: "needs_auth" as const }
                 return events
                   .publish(TuiEvent.ToastShow, {
@@ -620,10 +632,9 @@ export const layer = Layer.effect(
           client: mcpClient,
           status,
           transport,
-        } =
-          mcp.type === "remote"
-            ? yield* connectRemote(key, mcp as ConfigMCPV1.Info & { type: "remote" })
-            : yield* connectLocal(key, mcp as ConfigMCPV1.Info & { type: "local" })
+        } = mcp.type === "remote"
+          ? yield* connectRemote(key, mcp as ConfigMCPV1.Info & { type: "remote" })
+          : yield* connectLocal(key, mcp as ConfigMCPV1.Info & { type: "local" })
 
         if (!mcpClient) {
           if (status.status !== "connected" && status.status !== "disabled") {
@@ -635,16 +646,20 @@ export const layer = Layer.effect(
         return yield* Effect.gen(function* () {
           // altimate_change — McpCatalog.defs() tolerates both outputSchema
           // reference errors and Fabric-style null annotation hints (#792).
-          const listed = mcpClient.getServerCapabilities()?.tools
-            ? yield* McpCatalog.defs(mcpClient, mcp.timeout)
-            : []
+          const listed = mcpClient.getServerCapabilities()?.tools ? yield* McpCatalog.defs(mcpClient, mcp.timeout) : []
           if (!listed) {
             return yield* Effect.fail(new Error("Failed to get tools"))
           }
           // altimate_change start — fire-and-forget census telemetry once tools are listed
           if (transport) trackCensus(key, transport, listed.length)
           // altimate_change end
-          return { mcpClient, status, defs: listed, transport } satisfies CreateResult
+          return {
+            mcpClient,
+            status,
+            defs: listed,
+            transport,
+            instructions: mcpClient.getInstructions()?.trim(),
+          } satisfies CreateResult
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.tryPromise(() => mcpClient.close()).pipe(Effect.ignore, Effect.andThen(Effect.failCause(cause))),
@@ -691,6 +706,7 @@ export const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
+        delete s.instructions[name]
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
           Effect.logWarning("MCP connection closed", { server: name }).pipe(
@@ -747,6 +763,7 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
+          instructions: {},
         }
 
         // altimate_change start — auto-discover MCP servers from external AI tool configs
@@ -778,6 +795,7 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                if (result.instructions) s.instructions[key] = result.instructions
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -811,6 +829,7 @@ export const layer = Layer.effect(
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}
+            s.instructions = {}
             yield* Effect.forEach(
               clients,
               (client) =>
@@ -844,6 +863,7 @@ export const layer = Layer.effect(
       const client = s.clients[name]
       delete s.clients[name]
       delete s.defs[name]
+      delete s.instructions[name]
       if (!client) return Effect.void
       return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
     }
@@ -853,6 +873,7 @@ export const layer = Layer.effect(
       name: string,
       client: MCPClient,
       listed: MCPToolDef[],
+      instructions: string | undefined,
       timeout?: number,
     ) {
       const bridge = yield* EffectBridge.make()
@@ -860,6 +881,8 @@ export const layer = Layer.effect(
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
+      if (instructions) s.instructions[name] = instructions
+      else delete s.instructions[name]
       watch(s, name, client, bridge, timeout)
       if (previous) yield* Effect.tryPromise(() => previous.close()).pipe(Effect.ignore)
       return s.status[name]
@@ -889,6 +912,18 @@ export const layer = Layer.effect(
       return s.clients
     })
 
+    const instructions = Effect.fn("MCP.instructions")(function* () {
+      const s = yield* InstanceState.get(state)
+      return Object.entries(s.instructions)
+        .filter(([name]) => s.status[name]?.status === "connected")
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, item]) => ({
+          name,
+          instructions: item,
+          tools: (s.defs[name] ?? []).map((tool) => McpCatalog.toolName(name, tool.name)),
+        }))
+    })
+
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
       const result = yield* create(name, mcp)
@@ -900,7 +935,7 @@ export const layer = Layer.effect(
         return result.status
       }
 
-      return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout)
+      return yield* storeClient(s, name, result.mcpClient, result.defs!, result.instructions, mcp.timeout)
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
@@ -964,9 +999,7 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         const directory = yield* InstanceState.directory
         yield* Effect.promise(() => {
-          const run = persistChain.then(() =>
-            persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config),
-          )
+          const run = persistChain.then(() => persistMcpEnabledUnlocked(name, enabled, directory, Global.Path.config))
           persistChain = run.catch(() => {})
           return run
         })
@@ -984,8 +1017,7 @@ export const layer = Layer.effect(
           const names = await listMcpInConfig(p)
           if (names.includes(name)) {
             const entry = await readMcpEntryFromDisk(name, p)
-            if (entry)
-              await addMcpToConfig(name, { ...entry, enabled } as Parameters<typeof addMcpToConfig>[1], p)
+            if (entry) await addMcpToConfig(name, { ...entry, enabled } as Parameters<typeof addMcpToConfig>[1], p)
             found = true
             break
           }
@@ -1015,7 +1047,7 @@ export const layer = Layer.effect(
 
     const tools = Effect.fn("MCP.tools")(function* () {
       // altimate_change start — values carry the original client name (see Interface.tools).
-      const result: Record<string, Tool & { client: string }> = {}
+      const result: Record<string, McpTool & { clientName: string }> = {}
       // altimate_change end
       const s = yield* InstanceState.get(state)
 
@@ -1032,10 +1064,9 @@ export const layer = Layer.effect(
           continue
         }
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
-        for (const mcpTool of listed) {
-          const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
+        for (const def of listed) {
           // altimate_change start — attach the original client name for source classification downstream.
-          result[key] = Object.assign(McpCatalog.convertTool(mcpTool, client, timeout), { client: clientName })
+          result[McpCatalog.toolName(clientName, def.name)] = { def, client, timeout, clientName }
           // altimate_change end
         }
       }
@@ -1046,17 +1077,22 @@ export const layer = Layer.effect(
       s: State,
       listFn: (c: Client, timeout?: number) => Promise<T[]>,
       label: string,
+      key?: (item: T) => string,
+      targetClientName?: string,
     ) {
       return Effect.gen(function* () {
         const cfg = yield* cfgSvc.get()
         return yield* Effect.forEach(
-          Object.entries(s.clients).filter(([name]) => s.status[name]?.status === "connected"),
+          Object.entries(s.clients).filter(
+            ([name]) => s.status[name]?.status === "connected" && (!targetClientName || name === targetClientName),
+          ),
           ([clientName, client]) =>
             McpCatalog.fetch(
               clientName,
               client,
               (c) => listFn(c, requestTimeout(s, clientName, cfg.mcp?.[clientName], cfg.experimental?.mcp_timeout)),
               label,
+              key,
             ).pipe(Effect.map((items) => Object.entries(items ?? {}))),
           { concurrency: "unbounded" },
         ).pipe(Effect.map((results) => Object.fromEntries<T & { client: string }>(results.flat())))
@@ -1067,8 +1103,24 @@ export const layer = Layer.effect(
       return yield* collectFromConnected(yield* InstanceState.get(state), McpCatalog.prompts, "prompts")
     })
 
-    const resources = Effect.fn("MCP.resources")(function* () {
-      return yield* collectFromConnected(yield* InstanceState.get(state), McpCatalog.resources, "resources")
+    const resources = Effect.fn("MCP.resources")(function* (clientName?: string) {
+      return yield* collectFromConnected(
+        yield* InstanceState.get(state),
+        McpCatalog.resources,
+        "resources",
+        (resource) => resource.uri,
+        clientName,
+      )
+    })
+
+    const resourceTemplates = Effect.fn("MCP.resourceTemplates")(function* (clientName?: string) {
+      return yield* collectFromConnected(
+        yield* InstanceState.get(state),
+        McpCatalog.resourceTemplates,
+        "resource templates",
+        (template) => template.uriTemplate,
+        clientName,
+      )
     })
 
     const withClient = Effect.fnUntraced(function* <A>(
@@ -1160,7 +1212,7 @@ export const layer = Layer.effect(
         .join("")
       yield* auth.updateOAuthState(mcpName, oauthState)
       let capturedUrl: URL | undefined
-      const authProvider = new McpOAuthProvider(
+      const authProvider = new McpOAuthPendingProvider(
         mcpName,
         mcpConfig.url,
         {
@@ -1192,15 +1244,16 @@ export const layer = Layer.effect(
       return yield* Effect.tryPromise({
         try: () => {
           const client = createClient(directory)
-          return client
-            .connect(transport)
-            .then(() => ({ authorizationUrl: "", oauthState, client }) satisfies AuthResult)
+          return client.connect(transport).then(async () => {
+            await authProvider.commit()
+            return { authorizationUrl: "", oauthState, client } satisfies AuthResult
+          })
         },
         catch: (error) => error,
       }).pipe(
         Effect.catch((error) => {
           if (error instanceof UnauthorizedError && capturedUrl) {
-            pendingOAuthTransports.set(mcpName, transport)
+            pendingOAuthTransports.set(mcpName, { transport, provider: authProvider })
             return Effect.succeed({ authorizationUrl: capturedUrl.toString(), oauthState } satisfies AuthResult)
           }
           return Effect.die(error)
@@ -1208,7 +1261,10 @@ export const layer = Layer.effect(
       )
     })
 
-    const authenticate = Effect.fn("MCP.authenticate")(function* (mcpName: string) {
+    const authenticate = Effect.fn("MCP.authenticate")(function* (
+      mcpName: string,
+      onAuthorization?: (authorizationUrl: string) => void,
+    ) {
       const result = yield* startAuth(mcpName)
       if (!result.authorizationUrl) {
         const client = "client" in result ? result.client : undefined
@@ -1230,27 +1286,13 @@ export const layer = Layer.effect(
 
         const s = yield* InstanceState.get(state)
         yield* auth.clearOAuthState(mcpName)
-        return yield* storeClient(s, mcpName, client, listed, mcpConfig.timeout)
+        return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout)
       }
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
+      onAuthorization?.(result.authorizationUrl)
 
-      yield* Effect.tryPromise(() => open(result.authorizationUrl)).pipe(
-        Effect.flatMap((subprocess) =>
-          Effect.callback<void, Error>((resume) => {
-            const timer = setTimeout(() => resume(Effect.void), 500)
-            subprocess.on("error", (err) => {
-              clearTimeout(timer)
-              resume(Effect.fail(err))
-            })
-            subprocess.on("exit", (code) => {
-              if (code !== null && code !== 0) {
-                clearTimeout(timer)
-                resume(Effect.fail(new Error(`Browser open failed with exit code ${code}`)))
-              }
-            })
-          }),
-        ),
+      yield* browser.open(result.authorizationUrl).pipe(
         Effect.catch(() => {
           return events.publish(BrowserOpenFailed, { mcpName, url: result.authorizationUrl }).pipe(Effect.ignore)
         }),
@@ -1269,26 +1311,28 @@ export const layer = Layer.effect(
 
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
       yield* requireMcpConfig(mcpName)
-      const transport = pendingOAuthTransports.get(mcpName)
-      if (!transport) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
+      const pending = pendingOAuthTransports.get(mcpName)
+      if (!pending) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
 
-      const result = yield* Effect.tryPromise({
-        try: () => transport.finishAuth(authorizationCode).then(() => true as const),
-        catch: (error) => {
-          return error
-        },
-      }).pipe(Effect.option)
+      const error = yield* Effect.tryPromise({
+        try: () => pending.transport.finishAuth(authorizationCode),
+        catch: (error) => error,
+      }).pipe(
+        Effect.match({
+          onFailure: (error) => (error instanceof Error ? error.message : String(error)),
+          onSuccess: () => undefined,
+        }),
+      )
 
-      if (Option.isNone(result)) {
-        return { status: "failed", error: "OAuth completion failed" } satisfies Status
-      }
+      if (error) return { status: "failed", error: `OAuth completion failed: ${error}` } satisfies Status
 
+      yield* Effect.promise(() => pending.provider?.commit() ?? Promise.resolve())
       yield* auth.clearCodeVerifier(mcpName)
       pendingOAuthTransports.delete(mcpName)
 
       const mcpConfig = yield* requireMcpConfig(mcpName)
 
-      return yield* createAndStore(mcpName, mcpConfig)
+      return yield* createAndStore(mcpName, { ...mcpConfig, enabled: true })
     })
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
@@ -1320,18 +1364,25 @@ export const layer = Layer.effect(
     })
 
     const getAuthStatus = Effect.fn("MCP.getAuthStatus")(function* (mcpName: string) {
-      const entry = yield* auth.get(mcpName)
+      const runtimeConfig = (yield* InstanceState.has(state))
+        ? (yield* InstanceState.get(state)).config[mcpName]
+        : undefined
+      const mcpConfig = runtimeConfig ?? (yield* cfgSvc.get()).mcp?.[mcpName]
+      if (!mcpConfig || !isMcpConfigured(mcpConfig) || mcpConfig.type !== "remote") return "not_authenticated"
+      const entry = yield* auth.getForUrl(mcpName, mcpConfig.url)
       if (!entry?.tokens) return "not_authenticated"
-      const expired = yield* auth.isTokenExpired(mcpName)
-      return expired ? "expired" : "authenticated"
+      if (entry.tokens.expiresAt && entry.tokens.expiresAt < Date.now() / 1000) return "expired"
+      return "authenticated"
     })
 
     return Service.of({
       status,
       clients,
+      instructions,
       tools,
       prompts,
       resources,
+      resourceTemplates,
       add,
       connect,
       disconnect,
@@ -1356,17 +1407,24 @@ export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
 // --- Per-service runtime ---
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(McpAuth.defaultLayer),
-  Layer.provide(EventV2Bridge.defaultLayer),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(CrossSpawnSpawner.defaultLayer),
-  Layer.provide(FSUtil.defaultLayer),
-))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(McpAuth.defaultLayer),
+    Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(CrossSpawnSpawner.defaultLayer),
+    Layer.provide(FSUtil.defaultLayer),
+    Layer.provide(McpBrowser.defaultLayer),
+  ),
+)
 // altimate_change end
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node])
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node]),
+})
 // altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the

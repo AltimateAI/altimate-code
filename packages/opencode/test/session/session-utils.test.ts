@@ -50,7 +50,7 @@ describe("Session.fromRow / toRow", () => {
         diffs: [{ file: "src/index.ts", additions: 10, deletions: 5 }] as any,
       },
       share: { url: "https://example.com/share/123" },
-      revert: "snapshot_abc" as any,
+      revert: { messageID: "msg_abc" as any, snapshot: "snapshot_abc" },
       permission: "plan" as any,
       time: {
         created: 1700000000000,
@@ -73,7 +73,7 @@ describe("Session.fromRow / toRow", () => {
     expect(restored.version).toBe(info.version)
     expect(restored.summary).toEqual(info.summary)
     expect(restored.share).toEqual(info.share)
-    expect(restored.revert).toBe(info.revert)
+    expect(restored.revert).toEqual(info.revert)
     expect(restored.permission).toBe(info.permission)
     expect(restored.time.created).toBe(info.time.created)
     expect(restored.time.updated).toBe(info.time.updated)

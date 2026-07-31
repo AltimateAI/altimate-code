@@ -8,13 +8,18 @@ import { MessageV2 } from "./message-v2"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
+// altimate_change start — get/setAgentModel: the legacy Session facade above doesn't decode
+// agent/model (see session/index.ts's fromRow) or publish through EventV2Bridge, so the
+// session-level agent/model persistence below goes through the Effect-backed module instead.
+import * as SessionEffect from "./session"
+// altimate_change end
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
 // altimate_change start — shared family→vendor classifier (#888 J1)
 import { familyVendor } from "../provider/family"
 // altimate_change end
-import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
+import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions } from "ai"
 import { SessionCompaction } from "./compaction"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
@@ -55,6 +60,7 @@ import { decodeDataUrl } from "@/util/data-url"
 // altimate_change start — bridge the Effect-based Tool API (v1.17.9) back to this Promise-based module
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -76,9 +82,44 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+// NOTE: upstream v1.18.10 introduced Database/ModelV2/ProviderV2/SessionTable-direct reads plus two
+// new modules — SessionReminders (./reminders) and SessionTools (./tools) — and an LLMEvent from a
+// new @opencode-ai/llm package, all part of upstream's further Effect-native rewrite of session
+// orchestration. The fork keeps the Promise-based SessionPrompt namespace (bridged into Effect via
+// AppRuntime/EventV2Bridge, same pattern as the rest of session/*) rather than adopting that
+// rewrite, so these upstream-only imports are not wired in here. Flagged for a follow-up
+// feature-parity review — not a silent drop, just out of scope for a conflict-resolution pass.
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
+
+// altimate_change start — upstream v1.18.10 MCP resource attachment size/mime guard, ported onto
+// the fork's Promise-based path (see resource.blob handling below). decodeMessageInfo/
+// decodeMessagePart from upstream's version are NOT ported: they validate raw SessionV1 rows read
+// straight off Database, which is upstream's Effect-native architecture — the fork's SessionPrompt
+// reads through the MessageV2/Session facades instead, so there's no equivalent raw-row boundary
+// here for them to guard.
+const MAX_MCP_RESOURCE_BLOB_BYTES = 10 * 1024 * 1024
+const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
+  "application/pdf",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+])
+
+function mcpResourceBase64Size(value: string) {
+  const trimmed = value.replace(/\s/g, "")
+  const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0
+  return Math.max(0, Math.floor((trimmed.length * 3) / 4) - padding)
+}
+
+function formatMcpResourceBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${Math.ceil(value / 1024)} KB`
+  return `${Math.ceil(value / (1024 * 1024))} MB`
+}
+// altimate_change end
 
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
@@ -109,12 +150,7 @@ export namespace SessionPrompt {
   // The trace span is a sibling of the root (tracing.ts:1009 assigns
   // parentSpanId to rootSpanId), not a nested child — good enough for
   // waterfall correlation via timestamps, and no schema change is required.
-  async function traceSpan<T>(
-    name: string,
-    fn: () => Promise<T>,
-    input?: unknown,
-    sessionID?: SessionID,
-  ): Promise<T> {
+  async function traceSpan<T>(name: string, fn: () => Promise<T>, input?: unknown, sessionID?: SessionID): Promise<T> {
     const startTime = Date.now()
     if (sessionID) void SessionStatus.publishPhase(sessionID, name, true)
     try {
@@ -170,6 +206,15 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
+  // NOTE: upstream v1.18.10 replaced this whole module's implementation with an Effect-native
+  // `Layer.effect(Service, Effect.gen(...))` that yields every dependency (SessionStatus, Session,
+  // Agent, Provider, SessionProcessor, SessionCompaction, Plugin, Command, Config, Permission,
+  // FSUtil, MCP, LSP, ToolRegistry, Truncate, Image, ChildProcessSpawner, Instruction,
+  // SessionRunState, SessionRevert, SessionSummary, SystemPrompt, LLM, EventV2Bridge, RuntimeFlags,
+  // Database) as an Effect Context.Service. The fork deliberately keeps SessionPrompt as a
+  // Promise-based namespace (bridged into Effect via AppRuntime/EventV2Bridge — same pattern used
+  // across session/*), so upstream's Service/Layer rewrite is not adopted here; this is the same
+  // architectural divergence noted at the top of the file, not a new decision.
   const state = Instance.state(
     () => {
       const data: Record<
@@ -432,12 +477,7 @@ export namespace SessionPrompt {
     let session: Awaited<ReturnType<typeof Session.get>>
     let altCfg: Awaited<ReturnType<typeof Config.get>>
     try {
-      session = await traceSpan(
-        "bootstrap.session-get",
-        () => Session.get(sessionID),
-        { sessionID },
-        sessionID,
-      )
+      session = await traceSpan("bootstrap.session-get", () => Session.get(sessionID), { sessionID }, sessionID)
       // altimate_change start - detect environment fingerprint at session start
       altCfg = await traceSpan("bootstrap.config-get", () => Config.get(), undefined, sessionID)
       if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
@@ -558,6 +598,14 @@ export namespace SessionPrompt {
         }
       }
 
+      // NOTE: upstream v1.18.10 factored shell-tool execution (shellImpl), and model resolution
+      // (getModel/currentModel reading SessionTable directly via Database) into named Effect
+      // service methods here. The fork keeps equivalent capability inline via `Provider.getModel`
+      // (see e.g. below in this file) and `Shell.preferred`/`Shell.args` + `Bun.spawn` (see the
+      // shell tool call handling later in this file) rather than these factored Effect helpers —
+      // not adopted here due to the architecture mismatch (Effect Service vs Promise namespace),
+      // but equivalent behavior already exists elsewhere in this file.
+
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
@@ -567,10 +615,12 @@ export namespace SessionPrompt {
       // into the next loop instead of terminating the session.
       const lastAssistantHasToolParts =
         lastAssistant !== undefined &&
-        (msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts.some((part) => {
-          if (part.type !== "tool") return false
-          return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
-        }) ??
+        (msgs
+          .find((msg) => msg.info.id === lastAssistant.id)
+          ?.parts.some((part) => {
+            if (part.type !== "tool") return false
+            return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
+          }) ??
           false)
       if (
         lastAssistant?.finish &&
@@ -610,9 +660,7 @@ export namespace SessionPrompt {
       // TODO: centralize "invoke tool" logic
       if (task?.type === "subtask") {
         // altimate_change start — v1.17.9: TaskTool is an Effect of Info; init() yields the executable def
-        const taskTool = await AppRuntime.runPromise(
-          Effect.flatMap(TaskTool, (info) => info.init()),
-        )
+        const taskTool = await AppRuntime.runPromise(Effect.flatMap(TaskTool, (info) => info.init()))
         // altimate_change end
         const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
         const assistantMessage = (await Session.updateMessage({
@@ -846,9 +894,7 @@ export namespace SessionPrompt {
         model,
       })
       msgs = reminderResult.messages
-      const hoistedReminders = isAnthropicLikeModel(model)
-        ? []
-        : reminderResult.trustedReminderParts.map((p) => p.text)
+      const hoistedReminders = isAnthropicLikeModel(model) ? [] : reminderResult.trustedReminderParts.map((p) => p.text)
       // altimate_change end
 
       // altimate_change start — plan refinement detection and telemetry
@@ -1036,6 +1082,12 @@ export namespace SessionPrompt {
           },
         })
       }
+
+      // NOTE: upstream v1.18.10's Effect-native `createUserMessage` service method lived here.
+      // The fork already has its own `createUserMessage` (see below in this file) that resolves
+      // agent/model the same way and now also persists a session-level agent/model change via
+      // `Session.setAgentModel` (see the altimate_change block in that function) — feature parity
+      // with upstream's `sessions.setAgentModel` call, restored.
 
       if (step === 1) {
         // altimate_change start - reset training session tracking to avoid stale applied counts
@@ -1380,7 +1432,13 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({ kind: "dispatch_enter", sessionID, step, cwd: vCtx.workingDirectory, sessionStartMs: vCtx.sessionStartMs }),
+                JSON.stringify({
+                  kind: "dispatch_enter",
+                  sessionID,
+                  step,
+                  cwd: vCtx.workingDirectory,
+                  sessionStartMs: vCtx.sessionStartMs,
+                }),
             )
           }
           const checks = await ValidatorRegistry.runAll(vCtx)
@@ -1483,7 +1541,12 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({ kind: "dispatch_error", sessionID, step, error: e instanceof Error ? e.message : String(e) }),
+                JSON.stringify({
+                  kind: "dispatch_error",
+                  sessionID,
+                  step,
+                  error: e instanceof Error ? e.message : String(e),
+                }),
             )
           }
         }
@@ -1753,118 +1816,151 @@ export namespace SessionPrompt {
       })
     }
 
-    // altimate_change start — split the original client name off the model-facing tool object so
-    // it's used only for source classification and never leaks into the schema sent to the model.
+    // altimate_change start — upstream_fix: v1.18.10 replaced the ai-sdk MCP client adapter
+    // (which returned flat ai-sdk tools with `execute`/`inputSchema` directly, plus a `client`
+    // string) with a raw `{ def, client: MCPClient, timeout, clientName }` shape — `def` is just
+    // the protocol-level tool definition, `client` is the SDK client object. Build the ai-sdk Tool
+    // ourselves and call `client.callTool` directly (matching the ToolRegistry.tools() pattern above).
     for (const [key, entry] of Object.entries(await MCP.tools())) {
-      const { client: clientName, ...item } = entry
-      // altimate_change end
-      const execute = item.execute
-      if (!execute) continue
+      const { def, client, clientName, timeout } = entry
 
-      const schemaResult = asSchema(item.inputSchema) as { jsonSchema: any }
-      const transformed = ProviderTransform.schema(input.model, schemaResult.jsonSchema)
-      item.inputSchema = jsonSchema(transformed)
-      // Wrap execute to add plugin hooks and format output
-      item.execute = async (args, opts) => {
-        const ctx = context(args, opts)
+      // def.inputSchema is already JSON Schema (MCP protocol shape), unlike the ai-sdk Zod
+      // schemas ToolRegistry.tools() produces above — no asSchema() unwrap needed.
+      const transformed = ProviderTransform.schema(input.model, def.inputSchema)
 
-        await Plugin.trigger(
-          "tool.execute.before",
-          {
-            tool: key,
-            sessionID: ctx.sessionID,
-            callID: opts.toolCallId,
-          },
-          {
-            args,
-          },
-        )
+      tools[key] = tool({
+        description: def.description,
+        inputSchema: jsonSchema(transformed),
+        async execute(args, opts) {
+          const ctx = context(args, opts)
 
-        // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
-        // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
-        // check. Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
-        await AppRuntime.runPromise(
-          ctx.ask({
-            permission: key,
-            metadata: {},
-            patterns: ["*"],
-            always: ["*"],
-          }),
-        )
-        // altimate_change end
+          await Plugin.trigger(
+            "tool.execute.before",
+            {
+              tool: key,
+              sessionID: ctx.sessionID,
+              callID: opts.toolCallId,
+            },
+            {
+              args,
+            },
+          )
 
-        const result = await execute(args, opts)
+          // upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the Effect object
+          // and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission check.
+          // Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
+          await AppRuntime.runPromise(
+            ctx.ask({
+              permission: key,
+              metadata: {},
+              patterns: ["*"],
+              always: ["*"],
+            }),
+          )
 
-        await Plugin.trigger(
-          "tool.execute.after",
-          {
-            tool: key,
-            sessionID: ctx.sessionID,
-            callID: opts.toolCallId,
-            args,
-          },
-          result,
-        )
+          // altimate_change start — upstream_fix: mirror McpCatalog.convertTool's call options:
+          // forward the execution abort signal (cancelling a session cancels the in-flight MCP
+          // request), reset the timeout on progress (long tools that report progress extend
+          // their deadline instead of dying), and register the progress hook the SDK requires
+          // to send a progress token at all.
+          const result = await client.callTool({ name: def.name, arguments: args }, undefined, {
+            resetTimeoutOnProgress: true,
+            signal: opts.abortSignal,
+            ...(timeout !== undefined ? { timeout } : {}),
+            onprogress: () => {},
+          })
 
-        const textParts: string[] = []
-        const attachments: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[] = []
+          // altimate_change start — upstream_fix: a CallToolResult with isError:true is a
+          // FAILURE — mirror McpCatalog.convertTool / the code-mode adapter instead of
+          // reporting rejected MCP operations as completed tool output.
+          if ((result as { isError?: boolean }).isError) {
+            throw new Error(
+              ((result.content ?? []) as any[])
+                .flatMap((item) => (item.type === "text" ? [item.text] : []))
+                .filter((text: string) => text.trim())
+                .join("\n\n") || "MCP tool returned an error",
+            )
+          }
+          // altimate_change end
 
-        for (const contentItem of result.content) {
-          if (contentItem.type === "text") {
-            textParts.push(contentItem.text)
-          } else if (contentItem.type === "image") {
-            attachments.push({
-              type: "file",
-              mime: contentItem.mimeType,
-              url: `data:${contentItem.mimeType};base64,${contentItem.data}`,
-            })
-          } else if (contentItem.type === "resource") {
-            const { resource } = contentItem
-            if (resource.text) {
-              textParts.push(resource.text)
-            }
-            if (resource.blob) {
+          // altimate_change start — upstream_fix: preserve structured-only results — a valid
+          // `{ content: [], structuredContent }` reply would otherwise project to an empty
+          // success (McpCatalog.convertTool synthesizes the same JSON text block).
+          const structured = (result as { structuredContent?: unknown }).structuredContent
+          if ((result.content ?? []).length === 0 && structured !== undefined && structured !== null) {
+            result.content = [{ type: "text" as const, text: JSON.stringify(structured) }] as typeof result.content
+          }
+          // altimate_change end
+          // altimate_change end
+
+          await Plugin.trigger(
+            "tool.execute.after",
+            {
+              tool: key,
+              sessionID: ctx.sessionID,
+              callID: opts.toolCallId,
+              args,
+            },
+            result,
+          )
+
+          const textParts: string[] = []
+          const attachments: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[] = []
+
+          for (const contentItem of (result.content ?? []) as any[]) {
+            if (contentItem.type === "text") {
+              textParts.push(contentItem.text)
+            } else if (contentItem.type === "image") {
               attachments.push({
                 type: "file",
-                mime: resource.mimeType ?? "application/octet-stream",
-                url: `data:${resource.mimeType ?? "application/octet-stream"};base64,${resource.blob}`,
-                filename: resource.uri,
+                mime: contentItem.mimeType,
+                url: `data:${contentItem.mimeType};base64,${contentItem.data}`,
               })
+            } else if (contentItem.type === "resource") {
+              const { resource } = contentItem
+              if (resource.text) {
+                textParts.push(resource.text)
+              }
+              if (resource.blob) {
+                attachments.push({
+                  type: "file",
+                  mime: resource.mimeType ?? "application/octet-stream",
+                  url: `data:${resource.mimeType ?? "application/octet-stream"};base64,${resource.blob}`,
+                  filename: resource.uri,
+                })
+              }
             }
           }
-        }
 
-        const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
-        // altimate_change start — authoritative source + readable title from the original client
-        // name, shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
-        const described = describeMcpTool(key, clientName)
-        // altimate_change end
-        const metadata = {
-          ...(result.metadata ?? {}),
-          truncated: truncated.truncated,
-          ...(truncated.truncated && { outputPath: truncated.outputPath }),
-          // altimate_change start — stamp the authoritative source badge
-          source: described.source,
-          // altimate_change end
-        }
+          const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
+          // authoritative source + readable title from the original client name, shared with
+          // SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
+          const described = describeMcpTool(key, clientName)
+          const metadata = {
+            ...((result as { _meta?: Record<string, unknown> })._meta ?? {}),
+            truncated: truncated.truncated,
+            ...(truncated.truncated && { outputPath: truncated.outputPath }),
+            // stamp the authoritative source badge
+            source: described.source,
+          }
 
-        return {
-          // altimate_change start — MCP tools have no native title; give a readable label
-          title: described.title,
-          // altimate_change end
-          metadata,
-          output: truncated.content,
-          attachments: attachments.map((attachment) => ({
-            ...attachment,
-            id: PartID.ascending(),
-            sessionID: ctx.sessionID,
-            messageID: input.processor.message.id,
-          })),
-          content: result.content, // directly return content to preserve ordering when outputting to model
-        }
-      }
-      tools[key] = item
+          return {
+            // MCP tools have no native title; give a readable label
+            title: described.title,
+            metadata,
+            output: truncated.content,
+            attachments: attachments.map((attachment) => ({
+              ...attachment,
+              id: PartID.ascending(),
+              sessionID: ctx.sessionID,
+              messageID: input.processor.message.id,
+            })),
+            content: result.content, // directly return content to preserve ordering when outputting to model
+          }
+        },
+      })
     }
+    // altimate_change end
 
     return tools
   }
@@ -1948,6 +2044,33 @@ export namespace SessionPrompt {
       format: input.format,
       variant,
     }
+    // altimate_change start — upstream_fix: persist session-level agent/model when it changes
+    // (see the "feature-parity follow-up" note above this function's resolvedModel/agent block).
+    // Session.setAgentModel does the actual write + diff (direct SQL, so it's immediately visible
+    // regardless of which runtime built this call — unlike an Effect Session.Service round-trip,
+    // which would only land once some *other* fiber's EventV2 projector happens to be listening on
+    // the same PubSub instance). We still need a real session.updated event on EventV2Bridge for
+    // listeners (e.g. the TUI) — Session.setAgentModel's own Bus.publish only reaches the legacy
+    // zod Bus — so fire that separately via AppRuntime, matching the pattern already used for
+    // Command.Event.Executed below in this file.
+    const agentModelResult = await Session.setAgentModel({
+      sessionID: input.sessionID,
+      agent: info.agent,
+      model: { id: model.modelID, providerID: model.providerID, variant: variant ?? "default" },
+      time: info.time.created,
+    })
+    if (agentModelResult.changed) {
+      const sessionInfo = SessionEffect.fromRow(agentModelResult.row)
+      AppRuntime.runPromise(
+        EventV2Bridge.Service.use((events) =>
+          events.publish(SessionV1.Event.Updated, {
+            sessionID: input.sessionID,
+            info: sessionInfo as unknown as typeof SessionV1.Event.Updated.data.Type.info,
+          }),
+        ),
+      ).catch((error) => log.warn("failed to publish session.updated for agent/model change", { error }))
+    }
+    // altimate_change end
     using _ = defer(() => InstructionPrompt.clear(info.id))
 
     type Draft<T> = T extends MessageV2.Part ? Omit<T, "id"> & { id?: string } : never
@@ -1973,7 +2096,6 @@ export namespace SessionPrompt {
                 text: `Reading MCP resource: ${part.filename} (${uri})`,
               },
             ]
-
             try {
               const resourceContent = await MCP.readResource(clientName, uri)
               if (!resourceContent) {
@@ -1986,7 +2108,8 @@ export namespace SessionPrompt {
                 : [resourceContent.contents]
 
               for (const content of contents) {
-                if ("text" in content && content.text) {
+                if (!content || typeof content !== "object") continue
+                if ("text" in content && typeof content.text === "string" && content.text) {
                   pieces.push({
                     messageID: info.id,
                     sessionID: input.sessionID,
@@ -1994,16 +2117,48 @@ export namespace SessionPrompt {
                     synthetic: true,
                     text: content.text as string,
                   })
-                } else if ("blob" in content && content.blob) {
-                  // Handle binary content if needed
-                  const mimeType = "mimeType" in content ? content.mimeType : part.mime
+                  // altimate_change start — upstream v1.18.10 MCP resource attachment size/mime guard
+                } else if ("blob" in content && typeof content.blob === "string" && content.blob) {
+                  const mime =
+                    "mimeType" in content && typeof content.mimeType === "string" ? content.mimeType : part.mime
+                  const filename = "uri" in content && typeof content.uri === "string" ? content.uri : part.filename
+                  const size = mcpResourceBase64Size(content.blob)
+                  if (!SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES.has(mime)) {
+                    pieces.push({
+                      messageID: info.id,
+                      sessionID: input.sessionID,
+                      type: "text",
+                      synthetic: true,
+                      text: `[Binary MCP resource omitted: ${filename ?? uri} (${mime}, ${formatMcpResourceBytes(size)}) is not a supported attachment type]`,
+                    })
+                    continue
+                  }
+                  if (size > MAX_MCP_RESOURCE_BLOB_BYTES) {
+                    pieces.push({
+                      messageID: info.id,
+                      sessionID: input.sessionID,
+                      type: "text",
+                      synthetic: true,
+                      text: `[Binary MCP resource omitted: ${filename ?? uri} (${mime}, ${formatMcpResourceBytes(size)}) exceeds ${formatMcpResourceBytes(MAX_MCP_RESOURCE_BLOB_BYTES)}]`,
+                    })
+                    continue
+                  }
                   pieces.push({
                     messageID: info.id,
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `[Binary content: ${mimeType}]`,
+                    text: `[Binary MCP resource attached: ${filename ?? uri} (${mime})]`,
                   })
+                  pieces.push({
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "file",
+                    mime,
+                    filename,
+                    url: `data:${mime};base64,${content.blob}`,
+                  })
+                  // altimate_change end
                 }
               }
 
@@ -2842,7 +2997,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
     if (input.command === "mcps") {
-
       // Helper: build and persist an assistant reply for a command shortcut.
       async function respond(
         parentID: MessageID,
@@ -2851,17 +3005,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       ): Promise<MessageV2.WithParts> {
         const now = Date.now()
         const assistantMsg: MessageV2.Assistant = {
-          id: MessageID.ascending(), role: "assistant", sessionID: input.sessionID,
-          parentID, modelID: model.modelID, providerID: model.providerID,
-          mode: "builder", agent: "builder",
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: input.sessionID,
+          parentID,
+          modelID: model.modelID,
+          providerID: model.providerID,
+          mode: "builder",
+          agent: "builder",
           path: { cwd: Instance.directory, root: Instance.worktree },
-          cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          finish: "stop", time: { created: now, completed: now },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          finish: "stop",
+          time: { created: now, completed: now },
         }
         await Session.updateMessage(assistantMsg)
         const textPart: MessageV2.TextPart = {
-          id: PartID.ascending(), sessionID: input.sessionID, messageID: assistantMsg.id,
-          type: "text", text: responseText, time: { start: now, end: now },
+          id: PartID.ascending(),
+          sessionID: input.sessionID,
+          messageID: assistantMsg.id,
+          type: "text",
+          text: responseText,
+          time: { start: now, end: now },
         }
         await Session.updatePart(textPart)
         AppRuntime.runPromise(
@@ -2915,11 +3080,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (!cfg.mcp?.[name]) {
           const known = Object.keys(cfg.mcp ?? {})
           const suffix = known.length ? ` Known servers: ${known.join(", ")}.` : ""
-          return respond(
-            userMsg.info.id,
-            `MCP server **${name}** not found in config.${suffix}`,
-            model,
-          )
+          return respond(userMsg.info.id, `MCP server **${name}** not found in config.${suffix}`, model)
         }
 
         let responseText: string
@@ -2932,7 +3093,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             responseText = `MCP server **${name}** enabled. Status: connected.`
           } else {
             const errSuffix = entry?.status === "failed" ? " — " + entry.error : ""
-          responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
+            responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
           }
         } else {
           await MCP.disconnect(name)
@@ -3114,6 +3275,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       variant: input.variant,
     })) as MessageV2.WithParts
 
+    // NOTE: upstream v1.18.10 declared ModelRef/PromptInput/LoopInput/ShellInput/CommandInput as
+    // Effect Schema types here. The fork already defines PromptInput/ShellInput/CommandInput as
+    // zod schemas elsewhere in this file (search `z.infer<typeof PromptInput>` etc.) — not adding
+    // upstream's Schema-based duplicates since they'd collide (same exported type names, two
+    // different schema libraries).
     AppRuntime.runPromise(
       EventV2Bridge.Service.use((events) =>
         events.publish(Command.Event.Executed, {
@@ -3247,6 +3413,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // NOTE: upstream v1.18.10's module-level `node = LayerNode.make({ service, layer, deps: LayerNode.lazy(() => [...]) })`
+  // (with the full session-service dependency list) and its `bashRegex`/`argsRegex`/
+  // `placeholderRegex`/`quoteTrimRegex` constants + trailing `export * as SessionPrompt from
+  // "./prompt"` are all specific to upstream's flat-module (non-namespace) file layout. The fork
+  // wraps the whole file in `export namespace SessionPrompt { ... }` (opened above), which already
+  // provides the `SessionPrompt` named export directly — upstream's `export * as SessionPrompt`
+  // re-export trick isn't needed. The regex constants already exist locally inside the fork's
+  // `command` function (search `bashRegex` elsewhere in this file). The bridge-facade `node` just
+  // above (empty deps, since it only wraps Promise calls) is what `SessionPrompt.node` resolves to
+  // for external consumers — not adopting upstream's separate full-dependency-list node here.
+  export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

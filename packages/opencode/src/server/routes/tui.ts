@@ -342,7 +342,12 @@ export const TuiRoutes = lazy(() =>
       validator(
         "json",
         z.union(
-          (Object.values(TuiEvent) as EventV2.Definition[]).map((def) => {
+          // altimate_change start — upstream_fix: TuiEvent.Definitions is itself an
+          // array export alongside the individual event definitions. Object.values(TuiEvent)
+          // picked it up as a bogus fifth "definition" whose .data is undefined, crashing
+          // zod(def.data) below. Iterate the inventory array directly instead.
+          (TuiEvent.Definitions as unknown as EventV2.Definition[]).map((def) => {
+            // altimate_change end
             return z
               .object({
                 type: z.literal(def.type),
@@ -356,7 +361,9 @@ export const TuiRoutes = lazy(() =>
       ),
       async (c) => {
         const evt = c.req.valid("json") as { type: string; properties: unknown }
-        const def = (Object.values(TuiEvent) as EventV2.Definition[]).find((def) => def.type === evt.type)!
+        // altimate_change start — upstream_fix: see note above; use the inventory array, not Object.values(TuiEvent)
+        const def = (TuiEvent.Definitions as unknown as EventV2.Definition[]).find((def) => def.type === evt.type)!
+        // altimate_change end
         await publishTui(def, evt.properties as EventV2.Data<typeof def>)
         return c.json(true)
       },

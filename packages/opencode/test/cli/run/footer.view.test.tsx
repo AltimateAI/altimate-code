@@ -59,7 +59,7 @@ function model(input: {
     providerID: "opencode",
     api: {
       id: "opencode",
-      url: "https://opencode.ai",
+      url: "https://altimate.ai",
       npm: "@ai-sdk/openai-compatible",
     },
     name: input.name,
@@ -637,6 +637,42 @@ test("direct subagent panel renders active subagents", async () => {
     expect(frame).not.toContain("┃")
     expectPaletteList(list, 0)
     expect(rows).toBe(8)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("direct subagent panel closes when moving up from the first item", async () => {
+  const [tabs] = createSignal([
+    subagent({ sessionID: "s-1", label: "Explore", description: "Inspect auth flow" }),
+    subagent({ sessionID: "s-2", label: "General", description: "Write migration plan" }),
+  ])
+  const [current] = createSignal<string | undefined>()
+  let closed = 0
+
+  const app = await testRender(
+    () => (
+      <box width={100} height={RUN_SUBAGENT_PANEL_ROWS}>
+        <RunSubagentSelectBody
+          theme={() => RUN_THEME_FALLBACK.footer}
+          tabs={tabs}
+          current={current}
+          onClose={() => closed++}
+          onSelect={() => {}}
+        />
+      </box>
+    ),
+    { width: 100, height: RUN_SUBAGENT_PANEL_ROWS },
+  )
+
+  try {
+    await app.renderOnce()
+    app.mockInput.pressKey("ARROW_DOWN")
+    app.mockInput.pressKey("ARROW_UP")
+    expect(closed).toBe(0)
+
+    app.mockInput.pressKey("ARROW_UP")
+    expect(closed).toBe(1)
   } finally {
     app.renderer.destroy()
   }

@@ -10,7 +10,7 @@ describe("tui command", () => {
     // Assertions use regex (not string literals) so Bun's transpiler doesn't
     // statically resolve `@/cli/network` into `file:///…/network.ts` in the
     // expected value — a CI-only cache quirk that inverts the comparison.
-    expect(source).toMatch(/import \{ withNetworkOptions, resolveNetworkOptions \} from "@\/cli\/network"/)
+    expect(source).toMatch(/import \{ withNetworkOptions, resolveNetworkOptions, hasArg \} from "@\/cli\/network"/)
     expect(source).toMatch(/import \{ AppRuntime \} from "@\/effect\/app-runtime"/)
     expect(source).toContain("await AppRuntime.runPromise(resolveNetworkOptions(args))")
     expect(source).not.toContain("resolveNetworkOptionsNoConfig(args)")
@@ -23,8 +23,14 @@ describe("tui command", () => {
     )
     expect(start).toBeGreaterThan(-1)
 
-    const end = source.indexOf("// altimate_change end", start)
-    expect(end).toBeGreaterThan(start)
+    // The outer block now contains a nested altimate_change block (TUI network options honor
+    // global server config), so the *first* "altimate_change end" after `start` closes that
+    // inner block, not this one. Anchor on "await stop()" (known to be inside the outer block)
+    // and take the next end-marker after that instead.
+    const cleanupMarker = source.indexOf("await stop()", start)
+    expect(cleanupMarker).toBeGreaterThan(start)
+    const end = source.indexOf("// altimate_change end", cleanupMarker)
+    expect(end).toBeGreaterThan(cleanupMarker)
 
     const block = source.slice(start, end)
     const validate = block.indexOf("await validateSession")

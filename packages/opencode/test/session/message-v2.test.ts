@@ -484,7 +484,11 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    const result = ProviderTransform.message(await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], anthropicModel), anthropicModel, {})
+    const result = ProviderTransform.message(
+      await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], anthropicModel),
+      anthropicModel,
+      {},
+    )
     expect(result).toHaveLength(3)
     expect(result[2].role).toBe("tool")
     expect(result[2].content[0]).toMatchObject({
@@ -501,7 +505,7 @@ describe("session.message-v2.toModelMessage", () => {
     })
   })
 
-  test("preserves bedrock pdf tool-result media in tool output", async () => {
+  test("hoists bedrock pdf tool-result media into a follow-up user message attachment", async () => {
     const bedrockModel: Provider.Model = {
       ...model,
       id: ModelID.make("amazon-bedrock/anthropic.claude-sonnet-4-6"),
@@ -589,13 +593,25 @@ describe("session.message-v2.toModelMessage", () => {
             type: "tool-result",
             toolCallId: "call-bedrock-pdf-1",
             toolName: "read",
+            // Bedrock doesn't support PDFs in tool results (only images), so the
+            // tool output falls back to plain text and the PDF data is hoisted
+            // into a follow-up user message instead (see below).
             output: {
-              type: "content",
-              value: [
-                { type: "text", text: "PDF read successfully" },
-                { type: "media", mediaType: "application/pdf", data: pdf },
-              ],
+              type: "text",
+              value: "PDF read successfully",
             },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: MessageV2.SYNTHETIC_ATTACHMENT_PROMPT },
+          {
+            type: "file",
+            mediaType: "application/pdf",
+            filename: undefined,
+            data: `data:application/pdf;base64,${pdf}`,
           },
         ],
       },
@@ -788,7 +804,9 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    expect(await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model, { toolOutputMaxChars: 4 })).toStrictEqual([
+    expect(
+      await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model, { toolOutputMaxChars: 4 }),
+    ).toStrictEqual([
       {
         role: "user",
         content: [{ type: "text", text: "run tool" }],
@@ -1096,7 +1114,11 @@ describe("session.message-v2.toModelMessage", () => {
     ]
 
     expect(
-      ProviderTransform.message(await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], openrouterModel), openrouterModel, {}),
+      ProviderTransform.message(
+        await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], openrouterModel),
+        openrouterModel,
+        {},
+      ),
     ).toStrictEqual([
       {
         role: "assistant",
@@ -1452,6 +1474,7 @@ describe("session.message-v2.fromError", () => {
       "prompt is too long: 213462 tokens > 200000 maximum",
       "Your input exceeds the context window of this model",
       "The input token count (1196265) exceeds the maximum number of tokens allowed (1048575)",
+      "tokens in request more than max tokens allowed",
       "Please reduce the length of the messages or completion",
       "400 status code (no body)",
       "413 status code (no body)",

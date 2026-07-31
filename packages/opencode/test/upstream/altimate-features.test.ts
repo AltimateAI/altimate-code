@@ -356,10 +356,7 @@ describe("altimate features: Config plugin helpers added in bridge", () => {
   })
 
   test("core V1 config declares the plugin Spec type as string | [string, Options]", async () => {
-    const src = await fs.readFile(
-      path.join(repoRoot, "packages", "core", "src", "v1", "config", "plugin.ts"),
-      "utf-8",
-    )
+    const src = await fs.readFile(path.join(repoRoot, "packages", "core", "src", "v1", "config", "plugin.ts"), "utf-8")
     // Schema.Union of a bare string and a [string, Options] tuple — the
     // structural equivalent of the old `string | [string, PluginOptions]`.
     expect(src).toMatch(/export const Spec\s*=\s*Schema\.Union\(\[\s*Schema\.String\s*,/)
@@ -436,12 +433,19 @@ describe("altimate features: Account.active returns Promise", () => {
 // with it. We verify the full chain — the util defines the escaping, and the
 // callback imports + uses it.
 describe("altimate features: OAuth callback HTML escapes user-controllable error", () => {
-  test("escapeHtml is defined (shared util) and imported by oauth-callback.ts", async () => {
+  // Since the v1.18.10 merge, the callback server renders via the shared OauthCallbackPage
+  // (packages/core/src/oauth/page.ts) — the escaping invariant lives there now.
+  async function readCorePage(): Promise<string> {
+    const { readFile } = await import("fs/promises")
+    const { join } = await import("path")
+    return readFile(join(import.meta.dir, "..", "..", "..", "core", "src", "oauth", "page.ts"), "utf-8")
+  }
+
+  test("oauth-callback.ts delegates rendering to OauthCallbackPage, which defines escapeHtml", async () => {
     const callback = await readSrc("mcp", "oauth-callback.ts")
-    // Must pull escapeHtml in from the shared html util.
-    expect(callback).toMatch(/import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/)
-    const util = await readSrc("util", "html.ts")
-    expect(util).toMatch(/export function escapeHtml/)
+    expect(callback).toMatch(/import\s*\{\s*OauthCallbackPage\s*\}\s*from\s*["']@opencode-ai\/core\/oauth\/page["']/)
+    const page = await readCorePage()
+    expect(page).toMatch(/function escapeHtml/)
   })
 
   test("escapeHtml replaces &, <, >, \", ' with HTML entities", async () => {
@@ -454,15 +458,22 @@ describe("altimate features: OAuth callback HTML escapes user-controllable error
     expect(src).toContain("&#39;")
   })
 
-  test("HTML_ERROR template wraps the error string with escapeHtml(error)", async () => {
+  test("error responses route user-controllable strings through OauthCallbackPage.error, which escapes", async () => {
     const src = await readSrc("mcp", "oauth-callback.ts")
-    expect(src).toMatch(/escapeHtml\(error\)/)
+    // Every error render goes through the shared page component (no inline HTML)
+    expect(src).toMatch(/OauthCallbackPage\.error\(/)
+    expect(src).not.toContain("<html")
+    const page = await readCorePage()
+    // The page escapes every interpolated user-visible field
+    expect(page).toMatch(/escapeHtml\(input\.headline\)/)
+    expect(page).toMatch(/escapeHtml\(input\.footnote\)/)
+    expect(page).toMatch(/escapeHtml\(detail\)/)
   })
 
-  test("HTML_SUCCESS title uses 'Altimate Code', not 'OpenCode'", async () => {
-    const src = await readSrc("mcp", "oauth-callback.ts")
-    expect(src).toContain("Altimate Code - Authorization Successful")
-    expect(src).not.toMatch(/OpenCode\s*-\s*Authorization Successful/)
+  test("success page title uses 'Altimate Code', not 'OpenCode'", async () => {
+    const page = await readCorePage()
+    expect(page).toContain("Altimate Code")
+    expect(page).not.toMatch(/\bOpenCode\b(?!_)/)
   })
 })
 
@@ -491,10 +502,11 @@ describe("altimate features: plugin/index.ts wiring", () => {
     expect(src).toContain("SnowflakeCortexAuthPlugin")
     expect(src).toContain("DatabricksAuthPlugin")
     expect(src).toContain("AltimateAuthPlugin")
-    // All three must show up in the INTERNAL_PLUGINS array.
-    const arrIdx = src.indexOf("INTERNAL_PLUGINS")
+    // All three must show up in the internal-plugin list (renamed from
+    // INTERNAL_PLUGINS to internalPlugins() in the v1.18.10 merge).
+    const arrIdx = src.indexOf("function internalPlugins")
     expect(arrIdx).toBeGreaterThan(-1)
-    const arrBlock = src.slice(arrIdx, arrIdx + 500)
+    const arrBlock = src.slice(arrIdx, arrIdx + 900)
     expect(arrBlock).toContain("SnowflakeCortexAuthPlugin")
     expect(arrBlock).toContain("DatabricksAuthPlugin")
     expect(arrBlock).toContain("AltimateAuthPlugin")

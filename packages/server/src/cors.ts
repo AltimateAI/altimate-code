@@ -1,6 +1,12 @@
 import { Context } from "effect"
 
-const opencodeOrigin = /^https:\/\/([a-z0-9-]+\.)*opencode\.ai$/
+// altimate_change start — brand the built-in allowed-origin regex to the fork's
+// domain. This package (@opencode-ai/server) wasn't covered by the branding
+// transform script that ran over packages/opencode; without this, requests
+// from https://app.altimate.ai (our web app) are rejected as an untrusted CORS
+// origin, including on error responses like 401 that still need CORS headers.
+const opencodeOrigin = /^https:\/\/([a-z0-9-]+\.)*altimate\.ai$/
+// altimate_change end
 
 export type CorsOptions = { readonly cors?: ReadonlyArray<string> }
 

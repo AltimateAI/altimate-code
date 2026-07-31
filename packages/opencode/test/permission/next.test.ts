@@ -4,22 +4,20 @@ import os from "os"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Database as CoreDatabase } from "@opencode-ai/core/database/database"
 import { Database as LegacyDatabase, sql } from "../../src/storage/db"
 import { Permission } from "../../src/permission"
-import { InstanceBootstrap } from "../../src/project/bootstrap-service"
+import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
 import { requireInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 
-const events = EventV2Bridge.defaultLayer
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
-const env = Layer.mergeAll(
-  Permission.layer.pipe(Layer.provide(CoreDatabase.defaultLayer), Layer.provide(events)),
-  events,
-  CrossSpawnSpawner.defaultLayer,
-  InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
+const env = AppNodeBuilder.build(
+  LayerNode.group([Permission.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
+  [[InstanceStore.bootstrapNode, noopBootstrap]],
 )
 const it = testEffect(env)
 

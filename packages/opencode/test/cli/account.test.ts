@@ -4,7 +4,7 @@ import stripAnsi from "strip-ansi"
 import { defaultConsoleUrl, formatAccountLabel, formatOrgLine } from "../../src/cli/cmd/account"
 
 describe("console account display", () => {
-  // altimate_change — fork's default login console is console.altimate.ai, not upstream's console.opencode.ai.
+  // altimate_change — fork's default login console is console.altimate.ai, not upstream's console.altimate.ai.
   test("uses console.altimate.ai as the default login URL", () => {
     expect(defaultConsoleUrl).toBe("https://console.altimate.ai")
   })

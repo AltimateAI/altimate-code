@@ -2,6 +2,7 @@ import { unwatchFile, watchFile } from "node:fs"
 import { stat, readFile } from "node:fs/promises"
 import path from "node:path"
 import { Effect, Layer, Stream } from "effect"
+import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
@@ -14,6 +15,10 @@ import { LSP } from "../lsp/lsp"
 import { File } from "../file"
 import { Snapshot } from "../snapshot"
 import { Project } from "./project"
+// altimate_change start — upstream_fix: ShareNext was referenced below (yield* ShareNext.Service,
+// ShareNext.node) but never imported
+import { ShareNext } from "@/share/share-next"
+// altimate_change end
 import { Vcs } from "./vcs"
 import { Command } from "../command"
 import { GlobalBus, type GlobalEvent } from "@/bus/global"
@@ -21,8 +26,8 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { InstanceRef } from "@/effect/instance-ref"
 import type { InstanceContext } from "@/project/instance-context"
-import { ShareNext } from "@/share/share-next"
-import { Service as BootstrapService } from "./bootstrap-service"
+import { Config } from "@/config/config"
+import { Service } from "./bootstrap-service"
 import { Instance } from "./instance"
 // altimate_change start — upstream_fix: bridge merge dropped the Truncate.init()
 // call below. Without it the hourly Scheduler cleanup task for tool-output files
@@ -30,6 +35,9 @@ import { Instance } from "./instance"
 // unboundedly. Restore main's call site.
 import { Truncate } from "../tool/truncation"
 // altimate_change end
+
+export { Service } from "./bootstrap-service"
+export type { Interface } from "./bootstrap-service"
 
 // altimate_change start — upstream_fix: restore branch HEAD watcher in shipped bootstrap
 async function gitHeadPath(directory: string) {
@@ -98,122 +106,106 @@ const startBranchHeadWatcher = Effect.fn("InstanceBootstrap.startBranchHeadWatch
 })
 // altimate_change end
 
-// Per-instance bootstrap logic. Requires the individual services (provided by the
-// bootstrap layer's deps in the upstream path, or by AppRuntime's AppLayer in the
-// fork's imperative path) plus the InstanceRef supplied by the caller.
-const runBootstrap = Effect.gen(function* () {
-  const plugin = yield* Plugin.Service
-  const share = yield* ShareNext.Service
-  const format = yield* Format.Service
-  const lsp = yield* LSP.Service
-  const vcs = yield* Vcs.Service
-  const snapshot = yield* Snapshot.Service
-  const project = yield* Project.Service
-  const events = yield* EventV2Bridge.Service
-
-  const ctx = yield* InstanceState.context
-  yield* Effect.logInfo("bootstrapping", { directory: ctx.directory })
-  // altimate_change start — upstream_fix: bootstrap branch watcher for Vcs.init()
-  yield* startBranchHeadWatcher(ctx, events)
-  // altimate_change end
-
-  yield* plugin.init()
-  yield* share.init()
-  yield* format.init()
-  yield* lsp.init()
-  // altimate_change start — File.init still uses the legacy Instance.state store.
-  yield* Effect.sync(() => Instance.restore(ctx, () => File.init()))
-  // altimate_change end
-  yield* vcs.init()
-  yield* snapshot.init()
-  // altimate_change start — upstream_fix: see header note for why this is here
-  yield* Effect.sync(() => Truncate.init())
-  // altimate_change end
-
-  const projectID = ctx.project.id
-  yield* Stream.runForEach(events.subscribe(Command.Event.Executed), (payload) =>
-    payload.data.name === Command.Default.INIT ? project.setInitialized(projectID) : Effect.void,
-  ).pipe(Effect.forkDetach)
-})
-
-export const layer: Layer.Layer<
-  BootstrapService,
-  never,
-  | Plugin.Service
-  | ShareNext.Service
-  | Format.Service
-  | LSP.Service
-  | Vcs.Service
-  | Snapshot.Service
-  | Project.Service
-  | EventV2Bridge.Service
-> = Layer.effect(
-  BootstrapService,
+const layer = Layer.effect(
+  Service,
   Effect.gen(function* () {
-    // Capture the bootstrap dependencies at layer construction so the per-instance
-    // `run` Effect surfaces no requirements beyond the InstanceRef the caller supplies.
-    const context = yield* Effect.context<
-      | Plugin.Service
-      | ShareNext.Service
-      | Format.Service
-      | LSP.Service
-      | Vcs.Service
-      | Snapshot.Service
-      | Project.Service
-      | EventV2Bridge.Service
-    >()
-    return BootstrapService.of({ run: Effect.provide(runBootstrap, context) })
+    // Yield each bootstrap dep at layer init so `run` itself has R = never.
+    // InstanceStore imports only the lightweight tag from bootstrap-service.ts,
+    // so it can depend on bootstrap without importing this implementation graph.
+    const config = yield* Config.Service
+    const format = yield* Format.Service
+    const lsp = yield* LSP.Service
+    const plugin = yield* Plugin.Service
+    const project = yield* Project.Service
+    const shareNext = yield* ShareNext.Service
+    const snapshot = yield* Snapshot.Service
+    const vcs = yield* Vcs.Service
+    // altimate_change start — bootstrap needs EventV2Bridge for the branch-HEAD watcher and the
+    // Command.Event.Executed -> Project.setInitialized bridge below (both fork additions, absent upstream)
+    const events = yield* EventV2Bridge.Service
+    // altimate_change end
+
+    const run = Effect.gen(function* () {
+      const ctx = yield* InstanceState.context
+      yield* Effect.logInfo("bootstrapping", { directory: ctx.directory })
+      // everything depends on config so eager load it for nice traces
+      yield* config.get()
+      // Plugin can mutate config so it has to be initialized before anything else.
+      yield* plugin.init()
+
+      // altimate_change start — upstream_fix: bootstrap branch watcher for Vcs.init()
+      yield* startBranchHeadWatcher(ctx, events)
+      // altimate_change end
+
+      // altimate_change start — File.init still uses the legacy Instance.state store.
+      yield* Effect.sync(() => Instance.restore(ctx, () => File.init()))
+      // altimate_change end
+
+      // Each service self-manages its own slow work via Effect.forkScoped against
+      // its per-instance state scope. We just await materialization here.
+      // altimate_change — upstream_fix: `project` (Project.Service) has no `.init()` method;
+      // drop it from this list (it's still yielded above for setInitialized() below)
+      yield* Effect.forEach(
+        [lsp, shareNext, format, vcs, snapshot],
+        (s) => s.init().pipe(Effect.catchCause((cause) => Effect.logWarning("init failed", { cause }))),
+        { concurrency: "unbounded", discard: true },
+      ).pipe(Effect.withSpan("InstanceBootstrap.init"))
+
+      // altimate_change start — upstream_fix: see header note for why this is here
+      yield* Effect.sync(() => Truncate.init())
+      // altimate_change end
+
+      // altimate_change start — mark the project initialized once the dbt/etc `init` command runs
+      const projectID = ctx.project.id
+      yield* Stream.runForEach(events.subscribe(Command.Event.Executed), (payload) =>
+        payload.data.name === Command.Default.INIT ? project.setInitialized(projectID) : Effect.void,
+      ).pipe(Effect.forkDetach)
+      // altimate_change end
+    }).pipe(Effect.withSpan("InstanceBootstrap"))
+
+    return Service.of({ run })
   }),
 )
 
-// altimate_change start — Layer.suspend defers the facade .defaultLayer reads past the circular
-// module-init (the fork Service facades are added to namespace modules that participate in import
-// cycles; accessing X.defaultLayer at module-eval yielded undefined).
-export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(
-    Layer.provide(Plugin.defaultLayer),
-    Layer.provide(ShareNext.defaultLayer),
-    Layer.provide(Format.defaultLayer),
-    Layer.provide(LSP.defaultLayer),
-    Layer.provide(Vcs.defaultLayer),
-    Layer.provide(Snapshot.defaultLayer),
-    Layer.provide(Project.defaultLayer),
-    Layer.provide(EventV2Bridge.defaultLayer),
-  ),
-)
-// altimate_change end
-
-// altimate_change start — upstream_fix: thunk defers reading cyclically-imported facade
-// `.node` exports until buildLayer runs, avoiding load-time undefined.
-export const node = LayerNode.make(layer, () => [
-  Plugin.node,
-  ShareNext.node,
-  Format.node,
-  LSP.node,
-  Vcs.node,
-  Snapshot.node,
-  Project.node,
-  EventV2Bridge.node,
-])
-// altimate_change end
+export const node = makeGlobalNode({
+  service: Service,
+  layer: layer,
+  // altimate_change start — EventV2Bridge.node: the branch-HEAD watcher + setInitialized bridge
+  // above need EventV2Bridge.Service, which upstream's bootstrap doesn't depend on.
+  deps: LayerNode.lazy(() => [
+    Config.node,
+    Format.node,
+    LSP.node,
+    Plugin.node,
+    Project.node,
+    ShareNext.node,
+    Snapshot.node,
+    Vcs.node,
+    EventV2Bridge.node,
+  ]),
+  // altimate_change end
+})
 
 // altimate_change start — imperative bootstrap entrypoint for the fork's ALS-based
 // `Instance.provide({ init })` path (server.ts / project.ts / serve-upgrade-check.ts).
 // Upstream drives `bootstrap.run` via the Effect InstanceStore; the fork still boots
 // instances through the imperative `Instance` namespace, so expose the same `run`
 // Effect as an async callback that explicitly threads the active InstanceRef. The
-// Effect layer exports above (Service/layer/defaultLayer/node) serve the upstream path.
+// Effect layer exports above (Service/layer/node) serve the upstream path.
 async function bootstrap() {
   const { Instance } = await import("./instance")
   const { AppRuntime } = await import("@/effect/app-runtime")
   const ctx = Instance.current
+  const runBootstrap = Effect.gen(function* () {
+    const service = yield* Service
+    yield* service.run
+  })
   await AppRuntime.runPromise(runBootstrap.pipe(Effect.provideService(InstanceRef, ctx)))
 }
 
 export const InstanceBootstrap = Object.assign(bootstrap, {
-  Service: BootstrapService,
+  Service,
   layer,
-  defaultLayer,
   node,
 })
 // altimate_change end

@@ -1,4 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change start — AppNodeBuilder for the defaultLayer facade kept for existing consumers
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
+// altimate_change end
 import { Config } from "@/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { MessageV2 } from "@/session/message-v2"
@@ -56,7 +59,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -167,12 +170,11 @@ export const layer = Layer.effect(
   }),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(Config.defaultLayer)))
-// altimate_change end
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [Config.node]) })
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Config.node])
+// altimate_change start — defaultLayer kept for existing test consumers; compiled from `node`
+// since per-service `.defaultLayer` facades were dropped upstream in favor of the LayerNode graph.
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)) as Layer.Layer<Service>
 // altimate_change end
 
 export * as Image from "./image"

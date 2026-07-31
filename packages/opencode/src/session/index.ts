@@ -37,6 +37,7 @@ import { AppRuntime } from "@/effect/app-runtime"
 // core SessionTable columns brand project ids as "Project.ID"; re-brand the fork "ProjectID"
 // at the drizzle boundary so column comparisons/inserts typecheck.
 import { ProjectV2 } from "@opencode-ai/core/project"
+import { SessionMessage } from "@opencode-ai/schema/session-message"
 // altimate_change end
 
 export namespace Session {
@@ -68,7 +69,18 @@ export namespace Session {
           }
         : undefined
     const share = row.share_url ? { url: row.share_url } : undefined
-    const revert = row.revert ?? undefined
+    // altimate_change start — upstream_fix: core's SessionTable.revert column brands messageID/
+    // partID as "Session.Message.ID"/plain string; Info.revert uses the fork's MessageID/PartID
+    // brands. Re-brand (identity at runtime).
+    const revert = row.revert
+      ? {
+          messageID: MessageID.make(row.revert.messageID),
+          partID: row.revert.partID ? PartID.make(row.revert.partID) : undefined,
+          snapshot: row.revert.snapshot,
+          diff: row.revert.diff,
+        }
+      : undefined
+    // altimate_change end
     return {
       id: row.id,
       slug: row.slug,
@@ -116,7 +128,16 @@ export namespace Session {
       summary_deletions: info.summary?.deletions,
       summary_files: info.summary?.files,
       summary_diffs: info.summary?.diffs,
-      revert: info.revert ?? null,
+      // altimate_change — upstream_fix: re-brand fork MessageID/PartID to core "Session.Message.ID"
+      // for the column (identity at runtime); see fromRow's matching comment.
+      revert: info.revert
+        ? {
+            messageID: SessionMessage.ID.make(info.revert.messageID),
+            partID: info.revert.partID,
+            snapshot: info.revert.snapshot,
+            diff: info.revert.diff,
+          }
+        : null,
       permission: info.permission,
       metadata: info.metadata,
       time_created: info.time.created,
@@ -460,6 +481,50 @@ export namespace Session {
     },
   )
 
+  // altimate_change start — upstream_fix: PR #18186-era upstream persists a session-level
+  // agent/model change (via sessions.setAgentModel) whenever createUserMessage resolves an
+  // agent/model that differs from the session's stored one; the fork's imperative
+  // createUserMessage never persisted it. See prompt.ts's createUserMessage, which calls this
+  // and then separately fires a proper EventV2Bridge session.updated event via AppRuntime
+  // (this facade's own Bus.publish only reaches the legacy zod Bus, not EventV2Bridge).
+  export const setAgentModel = fn(
+    z.object({
+      sessionID: SessionID.zod,
+      agent: z.string(),
+      model: z.object({
+        id: z.string(),
+        providerID: z.string(),
+        variant: z.string().optional(),
+      }),
+      time: z.number(),
+    }),
+    async (input) => {
+      return Database.use((db) => {
+        // legacy Info/fromRow doesn't decode agent/model (see fromRow above), so diff against
+        // the raw row instead of asking the caller to pass in the previous value.
+        const existing = db.select().from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get()
+        if (!existing) throw new NotFoundError({ message: `Session not found: ${input.sessionID}` })
+        const unchanged =
+          existing.agent === input.agent &&
+          existing.model?.id === input.model.id &&
+          existing.model?.providerID === input.model.providerID &&
+          existing.model?.variant === input.model.variant
+        if (unchanged) return { changed: false as const, row: existing }
+        const row = db
+          .update(SessionTable)
+          .set({ agent: input.agent, model: input.model, time_updated: input.time })
+          .where(eq(SessionTable.id, input.sessionID))
+          .returning()
+          .get()
+        if (!row) throw new NotFoundError({ message: `Session not found: ${input.sessionID}` })
+        const info = fromRow(row)
+        Database.effect(() => Bus.publish(Event.Updated, { info }))
+        return { changed: true as const, row }
+      })
+    },
+  )
+  // altimate_change end
+
   export const setPermission = fn(
     z.object({
       sessionID: SessionID.zod,
@@ -492,7 +557,16 @@ export namespace Session {
         const row = db
           .update(SessionTable)
           .set({
-            revert: input.revert ?? null,
+            // altimate_change — upstream_fix: re-brand fork MessageID to core "Session.Message.ID"
+            // for the column (identity at runtime); see fromRow's matching comment.
+            revert: input.revert
+              ? {
+                  messageID: SessionMessage.ID.make(input.revert.messageID),
+                  partID: input.revert.partID,
+                  snapshot: input.revert.snapshot,
+                  diff: input.revert.diff,
+                }
+              : null,
             summary_additions: input.summary?.additions,
             summary_deletions: input.summary?.deletions,
             summary_files: input.summary?.files,

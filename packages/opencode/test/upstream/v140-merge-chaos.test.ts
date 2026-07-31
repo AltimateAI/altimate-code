@@ -172,12 +172,16 @@ describe("v1.4.0 chaos — KNOWN ISSUES (round 3 findings)", () => {
   // meant a single buggy plugin's chat.params (or any hook) could crash
   // the session at session/llm.ts:121. Round-3 fix wraps the hook call
   // in try/catch and logs failures, then continues with remaining hooks.
-  test("Plugin.trigger isolates hook failures (try/catch around hook invocation)", async () => {
+  test("Plugin.trigger isolates hook failures (tryPromise + ignore around hook invocation)", async () => {
     const pluginSrc = readFileSync(path.join(repoRoot, "packages/opencode/src/plugin/index.ts"), "utf-8")
-    // Extract the body of the trigger function
-    const triggerBody = pluginSrc.match(/export async function trigger[\s\S]*?^  }$/m)?.[0] ?? ""
-    // Must wrap the hook invocation in try { await fn(input, output) } catch
-    expect(triggerBody).toMatch(/try\s*\{[\s\S]*await fn\(input, output\)[\s\S]*\}\s*catch/)
+    // Since the v1.18.10 merge, trigger is Effect-native (the async export is a thin
+    // makeRuntime delegate) — the isolation lives in the Effect body: each hook call is
+    // wrapped in Effect.tryPromise and the failure is discarded via Effect.ignore.
+    const triggerBody = pluginSrc.match(/const trigger = Effect\.fn\("Plugin\.trigger"\)[\s\S]*?^    \}\)$/m)?.[0] ?? ""
+    expect(triggerBody).toMatch(/Effect\.tryPromise\(\{[\s\S]*fn\(input, output\)[\s\S]*\}\)/)
+    expect(triggerBody).toMatch(/Effect\.ignore/)
+    // and the Promise-facade export must delegate to the isolated Effect trigger
+    expect(pluginSrc).toMatch(/export async function trigger[\s\S]*?svc\.trigger\(name, input, output\)/)
   })
 
   test("Plugin.trigger logs and continues when a hook throws (functional check)", async () => {
@@ -187,9 +191,9 @@ describe("v1.4.0 chaos — KNOWN ISSUES (round 3 findings)", () => {
     // shape test — the full path requires Bus + state, so this asserts
     // the source-level invariant only. Pairs with the regex test above.
     const pluginSrc = readFileSync(path.join(repoRoot, "packages/opencode/src/plugin/index.ts"), "utf-8")
-    const triggerBody = pluginSrc.match(/export async function trigger[\s\S]*?^  }$/m)?.[0] ?? ""
-    // The catch block must call log.error — proves we're logging not silently swallowing
-    expect(triggerBody).toMatch(/catch[\s\S]*log\.error/)
+    const triggerBody = pluginSrc.match(/const trigger = Effect\.fn\("Plugin\.trigger"\)[\s\S]*?^    \}\)$/m)?.[0] ?? ""
+    // The failure path must log — proves we're logging not silently swallowing
+    expect(triggerBody).toMatch(/tapError[\s\S]*logError/)
   })
 
   // [KNOWN ISSUE] Bearer regex test coverage hole.

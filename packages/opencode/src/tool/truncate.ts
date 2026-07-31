@@ -1,4 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change start — AppNodeBuilder for the defaultLayer facade kept for existing consumers
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
+// altimate_change end
 import { NodePath } from "@effect/platform-node"
 import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effect"
 import path from "path"
@@ -46,7 +49,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Truncate") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
@@ -151,12 +154,14 @@ export const layer = Layer.effect(
   }),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FSUtil.defaultLayer), Layer.provide(NodePath.layer)))
-// altimate_change end
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [FSUtil.node]) })
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [FSUtil.node])
+// altimate_change start — defaultLayer kept for existing consumers (app-runtime.ts,
+// test/tool/bash.test.ts); compiled from `node` (per-service `.defaultLayer` facades were
+// dropped upstream) plus NodePath.layer, which this service's layer still depends on directly.
+export const defaultLayer = Layer.suspend(() => AppNodeBuilderV1.build(node)).pipe(
+  Layer.provide(NodePath.layer),
+) as Layer.Layer<Service>
 // altimate_change end
 
 export * as Truncate from "./truncate"

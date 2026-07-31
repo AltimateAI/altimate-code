@@ -1,19 +1,16 @@
-import { Schema } from "effect"
 // altimate_change start — upstream_fix: QuestionID zod validators must preserve the que prefix
 import z from "zod"
 // altimate_change end
+import { QuestionV1 } from "@opencode-ai/schema/question-v1"
 
-import { Identifier } from "@/id/id"
-import { Newtype } from "@opencode-ai/core/schema"
-
-export class QuestionID extends Newtype<QuestionID>()("QuestionID", Schema.String.check(Schema.isStartsWith("que"))) {
-  static ascending(id?: string): QuestionID {
-    return this.make(Identifier.ascending("question", id))
-  }
-  // altimate_change start — upstream_fix: restore que-prefix validation for zod callers
-  static zod = z
+// altimate_change start — upstream_fix: restore que-prefix validation for zod callers
+// (QuestionV1.ID has no zod-compatible validator; server/routes/question.ts uses QuestionID.zod
+// directly inside a zod object at the Hono edge).
+export const QuestionID = Object.assign(QuestionV1.ID, {
+  zod: z
     .string()
     .startsWith("que")
-    .transform((value) => QuestionID.make(value))
-  // altimate_change end
-}
+    .transform((value) => QuestionV1.ID.make(value)),
+})
+// altimate_change end
+export type QuestionID = typeof QuestionID.Type

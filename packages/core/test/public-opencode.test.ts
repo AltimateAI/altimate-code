@@ -152,7 +152,12 @@ const ref = (input: { id?: string; variant?: string } = {}) =>
   Schema.decodeUnknownSync(Model.Ref)({
     id: input.id ?? "chat",
     providerID: "public-test",
-    variant: input.variant,
+    // altimate_change start — upstream_fix: Model.Ref's `variant` field decodes via
+    // Schema.optionalKey (see packages/schema/src/schema.ts's `optional` helper), which in the
+    // v1.18.10 effect version requires the key to be absent, not merely `undefined`-valued, to
+    // be treated as omitted. Only include the key when a variant was actually requested.
+    ...(input.variant !== undefined ? { variant: input.variant } : {}),
+    // altimate_change end
   })
 
 const writeProvider = (directory: string, disabled = false) =>

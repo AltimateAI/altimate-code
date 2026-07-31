@@ -1,4 +1,3 @@
-import os from "os"
 import path from "path"
 import { parse as parseJsonc } from "jsonc-parser"
 import { Log } from "../util/log"
@@ -6,6 +5,12 @@ import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
 import { ConfigPaths } from "../config/paths"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+// altimate_change start — upstream_fix: use Global.Path.home (which honors
+// OPENCODE_TEST_HOME) instead of raw os.homedir(), so tests don't read a real
+// developer's ~/.claude.json / ~/.gemini/settings.json and leak live MCP
+// servers into "isolated" test instances. See discoverClaudeCode below.
+import { Global } from "../global"
+// altimate_change end
 
 const log = Log.create({ service: "mcp.discover" })
 
@@ -239,7 +244,7 @@ async function discoverClaudeCode(
   result: Record<string, ConfigMCPV1.Info>,
   contributingSources: string[],
 ) {
-  const claudeJsonPath = path.join(os.homedir(), ".claude.json")
+  const claudeJsonPath = path.join(Global.Path.home, ".claude.json")
   const parsed = await readJsonSafe(claudeJsonPath)
   if (!parsed || typeof parsed !== "object") return
 
@@ -304,7 +309,7 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   log.info("Discovering MCP servers from external AI tool configs...")
   const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
-  const homedir = os.homedir()
+  const homedir = Global.Path.home
 
   // Recursively scan every mcp.json under the project root — covers
   // .vscode/mcp.json (VS Code), .cursor/mcp.json (Cursor),

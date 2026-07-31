@@ -72,7 +72,9 @@ import { isValidDatabricksHost } from "../altimate/plugin/databricks"
 // altimate_change start — raise SSE chunk-timeout watchdog 2min→5min (#844) for slow warehouse/LLM streams
 const DEFAULT_CHUNK_TIMEOUT = 300_000
 // altimate_change end
-// altimate_change start — OpenAI-compatible HTTP header timeout support
+// altimate_change start — OpenAI-compatible HTTP header timeout support.
+// 10s (not upstream's 300s chunk default): fail fast when an OpenAI-compatible
+// endpoint never returns response headers.
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
 // altimate_change end
@@ -85,6 +87,46 @@ export namespace Provider {
     if (!match) return false
     return Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini")
   }
+
+  // altimate_change start — upstream addition (v1.18.10): fuzzy "did you mean" suggestions
+  // drawn from a provider's full catalog entry, filtering out models the caller couldn't
+  // actually select (deprecated always, alpha unless experimental models are enabled)
+  function modelSuggestions(provider: Info | undefined, modelID: ModelID): string[] {
+    const available = provider
+      ? Object.keys(provider.models).filter((id) => {
+          const model = provider.models[id]
+          if (model.status === "deprecated") return false
+          if (model.status === "alpha" && !Flag.OPENCODE_ENABLE_EXPERIMENTAL_MODELS) return false
+          return true
+        })
+      : []
+    const fuzzy = fuzzysort.go(modelID, available, { limit: 3, threshold: -10000 }).map((m) => m.target)
+    if (fuzzy.length) return fuzzy
+    const query = modelID
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((part) => part.length > 1)
+    return sortBy(
+      available
+        .map((id) => ({ id, score: query.filter((part) => id.toLowerCase().includes(part)).length }))
+        .filter((item) => item.score > 0),
+      [(item) => item.score, "desc"],
+      [(item) => item.id, "asc"],
+    )
+      .slice(0, 3)
+      .map((item) => item.id)
+  }
+  // altimate_change end
+
+  // altimate_change start — upstream addition (v1.18.10): Vertex AI's "eu"/"us" continental
+  // multi-regions require the Regional Endpoint Platform domain for Claude models; single-region
+  // locations (e.g. "europe-west1") keep the standard per-region aiplatform.googleapis.com host
+  function googleVertexAnthropicBaseURL(project: string | undefined, location: string | undefined) {
+    if (!project) return
+    if (location !== "eu" && location !== "us") return
+    return `https://aiplatform.${location}.rep.googleapis.com/v1/projects/${project}/locations/${location}/publishers/anthropic/models`
+  }
+  // altimate_change end
 
   function wrapSSE(res: Response, ms: number, ctl: AbortController) {
     if (typeof ms !== "number" || ms <= 0) return res
@@ -373,6 +415,16 @@ export namespace Provider {
       return { autoload: false }
     },
     // altimate_change end
+    // altimate_change start — upstream addition (v1.18.10): Meta (Llama) native API responses endpoint
+    meta: async () => {
+      return {
+        autoload: false,
+        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+          return sdk.responses(modelID)
+        },
+      }
+    },
+    // altimate_change end
     openai: async () => {
       return {
         autoload: false,
@@ -429,7 +481,7 @@ export namespace Provider {
         },
       }
     },
-    "azure-cognitive-services": async () => {
+    "azure-cognitive-services": async (provider) => {
       const resourceName = Env.get("AZURE_COGNITIVE_SERVICES_RESOURCE_NAME")
       return {
         autoload: false,
@@ -442,7 +494,9 @@ export namespace Provider {
           }
         },
         options: {
-          baseURL: resourceName ? `https://${resourceName}.cognitiveservices.azure.com/openai` : undefined,
+          baseURL: resourceName
+            ? `https://${resourceName}.cognitiveservices.azure.com/openai${provider.options?.useDeploymentBasedUrls ? "" : "/v1"}`
+            : undefined,
         },
       }
     },
@@ -485,7 +539,14 @@ export namespace Provider {
         process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI || process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI,
       )
 
-      if (!profile && !awsAccessKeyId && !awsBearerToken && !awsWebIdentityTokenFile && !containerCreds && !configApiKey)
+      if (
+        !profile &&
+        !awsAccessKeyId &&
+        !awsBearerToken &&
+        !awsWebIdentityTokenFile &&
+        !containerCreds &&
+        !configApiKey
+      )
         return { autoload: false }
 
       const providerOptions: AmazonBedrockProviderSettings = {
@@ -678,11 +739,18 @@ export namespace Provider {
       const location = Env.get("GOOGLE_CLOUD_LOCATION") ?? Env.get("VERTEX_LOCATION") ?? "global"
       const autoload = Boolean(project)
       if (!autoload) return { autoload: false }
+      // altimate_change start — upstream addition (v1.18.10): route "eu"/"us" continental
+      // multi-regions through the Regional Endpoint Platform domain
+      const baseURL = googleVertexAnthropicBaseURL(project, location)
+      // altimate_change end
       return {
         autoload: true,
         options: {
           project,
           location,
+          // altimate_change start — upstream addition (v1.18.10)
+          ...(baseURL && { baseURL }),
+          // altimate_change end
         },
         async getModel(sdk: any, modelID) {
           const id = String(modelID).trim()
@@ -985,12 +1053,14 @@ export namespace Provider {
           }),
         ]),
       }),
+      // altimate_change start — upstream addition (v1.18.10): reject non-finite cost values
+      // (NaN/Infinity from a bad models.dev entry) so toPublicInfo can filter invalid models
       cost: z.object({
-        input: z.number(),
-        output: z.number(),
+        input: z.number().finite(),
+        output: z.number().finite(),
         cache: z.object({
-          read: z.number(),
-          write: z.number(),
+          read: z.number().finite(),
+          write: z.number().finite(),
         }),
         experimentalOver200K: z
           .object({
@@ -1003,6 +1073,7 @@ export namespace Provider {
           })
           .optional(),
       }),
+      // altimate_change end
       limit: z.object({
         context: z.number(),
         input: z.number().optional(),
@@ -1042,7 +1113,10 @@ export namespace Provider {
       family: model.family,
       api: {
         id: model.id,
-        url: model.provider?.api ?? provider.api!,
+        // altimate_change start — upstream_fix: default to "" (not undefined) when neither the
+        // model nor the provider declares an API URL
+        url: model.provider?.api ?? provider.api ?? "",
+        // altimate_change end
         npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
       },
       status: model.status ?? "active",
@@ -1071,11 +1145,13 @@ export namespace Provider {
         input: model.limit.input,
         output: model.limit.output,
       },
+      // altimate_change start — upstream_fix: default missing capability booleans instead of
+      // passing through undefined
       capabilities: {
-        temperature: model.temperature,
-        reasoning: model.reasoning,
-        attachment: model.attachment,
-        toolcall: model.tool_call,
+        temperature: model.temperature ?? false,
+        reasoning: model.reasoning ?? false,
+        attachment: model.attachment ?? false,
+        toolcall: model.tool_call ?? true,
         input: {
           text: model.modalities?.input?.includes("text") ?? false,
           audio: model.modalities?.input?.includes("audio") ?? false,
@@ -1092,23 +1168,88 @@ export namespace Provider {
         },
         interleaved: model.interleaved ?? false,
       },
-      release_date: model.release_date,
+      // altimate_change end
+      // altimate_change start — upstream_fix: default to "" (not undefined)
+      release_date: model.release_date ?? "",
+      // altimate_change end
       variants: {},
     }
 
-    m.variants = mapValues(ProviderTransform.variants(m), (v) => v)
+    // altimate_change start — upstream addition (v1.18.10): declarative reasoning_options
+    // metadata takes priority over the model-ID heuristic when models.dev declares it
+    m.variants = mapValues(ProviderTransform.reasoningVariants(model, m) ?? ProviderTransform.variants(m), (v) => v)
+    // altimate_change end
 
     return m
   }
 
+  // altimate_change start — upstream addition (v1.18.10): converts a mode's declared
+  // provider.body into camelCase providerOptions, special-casing the OpenAI `reasoning.mode`
+  // field (used by opencode's own gateway to select service tiers) into `reasoningMode`
+  function modeOptions(model: Model, body: Record<string, unknown> | undefined) {
+    if (!body) return model.options
+    const options = Object.fromEntries(
+      Object.entries(body).map(([key, value]) => [key.replace(/_([a-z])/g, (_, char) => char.toUpperCase()), value]),
+    )
+    const reasoning = body.reasoning
+    if (
+      model.api.npm !== "@ai-sdk/openai" ||
+      typeof reasoning !== "object" ||
+      reasoning === null ||
+      typeof (reasoning as any).mode !== "string"
+    )
+      return options
+    const { reasoning: _, ...rest } = options
+    return { ...rest, reasoningMode: (reasoning as any).mode }
+  }
+  // altimate_change end
+
   export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
+    // altimate_change start — upstream addition (v1.18.10): per-model experimental.modes
+    // generate derived "<id>-<mode>" model entries with mode-specific cost/options overrides
+    const models: Record<string, Model> = {}
+    for (const [key, model] of Object.entries(provider.models)) {
+      models[key] = fromModelsDevModel(provider, model)
+      for (const [mode, opts] of Object.entries(model.experimental?.modes ?? {})) {
+        const id = `${model.id}-${mode}`
+        const base = fromModelsDevModel(provider, model)
+        models[id] = {
+          ...base,
+          id: ModelID.make(id),
+          name: `${model.name} ${mode[0].toUpperCase()}${mode.slice(1)}`,
+          cost: opts.cost
+            ? mergeDeep(base.cost, {
+                input: opts.cost.input,
+                output: opts.cost.output,
+                cache: {
+                  read: opts.cost.cache_read ?? 0,
+                  write: opts.cost.cache_write ?? 0,
+                },
+                experimentalOver200K: opts.cost.context_over_200k
+                  ? {
+                      input: opts.cost.context_over_200k.input,
+                      output: opts.cost.context_over_200k.output,
+                      cache: {
+                        read: opts.cost.context_over_200k.cache_read ?? 0,
+                        write: opts.cost.context_over_200k.cache_write ?? 0,
+                      },
+                    }
+                  : base.cost.experimentalOver200K,
+              })
+            : base.cost,
+          options: modeOptions(base, opts.provider?.body),
+          headers: opts.provider?.headers ?? base.headers,
+        }
+      }
+    }
+    // altimate_change end
     return {
       id: ProviderID.make(provider.id),
       source: "custom",
       name: provider.name,
       env: provider.env ?? [],
       options: {},
-      models: mapValues(provider.models, (model) => fromModelsDevModel(provider, model)),
+      models,
     }
   }
 
@@ -1117,6 +1258,12 @@ export namespace Provider {
     const config = await Config.get()
     const modelsDev = await ModelsDev.get()
     const database = mapValues(modelsDev, fromModelsDevProvider)
+    // altimate_change start — upstream_fix: pristine, never-mutated snapshot of the full catalog.
+    // `database` below gets mutated in place by custom loaders (e.g. the opencode loader deletes
+    // paid models when unauthenticated) and by the config/blacklist/whitelist filtering pass, so
+    // it can't be used for "did you mean" suggestions once a provider is unloaded/filtered down.
+    const catalog = structuredClone(database)
+    // altimate_change end
 
     const disabled = new Set(config.disabled_providers ?? [])
     const enabled = config.enabled_providers ? new Set(config.enabled_providers) : null
@@ -1225,8 +1372,14 @@ export namespace Provider {
           context: 1000000,
           output: 64000,
         }),
-        "claude-opus-4-8": makeSnowflakeModel("claude-opus-4-8", "Claude Opus 4.8", { context: 1000000, output: 128000 }),
-        "claude-opus-4-7": makeSnowflakeModel("claude-opus-4-7", "Claude Opus 4.7", { context: 1000000, output: 128000 }),
+        "claude-opus-4-8": makeSnowflakeModel("claude-opus-4-8", "Claude Opus 4.8", {
+          context: 1000000,
+          output: 128000,
+        }),
+        "claude-opus-4-7": makeSnowflakeModel("claude-opus-4-7", "Claude Opus 4.7", {
+          context: 1000000,
+          output: 128000,
+        }),
         "claude-sonnet-4-6": makeSnowflakeModel("claude-sonnet-4-6", "Claude Sonnet 4.6", {
           context: 200000,
           output: 64000,
@@ -1496,16 +1649,21 @@ export namespace Provider {
           if (model.id && model.id !== modelID) return modelID
           return existingModel?.name ?? modelID
         })
+        // altimate_change start — upstream_fix: hoisted so the interleaved-reasoning default
+        // below can key off the resolved api.id/npm instead of recomputing them
+        const apiID = model.id ?? existingModel?.api.id ?? modelID
+        const apiNpm =
+          model.provider?.npm ??
+          provider.npm ??
+          existingModel?.api.npm ??
+          modelsDev[providerID]?.npm ??
+          "@ai-sdk/openai-compatible"
+        // altimate_change end
         const parsedModel: Model = {
           id: ModelID.make(modelID),
           api: {
-            id: model.id ?? existingModel?.api.id ?? modelID,
-            npm:
-              model.provider?.npm ??
-              provider.npm ??
-              existingModel?.api.npm ??
-              modelsDev[providerID]?.npm ??
-              "@ai-sdk/openai-compatible",
+            id: apiID,
+            npm: apiNpm,
             url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api,
           },
           status: model.status ?? existingModel?.status ?? "active",
@@ -1530,7 +1688,15 @@ export namespace Provider {
               video: model.modalities?.output?.includes("video") ?? existingModel?.capabilities.output.video ?? false,
               pdf: model.modalities?.output?.includes("pdf") ?? existingModel?.capabilities.output.pdf ?? false,
             },
-            interleaved: model.interleaved ?? false,
+            // altimate_change start — upstream addition (v1.18.10): default custom openai-compatible
+            // DeepSeek models to reasoning_content interleaving unless already configured
+            interleaved:
+              model.interleaved ??
+              existingModel?.capabilities.interleaved ??
+              (!existingModel && apiNpm === "@ai-sdk/openai-compatible" && apiID.includes("deepseek")
+                ? { field: "reasoning_content" }
+                : false),
+            // altimate_change end
           },
           cost: {
             input: model?.cost?.input ?? existingModel?.cost?.input ?? 0,
@@ -1741,6 +1907,9 @@ export namespace Provider {
       // altimate_change start — expose full provider database (including unauthenticated custom providers)
       database,
       // altimate_change end
+      // altimate_change start — upstream_fix: pristine catalog snapshot for suggestion lookups
+      catalog,
+      // altimate_change end
       sdk,
       modelLoaders,
       varsLoaders,
@@ -1765,6 +1934,22 @@ export namespace Provider {
       const s = await state()
       const provider = s.providers[model.providerID]
       const options = { ...provider.options }
+
+      // altimate_change start — upstream addition (v1.18.10): Claude models routed through the
+      // "google-vertex" provider (not "google-vertex-anthropic") use the anthropic sub-SDK, which
+      // also needs the Regional Endpoint Platform baseURL for continental multi-regions
+      if (
+        model.providerID === "google-vertex" &&
+        model.api.npm === "@ai-sdk/google-vertex/anthropic" &&
+        !options.baseURL
+      ) {
+        const baseURL = googleVertexAnthropicBaseURL(
+          typeof options.project === "string" ? options.project : undefined,
+          typeof options.location === "string" ? options.location : undefined,
+        )
+        if (baseURL) options.baseURL = baseURL
+      }
+      // altimate_change end
 
       if (model.providerID === "google-vertex" && !model.api.npm.includes("@ai-sdk/openai-compatible")) {
         delete options.fetch
@@ -1914,17 +2099,26 @@ export namespace Provider {
     const s = await state()
     const provider = s.providers[providerID]
     if (!provider) {
-      const availableProviders = Object.keys(s.providers)
-      const matches = fuzzysort.go(providerID, availableProviders, { limit: 3, threshold: -10000 })
-      const suggestions = matches.map((m) => m.target)
+      // altimate_change start — upstream_fix: fall back to the pristine catalog entry (a
+      // provider may exist in the catalog but not be loaded — e.g. no API key configured) so
+      // suggestions still surface real catalog model IDs instead of only loaded provider IDs
+      const catalogProvider = s.catalog[providerID]
+      const suggestions = catalogProvider
+        ? modelSuggestions(catalogProvider, modelID)
+        : fuzzysort
+            .go(providerID, Object.keys({ ...s.catalog, ...s.providers }), { limit: 3, threshold: -10000 })
+            .map((m) => m.target)
+      // altimate_change end
       throw new ModelNotFoundError({ providerID, modelID, suggestions })
     }
 
     const info = provider.models[modelID]
     if (!info) {
-      const availableModels = Object.keys(provider.models)
-      const matches = fuzzysort.go(modelID, availableModels, { limit: 3, threshold: -10000 })
-      const suggestions = matches.map((m) => m.target)
+      // altimate_change start — upstream_fix: prefer suggestions from the loaded provider, but
+      // fall back to the full catalog when the loaded (possibly filtered) set has no matches
+      const current = modelSuggestions(provider, modelID)
+      const suggestions = current.length ? current : modelSuggestions(s.catalog[providerID], modelID)
+      // altimate_change end
       throw new ModelNotFoundError({ providerID, modelID, suggestions })
     }
     return info
@@ -1972,65 +2166,76 @@ export namespace Provider {
     }
   }
 
+  // altimate_change start — upstream addition (v1.18.10): family-metadata-driven small model
+  // selection, replacing the old model-ID substring heuristic. Models are matched by their
+  // models.dev `family` tag and the newest `release_date` within a family wins, instead of a
+  // fixed list of hardcoded model-ID fragments that drift as new model names ship.
+  const SMALL_MODEL_FAMILY_PRIORITY = ["gemini-flash", "gpt-nano", "claude-haiku"]
+
   export async function getSmallModel(providerID: ProviderID) {
     const cfg = await Config.get()
 
     if (cfg.small_model) {
       const parsed = parseModel(cfg.small_model)
-      return getModel(parsed.providerID, parsed.modelID)
+      try {
+        return await getModel(parsed.providerID, parsed.modelID)
+      } catch (e) {
+        if (e instanceof ModelNotFoundError) return undefined
+        throw e
+      }
     }
 
     const provider = await state().then((state) => state.providers[providerID])
-    if (provider) {
-      let priority = [
-        "claude-haiku-4-5",
-        "claude-haiku-4.5",
-        "3-5-haiku",
-        "3.5-haiku",
-        "gemini-3-flash",
-        "gemini-2.5-flash",
-        "gpt-5-nano",
-      ]
-      if (providerID.startsWith("opencode")) {
-        priority = ["gpt-5-nano"]
-      }
-      if (providerID.startsWith("github-copilot")) {
-        // prioritize free models for github copilot
-        priority = ["gpt-5-mini", "claude-haiku-4.5", ...priority]
-      }
-      for (const item of priority) {
-        if (providerID === ProviderID.amazonBedrock) {
-          const crossRegionPrefixes = ["global.", "us.", "eu."]
-          const candidates = Object.keys(provider.models).filter((m) => m.includes(item))
+    if (!provider) return undefined
 
-          // Model selection priority:
-          // 1. global. prefix (works everywhere)
-          // 2. User's region prefix (us., eu.)
-          // 3. Unprefixed model
-          const globalMatch = candidates.find((m) => m.startsWith("global."))
-          if (globalMatch) return getModel(providerID, ModelID.make(globalMatch))
+    // TODO: Remove these provider-specific assumptions once model syncing reliably reports
+    // available deployments. Azure deployments are inferred, not enumerable, so every "model"
+    // here is a guess rather than something known to be actually deployed.
+    if (providerID === ProviderID.azure || providerID === ProviderID.make("azure-cognitive-services")) {
+      return undefined
+    }
 
-          const region = provider.options?.region
-          if (region) {
-            const regionPrefix = region.split("-")[0]
-            if (regionPrefix === "us" || regionPrefix === "eu") {
-              const regionalMatch = candidates.find((m) => m.startsWith(`${regionPrefix}.`))
-              if (regionalMatch) return getModel(providerID, ModelID.make(regionalMatch))
-            }
-          }
+    const priority = providerID.startsWith("opencode")
+      ? ["gpt-nano"]
+      : providerID.startsWith("github-copilot")
+        ? ["gpt-mini", ...SMALL_MODEL_FAMILY_PRIORITY]
+        : SMALL_MODEL_FAMILY_PRIORITY
+    const models = sortBy(
+      Object.values(provider.models),
+      [(model) => model.release_date, "desc"],
+      [(model) => model.id, "desc"],
+    )
+    for (const family of priority) {
+      const candidates = models.filter((model) => model.family === family)
+      if (providerID === ProviderID.amazonBedrock) {
+        const crossRegionPrefixes = ["global.", "us.", "eu."]
 
-          const unprefixed = candidates.find((m) => !crossRegionPrefixes.some((p) => m.startsWith(p)))
-          if (unprefixed) return getModel(providerID, ModelID.make(unprefixed))
-        } else {
-          for (const model of Object.keys(provider.models)) {
-            if (model.includes(item)) return getModel(providerID, ModelID.make(model))
+        // Model selection priority:
+        // 1. global. prefix (works everywhere)
+        // 2. User's region prefix (us., eu.)
+        // 3. Unprefixed model
+        const globalMatch = candidates.find((model) => model.id.startsWith("global."))
+        if (globalMatch) return globalMatch
+
+        const region = provider.options?.region
+        if (region) {
+          const regionPrefix = region.split("-")[0]
+          if (regionPrefix === "us" || regionPrefix === "eu") {
+            const regionalMatch = candidates.find((model) => model.id.startsWith(`${regionPrefix}.`))
+            if (regionalMatch) return regionalMatch
           }
         }
+
+        const unprefixed = candidates.find((model) => !crossRegionPrefixes.some((p) => model.id.startsWith(p)))
+        if (unprefixed) return unprefixed
+        continue
       }
+      if (candidates[0]) return candidates[0]
     }
 
     return undefined
   }
+  // altimate_change end
 
   const priority = ["gpt-5", "claude-sonnet-4", "big-pickle", "gemini-3-pro"]
   export function sort<T extends { id: string }>(models: T[]) {
@@ -2059,13 +2264,18 @@ export namespace Provider {
       return { providerID: entry.providerID, modelID: entry.modelID }
     }
 
+    // altimate_change start — upstream_fix: an empty provider config (`provider: {}`) means "no
+    // allowlist configured" the same as an absent one, not "allow no providers"
+    const configured = Object.keys(cfg.provider ?? {})
+    // altimate_change end
+
     // altimate_change start — default to altimate-backend when configured and no model chosen yet
     const altimateProviderID = ProviderID.make("altimate-backend")
     const altimateProvider = providers[altimateProviderID]
     if (
       altimateProvider &&
       altimateProvider.models[ModelID.make("altimate-default")] &&
-      (!cfg.provider || Object.keys(cfg.provider).includes(String(altimateProviderID)))
+      (configured.length === 0 || configured.includes(String(altimateProviderID)))
     ) {
       // altimate_change start — log when altimate-backend auto-selected
       log.info("defaulting to altimate-backend/altimate-default (no model configured)")
@@ -2077,7 +2287,7 @@ export namespace Provider {
     }
     // altimate_change end
 
-    const provider = Object.values(providers).find((p) => !cfg.provider || Object.keys(cfg.provider).includes(p.id))
+    const provider = Object.values(providers).find((p) => configured.length === 0 || configured.includes(p.id))
     if (!provider) throw new Error("no providers found")
     const [model] = sort(Object.values(provider.models))
     if (!model) throw new Error("no models found")
@@ -2114,9 +2324,15 @@ export namespace Provider {
     providerID: ProviderID,
   })
 
-  /** Public projection of a provider Info for the list endpoint (identity today). */
+  /** Public projection of a provider Info for the list endpoint. */
   export function toPublicInfo(info: Info): Info {
-    return info
+    // altimate_change start — upstream addition (v1.18.10): drop models that fail the strict
+    // Model schema (e.g. NaN cost from a bad models.dev entry) from the public listing
+    return {
+      ...info,
+      models: pickBy(info.models, (model) => Model.safeParse(model).success),
+    }
+    // altimate_change end
   }
 
   /** Map of providerID -> default (top-sorted) model id, skipping providers with no models. */
@@ -2194,7 +2410,9 @@ export namespace Provider {
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+  export const node = LayerNode.make({ service: Service, layer, deps: LayerNode.lazy(() => []) })
+  // altimate_change end
 
   // Effect accessor over the Service (mirrors Env.use): `Provider.use.list()`
   // returns an Effect requiring `Provider.Service` in R. Used by tests/consumers

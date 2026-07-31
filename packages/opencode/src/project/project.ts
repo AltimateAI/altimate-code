@@ -124,7 +124,11 @@ export namespace Project {
     // altimate_change start — include icon override when decoding core project rows.
     const icon =
       row.icon_url || row.icon_url_override || row.icon_color
-        ? { url: row.icon_url ?? undefined, override: row.icon_url_override ?? undefined, color: row.icon_color ?? undefined }
+        ? {
+            url: row.icon_url ?? undefined,
+            override: row.icon_url_override ?? undefined,
+            color: row.icon_color ?? undefined,
+          }
         : undefined
     // altimate_change end
     return {
@@ -298,7 +302,11 @@ export namespace Project {
     })
 
     const row = Database.use((db) =>
-      db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(data.id))).get(),
+      db
+        .select()
+        .from(ProjectTable)
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(data.id)))
+        .get(),
     )
     const existing = row
       ? fromRow(row)
@@ -432,7 +440,13 @@ export namespace Project {
   }
 
   export function get(id: ProjectID): Info | undefined {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
+    const row = Database.use((db) =>
+      db
+        .select()
+        .from(ProjectTable)
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+        .get(),
+    )
     if (!row) return undefined
     return fromRow(row)
   }
@@ -488,7 +502,13 @@ export namespace Project {
   )
 
   export async function sandboxes(id: ProjectID) {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
+    const row = Database.use((db) =>
+      db
+        .select()
+        .from(ProjectTable)
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+        .get(),
+    )
     if (!row) return []
     const data = fromRow(row)
     const valid: string[] = []
@@ -500,7 +520,13 @@ export namespace Project {
   }
 
   export async function addSandbox(id: ProjectID, directory: string) {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
+    const row = Database.use((db) =>
+      db
+        .select()
+        .from(ProjectTable)
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+        .get(),
+    )
     if (!row) throw new Error(`Project not found: ${id}`)
     const sandboxes = [...row.sandboxes]
     const sandbox = AbsolutePath.make(directory)
@@ -525,7 +551,13 @@ export namespace Project {
   }
 
   export async function removeSandbox(id: ProjectID, directory: string) {
-    const row = Database.use((db) => db.select().from(ProjectTable).where(eq(ProjectTable.id, ProjectV2.ID.make(id))).get())
+    const row = Database.use((db) =>
+      db
+        .select()
+        .from(ProjectTable)
+        .where(eq(ProjectTable.id, ProjectV2.ID.make(id)))
+        .get(),
+    )
     if (!row) throw new Error(`Project not found: ${id}`)
     const sandboxes = row.sandboxes.filter((s) => s !== directory)
     const result = Database.use((db) =>
@@ -799,7 +831,8 @@ export namespace Project {
           )
           .pipe(Effect.orDie)
 
-        if (resolved.vcs && id !== ProjectID.global) yield* resolver.commit({ store: resolved.vcs.store, id: ProjectV2.ID.make(id) })
+        if (resolved.vcs && id !== ProjectID.global)
+          yield* resolver.commit({ store: resolved.vcs.store, id: ProjectV2.ID.make(id) })
         yield* emitUpdated(result)
         if (flags.experimentalIconDiscovery) yield* discoverEffect(result)
         return { project: result, sandbox: activeDirectory }
@@ -887,7 +920,11 @@ export namespace Project {
   export const use = serviceUse(Service)
   // altimate_change end
 
-  export const node = LayerNode.make(layer, [EffectDatabase.node, ProjectV2.node, ProjectDirectories.node, RuntimeFlags.node])
+  export const node = LayerNode.make({
+    service: Service,
+    layer: layer,
+    deps: LayerNode.lazy(() => [EffectDatabase.node, ProjectV2.node, ProjectDirectories.node, RuntimeFlags.node]),
+  })
   // altimate_change end
 }
 

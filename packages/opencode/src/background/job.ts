@@ -15,7 +15,7 @@ export {
 } from "@opencode-ai/core/background-job"
 
 /** Keeps the legacy service instance-scoped while sharing the core registry engine. */
-export const layer = Layer.effect(
+const layer = Layer.effect(
   CoreBackgroundJob.Service,
   Effect.gen(function* () {
     const state = yield* InstanceState.make(() => CoreBackgroundJob.make)
@@ -32,8 +32,12 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer
+export const node = LayerNode.make({ service: CoreBackgroundJob.Service, layer, deps: [] })
 
-export const node = LayerNode.make(layer, [])
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (session/run-state.ts, session/session.ts). Removed upstream in the
+// makeGlobalNode migration.
+export const defaultLayer = layer
+// altimate_change end
 
 export * as BackgroundJob from "./job"

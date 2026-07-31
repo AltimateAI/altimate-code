@@ -19,7 +19,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/En
 
 export const use = serviceUse(Service)
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const state = yield* InstanceState.make<State>(Effect.fn("Env.state")(() => Effect.succeed({ ...process.env })))
@@ -39,14 +39,12 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer
-
-export const node = LayerNode.make(layer, [])
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
 
 // altimate_change start — restore the imperative wrappers upstream removed in the Effect-only
 // migration. Env is backed by process.env (no async IO), and the fork callers read it
 // synchronously, so these run the Service effects via runSync and return plain values.
-const { runSync: runEnvSync } = makeRuntime(Service, defaultLayer)
+const { runSync: runEnvSync } = makeRuntime(Service, layer)
 export function get(key: string) {
   return runEnvSync((s) => s.get(key))
 }

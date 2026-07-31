@@ -5,7 +5,7 @@ import os from "os"
 import { Context, Effect, Layer } from "effect"
 import { Flock } from "./util/flock"
 import { Flag } from "./flag/flag"
-import { LayerNode } from "./effect/layer-node"
+import { makeGlobalNode } from "./effect/app-node"
 
 // altimate_change start — app name (fork data dir; mirror packages/opencode/src/global/index.ts).
 // The overlay merge reverted this to upstream's "opencode", splitting the fork's data
@@ -77,13 +77,17 @@ export function make(input: Partial<Interface> = {}): Interface {
   }
 }
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.sync(() => Service.of(make())),
 )
 
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: [] })
+
+// altimate_change start — upstream_fix: restore defaultLayer for fork test/facade consumers;
+// removed upstream in the makeGlobalNode migration.
 export const defaultLayer = layer
-export const node = LayerNode.make(layer, [])
+// altimate_change end
 
 export const layerWith = (input: Partial<Interface>) =>
   Layer.effect(

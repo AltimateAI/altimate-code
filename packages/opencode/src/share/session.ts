@@ -14,7 +14,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionShare") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const cfg = yield* Config.Service
@@ -50,16 +50,22 @@ export const layer = Layer.effect(
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(ShareNext.defaultLayer),
-  Layer.provide(Session.defaultLayer),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(RuntimeFlags.defaultLayer),
-))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(ShareNext.defaultLayer),
+    Layer.provide(Session.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(RuntimeFlags.defaultLayer),
+  ),
+)
 // altimate_change end
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Config.node, Session.node, ShareNext.node, RuntimeFlags.node])
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [Config.node, Session.node, ShareNext.node, RuntimeFlags.node]),
+})
 // altimate_change end
 
 export * as SessionShare from "./session"

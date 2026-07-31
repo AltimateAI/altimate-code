@@ -2,6 +2,8 @@ export * as TuiConfig from "./tui"
 
 import path from "path"
 import { mergeDeep, unique } from "remeda"
+import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Context, Effect, Fiber, Layer } from "effect"
 import { ConfigParse } from "@/config/parse"
 import * as ConfigPaths from "@/config/paths"
@@ -257,7 +259,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   }
 })
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const directory = yield* CurrentWorkingDirectory
@@ -295,13 +297,19 @@ export const layer = Layer.effect(
   }).pipe(Effect.withSpan("TuiConfig.layer")),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(Layer.provide(Project.defaultLayer), Layer.provide(Npm.defaultLayer), Layer.provide(FSUtil.defaultLayer)),
-)
+// altimate_change start — upstream_fix: Project.node dep for the worktree-bounded TUI config
+// discovery restored above (project.fromDirectory)
+export const node = LayerNode.make({
+  service: Service,
+  layer,
+  deps: LayerNode.lazy(() => [Npm.node, FSUtil.node, Project.node]),
+})
 // altimate_change end
 
-const { runPromise } = makeRuntime(Service, defaultLayer)
+const { runPromise } = makeRuntime(
+  Service,
+  Layer.suspend(() => AppNodeBuilderV1.build(node)),
+)
 
 export async function waitForDependencies() {
   await runPromise((svc) => svc.waitForDependencies())

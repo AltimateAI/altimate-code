@@ -1,100 +1,4 @@
-import { describe, test, expect, beforeEach, mock, afterEach } from "bun:test"
-
-// ---------------------------------------------------------------------------
-// Mocks — set up before importing the MCP module
-// ---------------------------------------------------------------------------
-
-// Track telemetry events
-let trackedEvents: Array<{ type: string; [key: string]: any }> = []
-
-// Track client operations
-const mockClients: Record<
-  string,
-  {
-    connected: boolean
-    listToolsCalls: number
-    listToolsResult?: { tools: Array<{ name: string; inputSchema: any; description?: string }> }
-    listToolsError?: Error
-    closeCalls: number
-  }
-> = {}
-
-// Mock transport tracking
-const transportAttempts: Array<{
-  type: "streamable" | "sse" | "stdio"
-  error?: string
-}> = []
-
-// Mock the MCP SDK client
-mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
-  Client: class MockClient {
-    name: string
-    constructor(opts: any) {
-      this.name = opts?.name ?? "test"
-    }
-    async connect(_transport: any) {
-      // Connect always succeeds in our mock
-    }
-    async listTools() {
-      return { tools: [] }
-    }
-    async listResources() {
-      return { resources: [] }
-    }
-    async listPrompts() {
-      return { prompts: [] }
-    }
-    setNotificationHandler() {}
-    async close() {}
-  },
-}))
-
-mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
-  StreamableHTTPClientTransport: class {
-    constructor() {
-      transportAttempts.push({ type: "streamable" })
-    }
-  },
-}))
-
-mock.module("@modelcontextprotocol/sdk/client/sse.js", () => ({
-  SSEClientTransport: class {
-    constructor() {
-      transportAttempts.push({ type: "sse" })
-    }
-  },
-}))
-
-mock.module("@modelcontextprotocol/sdk/client/stdio.js", () => ({
-  StdioClientTransport: class {
-    stderr: any = null
-    constructor() {
-      transportAttempts.push({ type: "stdio" })
-    }
-  },
-}))
-
-mock.module("@modelcontextprotocol/sdk/client/auth.js", () => ({
-  UnauthorizedError: class UnauthorizedError extends Error {
-    constructor(msg?: string) {
-      super(msg ?? "Unauthorized")
-      this.name = "UnauthorizedError"
-    }
-  },
-}))
-
-mock.module("@modelcontextprotocol/sdk/types.js", () => ({
-  CallToolResultSchema: {},
-  ToolListChangedNotificationSchema: {},
-}))
-
-beforeEach(() => {
-  trackedEvents = []
-  transportAttempts.length = 0
-  for (const key of Object.keys(mockClients)) {
-    delete mockClients[key]
-  }
-})
+import { describe, test, expect } from "bun:test"
 
 // ---------------------------------------------------------------------------
 // These tests verify MCP behaviors by testing the patterns and logic used
@@ -131,12 +35,7 @@ describe("MCP error recovery", () => {
     const clients: Record<string, any> = { "test-server": { mock: true } }
     const status: Record<string, any> = { "test-server": { status: "connected" } }
 
-    const result = simulateToolsListFailure(
-      "test-server",
-      clients,
-      status,
-      new Error("Connection refused"),
-    )
+    const result = simulateToolsListFailure("test-server", clients, status, new Error("Connection refused"))
 
     expect(result.status).toBe("failed")
     expect(result.error).toBe("Connection refused")
@@ -147,12 +46,7 @@ describe("MCP error recovery", () => {
     const clients: Record<string, any> = { "test-server": { mock: true } }
     const status: Record<string, any> = { "test-server": { status: "connected" } }
 
-    simulateToolsListFailure(
-      "test-server",
-      clients,
-      status,
-      new Error("Timeout"),
-    )
+    simulateToolsListFailure("test-server", clients, status, new Error("Timeout"))
 
     expect(clients["test-server"]).toBeUndefined()
   })
@@ -167,12 +61,7 @@ describe("MCP error recovery", () => {
       "server-b": { status: "connected" },
     }
 
-    simulateToolsListFailure(
-      "server-a",
-      clients,
-      status,
-      new Error("server-a failed"),
-    )
+    simulateToolsListFailure("server-a", clients, status, new Error("server-a failed"))
 
     expect(clients["server-a"]).toBeUndefined()
     expect(clients["server-b"]).toBeDefined()
@@ -282,9 +171,7 @@ describe("MCP tool registration", () => {
   })
 
   test("empty tools list results in empty set", () => {
-    const registered = simulateToolRegistration([
-      { clientName: "server-a", tools: [] },
-    ])
+    const registered = simulateToolRegistration([{ clientName: "server-a", tools: [] }])
 
     expect(registered.size).toBe(0)
   })
@@ -381,9 +268,7 @@ describe("MCP initialization resilience", () => {
 
   test("disabled servers are marked as disabled", async () => {
     // Simulates mcp/index.ts lines 186-189
-    function simulateDisabledCheck(
-      servers: Record<string, { enabled?: boolean }>,
-    ) {
+    function simulateDisabledCheck(servers: Record<string, { enabled?: boolean }>) {
       const status: Record<string, any> = {}
 
       for (const [key, mcp] of Object.entries(servers)) {
@@ -440,13 +325,7 @@ describe("MCP status transitions", () => {
       { status: "needs_client_registration" },
     ]
 
-    const validStatuses = new Set([
-      "connected",
-      "disabled",
-      "failed",
-      "needs_auth",
-      "needs_client_registration",
-    ])
+    const validStatuses = new Set(["connected", "disabled", "failed", "needs_auth", "needs_client_registration"])
 
     for (const s of statuses) {
       expect(validStatuses.has(s.status)).toBe(true)
@@ -610,9 +489,7 @@ describe("MCP listTools failure and cleanup", () => {
    * Simulates mcp/index.ts lines 555-576: after connecting, if listTools
    * fails, the client is closed and status is set to "failed".
    */
-  async function simulatePostConnectListToolsFailure(opts: {
-    listToolsError: Error
-  }) {
+  async function simulatePostConnectListToolsFailure(opts: { listToolsError: Error }) {
     let clientClosed = false
     const mcpClient = {
       close: async () => {

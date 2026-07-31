@@ -1,19 +1,20 @@
 import { Effect } from "effect"
 import { ModelV2 } from "../../model"
-import { PluginV2 } from "../../plugin"
+import { define } from "../internal"
 
-export const OpenRouterPlugin = PluginV2.define({
-  id: PluginV2.ID.make("openrouter"),
-  effect: Effect.gen(function* () {
-    return {
-      "catalog.transform": Effect.fn(function* (evt) {
+export const OpenRouterPlugin = define({
+  id: "openrouter",
+  effect: Effect.fn(function* (ctx) {
+    yield* ctx.catalog.transform(
+      Effect.fn(function* (evt) {
         for (const item of evt.provider.list()) {
           if (item.provider.api.type !== "aisdk") continue
           if (item.provider.api.package !== "@openrouter/ai-sdk-provider") continue
           evt.provider.update(item.provider.id, (provider) => {
             // altimate_change start — provider identity headers
             provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
-            provider.request.headers["X-Title"] = "altimate-code"
+            // X-Title stays upstream: OpenRouter keys allowlisted callers on this exact legacy value.
+            provider.request.headers["X-Title"] = "opencode"
             // altimate_change end
           })
           for (const modelID of [ModelV2.ID.make("gpt-5-chat-latest"), ModelV2.ID.make("openai/gpt-5-chat")]) {
@@ -26,11 +27,13 @@ export const OpenRouterPlugin = PluginV2.define({
           }
         }
       }),
-      "aisdk.sdk": Effect.fn(function* (evt) {
+    )
+    yield* ctx.aisdk.sdk(
+      Effect.fn(function* (evt) {
         if (evt.package !== "@openrouter/ai-sdk-provider") return
         const mod = yield* Effect.promise(() => import("@openrouter/ai-sdk-provider"))
         evt.sdk = mod.createOpenRouter(evt.options)
       }),
-    }
+    )
   }),
 })

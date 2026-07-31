@@ -190,6 +190,7 @@ export function sortModelOptions<T extends { footer?: string; releaseDate: strin
   return sortBy(
     options,
     (option) => option.footer !== "Free",
+    [(option) => option.releaseDate, "desc"],
     (option) => option.title,
   )
 }

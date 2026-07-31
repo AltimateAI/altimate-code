@@ -58,20 +58,23 @@ describe("bridge merge cycle 1: Account.active() is async — every caller await
     expect(content).toMatch(/export\s+async\s+function\s+active\s*\(\s*\)\s*:\s*Promise<Info\s*\|\s*undefined>/)
   })
 
-  test("share-next.ts awaits Account.active()", async () => {
+  test("share-next.ts resolves the active account effectfully (no dangling thenable)", async () => {
+    // v1.18.10 migrated share-next to the Effect Service pattern: the account is resolved
+    // via `yield* Account.Service` and `yield* account.active()`. The original bug class —
+    // treating active() as sync and reading `.id` off a thenable — cannot recur as long as
+    // every active() call is yielded (Effect) or awaited (Promise facade).
     const content = await readText(path.join(srcDir, "share", "share-next.ts"))
-    expect(content).toMatch(/await\s+Account\.active\s*\(\s*\)/)
-    // Negative — bare call without await would re-introduce the bug.
+    expect(content).toMatch(/yield\*\s+Account\.Service/)
+    expect(content).toMatch(/yield\*\s+account\.active\s*\(\s*\)/)
     const lines = content.split("\n")
     for (const line of lines) {
-      // skip comments and the type re-export
       if (line.trim().startsWith("//") || line.trim().startsWith("*")) continue
       if (
-        /Account\.active\s*\(/.test(line) &&
-        !/await\s+Account\.active\s*\(/.test(line) &&
-        !/=\s*Account\.active\b/.test(line)
+        /\baccount\.active\s*\(/.test(line) &&
+        !/(yield\*|await)\s+account\.active\s*\(/.test(line) &&
+        !/=\s*account\.active\b/.test(line)
       ) {
-        throw new Error(`share-next.ts has a non-awaited Account.active() call: ${line}`)
+        throw new Error(`share-next.ts has an unresolved account.active() call: ${line}`)
       }
     }
   })
@@ -169,20 +172,27 @@ describe("bridge merge cycle 2: XSS — HTML error pages must escape interpolate
     expect(content).not.toMatch(/\$\{error\}(?![^"]*"\s*,\s*escapeHtml)/)
   })
 
-  test("mcp/oauth-callback.ts HTML_ERROR uses escapeHtml around interpolated error", async () => {
-    // v1.17.9 refactored the inline escapeHtml into a shared `@/util/html` helper.
-    // The security invariant is unchanged: the ${error} interpolation must still
-    // flow through escapeHtml (now imported rather than locally defined).
+  test("mcp/oauth-callback.ts routes error HTML through the escaping OauthCallbackPage", async () => {
+    // v1.18.10 replaced the inline HTML templates with the shared OauthCallbackPage
+    // component (packages/core/src/oauth/page.ts), which escapes every interpolated
+    // user-visible field. The security invariant is unchanged: no raw ${error} HTML.
     const content = await readText(path.join(srcDir, "mcp", "oauth-callback.ts"))
-    expect(content).toMatch(/escapeHtml/)
-    expect(content).toContain("${escapeHtml(error)}")
-    expect(content).not.toMatch(/\$\{error\}(?![^"]*"\s*,\s*escapeHtml)/)
+    expect(content).toMatch(/OauthCallbackPage\.error\(/)
+    expect(content).not.toContain("<html")
+    expect(content).not.toMatch(/\$\{error\}/)
+    const page = await readText(path.join(srcDir, "..", "..", "core", "src", "oauth", "page.ts"))
+    expect(page).toMatch(/escapeHtml\(input\.headline\)/)
+    expect(page).toMatch(/escapeHtml\(detail\)/)
   })
 
-  test("escapeHtml covers <, >, &, \" and ' (codex inline + shared util)", async () => {
-    // codex.ts keeps an inline escapeHtml; oauth-callback.ts imports the shared
-    // `util/html.ts` helper. Verify the entity coverage at whichever site defines it.
-    const escapingFiles = [path.join(srcDir, "plugin", "codex.ts"), path.join(srcDir, "util", "html.ts")]
+  test("escapeHtml covers <, >, &, \" and ' (codex inline + core oauth page)", async () => {
+    // codex.ts keeps an inline escapeHtml; oauth-callback.ts delegates to the shared
+    // OauthCallbackPage (core/src/oauth/page.ts) since v1.18.10. Verify the entity
+    // coverage at whichever site defines the escaper.
+    const escapingFiles = [
+      path.join(srcDir, "plugin", "codex.ts"),
+      path.join(srcDir, "..", "..", "core", "src", "oauth", "page.ts"),
+    ]
     for (const file of escapingFiles) {
       const content = await readText(file)
       expect(content).toContain("&amp;")
@@ -191,9 +201,9 @@ describe("bridge merge cycle 2: XSS — HTML error pages must escape interpolate
       expect(content).toContain("&quot;")
       expect(content).toContain("&#39;")
     }
-    // oauth-callback.ts must import the shared escaper (no raw error interpolation).
+    // oauth-callback.ts must delegate to the escaping page component (no raw error interpolation).
     const callback = await readText(path.join(srcDir, "mcp", "oauth-callback.ts"))
-    expect(callback).toMatch(/import\s+\{\s*escapeHtml\s*\}\s+from\s+["']@\/util\/html["']/)
+    expect(callback).toMatch(/import\s+\{\s*OauthCallbackPage\s*\}\s+from\s+["']@opencode-ai\/core\/oauth\/page["']/)
   })
 })
 
@@ -383,11 +393,11 @@ describe("bridge merge: effect pinned to 4.0.0-beta.74 (v1.17.9, migrated off Se
   // v1.17.9 bumped effect past the beta.43 pin. beta.58 removed ServiceMap, so the
   // merge migrated every service to `Context.Service`. The version now lives in the
   // workspace `catalog` (consumed via `catalog:`), not a top-level `overrides` pin.
-  test("root package.json catalog pins effect + @effect/platform-node to 4.0.0-beta.74", async () => {
+  test("root package.json catalog pins effect + @effect/platform-node together (beta.83 since v1.18.10)", async () => {
     const pkg = JSON.parse(await readText(path.join(repoRoot, "package.json")))
     const catalog = pkg.workspaces?.catalog ?? pkg.catalog ?? {}
-    expect(catalog["effect"]).toBe("4.0.0-beta.74")
-    expect(catalog["@effect/platform-node"]).toBe("4.0.0-beta.74")
+    expect(catalog["effect"]).toBe("4.0.0-beta.83")
+    expect(catalog["@effect/platform-node"]).toBe("4.0.0-beta.83")
   })
 
   test("services use Context.Service (ServiceMap was removed from effect in beta.58)", async () => {

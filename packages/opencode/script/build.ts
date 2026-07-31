@@ -379,8 +379,15 @@ for (const item of targets) {
   console.log(`building ${name}`)
   await $`mkdir -p dist/${name}/bin`
 
-  const opentuiCoreDir = path.dirname(fileURLToPath(import.meta.resolve("@opentui/core")))
-  const parserWorker = fs.realpathSync(path.join(opentuiCoreDir, "parser.worker.js"))
+  // altimate_change start — upstream_fix: opentui 0.4.5 (v1.18.10 bump) resolves its
+  // tree-sitter worker via `import.meta.resolve("@opentui/core/parser.worker")` and expects
+  // the worker embedded as a virtual file; the old realpath-entrypoint embedding leaves the
+  // loader's path resolution undefined in compiled binaries (TUI crashed at startup with
+  // "undefined is not an object (evaluating 'loadedPath.startsWith')"). Mirrors upstream's
+  // v1.18.10 build.ts change.
+  const treeSitterWorker = await Bun.file(fileURLToPath(import.meta.resolve("@opentui/core/parser.worker"))).text()
+  const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
+  // altimate_change end
   // altimate_change start — upstream_fix: TUI tree relocated cli/cmd/tui -> cli/tui in this merge;
   // build entry path must follow (was ./src/cli/cmd/tui/worker.ts -> ModuleNotFound at build).
   const workerPath = "./src/cli/tui/worker.ts"
@@ -388,7 +395,6 @@ for (const item of targets) {
 
   // Use platform-specific bunfs root path based on target OS
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
-  const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
 
   // -------------------------------------------------------------------------
   // Stage a per-target copy of @altimateai/altimate-core so we can embed the
@@ -481,7 +487,12 @@ for (const item of targets) {
       execArgv: [`--user-agent=altimate/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
-    entrypoints: ["./src/index.ts", parserWorker, workerPath],
+    // altimate_change start — upstream_fix: embed the opentui 0.4.5 worker as a virtual file
+    files: {
+      [treeSitterWorkerPath]: treeSitterWorker,
+    },
+    entrypoints: ["./src/index.ts", workerPath, treeSitterWorkerPath],
+    // altimate_change end
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
@@ -491,7 +502,9 @@ for (const item of targets) {
       OPENCODE_BUILTIN_SKILLS: JSON.stringify(builtinSkills),
       OPENCODE_CHANGELOG: JSON.stringify(changelog),
       OPENCODE_WORKER_PATH: workerPath,
-      OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
+      // altimate_change start — upstream_fix: point opentui at the embedded virtual worker
+      OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
+      // altimate_change end
     },
   })
 

@@ -3,6 +3,7 @@ export * as GlobTool from "./glob"
 import { ToolFailure } from "@opencode-ai/llm"
 import { Effect, Layer, Schema } from "effect"
 import path from "path"
+import { makeLocationNode } from "../effect/app-node"
 import { FileSystem } from "../filesystem"
 // altimate_change start — upstream_fix: FSUtil for Location containment (see execute)
 import { FSUtil } from "../fs-util"
@@ -11,6 +12,7 @@ import { Location } from "../location"
 import { Ripgrep } from "../ripgrep"
 import { RelativePath } from "../schema"
 import { PermissionV2 } from "../permission"
+import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 
@@ -36,7 +38,7 @@ export const toModelOutput = (output: ModelOutput) => {
 }
 
 /** Glob leaf that defaults its filesystem root to the active Location. */
-export const layer = Layer.effectDiscard(
+const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const tools = yield* Tools.Service
     const ripgrep = yield* Ripgrep.Service
@@ -103,12 +105,11 @@ export const layer = Layer.effectDiscard(
                 })
                 .pipe(
                   Effect.map((result) =>
-                    result.map(
-                      (entry) =>
-                        new FileSystem.Entry({
-                          ...entry,
-                          path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
-                        }),
+                    result.map((entry) =>
+                      FileSystem.Entry.make({
+                        ...entry,
+                        path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
+                      }),
                     ),
                   ),
                 )
@@ -120,3 +121,11 @@ export const layer = Layer.effectDiscard(
       .pipe(Effect.orDie)
   }),
 )
+
+export const node = makeLocationNode({
+  name: "tool/glob",
+  layer,
+  // altimate_change start — upstream_fix: FSUtil.node for the Location-containment check above
+  deps: [ToolRegistry.node, Ripgrep.node, Location.node, PermissionV2.node, FSUtil.node],
+  // altimate_change end
+})

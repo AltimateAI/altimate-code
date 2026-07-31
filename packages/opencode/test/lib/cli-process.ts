@@ -19,8 +19,10 @@
 // different return shape — see the TODO at the bottom of OpencodeCli.
 import { test, type TestOptions } from "bun:test"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
-import { Deferred, Duration, Effect, Layer, Queue, Scope, Stream } from "effect"
+import { Deferred, Duration, Effect, Layer, Queue, Schedule, Scope, Stream } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcess } from "effect/unstable/process"
 import path from "node:path"
@@ -109,6 +111,11 @@ export type RunResult = {
   readonly durationMs: number
 }
 
+export type RunHandle = {
+  readonly interrupt: () => void
+  readonly result: Effect.Effect<RunResult>
+}
+
 export type SpawnOpts = {
   readonly timeoutMs?: number
   readonly env?: Record<string, string>
@@ -125,6 +132,7 @@ export type RunOpts = SpawnOpts & {
   readonly format?: "default" | "json"
   readonly command?: string
   readonly printLogs?: boolean
+  readonly permission?: Record<string, "ask" | "allow" | "deny">
   readonly extraArgs?: string[]
 }
 
@@ -180,6 +188,7 @@ export type AcpHandle = {
 export type OpencodeCli = {
   // High-level: run a single prompt against the test model. Short-lived.
   readonly run: (message: string, opts?: RunOpts) => Effect.Effect<RunResult>
+  readonly startRun: (message: string, opts?: RunOpts) => Effect.Effect<RunHandle, never, Scope.Scope>
   // Spawn `opencode serve` and wait until it's listening. Long-lived: the
   // returned handle is killed when the caller's Scope closes. Fails if the
   // listening line doesn't appear within `readyTimeoutMs`.
@@ -218,9 +227,12 @@ export function withCliFixture<A, E>(
     const fs = yield* FSUtil.Service
     const appProc = yield* AppProcess.Service
 
-    // FileSystem.makeTempDirectoryScoped handles both creation and scope-tied
-    // cleanup — replaces the old mkdir + addFinalizer pair.
-    const home = yield* fs.makeTempDirectoryScoped({ prefix: "oc-cli-" })
+    const home = yield* fs.makeTempDirectory({ prefix: "oc-cli-" })
+    yield* Effect.addFinalizer(() =>
+      fs
+        .remove(home, { recursive: true })
+        .pipe(Effect.retry(Schedule.spaced("50 millis").pipe(Schedule.both(Schedule.recurs(20)))), Effect.ignore),
+    )
 
     const configJson = JSON.stringify(testProviderConfig(llm.url))
     const env = isolatedEnv(home, configJson)
@@ -267,13 +279,13 @@ export function withCliFixture<A, E>(
       )
       return {
         exitCode: result.exitCode,
-        stdout: result.stdout.toString(),
-        stderr: result.stderr.toString(),
+        stdout: normalizeLines(result.stdout.toString()),
+        stderr: normalizeLines(result.stderr.toString()),
         durationMs: Date.now() - start,
       }
     })
 
-    const run = (message: string, opts?: RunOpts): Effect.Effect<RunResult> => {
+    const runArgs = (message: string, opts?: RunOpts) => {
       const argv: string[] = ["run"]
       if (opts?.printLogs) argv.push("--print-logs")
       argv.push("--model", opts?.model ?? testModelID)
@@ -282,26 +294,41 @@ export function withCliFixture<A, E>(
       if (opts?.command) argv.push("--command", opts.command)
       if (opts?.extraArgs) argv.push(...opts.extraArgs)
       argv.push(message)
-      // altimate_change start — retry once on SQLite "database is locked" from
-      // the child. Session storage opens SQLite at boot and the WAL
-      // checkpoint can collide with the tracer's write on cold spawns under
-      // parallel test load — a real transient, not a product bug. Retry only
-      // this specific error class so genuine failures still surface.
-      //
-      // Share the ORIGINAL timeout budget across both attempts so the retry
-      // can't blow past bun's per-test 90s timeout by starting another full
-      // 60s spawn on top of the first (CodeRabbit v0.9.4 review finding).
-      // Cap the retry at max(remaining, 15s) — enough for a warm-cache spawn
-      // + cold-SQLite open without granting an unbounded second window.
+      return argv
+    }
+
+    const runOpts = (opts?: RunOpts): SpawnOpts | undefined => {
+      if (!opts?.permission) return opts
+      return {
+        ...opts,
+        env: {
+          ...opts.env,
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            ...testProviderConfig(llm.url),
+            permission: opts.permission,
+          }),
+        },
+      }
+    }
+
+    const run = (message: string, opts?: RunOpts): Effect.Effect<RunResult> => {
+      // altimate_change start — retry once on SQLite "database is locked" from the child
+      // (v0.9.4 harness fix, re-homed here after the v1.18.10 merge split runArgs into a pure
+      // argv builder). Session storage opens SQLite at boot and the WAL checkpoint can collide
+      // with the tracer's write on cold spawns under parallel test load — a real transient, not
+      // a product bug. Retry only this error class; share the ORIGINAL timeout budget across
+      // both attempts (capped at max(remaining, 15s)) so the retry can't blow past bun's
+      // per-test timeout.
       return Effect.gen(function* () {
         const startedAt = Date.now()
         const originalTimeoutMs = opts?.timeoutMs ?? 60_000
-        const first = yield* spawn(argv, opts)
+        const argv = runArgs(message, opts)
+        const options = runOpts(opts)
+        const first = yield* spawn(argv, options)
         if (first.exitCode === 0) return first
         if (!/database is locked/i.test(first.stderr)) return first
-        // Emit a warning so a silent regression from transient → systematic
-        // stays visible in CI logs — the retry masking the failure would
-        // otherwise defeat the point of running the harness.
+        // Emit a warning so a silent regression from transient → systematic stays visible in
+        // CI logs — the retry masking the failure would otherwise defeat the harness.
         // eslint-disable-next-line no-console
         console.warn(
           `[cli-process] child hit \`database is locked\` on first attempt (exit=${first.exitCode}); retrying once. ` +
@@ -309,15 +336,44 @@ export function withCliFixture<A, E>(
         )
         const elapsed = Date.now() - startedAt
         const remaining = Math.max(originalTimeoutMs - elapsed, 15_000)
-        const second = yield* spawn(argv, { ...opts, timeoutMs: remaining })
-        // If the retry ALSO hits the lock, surface it — don't return a
-        // succeeded-looking envelope. Bun's expectExit(second, 0) will
-        // fire on the non-zero exit; the second attempt's stderr is
-        // what will be logged for the debugger.
-        return second
+        // If the retry ALSO hits the lock, surface it — expectExit fires on the non-zero exit.
+        return yield* spawn(argv, { ...options, timeoutMs: remaining })
       })
       // altimate_change end
     }
+
+    const startRun = Effect.fn("opencode.startRun")(function* (message: string, opts?: RunOpts) {
+      const start = Date.now()
+      const options = runOpts(opts)
+      const proc = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.spawn(["bun", "run", "--conditions=browser", cliEntry, ...runArgs(message, opts)], {
+            cwd: home,
+            env: { ...process.env, ...env, ...options?.env },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          }),
+        ),
+        (child) =>
+          Effect.promise(() => {
+            child.kill()
+            return child.exited
+          }).pipe(Effect.ignore),
+      )
+      const stdout = new Response(proc.stdout).text()
+      const stderr = new Response(proc.stderr).text()
+
+      return {
+        interrupt: () => proc.kill("SIGINT"),
+        result: Effect.promise(async () => ({
+          exitCode: await proc.exited,
+          stdout: normalizeLines(await stdout),
+          stderr: normalizeLines(await stderr),
+          durationMs: Date.now() - start,
+        })),
+      } satisfies RunHandle
+    })
 
     const serve = Effect.fn("opencode.serve")(function* (opts?: ServeOpts) {
       const argv = ["serve"]
@@ -472,14 +528,18 @@ export function withCliFixture<A, E>(
       } satisfies AcpHandle
     })
 
-    const opencode: OpencodeCli = { run, serve, acp, spawn, expectExit, parseJsonEvents }
+    const opencode: OpencodeCli = { run, startRun, serve, acp, spawn, expectExit, parseJsonEvents }
 
     return yield* fn({ llm, home, opencode })
     // FetchHttpClient is provided so test bodies can `yield* HttpClient.HttpClient`
     // and hit endpoints on `opencode.serve()` without rolling their own fetch.
   }).pipe(
     Effect.provide(
-      Layer.mergeAll(TestLLMServer.layer, FetchHttpClient.layer, FSUtil.defaultLayer, AppProcess.defaultLayer),
+      Layer.mergeAll(
+        TestLLMServer.layer,
+        FetchHttpClient.layer,
+        AppNodeBuilder.build(LayerNode.group([FSUtil.node, AppProcess.node])),
+      ),
     ),
   )
 }
@@ -490,6 +550,10 @@ function parseJsonEvents(stdout: string): Array<Record<string, unknown>> {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as Record<string, unknown>)
+}
+
+function normalizeLines(value: string) {
+  return value.replaceAll("\r\n", "\n")
 }
 
 // Convenience for the common assertion pattern. Dumps stderr/stdout when
@@ -533,7 +597,11 @@ const concurrentBuilder = <A, E>(
 ) =>
   SKIP_SUBPROCESS
     ? test.skip(name, () => {})
-    : test.concurrent(name, () => Effect.runPromise(Effect.scoped(withCliFixture(body))), opts)
+    : (process.platform === "win32" ? test : test.concurrent)(
+        name,
+        () => Effect.runPromise(Effect.scoped(withCliFixture(body))),
+        opts,
+      )
 // `.skip` unconditionally skips a single subprocess test (quarantine a known-broken one without
 // deleting it). Same typed signature as the builders so the body keeps its CliFixture typing; body/opts
 // are ignored. Use sparingly with a TODO explaining why.

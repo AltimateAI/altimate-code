@@ -25,6 +25,13 @@ export interface MergeConfig {
   skipFiles: string[]
 
   /**
+   * Glob patterns of LIVE fork files excluded from the branding audit only.
+   * Unlike skipFiles these are never deleted and their merge conflicts are
+   * resolved normally (manually), not auto-resolved to upstream.
+   */
+  auditExclude: string[]
+
+  /**
    * Glob patterns of files that historically hold altimate behavioral patches
    * (UA strings, retry loops, hour-aligned cleanup tasks, etc.) without
    * `altimate_change` markers. The bridge merge tool MUST flag these for human
@@ -87,6 +94,13 @@ const urlRules: StringReplacement[] = [
     pattern: /dev\.opencode\.ai/g,
     replacement: "dev.altimate.ai",
     description: "Dev subdomain",
+  },
+  {
+    // Regex-escaped form first (e.g. CORS origin patterns like /opencode\.ai$/) so the
+    // escaped dot survives the rewrite — the plain rule below would leave `opencode\` behind.
+    pattern: /opencode\\\.ai/g,
+    replacement: "altimate\\.ai",
+    description: "Root domain (regex-escaped)",
   },
   {
     pattern: /opencode\.ai/g,
@@ -441,6 +455,20 @@ export const defaultConfig: MergeConfig = {
     ".zed/settings.json",
     // Upstream changelog command — we have our own bridge-merge / release process.
     ".opencode/command/changelog.md",
+    // Upstream web/preview packages introduced after v1.17.9 — only consumed by
+    // skipped packages (app, enterprise, storybook). Not shipped by the CLI fork.
+    "packages/client/**",
+    "packages/session-ui/**",
+    "packages/sdk-next/**",
+    "packages/httpapi-codegen/**",
+  ],
+
+  // Files that are LIVE fork content but excluded from the branding audit
+  // (development metadata, vendored upstream test suites, generated SDK
+  // surfaces). These MUST NOT be in skipFiles: merge.ts deletes skipFiles
+  // matches and auto-resolves their conflicts to upstream's version, which
+  // would destroy or clobber these files.
+  auditExclude: [
     // Repo-local upstream opencode config/commands are development metadata, not
     // shipped fork source; keep them out of the branding audit.
     ".opencode/command/issues.md",
@@ -480,7 +508,7 @@ export const defaultConfig: MergeConfig = {
     // Provider and auth endpoints may key allowlists on the legacy
     // opencode/${version} User-Agent, so outbound provider UA strings stay
     // compatibility-branded even though UI copy is Altimate-branded.
-    "\"User-Agent\": `opencode/${InstallationVersion}",
+    '"User-Agent": `opencode/${InstallationVersion}',
     // The native Effect embedding API intentionally exports OpenCode-named
     // symbols/context ids for downstream compatibility.
     "export { OpenCode } from",
@@ -494,6 +522,15 @@ export const defaultConfig: MergeConfig = {
     "opencode-web-ui.gen.ts",
     // Historical compatibility note in the shared LLM package, not product copy.
     "OpenCode's historical Gemini rules",
+    // AI-gateway provider plugins (kilo/llmgateway/nvidia/openrouter/vercel/zenmux) key their
+    // own allowlists and (for NVIDIA) billing attribution on these exact legacy identity header
+    // values. HTTP-Referer/http-referer may stay Altimate-branded; X-Title/x-title, X-Source, and
+    // X-BILLING-INVOKE-ORIGIN must not be re-branded.
+    'headers["X-Title"] = "opencode"',
+    'headers["X-Title"] ??= "opencode"',
+    'headers["x-title"] = "opencode"',
+    'headers["X-Source"] = "opencode"',
+    'headers["X-BILLING-INVOKE-ORIGIN"] ??= "OpenCode"',
     "@opencode-ai/",
     "packages/opencode",
     "OPENCODE_",

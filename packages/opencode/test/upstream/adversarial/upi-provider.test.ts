@@ -89,7 +89,13 @@ describe("UPI-21 usage and cost accounting across AI SDK v6 shapes", () => {
   test("OpenAI-like cached input tokens subtract from billable input and never go negative", async () => {
     const usage = await Session.getUsage({
       model: model(),
-      usage: { inputTokens: 100, cachedInputTokens: 150, outputTokens: 10, reasoningTokens: 5, totalTokens: 115 } as any,
+      usage: {
+        inputTokens: 100,
+        cachedInputTokens: 150,
+        outputTokens: 10,
+        reasoningTokens: 5,
+        totalTokens: 115,
+      } as any,
       metadata: {},
     })
 
@@ -171,10 +177,14 @@ describe("UPI-16 and UPI-42 provider defaults and gateway prompt routing", () =>
 
   test("altimate-backend prompt routing matches canonical vendor routes by family", () => {
     expect(SystemPrompt.provider(gatewayModel("claude-sonnet"))[0]).toBe(
-      SystemPrompt.provider(model({ providerID: "anthropic", api: { id: "claude-sonnet-4", npm: "@ai-sdk/anthropic", url: "" } }))[0],
+      SystemPrompt.provider(
+        model({ providerID: "anthropic", api: { id: "claude-sonnet-4", npm: "@ai-sdk/anthropic", url: "" } }),
+      )[0],
     )
     expect(SystemPrompt.provider(gatewayModel("gemini-pro"))[0]).toBe(
-      SystemPrompt.provider(model({ providerID: "google", api: { id: "gemini-3-pro", npm: "@ai-sdk/google", url: "" } }))[0],
+      SystemPrompt.provider(
+        model({ providerID: "google", api: { id: "gemini-3-pro", npm: "@ai-sdk/google", url: "" } }),
+      )[0],
     )
     expect(SystemPrompt.provider(gatewayModel("unknown-family"))[0]).toBe(
       SystemPrompt.provider(model({ providerID: "openai", api: { id: "gpt-5", npm: "@ai-sdk/openai", url: "" } }))[0],
@@ -183,14 +193,19 @@ describe("UPI-16 and UPI-42 provider defaults and gateway prompt routing", () =>
 
   test("defaultModel keeps explicit config and recent-model precedence before altimate-backend fallback", async () => {
     const source = await fs.readFile(providerSource, "utf-8")
-    const body = source.slice(source.indexOf("export async function defaultModel()"), source.indexOf("export function parseModel"))
+    const body = source.slice(
+      source.indexOf("export async function defaultModel()"),
+      source.indexOf("export function parseModel"),
+    )
 
     expect(body.indexOf("if (cfg.model) return parseModel(cfg.model)")).toBeLessThan(
       body.indexOf("default to altimate-backend"),
     )
     expect(body.indexOf("for (const entry of recent)")).toBeLessThan(body.indexOf("default to altimate-backend"))
-    expect(body).toContain('providers[altimateProviderID]')
+    expect(body).toContain("providers[altimateProviderID]")
     expect(body).toContain('ModelID.make("altimate-default")')
-    expect(body).toContain('Object.keys(cfg.provider).includes(String(altimateProviderID))')
+    // v1.18.10: the allowlist read moved to a shared `configured` list (with the
+    // empty-`provider:{}`-means-no-allowlist upstream_fix); the gate semantics are identical.
+    expect(body).toContain("configured.length === 0 || configured.includes(String(altimateProviderID))")
   })
 })

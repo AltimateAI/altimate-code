@@ -40,7 +40,7 @@ export type Info = Schema.Schema.Type<typeof Info>
 
 export class AuthError extends Schema.TaggedErrorClass<AuthError>()("AuthError", {
   message: Schema.String,
-  cause: Schema.optional(Schema.Defect),
+  cause: Schema.optional(Schema.Defect()),
 }) {}
 
 export interface Interface {
@@ -60,7 +60,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Auth.cli") {}
 // altimate_change end
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fsys = yield* FSUtil.Service
@@ -107,8 +107,8 @@ export const layer = Layer.effect(
 export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FSUtil.defaultLayer)))
 // altimate_change end
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [FSUtil.node])
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({ service: Service, layer: layer, deps: LayerNode.lazy(() => [FSUtil.node]) })
 // altimate_change end
 
 // altimate_change start — restore the imperative Promise wrappers upstream removed in the

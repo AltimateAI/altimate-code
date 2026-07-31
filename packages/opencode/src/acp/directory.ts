@@ -1,4 +1,9 @@
+import { Agent } from "@/agent/agent"
 import { Command } from "@/command"
+import { InstanceRef } from "@/effect/instance-ref"
+import { InstanceBootstrap } from "@/project/bootstrap"
+import { InstanceStore } from "@/project/instance-store"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
@@ -113,7 +118,58 @@ export const build = (input: {
   }
 }
 
-export const layer = Layer.effect(
+export const loaderLayer = Layer.effect(
+  Loader,
+  Effect.gen(function* () {
+    const store = yield* InstanceStore.Service
+    const provider = yield* Provider.Service
+    const agent = yield* Agent.Service
+    const command = yield* Command.Service
+
+    return Loader.of({
+      load: Effect.fn("ACPDirectoryLoader.load")(function* (directory) {
+        const ctx = yield* store.load({ directory })
+        return yield* Effect.gen(function* () {
+          const providers = yield* provider.list()
+          const [agents, defaultAgent, commands, defaultModel] = yield* Effect.all(
+            [agent.list(), agent.defaultInfo(), command.list(), provider.defaultModel().pipe(Effect.option)],
+            { concurrency: "unbounded" },
+          )
+          return build({
+            directory,
+            // altimate_change start — upstream_fix: fork Provider.Service.list() returns
+            // Record<ProviderID, Provider.Info>; re-brand to core ProviderV2.ID keys (identity at
+            // runtime, matches the per-model re-branding already done inside build()).
+            providers: providers as Record<ProviderV2.ID, Provider.Info>,
+            // altimate_change end
+            modes: agents
+              .filter((item) => item.mode !== "subagent" && item.hidden !== true)
+              .map((item) => ({
+                id: item.name,
+                name: item.name,
+                ...(item.description ? { description: item.description } : {}),
+              })),
+            defaultModeID: defaultAgent.name,
+            commands: commands.toSorted((a, b) => a.name.localeCompare(b.name)),
+            // altimate_change start — upstream_fix: re-brand fork ProviderID/ModelID to core
+            // ProviderV2.ID/ModelV2.ID (identity at runtime)
+            ...(defaultModel._tag === "Some"
+              ? {
+                  defaultModel: {
+                    providerID: ProviderV2.ID.make(defaultModel.value.providerID),
+                    modelID: ModelV2.ID.make(defaultModel.value.modelID),
+                  },
+                }
+              : {}),
+            // altimate_change end
+          })
+        }).pipe(Effect.provideService(InstanceRef, ctx))
+      }),
+    })
+  }),
+)
+
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const loader = yield* Loader
@@ -172,5 +228,13 @@ export const layer = Layer.effect(
     })
   }),
 )
+
+export const loaderNode = LayerNode.make({
+  service: Loader,
+  layer: loaderLayer,
+  deps: LayerNode.lazy(() => [Provider.node, Agent.node, Command.node, InstanceStore.node]),
+})
+
+export const node = LayerNode.make({ service: Service, layer, deps: LayerNode.lazy(() => [loaderNode]) })
 
 export * as Directory from "./directory"

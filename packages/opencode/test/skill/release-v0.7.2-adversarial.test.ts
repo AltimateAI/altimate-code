@@ -24,16 +24,10 @@ import { join } from "node:path"
 
 const REPO_ROOT = join(import.meta.dir, "../../../..")
 
-const INSTALLATION_SRC = readFileSync(
-  join(REPO_ROOT, "packages/opencode/src/installation/index.ts"),
-  "utf-8",
-)
+const INSTALLATION_SRC = readFileSync(join(REPO_ROOT, "packages/opencode/src/installation/index.ts"), "utf-8")
 const INSTALL_SCRIPT = readFileSync(join(REPO_ROOT, "install"), "utf-8")
 const README = readFileSync(join(REPO_ROOT, "README.md"), "utf-8")
-const TROUBLESHOOTING = readFileSync(
-  join(REPO_ROOT, "docs/docs/reference/troubleshooting.md"),
-  "utf-8",
-)
+const TROUBLESHOOTING = readFileSync(join(REPO_ROOT, "docs/docs/reference/troubleshooting.md"), "utf-8")
 const ACTION_YML = readFileSync(join(REPO_ROOT, "github/action.yml"), "utf-8")
 
 // ---------------------------------------------------------------------------
@@ -71,9 +65,7 @@ describe("install endpoint URL — altimate.sh present and consistent", () => {
     // Tolerate either apex (altimate.sh) or www. The apex is broken today,
     // so the constant uses www., but a future apex-DNS fix can drop the www.
     // without touching this test.
-    expect(INSTALLATION_SRC).toMatch(
-      /UPGRADE_INSTALL_URL\s*=\s*"https:\/\/(www\.)?altimate\.sh\/install"/,
-    )
+    expect(INSTALLATION_SRC).toMatch(/UPGRADE_INSTALL_URL\s*=\s*"https:\/\/(www\.)?altimate\.sh\/install"/)
   })
 
   test("README and troubleshooting docs use the same host as the source", () => {
@@ -119,9 +111,7 @@ describe("upgradeCurl bounded timeout", () => {
   test("timeout constant is referenced by the upgrade fetch, not duplicated", () => {
     // altimate_change: assert the named constant is at the call site (Effect form);
     // a double-defined literal would mean someone reverted the named-constant refactor.
-    expect(INSTALLATION_SRC).toMatch(
-      /Effect\.timeout\(\s*UPGRADE_FETCH_TIMEOUT_MS\s*\)/,
-    )
+    expect(INSTALLATION_SRC).toMatch(/Effect\.timeout\(\s*UPGRADE_FETCH_TIMEOUT_MS\s*\)/)
     const timeoutLiterals = INSTALLATION_SRC.match(/Effect\.timeout\(\s*15_000\s*\)/g)
     expect(timeoutLiterals).toBeNull()
   })
@@ -142,9 +132,7 @@ describe("upgradeCurl error surface", () => {
     // is Effect.mapError on the fetch pipe instead of try/catch. A future refactor
     // that drops the wrapper would regress to "DOMException: The operation was
     // aborted" reaching the user with no URL, no instructions.
-    const upgradeCurlBody = INSTALLATION_SRC.match(
-      /const upgradeCurl = Effect\.fnUntraced\([\s\S]*?\n {4}\)/,
-    )
+    const upgradeCurlBody = INSTALLATION_SRC.match(/const upgradeCurl = Effect\.fnUntraced\([\s\S]*?\n\s+\}?\)\n\n/)
     expect(upgradeCurlBody).not.toBeNull()
     expect(upgradeCurlBody![0]).toMatch(/HttpClientRequest\.get\(UPGRADE_INSTALL_URL\)/)
     expect(upgradeCurlBody![0]).toMatch(/Effect\.mapError\(/)
@@ -163,9 +151,7 @@ describe("upgradeCurl error surface", () => {
   test("rethrown error points at the GitHub releases fallback", () => {
     // If www.altimate.sh is itself down, the user needs an exit ramp. The
     // releases page is the canonical fallback.
-    expect(INSTALLATION_SRC).toContain(
-      "https://github.com/AltimateAI/altimate-code/releases/latest",
-    )
+    expect(INSTALLATION_SRC).toContain("https://github.com/AltimateAI/altimate-code/releases/latest")
   })
 
   test("HTTP non-2xx is surfaced as a tagged error, not a bare statusText", () => {
@@ -174,9 +160,7 @@ describe("upgradeCurl error surface", () => {
     // ResponseError (carrying status + request). That error is then mapped to the
     // friendly UpgradeFailedError naming the install URL — never a bare statusText.
     expect(INSTALLATION_SRC).toMatch(/HttpClient\.filterStatusOk\(/)
-    const upgradeCurlBody = INSTALLATION_SRC.match(
-      /const upgradeCurl = Effect\.fnUntraced\([\s\S]*?\n {4}\)/,
-    )
+    const upgradeCurlBody = INSTALLATION_SRC.match(/const upgradeCurl = Effect\.fnUntraced\([\s\S]*?\n\s+\}?\)\n\n/)
     expect(upgradeCurlBody).not.toBeNull()
     expect(upgradeCurlBody![0]).toMatch(/new UpgradeFailedError\(/)
   })
@@ -265,9 +249,7 @@ describe("v0.7.1 curl-user recovery surface", () => {
   test("troubleshooting doc has install-path section pointing at the new URL", () => {
     // v0.7.1 curl users have a broken `altimate upgrade`. The troubleshooting
     // page must surface the manual one-liner so they can self-heal.
-    expect(TROUBLESHOOTING).toMatch(
-      /curl -fsSL https:\/\/(www\.)?altimate\.sh\/install \| bash/,
-    )
+    expect(TROUBLESHOOTING).toMatch(/curl -fsSL https:\/\/(www\.)?altimate\.sh\/install \| bash/)
   })
 
   test("README curl one-liner matches the source-side install URL", () => {

@@ -8,7 +8,7 @@ import { Flag } from "../flag/flag"
 import { isAbsolute, join } from "path"
 import { DatabaseMigration } from "./migration"
 import { InstallationChannel } from "../installation/version"
-import { LayerNode } from "../effect/layer-node"
+import { makeGlobalNode } from "../effect/app-node"
 
 const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
 type DatabaseShape = Effect.Success<typeof makeDatabase>
@@ -19,7 +19,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const db = yield* makeDatabase
@@ -54,10 +54,12 @@ export function path() {
   return join(Global.Path.data, `opencode-${InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
 }
 
-export const defaultLayer = Layer.unwrap(
-  Effect.gen(function* () {
-    return layerFromPath(path())
-  }),
-).pipe(Layer.provide(Global.defaultLayer))
+export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })
 
-export const node = LayerNode.make(layerFromPath(path()), [])
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (session/session.ts, session/todo.ts, worktree, account/repo, control-plane/workspace).
+// Upstream v1.18.10 removed it in the makeGlobalNode migration; the fork's legacy bridge layers
+// still compose it directly. Layer.suspend defers path()/Flag reads to build time, matching the
+// old Layer.unwrap(Effect.gen(...)) semantics.
+export const defaultLayer = Layer.suspend(() => layerFromPath(path()))
+// altimate_change end

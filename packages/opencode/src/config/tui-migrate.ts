@@ -8,7 +8,7 @@ import { Global } from "@opencode-ai/core/global"
 import { Filesystem } from "@/util/filesystem"
 import * as ConfigPaths from "@/config/paths"
 
-// altimate_change start — schema URL points to altimate.ai (was opencode.ai)
+// altimate_change start — schema URL points to altimate.ai (was altimate.ai)
 const TUI_SCHEMA_URL = "https://altimate.ai/tui.json"
 // altimate_change end
 

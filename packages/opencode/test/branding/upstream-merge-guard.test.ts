@@ -217,31 +217,30 @@ describe("OAuth/MCP branding", () => {
     expect(content).not.toMatch(/client_name:\s*"OpenCode"/)
   })
 
-  test('oauth-callback.ts HTML titles contain "Altimate Code" not "OpenCode"', () => {
+  // Since the v1.18.10 merge, oauth-callback.ts renders no inline HTML — every response
+  // delegates to the shared OauthCallbackPage component (packages/core/src/oauth/page.ts),
+  // so the branding guard asserts the delegation plus the shared page's branding.
+  const oauthPagePath = join(pkgDir, "..", "core", "src", "oauth", "page.ts")
+
+  test("oauth-callback.ts delegates all HTML responses to the shared OauthCallbackPage", () => {
     const content = readText(oauthCallbackPath)
-    // All <title> tags should reference Altimate Code
-    const titleMatches = content.match(/<title>[^<]+<\/title>/g) ?? []
-    expect(titleMatches.length).toBeGreaterThan(0)
-    for (const title of titleMatches) {
-      expect(title).toContain("Altimate Code")
-      expect(title).not.toContain("OpenCode")
-    }
+    expect(content).toContain('import { OauthCallbackPage } from "@opencode-ai/core/oauth/page"')
+    // No inline HTML documents left in the callback server
+    expect(content).not.toContain("<title>")
+    expect(content).not.toContain("<html")
+    expect(content).toMatch(/OauthCallbackPage\.(success|error)\(/)
   })
 
-  test("oauth-callback.ts body text references Altimate Code not OpenCode", () => {
-    const content = readText(oauthCallbackPath)
-    // User-facing strings mentioning the product
+  test('shared OauthCallbackPage titles and body reference "Altimate Code" not "OpenCode"', () => {
+    const content = readText(oauthPagePath)
     expect(content).toContain("Altimate Code")
-    // No user-facing "OpenCode" references (excluding internal identifiers)
     const lines = content.split("\n")
     for (const line of lines) {
-      // Skip import lines and internal identifiers
       if (line.trim().startsWith("import ")) continue
       if (line.includes("@opencode-ai/")) continue
       if (line.includes("OPENCODE_")) continue
       if (line.includes(".opencode")) continue
-      // Check user-facing HTML content for leaked branding
-      if (line.includes("<title>") || line.includes("<p>") || line.includes("<h")) {
+      if (line.includes("<title>") || line.includes("<p") || line.includes("<h")) {
         expect(line).not.toMatch(/\bOpenCode\b/)
       }
     }

@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
-import { AppProcess } from "@opencode-ai/core/process"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Installation } from "../../src/installation"
 
 function mockHttpClient(handler: (request: HttpClientRequest.HttpClientRequest) => Response) {
@@ -16,13 +17,13 @@ function jsonResponse(body: unknown) {
   })
 }
 
+// altimate_change start — upstream_fix: Installation has no `.layer`/`.defaultLayer` facade;
+// build from `.node` (which already wires AppProcess.node) and replace the httpClient node.
 function latestWith(body: unknown, method: Installation.Method) {
-  const layer = Installation.layer.pipe(
-    Layer.provide(mockHttpClient(() => jsonResponse(body))),
-    Layer.provide(AppProcess.defaultLayer),
-  )
+  const layer = AppNodeBuilder.build(Installation.node, [[httpClient, mockHttpClient(() => jsonResponse(body))]])
   return Effect.runPromise(Installation.use.latest(method).pipe(Effect.provide(layer)))
 }
+// altimate_change end
 
 describe("Installation.VERSION normalization", () => {
   test("VERSION does not have a 'v' prefix", () => {

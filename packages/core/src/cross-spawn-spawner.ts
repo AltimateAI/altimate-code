@@ -24,8 +24,8 @@ import {
 import * as NodeChildProcess from "node:child_process"
 import { PassThrough } from "node:stream"
 import launch from "cross-spawn"
-import { LayerNode } from "./effect/layer-node"
-import { filesystem, path } from "./effect/layer-node-platform"
+import { makeGlobalNode } from "./effect/app-node"
+import { filesystem, path } from "./effect/app-node-platform"
 
 const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
 
@@ -497,12 +497,16 @@ export const make = Effect.gen(function* () {
   return makeSpawner(spawnCommand)
 })
 
-export const layer: Layer.Layer<ChildProcessSpawner, never, FileSystem.FileSystem | Path.Path> = Layer.effect(
+const layer: Layer.Layer<ChildProcessSpawner, never, FileSystem.FileSystem | Path.Path> = Layer.effect(
   ChildProcessSpawner,
   make,
 )
 
+export const node = makeGlobalNode({ service: ChildProcessSpawner, layer, deps: [filesystem, path] })
+
+// altimate_change start — upstream_fix: restore defaultLayer for the fork's Promise-facade
+// consumers (mcp/index.ts). Removed upstream in the makeGlobalNode migration.
 export const defaultLayer = layer.pipe(Layer.provide(NodeFileSystem.layer), Layer.provide(NodePath.layer))
-export const node = LayerNode.make(layer, [filesystem, path])
+// altimate_change end
 
 export * as CrossSpawnSpawner from "./cross-spawn-spawner"

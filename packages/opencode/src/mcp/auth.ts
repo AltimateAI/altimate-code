@@ -50,14 +50,13 @@ export interface Interface {
   readonly updateOAuthState: (mcpName: string, oauthState: string) => Effect.Effect<void>
   readonly getOAuthState: (mcpName: string) => Effect.Effect<string | undefined>
   readonly clearOAuthState: (mcpName: string) => Effect.Effect<void>
-  readonly isTokenExpired: (mcpName: string) => Effect.Effect<boolean | null>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/McpAuth") {}
 
 export const use = serviceUse(Service)
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
@@ -142,13 +141,6 @@ export const layer = Layer.effect(
       return entry?.oauthState
     })
 
-    const isTokenExpired = Effect.fn("McpAuth.isTokenExpired")(function* (mcpName: string) {
-      const entry = yield* get(mcpName)
-      if (!entry?.tokens) return null
-      if (!entry.tokens.expiresAt) return false
-      return entry.tokens.expiresAt < Date.now() / 1000
-    })
-
     return Service.of({
       all,
       get,
@@ -162,17 +154,22 @@ export const layer = Layer.effect(
       updateOAuthState,
       getOAuthState,
       clearOAuthState,
-      isTokenExpired,
     })
   }),
 )
 
 // altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EffectFlock.defaultLayer), Layer.provide(FSUtil.defaultLayer)))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(EffectFlock.defaultLayer), Layer.provide(FSUtil.defaultLayer)),
+)
 // altimate_change end
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [FSUtil.node, EffectFlock.node])
+// altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: LayerNode.lazy(() => [FSUtil.node, EffectFlock.node]),
+})
 // altimate_change end
 
 export * as McpAuth from "./auth"

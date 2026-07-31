@@ -1,7 +1,6 @@
 export * as Session from "./session"
 
 import { Effect, Schema, Stream } from "effect"
-import { EventV2 } from "../event"
 import { ModelV2 } from "../model"
 import { SessionV2 } from "../session"
 import { MessageDecodeError } from "../session/error"
@@ -34,9 +33,13 @@ export type Delivery = SessionInput.Delivery
 export const ListInput = SessionV2.ListInput
 export type ListInput = SessionV2.ListInput
 
-export const EventCursor = EventV2.Cursor
-export type EventCursor = EventV2.Cursor
-export type Event = EventV2.CursorEvent<SessionEvent.DurableEvent>
+// altimate_change start — upstream_fix: EventV2.Cursor/CursorEvent were removed in the v1.18.10
+// refactor. SessionV2.events now cursors on the durable event's own sequence number directly
+// (see session.ts's `events: (input: { sessionID; after?: number }) => Stream<SessionEvent.DurableEvent, ...>`),
+// so the public API's cursor is just that sequence number and the event is the durable event itself.
+export type EventCursor = number
+export type Event = SessionEvent.DurableEvent
+// altimate_change end
 
 export const NotFoundError = SessionV2.NotFoundError
 export type NotFoundError = SessionV2.NotFoundError

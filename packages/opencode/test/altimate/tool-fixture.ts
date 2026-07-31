@@ -2,6 +2,14 @@ import { Effect, Layer } from "effect"
 import { Agent } from "@/agent/agent"
 import { Tool } from "@/tool/tool"
 import { Truncate } from "@/tool/truncate"
+// altimate_change start — TaskTool's init now yields BackgroundJob/Config/Session/RuntimeFlags
+// services (v1.18.10). Init only stores them (nothing is invoked at definition time), so empty
+// mocks are sufficient here.
+import { BackgroundJob } from "@/background/job"
+import { Config } from "@/config/config"
+import { Session } from "@/session/session"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+// altimate_change end
 import type { LegacyToolDef } from "@/altimate/tool-zod-compat"
 
 type ToolEffect = Effect.Effect<Tool.Info<any, any>, never, any> & { id: string }
@@ -14,10 +22,7 @@ export type TestToolContext = Omit<Tool.Context, "metadata" | "ask"> & {
 }
 
 export type TestTool<T extends ToolEffect> = Omit<Tool.InferDef<T>, "execute"> & {
-  execute(
-    args: any,
-    ctx: any,
-  ): Promise<Tool.ExecuteResult<any>>
+  execute(args: any, ctx: any): Promise<Tool.ExecuteResult<any>>
 }
 
 const testAgent = {
@@ -47,6 +52,24 @@ const toolLayer = Layer.mergeAll(
       limits: () => Effect.succeed({ maxLines: Number.MAX_SAFE_INTEGER, maxBytes: Number.MAX_SAFE_INTEGER }),
     }),
   ),
+  // altimate_change start — TaskTool's init yields BackgroundJob.Service (v1.18.10); stub it
+  Layer.succeed(
+    BackgroundJob.Service,
+    BackgroundJob.Service.of({
+      list: () => Effect.succeed([]),
+      get: () => Effect.succeed(undefined),
+      start: () => Effect.die(new Error("not implemented in test tool fixture")),
+      extend: () => Effect.succeed(false),
+      wait: () => Effect.die(new Error("not implemented in test tool fixture")),
+      waitForPromotion: () => Effect.die(new Error("not implemented in test tool fixture")),
+      promote: () => Effect.succeed(undefined),
+      cancel: () => Effect.succeed(undefined),
+    }),
+  ),
+  Layer.mock(Config.Service, {}),
+  Layer.mock(Session.Service, {}),
+  RuntimeFlags.layer(),
+  // altimate_change end
 )
 
 function toEffect(value: MaybeEffectOrPromise<void>): Effect.Effect<void, any, any> {
@@ -80,7 +103,6 @@ export async function initTool<T extends ToolEffect>(tool: T): Promise<TestTool<
   return {
     id: info.id,
     ...def,
-    execute: (args: any, ctx: any) =>
-      Effect.runPromise(def.execute(args, toEffectContext(ctx))),
+    execute: (args: any, ctx: any) => Effect.runPromise(def.execute(args, toEffectContext(ctx))),
   } as TestTool<T>
 }

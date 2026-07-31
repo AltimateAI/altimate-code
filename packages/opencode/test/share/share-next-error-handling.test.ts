@@ -13,24 +13,31 @@ function sliceBetween(startNeedle: string, endNeedle: string) {
   return source.slice(start, end)
 }
 
+// share-next.ts's fork-era imperative `try/catch` / `.catch()` guards around background share
+// sync were superseded by upstream's own Effect-native equivalent — Effect.catchCause +
+// Effect.forkIn(scope) — which these tests now verify directly (see the "supersedes the fork's
+// former imperative ..." comments in share-next.ts next to each site).
 describe("ShareNext background error handling", () => {
-  test("create catches background fullSync failures", () => {
-    const createBody = sliceBetween("export async function create", "function get(")
-    const activeLines = createBody
-      .split("\n")
-      .filter((line) => !line.trim().startsWith("//") && !line.trim().startsWith("*"))
+  test("create catches background full-sync failures", () => {
+    const createBody = sliceBetween(
+      'const create = Effect.fn("ShareNext.create")',
+      'const remove = Effect.fn("ShareNext.remove")',
+    )
 
-    expect(createBody).toContain("upstream_fix: catch background full share sync failures")
-    expect(createBody).toMatch(/fullSync\(sessionID\)\.catch\(/)
-    expect(createBody).toContain('log.error("share full sync failed"')
-    expect(activeLines.filter((line) => /fullSync\(sessionID\)/.test(line) && !/\.catch\(/.test(line))).toEqual([])
+    expect(createBody).toContain("supersedes the fork's")
+    expect(createBody).toContain("full-share-sync-failure-must-not-crash bug")
+    expect(createBody).toMatch(/full\(sessionID\)\.pipe\(/)
+    expect(createBody).toContain('Effect.logError("share full sync failed"')
+    expect(createBody).toContain("Effect.forkIn(s.scope)")
   })
 
-  test("delayed flush catches background sync failures", () => {
-    const syncBody = sliceBetween("async function sync", "export async function remove")
+  test("sync schedules a delayed flush that catches background failures", () => {
+    const syncBody = sliceBetween("function sync(sessionID: SessionID, data: Data[]) {", "const state: InstanceState")
 
-    expect(syncBody).toContain("upstream_fix: catch background share flush failures")
-    expect(syncBody).toMatch(/setTimeout\(async\s*\(\)\s*=>\s*{\s*\/\/ altimate_change start — upstream_fix: catch background share flush failures\s*try\s*{/)
-    expect(syncBody).toContain('log.error("share flush failed"')
+    expect(syncBody).toContain("supersedes the fork's")
+    expect(syncBody).toContain("share-sync-failure-must-not-crash bug")
+    expect(syncBody).toMatch(/flush\(sessionID\)\.pipe\(\s*Effect\.delay\(1000\)/)
+    expect(syncBody).toContain('Effect.logError("share flush failed"')
+    expect(syncBody).toContain("Effect.forkIn(s.scope)")
   })
 })

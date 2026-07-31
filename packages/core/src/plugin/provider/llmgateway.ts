@@ -1,28 +1,29 @@
 import { Effect } from "effect"
+import { define } from "../internal"
 import { Integration } from "../../integration"
-import { PluginV2 } from "../../plugin"
 
-export const LLMGatewayPlugin = PluginV2.define({
-  id: PluginV2.ID.make("llmgateway"),
-  effect: Effect.gen(function* () {
+export const LLMGatewayPlugin = define({
+  id: "llmgateway",
+  effect: Effect.fn(function* (ctx) {
     const integrations = yield* Integration.Service
-    return {
-      "catalog.transform": Effect.fn(function* (evt) {
+    yield* ctx.catalog.transform(
+      Effect.fn(function* (evt) {
         for (const item of evt.provider.list()) {
           if (item.provider.disabled) continue
-          if (!(yield* integrations.get(Integration.ID.make(item.provider.id)))) continue
           if (item.provider.api.type !== "aisdk") continue
           if (item.provider.api.package !== "@ai-sdk/openai-compatible") continue
           if (item.provider.api.url !== "https://api.llmgateway.io/v1") continue
+          if (!(yield* integrations.get(Integration.ID.make(item.provider.id)))) continue
           evt.provider.update(item.provider.id, (provider) => {
             // altimate_change start — provider identity headers
             provider.request.headers["HTTP-Referer"] = "https://altimate.ai/"
-            provider.request.headers["X-Title"] = "altimate-code"
-            provider.request.headers["X-Source"] = "altimate-code"
+            // X-Title and X-Source stay upstream: LLMGateway keys allowlisted callers on these exact legacy values.
+            provider.request.headers["X-Title"] = "opencode"
+            provider.request.headers["X-Source"] = "opencode"
             // altimate_change end
           })
         }
       }),
-    }
+    )
   }),
 })

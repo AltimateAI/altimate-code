@@ -1,4 +1,5 @@
 import { expect } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Provider } from "../../src/provider/provider"
 
 import { Effect } from "effect"
@@ -8,7 +9,7 @@ import { ProviderID } from "@/provider/schema"
 // Re-branded to the fork's ProviderID so it indexes Provider.list()'s
 // Record<ProviderID, Info> (core ProviderV2.ID is a distinct brand).
 const DIGITALOCEAN = ProviderID.make("digitalocean")
-const it = testEffect(Provider.defaultLayer)
+const it = testEffect(LayerNode.compile(Provider.node))
 
 const withEnv = <A, E, R>(values: Record<string, string>, effect: Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
