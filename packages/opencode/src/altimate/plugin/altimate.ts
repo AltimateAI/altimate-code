@@ -95,6 +95,11 @@ interface Pending {
 }
 
 let server: ReturnType<typeof createServer> | undefined
+// Shared in-flight startup promise. Concurrent `authorize()` calls must await
+// the SAME startup (and read the SAME bound port) instead of one racing past
+// the other on a stale/undefined `currentCallbackPort`. Cleared on both
+// success and failure so a subsequent retry re-runs the port walk.
+let startupInFlight: Promise<void> | undefined
 // Pending flows keyed by the unguessable `state`. Registered synchronously in
 // authorize() BEFORE the browser opens, so an instant redirect (an already
 // signed-in user) is matched instead of dropped; keying by state also lets two
@@ -102,7 +107,23 @@ let server: ReturnType<typeof createServer> | undefined
 const pending = new Map<string, Pending>()
 
 async function startCallbackServer(): Promise<void> {
-  if (server) return
+  // Fast path: server already bound and healthy.
+  if (server && currentCallbackPort !== undefined) return
+  // Coalesce: a second caller mid-startup awaits the first's outcome so the
+  // redirect it builds uses the actually-bound port, not a guess. Without
+  // this, `currentCallbackPort ?? PREFERRED` would resolve to 7317 on the
+  // second caller before the first's port walk finished — the exact race
+  // CodeRabbit + cubic flagged as P1.
+  if (startupInFlight) return startupInFlight
+  startupInFlight = doStartCallbackServer()
+  try {
+    await startupInFlight
+  } finally {
+    startupInFlight = undefined
+  }
+}
+
+async function doStartCallbackServer(): Promise<void> {
   server = createServer((req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${currentCallbackPort ?? CALLBACK_PORT_PREFERRED}`)
     if (url.pathname !== "/callback") {
