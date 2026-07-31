@@ -248,7 +248,13 @@ beforeEach(() => {
   // config (~/.claude.json etc.) on connect; without isolation the developer's real MCP servers
   // leak into these mock-server assertions (extra tools/servers → wrong counts). (bun's
   // os.homedir() caches $HOME at startup, so it must be spied rather than set via process.env.)
-  homedirSpy = spyOn(os, "homedir").mockImplementation(() => mkdtempSync(path.join(tmpdir(), "mcp-lifecycle-home-")))
+  //
+  // Hoist mkdtempSync OUT of the mock implementation — otherwise every
+  // os.homedir() call returns a NEW temp dir, so a writer and a reader in
+  // the same test see different homes (CodeRabbit v0.9.4 review finding).
+  // Create once per test and let all reads inside that test hit the same dir.
+  const homeDir = mkdtempSync(path.join(tmpdir(), "mcp-lifecycle-home-"))
+  homedirSpy = spyOn(os, "homedir").mockImplementation(() => homeDir)
   clientStates.clear()
   lastCreatedClientName = undefined
   connectShouldFail = false

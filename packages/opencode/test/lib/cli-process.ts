@@ -287,11 +287,21 @@ export function withCliFixture<A, E>(
       // checkpoint can collide with the tracer's write on cold spawns under
       // parallel test load — a real transient, not a product bug. Retry only
       // this specific error class so genuine failures still surface.
+      //
+      // Share the ORIGINAL timeout budget across both attempts so the retry
+      // can't blow past bun's per-test 90s timeout by starting another full
+      // 60s spawn on top of the first (CodeRabbit v0.9.4 review finding).
+      // Cap the retry at max(remaining, 15s) — enough for a warm-cache spawn
+      // + cold-SQLite open without granting an unbounded second window.
       return Effect.gen(function* () {
+        const startedAt = Date.now()
+        const originalTimeoutMs = opts?.timeoutMs ?? 60_000
         const first = yield* spawn(argv, opts)
         if (first.exitCode === 0) return first
         if (!/database is locked/i.test(first.stderr)) return first
-        return yield* spawn(argv, opts)
+        const elapsed = Date.now() - startedAt
+        const remaining = Math.max(originalTimeoutMs - elapsed, 15_000)
+        return yield* spawn(argv, { ...opts, timeoutMs: remaining })
       })
       // altimate_change end
     }
