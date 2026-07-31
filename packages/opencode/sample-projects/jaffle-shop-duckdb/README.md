@@ -47,14 +47,27 @@ do). Every option is wired to a real workflow:
 activation menu, no LLM in the loop. You can drive dbt yourself:
 
 ```bash
-# dbt-duckdb ships the dbt adapter; duckdb-cli ships the standalone `duckdb`
-# binary the query line at the bottom uses. Two distinct PyPI packages — if you
-# skip duckdb-cli, `dbt build` still works but `duckdb target/...` won't.
-pip install dbt-duckdb duckdb-cli         # or `pipx install dbt-duckdb duckdb-cli` if you hit PEP 668
+# Three PyPI packages that do different jobs:
+#   - dbt-core:   provides the `dbt` binary (the entry point)
+#   - dbt-duckdb: adapter — teaches dbt-core how to talk to DuckDB
+#   - duckdb-cli: standalone `duckdb` binary the ad-hoc query line uses
+# `pip install dbt-duckdb` pulls dbt-core as a dependency, so pip is fine.
+# `pipx install dbt-duckdb` does NOT — pipx only exposes entry points from the
+# named package, and dbt-duckdb has none. Use `--include-deps` if you go pipx.
+pip install dbt-duckdb duckdb-cli         # PEP 668 alternatives below
 cd ~/altimate-sample-dbt                  # wherever you materialized the sample
 dbt seed                                  # load the CSVs into DuckDB
 dbt build                                 # run models + tests
 duckdb target/jaffle.duckdb -c 'select * from customers'
+```
+
+If plain `pip` fails with `externally-managed-environment` (PEP 668, common
+on modern macOS Homebrew and Debian/Ubuntu Python), use one of these instead:
+
+```bash
+pipx install --include-deps dbt-duckdb && pipx install duckdb-cli
+# or
+uv tool install dbt-core --with dbt-duckdb && uv tool install duckdb-cli
 ```
 
 Once `dbt` is discoverable (venv, pipx, conda, uv, poetry, homebrew — the CLI
