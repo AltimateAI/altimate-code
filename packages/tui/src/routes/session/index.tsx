@@ -2421,7 +2421,13 @@ function Execute(props: ToolProps) {
   const isLoading = createMemo(() => props.part.state.status === "pending" || props.part.state.status === "running")
   const calls = createMemo(() => executeCalls(props.metadata.toolCalls))
   const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
-  const hasRuntimeError = createMemo(() => props.metadata.error === true)
+  // altimate_change — upstream_fix: metadata.error is a string in the shared tool contract
+  // (e.g. CodeModeTool cancellation sets "Execution cancelled."); a strict `=== true` never
+  // matched, so cancellations rendered as successes with hidden output.
+  const hasRuntimeError = createMemo(() => {
+    const err = props.metadata.error
+    return err === true || (typeof err === "string" && err.length > 0)
+  })
   const outputPreview = createMemo(() => collapseToolOutput(output(), 4, 4 * Math.max(20, ctx.width - 6)).output)
   const showOutput = createMemo(() => output() && hasRuntimeError())
   const content = createMemo(() => {

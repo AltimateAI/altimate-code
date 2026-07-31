@@ -337,6 +337,19 @@ export namespace ToolRegistry {
     return Flag.OPENCODE_EXPERIMENTAL
   }
 
+  // altimate_change start — upstream port (v1.18.10 code mode): the LIVE legacy prompt
+  // pipeline (SessionPrompt.resolveTools → namespace tools()) has no RuntimeFlags service,
+  // so mirror the flag's env semantics (explicit env wins, OPENCODE_EXPERIMENTAL implies)
+  // the same way backgroundSubagentsEnabled does — otherwise the feature flag is inert in
+  // real sessions and `execute` never appears.
+  function codeModeEnabled(flags?: ToolRuntimeFlags) {
+    if (flags?.experimentalCodeMode !== undefined) return flags.experimentalCodeMode
+    const value = process.env["OPENCODE_EXPERIMENTAL_CODE_MODE"]
+    if (value !== undefined) return ["1", "true", "yes"].includes(value.toLowerCase())
+    return Flag.OPENCODE_EXPERIMENTAL
+  }
+  // altimate_change end
+
   // altimate_change start — upstream_fix: allow Parallel-enabled websearch for non-opencode providers.
   function providerWebSearchEnabled(flags?: ToolRuntimeFlags) {
     if (flags) return flags.enableExa || flags.enableParallel
@@ -528,7 +541,7 @@ export namespace ToolRegistry {
     // altimate_change end
     // altimate_change start — include plugin-provided custom tools
     // altimate_change start — upstream port (v1.18.10 code mode): expose `execute` when enabled
-    const codeMode = runtimeFlags?.experimentalCodeMode ? [(await loadCodeMode()).tool] : []
+    const codeMode = codeModeEnabled(runtimeFlags) ? [(await loadCodeMode()).tool] : []
     return [...resolved, ...custom, ...pluginCustom, ...codeMode]
     // altimate_change end
     // altimate_change end
@@ -579,7 +592,7 @@ export namespace ToolRegistry {
     // catalog description; drop `execute` entirely when the caller's permission ruleset leaves
     // no visible MCP tools (mirrors upstream's describeCodeMode gate).
     let codeModeDescription: string | undefined
-    if (runtimeFlags?.experimentalCodeMode && tools.some((t) => t.id === "execute")) {
+    if (codeModeEnabled(runtimeFlags) && tools.some((t) => t.id === "execute")) {
       const { mod } = await loadCodeMode()
       // Session-level rules merge AFTER agent rules (session denials win) — mirrors the
       // runtime enforcement in session/tools.ts's ctx.ask ruleset.

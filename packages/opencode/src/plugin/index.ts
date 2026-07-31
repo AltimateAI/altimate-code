@@ -119,7 +119,10 @@ function getLegacyPlugins(mod: Record<string, unknown>) {
     if (seen.has(entry)) continue
     seen.add(entry)
     const plugin = getServerPlugin(entry)
-    if (!plugin) throw new TypeError("Plugin export is not a function")
+    // altimate_change — upstream_fix: legacy plugins may export helper constants/types
+    // alongside the plugin function; skip non-callable exports instead of throwing (the
+    // pre-merge loader ignored them — throwing skipped the ENTIRE plugin).
+    if (!plugin) continue
     result.push(plugin)
   }
 

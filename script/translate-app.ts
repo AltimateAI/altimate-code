@@ -374,7 +374,8 @@ async function translate(
 
   const proc = Bun.spawn(
     [
-      "opencode",
+      // altimate_change — upstream_fix: the fork publishes only the altimate-code binary
+      "altimate-code",
       "--pure",
       "run",
       "--dir",

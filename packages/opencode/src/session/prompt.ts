@@ -1858,11 +1858,40 @@ export namespace SessionPrompt {
             }),
           )
 
-          const result = await client.callTool(
-            { name: def.name, arguments: args },
-            undefined,
-            timeout !== undefined ? { timeout } : undefined,
-          )
+          // altimate_change start — upstream_fix: mirror McpCatalog.convertTool's call options:
+          // forward the execution abort signal (cancelling a session cancels the in-flight MCP
+          // request), reset the timeout on progress (long tools that report progress extend
+          // their deadline instead of dying), and register the progress hook the SDK requires
+          // to send a progress token at all.
+          const result = await client.callTool({ name: def.name, arguments: args }, undefined, {
+            resetTimeoutOnProgress: true,
+            signal: opts.abortSignal,
+            ...(timeout !== undefined ? { timeout } : {}),
+            onprogress: () => {},
+          })
+
+          // altimate_change start — upstream_fix: a CallToolResult with isError:true is a
+          // FAILURE — mirror McpCatalog.convertTool / the code-mode adapter instead of
+          // reporting rejected MCP operations as completed tool output.
+          if ((result as { isError?: boolean }).isError) {
+            throw new Error(
+              ((result.content ?? []) as any[])
+                .flatMap((item) => (item.type === "text" ? [item.text] : []))
+                .filter((text: string) => text.trim())
+                .join("\n\n") || "MCP tool returned an error",
+            )
+          }
+          // altimate_change end
+
+          // altimate_change start — upstream_fix: preserve structured-only results — a valid
+          // `{ content: [], structuredContent }` reply would otherwise project to an empty
+          // success (McpCatalog.convertTool synthesizes the same JSON text block).
+          const structured = (result as { structuredContent?: unknown }).structuredContent
+          if ((result.content ?? []).length === 0 && structured !== undefined && structured !== null) {
+            result.content = [{ type: "text" as const, text: JSON.stringify(structured) }] as typeof result.content
+          }
+          // altimate_change end
+          // altimate_change end
 
           await Plugin.trigger(
             "tool.execute.after",
